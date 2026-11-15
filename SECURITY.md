@@ -88,36 +88,51 @@ sandbox. Add only what you would install for yourself.
 
 ## Workers on other coding agents
 
-Workers can also run on Codex (off by default; Settings → Models). For such a worker:
+Workers can also run on Codex or Claude Code (off until you allow one, on Home's card or in
+Settings → *Coding agents*). For such a worker:
 
-- **No sandbox.** They never run while the worker sandbox is on. With it off they run as Copilot
-  workers do then: a Codex worker can do anything your account can (`danger-full-access`).
-- **Your checkouts.** Codex asks Chief of Staff before every edit, wherever it lands, a file
-  move's destination included, and before every command none of your Codex rules allows; the
-  same check as for Copilot workers keeps your own checkouts read-only to it: an edit there is
-  refused, and so is a command that writes there (a redirection, `tee`, `sed -i`, `cp`/`mv`/`rm`,
-  git that changes files, the index or branches, an install, a build or a test run), as far as
-  the command line can be read (on Windows, as PowerShell or cmd reads it), and so is a program
-  it can't read, run there on files there: it runs those in a copy of its own, as a Copilot
-  worker does. One of your own Codex `PermissionRequest` hooks, or a rule of yours allowing a
-  command, can let one through first.
-- **Ask first** (Codex versions before 0.168, the ones tested): every command none of your Codex
-  rules allows, every edit and every MCP call ask Chief of Staff, which refuses what it refuses
-  for a Copilot worker (`gh` writes and GitHub MCP writes among them, so PR reviews stay drafts);
-  ChatGPT's apps and Codex's subagents (which could open another worker's conversation) are off
-  for that worker. Your own Codex rules and hooks can allow what those checks would refuse.
-  Chief of Staff checks once per Codex version, on this machine and without a model, that each
-  kind of action asks it first and that no subagent is offered, and reads back each worker's
-  settings; a version that fails runs no worker that asks first (or none at all, when its edits
-  do not ask).
-- **Repository settings** (`.codex/` settings, hooks, rules, MCP servers) load only where you
-  trust the folder in Codex; a worktree is trusted as its repository is. Elsewhere none of them
-  loads, and the repository's `AGENTS.md` reaches the worker as text only: a message marked as
-  the repository's, never in Chief of Staff's instructions, with any tag in it escaped.
-- **A worker's own changes to them never load, with the sandbox on.** (Codex workers run only
-  without it, so for now their threads trust their folder's `.codex/` as your own Codex sessions
-  do: see *Folder settings without the sandbox*.) Codex reads a folder's `.codex/` when a thread
-  starts or resumes there: a rule in it lets commands run without asking Chief of Staff, an MCP
+- **Sandbox.** A Claude worker runs in Claude's own sandbox, set from Chief of Staff's policy for
+  a Copilot worker (writes only in its folders, protected paths read-only, your service secrets
+  unreadable, the network as Settings says), only on a Claude version whose check showed a write
+  outside its folder, a read of a protected file and a request to a host off the list all
+  failing. Codex workers never run while the worker sandbox is on (Codex's sandbox is not
+  checked yet); with it off, a Codex worker can do anything your account can
+  (`danger-full-access`), as Copilot workers then can.
+- **Your checkouts.** Every edit asks Chief of Staff first (Codex's approval, Claude's
+  `PreToolUse` hook), wherever it lands, a file move's destination included, and so does every
+  command (on Codex, every one none of your Codex rules allows); the same check as for Copilot
+  workers keeps your own checkouts read-only to them: an edit there is refused, and so is a
+  command that writes there (a redirection, `tee`, `sed -i`, `cp`/`mv`/`rm`, git that changes
+  files, the index or branches, an install, a build or a test run), as far as the command line
+  can be read (on Windows, as PowerShell or cmd reads it; a Claude worker's where its shell is,
+  after a `cd` too), and so is a program it can't read, run there on files there: it runs those
+  in a copy of its own, as a Copilot worker does. One of your own Codex `PermissionRequest` hooks, or a rule of yours allowing a command,
+  can let one through first.
+- **Ask first** (Codex versions before 0.168; Claude from 2.1.322): every command, edit and MCP
+  call asks Chief of Staff, which refuses what it refuses for a Copilot worker (`gh` writes and
+  GitHub MCP writes among them, so PR reviews stay drafts); Claude's commands are read as the
+  shell Claude runs them in. Codex: ChatGPT's apps and its subagents (which could open another
+  worker's conversation) are off, and your own Codex rules and hooks can allow what those checks
+  would refuse. Claude: your own Claude hooks are off (one could approve what Chief of Staff
+  refused); its subagents are checked as the worker; a cloud agent or a routine (which would run
+  where no check reaches) needs your OK each time, and is refused to a worker that asks first or
+  has a token limit. Chief of Staff checks once per version of each agent, on this machine,
+  without a model, with only an allowlisted environment and every connection caught by a proxy
+  of its own on 127.0.0.1, that each kind of action asks it first; a version that fails runs no
+  worker that asks first (or none at all, when its edits do not ask).
+- **Workers that read Slack** run on Claude only on a version whose check proved both its
+  sandbox and *Ask first*, with the same limits as on Copilot (checks on, network GitHub only,
+  Slack's read tools only); otherwise, and always for Codex, they run on Copilot.
+- **What reaches a worker from outside.** A repository's own agent settings (Codex's `.codex/`,
+  Claude's `.claude/` and `.mcp.json`) load only where you trust its folder in that agent; a
+  worktree is trusted as its repository is. Elsewhere none of them loads, and its `AGENTS.md` or
+  `CLAUDE.md` reaches the worker as text only: a message marked as the repository's, never in
+  Chief of Staff's instructions, with any tag in it escaped. A message from another Claude
+  session is shown as that session's, never as yours, can approve nothing, and starts a turn only
+  if Chief of Staff admits it; messages between Chief of Staff's own workers go through it, with
+  the limits of `tell_session`.
+- **A Codex worker's own changes to `.codex/` never load.** Codex reads a folder's `.codex/`
+  when a thread starts or resumes there: a rule in it lets commands run without asking Chief of Staff, an MCP
   server runs its command, and its settings reach every command's environment. So each time a
   Codex worker's thread starts or resumes, Chief of Staff compares each `.codex/` folder Codex
   would read with what it held when Chief of Staff handed the worker that folder (kept in Chief
@@ -126,21 +141,31 @@ Workers can also run on Codex (off by default; Settings → Models). For such a 
   `AGENTS.md` reaches it as text, and its timeline says so once. Edits to a `.codex/` folder or
   to Codex's settings folder are refused to workers, whatever their case. A command can still
   write there; it is the check at the next start that keeps it from loading.
-- **Spend limit:** Chief of Staff's own ledger, in tokens. It may be passed by the model call in
-  flight and by what child agents spend before they stop; spend lost when Codex stops mid-turn
-  is recorded as unknown, and a worker with a limit then waits for your *Go on*.
-- **Codex's memories** are off for every Codex worker: their background agent runs commands no
-  approval reaches, outside any receipt.
+- **Spend limit:** Chief of Staff's own ledger, in tokens, counted response by response on
+  Claude. It may be passed by the model call in flight and by what subagents spend before they
+  stop (on Claude, also by their output since the last answer); spend lost when the agent stops
+  mid-turn is recorded as unknown, and a worker with a limit then waits for your *Go on*.
+- **Memory:** Codex's memories and Claude's auto memory are off for every worker: Codex's
+  background agent runs commands no approval reaches; Claude's memory folder is shared with your
+  own sessions.
 - **Its processes** run under a small supervisor of Chief of Staff's, without Chief of Staff's
   `CHIEFOFSTAFF_*` variables (your Slack token among them), and end when Chief of Staff's process
   goes away, however it stops. The supervisor runs isolated from the folder it starts in
   (`python -I`, in a folder of Chief of Staff's own), so no Python file of a repository runs as
-  it; what Chief of Staff records of these processes keeps a hash of each command line, not the
-  command line.
-- **Its settings folder** (`~/.codex`, and `$CODEX_HOME`) cannot be added to *Also writable in
-  the sandbox* while Codex is on: its hooks run outside any sandbox.
-- **Sign-in** is Codex's own; Chief of Staff never reads or stores it. What a Codex worker reads
-  and writes goes to OpenAI under your Codex account, as with your own Codex sessions.
+  it. A Claude worker's MCP servers (their headers and variables) and instructions are in files
+  only you can read, named by path on its command line and removed with it; what Chief of Staff
+  records of these processes keeps a hash of each command line, not the command line.
+- **Your agent settings stay yours.** Chief of Staff never edits a Codex or Claude settings file
+  and runs nothing that does (`claude auth status` only where Claude was set up, so none of its
+  files is made). Each Claude worker runs your installed `claude` itself, unmodified. Codex's
+  settings folder (`~/.codex`, and `$CODEX_HOME`) and Claude's (`~/.claude`, and
+  `$CLAUDE_CONFIG_DIR`) cannot be added to *Also writable in the sandbox* while that agent is on:
+  their hooks run outside any sandbox.
+- **Sign-in** is each agent's own; Chief of Staff never reads, stores or forwards it (no
+  keychain item, no credentials file, no key of its own, no requests of its own), and keeps
+  only how Claude is signed in (a plan, a key, a cloud), never who. What a worker reads and
+  writes goes to OpenAI or Anthropic (or your cloud) under your account, as with your own
+  sessions.
 
 ## Sign-ins and credentials
 

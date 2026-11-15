@@ -1212,72 +1212,133 @@ limit per worker stops runaway workers.
 ## Workers on other coding agents
 
 Your workers can also run on [Codex](https://developers.openai.com/codex/cli), OpenAI's coding
-agent, with your own Codex sign-in. The Router, the Slack session, the Watchdog, workers that
-read Slack and Chief of Staff's own helpers stay on Copilot. Off by default: nothing of it runs,
-and nothing is looked for, until you turn it on.
+agent, or on [Claude Code](https://docs.claude.com/en/docs/claude-code), Anthropic's, each with
+your own sign-in. The Router, the Slack session, the Watchdog and Chief of Staff's own helpers
+stay on Copilot. With neither installed, nothing of this shows anywhere.
 
-**Turning it on.** Settings → *Models* → *Use another coding agent for workers…* opens the
-*Coding agents* group, which only then looks for the Codex CLI (its version and how it is signed
-in). Check *Use Codex for workers*; choose whether *New workers use* Copilot or Codex; give Codex
-workers a *Model* (empty: Codex's default) and a *Limit per worker* in tokens (empty: none). To
-use it for one task only, say so ("do this with Codex"): the Router then starts that worker on
-Codex. A worker keeps its agent for life; follow-ups go to it as to any worker. Codex needs macOS
-or Linux, the Codex CLI 0.167.2 or later, signed in (`codex login`), and the worker sandbox off;
-an agent you named that cannot run is said by the Router, never moved to Copilot. When the agent
-new workers use cannot run, they start on Copilot and their chat says why.
+**Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once per
+agent: *Codex is ready. Allow workers to use it?* *Allow* makes it available to workers (new
+workers stay on Copilot); *Not now* leaves it off and is not asked again. Settings → *Coding
+agents* (a tab that shows once one is installed) has a row per agent: its version and how it is
+signed in, how much of its plan's limits is used, and *Available for workers*. Under *Advanced*:
+the *Model* its workers use (empty: the agent's default) and a *Limit per worker* in tokens
+(empty: none). Once one is available, choose which agent *New workers use* (Copilot by default),
+and whether to *Let the Router choose* the agent for each task (off by default: it then says
+which it chose and why).
+
+**Choosing it for one task.** Type `@codex`, `@claude` or `@copilot` in Home's message box: the
+agent becomes a chip above it ("On Codex", × removes it), and the Router starts that work there.
+Saying so works too ("do this with Claude"). A worker keeps its agent: one on Codex or Claude
+says so beside its name in the sidebar, and with its model in its header.
+
+**When it can't run.**
+
+- An agent you named that cannot run (signed out, too old, turned off): the Router says why and
+  nothing starts elsewhere; its card offers *Sign-in help*, *Wait* or *Run on Copilot instead*.
+- The agent new workers use cannot run: they start on Copilot, and their name says why.
+- A plan's usage limit, or a rate limit the agent gave up on, reached in the middle of a task:
+  the worker pauses under *Needs you*, saying when the limit resets when the agent says it. *Go
+  on* once it has, or *Continue with* another agent from the task's **⋯**. Nothing switches by
+  itself.
+
+**Continue with another agent.** An idle worker's **⋯** has *Continue with Claude…* (or another
+agent on), and you can ask the Router ("hand this to Claude"): a new worker on that agent goes
+on from a summary of this one's work (its task, reports, last messages, and each folder's branch
+and uncommitted changes), in the same folders, and this one closes.
+Its checkouts are handed over, so two workers never write the same one.
+
+**Usage.** Each agent's row says how much of its plan's limits is used and when they reset,
+where the agent says it (Codex reads its own rate limits; Claude's come from what its workers
+last heard), with a chip from 80%. Chief of Staff never reads a sign-in for this. A worker's
+spend is in tokens, never credits: its header (against its limit, if it has one), its tasks'
+hover tips and a part of its own in *Usage*; the daily summary adds them on a day with some.
+
+**What each needs:** macOS or Linux.
+
+- **Codex:** the Codex CLI 0.167.2 or later, signed in (`codex login`).
+- **Claude:** Claude Code 2.1.322 or later, signed in by running `claude` in a terminal, and
+  Chief of Staff's Claude extra (`uv tool install 'chiefofstaff[claude]'`). Claude workers use
+  whatever your `claude` is signed in with: a Claude plan, an API key, Amazon Bedrock, Google
+  Cloud, Foundry or a gateway. Chief of Staff has no sign-in of its own for it and never reads
+  yours. On a Claude plan, Claude workers count against your plan's usage limits, under
+  Anthropic's terms.
 
 **What differs from a Copilot worker:**
 
-- **Spend** is in tokens, never credits: the worker's header, its tasks' hover tips and a part of
-  its own in *Usage*; the daily summary adds them on a day with some. A worker with a limit stops
-  once it has spent it; it may pass it by the model call in flight and what its child agents
-  spend before they stop. Tokens are counted as Codex counts them, cached input included. If
-  Codex stops in the middle of a turn, what it spent then is not known: a worker with a limit
-  then waits under *Needs you* until you say *Go on* (or *Retry*, if it failed). Without a limit
-  that is recorded and shown in *Usage*, and nothing waits.
-- **Ask first** works on Codex versions before 0.168 (the ones tested): every command none of
-  your Codex rules allows, every edit and every MCP call ask Chief of Staff, which answers as for
-  a Copilot worker; ChatGPT's apps and Codex's subagents are off for such a worker. Your own
-  Codex rules and `PermissionRequest` hooks can allow what those checks would refuse, as in your
-  Codex sessions. Newer versions run workers that act on their own; their **⋯** says why *Ask
-  first* is off. Codex takes up a switch to *Ask first* only in a new process: a worker at work
-  then stops (with what it left running), and *Go on* continues, asking first.
-- **Codex's memories are off in Chief of Staff's workers:** their background agent would run
-  commands nobody is asked about, which *Stop* does not end and no receipt shows. Your own Codex
-  sessions keep them; a Codex worker's name says so in its tooltip when you have them on.
-- **Sandbox:** Codex workers run as Copilot workers do with the sandbox off, with your caches,
-  tools and network (`danger-full-access`); your own Codex `sandbox_mode` is not applied to them.
-  Every edit and every command that writes still asks Chief of Staff first, so your own
-  checkouts stay read-only to them.
-  Their commands run without a login shell, with the environment and `PATH` a Copilot worker's
+- **Spend limit:** a worker with a limit stops once it has spent it. It may pass it by the model
+  call in flight, and by what its subagents spend before they stop (on Claude, also by their
+  output since its last answer, which Claude counts only then). Tokens are counted as each agent
+  counts them, cached input included. If the agent stops in the middle of a turn, what it spent
+  then is not known: a worker with a limit then waits under *Needs you* until you say *Go on* (or
+  *Retry*, if it failed). Without a limit that is recorded and shown in *Usage*, and nothing
+  waits.
+- **Ask first:** every command, edit and MCP call asks Chief of Staff, which answers as for a
+  Copilot worker, on the versions its check showed doing so (Codex before 0.168; Claude from
+  2.1.322, each version checked on this machine, without a model, before its first worker).
+  Codex: ChatGPT's apps and its subagents are off for such a worker, and your own Codex rules and
+  `PermissionRequest` hooks can allow what those checks would refuse. Claude: your own Claude
+  hooks are off for such a worker (one could approve what Chief of Staff refused); its name's
+  tooltip says so. A version that is not shown to ask first runs workers that act on their own;
+  their **⋯** says why *Ask first* is off. Codex takes up a switch to *Ask first* only in a new
+  process: a worker at work then stops (with what it left running), and *Go on* continues,
+  asking first.
+- **Sandbox:** Claude workers run in Claude's own sandbox, set as Chief of Staff's is for a
+  Copilot worker (writes only in its folders, your secrets unreadable, the network as Settings
+  says), on a version whose check showed it holding. Codex workers can't run while Settings →
+  *Workers* sandboxes workers (Codex's sandbox has not passed Chief of Staff's checks yet); with
+  it off they run as Copilot workers do then, with your caches, tools and network
+  (`danger-full-access`), and every edit and every command that writes still asks Chief of
+  Staff, so your own checkouts stay read-only to them. Your own Codex `sandbox_mode` and Claude `sandbox` settings are not applied.
+  Codex's commands run without a login shell, with the environment and `PATH` a Copilot worker's
   commands get; Codex puts its own helpers first on `PATH` and sets a few variables of its own
   (such as `LANG` and `LC_ALL` to `C.UTF-8`, `TERM=dumb`, `PAGER=cat`).
-- **Repositories:** a repository's `.codex/` settings, hooks and rules load only where you trust
-  its folder in Codex (a worktree as its repository is trusted). Elsewhere Codex reads none of
-  them, and Chief of Staff gives the worker the repository's `AGENTS.md` files as text: a
-  message marked as the repository's, with any tag in it escaped, so it can't pass as yours or
-  as Chief of Staff's. Trust the repository in Codex to load its `.codex/` settings and skills
-  in Codex workers. Codex workers run without the sandbox, so their threads trust those as
-  your own Codex sessions do. With the sandbox on they would load only as you last let them, as
-  for Copilot's: a `.codex/` folder
-  that changed since (or that Chief of Staff sees for the first time, outside a folder it made)
-  is not loaded for the worker, and its timeline says "Codex settings in this folder changed
-  (changed .codex/config.toml), so Codex won't load them for this worker until you say to use
-  them". **Use these settings** on that line loads them
-  from its next turn (after the one under way, if it is at work). Workers don't edit `.codex/` folders or Codex's settings folder.
-- **Questions:** a Codex worker asks you with a report's question (Codex has no `ask_user` here).
-  An MCP server that needs a sign-in is signed in with `codex mcp login <name>`.
+- **Workers that read Slack** run on Claude only on a version whose check showed both its
+  sandbox and *Ask first* holding, with the same guarantees as on Copilot (checks on, network
+  GitHub only); otherwise, and always for Codex, they run on Copilot, and say why.
+- **Memory:** Codex's memories and Claude's auto memory are off in Chief of Staff's workers
+  (Codex's run commands nobody is asked about; Claude's folder is shared with your own sessions).
+  Your own sessions keep theirs.
+- **Repositories:** a repository's own settings (Codex's `.codex/`, Claude's `.claude/` and
+  `.mcp.json`) load only where you trust its folder in that agent (a worktree as its repository
+  is trusted). Elsewhere none of them loads, and the repository's `AGENTS.md` or `CLAUDE.md`
+  reaches the worker as text: a message marked as the repository's, with any tag in it escaped,
+  so it can't pass as yours or as Chief of Staff's. Codex workers run without the sandbox, so
+  their threads trust Codex's as your own Codex sessions do. With the sandbox on they would load
+  only as you last let them, as for Copilot's: a `.codex/` folder that changed since (or that Chief of Staff sees for the first
+  time, outside a folder it made) is not loaded for the worker, and its timeline says "Codex
+  settings in this folder changed (changed .codex/config.toml), so Codex won't load them for this
+  worker until you say to use them". **Use these settings** on that line loads them from its
+  next turn (after the one under way, if it is at work). Workers don't edit `.codex/` folders or
+  Codex's settings folder.
+- **Questions:** a worker asks you with the same card as a Copilot worker's, and an MCP server's
+  form reaches you too. An MCP server that needs a sign-in is signed in from a terminal:
+  `codex mcp login <name>` or `claude mcp login <name>`.
+- **Claude's own tools** are tied into Chief of Staff: a worktree it makes is one of the
+  worker's checkouts (receipts, *Storage*, removed with the others); what it schedules (`/loop`,
+  a reminder) runs as a turn of its own, admitted, shown and stopped as any; another Claude
+  session's message is shown labelled with its sender, never as yours, and can approve nothing;
+  plan mode is approved when the worker acts on its own and asks you under *Ask first*; its
+  subagents get Chief of Staff's rules; a cloud agent or a routine needs your OK each time.
+  Receipts show no exit code where Claude gives none (a `grep` that found nothing, say).
+- **Continue in a terminal** (**⋯**) copies the agent's own command (`codex resume <thread>`, or
+  `cd <folder> && claude --resume <id>`); while it is open there, Chief of Staff writes nothing
+  to it, and it shows what you did there before its next message.
+- **Your own sessions:** *Other Copilot sessions* lists your own Codex and Claude sessions too.
+  Adopting a Claude session goes on in that session (not while it is open elsewhere); a Codex
+  thread goes on in a new thread of Chief of Staff's with its conversation, and yours stays as it
+  was. A worker on another agent has no search of your past Copilot sessions.
 
-**Turning it off** stops its workers at once, with what they left running, and ends its process;
-their chats, tasks and usage stay. *Go on* works again once it is back on.
+**Turning one off** stops its workers at once, with what they left running, and ends its
+processes; their chats, tasks and usage stay. *Go on* works again once it is back on.
 
 **Before installing an earlier version**, stop Chief of Staff and run
-`chiefofstaff --prepare-downgrade`: it stops the workers on Codex that were at work and checks
-that no Codex process is left. Earlier versions run every worker on Copilot and cannot resume
-Codex workers: close those you no longer need. If Chief of Staff was killed, run it (or
-`--prepare-downgrade`) once with this version first: it keeps its record of those processes in a
-form 0.1.46 and earlier cannot read, so they would not end what they left running. With no worker
-ever on another agent, it says there is nothing to prepare.
+`chiefofstaff --prepare-downgrade`: it stops the workers on other agents that were at work and
+checks that none of their processes is left. An earlier version can't go on with those workers:
+0.1.45 and 0.1.46 run Codex workers but refuse Claude's, and earlier versions run every worker on
+Copilot, without its conversation. Close those you no longer need. If Chief of Staff was killed,
+run it (or `--prepare-downgrade`) once with this version first: it keeps its record of those
+processes in a form 0.1.46 and earlier cannot read, so they would not end what they left running.
+With no worker ever on another agent, it says there is nothing to prepare.
 
 ## Daily summary and your profile
 

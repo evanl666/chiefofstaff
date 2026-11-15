@@ -68,8 +68,9 @@ only with a decision to make or a draft to approve.
 **Your Copilot, your machine**
 - Uses the Copilot you already have: your plan, models, plugins, skills, MCP servers and your
   company's policies, plus anything you add in Settings. No other AI service or API key.
-- If you also use Codex, workers can run on it instead, with your own Codex sign-in: turn it
-  on in Settings ([how](docs/guide.md#workers-on-other-coding-agents)).
+- If you also use Codex or Claude Code, workers can run on them instead, with your own sign-in:
+  allow them on Home or in Settings, and pick one for a task with `@codex` or `@claude`
+  ([how](docs/guide.md#workers-on-other-coding-agents)).
 - Every worker gets its own folder and git worktree, so your checkouts stay untouched. Workers
   run like your own Copilot sessions (those that read Slack keep permission checks by default); turn on
   *Ask first* for all of them (no pushes to `main`, no force pushes, no writes outside their
