@@ -237,6 +237,16 @@ BYPASSES = [
     "$(echo git) push origin main",
     "env $G push origin main",
     "`which git` push origin wb/x",
+    "find . -maxdepth 0 -exec $G push origin main \\;",
+    "caffeinate -i $G push origin main",
+    # Found by the 200k runs of this round: unquoted, a variable or a substitution in a
+    # refspec's source may be several refspecs (`HEAD:main HEAD`); a substitution and text
+    # after it are not what asks git for the checkout's branch.
+    "read B <<< 'HEAD:main HEAD'; git push origin $B:wb/x",
+    "git push origin $(cat refspecs):wb/x",
+    "git push origin $(printf 'HEAD:main ')HEAD",
+    "git push origin $(cat refspecs)\x02",
+    "git push origin $(git branch --show-current) # \x02",
 ]
 # What a worker does every day, on its own branch: let through.
 EVERYDAY = [
@@ -295,6 +305,9 @@ EVERYDAY = [
     "git config push.autoSetupRemote true && git push",
     "git subtree push --prefix=docs origin wb/x",
     "git send-pack ../origin.git wb/x",
+    'cp "$SRC" push.txt && git push origin wb/x',
+    "git push origin $(git branch --show-current):wb/y",
+    'git push origin "$B:wb/x"',
 ]
 # On a checkout of main itself: pushes that update no branch, or one the line made.
 ON_MAIN_ALLOWED = [
@@ -1822,7 +1835,9 @@ def test_a_cd_to_no_folder_but_the_systems_leaves_the_folder_unknown(command, go
         ('sh -c "git push origin $B:t"', "zsh", True),
         ("eval \"bash -c 'git push origin $B:l'\"", "zsh", True),
         ("sh -c 'sh -c \"git push origin $B[1]\"'", "zsh", True),
-        ('sh -c "git push origin $B:t"', "", False),
+        ("sh -c 'git push origin \"$B\":t'", "", False),
+        # (Unquoted, in bash too, `$B` may be several refspecs: found by this round's 200k runs.)
+        ('sh -c "git push origin $B:t"', "", True),
         ("zsh -c 'git push origin $B:t'", "", True),
     ],
 )

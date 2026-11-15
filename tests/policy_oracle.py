@@ -422,10 +422,10 @@ def pushed(record: str) -> set[str]:
     if not refspecs and command == "push":
         configured = [value for key, value in settings.items()
                       if key == f"remote.{remote.lower()}.push"]  # fmt: skip
+        if tags or deleting:
+            return set()  # (`--tags` pushes the tags alone, a remote's push refspecs not.)
         if configured:
             refspecs = configured
-        elif tags or deleting:
-            return set()
         elif mode == "matching" or settings.get(f"remote.{remote.lower()}.mirror") == "true":
             return {"main", "?"}
         elif mode in {"upstream", "tracking"}:
@@ -479,7 +479,8 @@ VALUES = ["main", "feat", "wb/x", "master", "", "'feat main'", "HEAD", "../main"
           "$(git rev-parse --abbrev-ref HEAD)", "/", "..", "'$(echo main)'", "$B",
           '"$PWD/../main"', "wb/main", "x/main", "xmain", "main.y", "MAIN",
           '"$(git symbolic-ref --short HEAD)"', "`git branch --show-current`",
-          "$(printf ma; printf in)", "git", "$(git branch --show-current | cat)"]  # fmt: skip
+          "$(printf ma; printf in)", "git", "$(git branch --show-current | cat)",
+          "'HEAD:main HEAD'"]  # fmt: skip
 SPELLINGS = {
     "read": ["read", "r\\ead", "'re'ad", '"read"', "\\read"],
     "export": ["export", "ex\\port", "'export'"],
@@ -943,6 +944,15 @@ FOUND = [
     ('git config alias.p push && git p origin main', 'feat'),
     ('G=git; $G push origin main', 'feat'),
     ('$(echo git) push origin main', 'feat'),
+    # Found by the 200k runs of this round (bash 3.2, zsh, on b45b8cd): git in a substitution
+    # that find runs; unquoted, a refspec's source that splits (bash 3.2 splits even its `:`
+    # at IFS's characters); `--tags` pushes no remote's push refspecs (the shim's model).
+    ('cd +1 | find ../feat -mindepth 1 -maxdepth 1 -name sub -execdir $(echo git) push origin master \\;', 'feat'),  # noqa: E501
+    ('find ../feat/sub -maxdepth 0 -execdir $(echo git) push origin HEAD \\;', 'main'),
+    ('command cd l; for IFS in HEAD x:main; do :; done; nice git push origin $B:r & un\\set B', 'feat', 'headmain'),  # noqa: E501
+    ("read B <<< 'HEAD:main HEAD'; git push origin $B:feat", 'feat'),
+    ("git push origin $(printf 'HEAD:main ')HEAD", 'feat'),
+    ('command git push origin --tags', 'main', 'headmain'),
 ]  # fmt: skip
 
 

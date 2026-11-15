@@ -31,7 +31,11 @@ to a branch of its own before a push is let through again (QA on 0.1.45).
 - **Other ways to push are read**: `git subtree push` and `git send-pack` (with no branch named,
   every branch of the same name on both sides), an alias that `git config` sets on a line that
   says push, and a command whose name a variable or a substitution holds on such a line
-  (`g=git; $g push origin main`) (E68).
+  (`g=git; $g push origin main`, also one another command runs: `find … -exec $G push`) (E68).
+- **An unquoted variable the line doesn't set, or a substitution, before a refspec's `:`** may
+  hold several refspecs (`$B:feat` with `B='HEAD:main HEAD'`): which branch the push updates is
+  not known, and it is refused, saying so (found checking these fixes; quoted, `"$B:feat"`, it
+  is one refspec, as before).
 - A long line of aliases (or of shells given `-c`) on a line that says push took time growing
   with its square to check; it is read in one pass.
 

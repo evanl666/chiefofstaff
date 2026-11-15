@@ -90,8 +90,9 @@ MADE_UP = "\x00"
 # What a substitution that asks git for the checkout's branch makes, as `HEAD` names it (only
 # those in current_query: `$(git branch --show-current)`…): the branch a push naming none
 # updates. A variable set to one holds it with when (Line.epoch, captured): a `cd` or a switch
-# after it may have made it another branch than the checkout's.
-CURRENT = MADE_UP + "HEAD"
+# after it may have made it another branch than the checkout's. (Its second character is in no
+# line it is taken from: Tally.currents; else a substitution and text after it could make it.)
+CURRENT = MADE_UP + "\x02"
 # What asks for it: git's command, the options it must have, and whether `HEAD` follows them.
 CURRENT_QUERIES = {
     "branch": (frozenset({"--show-current"}), False),
@@ -912,6 +913,7 @@ def captured(epoch: int) -> str:
 
 
 CAPTURED = re.compile(re.escape(CURRENT) + r"\x00[0-9]+")
+CURRENTS = re.compile(re.escape(CURRENT) + r"(?:\x00[0-9]+)?")
 
 
 DESTINATION_STOPS = re.compile(r"\$\(|\$\{|[`)}:]")
@@ -1000,6 +1002,8 @@ def expansions(
             # Split where unquoted (`$B`), and gone when empty, unless part of it is quoted
             # (`""$B`); a quoted one (`"$B"`) is one word, even empty.
             made = [put] if put == word or not isinstance(word, Splitting) else put.split()
+            if isinstance(word, Splitting) and put != word:  # (What is left unread splits still.)
+                made = [Splitting(piece) if UNSETTLED.search(piece) else piece for piece in made]
             made = made or ([""] if getattr(word, "quoted", False) else [])
             tally.expands(len(put), len(made))
             run += made
@@ -1078,6 +1082,7 @@ class Git:
     moved: bool = False  # Its folder is another than the shell's (`-C`).
     zsh: bool = False  # zsh's modifiers may be in its words (`$B:t`: Tally.modifiers).
     epoch: int = -1  # Its line's Line.epoch: a variable set to CURRENT then is its branch.
+    currents: bool = False  # Whether CURRENT in its words is what a substitution made.
 
 
 def git_command(
@@ -1284,12 +1289,16 @@ def read_refspecs(push: Push, words: list[str], git: Git) -> bool:
         target = destination(spec)
         whole = one_substitution(spec)
         named = pushed_branch(target) if MADE_UP in target else ""
-        if whole == "current" or named in {CURRENT, captured(git.epoch)}:
+        if git.currents and (whole == "current" or named in {CURRENT, captured(git.epoch)}):
             push.made_up = push.current = True  # As `HEAD`: its folder's branch (asked of git).
             push.mapped = push.mapped or ":" not in spec
             continue
         if whole:
             push.made_up = push.unknown = True  # What another substitution makes: not known.
+            continue
+        unread = CURRENTS.sub("", word) if git.currents else word  # (A branch's name: no space.)
+        if isinstance(word, Splitting) and UNSETTLED.search(unread):
+            push.unknown = True  # Unquoted, what it holds may be several refspecs: not known.
             continue
         if git.zsh and ZSH_MODIFIED.search(word):
             push.unknown = True  # (`$B:t`, `$B[2]`: what zsh makes of B, not read here.)
@@ -1450,6 +1459,7 @@ class Tally:
     outer_zsh: bool = False
     saying: dict[str, bool] = field(default_factory=dict)
     feeding: bool | None = None
+    currents: bool = False  # Whether CURRENT's second character is in no word of the line.
     # What the line may do to where pushes go, besides what it says of each: set git's push
     # configuration (`git config`), a branch's upstream (`git branch -u`, a branch made: Push.
     # upstreams_set), delete or rename a branch a checkout then names (Push.bare_check).
@@ -2254,7 +2264,21 @@ def read_command(words: list[str], index: int, line: Line) -> str:
                 folder = LOST  # Each found file's folder.
         elif program in FEEDERS:
             feeds = feeds or placeholder(program, words[position + 1 :])
+    if pushed_by_a_name(words) and line.says_push() and not line.tally.fed():
+        line.tally.pushes.append(Push(unknown=True))  # (`find … -exec $G push`, `watch $G push`.)
     return ""
+
+
+def pushed_by_a_name(words: list[str]) -> bool:
+    """Whether a command that runs no git it names may run one a variable or a substitution
+    names, with `push` (or `send-pack`) after it: a command it runs (`find … -exec`, `watch`,
+    `caffeinate`), whatever runs it."""
+    named = False
+    for word in words:
+        named = named or bool(UNSETTLED.search(word))
+        if named and word in {"push", "send-pack"}:
+            return True
+    return False
 
 
 # Commands that run another with words of their own added (each line of their input, a found
@@ -2386,7 +2410,7 @@ def read_git(
     removes, upstream = branches_changed(git.rest)
     line.tally.unbranched = line.tally.unbranched or removes
     line.tally.upstreams_set = line.tally.upstreams_set or upstream
-    git.epoch = line.epoch
+    git.epoch, git.currents = line.epoch, line.tally.currents
     if push := push_of(git):
         push.unknown = push.unknown or fed
         push.nested = bool(line.depth)
@@ -2602,6 +2626,7 @@ def read_pushes(command: str, cwd: str, shell: str) -> tuple[tuple[Push, ...], s
     if len(command) > MOST_LINE:
         return (), TOO_LONG
     tally = Tally(command, cwd, shell)
+    tally.currents = CURRENT[1] not in command
     try:
         why = read_line(command, cwd, 0, tally)
     except TooComplexError:
