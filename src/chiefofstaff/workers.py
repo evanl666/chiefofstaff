@@ -1747,15 +1747,25 @@ class Workers:
         before = self.runtime.elsewhere
         self.runtime.elsewhere = await self.runtime.open_elsewhere()
         changed = set(before) ^ set(self.runtime.elsewhere)
+        # Each other agent on, as its own backend sees its conversations open in a terminal; one
+        # not running now is not looked at (its workers' state there is not known: nothing is
+        # decided of them).
+        looked = {COPILOT_AGENT}
+        for agent in self.runtime.agents_on():
+            backend, _ = self.runtime.connection(agent)
+            if backend is None or not backend.alive():
+                continue
+            was = set(self.runtime.elsewhere_on.get(agent, {}))
+            changed |= was ^ set(await self.runtime.agent_elsewhere(agent))
+            looked.add(agent)
         for row in self.store.open_sessions(WORKER):
             copilot = self.runtime.copilot_id(row["id"])
+            if self.runtime.agent(row["id"]) not in looked:
+                continue
+            open_there = bool(self.runtime.is_elsewhere(row))
             if copilot in changed:
                 self.runtime.publish_session(row)
-            if (
-                copilot in self.runtime.elsewhere
-                and self.states.handle(row["id"])
-                and row["status"] != "working"
-            ):
+            if open_there and self.states.handle(row["id"]) and row["status"] != "working":
                 # Opened in a terminal while live here: it is the terminal's now (two programs
                 # would interleave its history). The mirror shows it; news waits for it.
                 with suppress(Exception):
@@ -1763,7 +1773,7 @@ class Workers:
             # Closed there (also while this app was not running): what waited for it goes; for a
             # worker on another agent, once that agent may run it again.
             if (
-                copilot not in self.runtime.elsewhere
+                not open_there
                 and (
                     self.store.get(f"heldnews:{row['id']}")
                     or self.store.get(f"refusedopen:{row['id']}")

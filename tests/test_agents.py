@@ -659,6 +659,25 @@ async def codex_worker(tmp_path, instructions="Report done: Fixed it.", settings
     return harness, runtime, worker, result["task_id"]
 
 
+async def test_a_codex_worker_resumed_by_hand_is_let_go_and_its_closing_said_once(
+    tmp_path, codex_on_path
+):
+    from by_hand import opened_by_hand, resumed_by_hand_is_let_go_and_said_closed_once
+
+    harness, runtime, worker, _ = await codex_worker(tmp_path)
+    try:
+        assert runtime.states.is_live(worker)
+        terminal = await opened_by_hand(tmp_path, "codex", "resume", runtime.copilot_id(worker))
+        try:
+            await resumed_by_hand_is_let_go_and_said_closed_once(harness, runtime, worker, terminal)
+        finally:
+            if terminal.returncode is None:
+                terminal.kill()
+                await terminal.wait()
+    finally:
+        await runtime.stop()
+
+
 def test_a_codex_worker_is_told_in_codex_terms_what_copilot_is_told_in_its_own():
     for copilot in prompts.AGENT_WORDS["codex"]:
         assert prompts.WORKER.count(copilot) == 1, copilot
