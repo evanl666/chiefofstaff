@@ -84,6 +84,9 @@ are a batch again, and your own questions stay listed (QA round on 0.1.45).
   session a batch, left out for good. It now takes two sessions of that name, or a worker's
   command where the session ran (as workers name their calls); one so named is still left out
   while it runs (QA on 0.1.45, E81).
+- On Linux, processes are known by their whole command lines: `ps` there cut each line to the
+  width `COLUMNS` gave, even into a pipe, so a process Chief of Staff started could be taken
+  for another one when it was looked for again; `ps -ww` never cuts.
 
 ## 0.1.45 (2026-11-14)
 
