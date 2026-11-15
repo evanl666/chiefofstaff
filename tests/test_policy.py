@@ -4,8 +4,10 @@ line here, and the pushes of ordinary work let through."""
 
 import itertools
 import os
+import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -542,9 +544,28 @@ SCANS = ("shell_commands", "shell_words", "heredocs", "without_comments", "witho
          "recursive_delete", "gh_api_writes", "written", "may_alias")  # fmt: skip
 LINEAR = 60
 # And how long a check may take, as a sanity bound only (CPU time: a check of one of these lines
-# takes well under a second, even traced for coverage on a busy machine; one grown quadratic
-# takes tens of seconds at these lengths). The work above is what is measured.
-SANITY = 5.0
+# takes about a second at most, traced for coverage; one grown quadratic takes minutes at these
+# lengths). The work above is what is measured. 5 s on a machine as fast as the one this was
+# measured on, where reading REFERENCE took REFERENCE_CPU (untraced); as many times more as it
+# takes longer here (a slow runner, coverage's tracing, a busy machine), up to MOST_SCALE: CI's
+# Linux runner with coverage took 5.2 s, at a load of 30, for a line that takes 0.3 s here.
+REFERENCE = "git push origin wb/x " + "word " * 20_000
+REFERENCE_CPU = 0.028
+MOST_SCALE = 20.0
+
+
+def calibrated(base: float = 5.0) -> float:
+    taken = []
+    for _ in range(5):
+        policy.reading.cache_clear()
+        started = time.process_time()
+        policy.reading(REFERENCE, "")
+        taken.append(time.process_time() - started)
+    policy.reading.cache_clear()
+    return base * min(MOST_SCALE, max(1.0, min(taken) / REFERENCE_CPU))
+
+
+SANITY = calibrated()
 
 
 @pytest.fixture
@@ -733,6 +754,11 @@ def test_a_line_too_much_to_read_that_pushes_is_refused_saying_why(command, work
         "git co a && " * 10_000 + "git push",
         "git -c alias.co=checkout co a && " * 5_000 + "git push",
         "$G co x; " * 20_000,
+        # The 100k bash run on 408c670: scripts commands run, read as lines of their own.
+        "sh -c 'echo x >> .git/config; true' " * 10_000 + "&& git push",
+        "eval eval sh -c " * 10_000 + "'git push'",
+        "env -S 'sh -c x' " * 10_000 + "&& git push",
+        "find . " + "-exec sh -c 'echo x >> .git/config' \\; " * 8_000 + "&& git push",
     ],
 )
 def test_no_line_is_slow_to_check(command, work, feature):
@@ -2607,3 +2633,58 @@ def test_a_script_fed_to_a_shell_that_runs_an_alias_that_pushes_is_refused(comma
 def test_a_script_fed_to_a_shell_that_names_no_alias_that_pushes_lets_it_through(command, tmp_path):
     work = aliased(tmp_path / "repo", "wb/x")
     assert denial(command, work) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sh -c 'echo remote.origin.push=HEAD:main >> .git/config; git push'",
+        "bash -c 'cp .git/config .git/new; echo x >> .git/new; cp .git/new .git/config; true'; "
+        "git push",
+        "find . -maxdepth 0 -exec sh -c 'cp ../push.cfg .git/config; git push' \\;",
+        "echo | xargs sh -c 'tee -a .git/config < ../push.cfg; git push'",
+        "(eval 'echo push.default=matching >> .git/config; true') && git push",
+        "(command eval 'cat ../push.cfg >> ~/.gitconfig; cd /; true') && git push",
+        "env -S 'tee -a .git/config x' < ../push.cfg; git push",
+        "zsh -lc 'sed -i.bak s/simple/matching/ .git/config && true'; git push",
+        "sh -c \"sh -c 'echo x >> .git/config; true'\"; git push",
+    ],
+)
+def test_a_script_a_command_runs_that_writes_gits_configuration_cant_tell(command, feature):
+    """The 100k bash run on 408c670: git's configuration written by a script a command runs
+    (`sh -c '…'`, `find … -exec sh -c '…'`, `xargs sh -c`, `env -S`, `eval`) was read as one
+    word, and missed unless its file came last. It is read as a line of its own."""
+    assert "can't tell which branch" in (denial(command, feature) or ""), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sh -c 'cat .git/config; git push'",
+        "bash -c 'git commit -m \"read .git/config\"; true' && git push",
+        "sh -c 'echo done > build.log; git push origin wb/x'",
+        "sh -c 'grep url .git/config' && git push",
+    ],
+)
+def test_a_script_a_command_runs_that_only_reads_gits_configuration_lets_it_through(
+    command, feature
+):
+    assert denial(command, feature) is None, command
+
+
+def nested_shells(script: str, size: int) -> str:
+    """A script given to `sh -c`, that line given to `sh -c` again, until it is `size` long."""
+    while len(script) < size:
+        script = "sh -c " + shlex.quote(script)
+    return script
+
+
+@pytest.mark.parametrize("size", [20_000, 100_000])
+def test_scripts_given_to_shells_deep_in_quotes_are_read_in_linear_time(size, work, feature):
+    """Each `sh -c` reads its script as a line, to MOST_NESTED deep (deeper: too complex, or
+    loosely): the quotes of each level make the line grow, the reading of it does not grow
+    faster."""
+    command = nested_shells("echo x >> .git/config; git push", size) + "; git push"
+    found, took = timed(command, feature)
+    assert found and linear(work, command) and took < SANITY
+    assert policy.written(command, str(feature))[0]

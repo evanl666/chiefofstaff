@@ -2948,19 +2948,32 @@ class Writes:
                     kept.append(word)
             self.command(kept)
 
-    def line(self, text: str):
-        """A line's simple commands; its redirections' targets."""
+    def line(self, text: str) -> list[str]:
+        """A line's simple commands; its redirections' targets. The scripts its commands run,
+        as lines of their own (`sh -c '…'`, `find … -exec sh -c '…'`, `env -S '…'`, `eval`)."""
         try:
             tokens = shell_words(text)
         except (ValueError, TooComplexError):
             self.loosely(squashed(text))
-            return
+            return []
         words: list[str] = []
+        given: list[str] = []  # (Its words as they are: inner_scripts reads `env -S`.)
+        scripts: list[str] = []
         target = ""  # The next word: a file written (">"), or read ("<").
         for token in [*tokens, Separator(";")]:
             if isinstance(token, Separator):
+                found, at = evaluated(given)
+                if found:  # (Its words: the script, read as a line; not files it names.)
+                    words = words[: at + 1]
+                else:
+                    found = inner_scripts(given)
+                    run = set(found)
+                    words = [
+                        w for w, as_given in zip(words, given, strict=True) if as_given not in run
+                    ]
                 self.command(words)
-                words, target = [], ""
+                scripts += found
+                words, given, target = [], [], ""
             elif target:
                 if target == ">":
                     self.note(token)
@@ -2977,16 +2990,29 @@ class Writes:
                 head = token[: token.at]
                 if head and not head.isdigit():
                     words.append(head.lower())
+                    given.append(head)
             else:
                 words.append(token.lower())
+                given.append(token)
+        return scripts
+
+
+def evaluated(words: list[str]) -> tuple[list[str], int]:
+    """What a simple command's `eval` runs (past assignments and `command`, `builtin`…): its
+    words, as one line; and where `eval` stands."""
+    for at, word in enumerate(words):
+        if ASSIGNMENT.match(word) or word in KEYWORDS or word in WRAPPERS or word[:1] == "-":
+            continue
+        return ([" ".join(words[at + 1 :])], at) if word.rsplit("/", 1)[-1] == "eval" else ([], 0)
+    return [], 0
 
 
 @functools.lru_cache(maxsize=32)
 def written(command: str, cwd: str) -> tuple[bool, frozenset[str]]:
     """Whether a line may write a git configuration file (git_config_file), and the names of
     the files it may write (without their folders, in lower case; "*" past MOST_WRITTEN): in
-    its commands and its substitutions' (a heredoc's body is text, but for those), to
-    MOST_NESTED deep (deeper, read loosely)."""
+    its commands, its substitutions' (a heredoc's body is text, but for those) and the scripts
+    its commands run (`sh -c`, `eval`…), to MOST_NESTED deep (deeper, read loosely)."""
     here = bool(GIT_DIR_TEXT.search(squashed(command))) or ".git" in Path(cwd).parts
     here = here or cwd.endswith(".git")
     writes = Writes(here)
@@ -3001,7 +3027,7 @@ def written(command: str, cwd: str) -> tuple[bool, frozenset[str]]:
         for body in bodies:
             inside += without_substitutions(body, quoted=True)[1]
         texts += [(body, depth + 1) for body in inside]
-        writes.line(plain)
+        texts += [(script, depth + 1) for script in writes.line(plain)]
     return writes.config, frozenset(writes.names)
 
 
@@ -3035,7 +3061,13 @@ def read_pushes(
         why = read_line(command, cwd, 0, tally)
     except TooComplexError:
         why = TOO_COMPLEX
-    tally.config_set = tally.config_set or written(command, cwd)[0]
+    # (A file of git's configuration is named `…config…`, or put in a repository's own folder:
+    # a line that says neither writes none, read so at once.)
+    text = squashed(command)
+    configured = (
+        any(part in text for part in ("config", ".git", "/git")) and written(command, cwd)[0]
+    )
+    tally.config_set = tally.config_set or configured
     for push in tally.pushes:
         push.unknown = push.unknown or tally.config_set  # (Where it goes: what the line set.)
         if push.alias:  # (Which aliases there are: what the line may have set.)
@@ -3952,8 +3984,17 @@ def fed_alias(command: str, cwd: str) -> bool:
 
 @functools.lru_cache(maxsize=32)
 def fed_shell(command: str) -> bool:
-    """feeds_shell, once a line."""
-    return feeds_shell(command)
+    """feeds_shell, once a line; at once for one that names no shell, `source`, `.`, `eval` or
+    `trap`, and makes up no command's name (`$SHELL`) or substitution: none it feeds (and one
+    too long or deep to read is refused for that)."""
+    text = squashed(command)
+    named = any(word.rsplit("/", 1)[-1].lstrip("=") in FED_NAMES for word in FED_SPLIT.split(text))
+    return (named or "$" in text or "`" in text) and feeds_shell(command)
+
+
+# The words that may feed a shell code (fed_shell), as a line splits them.
+FED_NAMES = FED_SHELLS | {"source", ".", "eval", "trap", "emulate", "busybox"}
+FED_SPLIT = re.compile(r"[\s;&|()<>{}=]+")
 
 
 def pushes_forced(command: str, cwd: str = "") -> bool:
