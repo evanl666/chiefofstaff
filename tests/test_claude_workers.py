@@ -910,6 +910,38 @@ async def test_a_claude_worker_with_schedules_is_not_handed_to_a_terminal_and_no
         await runtime.stop()
 
 
+async def test_a_worker_whose_folder_has_new_claude_settings_does_not_start_there_again(
+    tmp_path, claude_on_path
+):
+    """Claude's own settings that appeared in a worker's worktree since it began (a command run
+    without the sandbox could write one): their hooks and servers would run as Claude starts
+    there, outside its checks. Neither its next process nor the owner's terminal starts there
+    until they are restored."""
+    from test_round7_split import published
+
+    app = published(tmp_path, "app")
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        result = await spawn_on(
+            harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
+            instructions="Report done: made",
+        )  # fmt: skip
+        worker = result["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        cwd = Path(harness.store.session(worker)["cwd"])
+        await runtime.detach(worker)
+        (cwd / ".mcp.json").write_text('{"mcpServers": {"x": {"command": "true"}}}')
+        with pytest.raises(ValueError, match=r"changed since it started \(app/\.mcp\.json\)"):
+            await runtime.terminal_command(worker)
+        with pytest.raises(RuntimeError, match=r"changed since it started \(app/\.mcp\.json\)"):
+            await runtime.session_for(worker)
+        (cwd / ".mcp.json").unlink()
+        assert await runtime.session_for(worker), "restored: it starts again"
+    finally:
+        await runtime.stop()
+
+
 async def set_aside(runtime, task: str):
     """A finished task the owner cancels: the first cancel asks again, the second sets it aside."""
     with pytest.raises(ValueError, match="cancel again to set it aside"):

@@ -445,6 +445,23 @@ def default_effort(info: dict) -> str:
     return "medium" if "medium" in efforts else efforts[len(efforts) // 2]
 
 
+def file_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes() if path.is_file() else None
+    except OSError:
+        return None
+
+
+async def committed_bytes(tree: str, commit: str, name: str) -> bytes | None:
+    """A file as a commit has it (None: not in it)."""
+    process = await asyncio.create_subprocess_exec(
+        "git", "-C", tree, "show", f"{commit}:{name}",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )  # fmt: skip
+    output, _ = await process.communicate()
+    return output if process.returncode == 0 else None
+
+
 def describe_model(model: Any) -> dict:
     """The model facts the UI and session options need."""
     prices = model.billing.token_prices if model.billing else None
@@ -2254,6 +2271,12 @@ class Runtime:
         if row["status"] in {"working", "starting", "queued"} or self.states[session_id].held:
             raise ValueError("It is at work: stop it first, or wait until it is done.")
         agent = self.agent(session_id)
+        if agent == "claude" and (changed := await self.claude_settings_changed(row)):
+            raise ValueError(
+                f"Claude's own settings in its folder changed since it started ({changed}): "
+                "their hooks and servers would run in your terminal's session. Look at them and "
+                "restore them (or remove a new one) first."
+            )
         if self.store.get(f"schedulesdelete:{session_id}"):
             # Ended with its task, but still in its Claude conversation, which would bring them
             # back in the terminal: deleted there first (delete_dropped_schedules).
@@ -3591,6 +3614,30 @@ class Runtime:
             self.background(self.delete_dropped_schedules(session_id))
         return True
 
+    async def claude_settings_changed(self, row: dict) -> str:
+        """Claude's own settings in a worker's worktrees (backend_claude.CLAUDE_CONFIG_FILES)
+        that differ from where each began (its base commit's; for one carried from the owner's
+        checkout, the owner's): their hooks, apiKeyHelper and MCP servers would run as Claude
+        next starts there, outside the worker's checks. Its tools never write them; a command
+        run without the sandbox could. "" for none; else which, by folder and name."""
+        from .backend_claude import CLAUDE_CONFIG_FILES
+
+        changed: list[str] = []
+        for checkout in self.workspaces.checkouts(row):
+            tree, base = checkout.get("worktree"), checkout.get("base_ref")
+            if not tree or not base:
+                continue
+            carried = set(checkout.get("carried") or [])
+            for name in CLAUDE_CONFIG_FILES:
+                now = await asyncio.to_thread(file_bytes, Path(tree) / name)
+                if name in carried:
+                    was = await asyncio.to_thread(file_bytes, Path(checkout["repo"]) / name)
+                else:
+                    was = await committed_bytes(tree, base, name)
+                if now != was:
+                    changed.append(f"{Path(tree).name}/{name}")
+        return ", ".join(changed)
+
     async def delete_dropped_schedules(self, session_id: str) -> str:
         """Its dropped schedules (drop_schedules) deleted in Claude, by a turn of Chief of
         Staff's that does only that, once it is not at work: in its process, opened for this if
@@ -4518,6 +4565,12 @@ class Runtime:
             await self.ready_caches(row)
             options, trusted = self.options(row), self.trust(row)
         else:
+            if agent == "claude" and (changed := await self.claude_settings_changed(row)):
+                raise RuntimeError(
+                    f"Claude's own settings in its folder changed since it started ({changed}): "
+                    "their hooks and servers would run outside its checks as Claude starts "
+                    "there. Restore them (or remove a new one), then tell it to go on."
+                )
             options, trusted = self.agent_options(row), {}
             # Slack's read tools in this process: its token never reaches Claude's.
             if row["slack"] and agent == "claude" and (proxy := await self.slack.read_proxy()):
