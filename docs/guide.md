@@ -1292,9 +1292,7 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   Codex's commands run without a login shell, with the environment and `PATH` a Copilot worker's
   commands get; Codex puts its own helpers first on `PATH` and sets a few variables of its own
   (such as `LANG` and `LC_ALL` to `C.UTF-8`, `TERM=dumb`, `PAGER=cat`).
-- **Workers that read Slack** run on Claude only on a version whose check showed both its
-  sandbox and *Ask first* holding, with the same guarantees as on Copilot (checks on, network
-  GitHub only); otherwise, and always for Codex, they run on Copilot, and say why.
+- **Workers that read Slack** run on Copilot, and say why: not on Codex, and not on Claude yet.
 - **Memory:** Codex's memories and Claude's auto memory are off in Chief of Staff's workers
   (Codex's run commands nobody is asked about; Claude's folder is shared with your own sessions).
   Your own sessions keep theirs.
