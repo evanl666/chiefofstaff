@@ -1228,7 +1228,8 @@ which it chose and why).
 
 **Choosing it for one task.** Type `@codex`, `@claude` or `@copilot` in Home's message box: the
 agent becomes a chip above it ("On Codex", × removes it), and the Router starts that work there.
-Saying so works too ("do this with Claude"). A worker keeps its agent: one on Codex or Claude
+Saying so works too ("do this with Claude"). The chip wins over the Router's own choice. A
+worker keeps its agent: one on Codex or Claude
 says so beside its name in the sidebar, and with its model in its header.
 
 **When it can't run.**
@@ -1238,8 +1239,9 @@ says so beside its name in the sidebar, and with its model in its header.
 - The agent new workers use cannot run: they start on Copilot, and their name says why.
 - A plan's usage limit, or a rate limit the agent gave up on, reached in the middle of a task:
   the worker pauses under *Needs you*, saying when the limit resets when the agent says it. *Go
-  on* once it has, or *Continue with* another agent from the task's **⋯**. Nothing switches by
-  itself.
+  on at* that time (it goes on by itself then, unless you or another worker have told it
+  something since), *Go on* once it has, or *Continue with* another agent from the task's **⋯**.
+  Nothing switches by itself.
 
 **Continue with another agent.** An idle worker's **⋯** has *Continue with Claude…* (or another
 agent on), and you can ask the Router ("hand this to Claude"): a new worker on that agent goes
@@ -1299,7 +1301,11 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   Chief of Staff sets each of Claude's sandbox switches itself, and while the sandbox is on, a
   Claude worker does not start where your Claude settings (yours, a trusted project's, managed
   ones) add to its sandbox's lists (`excludedCommands`, `allowedDomains`, `allowWrite`, …) or set
-  a proxy port: Claude would merge them with Chief of Staff's. It says which key, and where.
+  a proxy port, allow edits by an absolute path (`Edit(//…)`, `Edit(~/…)`) or add directories
+  (`additionalDirectories`), or, for a worker whose network is limited, allow web domains
+  (`WebFetch(domain:…)`): Claude would merge them with Chief of Staff's. It says which key, and
+  where. Those files are read as Claude reads them (with a byte-order mark, at any size; a
+  sandboxed worker doesn't start where one is over 16 MB).
   Claude Code itself, at a sandboxed worker's first command in a git repository, adds one line,
   `**/.claude/.cc-writes/`, to your global git ignore file (`core.excludesFile`, else
   `~/.config/git/ignore`), unless git already ignores that folder. It also makes an empty
@@ -1331,18 +1337,24 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
 - **Claude's own tools** are tied into Chief of Staff: a worktree it makes is one of the
   worker's checkouts (receipts, *Storage*, removed with the others); what it schedules (`/loop`,
   a reminder) runs as a turn of its own, admitted, shown and stopped as any: *Stop* holds it
-  until you say *Go on*; *Cancel*, *Set aside* and closing the worker end it; one meant to
-  outlive the worker (`durable`) is refused. Another Claude session's message is shown labelled
-  with its sender, never as yours, and can approve nothing; a message to a session that isn't
-  one of your workers asks you each time. In plan mode the worker reads and writes only its
-  plan until the plan is approved (when the worker acts on its own, at once; under *Ask first*,
+  until you say *Go on*; *Cancel*, *Set aside* and closing the worker end it, and delete it in
+  Claude too, with one short turn of the worker's (Claude would bring it back when the session
+  is resumed); one meant to outlive the worker (`durable`) is refused. A worker doesn't write
+  Claude's own settings in its folders (`.claude/settings.json`, `.claude/settings.local.json`,
+  `.mcp.json`), which Claude would load when it resumes; if one changed anyway, the worker
+  doesn't open again until it is put back. Another Claude session's message is shown
+  labelled with the name it gives itself, unverified (any program of yours could send it), never
+  as yours, and can approve nothing; a message to a session that isn't one of your workers asks
+  you each time. In plan mode the worker reads and writes only its plan, and removes no
+  worktree, until the plan is approved (when the worker acts on its own, at once; under *Ask first*,
   by you); its subagents get Chief of Staff's rules; a cloud agent or a routine needs your OK
   each time. Receipts show no exit code where Claude gives none (a `grep` that found nothing,
   say).
 - **Continue in a terminal** (**⋯**) copies the agent's own command (`codex resume <thread>`, or
   `cd <folder> && claude --resume <id>`); while it is open there, Chief of Staff writes nothing
   to it, and it shows what you did there before its next message. A Claude worker with turns
-  scheduled is not handed over until they are deleted: they would go on in your terminal.
+  scheduled is not handed over until they are deleted in Claude: they would go on in your
+  terminal. Nor is one whose Claude settings in its folders changed.
 - **Your own sessions:** *Other Copilot sessions* lists your own Codex and Claude sessions too.
   Adopting a Claude session goes on in that session (not while it is open elsewhere); a Codex
   thread goes on in a new thread of Chief of Staff's with its conversation, and yours stays as it

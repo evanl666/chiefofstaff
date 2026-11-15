@@ -98,8 +98,11 @@ Settings → *Coding agents*). For such a worker:
   failing, with settings of the owner's that try to switch its sandbox off or weaken it in place
   (Chief of Staff's own settings win over those). Claude merges the lists of its sandbox settings
   across your settings, a trusted project's and managed settings: a sandboxed worker does not
-  start where any of them adds to those lists or sets a proxy port, nor where managed settings
-  weaken it at all. Codex workers never run while the worker sandbox is on (Codex's sandbox is not
+  start where any of them adds to those lists or sets a proxy port, allows edits by an absolute
+  path or adds directories (Claude makes those writable in its sandbox), or, for a worker whose
+  network is limited, allows web domains, nor where managed settings weaken it at all. Those
+  files are read as Claude reads them (a byte-order mark, any size; over 16 MB, the worker does
+  not start). Codex workers never run while the worker sandbox is on (Codex's sandbox is not
   checked yet); with it off, a Codex worker can do anything your account can
   (`danger-full-access`), as Copilot workers then can.
 - **Your checkouts.** Every edit asks Chief of Staff first (Codex's approval, Claude's
@@ -129,9 +132,14 @@ Settings → *Coding agents*). For such a worker:
   Claude's `.claude/` and `.mcp.json`) load only where you trust its folder in that agent; a
   worktree is trusted as its repository is. Elsewhere none of them loads, and its `AGENTS.md` or
   `CLAUDE.md` reaches the worker as text only: a message marked as the repository's, never in
-  Chief of Staff's instructions, with any tag in it escaped. A message from another Claude
-  session is shown as that session's, never as yours, can approve nothing, and starts a turn only
-  if Chief of Staff admits it; messages between Chief of Staff's own workers go through it, with
+  Chief of Staff's instructions, with any tag in it escaped. A Claude worker can't write Claude's
+  own settings in its folders (`.claude/settings.json`, `.claude/settings.local.json`,
+  `.mcp.json`: hooks, `apiKeyHelper`, MCP servers Claude would run when the worker resumes): its
+  edits are refused and its sandbox denies its commands; one changed anyway keeps the worker from
+  opening again, or going to a terminal, until it is put back. A message from another Claude
+  session is shown with the name it gives itself, marked unverified (Claude does not pass on who
+  sent it, and any process of yours can give any name), never as yours or a worker's, can approve
+  nothing, and starts a turn only if Chief of Staff admits it; messages between Chief of Staff's own workers go through it, with
   the limits of `tell_session`, and one to a session that isn't one of them asks you each time.
 - **A Codex worker's own changes to `.codex/` never load.** Codex reads a folder's `.codex/`
   when a thread starts or resumes there: a rule in it lets commands run without asking Chief of Staff, an MCP
@@ -143,6 +151,12 @@ Settings → *Coding agents*). For such a worker:
   `AGENTS.md` reaches it as text, and its timeline says so once. Edits to a `.codex/` folder or
   to Codex's settings folder are refused to workers, whatever their case. A command can still
   write there; it is the check at the next start that keeps it from loading.
+- **What a Claude worker schedules** (`/loop`, a reminder) runs only as a turn Chief of Staff
+  admits. Claude brings a session's schedules back when it is resumed, so when its task is
+  cancelled or set aside, or the worker closed, Chief of Staff deletes them in Claude too (one
+  short turn that may only list and delete them), and *Continue in a terminal* waits until
+  Claude's own list shows none left. In plan mode a worker writes only its plan, and removes no
+  worktree, until the plan is approved.
 - **Spend limit:** Chief of Staff's own ledger, in tokens, counted response by response on
   Claude. It may be passed by the model call in flight and by what subagents spend before they
   stop (on Claude, also by their output since the last answer); spend lost when the agent stops
