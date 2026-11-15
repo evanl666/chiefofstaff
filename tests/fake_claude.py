@@ -163,7 +163,7 @@ class Fake:
             sys.stderr.write(f"Error: Session ID {self.session_id} is already in use.\n")
             sys.stderr.flush()
             sys.exit(1)
-        return {"memory": "", "totals": {}, "transcript": [], "cwd": self.cwd}
+        return {"memory": "", "totals": {}, "transcript": [], "cwd": self.cwd, "crons": {}}
 
     def announce(self):
         """As Claude 2.1.x: `sessions/<pid>.json` in its configuration folder while it runs (an
@@ -827,6 +827,17 @@ class Fake:
         if found := re.search(r"Schedule '([^']+)' every minute( durably)?", text):
             schedule = {"cron": "* * * * *", "prompt": found.group(1), "recurring": True}
             call("CronCreate", schedule | ({"durable": True} if found.group(2) else {}))
+        if "call CronDelete for each job it lists as session-only" in text:
+            # Chief of Staff's request once its task ended (2.1.322's tools, as a model takes
+            # them); FAKE_CLAUDE_KEEPS_SCHEDULES: it lists them and deletes none.
+            call("CronList", {})
+            if not os.environ.get("FAKE_CLAUDE_KEEPS_SCHEDULES"):
+                if 'ScheduleWakeup with {"stop": true}' in text:
+                    call("ScheduleWakeup", {"stop": True})
+                for key, entry in self.schedules.items():
+                    if entry.get("kind") != "loop":
+                        call("CronDelete", {"id": key})
+            call("CronList", {})
         if found := re.search(r"Wake up later to '([^']+)'", text):
             wake = {"delaySeconds": 60, "reason": "later", "prompt": found.group(1)}
             call("ScheduleWakeup", wake)
@@ -1022,10 +1033,19 @@ class Fake:
                 await self.git("worktree", "remove", "--force", path)
             structured = {"action": data.get("action"), "originalCwd": self.cwd,
                           "worktreePath": path, "restoredCwd": self.cwd}  # fmt: skip
+        elif name == "ScheduleWakeup" and data.get("stop"):
+            ended = [key for key, entry in self.schedules.items() if entry.get("kind") == "loop"]
+            for key in ended:
+                self.schedules.pop(key, None)
+                self.state.setdefault("crons", {}).pop(key, None)
+            structured = {"stopped": True, "cancelled": len(ended)}
         elif name in {"CronCreate", "ScheduleWakeup"}:
             key = uuid.uuid4().hex[:8]
             recurring = name == "CronCreate" and bool(data.get("recurring", True))
-            self.schedules[key] = {"prompt": data["prompt"], "recurring": recurring}
+            kind = "cron" if name == "CronCreate" else "loop"
+            self.schedules[key] = {"prompt": data["prompt"], "recurring": recurring, "kind": kind}
+            if not data.get("durable"):
+                self.state.setdefault("crons", {})[key] = dict(self.schedules[key])
             task = asyncio.ensure_future(self.fire(key))
             self.tasks.add(task)
             if name == "CronCreate":
@@ -1041,7 +1061,13 @@ class Fake:
                               "clampedDelaySeconds": 60, "wasClamped": False}  # fmt: skip
         elif name == "CronDelete":
             self.schedules.pop(str(data.get("id") or ""), None)
+            self.state.setdefault("crons", {}).pop(str(data.get("id") or ""), None)
             structured = {"id": data.get("id")}
+        elif name == "CronList":
+            jobs = self.jobs()
+            structured = {"jobs": jobs}
+            text = "\n".join(f"{job['id']} — Every minute: {job['prompt']}" for job in jobs)
+            text = text or "No scheduled jobs."
         elif name == "SendMessage":
             text = f"Message sent to {data.get('to')}."
             note("FAKE_CLAUDE_SENT", {"to": data.get("to"), "message": data.get("message")})
@@ -1076,6 +1102,22 @@ class Fake:
         output, _ = await process.communicate()
         return output.decode().strip()
 
+    def resurrect(self):
+        """As 2.1.322 on --resume: the session's crons and its /loop wakeup come back from its
+        conversation, but those a CronDelete named (and a /loop ScheduleWakeup stopped)."""
+        for key, entry in (self.state.get("crons") or {}).items():
+            self.schedules[key] = dict(entry)
+            self.tasks.add(asyncio.get_event_loop().create_task(self.fire(key)))
+
+    def jobs(self) -> list[dict]:
+        """CronList's jobs, as 2.1.322 gives them (session-only ones: durable false)."""
+        return [
+            {"id": key, "cron": entry.get("cron") or "* * * * *", "humanSchedule": "Every minute",
+             "prompt": entry["prompt"], **({"recurring": True} if entry["recurring"] else {}),
+             "durable": False}
+            for key, entry in self.schedules.items()
+        ]  # fmt: skip
+
     async def fire(self, key: str):
         """A schedule fires (FAKE_CLAUDE_FIRE_SECONDS apart, for a test; Claude's are a minute
         at least): its prompt, as it is, through the gate; a recurring one up to 3 times."""
@@ -1089,6 +1131,7 @@ class Fake:
             self.prompts.put_nowait({"content": entry["prompt"], "origin": None, "uuid": None})
             if not entry["recurring"]:
                 self.schedules.pop(key, None)
+                self.state.setdefault("crons", {}).pop(key, None)
                 return
 
     async def inbox(self):
@@ -1441,6 +1484,7 @@ class Fake:
 
 async def serve(flags: dict):
     fake = Fake(flags)
+    fake.resurrect()
     fake.save()
     turns = asyncio.ensure_future(fake.turns())
     inbox = asyncio.ensure_future(fake.inbox())

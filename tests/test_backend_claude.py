@@ -1665,6 +1665,27 @@ async def test_a_message_from_one_of_chief_of_staffs_workers_processes_is_said_t
     assert told == ["b1" * 16, ""]
 
 
+async def test_while_it_deletes_its_schedules_it_calls_nothing_else(agent, tmp_path):
+    session = await agent.create_session(session_id="b5" * 16, name="t", **options(tmp_path))
+    worker = session.worker
+    worker.cleanup = backend_claude.Cleanup(["a1b2c3d4"], loop=True)
+    for name, arguments in [
+        ("Bash", {"command": "ls"}),
+        ("Write", {"file_path": str(tmp_path / "x"), "content": "x"}),
+        ("CronCreate", {"cron": "* * * * *", "prompt": "again"}),
+        ("ScheduleWakeup", {"prompt": "again", "delaySeconds": 60}),
+        ("Agent", {"prompt": "go on", "description": "d"}),
+    ]:
+        assert await worker.decide(name, arguments, "c") == backend_claude.CLEANUP_ONLY, name
+    for name, arguments in [
+        ("CronList", {}),
+        ("CronDelete", {"id": "a1b2c3d4"}),
+        ("ScheduleWakeup", {"stop": True}),
+    ]:
+        assert await worker.decide(name, arguments, "c") == "", name
+    assert worker.cleanup.deleted == {"a1b2c3d4"}
+
+
 @pytest.mark.parametrize("ask_first", [False, True])
 async def test_while_it_plans_it_writes_only_its_plan_and_runs_only_what_reads(
     agent, tmp_path, ask_first
