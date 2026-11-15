@@ -40,7 +40,9 @@ to a branch of its own before a push is let through again (QA on 0.1.45).
   saying it can't tell which branch, also after a switch there: that switch may have been in
   another folder (found checking these fixes; 0.1.45 let `eval …; git switch -c fix && cd
   ../main && git push` through). And the checkout's branch a substitution puts in a line
-  `eval` or `sh -c` runs is the branch where it ran: after a `cd` in that line, not known.
+  `eval` or `sh -c` runs is the branch where it ran: after a `cd` in that line, not known. Text
+  the shell can't parse (read loosely) that sets git's configuration or defines an alias can't
+  tell where its pushes go either.
 - A long line of aliases (or of shells given `-c`) on a line that says push took time growing
   with its square to check; it is read in one pass.
 

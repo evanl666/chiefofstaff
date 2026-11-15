@@ -1379,9 +1379,14 @@ def send_pack(git: Git) -> Push:
 # In text read loosely: what may take a command to another folder, git to another repository,
 # or the folder's checkout to another branch (bash runs the lines before one it cannot parse).
 ELSEWHERE = re.compile(
-    r"\b(?:cd|pushd|popd|eval|source|exec|function|checkout|switch|symbolic-ref)\b"
+    r"\b(?:cd|pushd|popd|eval|source|exec|function|checkout|switch|symbolic-ref|branch"
+    r"|worktree|update-ref)\b"
     r"|(?:^|[\s;&|(`])\.\s|-C|GIT_DIR|GIT_WORK_TREE|--git-dir|--work-tree|\(\s*\)"
 )
+# And what may make a word a command that pushes (an alias), or set where pushes go (`git …
+# config`): every push of such text is not known.
+ALIASING = re.compile(r"\balias\b|\bBASH_ALIASES\b|\b[gs]?aliases\b")
+CONFIG_WORD = re.compile(r"\bconfig\b")
 
 
 def loose_pushes(command: str, cwd: str) -> list[Push]:
@@ -1390,11 +1395,17 @@ def loose_pushes(command: str, cwd: str) -> list[Push]:
     (with nothing between them: git's options, an alias, are not read here). A bare one is
     judged by the line's folder, unless the text may go elsewhere first (no `cd` or `-C` is
     read here: ELSEWHERE). Not known where it pushes: one whose words name a variable or run
-    a command (no variable is read here), and a `push` after a `git` of an earlier stretch
-    (`git -C "$(cd x && pwd)" push`)."""
+    a command (no variable is read here), a `push` after a `git` of an earlier stretch
+    (`git -C "$(cd x && pwd)" push`) or before this one's, any in text that defines an alias,
+    and every one in text that runs `git … config`."""
     found, elsewhere, gits = [], bool(ELSEWHERE.search(command)), False
+    aliased = bool(ALIASING.search(command)) and "push" in squashed(command)
+    configures = False
     for stretch in FLOOR_ENDS.split(command):
         git = GIT_WORD.search(stretch)
+        configures = configures or bool(git and CONFIG_WORD.search(stretch, git.end()))
+        if git and gits and PUSH_WORD.search(stretch, 0, git.start()):
+            found.append(Push(unknown=True))  # (`g push … $(git …)`: g, an alias, not read.)
         push = PUSH_WORD.search(stretch, git.end()) if git else PUSH_WORD.search(stretch)
         if not push or not (git or gits):
             gits = gits or bool(git)
@@ -1416,7 +1427,9 @@ def loose_pushes(command: str, cwd: str) -> list[Push]:
             if found_push.bare_in is not None and (not cwd or elsewhere):
                 found_push.bare_in, found_push.unknown = None, True
             found.append(found_push)
-    return found
+    for push in found:
+        push.unknown = push.unknown or configures
+    return found + ([Push(unknown=True)] if aliased else [])
 
 
 def shell_script(words: list[str], position: int) -> str | None:

@@ -978,6 +978,10 @@ FOUND = [
     # Found by the zsh 200k run on 9b2859f (a file a line before had left): the user's settings
     # are where HOME says; a line that sets it can't tell where its pushes go.
     ("echo push.default=matching > .shimconfig; { HOME=\"$PWD\" && PWD=\"$PWD\" \\git push origin; }", 'feat'),  # noqa: E501
+    # Found by the docker 200k run (bash 5.2, dash) on 4454349: in text read loosely (not
+    # parsed), push configuration a line sets, and an alias before a `git` of its stretch.
+    ('git config --global remote.origin.mirror true | nice git push --set-upstream origin || CDPATH=\'a b\'; git status\necho "x', 'feat'),  # noqa: E501
+    ('shopt -s expand_aliases 2>/dev/null; alias g=\'git\'\ng push origin HEAD:refs/heads/$(git rev-parse --abbrev-ref HEAD)\necho "x', 'main'),  # noqa: E501
 ]  # fmt: skip
 
 
