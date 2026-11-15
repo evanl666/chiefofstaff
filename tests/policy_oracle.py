@@ -351,7 +351,12 @@ class Sandbox:
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            # (macOS says EPERM for a group whose processes are all ending: one that ended as
+            # it was stopped, on a busy machine.)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                process.kill()
             process.wait()
         for _ in range(2000):  # Its jobs (`&`), up to 10 s more.
             try:
@@ -1130,6 +1135,11 @@ FOUND = [
     ('$G p origin main', 'feat', 'aliases'),
     ('$G co main && $G push', 'feat', 'aliases'),
     ('$G co main && git p', 'feat', 'aliases'),
+    # Found by the 100k bash run on 02b8513: a script fed to a shell that runs an alias that
+    # pushes (the line says no push).
+    ("(echo '$(echo git) p && <<<.. command -p '\\''re'\\''ad G' | xargs -0 sh -c)", 'main/sub', 'aliases'),  # noqa: E501
+    ("echo 'git p origin main' | sh", 'feat', 'aliases'),
+    ("echo 'git p' | bash", 'main', 'aliases'),
 ]  # fmt: skip
 
 

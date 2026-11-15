@@ -8,12 +8,12 @@ import sys
 # Events are batched in the app; tests deliver them at once.
 os.environ.setdefault("CHIEFOFSTAFF_EVENT_DEBOUNCE", "0")
 os.environ.setdefault("CHIEFOFSTAFF_RETRY_DELAY", "0.01")
-import tempfile
+from own_home import home_for_tests
 
 # The tests run with a home of their own (HOME, XDG_CONFIG_HOME) and git configuration of their
 # own (GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM), never the owner's: git they run, and lines the
 # push check's oracle runs, read and write those (owners_git_configuration_untouched checks).
-os.environ["HOME"] = tempfile.mkdtemp(prefix="cos-tests-home-")
+os.environ["HOME"] = home_for_tests()
 os.environ["XDG_CONFIG_HOME"] = os.environ["HOME"] + "/.config"
 os.environ["GIT_CONFIG_GLOBAL"] = os.environ["HOME"] + "/.gitconfig"
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"

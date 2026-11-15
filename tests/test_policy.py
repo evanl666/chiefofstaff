@@ -1694,9 +1694,11 @@ def test_the_tests_have_a_home_and_git_configuration_of_their_own():
     account's own home) wrote the owner's git configuration. The tests run with a home, an
     XDG_CONFIG_HOME and git configuration of their own (conftest), never the account's."""
     import policy_oracle as oracle
+    from own_home import MOST_PATH, owners_only
 
     home = Path(os.environ["HOME"])
-    assert home.resolve() != oracle.REAL_HOME.resolve() and home.name.startswith("cos-tests-home")
+    assert home.resolve() != oracle.REAL_HOME.resolve() and home == home.resolve()
+    assert len(str(home)) <= MOST_PATH and owners_only(home)
     assert os.environ["XDG_CONFIG_HOME"] == f"{home}/.config"
     assert os.environ["GIT_CONFIG_NOSYSTEM"] == "1"
     owners = {oracle.REAL_HOME / ".gitconfig", oracle.REAL_HOME / ".config" / "git" / "config"}
@@ -1734,6 +1736,29 @@ def test_a_line_the_oracle_runs_changes_nothing_out_of_its_sandbox(tmp_path):
     line = f"echo x > {home}/outside; echo y > {home}/sandbox/inside"
     subprocess.run([*prefix, "/bin/sh", "-c", line], check=False, capture_output=True)
     assert not (home / "outside").exists() and (home / "sandbox" / "inside").exists()
+
+
+def test_a_line_that_ends_as_the_oracle_stops_it_is_no_error(tmp_path, monkeypatch):
+    """The 100k run on 84ef95b, on a machine loaded past 150: a line past its 10 seconds ended
+    as it was stopped, and macOS said EPERM to killing its (ending) process group."""
+    import policy_oracle as oracle
+
+    class Late(subprocess.Popen):
+        def wait(self, timeout=None):
+            if timeout == 10:
+                super().wait()
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return super().wait(timeout)
+
+    def refused(*_):
+        raise PermissionError(1, "Operation not permitted")
+
+    box = oracle.Sandbox(tmp_path / "box")
+    monkeypatch.setattr(oracle.subprocess, "Popen", Late)
+    monkeypatch.setattr(oracle.os, "killpg", refused)
+    assert box.run("git push origin feat", "feat") == [
+        f"PUSH\t{box.folder('feat')}\tfeat\t\t\tpush\x1forigin\x1ffeat"
+    ]
 
 
 def commands_of(text: str) -> list[tuple[str, list[str]]]:
@@ -2553,3 +2578,32 @@ def test_the_users_alias_that_switches_and_one_given_with_c_are_read(
     assert "default branch" in (
         denial("git -c alias.co=checkout co main && git push", feature) or ""
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo 'git p origin main' | sh",
+        "echo 'git p' | bash",
+        "(echo '$(echo git) p && <<<.. command -p '\\''re'\\''ad G' | xargs -0 sh -c)",
+        "bash <<< 'git p origin feature/x'",
+        "cat <<'EOF' | sh\ngit via main\ngit p\nEOF",
+        "printf 'git co main\\n' | sh; git push origin wb/x",
+    ],
+)
+def test_a_script_fed_to_a_shell_that_runs_an_alias_that_pushes_is_refused(command, tmp_path):
+    """Found by the 100k bash run on 02b8513: a script fed to a shell runs aliases too; one of
+    git's configuration that pushes (or that switches, on a line that says push) is named in
+    the line: which branch the script pushes, not known."""
+    work = aliased(tmp_path / "repo", "wb/x")
+    assert "can't tell which branch" in (denial(command, work) or ""), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["echo 'git status' | sh", "echo 'git co feature/x' | sh", "echo 'git f log' | bash",
+     "echo 'make test' | sh", "printf 'p\\n' | grep p"],
+)  # fmt: skip
+def test_a_script_fed_to_a_shell_that_names_no_alias_that_pushes_lets_it_through(command, tmp_path):
+    work = aliased(tmp_path / "repo", "wb/x")
+    assert denial(command, work) is None, command

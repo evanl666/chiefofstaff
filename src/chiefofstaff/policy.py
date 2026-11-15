@@ -3493,9 +3493,10 @@ class Pushing:
     update; each branch's upstream (`branch.<name>.merge`, where `upstream` pushes it); an
     include that depends on the branch (`includeIf.onbranch:…`); or not known. Its aliases (by
     name, in lower case), those that may push (`pushers`: one whose text says push, send-pack
-    or subtree, names another alias, or a shell's; `shell_pushers`: a shell's that says so),
-    the names of the files it includes (without their folders, in lower case); and whether git
-    could not be asked (`unread`)."""
+    or subtree, names another alias, or a shell's; `shell_pushers`: one whose text says so),
+    those that switch branches or set configuration (`switchers`: EXPANDED), the names of the
+    files it includes (without their folders, in lower case); and whether git could not be
+    asked (`unread`)."""
 
     every: bool = False
     mode: str = "simple"
@@ -3506,6 +3507,7 @@ class Pushing:
     aliases: dict[str, str | None] = field(default_factory=dict)
     pushers: set[str] = field(default_factory=set)
     shell_pushers: set[str] = field(default_factory=set)
+    switchers: set[str] = field(default_factory=set)
     includes: set[str] = field(default_factory=set)
     unread: bool = False
 
@@ -3542,6 +3544,9 @@ def pushing_of(entries: list[tuple[str, str | None]] | None) -> Pushing:
             pushing.shell_pushers.add(name)
         if value is None or text.startswith("!"):
             pushing.pushers.add(name)
+        shell = text.startswith("!")
+        if any(word in text for word in EXPANDED) if shell else alias_switches_to(value or ""):
+            pushing.switchers.add(name)
     pushing.unknown = (
         pushing.unknown or pushing.mode == "?" or len(pushing.refspecs) > MOST_BRANCHES
     )
@@ -3914,6 +3919,8 @@ def pushes_unknown(command: str, cwd: str = "") -> bool:
     one's from git (see bare_reading), or may be the default branch only because of a switch
     before it; or the line runs a command whose name it makes up (Push.anonymous), unless it
     feeds that a script (fed_script says so then)."""
+    if fed_alias(command, cwd):
+        return True
     found = judged(command, cwd)
     checked = checked_branches(found)
     anonymous = False
@@ -3925,6 +3932,28 @@ def pushes_unknown(command: str, cwd: str = "") -> bool:
         if unknown or (several and branches is not None and branches & DEFAULT_BRANCHES):
             return True
     return anonymous and not fed_script(command, cwd)
+
+
+def fed_alias(command: str, cwd: str) -> bool:
+    """Whether a line feeds a shell a script (feeds_shell) that may run an alias of git's
+    configuration that pushes: one a word of the line names (the folder's configuration, read
+    with where pushes go; one that can't be read, any where the line says git), or one that
+    switches branches, on a line that says push. What the script pushes: not known."""
+    words = said_words(command)
+    if not words or not fed_shell(command):
+        return False
+    settings = alias_settings(cwd)
+    if settings.unread:
+        return "git" in words
+    pushers = settings.shell_pushers | {name for name, value in settings.aliases.items()
+                                        if value is None}  # fmt: skip
+    return bool(words & pushers) or bool(words & settings.switchers and "push" in words)
+
+
+@functools.lru_cache(maxsize=32)
+def fed_shell(command: str) -> bool:
+    """feeds_shell, once a line."""
+    return feeds_shell(command)
 
 
 def pushes_forced(command: str, cwd: str = "") -> bool:
