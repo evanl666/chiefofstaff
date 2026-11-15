@@ -3179,6 +3179,18 @@ class ClaudeAgent:
     def epochs(self) -> set[str]:
         return {worker.epoch for worker in self.workers.values() if worker.alive()}
 
+    async def worker_ended(self, name: str, seconds: float = STOP_SECONDS):
+        """A worker's process (let go of, or closing) has ended: its task done, which waits for
+        its process and what it started (or `seconds`, then it is stopped)."""
+        worker = self.workers.get(name)
+        if worker is None or worker.task is None or worker.task.done():
+            return
+        if not worker.stopping:
+            await worker.stop()
+            return
+        with suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(worker.task), seconds)
+
     def worker_of(self, pid: int) -> str:
         """Which of its workers a process is (its supervisor's, its CLI's or one they started):
         that worker's name (its row's id), "" for any other process."""

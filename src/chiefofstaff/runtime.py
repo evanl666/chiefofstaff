@@ -3361,10 +3361,24 @@ class Runtime:
         if agent != COPILOT_AGENT:
             await self.new_worker_agent(agent, bool(row["slack"]))  # Raises why it cannot.
         summary = await self.handoff_summary(row, current)
+        # As it is now (a turn may have begun while the summary was written).
+        row = self.store.session(session_id)
+        if row["closed_at"]:
+            raise ValueError("It was closed meanwhile.")
+        if row["status"] in {"working", "starting", "queued"} or self.states[session_id].held:
+            raise ValueError("It is at work: stop it first, or wait until it is done.")
+        if self.is_elsewhere(row):
+            raise ValueError("It is open in a terminal: exit it there first.")
         new_id = str(uuid4())
         title = row["title"]
-        if self.states.is_live(session_id):
-            await self.detach(session_id)
+        handed = {"repos": row["repos"] or "[]", "project": row["project"] or ""}
+        # Its checkouts are the new worker's: closing this one removes none of them, nor its
+        # workspace (Workspaces.release). It closes first, a turn begun meanwhile with it, and
+        # what it left running: its process gone before another writes in its folders.
+        self.store.update_session(session_id, repos="[]", project="")
+        self.store.set(f"continued:{session_id}", new_id)
+        await self.workers.close(session_id, by="you")
+        await self.worker_gone(session_id, current)
         self.store.create_session(
             new_id, WORKER, title, "queued", cwd=row["cwd"], branch=row["branch"],
             slack=row["slack"],
@@ -3377,13 +3391,10 @@ class Runtime:
         self.store.update_session(
             new_id,
             task=row["task"] or "",
-            project=row["project"] or "",
-            repos=row["repos"] or "[]",
+            project=handed["project"],
+            repos=handed["repos"],
             yolo=row["yolo"] or "",
         )
-        # Its checkouts are the new worker's now: closing this one removes none of them.
-        self.store.update_session(session_id, repos="[]", project="")
-        self.store.set(f"continued:{session_id}", new_id)
         self.store.set(f"continues:{new_id}", session_id)
         task = self.tasks.create(new_id, title, summary[:4000])
         self.add_message(
@@ -3402,10 +3413,16 @@ class Runtime:
         # Its first message, as a new worker's task is given (spawn_worker).
         prompt = wrap("router", "task", summary, title=title, task=task["id"])
         self.add_message(new_id, "router", summary, {"prompt": prompt, "task_id": task["id"]})
-        await self.workers.close(session_id, by="you")
         self.publish_session(self.store.session(new_id))
         self.background(self.workers.pump())
         return {"session_id": new_id, "task_id": task["id"]}
+
+    async def worker_gone(self, session_id: str, agent: str):
+        """Its own process (another agent's that runs one per worker: Claude's) has ended."""
+        backend, _ = self.connection(agent)
+        ended: Any = getattr(backend, "worker_ended", None)
+        if ended is not None:
+            await ended(session_id)
 
     async def handoff_summary(self, row: dict, agent: str) -> str:
         """What the worker that continues another's work is told (its first message): the
