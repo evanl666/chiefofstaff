@@ -161,7 +161,13 @@ Settings → *Coding agents*). For such a worker:
   processes keeps a hash of each command line, not the command line.
 - **Your agent settings stay yours.** Chief of Staff never edits a Codex or Claude settings file
   and runs nothing that does (Codex, and `claude auth status`, only where that agent was set up,
-  so none of its files is made; Codex refreshes its own model cache as it starts). Each Claude worker runs your installed `claude` itself, unmodified. Codex's
+  so none of its files is made; at startup only their version and sign-in commands; Codex
+  refreshes its own model cache when Settings starts it). One change outside Claude's own folder
+  is Claude Code's own, with no setting to turn it off: at a sandboxed worker's first command in a
+  git repository, it adds the line `**/.claude/.cc-writes/` to your global git ignore file
+  (unless git already ignores that folder) and makes an empty `.claude/.cc-writes/` staging
+  folder there and in the repository's main checkout. Each Claude worker runs your installed
+  `claude` itself, unmodified. Codex's
   settings folder (`~/.codex`, and `$CODEX_HOME`) and Claude's (`~/.claude`, and
   `$CLAUDE_CONFIG_DIR`) cannot be added to *Also writable in the sandbox* while that agent is on:
   their hooks run outside any sandbox.

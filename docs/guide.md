@@ -1257,10 +1257,14 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
 
 - **Codex:** the Codex CLI 0.167.2 or later, signed in (`codex login`). Chief of Staff runs
   nothing of Codex where it was never set up (no `~/.codex`, or `CODEX_HOME`): any run would
-  make that folder. Settings looks at it as Codex starts, without its plugin sync; Codex still
-  refreshes its own model cache then.
+  make that folder. For Home's first-run card it runs only `codex --version` and
+  `codex login status`. Only once you open Settings → *Coding agents* does it start Codex to
+  read its models and limits, without Codex's plugin sync (Codex still refreshes its own model
+  cache then).
 - **Claude:** Claude Code 2.1.322 or later, signed in by running `claude` in a terminal, and
-  Chief of Staff's Claude extra (`uv tool install 'chiefofstaff[claude]'`). Claude workers use
+  Chief of Staff's Claude extra (`uv tool install 'chiefofstaff[claude]'`). For Home's first-run
+  card Chief of Staff runs only `claude --version`, and `claude auth status` where Claude was set
+  up (its `.claude.json` is there). Claude workers use
   whatever your `claude` is signed in with: a Claude plan, an API key, Amazon Bedrock, Google
   Cloud, Foundry or a gateway. Chief of Staff has no sign-in of its own for it and never reads
   yours. On a Claude plan, Claude workers count against your plan's usage limits, under
@@ -1296,6 +1300,12 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   Claude worker does not start where your Claude settings (yours, a trusted project's, managed
   ones) add to its sandbox's lists (`excludedCommands`, `allowedDomains`, `allowWrite`, …) or set
   a proxy port: Claude would merge them with Chief of Staff's. It says which key, and where.
+  Claude Code itself, at a sandboxed worker's first command in a git repository, adds one line,
+  `**/.claude/.cc-writes/`, to your global git ignore file (`core.excludesFile`, else
+  `~/.config/git/ignore`), unless git already ignores that folder. It also makes an empty
+  `.claude/.cc-writes/` folder, where it stages whole-file writes, in the worker's folder and in
+  the repository's main checkout; git shows neither. No setting of Claude Code 2.1.322 turns
+  this off.
   Codex's commands run without a login shell, with the environment and `PATH` a Copilot worker's
   commands get; Codex puts its own helpers first on `PATH` and sets a few variables of its own
   (such as `LANG` and `LC_ALL` to `C.UTF-8`, `TERM=dumb`, `PAGER=cat`).
