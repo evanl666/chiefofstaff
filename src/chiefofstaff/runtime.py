@@ -256,6 +256,8 @@ TASKS_SHOWN_HOURS = 72
 OPEN_WORK = frozenset({"running", "waiting"})
 # The same message again within this long is not shown twice.
 REPEAT_SECONDS = 60
+# Why a worker that reads Slack runs on Copilot rather than Claude, for now (blocked_on).
+SLACK_NOT_ON_CLAUDE = "Chief of Staff does not run them on Claude yet"
 # Another agent's sandbox, until its version's check showed it holding (agent_refused).
 SANDBOX_UNPROVEN = "its sandbox has not passed Chief of Staff's checks yet"
 GITHUB_HOSTS = (
@@ -1455,9 +1457,11 @@ class Runtime:
         sandbox = refused.get("sandbox", SANDBOX_UNPROVEN)
         if row["slack"]:
             # The same guarantees as a Copilot worker that reads Slack: its commands sandboxed
-            # (GitHub only), and asking first, on a version shown to do both.
+            # (GitHub only), and asking first, on a version shown to do both. Not on Claude for
+            # now: its Slack safeguards are under review (2026-11-15).
             why = (
-                "this computer can't sandbox workers" if not self.sandbox_host
+                SLACK_NOT_ON_CLAUDE if agent == "claude"
+                else "this computer can't sandbox workers" if not self.sandbox_host
                 else sandbox or refused.get("ask_first") or (
                     "it acts on its own" if self.yolo(row) else ""
                 )

@@ -86,9 +86,7 @@ Settings → *Coding agents*). For such a worker:
   without a model, with only an allowlisted environment and every connection caught by a proxy
   of its own on 127.0.0.1, that each kind of action asks it first; a version that fails runs no
   worker that asks first (or none at all, when its edits do not ask).
-- **Workers that read Slack** run on Claude only on a version whose check proved both its
-  sandbox and *Ask first*, with the same limits as on Copilot (checks on, network GitHub only,
-  Slack's read tools only); otherwise, and always for Codex, they run on Copilot.
+- **Workers that read Slack** run on Copilot: not on Codex, and not on Claude yet.
 - **What reaches a worker from outside.** A repository's own agent settings (Codex's `.codex/`,
   Claude's `.claude/` and `.mcp.json`) load only where you trust its folder in that agent; a
   worktree is trusted as its repository is. Elsewhere none of them loads, and its `AGENTS.md` or

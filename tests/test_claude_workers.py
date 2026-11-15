@@ -345,31 +345,22 @@ async def test_claude_workers_run_sandboxed_only_on_a_version_whose_sandbox_held
         await runtime.stop()
 
 
-@pytest.mark.parametrize(
-    ("sandbox", "ask_first", "yolo", "expected"),
-    [
-        ("", "", "", ""),
-        ("its sandbox let a command out", "", "", "its sandbox let a command out"),
-        ("", "it did not ask first for a command", "", "it did not ask first for a command"),
-        ("", "", "on", "it acts on its own"),
-    ],
-)
-async def test_a_worker_that_reads_slack_runs_on_claude_only_with_its_guarantees(
-    tmp_path, claude_on_path, monkeypatch, sandbox, ask_first, yolo, expected
+async def test_a_worker_that_reads_slack_runs_on_copilot_not_claude_for_now(
+    tmp_path, claude_on_path, monkeypatch
 ):
-    monkeypatch.setitem(PASSED, "sandbox", sandbox)
-    monkeypatch.setitem(PASSED, "ask_first", ask_first)
+    """Held until Claude's Slack safeguards are reviewed: whatever its version's check showed,
+    a worker that reads Slack is not run on Claude (it runs on Copilot, saying why)."""
+    monkeypatch.setitem(PASSED, "sandbox", "")
     _, runtime = await started(tmp_path)
     try:
-        await saved(runtime, {"claude": {"enabled": True}})
+        await saved(runtime, {"claude": {"enabled": True}, "new_workers": "claude"})
         await runtime.connect_agent("claude")
-        row = {"id": "", "role": "worker", "slack": 1, "yolo": yolo, "closed_at": None}
-        why = runtime.blocked_on("claude", row)
-        assert why == (
-            f"Workers that read Slack run on Copilot, not Claude: {expected}." if expected else ""
+        row = {"id": "", "role": "worker", "slack": 1, "yolo": "", "closed_at": None}
+        assert runtime.blocked_on("claude", row) == (
+            "Workers that read Slack run on Copilot, not Claude: Chief of Staff does not run "
+            "them on Claude yet."
         )
-        runtime.sandbox_host = False
-        assert "this computer can't sandbox workers" in runtime.blocked_on("claude", row)
+        assert runtime.blocked_on("claude", {**row, "slack": 0}) == ""
     finally:
         await runtime.stop()
 
