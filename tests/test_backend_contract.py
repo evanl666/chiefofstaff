@@ -28,6 +28,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,7 +37,7 @@ from uuid import uuid4
 import claude_standin
 import pytest
 import scripted_model
-from conftest import REAL_CLAUDE, fake_claude, fake_codex
+from conftest import CODEX_COMMAND, REAL_CLAUDE, fake_claude, fake_codex
 from copilot import define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
@@ -200,7 +201,7 @@ async def backend(request, tmp_path, monkeypatch):
         monkeypatch.setenv("CODEX_HOME", str(home))
         model = scripted_model.Model()
         # One app-server, as each worker has its own (CodexAgent); the adapter's contract.
-        backend = CodexBackend(shutil.which("codex") or "codex")
+        backend = CodexBackend(CODEX_COMMAND)
         backend.model = model
         backend.arguments += model.arguments(tmp_path)
         backend.needs_sign_in = False
@@ -307,6 +308,14 @@ class Turn:
     async def wait(self, seconds=120):
         await asyncio.wait_for(self.idle.wait(), seconds)
         self.idle.clear()
+
+    async def failed(self, seconds=120):
+        """The turn's error, once it failed."""
+        deadline = time.monotonic() + seconds
+        while not (errors := [e for e in self.events if e.type.value == "session.error"]):
+            assert time.monotonic() < deadline, "no error"
+            await asyncio.sleep(0.05)
+        return errors[-1]
 
 
 async def open_session(backend, tmp_path, **options):
@@ -1106,6 +1115,27 @@ async def test_exit_codes_only_where_the_agent_gives_them(backend, tmp_path):
     )
 
 
+@pytest.mark.parametrize("asked", ["Hit the usage limit", "Hit the rate limit"])
+async def test_a_turn_refused_for_a_limit_says_it_is_a_limit(backend, tmp_path, asked):
+    """A request the model's service refused for a limit (a 429: a plan's usage limit, or a rate
+    limit the agent gave up retrying): the turn's error says it is one (Events.plan_limited pauses
+    its worker: not failed, nor tried again), with when it resets where the agent said."""
+    if not isinstance(backend, CodexBackend | ClaudeAgent):
+        pytest.skip("Codex's and Claude's adapters.")
+    session, turn = await open_session(backend, tmp_path)
+    await session.send(asked)
+    error = await turn.failed()
+    assert error.data.error_type == "plan_limit", error.data.message
+    limit = error.data.limit
+    if isinstance(backend, CodexBackend) and asked == "Hit the usage limit":
+        # A ChatGPT plan's: its window used up, as Codex said its rate limits.
+        assert limit["status"] == "rejected" and limit["label"] == "5-hour limit"
+        assert limit["resets_at"] > time.time()
+    else:
+        # A rate limit (Claude with a key says no plan's limit): no reset known.
+        assert limit == {"status": "limited", "resets_at": 0}
+
+
 async def test_the_agent_chooses_its_sessions_ids_or_takes_ours(backend, tmp_path):
     only_agent_like(backend)
     asked = str(uuid4())
@@ -1608,7 +1638,7 @@ async def test_with_ask_first_codex_asks_for_dotted_and_plugin_servers_set_to_ru
             f'[plugins."notes@cos".mcp_servers.plugin_notes.{review}]\napproval_mode = "approve"\n'
         )
     model = scripted_model.Model()
-    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex = CodexBackend(CODEX_COMMAND)
     codex.arguments += model.arguments(tmp_path)
     codex.needs_sign_in = False
     codex.created = []
@@ -1659,7 +1689,7 @@ async def test_a_codex_thread_open_in_another_app_server_is_said_to_be(tmp_path,
     model = scripted_model.Model()
     servers = []
     for _ in range(2):
-        server = CodexBackend(shutil.which("codex") or "codex")
+        server = CodexBackend(CODEX_COMMAND)
         server.arguments += model.arguments(tmp_path)
         server.needs_sign_in = False
         server.created = []
@@ -1707,7 +1737,7 @@ async def test_a_codex_worker_has_the_mcp_servers_and_skill_folders_of_settings(
         "tools": ["*"],
     }
     model = scripted_model.Model()
-    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex = CodexBackend(CODEX_COMMAND)
     codex.arguments += model.arguments(tmp_path)
     codex.needs_sign_in = False
     codex.created = []
@@ -1744,7 +1774,7 @@ async def test_codexs_check_of_a_tested_version_finds_nothing(tmp_path, monkeypa
     home = tmp_path / "codex-home"
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
-    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex = CodexBackend(CODEX_COMMAND)
     codex.needs_sign_in = False
     await codex.start()
     try:
@@ -1777,7 +1807,7 @@ async def test_codexs_check_finds_subagents_offered_to_a_thread_that_asks_first(
         return config
 
     monkeypatch.setattr(CodexBackend, "thread_config", without_agents_off)
-    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex = CodexBackend(CODEX_COMMAND)
     codex.needs_sign_in = False
     await codex.start()
     try:
@@ -1809,7 +1839,7 @@ async def test_an_mcp_call_chief_of_staff_approves_is_approved_for_that_call_alo
     before = (home / "config.toml").read_bytes()
     monkeypatch.setenv("CODEX_HOME", str(home))
     model = scripted_model.Model()
-    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex = CodexBackend(CODEX_COMMAND)
     codex.arguments += model.arguments(tmp_path)
     codex.needs_sign_in = False
     codex.created = []
@@ -1852,7 +1882,7 @@ async def test_a_worker_that_asks_first_is_offered_no_subagents_by_a_model_that_
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
     model = scripted_model.Model(multi_agent_version=version)
-    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex = CodexBackend(CODEX_COMMAND)
     codex.arguments += model.arguments(tmp_path)
     codex.needs_sign_in = False
     codex.created = []
@@ -1885,7 +1915,7 @@ async def test_codex_memories_never_run_their_agent_for_a_worker(tmp_path, monke
     (home / "config.toml").write_text("[features]\nmemories = true\n")
     monkeypatch.setenv("CODEX_HOME", str(home))
     model = scripted_model.Model()
-    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex = CodexBackend(CODEX_COMMAND)
     codex.arguments += model.arguments(tmp_path)
     codex.needs_sign_in = False
     codex.created = []
@@ -2405,7 +2435,7 @@ async def test_a_codex_worker_reaches_no_other_workers_thread(tmp_path, monkeypa
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
     model = scripted_model.Model()
-    agent = CodexAgent(shutil.which("codex") or "codex")
+    agent = CodexAgent(REAL_CODEX)
     agent.arguments += model.arguments(tmp_path)
     agent.needs_sign_in = False
     ended: list[tuple[str, str]] = []
@@ -2528,7 +2558,7 @@ async def test_an_owners_codex_thread_is_listed_and_continued_in_a_thread_of_chi
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
     model = scripted_model.Model()
-    codex = shutil.which("codex") or "codex"
+    codex = CODEX_COMMAND
     owners = CodexBackend(codex)
     owners.arguments += model.arguments(tmp_path)
     owners.needs_sign_in = False

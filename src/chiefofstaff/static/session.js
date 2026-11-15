@@ -79,13 +79,15 @@ export function renderHeader() {
   if (session.credits >= 0.05) meta.push(`${session.credits.toFixed(1)} credits`);
   // On another coding agent: its name and model there after its state, and its tokens.
   if (session.agent) meta.splice(1, 0, AGENT, session.model);
-  if (session.agent && session.tokens) meta.push(`${tokenCount(session.tokens)} tokens`);
+  if (session.agent && session.tokens) meta.push(session.token_limit ? `${tokenCount(session.tokens)} of ${tokenCount(session.token_limit)} tokens` : `${tokenCount(session.tokens)} tokens`);
+  // To run on another agent, it runs on Copilot: said, why on hover.
+  if (session.agent_fallback && state.snapshot.agents) meta.splice(1, 0, FALLBACK);
   const follows = session.follows || [];
   if (follows.length && !session.closed_at) meta.push(`following ${follows.length}`);
   const titles = { router: "Chat with your chief of staff", slack: "Slack", watchdog: "Watchdog" };
   $("#session-title").textContent = titles[session.role] || workerTitle(session);
   $("#session-title").title = session.role === "worker" && session.title !== workerTitle(session) ? `Started as “${session.title}”` : "";
-  if (session.agent) agentMeta(session, meta.filter(Boolean));
+  if (session.agent || meta.includes(FALLBACK)) agentMeta(session, meta.filter(Boolean));
   else $("#session-meta").textContent = meta.filter(Boolean).join(" · ");
   const where = session.role === "worker" ? (session.checkouts?.length ? session.checkouts.map((checkout) => `${checkout.path}${checkout.branch ? ` (${checkout.branch})` : ""}`) : [session.cwd]) : [];
   $("#session-meta").title = [...where, ...follows.map(threadLabel)].filter(Boolean).join("\n");
@@ -153,6 +155,14 @@ export function renderHeader() {
     };
     items.push(menuButton("Continue in a terminal", terminal));
   }
+  // Continue with another agent: a new worker there goes on from a summary, in the same
+  // folders; this one closes. Only once it is idle, only while other agents are on.
+  const idle = !["working", "queued", "starting"].includes(session.status) && !session.background && !session.elsewhere;
+  if (session.role === "worker" && !session.closed_at && !session.helper && idle && state.snapshot.agents) {
+    const names = { copilot: "Copilot", ...state.snapshot.agents.names };
+    const others = ["copilot", ...state.snapshot.agents.on].filter((name) => name !== (session.agent || "copilot"));
+    items.push(el("hr"), ...others.map((name) => menuButton(`Continue with ${names[name]}…`, () => continueWith(session, name, names[name]))));
+  }
   if (session.role === "worker" && !session.closed_at) {
     items.push(
       el("hr"),
@@ -178,6 +188,16 @@ export function renderHeader() {
       ? { locked: IN_TERMINAL }
       : { placeholder: session.closed_at ? "Message to reopen this worker…" : placeholders[session.role] || chatPlaceholder(session) },
   );
+}
+async function continueWith(session, agent, label) {
+  if (!confirm(`Continue “${workerTitle(session)}” with ${label}? A new worker on ${label} goes on from a summary of this one's work, in the same folders; this one closes.`)) return;
+  try {
+    const made = await api(`/api/sessions/${session.id}/continue`, { method: "POST", body: { agent } });
+    toast(`Continuing on ${label}.`);
+    select(made.session_id);
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 // A worker with several tasks: the one the owner chose in its chat, which what they write is
 // about (bug QA6-3: it was filed under the one given last, whatever they looked at): the task
@@ -243,10 +263,12 @@ export function setComposer({ placeholder = "", locked = "", attach = true } = {
 // The agent's name in the meta line of a worker on another coding agent: where it works
 // differently from a Copilot worker, its tooltip (and description) says how, a line each.
 const AGENT = Symbol("agent");
+const FALLBACK = Symbol("fallback");
 function agentMeta(session, parts) {
   const notes = session.agent_notes || [];
   const name = el("span", { text: session.agent_name, title: notes.join("\n") || undefined });
-  const nodes = parts.flatMap((part, index) => [index ? " · " : "", part === AGENT ? name : part]);
+  const fallback = el("span", { text: "Copilot", title: session.agent_fallback || undefined });
+  const nodes = parts.flatMap((part, index) => [index ? " · " : "", part === AGENT ? name : part === FALLBACK ? fallback : part]);
   if (notes.length) {
     name.setAttribute("aria-describedby", "session-agent-notes");
     nodes.push(el("span", { id: "session-agent-notes", hidden: true, text: notes.join(". ") }));
@@ -742,6 +764,7 @@ function homeEntry(message) {
     case "notice": {
       if (meta.settings) return eventLine({ mark: "✦", text, time, view: () => openSettings(meta.settings), viewText: "Open Settings" });
       if (meta.away_reply) return eventLine({ mark: "↩", text, time });
+      if (meta.agent_refused) return refusalCard(text, meta, time);
       // "Started “X” · new because …": the why is on hover (a " · " in the title is the title's).
       const started = /^(Started|New task|Continued)/.test(text);
       const node = eventLine({ mark: started ? "" : "·", kind: started ? "started" : "", text: headOf(text), time, view: meta.session_id ? () => focusTask(meta.task_id || "", meta.session_id) : null });
@@ -899,6 +922,35 @@ function renderMessage(original) {
       return el("div", { class: "line", text: message.text, title: clock(time) });
   }
 }
+// A worker the owner named an agent for that could not start on it: why, and what they can do
+// (nothing starts elsewhere unasked). Its actions go once answered.
+const SIGN_IN_HELP = "https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#workers-on-other-coding-agents";
+function refusalCard(text, meta, time) {
+  const open = (state.snapshot.agent_refusals || []).includes(meta.agent_refused);
+  const answer = async (action, button) => {
+    button.disabled = true;
+    try {
+      const fresh = await api(`/api/agent-refusals/${meta.agent_refused}`, { method: "POST", body: { action } });
+      // (Its key is absent once none is open: not kept from before.)
+      state.snapshot = { ...state.snapshot, ...fresh, agent_refusals: fresh.agent_refusals };
+      if (!fresh.agent_refusals?.includes(meta.agent_refused)) node.querySelector(".actions")?.remove();
+    } catch (error) {
+      button.disabled = false;
+      toast(error.message, "error");
+    }
+  };
+  const copilot = el("button", { type: "button", class: "secondary", text: "Run on Copilot instead" });
+  const wait = el("button", { type: "button", class: "text", text: "Wait" });
+  copilot.onclick = () => answer("copilot", copilot);
+  wait.onclick = () => answer("wait", wait);
+  const node = el(
+    "div",
+    { class: "card agent-refused", title: clock(time) },
+    el("p", { text }),
+    open ? el("div", { class: "actions" }, el("a", { class: "link", href: SIGN_IN_HELP, target: "_blank", rel: "noreferrer", text: "Sign-in help" }), el("span", { class: "spacer" }), wait, copilot) : null,
+  );
+  return node;
+}
 // "Use these settings": what changed is in its line; the worker goes on with them.
 function useSettingsButton(sessionId, { digest, changes }, className = "link") {
   const button = el("button", { type: "button", class: className, text: "Use these settings", title: changes, onclick: async (event) => {
@@ -986,6 +1038,8 @@ function ownerMessage(text, meta = {}, time = "", delivery = "", messageId = 0) 
   if (worker) node.dataset.worker = worker;
   // Sent from Home straight to one worker.
   if (meta.to) node.append(el("button", { type: "button", class: "to", text: `→ ${meta.to_title}`, title: "Open this worker", onclick: () => select(meta.to) }));
+  // The agent chosen for it with @ (its work runs there).
+  if (meta.agent) node.append(el("span", { class: "to", text: `On ${{ copilot: "Copilot", codex: "Codex", claude: "Claude" }[meta.agent] || meta.agent}` }));
   const files = meta.attachments || [];
   if (files.length) {
     node.append(

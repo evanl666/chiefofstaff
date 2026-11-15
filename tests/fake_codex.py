@@ -31,6 +31,10 @@ VERSION = os.environ.get("FAKE_CODEX_VERSION", "0.167.2")
 UNASKED = set(filter(None, os.environ.get("FAKE_CODEX_UNASKED", "").split(",")))
 
 
+class LimitedError(Exception):
+    """A turn a limit failed: its error (message, codexErrorInfo), as Codex says it."""
+
+
 class Server:
     def __init__(self):
         self.out = sys.stdout.buffer
@@ -188,6 +192,16 @@ class Server:
             return {"account": None, "requiresOpenaiAuth": True}
         account = {"type": "chatgpt", "email": None, "planType": "plus"}
         return {"account": account, "requiresOpenaiAuth": True}
+
+    async def on_account_ratelimits_read(self, params):
+        """A ChatGPT plan's limits (FAKE_CODEX_LIMITS: JSON, the primary window's used percent
+        and reset; by default 42% of a 5-hour window)."""
+        given = json.loads(os.environ.get("FAKE_CODEX_LIMITS") or "{}")
+        primary = {"usedPercent": given.get("used", 42), "windowDurationMins": 300,
+                   "resetsAt": given.get("resets_at", int(time.time()) + 3600)}  # fmt: skip
+        snapshot = {"limitId": "codex", "limitName": None, "primary": primary, "secondary": None,
+                    "credits": None, "planType": "plus"}  # fmt: skip
+        return {"rateLimits": snapshot, "rateLimitsByLimitId": None}
 
     async def on_model_list(self, params):
         if not params.get("cursor"):
@@ -540,6 +554,8 @@ class Server:
                 await self.think(thread_id, turn_id, steer)
         except asyncio.CancelledError:
             status = "interrupted"
+        except LimitedError as exc:
+            status, error = "failed", exc.args[0]
         except Exception as exc:
             status, error = "failed", {"message": str(exc)}
         for turn in (self.threads.get(thread_id) or {}).get("turns", []):
@@ -655,6 +671,24 @@ class Server:
             (failing := os.environ.get("FAKE_CODEX_FAILS_ON")) and failing in prompt
         ):
             raise RuntimeError("The model is overloaded.")
+        if "Hit the usage limit" in prompt:
+            # As 0.167.2 says a ChatGPT plan's limit reached: its rate limits, then the error.
+            resets = int(time.time()) + 5400
+            window = {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": resets}
+            self.notify("account/rateLimits/updated", {"rateLimits": {
+                "limitId": "codex", "limitName": None, "primary": window, "secondary": None,
+                "credits": None, "planType": None, "rateLimitReachedType": None}})  # fmt: skip
+            error = {"message": "You've hit your usage limit. Try again at 5:18 PM.",
+                     "codexErrorInfo": "usageLimitExceeded", "additionalDetails": None}  # fmt: skip
+            self.notify("error", {"error": error, "willRetry": False, "threadId": thread_id,
+                                  "turnId": turn_id})  # fmt: skip
+            raise LimitedError(error)
+        if "Hit the rate limit" in prompt:
+            # A 429 Codex gave up retrying.
+            error = {"message": "exceeded retry limit, last status: 429 Too Many Requests",
+                     "codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 429}},
+                     "additionalDetails": None}  # fmt: skip
+            raise LimitedError(error)
         if found := re.search(r"Remember the word '(\w+)'", prompt):
             thread["memory"] = found.group(1)
         if "Compact the conversation" in prompt:  # As Codex summarizes a long one.

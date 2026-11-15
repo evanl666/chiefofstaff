@@ -18,10 +18,12 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import agents
 from .bus import Bus
 from .models import (
+    AgentOffer,
     AgentSettings,
     ApproveSafe,
     ArtifactHide,
     CheckBackAction,
+    ContinueOn,
     DraftDecision,
     FocusRequest,
     FollowRetry,
@@ -33,6 +35,7 @@ from .models import (
     OwnerMessage,
     ProfileText,
     ProjectPath,
+    RefusalAnswer,
     RunsEnded,
     SessionModel,
     SessionYolo,
@@ -170,7 +173,7 @@ def stopped_text(reasons: list[str]) -> str:
 
 
 # Why a worker on another agent stopped when the owner turned that agent off (agent_block).
-TURNED_OFF = re.compile(r"^(?P<name>\w+) is turned off in Settings → Models\.$")
+TURNED_OFF = re.compile(r"^(?P<name>\w+) is turned off in Settings → Coding agents\.$")
 # Why one stopped when Ask first was turned on for it (agents.switched_to_ask_first).
 SWITCHED = re.compile(r"^(?P<name>\w+) takes up Ask first only in a new process\.$")
 
@@ -342,6 +345,7 @@ def create_app(
                 session_id,
                 payload.text,
                 attachments=payload.attachments,
+                agent=payload.agent,
                 task_id=payload.task_id,
                 typed=True,
                 settings_digest=payload.settings_digest,
@@ -390,10 +394,16 @@ def create_app(
             return await runtime.agent_models(agent, start=True)
         return await runtime.available_models()
 
-    # The Coding agents group in Settings → Models, once the owner opens it: never before.
+    # Settings' Coding agents tab, once the owner shows it: never before.
     @app.get("/api/agents")
     async def coding_agents():
         return await runtime.look_for_agents()
+
+    @app.post("/api/agents/{name}/offer")
+    async def agent_offer(name: str, payload: AgentOffer):
+        """The owner's answer on an agent's first-run card (Allow, or Not now)."""
+        await runtime.answer_offer(name, payload.allow)
+        return runtime.snapshot()
 
     @app.get("/api/usage")
     async def usage(since: float, until: float | None = None):
@@ -710,6 +720,23 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
 
+    @app.post("/api/agent-refusals/{key}")
+    async def agent_refusal(key: str, payload: RefusalAnswer):
+        """The owner's answer on a card for a worker its agent could not start."""
+        try:
+            await runtime.answer_refusal(key, payload.action)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return runtime.snapshot()
+
+    @app.post("/api/sessions/{session_id}/continue")
+    async def continue_on(session_id: str, payload: ContinueOn):
+        """Continue with <agent>…: a new worker on that agent goes on with this one's work."""
+        try:
+            return await runtime.continue_on(session_id, payload.agent)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
     @app.post("/api/sessions/{session_id}/close")
     async def close(session_id: str):
         await runtime.workers.close(session_id, by="you")
@@ -802,11 +829,11 @@ def create_app(
             if plan is not None:
                 await runtime.check_agent_models(plan)
             store.save_settings(settings)
-            before = agents.configured(store)
+            before, chose = agents.configured(store), agents.router_chooses(store)
             changed = plan is not None and agents.save(store, plan)
         stopped = await runtime.settings_changed(old, settings)
         if changed:
-            stopped += await runtime.agents_saved(before)
+            stopped += await runtime.agents_saved(before, chose)
         snapshot = runtime.snapshot()
         if stopped:
             # One toast says how many it stopped, and why.

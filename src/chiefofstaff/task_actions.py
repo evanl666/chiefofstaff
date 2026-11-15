@@ -3981,6 +3981,12 @@ class TaskActions:
         self.store.delete(f"news:{task_id}")  # Answering it, the owner has seen its news.
         self.runtime.asks.answered(task["session_id"], task_id)
         before = task["status"]
+        # How it waits (stopped, by whom; asked after its result), for if this never reaches it.
+        marks = {
+            key: value
+            for key in (f"stopped:{task_id}", f"goingon:{task_id}", f"askedafter:{task_id}")
+            if (value := self.store.get(key)) is not None
+        }
         self.runtime.learning.record(
             "follow-up",
             context=self.about(task, task["goal"]),
@@ -4055,6 +4061,9 @@ class TaskActions:
             if task["status"] != before:
                 self.store.delete(f"reopened:{task_id}")
                 self.tasks.move(task_id, before)  # The follow-up never reached its worker.
+                for key, value in marks.items():
+                    self.store.set(key, value)  # Still waiting as it was (Go on, by whom).
+                self.publish(self.tasks.get(task_id))
             raise
         self.runtime.owner_told(row, shown, message)
         return task
@@ -4577,6 +4586,11 @@ class TaskActions:
                 row = self.store.find_session(task["session_id"])
                 if who == agents.SPEND_STOP and row and not self.runtime.on_copilot(row["id"]):
                     return "stopped", self.runtime.spend_stop(row)["spend_why"]
+                if who == agents.PLAN_STOP:
+                    paused = " ".join((task["progress"] or "Paused by its plan's limit.").split())
+                    return "stopped", clip(
+                        f"{paused} Go on once it resets, or continue with another agent.", 300
+                    )
                 return "stopped", f"Stopped by {who}: tell it to go on, or cancel it"
             asked = self.open_question(task) or {}
             return "question", clip(" ".join((asked.get("text") or task["progress"]).split()), 300)

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,8 +23,12 @@ CONFIG = "agents"
 # The agents this release runs workers on, by the name rows keep (`agent:<row>`).
 NAMES = {"codex": "Codex", "claude": "Claude"}
 COPILOT = "copilot"
-# In the configuration, beside each agent's settings: the agent new workers use.
+# In the configuration, beside each agent's settings: the agent new workers use, and whether
+# the Router chooses one for each new worker (Settings → Coding agents, off unless chosen).
 NEW_WORKERS = "new_workers"
+ROUTER_CHOOSES = "router_chooses"
+# Whether the owner answered an agent's first-run card (kv `agentoffer:<agent>`).
+OFFERED = "agentoffer:"
 
 
 def stored(store: Store) -> dict[str, Any]:
@@ -53,6 +59,19 @@ def turned_on(store: Store) -> list[str]:
     return sorted(name for name, entry in configured(store).items() if entry.get("enabled"))
 
 
+def found() -> list[str]:
+    """The supported agents whose CLI is on this computer (a look at the PATH: nothing runs);
+    none on Windows, where none runs workers yet."""
+    if sys.platform == "win32":
+        return []
+    return [name for name in NAMES if shutil.which(COMMANDS[name])]
+
+
+def router_chooses(store: Store) -> bool:
+    """Whether the Router chooses the agent of each new worker (among those on)."""
+    return bool(stored(store).get(ROUTER_CHOOSES)) and bool(turned_on(store))
+
+
 def new_workers(store: Store) -> str:
     """The agent new workers use: Copilot, unless the owner chose one that is on."""
     chosen = stored(store).get(NEW_WORKERS)
@@ -79,8 +98,10 @@ def configure(store: Store, name: str, **values: Any) -> dict[str, Any]:
 
 # The most a worker's token limit can be (a typo's extra zeros are refused, not kept).
 MOST_TOKENS = 10**12
-# Who stopped a worker past its token limit, or whose spend is not known (its task's `stopped:`).
+# Who stopped a worker past its token limit, or whose spend is not known (its task's `stopped:`);
+# who paused one as its plan's limit was reached.
 SPEND_STOP = "its token limit"
+PLAN_STOP = "its plan's limit"
 
 
 def switched_to_ask_first(name: str) -> str:
@@ -96,6 +117,11 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
     plan: dict[str, Any] = {**stored(store)}
     for name, entry in change.items():
         if name == NEW_WORKERS:
+            continue
+        if name == ROUTER_CHOOSES:
+            if not isinstance(entry, bool):
+                raise ValueError("Let the Router choose: on or off.")
+            plan[ROUTER_CHOOSES] = entry
             continue
         if name not in NAMES or not isinstance(entry, dict):
             raise ValueError(f"Coding agents: Chief of Staff does not run {name!r}.")
@@ -189,31 +215,73 @@ def clock(at: float) -> str:
     return f"{(stamp.tm_hour % 12) or 12}:{stamp.tm_min:02d} {'am' if stamp.tm_hour < 12 else 'pm'}"
 
 
-def limit_line(limit: Any, now: float | None = None) -> str:
-    """What a plan's limit, as a worker's stream last said it, means now ("" once it reset, or
-    while nothing is near)."""
+def blocked(limit: Any) -> bool:
+    """Whether a plan's limit, as last said, refuses its workers' requests: reached, and no
+    extra usage carrying them on."""
+    return isinstance(limit, dict) and limit.get("status") == "rejected" and not limit.get("extra")
+
+
+def limit_line(limit: Any, now: float | None = None, name: str = "claude") -> str:
+    """What a plan's limit, as agent `name`'s worker last said it, means now ("" once it reset,
+    or while nothing is near). Status "rejected": its plan's limit is reached; "limited": its
+    requests were refused for a rate limit (a plan's or an account's) with no plan's limit
+    said."""
     limit = limit if isinstance(limit, dict) else {}
     resets = limit.get("resets_at") if isinstance(limit.get("resets_at"), int | float) else 0
     if resets and resets <= (time.time() if now is None else now):
         return ""
-    window = WINDOWS.get(str(limit.get("window") or ""), "usage limit")
+    window = WINDOWS.get(str(limit.get("window") or "")) or str(limit.get("label") or "usage limit")
     when = f"; it resets at {clock(resets)}" if resets else ""
+    if limit.get("status") == "rejected" and limit.get("extra"):
+        until = f" until it resets at {clock(resets)}" if resets else ""
+        return (
+            f"Your {display(name)} plan's {window} is reached; workers go on with extra usage"
+            f"{until}."
+        )
     if limit.get("status") == "rejected":
-        return f"Your Claude plan's {window} is reached{when}."
+        return f"Your {display(name)} plan's {window} is reached{when}."
     if limit.get("status") == "allowed_warning":
-        return f"Your Claude plan's {window} is close{when}."
+        return f"Your {display(name)} plan's {window} is close{when}."
+    if limit.get("status") == "limited":
+        return f"{display(name)} is refusing requests for a rate limit{when}."
     return ""
 
 
-def plan_limit(store: Store, name: str, live: Any = None) -> str:
-    """An agent's plan limit line for Settings: as its running backend has it, else as last
-    kept (kv `agentlimit:<agent>`)."""
+def plan_usage(store: Store, name: str, facts: dict) -> list[dict]:
+    """How much of each of its plan's limits is used, where the agent says it ({label, used:
+    percent, resets_at}): Codex's from its look, Claude's as its workers' streams last said it
+    (none before a worker ran, nor with an API key). Never anything about the account."""
+    if name == "codex":
+        return [
+            {"label": str(entry["window"]), "used": int(entry["used"]),
+             "resets_at": int(entry.get("resets_at") or 0)}
+            for entry in facts.get("limits") or []
+            if isinstance(entry, dict) and isinstance(entry.get("used"), int)
+        ]  # fmt: skip
+    live = facts.get("limit")
     if not live:
         try:
             live = json.loads(store.get(f"agentlimit:{name}") or "{}")
         except ValueError:
             live = {}
-    return limit_line(live)
+    if not isinstance(live, dict) or not isinstance(live.get("used"), int):
+        return []
+    resets = live.get("resets_at") if isinstance(live.get("resets_at"), int) else 0
+    if resets and resets <= time.time():
+        return []  # Reset since: not known now.
+    label = WINDOWS.get(str(live.get("window") or ""), "usage limit")
+    return [{"label": label, "used": live["used"], "resets_at": resets}]
+
+
+def live_limit(store: Store, name: str, live: Any = None) -> dict:
+    """An agent's plan limit: as its running backend has it, else as last kept (kv
+    `agentlimit:<agent>`)."""
+    if not live:
+        try:
+            live = json.loads(store.get(f"agentlimit:{name}") or "{}")
+        except ValueError:
+            live = {}
+    return live if isinstance(live, dict) else {}
 
 
 # Each agent's command, and what to install when it is not found.

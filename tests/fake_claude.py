@@ -11,10 +11,11 @@ SYSTEM (JSON merged into each turn's system/init: another permission mode); UNAS
 runs without asking PreToolUse, comma-separated); RUNS (a file each run's arguments are appended
 to); LOG (a file each message from the SDK is appended to); ON_ITS_OWN (a turn it starts after
 each one, past the gate: one no gate admitted); LIMIT (JSON: a rate_limit_event's info, sent
-before each turn); GATE_DELAY (seconds a prompt waits before its gate); NO_STEER (notes sent
-during a turn are taken up after it). With ANTHROPIC_BASE_URL set (Chief of Staff's check), its
-turns come from that stand-in Messages API, as Claude Code's would.
-"""
+as each turn's first request is answered); GATE_DELAY (seconds a prompt waits before its gate);
+NO_STEER (notes sent during a turn are taken up after it). With ANTHROPIC_BASE_URL set (Chief of
+Staff's check), its turns come from that stand-in Messages API, as Claude Code's would. A prompt
+saying "Hit the usage limit" (or "rate limit") is refused as for a rate limit (a 429), as 2.1.322
+says it."""
 
 import asyncio
 import atexit
@@ -433,9 +434,11 @@ class Fake:
         origin=None,
         subtype: str = "success",
         reason: str = "completed",
+        **more,
     ):
         self.send(
-            {
+            more
+            | {
                 "type": "result",
                 "subtype": subtype,
                 "is_error": bool(error) or subtype != "success",
@@ -454,15 +457,6 @@ class Fake:
 
     async def turn(self, entry: dict):
         text = self.text(entry["content"])
-        if limit := os.environ.get("FAKE_CLAUDE_LIMIT"):
-            self.send(
-                {
-                    "type": "rate_limit_event",
-                    "rate_limit_info": json.loads(limit),
-                    "uuid": str(uuid.uuid4()),
-                    "session_id": self.session_id,
-                }
-            )
         if delay := os.environ.get("FAKE_CLAUDE_GATE_DELAY"):
             await asyncio.sleep(float(delay))  # A prompt waiting its turn in Claude's queue.
         if not entry.get("ungated"):
@@ -509,6 +503,16 @@ class Fake:
         conversation = self.state.setdefault("messages", [])
         conversation.append({"role": "user", "content": entry["content"]})
         await self.chief_ready()
+        if limit := os.environ.get("FAKE_CLAUDE_LIMIT"):
+            # What its first request's answer said of the plan's limits (as Claude says it).
+            self.send(
+                {
+                    "type": "rate_limit_event",
+                    "rate_limit_info": json.loads(limit),
+                    "uuid": str(uuid.uuid4()),
+                    "session_id": self.session_id,
+                }
+            )
         if "Fail this turn" in text:
             self.send(
                 {
@@ -527,6 +531,33 @@ class Fake:
             )
             self.result(
                 turns=1, spent=dict.fromkeys(usage(0), 0), error="API Error: 529 Overloaded"
+            )
+            return
+        if "Hit the usage limit" in text or "Hit the rate limit" in text:
+            # As 2.1.322 says a request refused for a rate limit (a 429; a plan's has its
+            # rate_limit_event, FAKE_CLAUDE_LIMIT, before): Claude's words, and a failed turn.
+            said = "API Error: Request rejected (429) · You've hit your limit"
+            self.send(
+                {
+                    "type": "assistant",
+                    "error": "rate_limit",
+                    "message": {
+                        "id": str(uuid.uuid4()),
+                        "role": "assistant",
+                        "model": "<synthetic>",
+                        "content": [{"type": "text", "text": said}],
+                    },
+                    "parent_tool_use_id": None,
+                    "session_id": self.session_id,
+                    "uuid": str(uuid.uuid4()),
+                }
+            )
+            self.result(
+                turns=1,
+                spent=dict.fromkeys(usage(0), 0),
+                error=said,
+                reason="api_error",
+                api_error_status=429,
             )
             return
         spent: dict = {}

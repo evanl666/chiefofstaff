@@ -114,6 +114,7 @@ CODEX_SENDS: dict[str, tuple[str, ...]] = {
     "initialize": ("clientInfo", "capabilities"),
     "configRequirements/read": (),
     "account/read": (),
+    "account/rateLimits/read": (),
     "model/list": ("cursor",),
     "config/read": ("cwd", "includeLayers"),
     "plugin/installed": ("cwds",),
@@ -174,7 +175,11 @@ CODEX_FOLLOWS = (
     "model/rerouted",
     "thread/closed",
     "thread/compacted",
+    "account/rateLimits/updated",
 )
+# A turn that failed for a limit (codexErrorInfo): its plan's ("usageLimitExceeded"), or a rate
+# limit Codex gave up retrying (an HTTP 429 after its own retries).
+LIMIT_ERRORS = frozenset({"usageLimitExceeded", "rateLimitExceeded"})
 SCHEMA_SECONDS = 20.0
 # How long a stopping app-server has to end by itself at the end of its input (graceful: its
 # threads written down) before its supervisor is told to end its tree.
@@ -298,6 +303,52 @@ def iso(seconds: Any) -> dict:
     if not isinstance(seconds, int | float) or seconds <= 0:
         return {}
     return {"timestamp": datetime.fromtimestamp(seconds, tz=UTC).isoformat()}
+
+
+def limit_windows(snapshot: dict) -> list[dict]:
+    """A rate-limit snapshot's windows ({window, used: percent, resets_at}), as Settings says
+    them."""
+    found = []
+    for key in ("primary", "secondary"):
+        window = mapping(snapshot.get(key))
+        if not isinstance(window.get("usedPercent"), int):
+            continue
+        minutes = window.get("windowDurationMins")
+        found.append(
+            {
+                "window": window_name(minutes if isinstance(minutes, int) else 0),
+                "used": max(0, min(100, window["usedPercent"])),
+                "resets_at": int(window.get("resetsAt") or 0),
+            }
+        )
+    return found
+
+
+def limit_failure(error: dict, snapshot: dict) -> dict | None:
+    """A failed turn's limit, if a limit failed it: its plan's ("rejected", with the window used
+    up and when it resets, as Codex last said its rate limits) or a rate limit ("limited");
+    None for any other failure."""
+    info = error.get("codexErrorInfo")
+    too_many = isinstance(info, dict) and any(
+        mapping(detail).get("httpStatusCode") == 429 for detail in info.values()
+    )
+    if not too_many and not (isinstance(info, str) and info in LIMIT_ERRORS):
+        return None
+    full = [entry for entry in limit_windows(snapshot) if entry["used"] >= 100]
+    return {
+        "status": "rejected" if info == "usageLimitExceeded" else "limited",
+        **({"label": full[0]["window"]} if full else {}),
+        "resets_at": max((entry["resets_at"] for entry in full), default=0),
+    }
+
+
+def window_name(minutes: int) -> str:
+    """A plan limit's window as Settings names it ("5-hour limit", "weekly limit")."""
+    if minutes and minutes % (7 * 24 * 60) == 0:
+        return "weekly limit"
+    if minutes and minutes % 60 == 0 and minutes < 24 * 60:
+        return f"{minutes // 60}-hour limit"
+    return "usage limit"
 
 
 def codex_home() -> Path:
@@ -822,6 +873,8 @@ class CodexBackend:
         # resume's answer).
         self.epoch = ""
         self.restored: dict[str, dict] = {}
+        # Its plan's rate limits, as Codex last said them (account/rateLimits/updated).
+        self.rate_limits: dict[str, Any] = {}
         self.tasks: set[asyncio.Task] = set()
         # The supervisor's process and those it started, as last seen: pid -> command line.
         self.started: dict[int, str] = {}
@@ -1122,6 +1175,11 @@ class CodexBackend:
             task.add_done_callback(self.tasks.discard)
             return
         self.observe(method, params)
+        if method == "account/rateLimits/updated":
+            # Sparse: what it says is merged into what it said before.
+            update = mapping(params.get("rateLimits"))
+            self.rate_limits |= {k: v for k, v in update.items() if v is not None}
+            return
         thread = params.get("threadId") or (params.get("thread") or {}).get("id") or ""
         if session := self.session_of(thread, params):
             session.told += 1
@@ -1225,13 +1283,23 @@ class CodexBackend:
         )
 
     async def about(self) -> dict:
-        """Its version, how it is signed in (the kind of account, never who) and its models."""
+        """Its version, how it is signed in (the kind of account, never who), its models, and
+        how much of its plan's limits is used (where it has them: what it says of each window,
+        nothing about the account)."""
         auth = await self.get_auth_status()
         return {
             "version": self.cli_version,
             "account": auth.authType if auth.isAuthenticated else "",
             "models": await self.list_models(),
+            "limits": await self.plan_limits() if auth.isAuthenticated else [],
         }
+
+    async def plan_limits(self) -> list[dict]:
+        try:
+            answer = await self.request("account/rateLimits/read", None)
+        except CodexError:
+            return []  # Signed in with an API key: no plan, no limits.
+        return limit_windows(mapping(answer.get("rateLimits")))
 
     async def list_models(self) -> list[Any]:
         models, cursor = [], None
@@ -2968,8 +3036,12 @@ class CodexSession:
             self.queue.clear()  # Let go of: what it was sent is sent again (Delivery).
         if status == "failed":
             self.queue.clear()  # Given back: what it was sent is sent again (Delivery).
-            error = turn.get("error") or {}
-            self.emit("session.error", message=str(error.get("message") or "Codex failed."))
+            error = mapping(turn.get("error"))
+            said = str(error.get("message") or "Codex failed.")
+            if (limit := limit_failure(error, self.backend.rate_limits)) is not None:
+                self.emit("session.error", message=said, error_type="plan_limit", limit=limit)
+            else:
+                self.emit("session.error", message=said)
             return
         if status == "interrupted":
             self.queue.clear()

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -150,6 +151,25 @@ def reply(prompt: str, items: list[dict]) -> str:
     return "done"
 
 
+def limited(body: dict) -> tuple[dict, dict] | None:
+    """A request its prompt has refused for a limit, as OpenAI's backend refuses it (a 429): a
+    ChatGPT plan's usage limit ("Hit the usage limit": its rate limits used up, in the headers
+    Codex reads them from), or a rate limit; None for any other."""
+    items = [item for item in body.get("input") or [] if isinstance(item, dict)]
+    start = given(items)
+    prompt = text_of(items[start]) if start >= 0 and body.get("tools") else ""
+    resets = int(time.time()) + 5400
+    if "Hit the usage limit" in prompt:
+        error = {"type": "usage_limit_reached", "message": "You've hit your usage limit.",
+                 "plan_type": "plus", "resets_at": resets}  # fmt: skip
+        headers = {"x-codex-primary-used-percent": "100", "x-codex-primary-window-minutes": "300",
+                   "x-codex-primary-reset-at": str(resets)}  # fmt: skip
+        return {"error": error}, headers
+    if "Hit the rate limit" in prompt:
+        return {"error": {"type": "rate_limit_exceeded", "message": "Rate limit reached."}}, {}
+    return None
+
+
 def answer(body: dict) -> dict:
     """The next output item for this request."""
     items = [item for item in body.get("input") or [] if isinstance(item, dict)]
@@ -238,6 +258,15 @@ class Answer(BaseHTTPRequestHandler):
         model.requests += 1
         model.bodies.append(body)
         number = model.requests
+        if refused := limited(body):
+            data = json.dumps(refused[0]).encode()
+            self.send_response(429)
+            for name, value in {"content-type": "application/json", **refused[1]}.items():
+                self.send_header(name, value)
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         item = answer(body)
         if item.get("type") == "message":
             item["id"] = f"message-{number}"

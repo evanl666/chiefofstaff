@@ -113,6 +113,21 @@ class Handler(BaseHTTPRequestHandler):
         if "count_tokens" in self.path:
             data = json.dumps({"input_tokens": 10}).encode()
             kind = "application/json"
+        elif "Hit the usage limit" in latest(body)[0] or "Hit the rate limit" in latest(body)[0]:
+            # Refused for a rate limit, as the API refuses it (a key's: no plan's headers), and
+            # not to be tried again (else Claude Code retries it for minutes).
+            refused = {
+                "type": "rate_limit_error",
+                "message": "This request would exceed your limit.",
+            }
+            data = json.dumps({"type": "error", "error": refused}).encode()
+            self.send_response(429)
+            self.send_header("content-type", "application/json")
+            self.send_header("x-should-retry", "false")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         else:
             with server.lock:
                 server.number += 1

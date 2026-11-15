@@ -3,7 +3,7 @@ tasks, cards that need the owner) on a fake Copilot, at 800 to 1440 px, light an
 sidebar's Other Copilot sessions with 3, 12 and 40 of them, before and after where each stands
 is shown (browser-shots/others/: a title keeps its width); Send to Chief's line in Settings and a
 sent item's line on Home (browser-shots/send/); Monitoring's runs and Artifacts' folded runs
-(browser-shots/qa-e41/); the Coding agents group in Settings → Models and a worker on Codex
+(browser-shots/qa-e41/); Settings' Coding agents tab and a worker on Codex
 (browser-shots/agents-m2/); a task's life: its cards, a failed task out of Needs you, failing
 Watch scans (browser-shots/qa7-life/); Your OK and Handled for you (browser-shots/qa8-approvals/).
 
@@ -35,6 +35,7 @@ from playwright.async_api import async_playwright, expect
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
+from agent_paths import without_agents  # noqa: E402
 from conftest import FakeClient, FakeSlackMcp, FakeTokens, call_tool, settle  # noqa: E402
 
 from chiefofstaff.runtime import Runtime  # noqa: E402
@@ -1022,9 +1023,9 @@ async def signed_out(route):
 
 
 async def agents_views(runtime, browser, quality: Quality):
-    """Other coding agents (docs/design/more-agents.md 5.10): the last line of Settings →
-    Models; the Coding agents group it unfolds (Codex's and Claude's rows), found and being turned
-    on; on, folded and open; a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
+    """Other coding agents (docs/design/more-agents.md 5.10, the agent picker): Settings' Coding
+    agents tab (Codex's and Claude's rows), signed out, found, being turned on, on with Advanced
+    open; a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
     (browser-shots/agents-m2/quality-*)."""
     from copilot.tools import ToolInvocation
     from ui_edges import agents_saved, codex_off_path, codex_on_path, until
@@ -1032,6 +1033,7 @@ async def agents_views(runtime, browser, quality: Quality):
     folder = SHOTS / "agents-m2"
     folder.mkdir(exist_ok=True)
     codex, _ = codex_on_path()
+    runtime.found_cache = (float("-inf"), [])  # Looked at the PATH again: now they are on it.
     try:
         for scheme in ("light", "dark"):
             context = await browser.new_context(
@@ -1040,19 +1042,18 @@ async def agents_views(runtime, browser, quality: Quality):
             page = await context.new_page()
             await page.goto(f"{BASE}/#token={TOKEN}")
             await expect(page.locator("#application")).to_be_visible()
-            for state in ("off", "signed-out", "found", "enabling", "on-folded", "on-open"):
-                await page.locator("#settings-button").click()
-                await page.locator("#settings-tabs [data-tab=models]").click()
-                group = page.locator("#agents-group")
+            for state in ("signed-out", "found", "enabling", "on-open"):
                 if state == "signed-out":
                     # One that cannot be turned on: it looks it, in both themes.
                     await page.route("**/api/agents", signed_out)
-                    await page.locator("#agents-open").click()
+                await page.locator("#settings-button").click()
+                await page.locator("#settings-tabs [data-tab=agents]").click()
+                group = page.locator("#settings-pane .tab[data-tab=agents]")
+                if state == "signed-out":
                     await expect(group.locator(".agent-row.disabled .agent-problem")).to_have_count(
                         2
                     )
                 if state in {"found", "enabling"}:
-                    await page.locator("#agents-open").click()
                     await expect(group.locator(".agent-row small[role=status]")).to_have_text(
                         [
                             "0.167.2 · signed in with ChatGPT",
@@ -1063,11 +1064,10 @@ async def agents_views(runtime, browser, quality: Quality):
                 if state == "enabling":
                     await group.locator("input[name=agent_codex_enabled]").check()
                 if state == "on-open":
-                    await group.locator("summary").click()
                     await expect(group.locator("input[name=agent_codex_enabled]")).to_be_checked(
                         timeout=20000
                     )
-                await page.locator("#agents-line").scroll_into_view_if_needed()
+                    await group.locator(".agent-row[data-agent=codex] summary").click()
                 for width in WIDTHS:
                     await page.set_viewport_size({"width": width, "height": 900})
                     await page.wait_for_timeout(100)
@@ -1118,9 +1118,7 @@ async def agents_views(runtime, browser, quality: Quality):
     finally:
         await agents_saved(runtime, {"codex": {"enabled": False}})
         codex_off_path(codex)
-    log(
-        "Coding agents: the Models line, the group's states, a Codex worker; browser-shots/agents-m2/"
-    )
+    log("Coding agents: the tab's states, a Codex worker; browser-shots/agents-m2/")
 
 
 async def main():
@@ -1132,6 +1130,8 @@ async def main():
     phase = sys.argv[1] if len(sys.argv) > 1 else "check"
     SHOTS.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cos-quality-") as temporary:
+        # The owner's own agents are never found here: stand-ins are put on the PATH where used.
+        os.environ["PATH"] = without_agents(os.environ["PATH"], Path(temporary) / "bin")
         holder: dict = {}
 
         def factory(store, bus):

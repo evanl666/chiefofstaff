@@ -4,7 +4,7 @@ import { $, api, closeMenus, closeOnBackdrop, FRESH_START, rememberKey, startFre
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, othersOn, routerId, state, viewedId } from "./state.js";
 import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
 import { appendMessages, chatAnchor, followAnchor, renderHeader, scrolledByOwner, scrollToBottom, select } from "./session.js";
-import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setRecipient } from "./mention.js";
+import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setAgent, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
 import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, showLength, takeAttachments, tooLong } from "./composer.js";
@@ -53,6 +53,8 @@ function bindUi() {
     input.value = "";
     autosize();
     const to = routerSide() ? mention.to : null;
+    // The agent chosen with @ for what this asks (only from Home, only while agents are on).
+    const agent = routerSide() && !to && mention.agent ? mention.agent.name : "";
     // Images go along only when there are any: a server without them takes the message as before.
     const body = (extra = {}) => ({ text, ...extra, ...(files.length ? { attachments: attachmentBody(files) } : {}) });
     try {
@@ -81,8 +83,9 @@ function bindUi() {
       // it is for that line alone).
       const task = chatAnchor();
       const held = byId(viewedId())?.settings_hold?.digest;
-      const extra = { ...(task ? { task_id: task } : {}), ...(held ? { settings_digest: held } : {}) };
+      const extra = { ...(agent ? { agent } : {}), ...(task ? { task_id: task } : {}), ...(held ? { settings_digest: held } : {}) };
       appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body(extra) })]);
+      if (agent) setAgent(null);
     } catch (error) {
       if (other) input.disabled = false;
       if (error.fresh) {

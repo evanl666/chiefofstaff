@@ -588,10 +588,24 @@ class Attachment(StrictModel):
     data: str = Field(min_length=4, max_length=7_000_000)
 
 
+class AgentOffer(StrictModel):
+    allow: bool
+
+
+class ContinueOn(StrictModel):
+    agent: Literal["copilot", "codex", "claude"]
+
+
+class RefusalAnswer(StrictModel):
+    action: Literal["copilot", "wait"]
+
+
 class OwnerMessage(StrictModel):
     text: str = Field(default="", max_length=20000)
     # From the Router chat, addressed to one worker: it goes to that worker directly.
     to: str = Field(default="", max_length=64)
+    # The coding agent the owner chose in the composer (@codex) for what this asks.
+    agent: Literal["", "copilot", "codex", "claude"] = ""
     attachments: list[Attachment] = Field(default_factory=list, max_length=5)
     # In a worker's chat: the task of its the owner looks at there (Runtime.chat_task).
     task_id: str = Field(default="", max_length=64)
