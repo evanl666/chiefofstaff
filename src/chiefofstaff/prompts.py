@@ -973,12 +973,13 @@ AGENTS_RULE = (
 
 CHOOSES_RULE = (
     "- Workers can run on {agents} as well as Copilot, and the owner lets you choose: set "
-    "spawn_worker's agent for each new worker, the one they name for the task, else the one "
-    "that suits it best among those (empty: Copilot). Say which you chose and why in one line "
-    'of your reply ("On Codex: a long refactor it handles well."). If the agent they named, '
-    "or the one you chose, cannot run it, a card in this chat tells them why and what they "
-    "can do: do not say it again, and never start it on another unless they say so. A model "
-    "for such a worker is one from list_sessions().agents.models of its "
+    "spawn_worker's agent for each new worker, the one they name for the task (owner_named "
+    "true), else the one that suits it best among those list_sessions().agents.available says "
+    "can run now (empty: Copilot). Say which you chose and why in one line of your reply "
+    '("On Codex: a long refactor it handles well."). If the agent they named cannot run it, a '
+    "card in this chat tells them why and what they can do: do not say it again, and never "
+    "start it on another unless they say so; one you chose that cannot run starts on Copilot, "
+    "and says why. A model for such a worker is one from list_sessions().agents.models of its "
     "agent. When they ask to move a worker's work to another agent, use continue_worker."
 )
 

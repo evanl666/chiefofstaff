@@ -646,6 +646,8 @@ class Runtime:
         # stopped at their limit.
         self.turn_runs: dict[tuple[str, str], str] = {}
         self.spend_stopping: set[str] = set()
+        # Why another agent last failed to start for a new worker (agent_unavailable).
+        self.agent_failed: dict[str, str] = {}
         self.states = SessionStates()
         # Whether this machine can run Copilot's command sandbox, and whether gh works inside it.
         self.sandbox_host = sandbox_supported()
@@ -1599,12 +1601,15 @@ class Runtime:
             return {}
         return found if isinstance(found, dict) else {}
 
-    async def new_worker_agent(self, named: str, slack: bool) -> tuple[str, str]:
+    async def new_worker_agent(self, named: str, slack: bool, picked: str = "") -> tuple[str, str]:
         """The agent a new worker of the owner's runs on, and what its timeline says of it: the
         one the owner named (refused with why when it cannot run it now: never moved to
-        another), else the one Settings chose for new workers, or Copilot with why when that one
-        cannot run it. One that reads Slack runs on Copilot."""
-        chosen = named or (agents.new_workers(self.store) if self.agents else COPILOT_AGENT)
+        another), else the one the Router chose (`picked`) or Settings chose for new workers,
+        or Copilot with why when that one cannot run it. One that reads Slack runs on
+        Copilot."""
+        chosen = (
+            named or picked or (agents.new_workers(self.store) if self.agents else COPILOT_AGENT)
+        )
         if chosen == COPILOT_AGENT:
             return chosen, ""
         if chosen not in agents.NAMES:
@@ -1618,13 +1623,37 @@ class Runtime:
                 await self.recheck_agent(chosen)
             except Exception as exc:
                 why = f"{agents.display(chosen)} could not start: {describe(exc)}"
+                self.agent_failed[chosen] = why  # Said to the Router (agent_unavailable).
             else:
+                self.agent_failed.pop(chosen, None)
                 why = self.blocked_on(chosen, row)  # What its version showed, now known.
         if not why:
             return chosen, ""
         if named:
             raise ValueError(why)
         return COPILOT_AGENT, f"Started on Copilot: {why}"
+
+    def agent_unavailable(self, name: str) -> str:
+        """Why a new worker of the owner's could not run on this agent now ("" when it could,
+        as far as is known before it starts)."""
+        entry = self.agents.get(name)
+        if entry is not None and entry.offline:
+            return f"{agents.display(name)} stopped and could not start again."
+        backend, _ = self.connection(name)
+        if (why := self.agent_failed.get(name)) and not (backend and backend.alive()):
+            return why  # Its last start failed (signed out, say), and it has not run since.
+        row = {"id": "", "role": WORKER, "slack": 0, "yolo": "", "closed_at": None, "cwd": ""}
+        return self.blocked_on(name, row)
+
+    def chosen_agent(self) -> str:
+        """The agent the owner chose in the composer (@codex) for what the Router does now:
+        on the owner's message since its last turn, if it is on."""
+        router = self.router_id()
+        since = int(self.store.get(f"idle:{router}") or 0)
+        for message in reversed(self.store.messages(router, after=since, limit=20)):
+            if message["kind"] == "owner" and (agent := (message["meta"] or {}).get("agent")):
+                return agent if agent in {COPILOT_AGENT, *self.agents_on()} else ""
+        return ""
 
     async def check_agent_model(self, agent: str, model: str):
         """A model the Router picked for a worker on another agent: one that agent offers."""
@@ -3093,7 +3122,7 @@ class Runtime:
         if row["role"] == ROUTER and (on := self.agents_on()):
             # Its spawn_worker names the agents on (as without them otherwise), and it can move a
             # worker's work to another (continue_worker).
-            spawn = self.toolset.spawn_on(on)
+            spawn = self.toolset.spawn_on(on, chooses=agents.router_chooses(self.store))
             tools = [spawn if tool.name == "spawn_worker" else tool for tool in tools]
             tools.append(self.toolset.continue_on(on))
         options: dict[str, Any] = {
@@ -7215,6 +7244,12 @@ class Runtime:
             and (said := await self.settings_typed(row, text, settings_digest, task_id))
         ):
             return said
+        if agent and row["role"] == ROUTER and agent not in {COPILOT_AGENT, *self.agents_on()}:
+            # Chosen in the composer, then turned off before it was sent: said, not dropped.
+            raise ValueError(
+                f"{agents.display(agent)} is turned off in Settings → Coding agents: turn it "
+                "on, or send this without choosing it."
+            )
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id, restore=True)
         if row["role"] == WORKER:

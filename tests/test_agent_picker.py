@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from conftest import Harness
-from test_agents import ran, router_options, saved, spawn_on
+from test_agents import ran, router_options, saved, schema, spawn_on
 
 from chiefofstaff import agents, prompts, task_actions
 from chiefofstaff.roles import WORKER
@@ -116,8 +116,8 @@ async def test_the_agent_chosen_in_the_composer_is_the_routers_to_use(tmp_path, 
         assert message["meta"]["agent"] == "codex"
         prompt = harness.store.messages(harness.router_id)[-1]["meta"]["prompt"]
         assert 'The owner chose Codex for this: spawn_worker\'s agent is "codex"' in prompt
-        plain = await runtime.owner_send(harness.router_id, "Thanks", agent="claude")
-        assert "agent" not in plain["meta"], "not one on: as if none was chosen"
+        with pytest.raises(ValueError, match="Claude is turned off"):
+            await runtime.owner_send(harness.router_id, "Thanks", agent="claude")
     finally:
         await runtime.stop()
 
@@ -282,6 +282,54 @@ async def test_a_named_agent_that_cannot_run_offers_choices_and_starts_nothing_e
         assert "agent_refusals" not in runtime.snapshot()
         with pytest.raises(ValueError, match="answered already"):
             await runtime.answer_refusal(key, "wait")
+    finally:
+        await runtime.stop()
+
+
+async def test_the_routers_own_pick_that_cannot_run_starts_on_copilot_an_owners_does_not(
+    tmp_path, codex_installed, monkeypatch
+):
+    """Letting the Router choose: it hears which agents can run now (and why another can't),
+    and says whether the owner named its pick: one it chose itself that cannot run starts on
+    Copilot, saying why; one the owner named is never replaced."""
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}, "router_chooses": True})
+        assert "owner_named" in schema(router_options(harness, runtime))["properties"]
+        assert (await runtime.toolset.agents_listed(["codex"]))["available"] == ["codex"]
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        await runtime.disconnect_agent("codex")
+        chose = await spawn_on(
+            harness, runtime, title="Lint it", instructions="Lint", agent="codex"
+        )
+        assert runtime.agent(chose["session_id"]) == "copilot"
+        assert runtime.view(harness.store.session(chose["session_id"]))[
+            "agent_fallback"
+        ].startswith("Started on Copilot: Codex could not start: Codex is not signed in")
+        listed = await runtime.toolset.agents_listed(["codex"])
+        assert listed["available"] == [] and "not signed in" in listed["not_now"]["codex"]
+        named = await spawn_on(harness, runtime, title="Fix it", instructions="Fix",
+                               agent="codex", owner_named=True)  # fmt: skip
+        assert named.result_type == "failure", "the owner named it: never replaced"
+    finally:
+        await runtime.stop()
+
+
+async def test_an_agent_chosen_in_the_composer_is_kept_or_refused_never_dropped(
+    tmp_path, codex_installed
+):
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        await runtime.owner_send(harness.router_id, "Port the parser", agent="codex")
+        # The Router leaves agent empty for that turn: the owner's choice holds.
+        made = await spawn_on(harness, runtime, title="Port it", instructions="Port")
+        assert runtime.agent(made["session_id"]) == "codex"
+        await saved(runtime, {"codex": {"enabled": False}})
+        before = len(harness.store.messages(harness.router_id))
+        with pytest.raises(ValueError, match="Codex is turned off in Settings → Coding agents"):
+            await runtime.owner_send(harness.router_id, "And the lexer", agent="codex")
+        assert len(harness.store.messages(harness.router_id)) == before, "nothing sent"
     finally:
         await runtime.stop()
 
