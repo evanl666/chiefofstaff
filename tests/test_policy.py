@@ -261,6 +261,7 @@ BYPASSES = [
     # (A docker 200k run.) Read loosely (not parsed): configuration set, an alias.
     'git config --global remote.origin.mirror true | git push origin\necho "x',
     'alias g=git\ng push origin HEAD:refs/heads/$(git rev-parse --abbrev-ref HEAD)\necho "x',
+    'G=$(printf gi)t\n$G push origin main\necho "x',
 ]
 # What a worker does every day, on its own branch: let through.
 EVERYDAY = [

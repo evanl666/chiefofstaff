@@ -1396,8 +1396,9 @@ def loose_pushes(command: str, cwd: str) -> list[Push]:
     judged by the line's folder, unless the text may go elsewhere first (no `cd` or `-C` is
     read here: ELSEWHERE). Not known where it pushes: one whose words name a variable or run
     a command (no variable is read here), a `push` after a `git` of an earlier stretch
-    (`git -C "$(cd x && pwd)" push`) or before this one's, any in text that defines an alias,
-    and every one in text that runs `git … config`."""
+    (`git -C "$(cd x && pwd)" push`) or before this one's, or after a command a variable
+    names (`$G push`), any in text that defines an alias, and every one in text that runs
+    `git … config`."""
     found, elsewhere, gits = [], bool(ELSEWHERE.search(command)), False
     aliased = bool(ALIASING.search(command)) and "push" in squashed(command)
     configures = False
@@ -1407,6 +1408,9 @@ def loose_pushes(command: str, cwd: str) -> list[Push]:
         if git and gits and PUSH_WORD.search(stretch, 0, git.start()):
             found.append(Push(unknown=True))  # (`g push … $(git …)`: g, an alias, not read.)
         push = PUSH_WORD.search(stretch, git.end()) if git else PUSH_WORD.search(stretch)
+        if push and not git and UNSETTLED.search(stretch, 0, push.start()):
+            found.append(Push(unknown=True))  # (`$G push`: a command a variable names.)
+            continue
         if not push or not (git or gits):
             gits = gits or bool(git)
             continue
