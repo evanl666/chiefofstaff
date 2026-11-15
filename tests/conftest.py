@@ -664,6 +664,15 @@ def claude_on_path(tmp_path, monkeypatch, owners_claude_hidden):
 
 
 @pytest.fixture(autouse=True)
+def codex_set_up(tmp_path_factory, monkeypatch):
+    """Codex's folder (CODEX_HOME), as where it was set up: an empty one of the test's own, not
+    the owner's ~/.codex (where there is none, nothing of Codex runs). Tests on the real Codex
+    (CHIEFOFSTAFF_TEST_CODEX) use the owner's, for its sign-in."""
+    if not os.environ.get("CHIEFOFSTAFF_TEST_CODEX"):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex-home")))
+
+
+@pytest.fixture(autouse=True)
 def codex_wire_checked():
     """Each message either way between Chief of Staff and a fake Codex is as Codex's protocol
     has it (the tested version's, kept in tests/codex_protocol: tests/codex_schema.py)."""

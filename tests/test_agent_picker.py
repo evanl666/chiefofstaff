@@ -14,7 +14,8 @@ import pytest
 from conftest import Harness
 from test_agents import ran, router_options, saved, schema, spawn_on
 
-from chiefofstaff import agents, prompts, task_actions
+from chiefofstaff import agents, backend_codex, prompts, task_actions
+from chiefofstaff.backend_codex import CodexAgent
 from chiefofstaff.roles import WORKER
 
 
@@ -93,6 +94,44 @@ async def test_not_now_leaves_it_off_and_it_is_not_offered_again(tmp_path, codex
         assert "agent_offers" not in runtime.snapshot() and len(ran(runs)) == 1, (
             "never looked at again for its card"
         )
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["home", "CODEX_HOME"])
+async def test_a_codex_never_set_up_is_not_offered_and_nothing_of_it_runs_or_is_made(
+    tmp_path, codex_installed, monkeypatch, configured
+):
+    # Any run of Codex 0.167.2 makes its folder (~/.codex, its databases) where it was never set
+    # up: it is not run then, and Settings says why.
+    _, runs = codex_installed
+    home = tmp_path / "home"
+    (home / ".codex").rmdir()
+    if configured:
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    _, runtime = await started(tmp_path)
+    try:
+        await runtime.offer_agents()
+        assert "agent_offers" not in runtime.snapshot()
+        (entry,) = (await runtime.look_for_agents())["agents"]
+        assert entry["problem"] == "Not set up: run `codex` in a terminal and sign in."
+        with pytest.raises(RuntimeError, match=r"^Not set up: run `codex`"):
+            await CodexAgent("codex").start()
+        assert not runs.exists(), "nothing of Codex ran"
+        assert list(home.iterdir()) == [] and not (tmp_path / "codex-home").exists()
+    finally:
+        await runtime.stop()
+
+
+async def test_a_look_runs_codex_without_its_plugin_sync(tmp_path, codex_installed):
+    # Each app-server syncs plugins as it starts, rewriting Codex's plugin cache (0.167.2): a
+    # look (Settings, a first-run card) turns that off for its own process; workers keep it.
+    _, runs = codex_installed
+    _, runtime = await started(tmp_path)
+    try:
+        await until(lambda: runtime.snapshot().get("agent_offers"))
+        (looked,) = ran(runs)
+        assert looked.endswith(" ".join(backend_codex.LOOK_SETTINGS)), looked
     finally:
         await runtime.stop()
 
