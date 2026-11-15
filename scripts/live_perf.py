@@ -1,7 +1,7 @@
 """Performance gate (more-agents.md section 7, decision 18): the same projects, a worker on
-Codex and one on Copilot (the Router on Copilot), cold and warm caches, five runs each. Passes
-when, per project and cache state, the Codex worker's median install or build time is within 10%
-(or 15 s, if that is more) of the Copilot worker's.
+Codex (or Claude, with --agent claude) and one on Copilot (the Router on Copilot), cold and warm
+caches, five runs each. Passes when, per project and cache state, the other agent's worker's
+median install or build time is within 10% (or 15 s, if that is more) of the Copilot worker's.
 
 Each cache state is one command a worker runs, as given: `python3 bench.py cold|warm`, which
 installs or builds five times and times each run inside (the receipt of the command, as the
@@ -16,7 +16,7 @@ be the same for both agents. Projects go one at a time, the two agents in turn
 Needs node with npm (pnpm and yarn run through npx), uv, python3, and a JDK and Gradle (PERF_TOOLS:
 a folder with jdk/Contents/Home and gradle-*/; Gradle is left out without them).
 
-    TMPDIR=… uv run python scripts/live_perf.py [npm pnpm yarn uv pip gradle]
+    TMPDIR=… uv run python scripts/live_perf.py [--agent codex|claude] [npm pnpm yarn uv pip gradle]
 """
 
 import asyncio
@@ -43,6 +43,9 @@ from live_parity import setup, write
 PORT, SLACK_PORT = 19110, 19160
 MODEL = os.environ.get("LIVE_AGENTS_MODEL", "claude-sonnet-5.5")
 RUNS = int(os.environ.get("PERF_RUNS", "5"))
+# The agent compared with Copilot: codex, or claude (--agent).
+AGENT = sys.argv[sys.argv.index("--agent") + 1] if "--agent" in sys.argv else "codex"
+LABEL = {"codex": "Codex", "claude": "Claude"}[AGENT]
 TOOLS = Path(os.environ.get("PERF_TOOLS", "")).expanduser()
 
 BENCH = '''"""Installs or builds this project RUNS times (cold: an empty cache each time; warm: the
@@ -329,8 +332,8 @@ async def bench(
     }
 
 
-def within(codex: float, copilot: float) -> bool:
-    return codex <= copilot + max(0.10 * copilot, 15.0)
+def within(other: float, copilot: float) -> bool:
+    return other <= copilot + max(0.10 * copilot, 15.0)
 
 
 async def main() -> int:
@@ -345,11 +348,14 @@ async def main() -> int:
     caches.mkdir()
     results_root = root / "results"
     chosen = projects(root)
-    if wanted := {name.lower() for name in sys.argv[1:]}:
+    named = [
+        a for i, a in enumerate(sys.argv[1:], 1) if a != "--agent" and sys.argv[i - 1] != "--agent"
+    ]
+    if wanted := {name.lower() for name in named}:
         chosen = {name: project for name, project in chosen.items() if name in wanted}
     for name, project in chosen.items():
         make(project, name, caches, results_root)
-    app = App(root / "data", root / "log", {"COPILOT_HOME": str(home)})
+    app = App(root / "data", root / "log", {"COPILOT_HOME": str(home)}, agents=True)
     await app.start()
     database = root / "data" / "chiefofstaff.db"
     results: dict[str, dict] = {}
@@ -358,12 +364,12 @@ async def main() -> int:
         await app.post("/api/settings", {
             **current, "projects": [str(p["path"]) for p in chosen.values()], "model": MODEL,
             "max_workers": 2, "mac_notifications": False, "digest_time": "", "worker_yolo": True,
-            "agents": {"codex": {"enabled": True, "model": "", "limit": 0},
+            "agents": {AGENT: {"enabled": True, "model": "", "limit": 0},
                        "new_workers": "copilot"},
         })  # fmt: skip
         router = (await app.get("/api/state"))["router_id"]
         for index, (name, project) in enumerate(chosen.items()):
-            order = ["codex", "copilot"] if index % 2 == 0 else ["copilot", "codex"]
+            order = [AGENT, "copilot"] if index % 2 == 0 else ["copilot", AGENT]
             results[name] = {}
             for agent in order:
                 log(f"=== {name} on {agent}")
@@ -373,10 +379,10 @@ async def main() -> int:
                 log(f"{name} {agent}: {results[name][agent]}")
         with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
             (tokens,) = db.execute(
-                "SELECT COALESCE(SUM(tokens), 0) FROM agent_usage WHERE agent='codex'"
+                "SELECT COALESCE(SUM(tokens), 0) FROM agent_usage WHERE agent=?", (AGENT,)
             ).fetchone()
             (spent,) = db.execute("SELECT COALESCE(SUM(credits), 0) FROM usage").fetchone()
-        log(f"Codex tokens: {tokens:,}; Copilot credits: {spent:.1f}")
+        log(f"{LABEL} tokens: {tokens:,}; Copilot credits: {spent:.1f}")
     finally:
         await app.stop()
         with contextlib.suppress(Exception):
@@ -385,8 +391,8 @@ async def main() -> int:
             json.dumps(results, indent=1)
         )
     print(f"\n================ PERFORMANCE GATE (median of {RUNS}, seconds) ================")
-    print(f"{'project':8} {'cache':5} {'Copilot':>8} {'Codex':>8} {'diff':>7} {'margin':>7}  "
-          "verdict  (agent's own cost per command: Copilot / Codex)")  # fmt: skip
+    print(f"{'project':8} {'cache':5} {'Copilot':>8} {LABEL:>8} {'diff':>7} {'margin':>7}  "
+          f"verdict  (agent's own cost per command: Copilot / {LABEL})")  # fmt: skip
     failed = []
 
     def cost(value):
@@ -395,30 +401,30 @@ async def main() -> int:
     for name, by_agent in results.items():
         for mode in ("cold", "warm"):
             copilot = statistics.median(by_agent["copilot"][mode])
-            codex = statistics.median(by_agent["codex"][mode])
+            other = statistics.median(by_agent[AGENT][mode])
             margin = max(0.10 * copilot, 15.0)
-            ok = within(codex, copilot)
+            ok = within(other, copilot)
             failed += [] if ok else [f"{name} {mode}"]
-            diff = f"{(codex - copilot) / copilot:+.0%}" if copilot else "-"
-            print(f"{name:8} {mode:5} {copilot:8.1f} {codex:8.1f} {diff:>7} {margin:7.1f}  "
+            diff = f"{(other - copilot) / copilot:+.0%}" if copilot else "-"
+            print(f"{name:8} {mode:5} {copilot:8.1f} {other:8.1f} {diff:>7} {margin:7.1f}  "
                   f"{'pass' if ok else 'FAIL':7}  ({cost(by_agent['copilot']['overhead'][mode])} / "
-                  f"{cost(by_agent['codex']['overhead'][mode])})")  # fmt: skip
+                  f"{cost(by_agent[AGENT]['overhead'][mode])})")  # fmt: skip
     print("all within the margin" if not failed else f"OVER THE MARGIN: {', '.join(failed)}")
     print("\n================ CACHES (where the owner's would be, per agent) ================")
     for name, by_agent in results.items():
         # PATH is shown, not compared: each agent may put its own helpers first.
         found = {
             agent: [line for line in by_agent[agent]["where"] if not line.startswith("WHERE PATH")]
-            for agent in ("copilot", "codex")
+            for agent in ("copilot", AGENT)
         }
-        same = found["copilot"] == found["codex"] and bool(found["copilot"])
+        same = found["copilot"] == found[AGENT] and bool(found["copilot"])
         failed += [] if same else [f"{name} caches"]
         print(f"{name:8} {'same for both' if same else 'DIFFERENT'}")
-        for agent in ("copilot", "codex") if not same else ("copilot",):
+        for agent in ("copilot", AGENT) if not same else ("copilot",):
             print(f"  {agent if not same else 'both'}:")
             for line in found[agent]:
                 print(f"    {line[:300]}")
-        paths = {agent: by_agent[agent]["where"] for agent in ("copilot", "codex")}
+        paths = {agent: by_agent[agent]["where"] for agent in ("copilot", AGENT)}
         for agent, lines in paths.items():
             path = next((line[len("WHERE PATH ") :] for line in lines if "WHERE PATH" in line), "")
             others = next(

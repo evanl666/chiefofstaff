@@ -36,6 +36,8 @@ import httpx
 from chiefofstaff.backend import copilot_backend
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(1, str(Path(__file__).parent.parent / "tests"))
+from agent_paths import without_agents
 from fake_oauth_mcp import forget_sign_ins, keychain_accounts
 from fake_oauth_mcp import serve_in_thread as serve_docs
 from fake_slack_mcp import Workspace, serve_in_thread
@@ -68,10 +70,17 @@ def log(text: str):
 
 
 class App:
-    def __init__(self, data: Path, logfile: Path, extra_env: dict | None = None):
+    """Chief of Staff, run as the owner runs it. `agents`: with the owner's own coding agents
+    (codex, claude) found on the PATH, for the suites about them; else not, so that no first-run
+    card for them comes into suites about other things."""
+
+    def __init__(
+        self, data: Path, logfile: Path, extra_env: dict | None = None, agents: bool = False
+    ):
         self.data = data
         self.logfile = logfile
         self.extra_env = extra_env or {}
+        self.agents = agents
         self.process: subprocess.Popen | None = None
         self.http: httpx.AsyncClient | None = None
 
@@ -83,6 +92,8 @@ class App:
             **WATCHDOG_ENV,
             **self.extra_env,
         }
+        if not self.agents:
+            env["PATH"] = without_agents(env.get("PATH", ""), self.data.parent / "path")
         self.process = subprocess.Popen(
             [
                 sys.executable,
