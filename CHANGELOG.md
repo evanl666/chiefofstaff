@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+- **A slow script's `copilot -p` calls are a batch again.** A script that calls `copilot -p`
+  one call after the other, each taking minutes (agentic prompts), began its calls more than
+  two minutes apart, so they were never a batch, and those 0.1.43 had left out came back. Ten
+  or more alike calls are now one batch when each begins within two minutes of the one before
+  beginning, or within 30 seconds of it ending (a script starts its next call at once), and
+  only calls that end within 5 seconds of their answer count (a script's end 0.01 to 0.02 s
+  after it, CLI 1.0.102 to 1.0.112). Your own alike questions stay listed: those you read
+  before closing their session, and those that end at once (closed right after the answer, or
+  asked with `copilot -p`) when you start the next more than 30 seconds after one ends and more
+  than two minutes after it began. A script that waits minutes between its calls is listed
+  too, unless named `batch: …` or run by a worker's command (QA on 0.1.45, E70).
+- **Decided again after an upgrade, a worker's long loop no longer shows meanwhile.** With more
+  logs than one round reads, the newest were read first, and a worker's calls past its first
+  two hours were listed (until a restart left them out again). Logs are now read the oldest
+  first, and what an earlier version left out stays out until every log is read (or, for a log
+  it cannot read, until a round reads nothing new); `chiefofstaff tidy-sessions --apply` does
+  not move a session still as an earlier version decided it (one it could not check again),
+  and says so (QA on 0.1.45, E69).
+- **A question you ask in `/tmp` stays yours** while a worker runs `copilot -p` in its own
+  folder: `/tmp` counts for a worker's command only one that ran there (QA on 0.1.45, E79).
+- **A session you name `batch: …` is listed once it ends.** A name alone made a single
+  session a batch, left out for good. It now takes two sessions of that name, or a worker's
+  command where the session ran (as workers name their calls); one so named is still left out
+  while it runs (QA on 0.1.45, E81).
+
 ## 0.1.45 (2026-11-14)
 
 Workers can run on Codex, with your own Codex sign-in (off by default); more pushes to the

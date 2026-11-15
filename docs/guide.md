@@ -207,18 +207,24 @@ Opening one shows its latest conversation, and keeps it current while it works. 
 program made through Copilot's SDK (a script's, one per item of a batch, say) are not yours to
 continue and are not listed, unless you continued one in a terminal. Nor are one-shot
 `copilot -p` sessions (one prompt, then done) when something shows a program made them; when in
-doubt, a session is listed. That is: named `batch: …` with `copilot -p --name` (even while it
-runs); ten or more that start with the same words, each within two minutes of the one before
-(a script's batch); or a worker's, made while it ran a command (for as long as it ran; one
-whose end was not seen, two hours, and longer only for sessions that are clearly its) in the
-folder Chief of Staff made for it, or, when the command runs `copilot -p`, where the command
-ran or in a temporary folder (`/tmp`, `$TMPDIR`). The time and a folder alone are not enough:
-your questions in a project a worker also works in, or in `/tmp`, stay yours unless the worker
-was running `copilot -p` there then. Nothing in a
-session's files tells `copilot -p` from a question you asked in a terminal and left, so a few
-alike (from five to nine) stay listed as yours: `chiefofstaff tidy-sessions` names them. A
-single `copilot -p` you run yourself is listed, as is every session you typed more than one
-message in, resumed, or have open (unless it is named `batch: …`).
+doubt, a session is listed. That is: ten or more that start with the same words, each ended
+within 5 seconds of its answer (a script's call; you read an answer before closing a session)
+and begun within two minutes of the one before beginning or within 30 seconds of it ending,
+however long each took (a script's: it starts its next call at once; you take longer); two or
+more named alike `batch: …` with `copilot -p --name` (one even while it runs); or a worker's,
+made while it ran a command (for as long as it ran; one whose end was not seen, two hours, and
+longer only for sessions that are clearly its) in the folder Chief of Staff made for it, or,
+when the command runs `copilot -p` (or the session is one of its batch, or named `batch: …`),
+where the command ran: its folder, a folder it went to, `/tmp` or `$TMPDIR` if it ran there.
+The time and a folder alone are not enough: your questions in a project a worker also works
+in, or in `/tmp`, stay yours unless the worker was running `copilot -p` there then, and a
+session you name `batch: …` yourself is listed once it ends. Nothing in a session's files tells
+`copilot -p` from a question you asked in a terminal and left, so a few alike (from five to
+nine) stay listed as yours: `chiefofstaff tidy-sessions` names them. A single `copilot -p` you
+run yourself is listed, as is every session you typed more than one message in, resumed, or
+have open (unless it is named `batch: …`). After an upgrade, what an earlier version decided
+is decided again, the oldest sessions first; until every log is read (or, with a log it
+cannot read, until a round reads nothing new), a session it left out stays out.
 The Router does not see the others either. Workers name each call of a batch
 `batch: <their task>` and give it a Copilot home of their own (`COPILOT_HOME` in their folder),
 so its sessions do not reach yours at all.
@@ -230,7 +236,8 @@ then the few alike it leaves listed and does not move; it reads every log first 
 many are left as it goes, and how many it could not read, if any) and changes nothing. `chiefofstaff tidy-sessions --apply`, run in your own terminal, moves them to
 `~/.copilot/session-state-moved-by-chiefofstaff/<date>/` with a `manifest.json` saying what each
 was: move a folder back into `session-state` to have that session again. Nothing is deleted, and
-sessions open now or changed in the last hour stay where they are. What was read from them as
+sessions open now or changed in the last hour stay where they are, as does one an earlier
+version left out that it could not check again (a log could not be read). What was read from them as
 your words and not learned from yet is dropped; a style or habit learned from them before stays
 until you undo or remove it in Settings → *You* (the command names them).
 

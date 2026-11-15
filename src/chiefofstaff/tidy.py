@@ -215,6 +215,9 @@ async def survey(store: Store, backend: Any, home: Path, now: float) -> Survey:
             state / meta.session_id,
         )
 
+    # One still as an earlier version decided it (by other rules, not decided again: a log
+    # it could not read, its own or one before it) is not moved: on what was not checked.
+    unchecked = "decided by an earlier version, not checked again (a log it could not read)"
     for meta in listing:
         if record := provenance.alike.get(meta.session_id):
             item = item_of(meta, ALIKE, record)
@@ -226,6 +229,8 @@ async def survey(store: Store, backend: Any, home: Path, now: float) -> Survey:
         log = log_of(item.session_id)
         item.log = identity(log) if log else None
         item.stays = stays(item, now)
+        if not item.stays and not current(item.record):
+            item.stays = unchecked
         result.found.append(item)
     result.alike.sort(key=lambda item: float(item.record.get("at") or 0))
     result.found.sort(key=lambda item: float(item.record.get("at") or 0))

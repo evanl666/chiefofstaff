@@ -66,9 +66,10 @@ def event(kind: str, at: float, agent: str = "", **data) -> str:
     return json.dumps(line, separators=(",", ":"))
 
 
-def prompt_mode(at: float, prompt: str, cwd: str = "/private/tmp") -> list[str]:
+def prompt_mode(at: float, prompt: str, cwd: str = "/private/tmp", took: float = 1.0) -> list[str]:
     """What `copilot -p "<prompt>" -s` writes (CLI 1.0.110): its model settled twice, the one
-    message, one turn, then it shuts down, all in about two seconds."""
+    message, one turn (`took` seconds), then it shuts down at once (0.2 s after its answer;
+    0.01 to 0.02 s measured, CLI 1.0.102 to 1.0.112)."""
     return [
         event(
             "session.start", at, sessionId="s", version=1, producer="copilot-agent",
@@ -80,10 +81,10 @@ def prompt_mode(at: float, prompt: str, cwd: str = "/private/tmp") -> list[str]:
         event("user.message", at + 0.5, content=prompt, delivery="idle", turnId="0",
               parentAgentTaskId=str(uuid4())),
         event("assistant.turn_start", at + 0.5, turnId="0"),
-        event("assistant.message", at + 1.5, content="billing"),
-        event("assistant.turn_end", at + 1.5, turnId="0"),
-        event("session.usage_checkpoint", at + 1.6),
-        event("session.shutdown", at + 1.7, shutdownType="routine"),
+        event("assistant.message", at + 0.5 + took, content="billing"),
+        event("assistant.turn_end", at + 0.5 + took, turnId="0"),
+        event("session.usage_checkpoint", at + 0.6 + took),
+        event("session.shutdown", at + 0.7 + took, shutdownType="routine"),
     ]  # fmt: skip
 
 
@@ -97,9 +98,12 @@ def memories(at: float) -> str:
     )  # fmt: skip
 
 
-def interactive(at: float, *said: str, exit_: bool = True) -> list[str]:
+def interactive(
+    at: float, *said: str, exit_: bool = True, asked: float = 60, closed: float | None = None
+) -> list[str]:
     """A session the owner typed in: its model resolved automatically, the CLI's memories, a
-    turn per message."""
+    turn per message (each `asked` seconds after the one before), closed an hour after it began
+    or `closed` seconds after the last answer."""
     lines = [
         event(
             "session.start", at, sessionId="s", version=1, producer="copilot-agent",
@@ -110,7 +114,7 @@ def interactive(at: float, *said: str, exit_: bool = True) -> list[str]:
         memories(at),
     ]  # fmt: skip
     for n, text in enumerate(said):
-        moment = at + 60 * (n + 1)
+        moment = at + asked * (n + 1)
         lines += [
             event("user.message", moment, content=text, delivery="idle", turnId=str(n)),
             event("assistant.turn_start", moment, turnId=str(n)),
@@ -118,7 +122,8 @@ def interactive(at: float, *said: str, exit_: bool = True) -> list[str]:
             event("assistant.turn_end", moment + 20, turnId=str(n)),
         ]
     if exit_:
-        lines.append(event("session.shutdown", at + 3600, shutdownType="routine"))
+        end = at + 3600 if closed is None else at + asked * len(said) + 20 + closed
+        lines.append(event("session.shutdown", end, shutdownType="routine"))
     return lines
 
 
@@ -231,18 +236,23 @@ def test_a_few_alike_are_the_owners_and_ten_a_scripts_batch():
     assert set(kinds(decide(alike(9), [], [])).values()) == {ALIKE}
     ten = decide(alike(10), [], [])
     assert kinds(ten) == dict.fromkeys([f"s{n}" for n in range(10)], BATCH)
-    assert ten["s0"] | {"at": 0} == {
-        "as": BATCH, "by": "", "why": "batch", "group": "g", "at": 0, "rules": provenance.RULES,
+    assert ten["s0"] | {"at": 0, "end": 0} == {
+        "as": BATCH, "by": "", "why": "batch", "group": "g", "at": 0, "end": 0, "quick": True,
+        "rules": provenance.RULES,
     }  # fmt: skip
     # One more of a batch decided before (its others are kept, not listed again).
     assert decide([shot(99, T0 + 300)], alike(10), [])["s99"]["as"] == BATCH
-    # Named a batch's: one is enough.
-    assert kinds(decide([OneShot("n1", T0, "n", "/w", named=True)], [], [])) == {"n1": BATCH}
+    # Named a batch's: two of a name, however far apart (E81: one alone is no batch).
+    one = OneShot("n1", T0, "n", "/w", named=True)
+    assert decide([one], [], []) == {}
+    two = decide([one, OneShot("n2", T0 + 9e4, "n", "/w", named=True)], [], [])
+    assert kinds(two) == {"n1": BATCH, "n2": BATCH}
 
 
 def window(start: float, end: float, *, copilot: bool = False, folder: str = "", by="w1",
-           places: tuple[str, ...] = ()) -> Window:  # fmt: skip
-    return Window(by, start, end, copilot, folder, places)
+           places: tuple[str, ...] = ("/tmp",)) -> Window:  # fmt: skip
+    """A command a worker ran, by default in /tmp (see LOOP, SCRIPT)."""
+    return Window(by, start, end, copilot, folder, tuple(os.path.realpath(p) for p in places))
 
 
 def test_a_worker_made_it_when_something_ties_it_to_the_worker(tmp_path, monkeypatch):
@@ -254,9 +264,9 @@ def test_a_worker_made_it_when_something_ties_it_to_the_worker(tmp_path, monkeyp
     found = decide(
         [shot(1, T0, cwd=str(folder / "out"))], [], [window(T0 - 5, T0 + 5, folder=real)]
     )
-    assert found["s1"] | {"at": 0} == {
-        "as": MADE_BY_WORKER, "by": "w1", "why": "folder", "group": "g", "at": 0,
-        "rules": provenance.RULES, "keeps_open": True,
+    assert found["s1"] | {"at": 0, "end": 0} == {
+        "as": MADE_BY_WORKER, "by": "w1", "why": "folder", "group": "g", "at": 0, "end": 0,
+        "quick": True, "rules": provenance.RULES, "keeps_open": True,
     }  # fmt: skip
     # A command that runs `copilot -p`, in a temporary folder.
     found = decide([shot(1, T0)], [], [window(T0 - 5, T0 + 5, copilot=True, by="w2")])
@@ -272,20 +282,27 @@ def test_a_worker_made_it_when_something_ties_it_to_the_worker(tmp_path, monkeyp
     # Its own folder first, over a command of another worker's that runs copilot.
     tied = [window(T0 - 5, T0 + 5, copilot=True, by="w2"), window(T0 - 9, T0 + 9, folder=real)]
     assert decide([shot(1, T0, cwd=str(folder))], [], tied)["s1"]["by"] == "w1"
-    # E54: where the command ran, or a temporary folder ($TMPDIR too): not the owner's project.
+    # E54: where the command ran: not the owner's project.
     loop = [window(T0 - 5, T0 + 5, copilot=True, places=("/srv/w1", "/srv/labels"))]
     assert decide([shot(1, T0, cwd="/w/app")], [], loop) == {}
     assert decide([shot(1, T0, cwd="/srv/labels")], [], loop)["s1"]["why"] == "command"
     assert decide([shot(1, T0, cwd="/srv/w1")], [], loop)["s1"]["why"] == "command"
     assert decide([shot(1, T0, cwd="/srv/labels/x")], [], loop) == {}, "where it ran, only"
+    # E79: a temporary folder ($TMPDIR too) only for a command that ran in one.
     monkeypatch.setenv("TMPDIR", str(tmp_path / "t"))
     monkeypatch.setattr(provenance.tempfile, "gettempdir", lambda: str(tmp_path / "t"))
-    assert decide([shot(1, T0, cwd=str(tmp_path / "t" / "x1"))], [], loop)["s1"]["by"] == "w1"
-    assert decide([shot(1, T0, cwd="/private/tmp/x2")], [], loop)["s1"]["by"] == "w1"
+    for cwd in (str(tmp_path / "t" / "x1"), "/private/tmp/x2"):
+        assert decide([shot(1, T0, cwd=cwd)], [], loop) == {}
+        in_tmp = [window(T0 - 5, T0 + 5, copilot=True, places=(str(tmp_path / "t" / "x0"),))]
+        assert decide([shot(1, T0, cwd=cwd)], [], in_tmp)["s1"]["by"] == "w1"
 
 
 UP = [[T0 - 100, T0 + 60], [T0 + 3600, T0 + 3700]]  # Stopped from T0+60 to T0+3600.
-LOOP = 'for t in tickets/*.txt; do copilot -p "$(cat $t)" -s; done'
+# A worker's loop of `copilot -p` calls, run in /tmp (its calls are there); and in its folder.
+IN_ITS_FOLDER = 'for t in tickets/*.txt; do copilot -p "$(cat $t)" -s; done'
+LOOP = f"cd /tmp && {IN_ITS_FOLDER}"
+# A script it runs in /tmp, that calls `copilot -p` (its calls are there too).
+SCRIPT = "cd /tmp && python3 ~/label.py"
 
 
 def commanded(store: Store, started: float, ended: float | None, command: str = LOOP):
@@ -495,6 +512,7 @@ def listed(session_id: str, at: float, *, cwd: str = "/private/tmp", made: str =
         session_id=session_id,
         summary=summary[:80],
         is_remote=False,
+        start_time=datetime.fromtimestamp(at, UTC),
         modified_time=datetime.fromtimestamp(at + 2, UTC),
         context=SimpleNamespace(working_directory=cwd, repository="", branch=""),
         client_name=made,
@@ -584,12 +602,12 @@ async def test_what_a_worker_ran_is_the_workers(tmp_path, home):
     store.execute(
         "INSERT INTO commands(session_id, call_id, command, started_at, ended_at) "
         "VALUES (?,?,?,?,?)",
-        ("w1", "c1", "python3 label.py --all", stored(T0 - 30), stored(T0 + 600)),
+        ("w1", "c1", f"{SCRIPT} --all", stored(T0 - 30), stored(T0 + 600)),
     )
     store.execute(
         "INSERT INTO commands(session_id, call_id, command, started_at, ended_at) "
         "VALUES (?,?,?,?,?)",
-        ("w1", "c2", 'copilot -p "Summarize notes.md" -s', stored(T0 + 7000), None),
+        ("w1", "c2", 'cd /tmp && copilot -p "Summarize notes.md" -s', stored(T0 + 7000), None),
     )
     batch = home.batch(10)
     alone = home.add(prompt_mode(T0 + 7200, "Summarize notes.md"), T0 + 7200)
@@ -611,15 +629,16 @@ async def test_what_a_worker_ran_is_the_workers(tmp_path, home):
 
 
 async def test_a_session_named_as_a_batchs_is_one_whatever_their_number(tmp_path, home):
-    """Workers name each `copilot -p` of a batch `--name "batch: <task>"`: one is enough. Never
-    while open, nor once someone talked in it."""
+    """Workers name each `copilot -p` of a batch `--name "batch: <task>"`: two of a name are a
+    batch's (whenever, one open now too), its worker's where its command ran. Never one someone
+    talked in, nor one only named alike."""
     harness = Harness(tmp_path / "data")
     store = harness.store
     store.create_session("w1", "worker", "Label the support tickets", "idle", cwd="/x")
     store.execute(
         "INSERT INTO commands(session_id, call_id, command, started_at, ended_at) "
         "VALUES (?,?,?,?,?)",
-        ("w1", "c1", "python3 label.py", stored(T0 + 7000), stored(T0 + 7400)),
+        ("w1", "c1", SCRIPT, stored(T0 + 7000), stored(T0 + 7400)),
     )
     alone = home.add(prompt_mode(T0, "Label this ticket: refund"), T0)
     home.metas[-1].name = "batch: label the support tickets"
@@ -690,13 +709,15 @@ async def test_only_what_would_be_the_owners_is_looked_at(tmp_path, home):
     assert {*sdk, *ours}.isdisjoint(store.items("made:"))
 
 
-async def test_a_round_reads_within_its_bytes_newest_first(tmp_path, home, monkeypatch):
+async def test_a_round_reads_within_its_bytes_oldest_first(tmp_path, home, monkeypatch):
+    """The oldest first (what one is depends on those before it), each after all those before
+    it: once one does not fit the round, those after it wait for the next round too."""
     store = Store(tmp_path / "data")
     ids = home.batch(14)
     size = home.log_of(ids[0]).stat().st_size
     monkeypatch.setattr(provenance, "ROUND_BYTES", size * 10 + 10)
     deciding_ = deciding(store, home)
-    assert await deciding_.made(home.metas, {}) == dict.fromkeys(ids[4:], BATCH)
+    assert await deciding_.made(home.metas, {}) == dict.fromkeys(ids[:10], BATCH)
     assert deciding_.pending == 4
     # The four left: too few for a batch of their own, they continue the one found.
     assert await deciding_.made(home.metas, {}) == dict.fromkeys(ids, BATCH), "the rest next"
@@ -704,6 +725,27 @@ async def test_a_round_reads_within_its_bytes_newest_first(tmp_path, home, monke
     big = home.add(prompt_mode(T0 + 200, LABEL + "x" * provenance.SHAPE_MOST), T0 + 200)
     assert big not in await deciding_.made(home.metas, {}), "too long to be one shot"
     assert deciding_.shapes[big][1] == UNREAD, "not read"
+    # One that does not fit after four: it and those after it, next round.
+    home.metas.clear()
+    later = home.batch(4, start=T0 + 9000)
+    long = home.add(prompt_mode(T0 + 9080, f"{LABEL} {'x' * size * 7}"), T0 + 9080)
+    after = home.batch(9, start=T0 + 9100)
+    deciding_ = deciding(Store(tmp_path / "data2"), home)
+    assert await deciding_.made(home.metas, {}) == {}
+    assert deciding_.pending == 10 and set(deciding_.shapes) == set(later)
+    await deciding_.made(home.metas, {})
+    assert deciding_.pending == 7
+    made = await deciding_.made(home.metas, {})
+    assert deciding_.pending == 0 and made == dict.fromkeys([*later, long, *after], BATCH)
+    # By when each began, not when it last changed (a long one began first, ended last).
+    home.metas.clear()
+    first = home.add(prompt_mode(T0, f"{LABEL} a", took=900), T0)
+    home.metas[-1].modified_time = datetime.fromtimestamp(T0 + 902, UTC)
+    second = home.add(prompt_mode(T0 + 10, f"{LABEL} b"), T0 + 10)
+    monkeypatch.setattr(provenance, "ROUND_BYTES", size + 10)
+    deciding_ = deciding(Store(tmp_path / "data3"), home)
+    await deciding_.made(home.metas, {})
+    assert set(deciding_.shapes) == {first} and second
 
 
 def test_a_session_in_a_workers_folder_by_its_real_path(tmp_path):
@@ -970,8 +1012,8 @@ def test_a_scripts_batch_is_left_out_and_the_owners_alike_questions_never(seed):
     command = window(started, at + 1, places=("/srv/labels",))
     found = decide(script, [], [command])
     assert {key: r["as"] for key, r in found.items()} == {
-        s.session_id: BATCH if s.cwd == "/w/app" else MADE_BY_WORKER for s in script
-    }, "the worker's where its command ran (or in /tmp); elsewhere, a script's still"
+        s.session_id: MADE_BY_WORKER if s.cwd == "/srv/labels" else BATCH for s in script
+    }, "the worker's where its command ran; elsewhere (/tmp too), a script's still"
     # The owner's: one a few minutes apart at least, or a few close together.
     at, mine = T0, []
     for n in range(rng.randint(1, 40)):
@@ -1180,7 +1222,7 @@ async def test_a_workers_batch_stays_its_whatever_its_pace_also_after_the_upgrad
     first = home.metas[0].modified_time.timestamp() - 2
     started = first - rng.uniform(0, provenance.LEAD - 60)
     ended = at + rng.uniform(1, 600) if rng.random() < 0.5 else None
-    commanded(store, started, ended, LOOP if loop else "python3 label.py")
+    commanded(store, started, ended, LOOP if loop else SCRIPT)
     for session_id, meta in zip(calls, home.metas, strict=True):
         # Copilot named in the command, or a batch of the script's (alike, begun soon after).
         why = "command" if loop else "batch"
@@ -1307,9 +1349,9 @@ async def test_a_command_whose_end_was_not_seen_is_not_kept_open_by_the_owners(t
 
 
 def test_a_command_whose_end_was_not_seen_runs_on_in_its_workers_own_folder():
-    """Its worker's sessions in the folder Chief of Staff made for it, or named a batch's, keep
-    it running; one where it ran (a checkout of the owner's) does not, nor does it go on after
-    a pause."""
+    """Its worker's sessions in the folder Chief of Staff made for it keep it running; one
+    where it ran (a checkout of the owner's) does not, named a batch's or not, nor does it go on
+    after a pause."""
     folder = "/srv/workspaces/w1"  # Not a temporary folder: that would be a reason too.
     command = Window("w1", T0, T0 + 7200, True, folder, ("/w",), T0 + 9e4)
     named = OneShot("s5", T0 + 8050, "n", "/w", named=True)
@@ -1324,7 +1366,6 @@ def test_a_command_whose_end_was_not_seen_runs_on_in_its_workers_own_folder():
     assert {key: (r["as"], r["why"], r["keeps_open"]) for key, r in found.items()} == {
         "s1": (MADE_BY_WORKER, "folder", True),
         "s2": (MADE_BY_WORKER, "folder", True),
-        "s5": (MADE_BY_WORKER, "command", True),
     }
 
 
@@ -1360,6 +1401,394 @@ async def test_the_owners_alike_questions_from_a_temporary_folder_stay_theirs(tm
         at = T0 + 60 + n * 1200
         home.add(prompt_mode(at, f"{REVIEW}pull/{n}"), at)
     assert await deciding(store, home).made(home.metas, {}) == {}
+
+
+# QA on 0.1.45: slow scripts, a long loop read again in parts, /tmp, a `batch:` name
+
+
+async def test_a_slow_scripts_calls_one_after_the_other_are_a_batch(tmp_path, home):
+    """E70: a script calls `copilot -p` one call after the other, each about 150 seconds
+    (agentic prompts): their starts were more than two minutes apart, so they were never a
+    batch, and those 0.1.43 had hidden came back. Each call begins as the one before ends (its
+    answer, then its exit at once): from the end of one to the start of the next, a batch, as
+    found afresh and as 0.1.43 kept them."""
+    store = Store(tmp_path / "data")
+    ids = [
+        home.add(prompt_mode(T0 + n * 150, f"{LABEL} {n}", took=148), T0 + n * 150)
+        for n in range(15)
+    ]
+    assert await deciding(store, home).made(home.metas, {}) == dict.fromkeys(ids, BATCH)
+    store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
+    for n, session_id in enumerate(ids):
+        record = {"as": "batch", "by": "", "why": "batch", "group": group_of(LABEL),
+                  "at": T0 + n * 150, "size": home.log_of(session_id).stat().st_size}  # fmt: skip
+        store.set(f"made:{session_id}", json.dumps(record))
+    assert await deciding(store, home).made(home.metas, {}) == dict.fromkeys(ids, BATCH)
+    # Decided as they come, each against those kept before it (when they ended, kept too).
+    store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
+    everyone, deciding_ = list(home.metas), deciding(store, home)
+    for n in range(1, 16):
+        home.metas = everyone[:n]
+        made = await deciding_.made(home.metas, {})
+    assert made == dict.fromkeys(ids, BATCH)
+    home.metas = everyone
+    # Minutes idle between short calls (a script's backoff, or the owner): nothing shows whose.
+    store.execute("DELETE FROM kv WHERE key LIKE 'made:%'")
+    home.metas.clear()
+    for n in range(15):
+        home.add(prompt_mode(T0 + n * 150, f"{LABEL} {n}"), T0 + n * 150)
+    assert await deciding(store, home).made(home.metas, {}) == {}
+
+
+async def test_the_owners_alike_questions_one_after_the_other_stay_theirs(tmp_path, home):
+    """E70's other side: ten alike questions asked one after the other, each in a terminal
+    session of its own closed 20 to 60 seconds after its answer (read first): the owner's,
+    though each began within two minutes of the one before. A script's call ends with its
+    answer (0.01 to 0.02 s after it, CLI 1.0.102 to 1.0.112); a person reads it first."""
+    store = Store(tmp_path / "data")
+    rng = random.Random(5)  # noqa: S311 (seeded: the same cases every run)
+    at = T0
+    for n in range(10):
+        closed = rng.uniform(20, 60)
+        home.add(interactive(at, f"{REVIEW}pull/{n}", asked=5, closed=closed), at, cwd="/w")
+        at += 5 + 20 + closed + 3
+    deciding_ = deciding(store, home)
+    assert await deciding_.made(home.metas, {}) == {}
+    assert not deciding_.alike, "not alike either: none ended with its answer"
+    # Asked from /tmp while a worker ran a command, kept by 0.1.44 as its batch: as it was (it
+    # cannot be told from a batch of the worker's 0.1.43 found, which 0.1.44 kept so).
+    store.create_session("w1", "worker", "Label the tickets", "idle", cwd="/x")
+    store.set("uptime", json.dumps([[T0 - 900, T0 + 9e5]]))
+    commanded(store, T0 - 30, T0 + 3600, SCRIPT)
+    for meta in home.metas:
+        meta.context.working_directory = "/private/tmp"
+        record = {"as": "worker", "by": "w1", "why": "batch", "group": "g", "at": T0, "rules": 2,
+                  "size": home.log_of(meta.session_id).stat().st_size}  # fmt: skip
+        store.set(f"made:{meta.session_id}", json.dumps(record))
+    made = await deciding(store, home).made(home.metas, {})
+    assert made == dict.fromkeys([meta.session_id for meta in home.metas], MADE_BY_WORKER)
+
+
+async def test_a_workers_long_loop_decided_again_in_rounds_is_never_listed(
+    tmp_path, home, monkeypatch, capsys
+):
+    """E69: a worker's three-hour `copilot -p` loop in /tmp, its end not seen; 0.1.43 kept its
+    270 calls as the worker's. Decided again 40 logs a round after the upgrade, the newest
+    first, the calls past two hours had none of the worker's before them and were listed (until
+    a restart hid them again). Read the oldest first, an earlier version's decision kept until
+    every log is read: none is listed at any round, in the same process or after a restart;
+    tidy-sessions says the same."""
+    monkeypatch.setenv("COPILOT_HOME", str(home.root))
+    store = worker_store(tmp_path)
+    commanded(store, T0 - 30, None, LOOP)
+    calls = []
+    for n in range(270):
+        at = T0 + n * 40
+        calls.append(home.add(prompt_mode(at, f"Ticket {n} {uuid4()}: label it"), at))
+        as_0143(store, home, calls[-1], at)
+    size = max(home.log_of(key).stat().st_size for key in calls)
+    monkeypatch.setattr(provenance, "ROUND_BYTES", size * 40 + 10)
+    deciding_ = deciding(store, home)
+    rounds = 0
+    while True:
+        made = await deciding_.made(home.metas, {})
+        rounds += 1
+        assert set(made) == set(calls), f"round {rounds}: {len(set(calls) - set(made))} listed"
+        if not deciding_.pending:
+            break
+    assert rounds == 7, "270 logs, 40 a round"
+    assert set(await deciding_.made(home.metas, {})) == set(calls), "the same process, again"
+    assert set(await deciding(store, home).made(home.metas, {})) == set(calls), "a restart"
+    store.close()
+    assert await tidy.run(tmp_path / "data", apply=False, backend=Listing(home)) == 0
+    assert "270 sessions a Chief of Staff worker made" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("ended", "before", "rounds"),
+    [(True, False, 1), (False, False, 1), (True, True, 1), (False, True, 1),
+     (True, True, 21), (False, True, 21), (False, False, 21)],
+)  # fmt: skip
+async def test_e38s_two_scripts_stay_left_out_whichever_way(
+    tmp_path, home, monkeypatch, ended, before, rounds
+):
+    """E38 (QA on 0.1.39 to 0.1.42): a worker ran two python scripts that called `copilot -p`
+    in /tmp, 246 calls each, a few seconds each; its commands seen to end or not; decided
+    afresh or as 0.1.43 kept them; their logs read in one round or in about 21. All 492 are
+    left out in the end, and those 0.1.43 left out stay so at every round."""
+    store = worker_store(tmp_path)
+    templates = (LABEL, "Translate the text below into French. Keep its tone and length. Text")
+    ids = []
+    for n, (script, template) in enumerate(
+        zip(("label.py", "translate.py"), templates, strict=True)
+    ):
+        start = T0 + n * 3600
+        commanded(store, start - 30, start + 246 * 12 if ended else None, f"python3 {script}")
+        for k in range(246):
+            at = start + k * 12
+            ids.append(home.add(prompt_mode(at, f"{template} {k}", took=8), at))
+            if before:
+                as_0143(store, home, ids[-1], at, "batch")
+    size = max(home.log_of(key).stat().st_size for key in ids)
+    if rounds > 1:
+        monkeypatch.setattr(provenance, "ROUND_BYTES", size * (len(ids) // rounds + 1))
+    deciding_ = deciding(store, home)
+    seen, read = set(), 0
+    while True:
+        made = set(await deciding_.made(home.metas, {}))
+        read += 1
+        assert made >= seen, "never listed again"
+        assert not before or made == set(ids), f"round {read}"
+        seen = made
+        if not deciding_.pending:
+            break
+    assert seen == set(ids) and read == rounds
+    assert set(await deciding(store, home).made(home.metas, {})) == set(ids), "a restart"
+
+
+async def test_a_batch_read_again_in_parts_is_never_listed(tmp_path, home, monkeypatch):
+    """E69: what 0.1.43 left out stays out until every log is read: twelve of a batch read five
+    a round are three rounds, the first two too few to be a batch by themselves."""
+    store = Store(tmp_path / "data")
+    ids = home.batch(12)
+    for n, session_id in enumerate(ids):
+        record = {"as": "batch", "by": "", "why": "batch", "group": group_of(LABEL),
+                  "at": T0 + n * 20, "size": home.log_of(session_id).stat().st_size}  # fmt: skip
+        store.set(f"made:{session_id}", json.dumps(record))
+    monkeypatch.setattr(provenance, "ROUND_BYTES", home.log_of(ids[0]).stat().st_size * 5 + 10)
+    deciding_ = deciding(store, home)
+    for left in (7, 2, 0):
+        assert await deciding_.made(home.metas, {}) == dict.fromkeys(ids, BATCH)
+        assert deciding_.pending == left
+    kept = [json.loads(value) for value in store.items("made:").values()]
+    assert {r.get("rules") for r in kept} == {provenance.RULES}
+
+
+async def test_what_was_left_out_stays_out_while_logs_before_it_are_not_read(
+    tmp_path, home, monkeypatch
+):
+    """E69: what an earlier version left out is decided again only once every log is read, and
+    none of it is taken for the owner's meanwhile: when a log before it could not be read in
+    this round (written to as it was read, say), one past the loop's first two hours has none
+    of the worker's before it, yet stays out, and is decided again next round."""
+    store = worker_store(tmp_path)
+    commanded(store, T0 - 30, None, LOOP)
+    calls = []
+    for n in range(270):
+        at = T0 + n * 40
+        calls.append(home.add(prompt_mode(at, f"Ticket {n} {uuid4()}: label it"), at))
+        as_0143(store, home, calls[-1], at)
+    read_log, first = provenance.read_log, {str(home.log_of(key)) for key in calls[:180]}
+    rounds = []
+
+    def unreadable_at_first(path, *arguments, **options):
+        if len(rounds) == 1 and str(path) in first:
+            return None
+        return read_log(path, *arguments, **options)
+
+    monkeypatch.setattr(provenance, "read_log", unreadable_at_first)
+    deciding_ = deciding(store, home)
+    while True:
+        rounds.append(1)
+        assert set(await deciding_.made(home.metas, {})) == set(calls), f"round {len(rounds)}"
+        if not deciding_.pending:
+            break
+    assert len(rounds) == 2
+    kept = [json.loads(value) for value in store.items("made:").values()]
+    assert {(r["as"], r.get("rules")) for r in kept} == {(MADE_BY_WORKER, provenance.RULES)}
+
+
+async def test_the_owners_question_in_tmp_while_a_worker_runs_copilot_elsewhere(tmp_path, home):
+    """E79: a worker runs a `copilot -p` loop in its own checkout; the owner asks a question
+    in /tmp meanwhile: theirs. A temporary folder counts for a command only one that ran in a
+    temporary folder."""
+    store = worker_store(tmp_path, cwd="/srv/w1")
+    commanded(store, T0 - 30, T0 + 3600, IN_ITS_FOLDER)
+    asked = home.add(prompt_mode(T0 + 60, "Why does this crash?"), T0 + 60)
+    assert await deciding(store, home).made(home.metas, {}) == {}
+    store.execute("DELETE FROM commands")
+    commanded(store, T0 - 30, T0 + 3600, LOOP)
+    assert await deciding(store, home).made(home.metas, {}) == {asked: MADE_BY_WORKER}
+
+
+async def test_a_batch_name_alone_is_no_batch(tmp_path, home):
+    """E81: a single-question session the owner named "Batch: …" was a batch of one, kept so
+    for good. A `batch:` name counts with another sign: another session of that name, or a
+    worker's command where it ran (as workers name their calls); open, a session so named is
+    left out only while it runs, and decided once it ends."""
+    store = worker_store(tmp_path, cwd="/srv/w1")
+    mine = home.add(prompt_mode(T0, "Summarize my notes", "/w"), T0, cwd="/w")
+    home.metas[-1].name = "Batch: notes for Monday"
+    assert await deciding(store, home).made(home.metas, {}) == {}
+    assert not store.items("made:")
+    # Two of one name, however far apart: a batch.
+    two = []
+    for at in (T0 + 3600, T0 + 90000):
+        two.append(home.add(prompt_mode(at, f"Label ticket {at}", "/w"), at, cwd="/w"))
+        home.metas[-1].name = "batch: label the tickets"
+    # One alone, by a worker's command that ran where it did: the worker's.
+    commanded(store, T0 + 9000, T0 + 9100, "python3 label.py")
+    its = home.add(prompt_mode(T0 + 9050, "Label ticket 9", "/srv/w1"), T0 + 9050, cwd="/srv/w1")
+    home.metas[-1].name = "batch: label one more"
+    made = await deciding(store, home).made(home.metas, {})
+    assert made == {two[0]: BATCH, two[1]: BATCH, its: MADE_BY_WORKER}
+    # One alone while a worker's command runs elsewhere: the owner's.
+    elsewhere = home.add(prompt_mode(T0 + 9060, "Label it", "/w"), T0 + 9060, cwd="/w")
+    home.metas[-1].name = "batch: label it"
+    assert elsewhere not in await deciding(store, home).made(home.metas, {})
+    # 0.1.44 kept the owner's one as a batch for good: decided again, theirs.
+    record = {"as": "batch", "by": "", "why": "named", "named": True, "group": "n", "at": T0,
+              "rules": 2, "size": home.log_of(mine).stat().st_size}  # fmt: skip
+    store.set(f"made:{mine}", json.dumps(record))
+    assert mine not in await deciding(store, home).made(home.metas, {})
+    assert f"made:{mine}" not in store.items("made:")
+    # Open, so named: left out while it runs, as a worker's call is (no row for each).
+    assert whose(home.metas[0], set(), {}, is_open=True) == BATCH
+
+
+# Review of the QA round on 0.1.45
+
+
+async def test_the_owners_own_runs_one_after_the_other_stay_theirs(tmp_path, home):
+    """Review: ten alike review questions the owner ran by hand, with `copilot -p` (three
+    minutes each, the next a minute after the one before ended), or in a terminal quit with
+    Ctrl+D two seconds after the answer (the next 90 seconds later): theirs. A script starts its
+    next call within a second or two of the one before ending (30 s at most counts), or within
+    two minutes of its start; a person takes longer."""
+    store = Store(tmp_path / "data")
+    at = T0
+    for n in range(10):
+        home.add(prompt_mode(at, f"{REVIEW}pull/{n}", "/w", took=180), at, cwd="/w")
+        at += 181 + 60
+    assert await deciding(store, home).made(home.metas, {}) == {}
+    home.metas.clear()
+    at = T0 + 90000
+    for n in range(10):
+        home.add(interactive(at, f"{REVIEW}pull/{n}", asked=10, closed=2), at, cwd="/w")
+        at += 10 + 20 + 2 + 90
+    deciding_ = deciding(store, home)
+    assert await deciding_.made(home.metas, {}) == {}
+    # Ten a script ran one after the other, each starting as the one before ended: its.
+    home.metas.clear()
+    ids = [
+        home.add(prompt_mode(T0 + 180000 + n * 31, f"{LABEL} {n}", took=29), T0 + 180000 + n * 31)
+        for n in range(10)
+    ]
+    assert await deciding(store, home).made(home.metas, {}) == dict.fromkeys(ids, BATCH)
+
+
+async def test_a_batch_0143_found_and_0144_kept_stays_its_workers(tmp_path, home):
+    """Review: 0.1.43 kept as a worker's batch twenty calls of a script in /tmp, five minutes
+    apart (by its measure, alike, begun soon after the command); 0.1.44 kept them so (its rules,
+    2). Decided again: as they were, as straight from 0.1.43."""
+    store = worker_store(tmp_path, cwd="/srv/w1")
+    commanded(store, T0 - 30, T0 + 20 * 300, "python3 label.py")
+    ids = [home.add(prompt_mode(T0 + n * 300, f"{LABEL} {n}"), T0 + n * 300) for n in range(20)]
+    for rules in (None, 2):
+        for n, session_id in enumerate(ids):
+            size = home.log_of(session_id).stat().st_size
+            record = {"as": "worker", "by": "w1", "why": "batch", "group": group_of(LABEL),
+                      "at": T0 + n * 300, "size": size}  # fmt: skip
+            store.set(
+                f"made:{session_id}", json.dumps(record | ({"rules": rules} if rules else {}))
+            )
+        made = await deciding(store, home).made(home.metas, {})
+        assert made == dict.fromkeys(ids, MADE_BY_WORKER), rules
+
+
+async def test_a_log_it_cannot_read_holds_nothing_back_for_long(tmp_path, home, monkeypatch):
+    """Review: a log it cannot read (no permission, or changing as it is read) was left for the
+    next round at every round, so what an earlier version decided was never decided again (one
+    the owner named "Batch: …" stayed hidden). Once a round reads nothing new, it is."""
+    store = Store(tmp_path / "data")
+    mine = home.add(prompt_mode(T0, "Summarize my notes", "/w"), T0, cwd="/w")
+    home.metas[-1].name = "Batch: notes for Monday"
+    record = {"as": "batch", "by": "", "why": "named", "named": True, "group": "n", "at": T0,
+              "rules": 2, "size": home.log_of(mine).stat().st_size}  # fmt: skip
+    store.set(f"made:{mine}", json.dumps(record))
+    locked = home.add(prompt_mode(T0 + 60, "Something else"), T0 + 60)
+    read_log = provenance.read_log
+    monkeypatch.setattr(
+        provenance,
+        "read_log",
+        lambda path, *a, **k: None if path == home.log_of(locked) else read_log(path, *a, **k),
+    )
+    deciding_ = deciding(store, home)
+    assert mine in await deciding_.made(home.metas, {}), "the first round: as it was"
+    assert deciding_.pending == 1
+    assert mine not in await deciding_.made(home.metas, {}), "nothing new read: decided again"
+    assert f"made:{mine}" not in store.items("made:")
+
+
+async def test_what_a_later_log_may_change_stays_as_it_was_until_it_is_read(
+    tmp_path, home, monkeypatch
+):
+    """E69: one an earlier version decided stays as it was while a log after it is left for
+    the next round: 0.1.45 kept one named a batch's (two of that name), the other, newer and
+    long, left by the round's bytes; alone, the first would be listed, then hidden again."""
+    store = Store(tmp_path / "data")
+    first = home.add(prompt_mode(T0, "Label ticket 1"), T0)
+    home.metas[-1].name = "batch: label the tickets"
+    size = home.log_of(first).stat().st_size
+    record = {"as": "batch", "by": "", "why": "named", "named": True, "group": "n", "at": T0,
+              "rules": 2, "size": size}  # fmt: skip
+    store.set(f"made:{first}", json.dumps(record))
+    second = home.add(prompt_mode(T0 + 60, f"Label ticket 2 {'x' * size}"), T0 + 60)
+    home.metas[-1].name = "batch: label the tickets"
+    monkeypatch.setattr(provenance, "ROUND_BYTES", size + 10)
+    deciding_ = deciding(store, home)
+    assert await deciding_.made(home.metas, {}) == {first: BATCH}
+    assert deciding_.pending == 1
+    monkeypatch.setattr(provenance, "ROUND_BYTES", 10 * size)
+    assert await deciding_.made(home.metas, {}) == {first: BATCH, second: BATCH}
+
+
+async def test_tidy_sessions_moves_nothing_decided_by_an_earlier_version_it_cannot_check(
+    tidy_home, home, monkeypatch, capsys
+):
+    """Review: with a log it could not read, tidy-sessions --apply moved sessions as an earlier
+    version decided them. What it decided again by these rules it moves; one still as an
+    earlier version decided it, while a log is not read, it leaves, and says why."""
+    batch = home.batch(12)
+    unreadable = home.add(prompt_mode(T0 + 9000, "Something else"), T0 + 9000)
+    aged(home)
+    with sqlite3.connect(tidy_home / "chiefofstaff.db") as db:
+        record = {"as": "batch", "by": "", "why": "batch", "group": "x", "at": T0 + 9000,
+                  "rules": 2, "size": home.log_of(unreadable).stat().st_size}  # fmt: skip
+        db.execute("INSERT INTO kv VALUES (?, ?)", (f"made:{unreadable}", json.dumps(record)))
+    read_log = provenance.read_log
+    monkeypatch.setattr(
+        provenance,
+        "read_log",
+        lambda path, *a, **k: None if path == home.log_of(unreadable) else read_log(path, *a, **k),
+    )
+    assert await tidy.run(tidy_home, apply=True, backend=Listing(home)) == 0
+    said = capsys.readouterr().out
+    assert "Moved 12 sessions" in said and "1 session not read" in said
+    assert "1 session decided by an earlier version, not checked again" in said
+    assert (home.root / "session-state" / unreadable).is_dir()
+    assert not any((home.root / "session-state" / key).exists() for key in batch)
+
+
+async def test_tidy_sessions_moves_nothing_it_could_not_check_with_every_log_read(
+    tidy_home, home, capsys
+):
+    """Review: one an earlier version decided whose log is gone (none waits to be read) is not
+    checked again by these rules either: left, and said."""
+    batch = home.batch(12)
+    gone = home.add(prompt_mode(T0 + 9000, "Something else"), T0 + 9000)
+    with sqlite3.connect(tidy_home / "chiefofstaff.db") as db:
+        record = {"as": "batch", "by": "", "why": "batch", "group": "x", "at": T0 + 9000,
+                  "rules": 2, "size": home.log_of(gone).stat().st_size}  # fmt: skip
+        db.execute("INSERT INTO kv VALUES (?, ?)", (f"made:{gone}", json.dumps(record)))
+    home.log_of(gone).unlink()
+    aged(home)
+    assert await tidy.run(tidy_home, apply=True, backend=Listing(home)) == 0
+    said = capsys.readouterr().out
+    assert "Moved 12 sessions" in said and "not read (it changed" not in said
+    assert "1 session decided by an earlier version, not checked again" in said
+    assert (home.root / "session-state" / gone).is_dir()
+    assert not any((home.root / "session-state" / key).exists() for key in batch)
 
 
 # The sidebar, the Router and learning, alike
@@ -1685,7 +2114,7 @@ def tidying(tmp_path, home, monkeypatch):
     store.execute(
         "INSERT INTO commands(session_id, call_id, command, started_at, ended_at) "
         "VALUES (?,?,?,?,?)",
-        ("w1", "c1", "python3 label.py", stored(T0 - 30), stored(T0 + 600)),
+        ("w1", "c1", SCRIPT, stored(T0 - 30), stored(T0 + 600)),
     )
     worker = home.batch(10)
     translate = "Translate the text below into French. Keep its tone and its length. Text"
