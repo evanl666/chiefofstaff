@@ -93,6 +93,16 @@ CODEX = Capabilities(
 OLDEST_CODEX = "0.167.2"
 # How long Settings waits for a Codex started to say what it is (look).
 LOOK_SECONDS = 30
+# Where Codex was never set up (no CODEX_HOME, ~/.codex), nothing of it runs: any run makes that
+# folder and its databases (0.167.2).
+NOT_SET_UP = "Not set up: run `codex` in a terminal and sign in."
+# What a look's own process turns off: the plugin sync each app-server runs as it starts,
+# which rewrites the records in Codex's plugin cache (0.167.2). Workers keep it.
+LOOK_SETTINGS = [
+    "-c", "features.plugins=false",
+    "-c", "features.remote_plugin=false",
+    "-c", "features.plugin_discovery_prefetch=false",
+]  # fmt: skip
 ASK_FIRST_BEFORE = "0.168.0"
 # How long a request to the app-server may take (seconds), and one that starts a thread.
 REQUEST_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_CODEX_TIMEOUT", "60"))
@@ -355,6 +365,11 @@ def codex_home() -> Path:
     """Codex's own folder for the owner (its CODEX_HOME, else ~/.codex)."""
     given = os.environ.get("CODEX_HOME")
     return Path(given).expanduser() if given else Path.home() / ".codex"
+
+
+def set_up() -> bool:
+    """Whether Codex was set up for the owner: its folder is there (codex_home)."""
+    return codex_home().is_dir()
 
 
 def writer_lock(thread: str) -> Path:
@@ -1915,7 +1930,9 @@ class CodexAgent:
     async def start(self) -> None:
         """What each worker's process checks as it starts (the CLI, its version, the
         administrator's requirements, the sign-in), once now in a process of its own: a Codex
-        that cannot run says why here."""
+        that cannot run says why here; where it was never set up, nothing runs (NOT_SET_UP)."""
+        if not await asyncio.to_thread(set_up):
+            raise RuntimeError(NOT_SET_UP)
         probe = self.process()
         try:
             await probe.start()
@@ -3464,9 +3481,15 @@ def codex_backend(command: str = "codex", folder: Path | None = None) -> CodexAg
 
 async def look(command: str = "codex", folder: Path | None = None) -> dict:
     """What Settings shows of the Codex on this computer, from an app-server started for this
-    and stopped: its version, how it is signed in and its models; raises with why its workers
-    cannot run (not found, too old, signed out, an administrator's requirements)."""
+    and stopped (its plugin sync off: LOOK_SETTINGS): its version, how it is signed in and its
+    models; raises with why its workers cannot run (not found, never set up: nothing run, too
+    old, signed out, an administrator's requirements)."""
+    if not shutil.which(command):
+        raise RuntimeError(f"Codex CLI '{command}' not found. Install it and sign in.")
+    if not await asyncio.to_thread(set_up):
+        raise RuntimeError(NOT_SET_UP)
     backend = CodexBackend(shutil.which(command) or command)
+    backend.arguments += LOOK_SETTINGS
     backend.folder = folder
     backend.experimental = False
     try:

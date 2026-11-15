@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from chiefofstaff import agents, backend, prompts
 from chiefofstaff.__main__ import lock_data_file, main
 from chiefofstaff.backend import copilot_records, process_table
+from chiefofstaff.backend_codex import LOOK_SETTINGS
 from chiefofstaff.digest import digest
 from chiefofstaff.models import Settings
 from chiefofstaff.roles import ROUTER
@@ -122,7 +123,7 @@ def test_agents_are_looked_for_only_once_the_group_is_opened(web, codex_on_path)
     assert codex["state"] == "0.167.2 · signed in with ChatGPT" and codex["problem"] == ""
     assert [model["id"] for model in codex["models"]] == ["gpt-test", "gpt-mini"]
     assert codex["enabled"] is False and codex["model"] == "" and codex["limit"] == 0
-    assert ran(runs) == ['app-server -c approvals_reviewer="user"']
+    assert ran(runs) == [" ".join(['app-server -c approvals_reviewer="user"', *LOOK_SETTINGS])]
     assert stored(web.data) == {} and "agent_usage" not in tables(web.data), (
         "looking stores nothing"
     )
@@ -411,6 +412,7 @@ async def test_a_task_runs_on_the_agent_the_owner_named(tmp_path, codex_on_path)
         assert listed["agents"] == {
             "new_workers": "copilot",
             "models": {"codex": ["gpt-test", "gpt-mini"]},
+            "available": ["codex"],
         }
     finally:
         await runtime.stop()
