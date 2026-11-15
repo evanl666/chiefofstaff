@@ -2420,7 +2420,9 @@ def read_git(
                     names = other.prior_also | other.also | ({other.new} if other.new else set())
                     push.bare_also |= names
                     push.unknown = push.unknown or other.unknown or other.prior_unknown
-        if push.bare_in is not None and (made := line.switched.get(push.bare_in)):
+        if push.bare_in is not None and UNSETTLED.search(push.bare_in):
+            push.unknown = True  # A folder not known (LOST): a switch "there" may be elsewhere.
+        elif push.bare_in is not None and (made := line.switched.get(push.bare_in)):
             new, also, unknown = switched_reading(made, index, line)
             push.bare_new, push.bare_also = new, push.bare_also | also
             push.unknown = push.unknown or unknown

@@ -36,6 +36,10 @@ to a branch of its own before a push is let through again (QA on 0.1.45).
   hold several refspecs (`$B:feat` with `B='HEAD:main HEAD'`): which branch the push updates is
   not known, and it is refused, saying so (found checking these fixes; quoted, `"$B:feat"`, it
   is one refspec, as before).
+- A push in a folder the line leaves unknown (after `eval`, a `cd` it can't follow) is refused,
+  saying it can't tell which branch, also after a switch there: that switch may have been in
+  another folder (found checking these fixes; 0.1.45 let `eval …; git switch -c fix && cd
+  ../main && git push` through).
 - A long line of aliases (or of shells given `-c`) on a line that says push took time growing
   with its square to check; it is read in one pass.
 

@@ -350,6 +350,8 @@ class Sandbox:
     def settings(self, folder: str) -> list[tuple[str, str | None]] | None:
         """What config_entries says of a folder here: the user's and its repository's settings
         the shim keeps (of where pushes go)."""
+        if "\x00" in folder or not Path(folder).is_dir():
+            return None  # (git can't be asked there.)
         top = self.top(folder)
         files = [self.root / ".shimconfig", *([top / ".git" / "shimconfig"] if top else [])]
         entries: list[tuple[str, str | None]] = []
@@ -953,6 +955,11 @@ FOUND = [
     ("read B <<< 'HEAD:main HEAD'; git push origin $B:feat", 'feat'),
     ("git push origin $(printf 'HEAD:main ')HEAD", 'feat'),
     ('command git push origin --tags', 'main', 'headmain'),
+    # Found by the zsh 200k run on f71cd5a: a switch and a push in folders not known (LOST)
+    # are not in the same one for that (`env -C`, a `cd` between them).
+    ("{ eval 'builtin declare CDPATH=/ || while false; do command git push -u origin HEAD; done'; }; (git switch feat && env -P ~/bin -C ~/main git push)", 'feat/sub'),  # noqa: E501
+    ('pushd "$(git rev-parse --show-toplevel)/../main"; { git switch feat && git push -o x origin; }', 'feat/sub', 'upstream'),  # noqa: E501
+    ('eval :; git switch -c fix && cd ../main && git push', 'feat'),
 ]  # fmt: skip
 
 

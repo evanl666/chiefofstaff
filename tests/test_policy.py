@@ -247,6 +247,9 @@ BYPASSES = [
     "git push origin $(printf 'HEAD:main ')HEAD",
     "git push origin $(cat refspecs)\x02",
     "git push origin $(git branch --show-current) # \x02",
+    # (A zsh 200k run.) A switch and a push in folders not known are not the same folder.
+    "eval :; git switch -c fix && cd ../main && git push",
+    "eval :; git switch main && env -C ../main git push",
 ]
 # What a worker does every day, on its own branch: let through.
 EVERYDAY = [
