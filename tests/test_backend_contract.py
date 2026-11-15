@@ -210,6 +210,13 @@ async def backend(request, tmp_path, monkeypatch):
         ]:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+        # A global git configuration of its own, naming a global ignore file of its own: Claude
+        # adds to that file (test_claudes_sandbox_adds_only_…), never the owner's here.
+        (tmp_path / "global-gitconfig").write_text(
+            f"[core]\n\texcludesFile = {tmp_path / 'global-git-ignore'}\n"
+            "[user]\n\tname = Contract\n\temail = contract@example.com\n"
+        )
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "global-gitconfig"))
         (tmp_path / "claude-config").mkdir()
         (tmp_path / "claude-config" / ".claude.json").write_text("{}\n")  # Set up.
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-contract-not-a-key")
@@ -528,6 +535,44 @@ async def test_the_sandbox_keeps_what_runs_code_outside_it_read_only(backend, tm
     )
     for target in targets:
         assert "marker" not in contents(target), target
+
+
+async def test_claudes_sandbox_adds_only_its_staging_folder_to_the_global_git_ignore(
+    backend, tmp_path
+):
+    """Claude Code itself (2.1.322), at the first sandboxed command of its process in a git
+    repository whose rules do not ignore it, adds one line to the global git ignore file
+    (core.excludesFile, else $XDG_CONFIG_HOME/git/ignore, else ~/.config/git/ignore) and makes
+    `.claude/.cc-writes/`, its staging folder for whole-file writes, where it works and in the
+    repository's main checkout (empty: git shows nothing). No setting turns either off. The one
+    change a Claude worker makes to the owner's files outside Claude's own folder (the guide,
+    SECURITY.md): anything more fails here."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    if not sandbox_supported():
+        pytest.skip("Claude's sandbox does not run on this machine.")
+    git_dir, work = sandboxed_repository(tmp_path)
+    main = git_dir.parent
+    gitconfig = (tmp_path / "global-gitconfig").read_bytes()
+    policy = SandboxPolicy(
+        readwrite=(str(work), str(git_dir)),
+        readonly=tuple(protected_git_paths(str(git_dir), [{"path": str(work)}])),
+    )
+    # Claude's own sandbox, as Chief of Staff sets it from its policy (agent_options).
+    session, turn = await open_session(backend, work, sandbox=policy)
+    await session.send("Run the shell command `true` and then reply with just: finished")
+    await turn.wait()
+    assert (tmp_path / "global-git-ignore").read_text() == "**/.claude/.cc-writes/\n"
+    assert (tmp_path / "global-gitconfig").read_bytes() == gitconfig
+    for checkout in (work, main):
+        staging = checkout / ".claude" / ".cc-writes"
+        assert staging.is_dir() and not any(staging.iterdir()), checkout
+    assert git_status(main) == "", "the main checkout's git status shows nothing of it"
+    # Already ignored now (or by the repository's own rules): a later process adds nothing.
+    session, turn = await open_session(backend, work, sandbox=policy)
+    await session.send("Run the shell command `true` and then reply with just: again")
+    await turn.wait()
+    assert (tmp_path / "global-git-ignore").read_text() == "**/.claude/.cc-writes/\n"
 
 
 MANIFESTS = {
@@ -862,6 +907,12 @@ def outside(written: list[str], theirs: list, home: Path) -> list[str]:
 
 def contents(path) -> str:
     return path.read_text() if path.exists() else ""
+
+
+def git_status(checkout) -> str:
+    return subprocess.run(
+        ["git", "status", "--porcelain"], cwd=checkout, capture_output=True, text=True, check=True
+    ).stdout
 
 
 def last_commit(checkout) -> str:
