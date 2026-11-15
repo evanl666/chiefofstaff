@@ -15,7 +15,9 @@ Codex and Claude can do what Copilot workers can.
   the versions Chief of Staff's check proves (2.1.322 and later, each checked on this machine
   without a model); Claude's worktrees, scheduled turns, plan mode, subagents and messages from
   other Claude sessions are tied into Chief of Staff's checks, receipts and timeline (*Stop*
-  holds what a worker scheduled; in plan mode it writes only its plan until that is approved);
+  holds what a worker scheduled, and *Cancel* deletes it in Claude too; in plan mode it writes
+  only its plan until that is approved; another session's message is marked unverified); a
+  worker doesn't write Claude's own settings (`.claude/settings.json`, `.mcp.json`) in its folders;
   its auto memory is off in workers; its spend is counted in tokens as it goes. Workers that read
   Slack stay on Copilot for now, and a sandboxed Claude worker doesn't start where your Claude
   settings would widen its sandbox. On a Claude plan, Claude workers count against your plan's
@@ -26,12 +28,12 @@ Codex and Claude can do what Copilot workers can.
   *Coding agents* tab (each agent's version, sign-in and plan usage, with a chip from 80%, and
   its model and token limit under *Advanced*) instead of a line under *Models*. Type `@codex`,
   `@claude` or `@copilot` to run a task there; optionally let the Router choose (it says which
-  and why). While another agent is on, every worker's row and header names its agent (Copilot
+  and why; your `@` wins). While another agent is on, every worker's row and header names its agent (Copilot
   too) and model.
 - **When an agent can't run:** a task you put on it is not moved elsewhere: the Router's card
   offers sign-in help, waiting, or running it on Copilot. A worker whose plan's usage limit (or
   a rate limit) is reached mid-task pauses under *Needs you* with when it resets (*Go on at*
-  that time, or now), instead of failing or retrying. *Continue with* another agent (a worker's **⋯**, a paused task's, or "hand
+  that time, unless you've told it something since, or now), instead of failing or retrying. *Continue with* another agent (a worker's **⋯**, a paused task's, or "hand
   this to Claude") goes on from a summary in the same folders.
 - **Codex and Claude workers do what Copilot workers do:** ask you with the same question card,
   get every file you attach (images as images, other files by path), fill MCP servers' forms
