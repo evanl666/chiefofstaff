@@ -188,6 +188,24 @@ async def test_the_agent_chosen_in_the_composer_is_the_routers_to_use(tmp_path, 
         await runtime.stop()
 
 
+@pytest.mark.parametrize("owner_named", [False, True], ids=["its-pick", "named"])
+async def test_the_owners_chip_wins_over_the_agent_the_router_gives(
+    tmp_path, codex_installed, owner_named
+):
+    """The owner chose Copilot in the composer: the Router's spawn runs there, whatever agent
+    it gives (its own pick, with Let the Router choose on, or one it took the owner to name)."""
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        agents.save(harness.store, agents.planned(harness.store, {"router_chooses": True}))
+        await runtime.owner_send(harness.router_id, "Fix the login test", agent="copilot")
+        result = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: x",
+                                agent="codex", owner_named=owner_named)  # fmt: skip
+        assert runtime.agent(result["session_id"]) == "copilot"
+    finally:
+        await runtime.stop()
+
+
 async def test_letting_the_router_choose_changes_its_rule_and_only_then(tmp_path, codex_installed):
     harness, runtime = await started(tmp_path)
     try:
