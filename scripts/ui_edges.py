@@ -8305,6 +8305,12 @@ async def picker_offer(runtime, browser):
     await expect(claude.locator(".label")).to_have_text("Claude is ready")
     await expect(claude.locator(".muted")).to_have_text(PLAN_NOTE)
     await picker_shoot(page, "first-run-card-claude", "light", focus=claude)
+    dark, other, other_errors, _ = await agents_page(browser, "dark")
+    await at_home(other)
+    await expect(other.locator("#agent-offer .label")).to_have_text("Claude is ready")
+    await picker_shoot(other, "first-run-card-claude", "dark", focus=other.locator("#agent-offer"))
+    assert not other_errors, other_errors
+    await dark.close()
     await claude.get_by_role("button", name="Not now").click()
     await expect(page.locator("#agent-offer")).to_have_count(0)
     assert agents.turned_on(runtime.store) == ["codex"]
@@ -8372,24 +8378,26 @@ async def picker_composer(runtime, browser):
         await expect(box).to_have_value("")
         await box.fill("Port the parser to Rust")
         await picker_shoot(page, "composer-chip", scheme, focus=page.locator("#composer"))
-        if scheme == "light":
-            sent: list = []
-
-            def posted(request, sent=sent):
-                if request.method == "POST" and request.url.endswith("/messages"):
-                    sent.append(request.post_data_json)
-
-            page.on("request", posted)
-            await box.press("Enter")
-            await expect(chip).to_be_hidden()
-            await until(lambda sent=sent: sent)
-            assert sent[-1] == {"text": "Port the parser to Rust", "agent": "codex"}, sent
-            mine = page.locator("#timeline .msg.owner").last
-            await expect(mine.locator("span.to")).to_have_text("On Codex")
-            await picker_shoot(page, "composer-sent", scheme, focus=mine)
-        else:
+        if scheme == "dark":  # Its clear button takes the chip away (and the agent with it).
             await chip.locator("button.clear").click()
             await expect(chip).to_be_hidden()
+            await page.locator("#composer-input").fill("@cod")
+            await page.locator("#mention-list li.agent", has_text="Codex").click()
+            await box.fill("Port the parser to Rust")
+        sent: list = []
+
+        def posted(request, sent=sent):
+            if request.method == "POST" and request.url.endswith("/messages"):
+                sent.append(request.post_data_json)
+
+        page.on("request", posted)
+        await box.press("Enter")
+        await expect(chip).to_be_hidden()
+        await until(lambda sent=sent: sent)
+        assert sent[-1] == {"text": "Port the parser to Rust", "agent": "codex"}, sent
+        mine = page.locator("#timeline .msg.owner").last
+        await expect(mine.locator("span.to")).to_have_text("On Codex")
+        await picker_shoot(page, "composer-sent", scheme, focus=mine)
         assert not errors, errors
         await context.close()
     log("picker: @codex in the composer, as a chip that goes with the message")
@@ -8467,6 +8475,12 @@ async def picker_workers(runtime, browser):
     notices = page.locator("#timeline .notice", has_text="Continues “Port the parser”")
     await expect(notices).to_have_count(1)
     await picker_shoot(page, "worker-continued", "light", "#main")
+    assert not errors, errors
+    await context.close()
+    context, page, errors, _ = await agents_page(browser, "dark")
+    await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", moved)
+    await expect(page.locator("#timeline .notice", has_text="Continues “Port")).to_have_count(1)
+    await picker_shoot(page, "worker-continued", "dark", "#main")
     assert not errors, errors
     await context.close()
     # A named agent that could not run: the Router's card offers what to do.
