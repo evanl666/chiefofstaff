@@ -259,14 +259,16 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
     // (changes requested, conflicts, failing CI) or news on it since is why, in its reason.
     if (task.status === "review") {
       const news = task.news ? `News: ${task.news.text || task.news.summary || "something new on it"}` : "";
-      // Prepared for you: what it prepared or why it paused says more than the PR's standing.
+      // Prepared for you: what it prepared or why it paused says more than the PR's standing,
+      // and is all its row says.
       const kept = task.shepherd?.action ? task.shepherd.line : "";
-      const issue = kept || (standing && standing.marker !== "mergeable" ? standing.why : news);
+      if (kept) return { ...at("needs", "review", kept), kept: true };
+      const issue = standing && standing.marker !== "mergeable" ? standing.why : news;
       return at("needs", "review", issue || (task.attention === "acceptance" ? task.attention_why || "" : ""));
     }
     if (task.news) return at("needs", "update", "");
     // Prepared for you: a plan to review, or its PR paused or stopped, waits for the owner.
-    if (task.attention === "prepared") return at("needs", KEPT_MARKERS[task.shepherd?.action?.kind] || "prepared", task.attention_why || "");
+    if (task.attention === "prepared") return { ...at("needs", KEPT_MARKERS[task.shepherd?.action?.kind] || "prepared", task.attention_why || ""), kept: true };
     // Cancelled after it finished, before it was accepted: over, not done.
     if (task.set_aside) return at("finished", "set-aside", "Cancelled after it finished: not accepted");
     // Accepted, and still waiting on what comes next (a review, the merge, a reply): monitored

@@ -1613,10 +1613,9 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .prepared-row { display: flex; align-items: center; gap: 12px; padding: 8px 14px; }
 .prepared-row .prepared-text { flex: 1 1 auto; min-width: 0; }
 .prepared-row .prepared-title { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.prepared-row .prepared-line { display: flex; align-items: baseline; gap: 6px; white-space: nowrap; font-size: var(--small); color: var(--soft); }
-.prepared-row .prepared-line .what, .prepared-row .prepared-line .why { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.prepared-row .prepared-line { font-size: var(--small); color: var(--soft); }
 .prepared-row .prepared-line .why { color: var(--muted); }
-.prepared-row .sep { color: var(--muted); flex: none; }
+.prepared-row .sep { color: var(--muted); }
 /* Its link: a 28 px target on a 12 px line, without making the line taller. */
 .prepared-row .pr { flex: none; display: inline-block; padding: 5px 0; margin: -5px 0; color: var(--accent); text-decoration: none; }
 .prepared-row .pr:hover { text-decoration: underline; }
@@ -1666,6 +1665,7 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 
 .confirm-dialog { width: min(460px, calc(100vw - 32px)); padding: 20px 22px; }
 .confirm-dialog p { color: var(--soft); margin: 8px 0 16px; }
+.confirm-dialog p a { text-decoration: underline; text-underline-offset: 2px; }
 .confirm-dialog .buttons { display: flex; justify-content: flex-end; gap: 10px; }
 
 #settings-pane .error-hint { color: var(--amber); }

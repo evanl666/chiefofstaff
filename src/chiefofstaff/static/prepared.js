@@ -38,9 +38,10 @@ function prLink(item) {
   return el("a", { class: "pr", href: item.url, target: "_blank", rel: "noreferrer", text: item.label, title: `${item.repo}#${item.number} on GitHub` });
 }
 // A PR found: its title, then what it needs (or why it is not one to hand over) and its link;
-// Hand to a worker at its end when it is one.
+// Hand to a worker at its end when it is one. The line wraps rather than cut what it needs off
+// (its "·" stays with the words before it).
 function foundCard(item, rest = "") {
-  const line = el("div", { class: "prepared-line" }, el("span", { class: item.why ? "why" : "what", text: item.why || item.what }), el("span", { class: "sep", text: "·", "aria-hidden": "true" }), prLink(item));
+  const line = el("div", { class: "prepared-line" }, el("span", { class: item.why ? "why" : "what", text: item.why || item.what }), el("span", { class: "sep", text: "\u00a0·", "aria-hidden": "true" }), " ", prLink(item));
   const text = el("div", { class: "prepared-text" }, el("div", { class: "prepared-title", text: item.title, title: item.title }), line);
   if (item.why) return el("div", { class: `card prepared-row ${rest}`.trim(), "data-target": item.target }, text);
   const hand = el("button", { type: "button", class: "text", text: "Hand to a worker", "data-tip": "A worker checks its branch out and keeps it moving: fixes and replies prepared for your approval", onclick: () => handOver(item, hand) });
@@ -95,7 +96,7 @@ export function keptLine(task) {
   if (!kept) return null;
   const words = [kept.line, kept.accept_note].filter(Boolean);
   if (!words.length) return null;
-  return el("div", { class: `kept-line${kept.refused ? " refused" : ""}`, text: words.join(" · ") });
+  return el("div", { class: `kept-line${kept.refused ? " refused" : ""}`, text: words.join(" ") });
 }
 // The row's one action, or null (refused: today's Ask it to fix… stays the action).
 export function keptButton(task, act) {
@@ -110,7 +111,7 @@ export function keptButton(task, act) {
   }[action.kind];
   const tips = {
     fix: "Prepare a fix in its worker, checked, for your approval (charged to today's credits)",
-    resume: "Keep it moving from its PR as it is now (merging still needs your Accept of its head)",
+    resume: "Look after it again from its PR as it is now (merging still needs your Accept of this commit)",
     review: "See exactly what would be published, and approve it",
     look: "What was tried, and why it stopped",
   };
@@ -120,11 +121,11 @@ export function keptMenu(task, act) {
   const kept = task.shepherd;
   if (!kept || !["review", "done"].includes(task.status)) return [];
   const items = [];
-  if (kept.keep) items.push({ text: "Stop keeping it moving", onclick: () => act(() => shepherdAction(kept.target, "keep", { on: false }), "It's yours again: its news comes to its worker as before.") });
-  else items.push({ text: "Keep it moving", onclick: () => act(() => shepherdAction(kept.target, "keep", { on: true }), "Kept moving.") });
+  if (kept.keep) items.push({ text: "Stop looking after this PR", onclick: () => act(() => shepherdAction(kept.target, "keep", { on: false }), "It's yours again: its news comes to its worker as before.") });
+  else items.push({ text: "Look after this PR", onclick: () => act(() => shepherdAction(kept.target, "keep", { on: true }), "Looking after it again.") });
   if (kept.merge_when_ready) items.push({ text: "Don't merge it by itself", onclick: () => act(() => shepherdAction(kept.target, "merge-when-ready", { on: false }), "It won't merge by itself.") });
-  else if (kept.keep) items.push({ text: "Merge when ready", onclick: () => act(() => shepherdAction(kept.target, "merge-when-ready", { on: true }), "It merges once approved and green, at the head you accepted.") });
-  if (kept.head && kept.head !== kept.accepted) items.push({ text: "Accept this head…", onclick: () => acceptHead(task) });
+  else if (kept.keep) items.push({ text: "Merge when ready", onclick: () => act(() => shepherdAction(kept.target, "merge-when-ready", { on: true }), "It merges once approved and green, at the commit you accepted.") });
+  if (kept.head && kept.head !== kept.accepted) items.push({ text: "Accept this commit…", onclick: () => acceptCommit(task) });
   if (kept.journal?.length) items.push({ text: "What it did", onclick: () => openJournal(task) });
   return items;
 }
@@ -332,16 +333,16 @@ export function openJournal(task) {
   document.body.append(dialog);
   dialog.showModal();
 }
-// Accept this head: its diff first (on GitHub), then the click.
-function acceptHead(task) {
+// Accept this commit: what changed first (on GitHub), then the click.
+function acceptCommit(task) {
   const kept = task.shepherd;
   const compare = kept.accepted ? `${kept.url}/files/${kept.accepted}..${kept.head}` : `${kept.url}/files`;
   const yes = el("button", { type: "button", text: `Accept ${shortSha(kept.head)}` });
   const dialog = el(
     "dialog",
-    { class: "confirm-dialog", "aria-label": "Accept this head" },
+    { class: "confirm-dialog", "aria-label": "Accept this commit" },
     el("h2", { text: `Accept ${kept.label} at ${shortSha(kept.head)}?` }),
-    el("p", {}, "It merges by itself only at a head you accepted. ", el("a", { href: compare, target: "_blank", rel: "noreferrer", text: "Look at what changed" }), " first."),
+    el("p", {}, "It merges by itself only at a commit you accepted. ", el("a", { href: compare, target: "_blank", rel: "noreferrer", text: "Look at what changed" }), " first."),
     el("div", { class: "buttons" }, el("button", { type: "button", class: "text", text: "Cancel", onclick: () => dialog.close() }), yes),
   );
   yes.addEventListener("click", async () => {

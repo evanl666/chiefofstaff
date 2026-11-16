@@ -311,7 +311,7 @@ async def head_checked(shepherd: Shepherd, operation: dict) -> dict:
     github = shepherd.runtime.github
     details = await github.pr_details(operation["repo"], int(operation["number"]))
     if details["head_repo_id"] != operation["head_repo_id"] or details["fork"]:
-        raise RefusedError("the PR's head repository changed: push it yourself")
+        raise RefusedError("the PR now comes from another repository: push it yourself")
     if details["head_ref"] != operation["ref"]:
         raise RefusedError("the PR's branch changed")
     if details["head"] != operation["lease"]:
@@ -349,7 +349,7 @@ async def send_push(shepherd: Shepherd, operation: dict, login: str, step: dict)
             "-C", tree, "merge-base", "--is-ancestor", operation["lease"], operation["commit"]
         )
     except ValueError as exc:
-        raise RefusedError("the fix does not build on the PR's head") from exc
+        raise RefusedError("the fix doesn't build on the PR's latest commit") from exc
     facts = {**operation, "protected": False, "default_branch": details["head_default"]}
     argv = [
         "git", *SAFE_GIT, "-C", tree, "push", "--no-verify",
@@ -410,7 +410,7 @@ async def send_resolve(shepherd: Shepherd, operation: dict, login: str, step: di
     github = shepherd.runtime.github
     details = await github.pr_details(operation["repo"], int(operation["number"]))
     if details["head"] != operation["after"]:
-        raise RefusedError("the fix is not the PR's head")
+        raise RefusedError("the fix isn't the PR's latest commit")
     thread = next((t for t in details["threads"] if t["id"] == operation["thread"]), None)
     if thread is None:
         raise RefusedError("its conversation is gone")
@@ -443,7 +443,7 @@ async def send_rerun(shepherd: Shepherd, operation: dict, login: str, step: dict
     github = shepherd.runtime.github
     details = await github.pr_details(operation["repo"], int(step["target"].rsplit("#", 1)[1]))
     if details["head"] != operation["head"]:
-        raise RefusedError("the PR moved since: its new head runs CI anew")
+        raise RefusedError("the PR moved since: CI runs again on its new commit")
     argv = ["gh", "run", "rerun", str(int(operation["run"])), "--failed", "--repo",
             operation["repo"]]  # fmt: skip
     if why := operation_denial(operation, argv):
@@ -560,13 +560,17 @@ async def merge_blockers(shepherd: Shepherd, claim: dict, details: dict) -> list
     head = details.get("head") or ""
     accepted = (claim.get("accepted") or {}).get("sha") or ""
     if not accepted:
-        return ["your Accept of its head"]
+        return ["your Accept"]
     if head != accepted:
         chain = await approved_chain(shepherd, claim, details, accepted, head)
         if not chain:
-            found.append("Accept this head (it is not what you accepted)")
-    if claim.get("state") != IDLE or claim.get("holder_kind") != "task":
-        found.append("Resume" if claim.get("state") == "paused" else "its claim")
+            found.append("Accept this commit (it isn't the one you accepted)")
+    if claim.get("state") == "paused":
+        found.append("Resume")
+    elif claim.get("holder_kind") != "task":
+        found.append("Look after this PR, turned on again")
+    elif claim.get("state") != IDLE:
+        found.append("what it's preparing")
     if details.get("draft"):
         found.append("it is a draft")
     if any(HOLD.search(label) for label in details.get("labels") or []):
@@ -579,11 +583,11 @@ async def merge_blockers(shepherd: Shepherd, claim: dict, details: dict) -> list
         found.append("required checks to pass")
     ran = set((claim.get("accepted") or {}).get("checks") or [])
     if missing := ran - {check["name"] for check in checks}:
-        found.append(f"{', '.join(sorted(missing)[:2])} to run on this head")
+        found.append(f"{', '.join(sorted(missing)[:2])} to run on this commit")
     reviews = details.get("reviews") or []
     if not any(r["state"] == "APPROVED" and r["commit"] == head and r["author"] != details["author"]
                for r in reviews):  # fmt: skip
-        found.append("an approval of this head")
+        found.append("an approval of this commit")
     if details.get("review") == "CHANGES_REQUESTED" or any(
         r["state"] == "CHANGES_REQUESTED" for r in reviews
     ):
@@ -630,7 +634,12 @@ async def try_merge(shepherd: Shepherd, target: str):
         if not claim or not claim["merge_when_ready"] or claim["state"] != IDLE:
             return
         details = claim.get("details") or {}
-        if await merge_blockers(shepherd, claim, details):
+        if blockers := await merge_blockers(shepherd, claim, details):
+            # Its row says what it waits for (the first two).
+            words = f"waiting for {' and '.join(blockers[:2])}"
+            if shepherd.store.get(f"mergewhy:{target}") != words:
+                shepherd.store.set(f"mergewhy:{target}", words)
+                shepherd.publish_holder(claim)
             return
         if any(
             step["kind"] == "merge" and step["h0"] == details["head"]

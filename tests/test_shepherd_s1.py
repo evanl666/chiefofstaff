@@ -246,7 +246,7 @@ async def test_on_a_codex_worker_it_is_refused_in_the_rows_words(world, monkeypa
     [step] = runtime.shepherd.control.steps(TARGET)
     assert step["state"] == "refused"
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
-    assert view["line"] == "Can't prepare fixes here: its worker runs on Codex, not Copilot"
+    assert view["line"] == "Can't prepare fixes here: its worker runs on Codex, not Copilot."
     assert view["refused"] and view["action"] is None
 
 
@@ -338,7 +338,7 @@ async def test_the_same_failure_after_its_fix_stops_trying(world):
     queued = await runtime.shepherd.signals(claim, task, details)
     assert queued == []
     view = runtime.task_actions.view(task)["shepherd"]
-    assert view["line"] == "Stopped: the same failure came back after its fix"
+    assert view["line"] == "The same failure came back after its fix."
     assert view["action"] == {"kind": "look", "label": "Look"}
 
 
@@ -831,7 +831,7 @@ async def test_a_fix_that_skips_a_test_is_for_approval_its_hunks_first(world):
     assert any(item["path"] == "tests/test_app.py" for item in plan["findings"])
     assert plan["diff"].index("tests/test_app.py") < plan["diff"].index("app.py\n")
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
-    assert view["line"] == "A fix is ready: it changes tests or checks"
+    assert view["line"] == "A fix for the failing CI is ready: it changes tests or checks."
 
 
 async def test_a_branch_that_requires_signed_commits_is_refused_with_why(world):
@@ -848,7 +848,7 @@ async def test_a_branch_that_requires_signed_commits_is_refused_with_why(world):
         push
     )
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
-    assert view["line"] == "Not published: the branch requires signed commits"
+    assert view["line"] == "Not published: the branch requires signed commits."
     assert view["action"] == {"kind": "look", "label": "Look"}
     row = runtime.store.session(world.worker)
     assert await runtime.shepherd.executor_refusal(row, step) == (
@@ -1212,9 +1212,11 @@ async def test_owner_actions_say_why_they_cant_apply(world):
         await shepherd.resume(TARGET)
     with pytest.raises(ValueError, match="doesn't keep this PR moving"):
         await shepherd.fix_it("github:acme/api#99")
-    with pytest.raises(ValueError, match="Accept its head first"):
+    with pytest.raises(
+        ValueError, match="Accept it first: Accept on its task, or Accept this commit in its menu"
+    ):
         await shepherd.merge_when_ready(TARGET, True)
-    with pytest.raises(ValueError, match="The PR moved since you looked"):
+    with pytest.raises(ValueError, match="The PR has new commits since you looked"):
         await shepherd.accept_head(TARGET, "f" * 40)
     world.github.permission = "READ"
     await shepherd.accept_head(TARGET, world.h0)
@@ -1236,7 +1238,7 @@ async def test_owner_actions_say_why_they_cant_apply(world):
     # Kept off: the owner's again; on: its task's, paused until Resume.
     await shepherd.keep(TARGET, False)
     claim = shepherd.control.claim(TARGET)
-    assert claim["holder_kind"] == "owner" and claim["reason"] == "you stopped keeping it moving"
+    assert claim["holder_kind"] == "owner" and claim["reason"] == "you stopped looking after it"
     await shepherd.keep(TARGET, True)
     claim = shepherd.control.claim(TARGET)
     assert claim["holder"] == world.task and claim["keep"]

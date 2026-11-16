@@ -1145,7 +1145,7 @@ function rowFoot(task, worker, phase, shown = false) {
   );
 }
 // What a row says of its reason: what it waits on, why it needs the owner, or what it came to.
-function rowWhy(task, worker, phase) {
+export function rowWhy(task, worker, phase) {
   if (phase.section === "monitoring") {
     // "Paused: its worker is on …", "Checks back at 3:15 PM: …" beside the status "Paused",
     // "Checks back": said once.
@@ -1154,6 +1154,8 @@ function rowWhy(task, worker, phase) {
     return { ...words, text: words.text.replace(said, "") };
   }
   if (phase.section === "finished") return { text: finishedWords(task, phase), help: "" };
+  // Prepared for you: its one line, said once (no result beside it, no warning mark).
+  if (phase.kept) return { text: phase.why, help: "" };
   if (phase.section === "needs") {
     // A question is said in full on the row; a result to accept says what it came to (its
     // status says it waits for Accept), and why it needs a look when something does: its PR's
@@ -1173,7 +1175,7 @@ export function rowLatest(task, worker, phase) {
     const line = activityLine(worker);
     return { text: line.textContent, help: line.dataset.tip };
   }
-  if (phase.section === "finished") return { text: "" };
+  if (phase.section === "finished" || phase.kept) return { text: "" };
   // Its runs are what it needs the owner for: its result (accepted) is not news.
   if (phase.marker === "runs-unknown") return { text: "" };
   if (phase.marker === "update") return { text: gist(task.news?.text || ""), help: task.news?.text };
