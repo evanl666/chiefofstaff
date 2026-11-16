@@ -81,8 +81,19 @@ ALLOWED = ("an install from an allowed host", f"curl -sS --max-time 20 -o /dev/n
            f"https://{ALLOWED_HOST}/simple/pip/ && echo {REACHED}")  # fmt: skip
 
 
-async def run_tool(session: Any, name: str, arguments: dict) -> tuple[bool, str]:
-    """(it ran, its output) for one tool call through the session's own pipeline."""
+def field(result: Any, *names: str) -> Any:
+    """A result's field, whether Copilot's answer came as a mapping (as it does) or an object."""
+    for name in names:
+        if isinstance(result, dict) and name in result:
+            return result[name]
+        if not isinstance(result, dict) and hasattr(result, name):
+            return getattr(result, name)
+    return None
+
+
+async def run_tool(session: Any, name: str, arguments: dict) -> tuple[bool, str, bool]:
+    """(it ran, its output, the sandbox was applied to it) for one tool call through the
+    session's own pipeline."""
     from copilot.generated.rpc import ToolsExecuteRequest
 
     try:
@@ -93,10 +104,14 @@ async def run_tool(session: Any, name: str, arguments: dict) -> tuple[bool, str]
             timeout=60,
         )
     except Exception as exc:
-        return False, str(exc)[:500]
-    text = str(getattr(result, "text_result_for_llm", "") or "")
-    kind = str(getattr(getattr(result, "result_type", None), "value", "") or "")
-    return kind not in {"failure", "rejected", "denied"}, text
+        return False, str(exc)[:500], False
+    text = str(field(result, "textResultForLlm", "text_result_for_llm") or "")
+    kind = field(result, "resultType", "result_type")
+    kind = str(getattr(kind, "value", kind) or "")
+    telemetry = field(result, "toolTelemetry", "tool_telemetry") or {}
+    properties = (telemetry.get("properties") if isinstance(telemetry, dict) else None) or {}
+    sandboxed = str(properties.get("sandboxApplied", "")).lower() == "true"
+    return kind not in {"failure", "rejected", "denied", ""}, text, sandboxed
 
 
 async def extra_tools(session: Any) -> list[str]:
@@ -176,18 +191,20 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
         session = await backend.resume_session(session_id, **options)
         failed += await extra_tools(session)
         for what, line in actions(folder):
-            ran, text = await run_tool(session, "bash", {"command": line, "description": what})
-            if ran and REACHED in text:
-                failed.append(what)
-        ran, text = await run_tool(session, "tell_session", {"session": "x", "text": "probe"})
+            ran, text, sandboxed = await run_tool(
+                session, "bash", {"command": line, "description": what}
+            )
+            if ran and (REACHED in text or not sandboxed):
+                failed.append(what if REACHED in text else f"{what} (unsandboxed)")
+        ran, _, _ = await run_tool(session, "tell_session", {"session": "x", "text": "probe"})
         if ran:
             failed.append("calling tell_session")
         if mcp_tool:
-            ran, text = await run_tool(session, mcp_tool, {})
+            ran, _, _ = await run_tool(session, mcp_tool, {})
             if ran:
                 failed.append(f"calling the MCP tool {mcp_tool}")
         what, line = ALLOWED
-        ran, text = await run_tool(session, "bash", {"command": line, "description": what})
+        ran, text, _ = await run_tool(session, "bash", {"command": line, "description": what})
         allowed = ran and REACHED in text
     finally:
         if session is not None:
@@ -204,7 +221,7 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
     elif not allowed:
         why = f"an install from {ALLOWED_HOST} did not work"
     return {"passed": not why, "why": why, "failed": failed, "version": version, "at": now(),
-            "took": time.time()}  # fmt: skip
+            "checked": time.time()}  # fmt: skip
 
 
 def _remove(path: Path):
