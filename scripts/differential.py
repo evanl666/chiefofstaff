@@ -191,7 +191,15 @@ EXAMPLE = Feature(
 # one, and each feature's off and on), each with why. None against v0.1.44: those of 0.1.41 to
 # 0.1.44 (the one-line heading, workers' batch CLI line, learning from talked sessions, the runs
 # kept, role rules, the Router's title rule, a check-back's runs) are its own behaviour.
-FIXES: list[Allow] = []
+FIXES: list[Allow] = [
+    # 0.1.46: sandboxed workers' package caches are their own, started from the owner's, which
+    # are read-only to them (caches.py); the switch says so instead of "share your stores".
+    Allow(
+        "the switch line for workers' caches in Settings → Workers, reworded",
+        element="#settings-dialog label:has(> input[name=shared_caches])",
+        views=r"^settings-workers-",
+    ),
+]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
 # by default (the owner agreed), so it is compared switched off against the baseline. On, the
