@@ -119,7 +119,6 @@ from .workspaces import (
     Workspaces,
     common_git_dir,
     git_dirs,
-    held_caches,
     own_code,
     protected_git_paths,
     registry_secrets,
@@ -1745,9 +1744,10 @@ class Runtime:
             writable.append(agent)  # Signing through the agent; key files stay unreadable.
         readonly += self.own_code(writes)
         readonly += cached.readonly
-        closed = list(cached.denied)
-        if row["slack"]:
-            closed += self.slack_closed(readonly)
+        # Workers that read Slack must not read the owner's registry credentials. Nothing
+        # else of the owner's needs closing: Copilot grants nothing of its own (dev-tool
+        # access is off, see caches.TOOLCHAINS).
+        closed = registry_secrets() if row["slack"] else []
         return SandboxPolicy(
             readwrite=tuple(dict.fromkeys(path for path in writable if path)),
             readonly=tuple(dict.fromkeys(readonly)),
@@ -1829,15 +1829,6 @@ class Runtime:
             for path in self.own_code_paths
             if not any(Path(os.path.realpath(path)).is_relative_to(folder) for folder in theirs)
         ]
-
-    @staticmethod
-    def slack_closed(readonly: list[str]) -> list[str]:
-        """For a worker that reads Slack: the owner's package caches join `readonly` (it never
-        writes what the owner's builds run), and what it may not read at all is returned: the
-        caches that do not exist yet, and the owner's registry credentials."""
-        caches, absent = held_caches()
-        readonly += caches
-        return [*absent, *registry_secrets()]
 
     def yolo(self, row: dict) -> bool:
         """Whether this worker acts without permission checks (a session choice, else Settings)."""

@@ -753,9 +753,9 @@ def worker_context(
         if slack:
             lines.append(
                 "You read Slack, so your sandbox is stricter than the owner's setting (whatever "
-                "it is): its network reaches GitHub only and the owner's package caches are "
-                "read-only, so installing packages or running tests that need them can fail here "
-                "(uv may even crash). Do not keep retrying: say in your report that this "
+                "it is): its network reaches GitHub only and your package caches are your own, "
+                "with nothing of the owner's, so installing packages or running tests that need "
+                "them can fail here. Do not keep retrying: say in your report that this "
                 "sandbox could not run them (not that the code failed), with the exact command "
                 "for the owner, so the Router can have a worker without Slack access run them."
             )

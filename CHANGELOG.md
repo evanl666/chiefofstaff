@@ -176,8 +176,20 @@ questions stay listed (QA round on 0.1.45).
   macOS sandbox (it reads the system's proxy settings from a service the sandbox closes):
   workers say so instead of retrying. Workers that read Slack get caches of their own in their
   workspace.
+- **Copilot's dev-tool access is off for sandboxed workers.** It opened your package caches
+  read-write in a project of their kind, and a folder of them deeper than one held read-only
+  stayed writable (`~/.gradle/wrapper/dists` under `~/.gradle/wrapper`: a worker could have
+  replaced the Gradle your `./gradlew` runs; also deno's and node's caches). Chief of Staff now
+  names everything a worker reads: its toolchains (every folder on your `PATH`, rustup's, nvm's,
+  pyenv's, SDKMAN's, asdf's, mise's and Volta's toolchains, JDKs, uv's Pythons and tools, Copilot's
+  own ripgrep, the homes `JAVA_HOME`, `GOROOT` and the like name), and for workers on your own
+  tasks your package caches and the registry settings their builds read (`~/.npmrc`,
+  `~/.m2/settings.xml`, pip's, uv's and Go's configuration…), all read-only. Nothing in your home
+  is writable to a worker but workers' caches; the other caches Copilot opened (deno's,
+  node-gyp's, Electron's, virtualenv's, NuGet's, ccache's, sccache's, gh's…) are workers' own
+  too. Every tool measured works as before, as fast.
 - **No sandboxed worker can change Chief of Staff's own code.** Its environment, wherever `uvx`
-  or `uv tool install` put it (`uvx` keeps it in uv's cache, which Copilot's sandbox opens
+  or `uv tool install` put it (`uvx` keeps it in uv's cache, which Copilot's sandbox opened
   read-write to commands in a Python project), the Python it runs on, every folder it imports
   from, its `chiefofstaff` command, the `pyproject.toml` and `uv.lock` of a source checkout it
   runs from, and the entries of uv's cache its packages come from are read-only to every
@@ -185,17 +197,13 @@ questions stay listed (QA round on 0.1.45).
   start. They are looked up once, when Copilot connects, off the event loop. Other environments
   uv makes (`uvx` of another tool, `uv run --with`) still work in a sandboxed worker. A worker
   you asked to work in place in Chief of Staff's own checkout may still change what is in it.
-- **Workers that read Slack get your package caches read-only, and none of your registry
-  credentials.** Copilot's sandbox opened npm's, pip's, uv's, Go's, Cargo's, Gradle's, Maven's
-  and other caches read-write to them too, and let them read `~/.npmrc`, `~/.m2/settings.xml`,
-  `~/.gradle/gradle.properties` and the like. Now those caches are read-only to them (one that
-  does not exist yet stays closed), and those files, `~/.pypirc`, Cargo's credentials, pip's and
-  uv's configuration, `~/.netrc`, Docker's `config.json`, `~/.git-credentials`, `gh`'s
-  `hosts.yml`, Bundler's, RubyGems', Go's, AWS's, Azure's, gcloud's and Kubernetes'
-  configuration and npm's global `npmrc` are unreadable.
-- **SECURITY.md says what holds today**: with the sandbox on, workers on your own tasks can write
-  your package caches (Copilot's dev-tool access), so they could plant code your own builds later
-  run. 0.1.47 gives them caches of their own.
+- **Workers that read Slack can't read your package caches or your registry credentials.**
+  Copilot's sandbox opened npm's, pip's, uv's, Go's, Cargo's, Gradle's, Maven's and other caches
+  read-write to them too, and let them read `~/.npmrc`, `~/.m2/settings.xml`,
+  `~/.gradle/gradle.properties` and the like. Now they have caches of their own, and those files,
+  `~/.pypirc`, Cargo's credentials, pip's and uv's configuration, `~/.netrc`, Docker's
+  `config.json`, `~/.git-credentials`, `gh`'s `hosts.yml`, Bundler's, RubyGems', Go's, AWS's,
+  Azure's, gcloud's and Kubernetes' configuration and npm's global `npmrc` are closed to them.
 
 ## 0.1.45 (2026-11-14)
 

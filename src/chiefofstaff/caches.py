@@ -1,16 +1,17 @@
 """Package caches of sandboxed workers: a cache of their own, the owner's beneath it, read-only.
 
-Copilot's sandbox (its dev-tool access) opens the owner's package caches read-write to a
+Copilot's sandbox (its dev-tool access) opened the owner's package caches read-write to a
 worker's commands in a project of their kind: what a worker wrote there, the owner's builds
-would later run unsandboxed. And some tools cannot work there at all (corepack's, uv's Pythons,
-Maven's wrapper, Gradle's native libraries). So every sandboxed worker that does not read Slack
-shares a tier of its own, in Chief of Staff's data folder, and writes there; the owner's caches
-are read-only to it. What the owner already has is read through where a tool can (Gradle's
-read-only dependency cache, Maven's tail repository, Go's module proxy, links to Playwright's
-browsers), and copied into the tier otherwise: copy-on-write clones (APFS clonefile, a Linux
-reflink where the file system has them), in the background, never on a worker's way. A
-worker's shell finds the tools pointed there by an init script Copilot sources before each
-command (Copilot sessions' shell init scripts), not by its prompt.
+would later run unsandboxed. And some tools could not work there at all (corepack's, uv's
+Pythons, Maven's wrapper, Gradle's native libraries). So dev-tool access is off for workers
+(what they read is named here: tool_paths, registry_config), and every sandboxed worker that
+does not read Slack shares a tier of its own, in the system's cache folder, and writes there;
+the owner's caches are read-only to it. What the owner already has is read through where a tool
+can (Gradle's read-only dependency cache, Maven's tail repository, Go's module proxy, links to
+Playwright's browsers), and copied into the tier otherwise: copy-on-write clones (APFS
+clonefile, a Linux reflink where the file system has them), in the background, never on a
+worker's way. A worker's shell finds the tools pointed there by an init script Copilot sources
+before each command (Copilot sessions' shell init scripts), not by its prompt.
 
 A worker that reads Slack gets a tier of its own in its workspace, nothing copied in.
 """
@@ -31,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from .workspaces import held_caches, too_broad
+from .workspaces import REGISTRY_SECRETS, held_caches, named, too_broad
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,102 @@ class Owner:
             env_dir("UV_PYTHON_INSTALL_DIR", data / "python"),
             env_dir("UV_TOOL_DIR", data / "tools"),
         ]
+
+    def copilot_tools(self) -> Path:
+        """Where the Copilot CLI unpacks itself and its tools (ripgrep, put on its shell's
+        PATH)."""
+        return self.caches() / "copilot" / "pkg"
+
+
+# Copilot's dev-tool access, off for workers (backend.CopilotBackend.sandbox): it opened the
+# owner's caches read-write, a folder deeper than one Chief of Staff held read-only included
+# (its rules apply shallow to deep), and none of it can be narrowed. What it granted to read
+# is granted here by name instead (its own list, CLI 1.0.111): toolchains in their usual places
+# in home, the toolchain homes the environment names, every folder on PATH; its read-write
+# caches are workers' own (script). Never a folder holding credentials (~/.cargo).
+TOOLCHAINS = (
+    ".rustup/toolchains", ".rustup/settings.toml", ".cargo/bin", "go/bin", ".nvm/versions",
+    ".nvm/alias", ".deno/bin", ".volta/bin", ".volta/tools", ".asdf/bin", ".asdf/libexec",
+    ".asdf/installs", ".asdf/shims", ".local/share/mise/installs", ".local/share/mise/shims",
+    "Library/Application Support/fnm", ".local/share/fnm", ".local/share/pipx", ".local/pipx",
+    ".pyenv/versions", ".pyenv/shims", ".pyenv/libexec", ".pyenv/version", "Library/Python",
+    ".sdkman/candidates", ".dotnet/sdk", ".dotnet/shared", ".dotnet/host", ".dotnet/packs",
+    ".dotnet/templates", ".dotnet/sdk-manifests", ".dotnet/store", ".dotnet/tools", ".gem/ruby",
+    ".rbenv/versions", ".rbenv/shims", ".rbenv/libexec", ".rbenv/version", ".rvm/rubies",
+    ".bun/bin", "Library/Java/JavaVirtualMachines", ".jdks",
+)  # fmt: skip
+# The variable, and the folders under it (none: the whole folder it names).
+TOOL_HOMES = {
+    "JAVA_HOME": (), "GOROOT": (), "GOPATH": (), "GOBIN": (), "RUSTUP_HOME": ("toolchains",
+    "settings.toml"), "CARGO_HOME": ("bin",), "NVM_DIR": (), "NVM_SYMLINK": (), "NODE_PATH": (),
+    "VOLTA_HOME": (), "FNM_DIR": (), "PNPM_HOME": (), "BUN_INSTALL": ("bin",), "DENO_INSTALL": (),
+    "PYENV_ROOT": (), "PIPX_HOME": (), "CONDA_PREFIX": (), "VIRTUAL_ENV": (), "PYTHONPATH": (),
+    "PYTHONHOME": (), "SDKMAN_DIR": ("candidates",), "DOTNET_ROOT": (), "RBENV_ROOT": (),
+    "ASDF_DATA_DIR": (), "MISE_DATA_DIR": (), "MAVEN_HOME": (), "M2_HOME": (), "GRADLE_HOME": (),
+    "ANDROID_HOME": (), "ANDROID_SDK_ROOT": (), "FLUTTER_ROOT": (), "VCPKG_ROOT": (),
+    "GIT_EXEC_PATH": (), "LD_LIBRARY_PATH": (),
+}  # fmt: skip
+# The owner's registry and proxy settings in home it granted to read too: for workers on the
+# owner's own tasks (a private registry), never for one that reads Slack. Gradle's and Cargo's
+# are linked into the tier (owner_settings).
+REGISTRY_CONFIG = (
+    ".npmrc", ".yarnrc", ".yarnrc.yml", ".bunfig.toml", ".m2/settings.xml", ".config/go/env",
+    "Library/Application Support/go/env", ".config/pip/pip.conf", ".pip/pip.conf",
+    "Library/Application Support/pip/pip.conf", ".config/uv/uv.toml", ".bundle/config", ".gemrc",
+    ".nuget/NuGet/NuGet.Config", ".config/NuGet/NuGet.Config", ".conan2/profiles",
+)  # fmt: skip
+MOVED_CONFIG = {
+    "NPM_CONFIG_USERCONFIG": (), "npm_config_userconfig": (), "NPM_CONFIG_GLOBALCONFIG": (),
+    "npm_config_globalconfig": (), "PIP_CONFIG_FILE": (), "UV_CONFIG_FILE": (), "GOENV": (),
+}  # fmt: skip
+
+
+def tool_paths(owner: Owner) -> list[str]:
+    """What workers' commands run, read-only: the toolchains above, uv's Pythons and tools,
+    the Copilot CLI's own tools, the folders on PATH (path_folders)."""
+    found = [*named(owner.home, TOOLCHAINS, TOOL_HOMES), *owner.toolchains()]
+    found.append(owner.copilot_tools())
+    found += path_folders(owner.home)
+    secrets = [owner.home / name for name in REGISTRY_SECRETS]
+    return [
+        str(path)
+        for path in dict.fromkeys(found)
+        if path.exists()
+        and not too_broad(str(path))
+        and not any(secret.is_relative_to(path) for secret in secrets)
+    ]
+
+
+def path_folders(home: Path) -> list[Path]:
+    """Each folder on PATH and, for a bin folder deep enough not to be one of home's own
+    (~/.cargo), the tool's folder above it (its lib, its share)."""
+    found = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        folder = Path(entry)
+        if folder.is_absolute():
+            found.append(folder)
+            above = folder.parent
+            if folder.name in {"bin", "shims"} and home not in {above, above.parent}:
+                found.append(above)
+    return found
+
+
+def global_npmrc() -> list[Path]:
+    """npm's global configuration, beside the node on PATH."""
+    if not (node := shutil.which("node")):
+        return []
+    return [
+        Path(binary).parent.parent / "etc" / "npmrc" for binary in (node, os.path.realpath(node))
+    ]
+
+
+def registry_config(owner: Owner) -> list[str]:
+    """The owner's registry settings that exist, read-only for workers on the owner's own
+    tasks."""
+    found = [*named(owner.home, REGISTRY_CONFIG, MOVED_CONFIG), *global_npmrc()]
+    return [
+        str(path) for path in dict.fromkeys(found) if path.exists() and not too_broad(str(path))
+    ]
 
 
 # What is copied into the tier, per tool: (name, the owner's folder, the tier's folder, the
@@ -500,6 +597,17 @@ def script(
         '-Dorg.gradle.daemon.idletimeout=900000${GRADLE_OPTS:+ $GRADLE_OPTS}"',
         f"export MAVEN_USER_HOME={q(str(t / 'maven'))}",
         f"export PLAYWRIGHT_BROWSERS_PATH={q(str(t / 'ms-playwright'))}",
+        # The other caches Copilot's dev-tool access opened in the owner's home, and any tool
+        # that keeps its cache under XDG_CACHE_HOME (gh's): workers' own too.
+        f"export XDG_CACHE_HOME={q(str(t / 'xdg'))} DENO_DIR={q(str(t / 'deno'))}",
+        f"export npm_config_devdir={q(str(t / 'node-gyp'))}"
+        f" electron_config_cache={q(str(t / 'electron'))}",
+        f"export VIRTUALENV_OVERRIDE_APP_DATA={q(str(t / 'virtualenv'))}"
+        f" BUNDLE_USER_CACHE={q(str(t / 'bundle'))}",
+        f"export NUGET_PACKAGES={q(str(t / 'nuget' / 'packages'))}"
+        f" NUGET_HTTP_CACHE_PATH={q(str(t / 'nuget' / 'http'))}",
+        f"export CCACHE_DIR={q(str(t / 'ccache'))} SCCACHE_DIR={q(str(t / 'sccache'))}"
+        f" HUGO_CACHEDIR={q(str(t / 'hugo'))} BAZELISK_HOME={q(str(t / 'bazelisk'))}",
         f"export TMPDIR={q(str(temporary) + '/')}",
     ]
     maven = f"-Dmaven.repo.local={t / 'maven' / 'repository'}"
@@ -604,7 +712,6 @@ class Plan:
     temporary: Path
     readwrite: list[str]
     readonly: list[str]
-    denied: list[str]
     text: str
     slack: bool
 
@@ -622,16 +729,19 @@ def plan(
     home: Path | None = None,
 ) -> Plan:
     """A worker's caches: the shared tier (a tier of its own in its workspace when it reads
-    Slack, nothing of the owner's copied there), the owner's caches read-only (absent ones
-    closed) and read through, uv's interpreters and tools readable, and its init script.
+    Slack, nothing of the owner's copied there), its toolchains read-only, the owner's caches
+    and registry settings read-only (read through) unless it reads Slack, and its init script.
     Nothing is written here (see prepare)."""
     owner = Owner(home or Path.home())
     own = workspace / PRIVATE if slack else tier
     temporary = worker_temp(session_id)
-    readonly, denied = held_caches(owner.home)
-    readonly += [str(path) for path in owner.toolchains() if path.is_dir()]
+    readonly = tool_paths(owner)
     readonly.append(str(scripts))
     if not slack:
+        # The owner's caches, read through (Gradle's, Maven's, Go's, Playwright's) or not; one
+        # that does not exist yet stays closed (Copilot grants nothing of its own here).
+        readonly += held_caches(owner.home)[0]
+        readonly += registry_config(owner)
         readonly += [str(source) for source, _ in owner_settings(own, owner)]
     readwrite = [str(own), str(temporary)]
     text = script(
@@ -639,7 +749,7 @@ def plan(
         None if slack else truststore_path,
     )  # fmt: skip
     readonly = [path for path in dict.fromkeys(readonly) if not too_broad(path)]
-    return Plan(own, temporary, readwrite, readonly, list(dict.fromkeys(denied)), text, slack)
+    return Plan(own, temporary, readwrite, readonly, text, slack)
 
 
 def prepare(found: Plan, session_id: str, scripts: Path, home: Path | None = None) -> Path | None:

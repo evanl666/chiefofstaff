@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -845,7 +846,9 @@ async def test_workers_write_a_cache_of_their_own_and_read_the_owners(tmp_path, 
         assert str(home / owner) in policy.readonly, f"{owner}: read, never written"
         assert not any(str(home / owner).startswith(path) for path in policy.readwrite), owner
     assert str(home / ".local/share/uv/python") in policy.readonly, "uv's Pythons run"
-    assert str(home / ".cargo/registry") in policy.denied, "none yet: none made"
+    assert not any(str(home / ".cargo") in path for path in policy.denied), (
+        "none yet: closed all the same (Copilot opens nothing of its own), and no empty folder"
+    )
     assert str(home / ".gradle/daemon") in policy.denied, "not the owner's own daemons"
     prompt = harness.session(worker).options["system_message"]["content"]
     assert "GRADLE_RO_DEP_CACHE" not in prompt, "set in its shell, not asked of the model"
@@ -870,6 +873,75 @@ async def test_workers_write_a_cache_of_their_own_and_read_the_owners(tmp_path, 
     assert tier in policy.readwrite and str(home / ".npm") in policy.readonly
     assert "GRADLE_RO_DEP_CACHE" not in runtime.cache_plan(harness.store.session(worker)).text
     assert str(home / "Library/Jupyter/runtime") in policy.denied, "denied before it exists"
+
+
+async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
+    tmp_path, monkeypatch
+):
+    """Copilot's dev-tool access is off for them (it opened the owner's caches read-write, a
+    folder deeper than one held read-only included): their tools, the owner's registry settings
+    and caches are granted read-only by name, and nothing in home is written but their own."""
+    from chiefofstaff.backend import CopilotBackend
+
+    for name in (*MOVED, "JAVA_HOME", "RUSTUP_HOME", "NVM_DIR", "VOLTA_HOME", "PYENV_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    folders = (
+        ".rustup/toolchains", ".cargo/bin", ".nvm/versions/node/v22/bin", ".pyenv/versions",
+        ".sdkman/candidates", "Library/Java/JavaVirtualMachines", "jdk", "tools/maven/bin",
+        ".gradle/wrapper/dists", ".npm", "Library/Caches/copilot/pkg",
+    )  # fmt: skip
+    files = (
+        ".rustup/settings.toml", ".cargo/credentials.toml", ".npmrc", ".m2/settings.xml",
+        ".config/go/env", ".netrc", ".aws/credentials", ".pypirc",
+    )  # fmt: skip
+    for name in folders:
+        (home / name).mkdir(parents=True)
+    for name in files:
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
+        (home / name).write_text("x")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    on_path = [home / ".cargo/bin", home / ".nvm/versions/node/v22/bin", home / "tools/maven/bin"]
+    monkeypatch.setenv("PATH", os.pathsep.join([*map(str, on_path), os.environ["PATH"]]))
+    monkeypatch.setenv("JAVA_HOME", str(home / "jdk"))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    for slack in (0, 1):
+        harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
+        row = harness.store.session(worker)
+        policy = runtime.sandbox_policy(row)
+        assert CopilotBackend(None).sandbox(policy).allow_dev_tool_access is False  # type: ignore[arg-type]
+        tools = (
+            ".rustup/toolchains", ".rustup/settings.toml", ".cargo/bin", ".nvm/versions",
+            ".pyenv/versions", ".sdkman/candidates", "Library/Java/JavaVirtualMachines", "jdk",
+            "tools/maven", "Library/Caches/copilot/pkg",
+        )  # fmt: skip
+        for tool in tools:
+            assert str(home / tool) in policy.readonly, (slack, tool)
+        config = (".npmrc", ".m2/settings.xml", ".config/go/env")
+        for name in config:
+            assert (str(home / name) in policy.readonly) == (not slack), (slack, name)
+        assert (str(home / ".npm") in policy.readonly) == (not slack), "the owner's caches"
+        for secret in (
+            ".cargo",
+            ".cargo/credentials.toml",
+            ".netrc",
+            ".aws/credentials",
+            ".pypirc",
+        ):
+            assert str(home / secret) not in policy.readonly, (slack, secret)
+        own = runtime.cache_plan(row)
+        theirs = [str(own.tier), str(runtime.workspaces.workspace(row)), str(own.temporary)]
+        for path in policy.readwrite:
+            if Path(path).is_relative_to(home):
+                assert any(Path(path).is_relative_to(mine) for mine in theirs), (slack, path)
+        text = own.text
+        for variable in ("XDG_CACHE_HOME", "DENO_DIR", "npm_config_devdir", "CCACHE_DIR"):
+            assert f"export {variable}={own.tier}/" in text or f" {variable}={own.tier}/" in text, (
+                variable
+            )
 
 
 MOVED = (
@@ -1037,7 +1109,7 @@ async def test_chiefs_own_code_is_read_only_for_every_sandboxed_worker(tmp_path,
             assert path not in policy.readwrite
 
 
-async def test_workers_that_read_slack_get_the_owners_caches_read_only(tmp_path, monkeypatch):
+async def test_workers_that_read_slack_get_none_of_the_owners_caches(tmp_path, monkeypatch):
     import sys
 
     for name in MOVED:
@@ -1068,25 +1140,25 @@ async def test_workers_that_read_slack_get_the_owners_caches_read_only(tmp_path,
     assert str(home / ".npm") in policy.readonly, "the owner's own tasks: read-only too"
     assert str(home / ".npmrc") not in policy.denied, "their registry, as in a terminal"
 
+    monkeypatch.setattr(sys, "platform", "linux")
+    policy = runtime.sandbox_policy(harness.store.session(worker))
+    assert str(home / "Library/Caches/pip") in policy.readonly, "another system's place: held too"
+    monkeypatch.setattr(sys, "platform", "darwin")
+
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
     policy = runtime.sandbox_policy(harness.store.session(worker))
     for cache in (".npm", ".cache/uv", ".m2/repository", "Library/Caches/pip", "gh/caches"):
-        assert str(home / cache) in policy.readonly, cache
-        assert not any(str(home / cache).startswith(path) for path in policy.readwrite), cache
+        assert not any(
+            str(home / cache).startswith(path) for path in (*policy.readwrite, *policy.readonly)
+        ), f"{cache}: not even read (Copilot grants nothing of its own)"
     for secret in (*secrets, ".azure"):
         assert str(home / secret) in policy.denied, secret
+        assert str(home / secret) not in policy.readonly, secret
     own = str(runtime.workspaces.workspace(harness.store.session(worker)) / ".caches")
     assert own in policy.readwrite, "a cache of its own, in its workspace"
     assert str(tmp_path / "worker-caches") not in policy.readwrite, "not the others'"
     assert str(home / ".pypirc") not in policy.denied, "no folder left where a file belongs"
-    assert str(home / ".gradle/caches") in policy.denied, "nor a cache made where there is none"
-    assert str(home / ".cache/pip") not in policy.denied, "Linux's place, on macOS: left alone"
-
-    monkeypatch.setattr(sys, "platform", "linux")
-    policy = runtime.sandbox_policy(harness.store.session(worker))
-    assert str(home / ".cache/pip") in policy.denied
-    assert str(home / "Library/Caches/pip") in policy.readonly, "there: held all the same"
-    assert str(home / "Library/Caches/Yarn") not in policy.denied
+    assert str(home / ".gradle/caches") not in policy.denied, "nor where a cache is not yet"
 
 
 def with_origin(repo: Path):

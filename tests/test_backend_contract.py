@@ -367,6 +367,79 @@ async def test_the_sandbox_keeps_what_runs_code_outside_it_read_only(backend, tm
         assert "marker" not in contents(target), target
 
 
+MANIFESTS = {
+    "node": "package.json", "python": "pyproject.toml", "gradle": "build.gradle",
+    "maven": "pom.xml", "go": "go.mod", "rust": "Cargo.toml",
+}  # fmt: skip
+
+
+@pytest.mark.copilot
+async def test_a_sandboxed_workers_commands_write_nothing_in_home_but_their_own(tmp_path):
+    """Copilot's own grants (its dev-tool access: the owner's package caches, read-write, in a
+    project of their kind) stay off: what Copilot enforces for each command, as its policy file
+    has it, lets a worker (one that reads Slack or not) write nothing in home but its workspace,
+    workers' caches, its temporary folder and Copilot's own folder for the session."""
+    if not (REAL and sandbox_supported()):
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 on a machine with Copilot's sandbox.")
+    from conftest import Harness
+    from copilot.generated.rpc import ShellExecuteUserRequestedRequest
+    from test_progress import spawn
+
+    from chiefofstaff.backend import copilot_home
+    from chiefofstaff.models import Settings
+
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    backend = copilot_backend("copilot")
+    await backend.start()
+    home = Path.home().resolve()
+    try:
+        for slack in (0, 1):
+            harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
+            row = harness.store.session(worker)
+            policy = runtime.sandbox_policy(row)
+            assert policy is not None
+            own = runtime.cache_plan(row)
+            workspace = runtime.workspaces.workspace(row)
+            for kind, marker in MANIFESTS.items():
+                project = workspace / kind
+                project.mkdir(parents=True, exist_ok=True)
+                (project / marker).write_text("")
+                session = await backend.create_session(
+                    session_id=str(uuid4()), name="contract test", model=MODEL,
+                    working_directory=str(project), sandbox_config=backend.sandbox(policy),
+                    on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+                )  # fmt: skip
+                try:
+                    await session.rpc.shell.execute_user_requested(
+                        ShellExecuteUserRequestedRequest(command="true", request_id=str(uuid4())),
+                        timeout=120,
+                    )
+                    folder = copilot_home() / "session-state" / session.session_id
+                    files = sorted((folder / "policies").glob("*.json"))
+                    assert files, f"{kind}: Copilot wrote no policy file"
+                    written = json.loads(files[-1].read_text())["filesystem"]["readwritePaths"]
+                finally:
+                    with contextlib.suppress(Exception):
+                        await backend.client.delete_session(session.session_id)
+                theirs = [own.tier, workspace, own.temporary, folder]
+                assert not outside(written, theirs, home), f"{kind}, slack={slack}: writable"
+    finally:
+        await backend.stop()
+
+
+def outside(written: list[str], theirs: list, home: Path) -> list[str]:
+    """What of `written` is in home and in none of `theirs`."""
+    mine = [Path(path).resolve() for path in theirs]
+    return [
+        path
+        for path in written
+        if Path(path).resolve().is_relative_to(home)
+        and not any(Path(path).resolve().is_relative_to(folder) for folder in mine)
+    ]
+
+
 def contents(path) -> str:
     return path.read_text() if path.exists() else ""
 

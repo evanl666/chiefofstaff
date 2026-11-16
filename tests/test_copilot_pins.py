@@ -67,6 +67,8 @@ def machine(tmp_path, monkeypatch):
         "CHIEFOFSTAFF_ROUTER_CONTEXT",
         *workspaces_module.MOVED_CACHES,
         *workspaces_module.MOVED_SECRETS,
+        *caches_module.TOOL_HOMES,
+        *caches_module.MOVED_CONFIG,
     ):
         monkeypatch.delenv(name, raising=False)
     # Chief of Staff's own code (where this Python runs from) and each system's own cache
@@ -75,6 +77,8 @@ def machine(tmp_path, monkeypatch):
     chief.mkdir()
     monkeypatch.setattr(runtime_module, "own_code", lambda: [str(chief)])
     monkeypatch.setattr(caches_module, "worker_temp", lambda session: tmp_path / f"t-{session[:8]}")
+    monkeypatch.setattr(caches_module, "path_folders", lambda home: [])
+    monkeypatch.setattr(caches_module, "global_npmrc", list)
     caches = workspaces_module.PLATFORM_CACHES["darwin"]
     monkeypatch.setattr(workspaces_module, "PLATFORM_CACHES", {"darwin": caches, "linux": caches})
     return SimpleNamespace(root=tmp_path, home=home, copilot=copilot)
@@ -311,18 +315,18 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "slack, created": (4501, "45e96f706f8f884c1ad15e268e2717480a4482bd75697b9db1a83afe2a21275f"),
     "slack, resumed": (4466, "90e994a20c3bcaadb98e628effd8a48499f866cc408d11fc19b63cbcb3fed734"),
     "the Copilot sandbox of a worker asking first": (
-        1881,
-        "0225cf167e01b754ff725d415afc49d9c4a42f0a23eea82d445d498d7ce2d09d",
+        1048,
+        "e1944173dbbc978b3c2c60b512aff563b022de64be7c58e7368644a857fcf19a",
     ),
     "watchdog, created": (3317, "74c2464eda92b08d7c0c2f0be7e9c18d5b80e0b4d7d7db7c5cbf22099bd3f111"),
     "watchdog, resumed": (3279, "3211b0fe48200b7a8b7e24baa9eca2c19608f7f40a7c4282665e9ca51f11ca54"),
     "worker asking first, sandboxed, created": (
-        20590,
-        "1e2528af5b55af34bf8cab126e69d152d1a3162f909c402beb4709ac64aace27",
+        19782,
+        "bdaf590c3189ad225fbd91fdca8dfef160e70da36c856a27e4c7a27fa9b368d5",
     ),
     "worker asking first, sandboxed, resumed": (
-        20545,
-        "3908f14756bdd11e48f034105eab11018db361ff2ca83f7803ce8f733f88692a",
+        19737,
+        "cfec460b6722445773cf54464d4be9af36927958091f762344a814fa0cdbdcf8",
     ),
     "worker in a trusted worktree, created": (
         18688,
@@ -333,12 +337,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "975d250bcb72472a04af36a9893065147566a7f2f0c36c4f60f2ce192f3b28d3",
     ),
     "worker that reads Slack, created": (
-        21086,
-        "f50aac348cfa9e6190e77a47465ae45f98d9ce385e35a6879dda24f46da661e7",
+        20208,
+        "632b3026ca8e28c261ce07a17e433aad348b6a97fdc38fd862ccde4f5b83b31a",
     ),
     "worker that reads Slack, resumed": (
-        21039,
-        "0aa5ed98b630561318a401b849c4759fb887c2b8ad5953c5ba644230da088522",
+        20161,
+        "d4e7a48a0cbcbdf8b314bf00dabeca117f166451fdfdcd35b3bb496e6620d0ab",
     ),
     "worker with its model, created": (
         18222,

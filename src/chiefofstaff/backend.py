@@ -344,7 +344,9 @@ class CopilotBackend:
             # added just because the session started there.
             add_current_working_directory=False,
             allow_bypass=False,
-            allow_dev_tool_access=True,
+            # Not Copilot's own grants to the owner's caches (read-write) and tools: the policy
+            # names what a worker reads and writes (caches.py).
+            allow_dev_tool_access=False,
             # MCP servers are what the owner or their company configured, not what an agent
             # wrote: they run as they do in Copilot, with their own sign-ins and network.
             sandbox_mcp_servers=False,

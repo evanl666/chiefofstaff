@@ -347,10 +347,16 @@ temporary folder, before each command (nothing in its instructions): installs an
 in your terminal, including uv's Pythons and tools (pre-commit, poetry), corepack's pnpm and Yarn,
 Maven's wrapper and Gradle (in the sandbox, Gradle runs without its native libraries and with
 the worker's own daemon). *Start workers' caches from yours* off (Settings) keeps your caches
-out of theirs. The folder can be deleted at any time no worker runs. Workers that read Slack have
-caches of their own in their workspace, and can't read the registry and credential files build
-tools use (`~/.npmrc`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.pypirc`,
-`~/.netrc`, `~/.git-credentials`, `~/.aws/credentials`…). No worker can change Chief of Staff's
+out of theirs. The folder can be deleted at any time no worker runs. Copilot's own *dev-tool
+access* (which opened your caches read-write) is off for sandboxed workers: nothing in your home
+is writable to them but that folder, and they read only what Chief of Staff names: their
+toolchains (what is on your `PATH`, rustup's, nvm's, pyenv's, SDKMAN's toolchains, JDKs, uv's
+Pythons…) and, for workers on your own tasks, your package caches and registry settings
+(`~/.npmrc`, `~/.m2/settings.xml`, pip's, uv's and Go's configuration…). Workers that read Slack
+have caches of their own in their workspace, can't read yours, and can't read the registry and
+credential files build tools use (`~/.npmrc`, `~/.m2/settings.xml`,
+`~/.gradle/gradle.properties`, `~/.pypirc`, `~/.netrc`, `~/.git-credentials`,
+`~/.aws/credentials`…). No worker can change Chief of Staff's
 own code or the Python it runs on, unless you asked it to work in place in Chief of Staff's own
 checkout. Before a worker's worktree is made, only origin's default branch is fetched, once for
 workers that start together.
