@@ -339,29 +339,37 @@ which they all share: what one worker downloads, the next one finds. Your own ca
 read-only to them, so a worker can never change what your builds run, yet nothing you already
 have is downloaded again: Gradle reads your dependency cache, Maven your local repository and Go
 your module downloads directly; Playwright finds your browsers through links; the rest (npm's,
-pnpm's, Yarn's, Bun's, pip's, uv's, poetry's, pre-commit's, corepack's and Cargo's caches,
-Gradle's and Maven's distributions, Go's build cache) is copied from yours in the background as
-copy-on-write clones, which take next to no disk space (on Linux, only on a file system with
-reflinks, such as Btrfs or XFS). Each worker's shell gets the tools pointed there, and its own
-temporary folder, before each command (nothing in its instructions): installs and builds work as
-in your terminal, including uv's Pythons and tools (pre-commit, poetry), corepack's pnpm and Yarn,
-Maven's wrapper and Gradle (in the sandbox, Gradle runs without its native libraries and with
-the worker's own daemon). Your caches are found where your own configuration in home keeps them
-(`cache=` in `~/.npmrc`, pip's `cache-dir`, Maven's `localRepository`…), never where a
-project's says. *Start workers' caches from yours* off (Settings) keeps your caches
-out of theirs. The folder can be deleted at any time no worker runs. Copilot's own *dev-tool
-access* (which opened your caches read-write) is off for sandboxed workers: nothing in your home
-is writable to them but that folder, and they read only what Chief of Staff names: their
-toolchains (what is on your `PATH`, nvm's, pyenv's, SDKMAN's toolchains, JDKs, uv's Pythons,
-rustup's for a Rust project…) and, for workers on your own tasks, your package caches and registry settings
-(`~/.npmrc`, `~/.m2/settings.xml`, pip's, uv's and Go's configuration…). Workers that read Slack
-have caches of their own in their workspace, can't read yours, and can't read the registry and
-credential files build tools use (`~/.npmrc`, `~/.m2/settings.xml`,
-`~/.gradle/gradle.properties`, `~/.pypirc`, `~/.netrc`, `~/.git-credentials`,
-`~/.aws/credentials`…). No worker can change Chief of Staff's
-own code or the Python it runs on, unless you asked it to work in place in Chief of Staff's own
-checkout. Before a worker's worktree is made, only origin's default branch is fetched, once for
-workers that start together.
+pnpm's, Yarn's, Bun's, pip's, uv's, poetry's, pre-commit's, corepack's, Cargo's, NuGet's, deno's,
+Electron's, ccache's and sccache's caches, Gradle's and Maven's distributions, Go's build cache)
+is copied from yours in the background as copy-on-write clones, which take next to no disk space.
+Where the disk cannot clone (Linux on ext4, or your caches on another volume), they are copied
+instead, up to 8 GB and a quarter of the free space: the first worker after Chief of Staff
+starts may download what that left out, once, for all workers after it. Each pass looks again
+only at folders of yours that changed. Each worker's shell gets the tools pointed there, and a
+temporary folder of its own, before each command (nothing in its instructions): installs and
+builds work as in your terminal, including uv's Pythons and tools (pre-commit, poetry, `uvx`),
+corepack's pnpm and Yarn, Maven's wrapper, `go get`, and Gradle (in the sandbox, Gradle runs
+without its native libraries and with the worker's own daemon). Your caches are found where
+your own configuration in home keeps them (`cache=` in `~/.npmrc`, pip's `cache-dir`, Maven's
+`localRepository`…), never where a project's says. *Start workers' caches from yours* off
+(Settings) keeps your caches out of theirs. **Storage** shows the folder's size, and *Clear*
+deletes it (it is made again as the next worker starts, and filled again from yours).
+
+Copilot's own *dev-tool access* (which opened your caches read-write) is off for sandboxed
+workers: nothing in your home is writable to them but that folder and their own temporary
+folders beside it, and they read only what Chief of Staff names: their toolchains (what is on
+your `PATH`, so tools installed under `~/.local/bin` too; nvm's, pyenv's, asdf's, mise's,
+SDKMAN's toolchains, JDKs, uv's Pythons, rustup's for a Rust project…) and, for workers on your
+own tasks, your package caches and what a private registry needs (`~/.npmrc`,
+`~/.m2/settings.xml` and `settings-security.xml`, pip's, uv's, poetry's and Go's configuration,
+`~/.netrc`, Cargo's credentials…), as in your terminal. Workers that read Slack have caches of
+their own in their workspace, can't read yours, and can't read the registry and credential files
+build tools use (`~/.npmrc`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.pypirc`,
+`~/.netrc`, `~/.git-credentials`, `~/.aws/credentials`…). Chief of Staff itself never writes
+through a link a worker made in those folders. No worker can change Chief of Staff's own code
+or the Python it runs on, unless you asked it to work in place in Chief of Staff's own checkout.
+Before a worker's worktree is made, only origin's default branch is fetched, once for workers
+that start together.
 
 Some tools behave differently inside the sandbox on macOS: Playwright's Chromium runs in a single
 process (the sandbox refuses the others it would start; Firefox, WebKit and full Chrome can't
@@ -374,9 +382,8 @@ Hooks of your Copilot plugins run in the sandbox too. One that writes elsewhere 
 fails there; the worker carries on and its timeline notes it once. To let it write, add its
 folder under *Also writable in the sandbox*.
 
-Inside the sandbox, a worker cannot use your keychain, Docker, Kerberos tickets, tools installed
-under `~/.local`, or read your home and other repositories, and `gh` needs Copilot's certificate
-trusted. That is the price of the confinement; with the sandbox off they work as in your
+Inside the sandbox, a worker cannot use your keychain, Docker or Kerberos tickets, or read your
+home and other repositories, and `gh` needs Copilot's certificate trusted. That is the price of the confinement; with the sandbox off they work as in your
 terminal.
 
 ### Disk space

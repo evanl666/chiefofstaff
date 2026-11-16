@@ -18,6 +18,7 @@ A worker that reads Slack gets a tier of its own in its workspace, nothing copie
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -27,10 +28,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from .safefs import CannotCloneError, Folder, UnsafePathError, open_folder
 from .workspaces import REGISTRY_SECRETS, held_caches, named, too_broad
@@ -162,6 +165,17 @@ class Owner:
         )
         return env_dir("npm_config_store_dir", mine)
 
+    def pnpm_store_named(self) -> bool:
+        """Whether the owner's environment or configuration names pnpm's store (which then
+        wins over workers' PNPM_HOME)."""
+        settings = self.home / "Library" / "Preferences" if self.mac else xdg_config(self.home)
+        return bool(
+            os.environ.get("npm_config_store_dir")  # noqa: SIM112  (npm reads either case)
+            or os.environ.get("NPM_CONFIG_STORE_DIR")
+            or config_value(self.npmrc(), "store-dir")
+            or config_value(settings / "pnpm" / "rc", "store-dir")
+        )
+
     def uv(self) -> Path:
         settings = env_dir("UV_CONFIG_FILE", xdg_config(self.home) / "uv" / "uv.toml")
         mine = self.configured(toml_value(settings, "cache-dir")) or xdg_cache(self.home) / "uv"
@@ -222,6 +236,40 @@ class Owner:
     def playwright(self) -> Path:
         return env_dir("PLAYWRIGHT_BROWSERS_PATH", self.caches() / "ms-playwright")
 
+    def cache(self, mac: str, linux: str) -> Path:
+        """A cache in the system's cache folder: ~/Library/Caches/<mac>, $XDG_CACHE_HOME/<linux>."""
+        return self.caches() / mac if self.mac else xdg_cache(self.home) / linux
+
+    def yarn_classic(self) -> Path:
+        return env_dir("YARN_CACHE_FOLDER", self.cache("Yarn", "yarn"))
+
+    def node_gyp(self) -> Path:
+        return self.cache("node-gyp", "node-gyp")
+
+    def electron(self) -> Path:
+        return env_dir("electron_config_cache", self.cache("electron", "electron"))
+
+    def deno(self) -> Path:
+        return env_dir("DENO_DIR", self.cache("deno", "deno"))
+
+    def ccache(self) -> Path:
+        return env_dir("CCACHE_DIR", self.cache("ccache", "ccache"))
+
+    def sccache(self) -> Path:
+        return env_dir("SCCACHE_DIR", self.cache("Mozilla.sccache", "sccache"))
+
+    def nuget(self) -> Path:
+        return env_dir("NUGET_PACKAGES", self.home / ".nuget" / "packages")
+
+    def virtualenv(self) -> Path:
+        data = self.home / "Library" / "Application Support" if self.mac else (
+            env_dir("XDG_DATA_HOME", self.home / ".local" / "share")
+        )  # fmt: skip
+        return data / "virtualenv"
+
+    def bundle(self) -> Path:
+        return env_dir("BUNDLE_USER_CACHE", self.home / ".bundle" / "cache")
+
     def toolchains(self) -> list[Path]:
         """Interpreters and tools uv installed (pre-commit, poetry…): read and run, never
         written. Copilot opens neither, so they fail in its sandbox."""
@@ -252,7 +300,8 @@ TOOLCHAINS = (
     ".sdkman/candidates", ".dotnet/sdk", ".dotnet/shared", ".dotnet/host", ".dotnet/packs",
     ".dotnet/templates", ".dotnet/sdk-manifests", ".dotnet/store", ".dotnet/tools", ".gem/ruby",
     ".rbenv/versions", ".rbenv/shims", ".rbenv/libexec", ".rbenv/version", ".rvm/rubies",
-    ".bun/bin", "Library/Java/JavaVirtualMachines", ".jdks",
+    ".bun/bin", "Library/Java/JavaVirtualMachines", ".jdks", ".tool-versions",
+    ".config/mise/config.toml",
 )  # fmt: skip
 # The variable, and the folders under it (none: the whole folder it names).
 TOOL_HOMES = {
@@ -279,10 +328,19 @@ REGISTRY_CONFIG = (
     "Library/Application Support/go/env", ".config/pip/pip.conf", ".pip/pip.conf",
     "Library/Application Support/pip/pip.conf", ".config/uv/uv.toml", ".bundle/config", ".gemrc",
     ".nuget/NuGet/NuGet.Config", ".config/NuGet/NuGet.Config", ".conan2/profiles",
+    # And the credentials a private registry needs, which it let them read as well: the
+    # owner's own tasks build as in their terminal (never for one that reads Slack).
+    ".netrc", ".cargo/credentials", ".cargo/credentials.toml", ".m2/settings-security.xml",
+    "Library/Application Support/pypoetry/auth.toml",
+    "Library/Application Support/pypoetry/config.toml", ".config/pypoetry/auth.toml",
+    ".config/pypoetry/config.toml", ".gradle/init.gradle", ".gradle/init.gradle.kts",
 )  # fmt: skip
 MOVED_CONFIG = {
     "NPM_CONFIG_USERCONFIG": (), "npm_config_userconfig": (), "NPM_CONFIG_GLOBALCONFIG": (),
     "npm_config_globalconfig": (), "PIP_CONFIG_FILE": (), "UV_CONFIG_FILE": (), "GOENV": (),
+    "NETRC": (), "CARGO_HOME": ("credentials", "credentials.toml"),
+    "POETRY_CONFIG_DIR": ("auth.toml", "config.toml"),
+    "GRADLE_USER_HOME": ("init.gradle", "init.gradle.kts"),
 }  # fmt: skip
 
 
@@ -311,13 +369,27 @@ def unsecret(paths: list[Path], home: Path) -> list[str]:
     ]
 
 
-def rust_project(folders: list[Path]) -> bool:
-    """Whether one of these folders is a Rust project, or has one up to two folders down."""
-    for folder in folders:
-        for pattern in ("", "*/", "*/*/"):
-            with suppress(OSError):
-                if any(next(folder.glob(pattern + marker), None) for marker in RUST_MARKERS):
-                    return True
+def rust_project(folders: list[Path], depth: int = 4) -> bool:
+    """Whether one of these folders is a Rust project, or has one up to `depth` folders down
+    (a maturin package deep in a monorepo), never looking into node_modules, a hidden folder or
+    through a link. Looked at once as a worker opens, in a thread."""
+    pending = [(folder, 0) for folder in folders]
+    while pending:
+        here, level = pending.pop()
+        try:
+            entries = list(os.scandir(here))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in RUST_MARKERS and not entry.is_dir(follow_symlinks=False):
+                return True
+            if (
+                level < depth
+                and entry.is_dir(follow_symlinks=False)
+                and not entry.name.startswith(".")
+                and entry.name != "node_modules"
+            ):
+                pending.append((Path(entry.path), level + 1))
     return False
 
 
@@ -363,7 +435,7 @@ def seeds(owner: Owner) -> list[tuple[str, Path, str, int]]:
     return [
         ("npm", owner.npm() / "_cacache", "npm/_cacache", 0),
         ("npm", owner.npm() / "_npx", "npm/_npx", 1),
-        ("pnpm", owner.pnpm_store(), "pnpm-store", 0),
+        ("pnpm", owner.pnpm_store(), "pnpm/store", 0),
         ("yarn", owner.yarn(), "yarn-berry/cache", 0),
         ("bun", owner.bun(), "bun", 1),
         ("pip", owner.pip(), "pip", 0),
@@ -382,6 +454,19 @@ def seeds(owner: Owner) -> list[tuple[str, Path, str, int]]:
         ("gradle", gradle / "wrapper" / "dists", "gradle/wrapper/dists", 2),
         ("maven", maven / "wrapper" / "dists", "maven/wrapper/dists", 2),
         ("go", owner.go_build(), "go/build", 0),
+        # Those the init script moves for tools Copilot's dev-tool access opened (Yarn 1's on
+        # Linux under XDG_CACHE_HOME, on macOS through the worker's temporary folder).
+        ("yarn1", owner.yarn_classic(), "xdg/yarn" if not owner.mac else "yarn-classic", 2),
+        ("cargo", cargo / "git" / "db", "cargo/git/db", 1),
+        ("cargo", cargo / "git" / "checkouts", "cargo/git/checkouts", 2),
+        ("nuget", owner.nuget(), "nuget/packages", 2),
+        ("electron", owner.electron(), "electron", 0),
+        ("deno", owner.deno(), "deno", 0),
+        ("ccache", owner.ccache(), "ccache", 0),
+        ("sccache", owner.sccache(), "sccache", 0),
+        ("virtualenv", owner.virtualenv(), "virtualenv", 0),
+        ("bundle", owner.bundle(), "bundle", 0),
+        *([] if owner.mac else [("node-gyp", owner.node_gyp(), "xdg/node-gyp", 1)]),
     ]
 
 
@@ -391,14 +476,37 @@ def seeds(owner: Owner) -> list[tuple[str, Path, str, int]]:
 # sandboxed worker writes too, goes through safefs: never through a link a worker made.
 
 
-def place(source: Path, into: Folder, name: str) -> bool:
-    """Clone `source` to `name` in `into` whole: under another name first, then renamed, so
-    that no tool ever finds half of it. Nothing is overwritten."""
+class Budget:
+    """What seeding may still copy (not clone) where the file system cannot clone (ext4, another
+    volume): a whole copy of the owner's caches takes their space again."""
+
+    def __init__(self, left: int):
+        self.left = left
+        self.copied = 0
+
+    def take(self, size: int) -> bool:
+        if size > self.left:
+            return False
+        self.left -= size
+        self.copied += size
+        return True
+
+
+def place(source: Path, into: Folder, name: str, budget: Budget | None = None) -> bool:
+    """Clone `source` to `name` in `into` whole (copied within `budget` where this file system
+    cannot clone): under another name first, then renamed, so that no tool ever finds half of
+    it. Nothing is overwritten."""
     if into.lstat(name) is not None:
         return False
     temporary = into.temporary_name(name).replace(".cos-", ".cos-seed-", 1)
     try:
-        if not into.clone(source, temporary):
+        try:
+            made = into.clone(source, temporary)
+        except CannotCloneError:
+            if budget is None or not budget.take(size_of(source)):
+                raise
+            made = into.copy_tree(source, temporary)
+        if not made:
             return False
         if into.lstat(name) is not None:
             return False  # A worker made it meanwhile: its own stays.
@@ -413,8 +521,26 @@ def place(source: Path, into: Folder, name: str) -> bool:
             into.remove(temporary)
 
 
-def fill(source: Path, target: Folder, depth: int) -> int:
-    """Clone into the `target` folder each unit of `source` it lacks (see seeds); how many."""
+def size_of(path: Path) -> int:
+    """The bytes of a file, or of all the files of a folder (not through links)."""
+    found = path.lstat()
+    if not stat.S_ISDIR(found.st_mode):
+        return found.st_size
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            with suppress(OSError):
+                total += (Path(root) / name).lstat().st_size
+    return total
+
+
+def fill(
+    source: Path, target: Folder, depth: int, budget: Budget | None = None,
+    seen: dict[str, int] | None = None,
+) -> int:  # fmt: skip
+    """Clone into the `target` folder each unit of `source` it lacks (see seeds); how many.
+    `seen`: each folder's modification time when it was last filled from, updated: one that has
+    not changed since is not looked at again (a million-file store, every pass)."""
     if not source.is_dir() or source.is_symlink():
         return 0
     copied = 0
@@ -422,21 +548,62 @@ def fill(source: Path, target: Folder, depth: int) -> int:
         here = Path(root)
         relative = here.relative_to(source).parts
         level = len(relative)
+        if depth and level == depth - 1:
+            names, folders[:] = [*folders, *files], []
+        else:
+            names = files if not depth or level < depth - 1 else [*folders, *files]
+        folders[:] = [name for name in folders if not name.startswith(".cos-")]
+        key = "/".join(relative)
+        try:
+            changed = here.stat().st_mtime_ns
+        except OSError:
+            continue
+        if seen is not None and seen.get(key) == changed:
+            continue  # Nothing added or removed here since: its files are in the tier.
         try:
             into = target.descend(relative, create=True)
         except (UnsafePathError, NotADirectoryError):
             folders[:] = []  # A worker's link or file there: not filled through.
             continue
         with into:
-            names = files if not depth or level < depth - 1 else [*folders, *files]
-            if depth and level == depth - 1:
-                folders[:] = []
-            folders[:] = [name for name in folders if not name.startswith(".cos-")]
+            done = True
             for name in names:
                 if name.startswith((".cos-", ".tmp", "tmp")) or name.endswith(".lock"):
                     continue
-                copied += place(here / name, into, name)
+                if into.lstat(name) is not None:
+                    continue
+                if place(here / name, into, name, budget):
+                    copied += 1
+                else:
+                    done = False  # Tried again next pass.
+        if seen is not None and done:
+            seen[key] = changed
     return copied
+
+
+def clear(tier: Path) -> None:
+    """Workers' caches deleted (made again as the next worker starts, filled again by the next
+    seeding): moved aside in one rename first, out of every worker's reach, then deleted by
+    folder descriptors, never following a link, made writable where a tool left them read-only
+    (Go's modules). Also what an earlier clear left, and what seeding knew it had filled."""
+    from .workspaces import rmtree_writable
+
+    parent = tier.parent
+    with open_folder(parent, parent, create=True) as folder:
+        if folder.lstat(tier.name) is not None:
+            folder.move(tier.name, f".clearing-{uuid4().hex[:8]}")
+        with suppress(OSError):
+            folder.remove(SEEDED)
+        aside = [name for name in folder.names() if name.startswith(".clearing-")]
+    for name in aside:
+        rmtree_writable(parent / name, parent)
+
+
+def copied_bytes(tier: Path) -> int:
+    """What seeding copied (not cloned) into the tier, where the file system cannot clone."""
+    with suppress(OSError, ValueError), open_folder(tier.parent / SEEDED, tier.parent) as notes:
+        return int(json.loads(notes.read("state.json") or b"{}").get("copied", 0))
+    return 0
 
 
 def tier_folder(tier: Path, trusted: Path | None = None) -> Folder:
@@ -445,29 +612,44 @@ def tier_folder(tier: Path, trusted: Path | None = None) -> Folder:
     return open_folder(tier, trusted or tier.parent, create=True, relink=True)
 
 
+SEEDED = "seeded"  # Beside the tier: what each pass found (fill's `seen`), and what it copied.
+COPY_BUDGET = 8 * 1024**3  # At most this much copied, not cloned (and a quarter of free space).
+
+
 def seed(tier: Path, owner: Owner) -> dict:
-    """Fill the tier from the owner's caches: what it lacks of them, cloned. Each tool's time,
-    in seconds, and whether this file system can clone at all."""
+    """Fill the tier from the owner's caches: what it lacks of them, cloned (copied where this
+    file system cannot clone, within COPY_BUDGET), each tool on its own: one that fails or
+    cannot be cloned never stops the others. Each tool's time, in seconds, and what it took."""
     timings: dict = {}
     started = time.monotonic()
-    with tier_folder(tier) as root:
+    with (
+        open_folder(tier.parent / SEEDED, tier.parent, create=True, mode=0o700) as notes,
+        tier_folder(tier) as root,
+    ):
+        state = json.loads(notes.read("state.json") or b"{}")
+        free = shutil.disk_usage(tier).free
+        budget = Budget(max(0, min(COPY_BUDGET, free // 4) - state.get("copied", 0)))
         for name, source, into, depth in seeds(owner):
             began = time.monotonic()
+            key = hashlib.sha256(f"{source}:{into}".encode()).hexdigest()[:16]
+            seen = state.setdefault("seen", {}).setdefault(key, {})
             try:
                 with root.descend(Path(into).parts, create=True) as folder:
-                    count = fill(source, folder, depth)
+                    count = fill(source, folder, depth, budget, seen)
             except UnsafePathError:
                 logger.warning("Workers' %s cache is a link: not filled", name)
                 continue
             except CannotCloneError as exc:
-                logger.info("Workers' caches are not copied from yours here: %s", exc)
-                timings["cannot_clone"] = str(exc)
-                break
+                timings[f"{name}_not_copied"] = str(exc)
+                continue
             except OSError:
                 logger.warning("Copying your %s cache for workers stopped", name, exc_info=True)
                 continue
             timings[name] = round(timings.get(name, 0) + time.monotonic() - began, 2)
             timings[f"{name}_copied"] = timings.get(f"{name}_copied", 0) + count
+        state["copied"] = state.get("copied", 0) + budget.copied
+        notes.write("state.json", json.dumps(state))
+    timings["copied_bytes"] = state["copied"]
     timings["total"] = round(time.monotonic() - started, 2)
     return timings
 
@@ -486,22 +668,27 @@ def link_browsers(tier: Folder, owner: Owner) -> None:
         if system() == "darwin":
             for name in target.names():
                 if name.startswith("chromium_headless_shell-"):
-                    with suppress(OSError), target.child(name) as shell:
-                        for kind in shell.names():
-                            if shell.is_folder(kind):
-                                with shell.child(kind) as folder:
-                                    launch_downloaded(shell, folder, "chrome-headless-shell")
+                    try:
+                        with target.child(name) as shell:
+                            for kind in shell.names():
+                                if shell.is_folder(kind):
+                                    with shell.child(kind) as folder:
+                                        launch_downloaded(shell, folder, "chrome-headless-shell")
+                    except OSError as exc:
+                        logger.info("Workers' %s: no launcher (%s)", name, exc)
         with suppress(OSError):
             if not source.is_dir() or os.path.samestat(source.stat(), os.fstat(target.fd or 0)):
                 return
         for entry in sorted(source.iterdir()) if source.is_dir() else []:
             if not entry.is_dir() or entry.name.startswith("."):
                 continue
-            if system() == "darwin" and entry.name.startswith("chromium_headless_shell-"):
-                single_process_shell(entry, target)
-            else:
-                with suppress(FileExistsError):
+            try:
+                if system() == "darwin" and entry.name.startswith("chromium_headless_shell-"):
+                    single_process_shell(entry, target)
+                elif target.lstat(entry.name) is None:
                     target.symlink(entry.name, entry)
+            except OSError as exc:  # Another worker starting made it meanwhile, or the like.
+                logger.info("Your browser %s for workers: %s", entry.name, exc)
 
 
 # Chromium checks in a Mach service when it starts its other processes, which Copilot's macOS
@@ -574,6 +761,12 @@ def owner_settings(tier: Path, owner: Owner) -> list[tuple[Path, Path]]:
         (owner.gradle() / "init.d", tier / "gradle" / "init.d"),
         (owner.cargo() / "config.toml", tier / "cargo" / "config.toml"),
         (owner.cargo() / "config", tier / "cargo" / "config"),
+        # A private registry's tokens, which the owner's builds use: read-only to workers on
+        # the owner's own tasks (registry_config), never linked for one that reads Slack.
+        (owner.cargo() / "credentials.toml", tier / "cargo" / "credentials.toml"),
+        (owner.cargo() / "credentials", tier / "cargo" / "credentials"),
+        (owner.gradle() / "init.gradle", tier / "gradle" / "init.gradle"),
+        (owner.gradle() / "init.gradle.kts", tier / "gradle" / "init.gradle.kts"),
     ]
     return [(source, link) for source, link in pairs if source.exists()]
 
@@ -584,20 +777,51 @@ def link_settings(tier: Folder, owner: Owner) -> None:
             parent = tier.descend(link.parent.relative_to(tier.path).parts, create=True)
         except (UnsafePathError, NotADirectoryError):
             continue
-        with parent:
+        with parent, suppress(OSError):  # Each on its own: one that fails stops no other.
             found = parent.lstat(link.name)
             if found and stat.S_ISLNK(found.st_mode) and parent.readlink(link.name) != str(source):
                 parent.delete(link.name)  # A worker pointed it elsewhere: put back.
                 found = None
             if found is None:
-                with suppress(FileExistsError):
-                    parent.symlink(link.name, source)
+                parent.symlink(link.name, source)
 
 
 # uv before 0.9.29 panics in Copilot's macOS sandbox: its HTTP client reads the system's proxy
 # settings from a service the sandbox closes ("Attempted to create a NULL object"), and no
 # setting skips that (system-configuration 0.7, in uv 0.9.29, handles it).
 UV_FIXED = (0, 9, 29)
+
+
+def uv_stamp() -> tuple[str, int]:
+    """Which uv the owner's shell finds, and when it last changed (an upgrade): uv is looked at
+    again when this does."""
+    path = shutil.which("uv") or ""
+    with suppress(OSError):
+        return path, Path(path).stat().st_mtime_ns if path else 0
+    return path, 0
+
+
+def node_headers() -> bool | None:
+    """Whether node-gyp's headers for the node on PATH are already in the owner's cache (read
+    from there, they need no folder of workers' own); None without node."""
+    if not (node := shutil.which("node")):
+        return None
+    try:
+        found = subprocess.run(  # noqa: S603  (the owner's node, as their shell finds it)
+            [node, "-p", "process.versions.node"], capture_output=True, text=True, timeout=20,
+            check=False,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return None
+    version = found.stdout.strip()
+    return bool(version) and (Owner(Path.home()).node_gyp() / version / "installVersion").is_file()
+
+
+def authority_stamp(copilot_home: Path) -> int:
+    """When Copilot's lasting certificate authority was made (0: there is none)."""
+    with suppress(OSError):
+        return (copilot_home / "credential-proxy-ca" / "ca.pem").stat().st_mtime_ns
+    return 0
 
 
 def old_uv() -> str:
@@ -659,6 +883,7 @@ def script(
     read_through: bool,
     goproxy: str,
     truststore: Path | None,
+    devdir: bool = False,
 ) -> str:
     """A worker's shell init script: every tool pointed at the tier, read through to the
     owner's caches where the tool can (`read_through`), a temporary folder of its own, the JVM
@@ -668,7 +893,9 @@ def script(
     lines = [
         "# Chief of Staff: where this worker's tools keep their caches (rewritten at each start).",
         f"export npm_config_cache={q(str(t / 'npm'))}",
-        f"export npm_config_store_dir={q(str(t / 'pnpm-store'))}",
+        # pnpm's store, in its home (not npm_config_store_dir, which npm 11.5 and later warns
+        # about at every command), unless the owner's own configuration names one.
+        f"export PNPM_HOME={q(str(t / 'pnpm'))}",
         # npm's and pnpm's checks for a newer version of themselves: pnpm can't record one in
         # the sandbox, so it fetched its own package list (0.7 MB) at every install.
         "export npm_config_update_notifier=false",
@@ -681,7 +908,9 @@ def script(
         f"export POETRY_CACHE_DIR={q(str(t / 'poetry'))} POETRY_VIRTUALENVS_IN_PROJECT=true",
         f"export PRE_COMMIT_HOME={q(str(t / 'pre-commit'))} COREPACK_HOME={q(str(t / 'corepack'))}",
         f"export CARGO_HOME={q(str(t / 'cargo'))}",
-        f"export GOMODCACHE={q(str(t / 'go' / 'mod'))} GOCACHE={q(str(t / 'go' / 'build'))}",
+        # GOPATH too: Go writes its checksum database's state there (pkg/sumdb) at `go get`.
+        f"export GOPATH={q(str(t / 'go'))} GOMODCACHE={q(str(t / 'go' / 'mod'))}"
+        f" GOCACHE={q(str(t / 'go' / 'build'))}",
         f"export GRADLE_USER_HOME={q(str(t / 'gradle'))}",
         # Gradle's native libraries would load from that writable folder, which the sandbox
         # refuses; its daemons are this worker's own (a daemon keeps the sandbox it started in).
@@ -693,8 +922,7 @@ def script(
         # The other caches Copilot's dev-tool access opened in the owner's home, and any tool
         # that keeps its cache under XDG_CACHE_HOME (gh's): workers' own too.
         f"export XDG_CACHE_HOME={q(str(t / 'xdg'))} DENO_DIR={q(str(t / 'deno'))}",
-        f"export npm_config_devdir={q(str(t / 'node-gyp'))}"
-        f" electron_config_cache={q(str(t / 'electron'))}",
+        f"export electron_config_cache={q(str(t / 'electron'))}",
         f"export VIRTUALENV_OVERRIDE_APP_DATA={q(str(t / 'virtualenv'))}"
         f" BUNDLE_USER_CACHE={q(str(t / 'bundle'))}",
         f"export NUGET_PACKAGES={q(str(t / 'nuget' / 'packages'))}"
@@ -703,6 +931,12 @@ def script(
         f" HUGO_CACHEDIR={q(str(t / 'hugo'))} BAZELISK_HOME={q(str(t / 'bazelisk'))}",
         f"export TMPDIR={q(str(temporary) + '/')}",
     ]
+    if owner.pnpm_store_named():
+        lines.append(f"export npm_config_store_dir={q(str(t / 'pnpm' / 'store'))}")
+    if devdir:
+        # node-gyp's headers: on macOS only this moves them (on Linux XDG_CACHE_HOME does),
+        # wanted only when the owner's own lack the node on PATH's (npm 11.5 warns about it).
+        lines.append(f"export npm_config_devdir={q(str(t / 'node-gyp'))}")
     maven = f"-Dmaven.repo.local={t / 'maven' / 'repository'}"
     if read_through:
         lines.append(f"export GRADLE_RO_DEP_CACHE={q(str(owner.gradle() / 'caches'))}")
@@ -720,6 +954,8 @@ def script(
         lines.append(
             f'[ -s {q(str(truststore))} ] && export JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS {store}"'
         )
+    # Copilot reports an init script that ends with an error before every command.
+    lines.append("true")
     return "\n".join(lines) + "\n"
 
 
@@ -782,10 +1018,12 @@ def worker_temp(session_id: str, tier: Path | None = None) -> Path:
     return (tier or default_tier()).parent / TEMP / session_id[:8]
 
 
-def make_temp(path: Path) -> bool:
+def make_temp(path: Path, yarn: Path | None = None) -> bool:
     """Make a worker's temporary folder, the owner's alone (0700); False when it cannot be.
     One there already is that worker's own from before (no other can make it there): kept as
-    it is if it is a folder, made again if it is a link or a file."""
+    it is if it is a folder, made again if it is a link or a file. `yarn`: Yarn 1's cache, as
+    it finds it on macOS when its own (~/Library/Caches/Yarn, the owner's) is not writable: in
+    the temporary folder (.yarn-cache-<uid>), linked to workers' own."""
     try:
         with (
             open_folder(path.parent, path.parent.parent, create=True, mode=0o700) as parent,
@@ -795,6 +1033,13 @@ def make_temp(path: Path) -> bool:
                 if os.fstat(own.fd).st_uid != os.getuid():
                     return False
                 os.fchmod(own.fd, 0o700)
+            if (
+                yarn
+                and hasattr(os, "getuid")
+                and own.lstat(name := f".yarn-cache-{os.getuid()}") is None
+            ):
+                with suppress(OSError):
+                    own.symlink(name, yarn)
         return True
     except OSError:
         return False
@@ -832,6 +1077,7 @@ def plan(
     truststore_path: Path | None = None,
     home: Path | None = None,
     rust: bool = False,
+    devdir: bool = False,
 ) -> Plan:
     """A worker's caches: the shared tier (a tier of its own in its workspace when it reads
     Slack, nothing of the owner's copied there), its toolchains read-only, the owner's caches
@@ -857,25 +1103,34 @@ def plan(
     # Nothing of the owner's is read through for a worker that reads Slack: it can't read it.
     text = script(
         own, owner, workspace, temporary, read_through and not slack, go.get("GOPROXY", ""),
-        None if slack else truststore_path,
+        None if slack else truststore_path, devdir and not slack,
     )  # fmt: skip
     readonly = [path for path in dict.fromkeys(readonly) if not too_broad(path)]
     trusted = workspace.parent if slack else tier.parent
     return Plan(own, trusted, temporary, readwrite, readonly, text, slack)
 
 
+PREPARING = threading.Lock()  # One worker readied at a time: two would race for the same links.
+
+
 def prepare(found: Plan, session_id: str, scripts: Path, home: Path | None = None) -> Path | None:
-    """Before a worker's session opens: its folders, the links into the owner's caches, and its
-    init script (in `scripts`, read-only to workers). The script's path; None when its
-    temporary folder could not be made its own."""
+    """Before a worker's session opens: its temporary folder and its init script (in `scripts`,
+    read-only to workers) first, which its tools need; then the links into the owner's
+    browsers and settings, each on its own (one that fails is logged and stops nothing). The
+    script's path; None when its temporary folder could not be made its own."""
     owner = Owner(home or Path.home())
-    with tier_folder(found.tier, found.trusted) as tier:
-        link_browsers(tier, owner)
-        if not found.slack:
-            link_settings(tier, owner)
-    if not make_temp(found.temporary):
-        return None
-    return write_script(scripts, session_id, found.text)
+    with PREPARING:
+        if not make_temp(found.temporary, found.tier / "yarn-classic" if owner.mac else None):
+            return None
+        path = write_script(scripts, session_id, found.text)
+        try:
+            with tier_folder(found.tier, found.trusted) as tier:
+                link_browsers(tier, owner)
+                if not found.slack:
+                    link_settings(tier, owner)
+        except OSError as exc:
+            logger.warning("Worker %s's caches folder: %s", session_id, exc)
+    return path
 
 
 def write_script(folder: Path, session_id: str, text: str) -> Path:

@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import Field
 
-from . import machine
+from . import caches, machine
 from .models import StrictModel
 from .roles import WORKER
 from .store import now
@@ -81,6 +81,7 @@ TITLES_AT_ONCE = 40
 SIZE, KEPT, KEEP = "storage:size:", "storage:kept:", "storage:keep:"
 HISTORY_KEY, LEVEL, NOTE = "storage:history", "storage:level", "storage:note"
 UV_KEY, OTHERS = "storage:uv", "storage:others"
+CACHES_KEY = "storage:worker-caches"
 # What a cleanup could not delete from trash, by path: its size, since when, last tried.
 STUCK = "storage:stuck"
 STUCK_RETRY_SECONDS = 86400
@@ -143,6 +144,7 @@ class Storage:
         self.cleaned_at = float("-inf")
         self.cleaning: set[str] = set()
         self.uv_measuring = False
+        self.caches_busy = ""  # "measuring" or "clearing" workers' caches.
         # What came of the owner's last action on a worker (a cleanup, why not): shown by it.
         self.notes: dict[str, str] = {}
         self.sizes: dict[str, dict] | None = None
@@ -942,6 +944,45 @@ class Storage:
             self.uv_measuring = False
             self.publish()
 
+    async def caches_measure(self) -> dict:
+        """How much sandboxed workers' own caches take (caches.py), measured when asked."""
+        if not self.caches_busy:
+            self.caches_busy = "measuring"
+            self.runtime.background(self.measure_caches())
+        return self.report()
+
+    async def measure_caches(self):
+        try:
+            path = str(self.runtime.cache_tier)
+            found: dict = {"at": now(), "size": 0}
+            if await asyncio.to_thread(os.path.isdir, path):
+                async with self.du_lock:
+                    sizes = await machine.disk_used([path], UV_SECONDS)
+                found["size"] = (sizes or {}).get(path)
+            self.store.set(CACHES_KEY, json.dumps(found))
+        finally:
+            self.caches_busy = ""
+            self.publish()
+
+    async def caches_clear(self) -> dict:
+        """Delete sandboxed workers' own caches (caches.clear): made again as the next worker
+        starts, filled again from the owner's by the next seeding."""
+        if not self.caches_busy:
+            self.caches_busy = "clearing"
+            self.runtime.background(self.clear_caches())
+        return self.report()
+
+    async def clear_caches(self):
+        try:
+            await asyncio.to_thread(caches.clear, self.runtime.cache_tier)
+            self.store.set(CACHES_KEY, json.dumps({"at": now(), "size": 0}))
+            self.runtime.cache_seeded = 0.0  # Filled again at the next worker's start.
+        except OSError as exc:
+            logger.warning("Workers' caches could not all be deleted: %s", exc)
+        finally:
+            self.caches_busy = ""
+            self.publish()
+
     # The report
 
     def report(self) -> dict:
@@ -1003,6 +1044,14 @@ class Storage:
                 "at": "",
                 **json.loads(self.store.get(UV_KEY) or "{}"),
                 "measuring": self.uv_measuring,
+            },
+            "caches": {
+                "path": str(self.runtime.cache_tier),
+                "size": None,
+                "at": "",
+                **json.loads(self.store.get(CACHES_KEY) or "{}"),
+                "copied": caches.copied_bytes(self.runtime.cache_tier),
+                "busy": self.caches_busy,
             },
             "working": self.working,
             "measuring_all": self.measure_all,

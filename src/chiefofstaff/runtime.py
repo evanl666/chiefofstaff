@@ -497,6 +497,10 @@ class Runtime:
         self.cache_tier = caches.default_tier()
         self.cache_scripts = store.directory / caches.SCRIPTS
         self.cache_facts: dict[str, Any] = {}
+        self.cache_facts_job: asyncio.Task | None = None
+        # Whether a worker's folders hold a Rust project (rustup's toolchains), per worker,
+        # looked at once as it opens (ready_caches).
+        self.cache_rust: dict[str, bool] = {}
         self.cache_seeding = False
         self.cache_seeded = 0.0
         self.toolset = Tools(self)
@@ -601,6 +605,7 @@ class Runtime:
                 # a copy of its data directory names (backend.copilot_orphans).
                 if self.own_code_paths is None:
                     self.own_code_paths = await asyncio.to_thread(own_code)
+                self.find_cache_facts()
                 records = self.recorded_processes()
                 directory = self.store.directory
                 if started := await asyncio.to_thread(copilot_orphans, records, directory):
@@ -1764,7 +1769,10 @@ class Runtime:
         """A sandboxed worker's caches (caches.plan): what they add to its sandbox, and its
         shell's init script."""
         workspace = self.workspaces.workspace(row)
-        folders = [workspace, *(Path(c["path"]) for c in self.workspaces.checkouts(row))]
+        rust = self.cache_rust.get(row["id"])
+        if rust is None:  # Not opened through ready_caches (looked at here, once).
+            rust = self.cache_rust[row["id"]] = caches.rust_project(self.project_folders(row))
+        facts = self.cache_facts
         return caches.plan(
             self.cache_tier,
             workspace,
@@ -1772,9 +1780,62 @@ class Runtime:
             self.cache_scripts,
             slack=bool(row["slack"]),
             read_through=self.store.settings().shared_caches,
-            go=self.cache_facts.get("go"),
-            truststore_path=self.cache_facts.get("truststore"),
-            rust=caches.rust_project(folders),
+            go=facts.get("go"),
+            truststore_path=facts.get("truststore"),
+            rust=rust,
+            devdir=sys.platform == "darwin" and facts.get("node_headers") is False,
+        )
+
+    def project_folders(self, row: dict) -> list[Path]:
+        return [
+            self.workspaces.workspace(row),
+            *(Path(c["path"]) for c in self.workspaces.checkouts(row)),
+        ]
+
+    def find_cache_facts(self):
+        """What workers' caches need to know of the owner's tools, looked up as Copilot
+        connects, on its own (whatever the caches settings, before any worker opens or seeding
+        starts): GOPROXY and Go's caches, an old uv, node-gyp's headers, the Java truststore."""
+        if self.cache_facts_job is None or self.cache_facts_job.done():
+            self.cache_facts_job = asyncio.create_task(self.cache_facts_now())
+
+    async def cache_facts_now(self):
+        found: dict[str, Any] = {
+            "go": await asyncio.to_thread(caches.go_env),
+            "uv": await asyncio.to_thread(caches.uv_stamp),
+            "old_uv": await asyncio.to_thread(caches.old_uv),
+            "node_headers": await asyncio.to_thread(caches.node_headers),
+            "ca": await asyncio.to_thread(caches.authority_stamp, copilot_home()),
+        }
+        if found["ca"]:
+            found["truststore"] = await asyncio.to_thread(
+                caches.truststore, self.cache_tier, copilot_home()
+            )
+        self.cache_facts.update(found)
+
+    async def ready_caches(self, row: dict):
+        """Before a worker's session opens: the facts its caches need (waited for: they take
+        well under a second, once a run), uv looked at again when its program changed (an
+        upgrade), the truststore made again for a new authority, and whether its folders hold
+        a Rust project (in a thread)."""
+        if row["role"] != WORKER:
+            return
+        if self.cache_facts_job is None:
+            self.find_cache_facts()
+        with suppress(Exception):
+            await asyncio.shield(self.cache_facts_job)  # type: ignore[arg-type]
+        stamp = await asyncio.to_thread(caches.uv_stamp)
+        if stamp != self.cache_facts.get("uv"):
+            self.cache_facts["uv"] = stamp
+            self.cache_facts["old_uv"] = await asyncio.to_thread(caches.old_uv)
+        authority = await asyncio.to_thread(caches.authority_stamp, copilot_home())
+        if authority != self.cache_facts.get("ca"):
+            self.cache_facts["ca"] = authority
+            self.cache_facts["truststore"] = await asyncio.to_thread(
+                caches.truststore, self.cache_tier, copilot_home()
+            )
+        self.cache_rust[row["id"]] = await asyncio.to_thread(
+            caches.rust_project, self.project_folders(row)
         )
 
     async def apply_cache_env(self, row: dict, session: Any):
@@ -1805,12 +1866,10 @@ class Runtime:
 
     async def seed_caches(self):
         try:
-            if "go" not in self.cache_facts:
-                self.cache_facts["go"] = await asyncio.to_thread(caches.go_env)
-                self.cache_facts["old_uv"] = await asyncio.to_thread(caches.old_uv)
-                self.cache_facts["truststore"] = await asyncio.to_thread(
-                    caches.truststore, self.cache_tier, copilot_home()
-                )
+            if self.cache_facts_job is None:
+                self.find_cache_facts()
+            with suppress(Exception):
+                await asyncio.shield(self.cache_facts_job)  # type: ignore[arg-type]
             go = self.cache_facts.get("go") or {}
             owner = caches.Owner(Path.home(), go.get("GOMODCACHE", ""), go.get("GOCACHE", ""))
             timings = await asyncio.to_thread(caches.seed, self.cache_tier, owner)
@@ -2851,6 +2910,7 @@ class Runtime:
         if agent == COPILOT_AGENT:
             with suppress(Exception):
                 await self.available_models()  # Efforts and context tiers depend on the model.
+            await self.ready_caches(row)
             options, trusted = self.options(row), self.trust(row)
         else:
             options, trusted = self.agent_options(row), {}

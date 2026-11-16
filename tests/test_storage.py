@@ -1277,3 +1277,20 @@ def test_the_retry_handler_never_stops_a_whole_delete(tmp_path, monkeypatch):
 
     monkeypatch.setitem(writable.__globals__, "rmtree_writable", broken)
     writable(os.open, str(folder), None)  # Logged; the rest of the delete goes on.
+
+
+async def test_workers_caches_are_measured_and_cleared_from_storage(tmp_path):
+    from chiefofstaff import caches
+
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    tier = runtime.cache_tier
+    write(tier / "npm" / "_cacache" / "blob", "x" * 4096)
+    report = await runtime.storage.caches_measure()
+    assert report["caches"]["path"] == str(tier) and report["caches"]["busy"] == "measuring"
+    await settle(runtime)
+    assert runtime.storage.report()["caches"]["size"] >= 4096
+    await runtime.storage.caches_clear()
+    await settle(runtime)
+    assert not tier.exists() and runtime.storage.report()["caches"]["size"] == 0
+    assert caches.copied_bytes(tier) == 0

@@ -194,6 +194,31 @@ questions stay listed (QA round on 0.1.45).
   configuration in home keeps them (npm's `cache=` and pnpm's `store-dir` in `~/.npmrc`, Yarn's
   `globalFolder`, pip's and uv's `cache-dir`, Maven's `localRepository`, Go's as `go env` has
   them), never where a project's says; no configuration file makes anything writable.
+- **Chief of Staff never writes through a link a worker made.** Where sandboxed workers write
+  too (their shared caches, their temporary and own folders), it wrote by path: a worker that
+  put a link where the Playwright launcher was about to be written made it overwrite one of
+  your files (`~/.zshenv`) with a launcher of the worker's choosing. Every write there now opens
+  each folder without following links and writes by name in it (files made new, then renamed
+  into place); checkouts and clones for workers are made in a folder of Chief of Staff's own and
+  moved into place in one rename; a worktree it removes goes out of every worker's reach in one
+  rename, is checked again there and deleted from there (not by git in place). Workers'
+  temporary folders and the Java truststore moved beside workers' caches, out of the system's
+  temporary folder, which every sandboxed worker can write.
+- **Workers' caches, more robust.** Two workers starting together no longer race (the second
+  went without its caches); a worker's temporary folder and init script come first, and the
+  rest (browser links, settings) never stops it. What workers' caches need to know (an old uv,
+  your GOPROXY, node-gyp's headers, the Java truststore) is found as Copilot connects, whatever
+  the caches settings, and uv is looked at again after an upgrade. `go get` works (Go's
+  checksum database state was in your read-only GOPATH). A private registry works as in your
+  terminal (`~/.netrc`, Cargo's credentials, poetry's auth, Maven's `settings-security.xml`,
+  Gradle's `init.gradle`, read-only; never for workers that read Slack); asdf's and mise's global
+  versions are read. Seeding goes on past a cache it cannot clone, copies (within 8 GB) where
+  the disk cannot clone, fills NuGet's, Electron's, deno's, ccache's, sccache's, Yarn 1's and
+  Cargo's git caches too, and looks again only at folders that changed. Rust projects are found
+  four folders down (not in node_modules), once per worker. npm 11.5 and later no longer warn
+  about pnpm's store at every command (pnpm's own PNPM_HOME instead). The init script never
+  ends in an error (Copilot reported it before every command). Storage shows workers' caches,
+  with *Clear*.
 - **Sandboxed workers run quick read-only commands together.** Each command starts in about
   0.3 s in Copilot's sandbox (its credential proxy starts anew for each); they are asked to join
   quick checks in one call (`git status --short && git log -3 --oneline && ls`). Measured: a

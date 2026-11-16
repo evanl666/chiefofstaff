@@ -927,14 +927,12 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
         for name in config:
             assert (str(home / name) in policy.readonly) == (not slack), (slack, name)
         assert (str(home / ".npm") in policy.readonly) == (not slack), "the owner's caches"
-        for secret in (
-            ".cargo",
-            ".cargo/credentials.toml",
-            ".netrc",
-            ".aws/credentials",
-            ".pypirc",
-        ):
+        for secret in (".cargo", ".aws/credentials", ".pypirc"):
             assert str(home / secret) not in policy.readonly, (slack, secret)
+        for credentials in (".netrc", ".cargo/credentials.toml"):
+            assert (str(home / credentials) in policy.readonly) == (not slack), (
+                f"{credentials}: a private registry's, as in a terminal (not to Slack readers)"
+            )
         own = runtime.cache_plan(row)
         theirs = [str(own.tier), str(runtime.workspaces.workspace(row)), str(own.temporary)]
         for path in policy.readwrite:
@@ -944,7 +942,7 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
         for variable in (
             "XDG_CACHE_HOME",
             "DENO_DIR",
-            "npm_config_devdir",
+            "electron_config_cache",
             "CCACHE_DIR",
             "UV_TOOL_DIR",
         ):
@@ -958,6 +956,7 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
     harness.store.execute(
         "UPDATE sessions SET repos=? WHERE id=?", (json.dumps([checkout]), worker)
     )
+    await runtime.ready_caches(harness.store.session(worker))  # Looked at as it opens again.
     policy = runtime.sandbox_policy(harness.store.session(worker))
     for tool in (".rustup/toolchains", ".rustup/settings.toml"):
         assert str(home / tool) in policy.readonly, f"{tool}: a Rust project's"
@@ -1022,6 +1021,47 @@ async def test_no_configuration_file_makes_a_folder_of_the_owners_writable(tmp_p
         assert (f"maven.repo.local.tail={moved / 'm2'}" in own.text) == (not slack)
         for read_through in ("GRADLE_RO_DEP_CACHE", "GOPROXY=file://"):
             assert (read_through in own.text) == (not slack), "none of the owner's, for Slack's"
+
+
+async def test_what_workers_caches_need_to_know_is_found_at_connect_whatever_the_settings(
+    tmp_path, monkeypatch
+):
+    """An old uv, the owner's GOPROXY and the like were found only by seeding: never with
+    "Start workers' caches from yours" off, nor for workers that read Slack, nor for one opened
+    before seeding started. Found as Copilot connects now; uv looked at again once upgraded."""
+    import threading
+
+    from chiefofstaff import caches
+
+    versions = {"/usr/bin/uv": "0.9.21"}
+    stamp = [("/usr/bin/uv", 1)]
+    monkeypatch.setattr(caches, "uv_stamp", lambda: stamp[0])
+    monkeypatch.setattr(caches, "old_uv", lambda: versions["/usr/bin/uv"])
+    monkeypatch.setattr(caches, "go_env", lambda: {"GOPROXY": "https://corp.example/go"})
+    looked = []
+
+    def rust(folders):
+        looked.append(threading.current_thread() is threading.main_thread())
+        return False
+
+    monkeypatch.setattr(caches, "rust_project", rust)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=False, shared_caches=False))
+    runtime = await harness.connect()
+    reader = await spawn(runtime, harness.router_id, "Reply in the thread")
+    assert looked == [False], "its folders looked at once, in a thread"
+    harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (reader,))
+    row = harness.store.session(reader)
+    said = runtime.session_prompt(row, runtime.sandbox_policy(row))
+    assert "This machine's uv (0.9.21) crashes in this sandbox" in said, "to Slack's too"
+    harness.store.save_settings(Settings(worker_sandbox=True, shared_caches=False))
+    worker = await spawn(runtime, harness.router_id, "Build")
+    text = runtime.cache_plan(harness.store.session(worker)).text
+    assert "https://corp.example/go" not in text, "nothing of the owner's read through: off"
+    versions["/usr/bin/uv"], stamp[0] = "", ("/usr/bin/uv", 2)  # brew upgrade uv
+    again = await spawn(runtime, harness.router_id, "Build again")
+    assert (
+        "crashes in this sandbox" not in harness.session(again).options["system_message"]["content"]
+    )
 
 
 MOVED = (

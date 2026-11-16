@@ -235,6 +235,16 @@ class Folder:
             return
         chmod(self, name, stat.S_IMODE(found.st_mode) | bits)
 
+    def copy_tree(self, source: Path, name: str) -> bool:
+        """A plain copy of the owner's `source` (a file, a link, or a folder with all in it) at
+        `name`, where this file system cannot clone it."""
+        try:
+            return copy_into(source, self, name)
+        except BaseException:
+            with suppress(OSError):
+                self.remove(name)
+            raise
+
     def clone(self, source: Path, name: str) -> bool:
         """A copy-on-write copy of the owner's `source` (a file or folder) at `name`, which
         must not exist: APFS clonefile on macOS (a folder whole), reflinks file by file on
@@ -383,6 +393,22 @@ def clone_mac(source: Path, folder: Folder, name: str) -> bool:
     if code in (errno.EXDEV, errno.ENOTSUP):
         raise CannotCloneError(code, os.strerror(code))
     return False
+
+
+def copy_into(source: Path, folder: Folder, name: str) -> bool:
+    found = os.lstat(source)
+    if stat.S_ISLNK(found.st_mode):
+        folder.symlink(name, os.readlink(source))
+    elif stat.S_ISDIR(found.st_mode):
+        folder.make(name, 0o700)
+        with folder.child(name) as inside:
+            for child in sorted(os.listdir(source)):
+                copy_into(source / child, inside, child)
+            if SAFE:
+                os.chmod(inside.descriptor(), stat.S_IMODE(found.st_mode))
+    elif stat.S_ISREG(found.st_mode):
+        folder.copy_in(source, name)
+    return True
 
 
 # Linux: the FICLONE ioctl, file by file, where the file system has reflinks (Btrfs, XFS).

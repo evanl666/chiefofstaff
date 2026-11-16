@@ -31,6 +31,10 @@ export function bindStorage() {
   $("#storage-close").addEventListener("click", () => $("#storage-dialog").close());
   $("#storage-measure").addEventListener("click", () => act("/api/storage/measure"));
   $("#storage-uv-measure").addEventListener("click", () => act("/api/storage/uv-measure"));
+  $("#storage-caches-measure").addEventListener("click", () => act("/api/storage/caches-measure"));
+  $("#storage-caches-clear").addEventListener("click", () => {
+    if (confirm("Delete sandboxed workers' own caches? They are made again from yours.")) act("/api/storage/caches-clear", undefined, "Clearing workers' caches…");
+  });
   $("#storage-settings").addEventListener("submit", saveSettings);
   refreshStorageLink();
   setInterval(refreshStorageLink, 60000);
@@ -89,6 +93,7 @@ function render(data) {
   renderWorkers(data);
   renderOthers(data);
   renderUv(data.uv);
+  if (data.caches) renderCaches(data.caches);
   renderHistory(data.history || []);
   if (!shown) fillSettings(data.settings);
 }
@@ -251,6 +256,14 @@ function renderUv(uv) {
   $("#storage-uv-path").textContent = shortPath(uv.path);
   $("#storage-uv-size").textContent = uv.measuring ? "Measuring… (it can take minutes)" : uv.size !== null && uv.size !== undefined ? `${sizeText(uv.size)}, measured ${since(uv.at)}` : uv.error || "Not measured";
   $("#storage-uv-measure").disabled = Boolean(uv.measuring);
+}
+function renderCaches(caches) {
+  $("#storage-caches-path").textContent = shortPath(caches.path);
+  const copied = caches.copied ? ` (${sizeText(caches.copied)} of it copied, not cloned)` : "";
+  const measured = caches.size !== null && caches.size !== undefined ? `${sizeText(caches.size)}${copied}, measured ${since(caches.at)}` : "Not measured";
+  $("#storage-caches-size").textContent = caches.busy === "measuring" ? "Measuring…" : caches.busy === "clearing" ? "Clearing…" : measured;
+  $("#storage-caches-measure").disabled = Boolean(caches.busy);
+  $("#storage-caches-clear").disabled = Boolean(caches.busy);
 }
 function renderHistory(history) {
   $("#storage-history").replaceChildren(

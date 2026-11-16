@@ -423,6 +423,11 @@
           <p><code id="storage-uv-path"></code> · <span id="storage-uv-size"></span> <button type="button" class="link" id="storage-uv-measure">Measure</button></p>
           <p class="hint">Shared by everything uv installs; Chief of Staff never deletes it. To free space, run <code>uv cache prune</code> (removes only unused entries). Never run <code>uv cache clean</code> while Chief of Staff runs: it can delete the environment it runs from. Install it once with <code>uv tool install chiefofstaff</code> and update with <code>uv tool upgrade chiefofstaff</code>, instead of launching <code>uvx chiefofstaff@latest</code> again and again (each new version adds an environment to the cache).</p>
         </section>
+        <section class="storage-caches">
+          <h3>Workers' caches</h3>
+          <p><code id="storage-caches-path"></code> · <span id="storage-caches-size"></span> <button type="button" class="link" id="storage-caches-measure">Measure</button> <button type="button" class="link" id="storage-caches-clear">Clear</button></p>
+          <p class="hint">Sandboxed workers' own package caches, started from yours as copy-on-write clones (where the disk cannot clone them, copies up to 8 GB). Clearing deletes them; the next worker makes them again, from yours, in the background. A worker installing at that moment may have to install again.</p>
+        </section>
         <section>
           <h3>Cleanup history</h3>
           <ul id="storage-history" class="storage-list storage-history"></ul>
