@@ -4,6 +4,7 @@ frozen commits, the owner's approval, a leased push, durable acceptance and a he
 merge."""
 
 import json
+from pathlib import Path
 
 import pytest
 from conftest import settle
@@ -145,6 +146,99 @@ async def test_the_step_profile_is_the_sessions_options_while_it_runs(world, mon
     runtime.shepherd.unmark(world.worker)
     plain = runtime.options(row)
     assert options["system_message"] == plain["system_message"]
+
+
+async def test_a_step_has_none_of_the_workers_mcp_servers(world, monkeypatch, tmp_path):
+    """Copilot's own (its mcp-config.json), Settings' and a worker's extra MCP servers: none is
+    configured for a step, each is disabled by name (Copilot then never starts it), and the
+    step's tools are only its own (one already running stays out of reach)."""
+    from chiefofstaff.policy import GITHUB_MCP
+    from chiefofstaff.shepherd import STEP_TOOLS
+
+    local = {"type": "local", "command": "true", "args": [], "tools": ["*"]}
+    copilot = tmp_path / "copilot-home"
+    copilot.mkdir()
+    (copilot / "mcp-config.json").write_text(json.dumps({"mcpServers": {"owner-tools": local}}))
+    monkeypatch.setenv("COPILOT_HOME", str(copilot))
+    monkeypatch.setenv("CHIEFOFSTAFF_WORKER_MCP", json.dumps({"probe-marker": local}))
+    docs = {"type": "http", "url": "https://docs.example.com/mcp"}
+    runtime = await claimed(world, mcp_servers={"acme-docs": docs})
+    plain = runtime.options(runtime.store.session(world.worker))
+    assert {"acme-docs", "probe-marker"} <= set(plain["mcp_servers"])
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    options = world.session().options
+    assert "mcp_servers" not in options
+    disabled = options["disabled_mcp_servers"]
+    assert {GITHUB_MCP, "owner-tools", "acme-docs", "probe-marker", "slack"} <= set(disabled)
+    assert len(disabled) == len(set(disabled))
+    assert options["available_tools"] == list(STEP_TOOLS)
+
+
+@pytest.mark.parametrize("slack", [False, True])
+async def test_a_step_reaches_only_what_the_owner_allowed_and_a_slack_reader_nothing(
+    world, monkeypatch, tmp_path, slack
+):
+    """The owner's extra hosts, the repository's own servers and the shared caches reach a
+    step; a worker that reads Slack gets none of them: no network at all."""
+    from shepherd_world import REPO
+
+    from chiefofstaff.models import RepositoryChoices
+
+    caches = tmp_path / "caches"
+    caches.mkdir()
+    monkeypatch.setattr("chiefofstaff.shepherd.shared_caches", lambda: [str(caches)])
+    runtime = await claimed(
+        world,
+        step_hosts=["registry.acme.dev"],
+        proactive_repos={REPO: RepositoryChoices(localhost=True)},
+        shared_caches=True,
+    )
+    if slack:
+        runtime.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (world.worker,))
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    assert runtime.shepherd.control.open_step(TARGET)["state"] == "running"
+    policy = world.session().options["sandbox_config"]
+    reach = (policy.allowed_hosts, policy.outbound, policy.local_network)
+    if slack:
+        assert reach == ((), False, False)
+        assert str(caches) not in policy.readwrite
+    else:
+        assert reach == (("registry.acme.dev",), True, True)
+        assert str(caches) in policy.readwrite
+    assert "github.com" in policy.blocked_hosts and policy.credentials is False
+
+
+async def test_hooks_in_the_repository_never_run_when_it_pushes(world):
+    """A hook the worker set up (husky's core.hooksPath, or the repository's hooks folder)
+    would run for git there, and never runs for Chief of Staff's push (outside any sandbox)."""
+    from shepherd_world import run
+
+    runtime = await claimed(world)
+    step, sha = await fixed(world, runtime)
+    tree = step["tree"]
+    marker = world.root / "hook-ran"
+    husky = world.root / "husky"
+    common = Path(
+        run("git", "-C", tree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    )
+    for folder in (husky, common / "hooks"):
+        folder.mkdir(exist_ok=True)
+        for name in ("pre-push", "reference-transaction", "post-checkout", "post-merge"):
+            hook = folder / name
+            hook.write_text(f"#!/bin/sh\necho {name} >> '{marker}'\n")
+            hook.chmod(0o755)
+    run("git", "-C", tree, "config", "core.hooksPath", str(husky))
+    run("git", "-C", tree, "hook", "run", "pre-push")
+    assert marker.read_text() == "pre-push\n"  # It would run.
+    marker.unlink()
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    assert world.github.head() == sha
+    assert runtime.shepherd.control.step(step["id"])["state"] == "published"
+    assert not marker.exists()
 
 
 async def test_off_has_no_tables_no_snapshot_and_no_hooks(harness, tmp_path):
