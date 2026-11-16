@@ -164,6 +164,7 @@ def seeds(owner: Owner) -> list[tuple[str, Path, str, int]]:
     gradle, maven, cargo = owner.gradle(), owner.maven(), owner.cargo()
     return [
         ("npm", owner.npm() / "_cacache", "npm/_cacache", 0),
+        ("npm", owner.npm() / "_npx", "npm/_npx", 1),
         ("pnpm", owner.pnpm_store(), "pnpm-store", 0),
         ("yarn", owner.yarn(), "yarn-berry/cache", 0),
         ("bun", owner.bun(), "bun", 1),
@@ -408,6 +409,32 @@ def link_settings(tier: Path, owner: Owner) -> None:
             link.symlink_to(source)
 
 
+# uv before 0.9.29 panics in Copilot's macOS sandbox: its HTTP client reads the system's proxy
+# settings from a service the sandbox closes ("Attempted to create a NULL object"), and no
+# setting skips that (system-configuration 0.7, in uv 0.9.29, handles it).
+UV_FIXED = (0, 9, 29)
+
+
+def old_uv() -> str:
+    """The owner's uv version when it is one that crashes in the sandbox (macOS), else ""."""
+    if system() != "darwin" or not (uv := shutil.which("uv")):
+        return ""
+    try:
+        found = subprocess.run(  # noqa: S603  (the owner's uv, as their shell finds it)
+            [uv, "--version"], capture_output=True, text=True, timeout=20, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    words = found.stdout.split()
+    if len(words) < 2:
+        return ""
+    try:
+        version = tuple(int(part) for part in words[1].split("+")[0].split(".")[:3])
+    except ValueError:
+        return ""
+    return words[1] if version < UV_FIXED else ""
+
+
 def go_proxy() -> str:
     """The owner's GOPROXY (go env), "" when Go is not installed."""
     if not shutil.which("go"):
@@ -455,6 +482,9 @@ def script(
         "# Chief of Staff: where this worker's tools keep their caches (rewritten at each start).",
         f"export npm_config_cache={q(str(t / 'npm'))}",
         f"export npm_config_store_dir={q(str(t / 'pnpm-store'))}",
+        # npm's and pnpm's checks for a newer version of themselves: pnpm can't record one in
+        # the sandbox, so it fetched its own package list (0.7 MB) at every install.
+        "export npm_config_update_notifier=false",
         f"export YARN_GLOBAL_FOLDER={q(str(t / 'yarn-berry'))}",
         f"export BUN_INSTALL_CACHE_DIR={q(str(t / 'bun'))}",
         f"export PIP_CACHE_DIR={q(str(t / 'pip'))} UV_CACHE_DIR={q(str(t / 'uv'))}",

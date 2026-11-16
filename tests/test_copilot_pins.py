@@ -28,10 +28,10 @@ from conftest import Harness, call_tool, settle
 from copilot.tools import Tool
 from test_runtime import at, logged
 
+from chiefofstaff import caches as caches_module
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff import tools as tools_module
 from chiefofstaff import watchdog as watchdog_module
-from chiefofstaff import caches as caches_module
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.backend import CopilotBackend
 from chiefofstaff.models import Settings

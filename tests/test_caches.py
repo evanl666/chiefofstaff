@@ -11,6 +11,7 @@ from chiefofstaff import caches
 
 # The real functions (tests' autouse fixture stubs them for every other test).
 SEED = caches.seed
+REAL_OLD_UV = caches.old_uv
 
 
 def clones(tmp_path: Path) -> bool:
@@ -88,6 +89,7 @@ def test_a_workers_init_script_starts_no_process_and_points_java_at_the_proxy(tm
         env={"PATH": os.environ["PATH"], "HTTPS_PROXY": "http://127.0.0.1:54313"},
     ).stdout
     assert f"npm_config_cache={tmp_path / 'tier' / 'npm'}" in found
+    assert "npm_config_update_notifier=false" in found, "no version checks at every install"
     assert "-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=54313" in found
     assert "javax.net.ssl.trustStore" not in found, "no truststore made: none named"
     assert f"GOPROXY=file://{tmp_path / 'home' / 'go' / 'pkg' / 'mod' / 'cache' / 'download'}," in (
@@ -164,3 +166,19 @@ def test_chief_of_staff_never_writes_where_a_link_a_worker_made_leads(tmp_path, 
     (home / ".npm" / "_cacache" / "blob").write_text("x")
     SEED(tier, owner)
     assert not list(elsewhere.iterdir()), "nor filled"
+
+
+def test_an_old_uv_is_named_for_workers(tmp_path, monkeypatch):
+    from chiefofstaff import prompts
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    for version, old in (("0.9.21", "0.9.21"), ("0.9.29", ""), ("0.13.8", ""), ("bad", "")):
+        uv = tmp_path / version / "uv"
+        uv.parent.mkdir()
+        uv.write_text(f"#!/bin/sh\necho 'uv {version} (Homebrew 2025-12-30)'\n")
+        uv.chmod(0o755)
+        monkeypatch.setenv("PATH", str(uv.parent))
+        assert REAL_OLD_UV() == old, version
+    text = prompts.worker_context("/w", "/w", [], True, "on", caches=True, old_uv="0.9.21")
+    assert "This machine's uv (0.9.21) crashes in this sandbox" in text
+    assert "crashes in this sandbox" not in prompts.worker_context("/w", "/w", [], True, "on")

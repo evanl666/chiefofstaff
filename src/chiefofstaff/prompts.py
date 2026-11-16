@@ -650,13 +650,15 @@ def worker_context(
     sandbox: str = "",
     caches: bool = False,
     local: bool = False,
+    old_uv: str = "",
     gh_accounts: list[dict] | None = None,
     gh_acting: dict[str, str] | None = None,
     slack: bool = False,
 ) -> str:
     """`sandbox`: "" (no sandbox), "on", or "on-no-gh" (gh cannot reach GitHub inside it).
     `caches`: its tools keep their caches in workers' own (caches.py), the owner's read-only
-    beneath; `local`: the sandbox lets it use localhost. `gh_acting`: the account Chief of Staff
+    beneath; `local`: the sandbox lets it use localhost; `old_uv`: the owner's uv, when it is one
+    that crashes in the sandbox. `gh_acting`: the account Chief of Staff
     acts as, by repository owner, where gh's active one cannot reach them
     (GitHubSource.acting_login)."""
     lines = [
@@ -735,6 +737,12 @@ def worker_context(
                 "Gradle, Maven, Playwright), with the owner's caches read-only beneath it: what "
                 "the owner or another worker already has is not downloaded again. Install and "
                 "build as usual; do not point HOME or those caches elsewhere."
+            )
+        if old_uv:
+            lines.append(
+                f"This machine's uv ({old_uv}) crashes in this sandbox (\"Attempted to create a "
+                'NULL object"; uv 0.9.29 and later do not): do not retry, report it as blocked '
+                "and tell the owner to update uv (`brew upgrade uv` or `uv self update`)."
             )
         if sys.platform == "darwin":
             lines.append(

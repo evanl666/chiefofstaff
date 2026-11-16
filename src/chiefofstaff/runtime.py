@@ -1804,6 +1804,7 @@ class Runtime:
         try:
             if "goproxy" not in self.cache_facts:
                 self.cache_facts["goproxy"] = await asyncio.to_thread(caches.go_proxy)
+                self.cache_facts["old_uv"] = await asyncio.to_thread(caches.old_uv)
                 self.cache_facts["truststore"] = await asyncio.to_thread(
                     caches.truststore, self.cache_tier, copilot_home()
                 )
@@ -2191,6 +2192,7 @@ class Runtime:
                 ("on-no-gh" if self.sandbox_gh is False else "on") if sandbox else "",
                 caches=bool(sandbox) and not row["slack"],
                 local=bool(sandbox and sandbox.local_network),
+                old_uv=self.cache_facts.get("old_uv", "") if sandbox else "",
                 gh_accounts=self.github.accounts_cache[1],
                 gh_acting=self.store.items("ghaccount:"),
                 slack=bool(sandbox) and bool(row["slack"]),
