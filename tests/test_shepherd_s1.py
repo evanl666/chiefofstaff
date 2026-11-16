@@ -705,3 +705,162 @@ async def test_a_steps_drafted_reply_is_kept_for_its_plan_and_nothing_else_is(wo
     plan = runtime.shepherd.control.step(step["id"])["plan"]
     assert [t["reply"] for t in plan["threads"]] == ["Done.", "30 matches the gateway."]
     assert not [w for w in world.github.writes if w[0] == "reply"]
+
+
+# More of S1's scenarios, offline.
+
+
+async def test_a_fix_that_skips_a_test_is_for_approval_its_hunks_first(world):
+    """SU7: a skip marker in the fix: approval class, said on the row, its hunks first."""
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    tree = __import__("pathlib").Path(step["tree"])
+    test = tree / "tests" / "test_app.py"
+    test.write_text(
+        test.read_text().replace(
+            "def test_timeout():", "import pytest\n\n\n@pytest.mark.skip\ndef test_timeout():"
+        )
+    )
+    (tree / "app.py").write_text((tree / "app.py").read_text() + "\n# tidy\n")
+    run("git", "commit", "-qam", "Skip it", cwd=tree)
+    sha = run("git", "rev-parse", "HEAD", cwd=tree)
+    await step_result(
+        runtime, world.worker, step=step["id"], outcome="fixed", summary="Skipped it.",
+        commit=sha, test_command="",
+    )  # fmt: skip
+    world.session().emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    plan = runtime.shepherd.control.step(step["id"])["plan"]
+    assert plan["change"] == "approval"
+    assert any(item["path"] == "tests/test_app.py" for item in plan["findings"])
+    assert plan["diff"].index("tests/test_app.py") < plan["diff"].index("app.py\n")
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["line"] == "A fix is ready: it changes tests or checks"
+
+
+async def test_a_branch_that_requires_signed_commits_is_refused_with_why(world):
+    """SY9: found at the push: nothing pushed; the next attempt is refused, saying why."""
+    runtime = await claimed(world)
+    step, _ = await fixed(world, runtime)
+    world.github.rules = [{"type": "required_signatures"}]
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    assert world.github.head() == world.h0
+    [push] = runtime.shepherd.control.actions(step["id"])
+    assert push["state"] == "failed" and push["outcome"] == "the branch requires signed commits"
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["line"] == "Not published: the branch requires signed commits"
+    assert view["action"] == {"kind": "look", "label": "Look"}
+    row = runtime.store.session(world.worker)
+    assert await runtime.shepherd.executor_refusal(row, step) == (
+        "the branch requires signed commits"
+    )
+
+
+async def test_writes_go_out_as_the_bound_account_or_not_at_all(world):
+    """SY11: its account signed out of gh: nothing is pushed, and the journal says so."""
+    runtime = await claimed(world)
+    step, _ = await fixed(world, runtime)
+    world.github.signed_out = True
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    assert world.github.head() == world.h0
+    [push] = runtime.shepherd.control.actions(step["id"])
+    assert push["state"] == "failed" and "no oauth token" in push["outcome"]
+
+
+async def test_a_reply_the_owner_posted_themselves_is_not_posted_again(world):
+    """SW9 and SY3: a reply with the plan's text is on GitHub already (the owner posted it, or
+    a send whose answer was lost): settled, never posted twice."""
+    from test_shepherd import STANCES, addressed, comments
+
+    runtime = await world.start()
+    comments(world)
+    await runtime.shepherd.tick()
+    step, _ = await addressed(world, runtime, STANCES)
+    world.github.posted.append(
+        {"id": 6999, "body": "Done: renamed it.", "in_reply_to_id": 501,
+         "html_url": "https://x/6999", "user": {"login": "me"}}
+    )  # fmt: skip
+    await approve(runtime.shepherd, step["id"], {"disclosure": "no"})
+    await settle(runtime)
+    await settle(runtime)
+    replies = [w[3] for w in world.github.writes if w[0] == "reply"]
+    assert replies == ["30 matches the gateway's timeout."]
+    sent = {a["payload"]["text"]: a for a in runtime.shepherd.control.actions(step["id"])
+            if a["kind"] == "reply"}  # fmt: skip
+    assert sent["Done: renamed it."]["state"] == "sent"
+    assert sent["Done: renamed it."]["link"] == "https://x/6999"
+
+
+async def test_a_check_that_ran_on_the_accepted_head_must_run_on_the_one_merged(world):
+    """SX6: after an approved fix, a check the accepted head ran is missing: not merged."""
+    from test_shepherd import green
+
+    runtime = await claimed(world)
+    green(world, world.h0)
+    await runtime.shepherd.read(TARGET)
+    await runtime.shepherd.accept_head(TARGET, world.h0)
+    assert runtime.shepherd.control.claim(TARGET)["accepted"]["checks"] == ["ci / test"]
+    world.github.checks.pop(world.h0)
+    step, sha = await fixed(world, runtime)
+    await runtime.shepherd.merge_when_ready(TARGET, True)
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    green(world, sha)
+    world.github.checks[sha] = [
+        {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "required": True}
+    ]
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert not world.github.merged
+
+
+async def test_acceptance_survives_closing_and_reopening_the_worker(world):
+    """SX10: closed between Accept and green, reopened: its acceptance kept, merged after
+    Resume."""
+    from test_shepherd import green
+
+    runtime = await claimed(world)
+    runtime.task_actions.accept(world.task)
+    await runtime.shepherd.merge_when_ready(TARGET, True)
+    await runtime.workers.close(world.worker)
+    await settle(runtime)
+    claim = runtime.shepherd.control.claim(TARGET)
+    assert claim["holder_kind"] == "owner" and claim["accepted"]["sha"] == world.h0
+    await runtime.workers.reopen(world.worker)
+    await settle(runtime)
+    claim = runtime.shepherd.control.claim(TARGET)
+    assert claim["holder"] == world.task and claim["state"] == "paused"
+    green(world, world.h0)
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert not world.github.merged
+    await runtime.shepherd.resume(TARGET)
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert world.github.merged
+
+
+async def test_after_the_merge_the_claim_ends_and_accept_stays_the_owners(world):
+    """SX11."""
+    from test_shepherd import green
+
+    runtime = await claimed(world)
+    await runtime.shepherd.accept_head(TARGET, world.h0)
+    await runtime.shepherd.merge_when_ready(TARGET, True)
+    green(world, world.h0)
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert world.github.merged
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert runtime.shepherd.control.claim(TARGET)["state"] == "ended"
+    task = runtime.tasks.get(world.task)
+    assert task["status"] == "review"  # Its result still waits for the owner's Accept.
