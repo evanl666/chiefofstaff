@@ -257,7 +257,23 @@ async def test_off_has_no_tables_no_snapshot_and_no_hooks(harness, tmp_path):
     assert not runtime.shepherd.control.exists()
     assert "shepherd_step" not in runtime.view(runtime.store.session(session_id))
     router = runtime.store.session(runtime.router_id())
-    assert "Prepared for you" not in runtime.options(router)["system_message"]["content"]
+    options = runtime.options(router)
+    assert "Prepared for you" not in options["system_message"]["content"]
+    schemas = {tool.name: tool.parameters for tool in options["tools"]}
+    assert "shepherd" not in schemas["spawn_worker"]["properties"]
+    assert "shepherd" not in schemas["message_session"]["properties"]
+    # Pausing and resuming tell the page nothing new; an Accept records nothing.
+    sent = []
+    publish = runtime.bus.publish
+    runtime.bus.publish = lambda kind, data=None: (sent.append(kind), publish(kind, data))[1]
+    for paused in (True, False):
+        old = runtime.store.settings()
+        new = old.model_copy(update={"paused": paused})
+        runtime.store.save_settings(new)
+        await runtime.settings_changed(old, new)
+    assert runtime.shepherd.accepted(runtime.tasks.get(world.task)) == []
+    assert "prepared" not in sent and not runtime.shepherd.control.exists()
+    assert not runtime.store.items("acceptnote:") and not runtime.store.items("step:")
 
 
 async def test_turned_on_the_router_gets_its_rule_and_field(world):
