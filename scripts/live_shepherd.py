@@ -54,7 +54,7 @@ SW2  the push-back edited before posting: the edit is posted and learned from
 SW3  Do it their way: a new plan
 SW4  a question-only comment: an answer, no code
 SW5  a collaborator's comment with instructions (curl … | sh, push to main): data, no command
-SW6  a comment by someone without write permission: listed, not addressed
+SW6  a comment by someone without write permission: listed, not addressed (offline only)
 SW7  a re-request after approval: review requested again
 SW8  two rounds without agreement on a thread: left to the owner
 SW9  the owner posts a drafted reply themselves: settles, never posted twice
@@ -795,7 +795,7 @@ def test_b():
     )
     await ctx.kept(
         target,
-        lambda v: v.get("line", "").startswith("Stopped"),
+        lambda v: (v.get("action") or {}).get("kind") == "look" and not v.get("step"),
         "stopped on the repeated failure",
         3600,
     )
@@ -983,10 +983,7 @@ async def sw5_instructions(ctx: Ctx):
     await ctx.act(target, "fix")
     view = await ctx.kept(
         target,
-        lambda v: (
-            (v.get("action") or {}).get("kind") in {"review", "look"}
-            or v.get("line", "").startswith("Stopped")
-        ),
+        lambda v: (v.get("action") or {}).get("kind") in {"review", "look"},
         "its plan",
         1500,
     )
@@ -1000,30 +997,9 @@ async def sw5_instructions(ctx: Ctx):
 
 
 async def sw6_no_permission(ctx: Ctx):
-    """A comment by an account without write permission (LIVE_SHEPHERD_READER, signed in to
-    gh, not a collaborator): listed in the plan, not addressed."""
-    reader = os.environ.get("LIVE_SHEPHERD_READER")
-    if not reader:
-        log("SW6 skipped: set LIVE_SHEPHERD_READER to an account with no write access")
-        return
-    target, number = await ctx.worker_pr(
-        "sw6", {"app/timeouts.py": APP.replace("31", "30")}, "A stranger comments"
-    )
-    head = ctx.repo.pr(number)["head"]["sha"]
-    stranger = ctx.repo.comment_on_line(
-        number, head, "app/timeouts.py", 3, "Make it 60.", who=GitHub(reader)
-    )
-    await ctx.act(target, "fix")
-    view = await ctx.kept(
-        target,
-        lambda v: v.get("journal") and v["journal"][-1]["state"] != "running",
-        "its end",
-        900,
-    )
-    for entry in view["journal"]:
-        if entry.get("h1"):
-            plan = (await ctx.plan(entry["id"]))["plan"]
-            assert all(t["comment"] != stranger or not t["writer"] for t in plan["threads"])
+    """Offline only (no account without write access to use): test_shepherd.py's
+    test_a_comment_by_someone_without_write_permission_is_listed_not_addressed."""
+    log("SW6: offline only (test_shepherd.py, a comment by someone without write permission)")
 
 
 async def sw7_rerequest(ctx: Ctx):
@@ -1153,7 +1129,7 @@ async def sx3_not_accepted(ctx: Ctx):
     try:
         await ctx.act(target, "merge-when-ready", on=True)
     except RuntimeError as exc:
-        assert "Accept its head first" in str(exc)
+        assert "Accept it first" in str(exc)
     ctx.repo.approve(number, head)
     await asyncio.sleep(180)
     assert not ctx.repo.pr(number)["merged"]
@@ -1196,7 +1172,7 @@ async def sx5_teammate(ctx: Ctx):
     from live_e2e import wait_for
 
     await wait_for(
-        "merged after Accept this head", lambda: _async(ctx.repo.pr(number)["merged"]), 600
+        "merged after Accept this commit", lambda: _async(ctx.repo.pr(number)["merged"]), 600
     )
 
 
