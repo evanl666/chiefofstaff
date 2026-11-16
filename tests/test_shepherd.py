@@ -87,7 +87,7 @@ async def test_a_failing_ci_fix_prepared_checked_approved_and_pushed(world):
     assert plan["change"] == "eligible"
     evidence = plan["evidence"]
     assert evidence["holds"] and evidence["checked"], evidence
-    assert evidence["words"].startswith("2 → 2 tests; `test_timeout` ✗→✓")
+    assert evidence["words"] == "`test_timeout` failed before and passes now; 2 tests ran on both"
     # The worker is let go of, unmarked, idle; its task's row offers the review.
     assert not runtime.shepherd.marked(world.worker)
     assert runtime.store.session(world.worker)["status"] == "idle"
@@ -233,7 +233,7 @@ async def test_a_head_the_journal_does_not_explain_pauses_it(world):
     assert claim["state"] == "paused" and head[:7] in claim["reason"]
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
     assert view["action"] == {"kind": "resume", "label": "Resume"}
-    assert view["line"].startswith("Paused: new commits not from a plan")
+    assert view["line"] == f"Paused: new commits it didn't push ({head[:7]})"
     await runtime.shepherd.resume(TARGET)
     claim = runtime.shepherd.control.claim(TARGET)
     assert claim["state"] == "idle" and runtime.shepherd.control.explains(claim, head)
@@ -445,3 +445,170 @@ async def test_turned_off_mid_attempt_it_drains(world):
     assert not runtime.shepherd.marked(world.worker)
     assert runtime.shepherd.control.step(step["id"])["state"] == "withdrawn"
     assert "shepherd" not in runtime.task_actions.view(runtime.tasks.get(world.task))
+
+
+def comments(world, *, author="maya", body="Please rename `timeout` to `login_timeout`."):
+    world.github.review = "CHANGES_REQUESTED"
+    world.github.threads = [
+        {
+            "id": "PRRT_1", "isResolved": False, "isOutdated": False, "path": "app.py", "line": 1,
+            "comments": {"nodes": [{"databaseId": 501, "author": {"login": author}, "body": body,
+                                    "createdAt": "2026-11-16T09:00:00Z", "url": "https://x/501"}]},
+        },
+        {
+            "id": "PRRT_2", "isResolved": False, "isOutdated": False, "path": "app.py", "line": 2,
+            "comments": {"nodes": [{"databaseId": 502, "author": {"login": "maya"},
+                                    "body": "Why 30 and not 60?",
+                                    "createdAt": "2026-11-16T09:01:00Z",
+                                    "url": "https://x/502"}]},
+        },
+    ]  # fmt: skip
+    world.github.reviews = [{"author": {"login": "maya"}, "state": "CHANGES_REQUESTED",
+                             "submittedAt": "2026-11-16T09:02:00Z",
+                             "commit": {"oid": world.h0}}]  # fmt: skip
+    world.github.default_checks = [
+        {"name": "ci / test", "status": "COMPLETED", "conclusion": "SUCCESS", "required": True}
+    ]
+
+
+async def addressed(world, runtime, stances):
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["kind"] == "address-review" and step["state"] == "running", step
+    folder = __import__("pathlib").Path(step["folder"])
+    asked = json.loads((folder / "threads.json").read_text())
+    assert [(a["comment"], a["author"], a["writer"]) for a in asked] == [
+        (501, "maya", True),
+        (502, "maya", True),
+    ]
+    sha = world.commit_fix(step["tree"])
+    await step_result(
+        runtime, world.worker, step=step["id"], outcome="addressed", summary="Renamed it.",
+        commit=sha, test_command="", threads=stances,
+    )  # fmt: skip
+    world.session().emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    return runtime.shepherd.control.step(step["id"]), sha
+
+
+STANCES = [
+    {"comment": 501, "stance": "fix", "reply": "Done: renamed it."},
+    {"comment": 502, "stance": "push-back", "reply": "30 matches the gateway's timeout."},
+]
+
+
+async def test_review_comments_one_plan_with_a_fix_replies_and_a_push_back(world):
+    runtime = await world.start()
+    comments(world)
+    await runtime.shepherd.tick()
+    step, sha = await addressed(world, runtime, STANCES)
+    assert step["state"] == "prepared", step
+    plan = step["plan"]
+    assert plan["kind"] == "fix" and plan["h1"] == sha and plan["reviewers"] == ["maya"]
+    assert [(t["comment"], t["stance"]) for t in plan["threads"]] == [
+        (501, "fix"),
+        (502, "push-back"),
+    ]
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["action"]["label"] == "Review & post"
+    # Nothing posts until the owner decides the repository's disclosure line.
+    with pytest.raises(ValueError, match="Answer first"):
+        await approve(runtime.shepherd, step["id"], {})
+    assert runtime.shepherd.control.step(step["id"])["state"] == "prepared"
+    edited = "30 matches the gateway's timeout, so a longer one never helps."
+    await approve(
+        runtime.shepherd, step["id"],
+        {"disclosure": "no", "replies": {"502": edited}, "resolve": ["501"]},
+    )  # fmt: skip
+    await settle(runtime)
+    await settle(runtime)
+    final = runtime.shepherd.control.step(step["id"])
+    assert final["state"] == "published", runtime.shepherd.control.actions(step["id"])
+    kinds = [action["kind"] for action in runtime.shepherd.control.actions(step["id"])]
+    assert kinds == ["push", "reply", "reply", "resolve", "request-review"]
+    writes = world.github.writes
+    replies = [w[3] for w in writes if w[0] == "reply"]
+    assert replies == ["Done: renamed it.", edited]  # The owner's edit, no disclosure line.
+    assert all(w[2] == "tok-me" for w in writes if w[0] in {"reply", "request-review"})
+    assert [t["isResolved"] for t in world.github.threads] == [True, False]
+    assert runtime.store.settings().proactive_repos["acme/api"].disclosure == "no"
+    learned = runtime.store.all("SELECT kind, owner FROM feedback ORDER BY id")
+    assert ("draft-edited", edited) in [(row["kind"], row["owner"]) for row in learned]
+
+
+async def test_disclosure_yes_adds_its_line(world):
+    runtime = await world.start()
+    comments(world)
+    await runtime.shepherd.tick()
+    step, _ = await addressed(world, runtime, STANCES[:1])
+    await approve(runtime.shepherd, step["id"], {"disclosure": "yes"})
+    await settle(runtime)
+    await settle(runtime)
+    [reply] = [w[3] for w in world.github.writes if w[0] == "reply"]
+    assert reply.startswith("Done: renamed it.") and "AI assistant" in reply
+
+
+async def test_do_it_their_way_prepares_a_new_plan(world):
+    runtime = await world.start()
+    comments(world)
+    await runtime.shepherd.tick()
+    step, _ = await addressed(world, runtime, STANCES)
+    redone = await approve(runtime.shepherd, step["id"], {"choice": {"502": "their-way"}})
+    await settle(runtime)
+    assert runtime.shepherd.control.step(step["id"])["state"] == "dismissed"
+    assert redone["signal"]["their_way"] == ["502"] and redone["clicked"] == 1
+    assert not world.github.writes
+
+
+async def test_a_comment_by_someone_without_write_permission_is_listed_not_addressed(world):
+    runtime = await world.start()
+    comments(world, author="drive-by")
+    world.github.review = ""
+    world.github.reviews = []
+    world.github.threads = world.github.threads[:1]
+    await runtime.shepherd.tick()
+    claim = runtime.shepherd.control.claim(TARGET)
+    asks = await runtime.shepherd.review_asks(claim["details"])
+    assert asks == []  # Neither a writer's thread nor changes requested: nothing to address.
+
+
+async def test_a_question_only_comment_gets_an_answer_and_no_code(world):
+    runtime = await world.start()
+    comments(world)
+    await runtime.shepherd.tick()
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    await step_result(
+        runtime, world.worker, step=step["id"], outcome="addressed", summary="Answered.",
+        threads=[{"comment": 502, "stance": "answer", "reply": "It matches the gateway."}],
+    )  # fmt: skip
+    world.session().emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    plan = runtime.shepherd.control.step(step["id"])["plan"]
+    assert plan["kind"] == "replies" and not plan["h1"]
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["action"]["label"] == "Review & post"
+
+
+async def test_an_infrastructure_failure_gets_a_rerun_plan_no_attempt(world):
+    runtime = await world.start()
+    world.github.log = "The runner has received a shutdown signal.\n"
+    await runtime.shepherd.tick()
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    [step] = runtime.shepherd.control.steps(TARGET)
+    assert step["state"] == "prepared" and step["plan"]["kind"] == "rerun"
+    assert not world.session().sent or "shepherd-step" not in world.session().sent[-1]
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["action"]["label"] == "Run it again"
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    [rerun] = [w for w in world.github.writes if w[0] == "rerun"]
+    assert rerun[1] == ("run", "rerun", "501", "--failed", "--repo", "acme/api")
+    # Once per head: no second rerun plan on it.
+    with pytest.raises(ValueError, match="tried already on this commit"):
+        await runtime.shepherd.fix_it(TARGET)

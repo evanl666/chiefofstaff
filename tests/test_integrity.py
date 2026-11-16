@@ -321,7 +321,8 @@ def test_other_runners_are_not_checked():
     assert integrity.test_identities("npm test", "ok") is None
     assert integrity.collect_command("make test") == ""
     compared = integrity.compare(None, None, None, None, 1, 0)
-    assert compared.holds and not compared.checked and "identities not checked" in compared.words
+    assert compared.holds and not compared.checked
+    assert compared.words == "its tests failed before and pass now; which tests ran was not checked"
 
 
 def test_compare_failing_to_passing_and_a_superset():
@@ -331,7 +332,7 @@ def test_compare_failing_to_passing_and_a_superset():
     list1 = Identities("pytest", collected={"t::a", "t::b", "t::c"})
     compared = integrity.compare(run0, run1, list0, list1, 1, 0)
     assert compared.holds and compared.checked
-    assert compared.words.startswith("2 → 3 tests; `a` ✗→✓")
+    assert compared.words == "`a` failed before and passes now; 2 tests before, 3 with the fix"
 
 
 def test_compare_finds_what_still_fails_broke_or_vanished():
@@ -340,6 +341,8 @@ def test_compare_finds_what_still_fails_broke_or_vanished():
     assert not still.holds and still.still_failing == ["t::a"]
     broke = integrity.compare(run0, Identities("pytest", failed={"t::b"}), None, None, 1, 1)
     assert not broke.holds and broke.broke == ["t::b"]
+    assert still.words == "`a` still fails; which tests ran was not checked"
+    assert broke.words.startswith("`a` failed before and passes now; `b` fails now;")
     gone = integrity.compare(
         run0,
         Identities("pytest", failed=set()),
@@ -348,7 +351,14 @@ def test_compare_finds_what_still_fails_broke_or_vanished():
         1,
         0,
     )
-    assert gone.holds and gone.missing == ["t::b"] and "1 no longer collected" in gone.words
+    assert gone.holds and gone.missing == ["t::b"]
+    assert (
+        gone.words
+        == "`a` failed before and passes now; 1 test no longer run; 2 tests before, 1 with the fix"
+    )
+    many = Identities("pytest", failed={f"t::f{n}" for n in range(5)})
+    fixed = integrity.compare(many, Identities("pytest", failed=set()), None, None, 1, 0)
+    assert fixed.words.startswith("`f0`, `f1`, `f2` and 2 more failed before and pass now")
 
 
 PLANNED = ["cd /f0 && pytest -q > /s/h0-run.txt 2>&1", "cd /f1 && pytest -q > /s/h1-run.txt 2>&1"]

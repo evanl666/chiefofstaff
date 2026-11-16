@@ -22,6 +22,7 @@ from .control import (
     QUEUED,
     RUNNING,
 )
+from .integrity import short_test
 
 if TYPE_CHECKING:
     from .shepherd import Shepherd
@@ -398,7 +399,7 @@ class Keeping:
             view["action"] = {"kind": "look", "label": "Look"}
             view["rank"] = 1
         elif last and last["state"] == "refused":
-            view["line"] = f"Can't run a shepherd step here: {last['why']}"
+            view["line"] = f"Can't prepare fixes here: {last['why']}"
             view["refused"] = True
             view["rank"] = 2
         elif last and last["state"] in {"published", "partly"} and last["kind"] != "merge":
@@ -438,12 +439,17 @@ class Keeping:
             t.get("reply") and t.get("stance") != "leave" for t in plan.get("threads") or []
         )
         words = "Review & post" if replies else "Review fix"
-        evidence = (plan.get("evidence") or {}).get("words") or ""
+        evidence = plan.get("evidence") or {}
+        fixed = evidence.get("fixed") or []
         line = "A fix is ready" if plan.get("h1") else "Replies are ready"
         if plan.get("change") == "approval":
             line += ": it changes tests or checks"
-        elif evidence:
-            line += f" · {evidence}"
+        elif plan.get("h1") and not (evidence.get("holds") and not evidence.get("void")):
+            line += ", not fully checked"
+        elif len(fixed) == 1:
+            line += f": {short_test(fixed[0])} passes now"
+        elif fixed:
+            line += f": {len(fixed)} failing tests pass now"
         return {"line": line, "rank": 0,
                 "action": {"kind": "review", "label": words, "step": step["id"]}}  # fmt: skip
 
