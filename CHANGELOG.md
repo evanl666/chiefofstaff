@@ -161,16 +161,20 @@ questions stay listed (QA round on 0.1.45).
   another worker already have.** Copilot's sandbox let them write your caches, so a worker could
   plant code your own builds then ran; and many tools failed in it: pnpm and Yarn through
   corepack, uv (your uv-installed Pythons were unreadable), poetry and pre-commit installed with
-  `uv tool`, Maven's wrapper, and Gradle (its native libraries, and Java never reached the
-  sandbox's proxy, so each worker downloaded Gradle again, 140 MB, when it could at all). Now
-  every sandboxed worker shares a cache folder of workers' own, with yours read-only beneath it:
-  Gradle, Maven and Go read yours directly, Playwright's browsers are linked, and the rest is
-  copied from yours in the background as copy-on-write clones (about two seconds, never while a
-  worker waits). Each worker's shell gets its tools pointed there (and a temporary folder of its
-  own) before each command, at a cost of about 1 ms; the Gradle instructions workers were given
-  are gone. Every one of those tools now installs, builds and tests in the sandbox; a second
-  worker downloads nothing. Playwright's Chromium runs in a single process there (the sandbox
-  refuses the processes it would start). Workers that read Slack get caches of their own in their
+  `uv tool`, Maven's wrapper, Gradle (its native libraries; and Java never reached the sandbox's
+  proxy, so each worker downloaded Gradle again, 140 MB, when it could at all), and Playwright's
+  Chromium. Now every sandboxed worker shares a cache folder of workers' own, with yours
+  read-only beneath it: Gradle, Maven and Go read yours directly, Playwright's browsers are
+  linked, and the rest is copied from yours in the background as copy-on-write clones (a few
+  seconds the first time, about one after; never while a worker waits). Each worker's shell gets
+  its tools pointed there, and a temporary folder of its own, before each command (about 1 ms);
+  the Gradle instructions workers were given are gone, and npm's and pnpm's checks for newer
+  versions of themselves are off (pnpm fetched 0.7 MB at every install to make one). All of
+  those tools now install, build and test in the sandbox, as fast as before where they already
+  worked, and a second worker downloads nothing. Playwright's Chromium runs in a single process
+  there (the sandbox refuses the others it starts). uv before 0.9.29 still crashes in Copilot's
+  macOS sandbox (it reads the system's proxy settings from a service the sandbox closes):
+  workers say so instead of retrying. Workers that read Slack get caches of their own in their
   workspace.
 - **No sandboxed worker can change Chief of Staff's own code.** Its environment, wherever `uvx`
   or `uv tool install` put it (`uvx` keeps it in uv's cache, which Copilot's sandbox opens

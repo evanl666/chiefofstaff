@@ -358,7 +358,9 @@ workers that start together.
 Some tools behave differently inside the sandbox on macOS: Playwright's Chromium runs in a single
 process (the sandbox refuses the others it would start; Firefox, WebKit and full Chrome can't
 start there), Java reaches github.com only if you have run `copilot sandbox ca create` (Copilot's
-proxy answers for it), and uv older than 0.13 may crash there (`brew upgrade uv`).
+proxy answers for it), and uv before 0.9.29 crashes there (it reads macOS's proxy settings from a
+service the sandbox closes; `brew upgrade uv` or `uv self update`): workers are told so, and
+report it rather than retry.
 
 Hooks of your Copilot plugins run in the sandbox too. One that writes elsewhere (a journal, say)
 fails there; the worker carries on and its timeline notes it once. To let it write, add its
