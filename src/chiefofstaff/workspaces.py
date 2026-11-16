@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from . import machine, receipts
 from .models import Settings
-from .policy import within
+from .policy import REPOSITORY_SETTINGS, within
 from .roles import WORKER
 from .store import Store
 
@@ -635,6 +635,139 @@ def files_under(top: Path, path: str, found: dict[str, bytes], budget: list[int]
             return False
     found.update(adding)
     return True
+
+
+# What a check found, by what the disk shows of the paths (and of the checkout's HEAD when that
+# is the base): a worker's turn checks again in about a millisecond while nothing changed. A
+# file's ctime moves with any change and cannot be set back without root.
+DIFFERING_CACHE: dict[tuple, tuple[tuple, list[str]]] = {}
+FULL_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def disk_signature(top: Path, base: str, paths: Sequence[str]) -> tuple | None:
+    """What changes when any of the paths does, or the checkout's HEAD; None: not cacheable."""
+    if base != "HEAD" and not FULL_ID.fullmatch(base):
+        return None  # A ref that moves by itself (origin/HEAD at a fetch).
+    entries: list[tuple] = []
+    stack = list(paths)
+    while stack:
+        if len(entries) > MOST_COMPARED_FILES:
+            return None
+        name = stack.pop()
+        try:
+            info = os.lstat(top / name)
+        except FileNotFoundError:
+            entries.append((name,))
+            continue
+        except OSError:
+            return None
+        entries.append((name, info.st_mode, info.st_size, info.st_ino, info.st_ctime_ns))
+        if stat.S_ISDIR(info.st_mode):
+            try:
+                stack += [f"{name}/{entry.name}" for entry in sorted((top / name).iterdir())]
+            except OSError:
+                return None
+    if base == "HEAD":
+        dot_git = top / ".git"
+        git_dir = dot_git
+        with suppress(OSError):
+            if dot_git.is_file() and (text := dot_git.read_text()).startswith("gitdir:"):
+                git_dir = (top / text.removeprefix("gitdir:").strip()).resolve()
+        for name in ("HEAD", "index", "logs/HEAD", "packed-refs"):
+            try:
+                info = (git_dir / name).stat()
+                entries.append((name, info.st_size, info.st_ino, info.st_ctime_ns))
+            except OSError:
+                entries.append((name,))
+    return tuple(entries)
+
+
+async def differing_now(top: Path | str, base: str, paths: Sequence[str]) -> list[str]:
+    """differing, answered from the last check while nothing of it changed on the disk."""
+    key = (str(top), base, tuple(paths))
+    signature = await asyncio.to_thread(disk_signature, Path(top), base, list(paths))
+    if signature is not None and (cached := DIFFERING_CACHE.get(key)) and cached[0] == signature:
+        return list(cached[1])
+    found = await differing(top, base, paths)
+    if signature is not None:
+        if len(DIFFERING_CACHE) >= 256:
+            DIFFERING_CACHE.clear()
+        DIFFERING_CACHE[key] = (signature, found)
+    return found
+
+
+def gated_present(top: Path, cwd: Path) -> list[str]:
+    """The repository settings Copilot loads in a trusted folder (policy.REPOSITORY_SETTINGS)
+    that are there, from the working directory up to the checkout's top (relative to it)."""
+    if cwd != top and not cwd.is_relative_to(top):
+        return []
+    folders = [cwd, *[parent for parent in cwd.parents if parent.is_relative_to(top)]]
+    return [
+        (folder / name).relative_to(top).as_posix()
+        for folder in folders
+        for name in REPOSITORY_SETTINGS
+        if os.path.lexists(folder / name)
+    ]
+
+
+def content_key(path: Path) -> str:
+    """What a file (or folder, at any depth) holds, told apart from anything else ("": none)."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return ""
+    if stat.S_ISREG(info.st_mode):
+        if info.st_size > MOST_COMPARED_BYTES:
+            return ""
+        try:
+            return "f:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return ""
+    if stat.S_ISLNK(info.st_mode):
+        try:
+            return "l:" + str(path.readlink())
+        except OSError:
+            return ""
+    if stat.S_ISDIR(info.st_mode):
+        try:
+            names = sorted(entry.name for entry in path.iterdir())[:MOST_COMPARED_FILES]
+        except OSError:
+            return ""
+        inner = "\0".join(f"{name}={content_key(path / name)}" for name in names)
+        return "d:" + hashlib.sha256(inner.encode()).hexdigest()
+    return ""
+
+
+async def settings_differing(
+    top: Path, base: str, present: list[str], accepted: dict[str, str] | None = None
+) -> list[str]:
+    """Of the repository settings there (gated_present), those that differ from `base` and are
+    not as `accepted` (the owner's own, by content_key); about a millisecond while nothing
+    changed since the last check."""
+    found = await differing_now(top, base, present)
+    if not found:
+        return []
+    keys = await asyncio.to_thread(lambda: {path: content_key(top / path) for path in found})
+    return [path for path in found if not keys[path] or (accepted or {}).get(path) != keys[path]]
+
+
+async def settings_snapshot(top: Path, base: str, cwd: Path) -> dict[str, str]:
+    """The repository settings that differ from `base` now, by content: the owner's own (its
+    local settings, files carried into a worktree), when Chief of Staff makes a checkout."""
+    present = await asyncio.to_thread(gated_present, top, cwd)
+    if not present:
+        return {}
+    found = await differing(top, base, present)
+    keys = await asyncio.to_thread(lambda: {path: content_key(top / path) for path in found})
+    return {path: key for path, key in keys.items() if key}
+
+
+def nearest_top(folder: Path) -> Path | None:
+    """The nearest folder (this one or above) that is a git checkout's top (has a .git)."""
+    for place in [folder, *folder.parents]:
+        if os.path.lexists(place / ".git"):
+            return place
+    return None
 
 
 def blob_ids(data: bytes, length: int) -> set[str]:
@@ -2484,6 +2617,9 @@ class Workspaces:
             checkout = {"project": str(path), "path": str(path), "branch": "", "shared": True}
             if git_dir := await common_git_dir(path):
                 checkout["git_dir"] = git_dir
+            if top := await asyncio.to_thread(nearest_top, path):
+                # The owner's own uncommitted repository settings there (their local ones).
+                checkout["settings"] = await settings_snapshot(top, "HEAD", path)
             return checkout
         toplevel = await git("-C", str(path), "rev-parse", "--show-toplevel")
         top = await asyncio.to_thread(Path(toplevel.strip()).resolve)

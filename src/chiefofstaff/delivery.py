@@ -119,6 +119,13 @@ class Delivery:
             # A worktree removed under it (by hand, a cleanup) is back before it reads this.
             with suppress(Exception):
                 await self.runtime.workspaces.restore(row)
+            if self.runtime.agent(session_id) == COPILOT_AGENT:
+                try:
+                    # Repository settings changed in its trusted folder: no turn starts there.
+                    await self.runtime.copilot_settings_gate(row)
+                except Exception:
+                    self.store.update_message_meta(message["id"], meta or {})  # Not replayed.
+                    raise
             self.rest_after(row)
         if batch and row["role"] in {ROUTER, SLACK}:
             if row["status"] == "working":

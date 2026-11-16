@@ -11,6 +11,16 @@
   a worker only while it is as committed (in the worker's worktree, as it was when the worktree
   was made; in your own checkout, as its last commit), and the worker's timeline says when it
   doesn't. Workers' edits to `.codex/` folders and to Codex's own settings folder are refused.
+- **Security: a Copilot worker could plant hooks and MCP servers for itself.** In a repository
+  you trust in Copilot (a worktree of it is trusted too), a worker could write the repository's
+  own Copilot settings in its folder: hooks (`.github/hooks/`, `.github/copilot/settings.json`,
+  and `.claude/settings.json`, whose hooks Copilot runs too) from its next resume, and MCP
+  servers (`.mcp.json`, `.github/mcp.json`) from its next turn. A hook could approve commands
+  Chief of Staff would refuse, and an MCP server ran outside the worker sandbox. Now, before
+  each start and each turn, those settings are compared with the worker's base (its worktree's
+  base commit; in your own checkout, its last commit and the local settings you had there): a
+  worker whose settings changed is stopped and not opened there until the change is removed, and
+  says so. Workers' edits to those files are refused.
 
 ## 0.1.45 (2026-11-14)
 

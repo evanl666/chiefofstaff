@@ -314,6 +314,17 @@ worker in a worktree of a repository you trust in Copilot is trusted too, so tha
 MCP servers load there as well. If you use Copilot's own sandbox, workers follow your settings
 for it.
 
+A repository's own Copilot settings load for a worker only as committed: its hooks and MCP
+servers (`.github/hooks/`, `.mcp.json`, `.github/mcp.json`, `.github/copilot/`,
+`.github/extensions/`, and the hooks of `.claude/settings.json` and `settings.local.json`,
+which Copilot runs too) would run outside the worker's sandbox and Chief of Staff's checks. So
+before each turn and each start, Chief of Staff compares them with the worker's base: the
+commit its worktree was made from, or in your own checkout its last commit (and the local
+settings you had there when the worker was given it). If one changed, the worker is stopped
+and not opened there again ("Copilot settings in this folder changed since …; Chief of Staff
+won't open the worker there until the change is removed"); in your own checkout, commit the
+change if it is yours. Workers don't edit those files.
+
 With the **sandbox** on (Settings; always for workers that read Slack), workers' shell commands can write only to their
 workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
 `HEAD` and index), never see your

@@ -83,7 +83,7 @@ from .models import AS_SAVED, Attachment, SentItem, Settings
 from .notify import mac_notification
 from .others import Others
 from .peers import Peers
-from .policy import GITHUB_MCP, within
+from .policy import GITHUB_MCP, REPOSITORY_SETTINGS, repository_settings, within
 from .provenance import ALIVE_EVERY, RUNS_KEPT, Provenance, log_of, runs_of
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sendsocket import LimitedError, SendSocket
@@ -116,9 +116,14 @@ from .workspaces import (
     Workspaces,
     base_of,
     common_git_dir,
+    content_key,
+    gated_present,
     git_dirs,
+    nearest_top,
     protected_git_paths,
     service_secrets,
+    settings_differing,
+    settings_snapshot,
     shared_caches,
 )
 
@@ -136,7 +141,7 @@ def clip_words(text: str, size: int) -> str:
 
 
 # A repository's own Copilot configuration that Copilot loads only in a trusted folder.
-TRUST_GATED = (".mcp.json", ".github/mcp.json", ".github/hooks", ".github/copilot")
+TRUST_GATED = REPOSITORY_SETTINGS
 
 
 def needs_trust(top: Path, cwd: Path) -> bool:
@@ -298,6 +303,11 @@ class IneligibleError(RuntimeError):
     """A worker on another agent may not run now (Runtime.agent_block says why)."""
 
 
+class SettingsChangedError(RuntimeError):
+    """A Copilot worker's folder holds repository settings changed since its base, which
+    Copilot would load there (a trusted folder): it is not opened, nor sent a turn, there."""
+
+
 class OpenElsewhereError(RuntimeError):
     """A session is open in another Copilot window (a terminal): `pid` runs it."""
 
@@ -440,6 +450,8 @@ class Runtime:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.status = {"state": "starting", "error": ""}
         self.models_cache: tuple[float, list[dict]] = (0.0, [])
+        # What each worker's timeline last said of repository settings left out (copilot_settings).
+        self.settings_lines: dict[str, str] = {}
         # Sessions another program (a terminal) has open: session id -> pid. Refreshed by the
         # watch loop and before resuming a session.
         self.elsewhere: dict[str, int] = {}
@@ -1720,6 +1732,12 @@ class Runtime:
         readonly = [
             path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
         ]
+        # Repository settings Copilot would load (hooks, MCP servers), in each of its folders and
+        # those above them up to their checkout's top: its commands never write them.
+        for folder in map(Path, self.workspaces.writes(row)):
+            top = nearest_top(folder) or folder
+            places = [folder, *[p for p in folder.parents if p.is_relative_to(top)]]
+            readonly += [str(place / name) for place in places for name in REPOSITORY_SETTINGS]
         ssh = Path.home() / ".ssh"
         readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
         if agent := os.environ.get("SSH_AUTH_SOCK"):
@@ -2771,7 +2789,16 @@ class Runtime:
         if agent == COPILOT_AGENT:
             with suppress(Exception):
                 await self.available_models()  # Efforts and context tiers depend on the model.
-            options, trusted = self.options(row), self.trust(row)
+            options = self.options(row)
+            # Repository settings a worker changed in its folder (hooks, MCP servers): Copilot
+            # loads them in a trusted folder, so it does not open there; in another, it is not
+            # given trust.
+            refused, line = await self.copilot_settings(row)
+            if line:
+                self.settings_said(row["id"], line)
+                if refused:
+                    raise SettingsChangedError(line)
+            trusted = {} if line else self.trust(row)
         else:
             options, trusted = self.agent_options(row), {}
         copilot_id = copilot or self.copilot_id(row["id"])
@@ -2852,6 +2879,104 @@ class Runtime:
             await self.workers.import_history(row, session)
         self.publish_session(self.store.session(session_id))
         return session
+
+    def copilot_place(self, row: dict) -> tuple[dict | None, Path, str] | None:
+        """The checkout a worker's folder is in, its top, and the commit its repository settings
+        are compared with: its worktree's base (a checkout of the worker's own: its remote's
+        default branch), the owner's checkout's HEAD."""
+        cwd = Path(os.path.realpath(row["cwd"]))
+        for checkout in json.loads(row.get("repos") or "[]"):
+            path = checkout.get("path") or ""
+            top = checkout.get("worktree") or (path and nearest_top(Path(os.path.realpath(path))))
+            if not top:
+                continue
+            top = Path(os.path.realpath(top))
+            if cwd == top or cwd.is_relative_to(top):
+                return checkout, top, "HEAD" if checkout.get("shared") else base_of(checkout)
+        top = nearest_top(cwd)
+        return (None, top, "HEAD") if top else None
+
+    async def accepted_settings(self, row: dict, checkout: dict | None, top: Path) -> dict:
+        """The owner's own repository settings in a checkout that differ from its base (their
+        local ones, those carried into a worktree), as they were when it was made."""
+        if checkout is None:
+            return {}
+        if "settings" in checkout:
+            return dict(checkout["settings"] or {})
+        if checkout.get("shared"):
+            # Made before this check: the owner's local ones as they are now, kept from now on.
+            kept = await settings_snapshot(top, "HEAD", Path(checkout["path"]))
+            checkouts = json.loads(row.get("repos") or "[]")
+            for each in checkouts:
+                if each.get("path") == checkout.get("path"):
+                    each["settings"] = kept
+            self.update_session(row["id"], repos=json.dumps(checkouts))
+            return kept
+        # A worktree: what it was given from the owner's checkout (gitignored files it carried),
+        # as it is there.
+        repo = checkout.get("repo") or ""
+        return {
+            path: key
+            for path in checkout.get("carried") or []
+            if repo and repository_settings(path) and (key := content_key(Path(repo) / path))
+        }
+
+    async def copilot_settings(self, row: dict) -> tuple[bool, str]:
+        """(refused, line): what of the repository settings Copilot would load for a Copilot
+        worker's folder (policy.REPOSITORY_SETTINGS) changed since its base ("" for none), and
+        whether Copilot trusts that folder, so that it would load them (refused then)."""
+        if row["role"] != WORKER or not row["cwd"] or self.agent(row["id"]) != COPILOT_AGENT:
+            return False, ""
+        place = await asyncio.to_thread(self.copilot_place, row)
+        if place is None:
+            return False, ""
+        checkout, top, base = place
+        cwd = Path(await asyncio.to_thread(os.path.realpath, row["cwd"]))
+        if not (present := await asyncio.to_thread(gated_present, top, cwd)):
+            return False, ""  # None there: no git call, nothing kept.
+        accepted = await self.accepted_settings(row, checkout, top)
+        if not (changed := await settings_differing(top, base, present, accepted)):
+            return False, ""
+        trusted = copilot_trusts(row["cwd"]) or bool(
+            checkout and copilot_trusts(checkout.get("repo") or checkout.get("project") or "")
+        )
+        listed = ", ".join(changed[:3]) + (
+            f" and {len(changed) - 3} more" if len(changed) > 3 else ""
+        )
+        if base == "HEAD":
+            what = f"Copilot settings in this folder have changes not committed ({listed})"
+            until = "until you commit or remove the change"
+        else:
+            short = base[:7] if re.fullmatch(r"[0-9a-f]{40,64}", base) else base
+            what = f"Copilot settings in this folder changed since {short} ({listed})"
+            until = "until the change is removed"
+        if trusted:
+            return True, f"{what}; Chief of Staff won't open the worker there {until}."
+        return False, f"{what}, so Copilot won't load them for this worker."
+
+    def settings_said(self, session_id: str, line: str):
+        """Its timeline says it once, until it changes."""
+        if self.settings_lines.get(session_id) != line:
+            self.settings_lines[session_id] = line
+            self.add_message(session_id, "notice", line)
+
+    async def copilot_settings_gate(self, row: dict):
+        """Before a turn Chief of Staff sends a Copilot worker: repository settings changed in
+        its trusted folder (Copilot loads a new MCP server at a turn's start, hooks at a
+        resume) stop it, and it is let go of until they are as they were."""
+        refused, line = await self.copilot_settings(row)
+        if not line:
+            return
+        if not refused:
+            self.settings_said(row["id"], line)
+            return
+        if self.states.is_live(row["id"]):
+            if row["status"] == "working":
+                self.settings_lines[row["id"]] = line
+                await self.workers.interrupt(row["id"], by="Chief of Staff", notice=line)
+            await self.detach(row["id"])
+        self.settings_said(row["id"], line)
+        raise SettingsChangedError(line)
 
     def trust(self, row: dict) -> dict:
         """A worker in a worktree of a project the owner trusts in Copilot gets the trust its

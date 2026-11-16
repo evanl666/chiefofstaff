@@ -22,7 +22,7 @@ from . import prompts, receipts, threads
 from .backend import running_background, stop_background
 from .delivery import digest
 from .envelope import from_owner, news_tasks, tasks_named, wrap
-from .policy import owners_checkout, permission_denial, written_file
+from .policy import owners_checkout, permission_denial, settings_write, written_file
 from .roles import ROUTER, SLACK, WORKER
 from .store import now
 
@@ -865,8 +865,10 @@ class Events:
         row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
         if not row:
             return PermissionDecisionReject(feedback="Unknown session.")
-        if (reason := owners_checkout(row, request, self.workspaces.checkouts(row))) or (
-            not self.runtime.yolo(row) and (reason := await self.denial(row, request))
+        if (
+            (reason := owners_checkout(row, request, self.workspaces.checkouts(row)))
+            or (reason := settings_write(row, request))
+            or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
         ):
             self.runtime.add_message(row["id"], "notice", reason)
             return PermissionDecisionReject(feedback=reason)

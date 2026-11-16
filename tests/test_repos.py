@@ -399,6 +399,285 @@ async def test_workers_load_what_the_owners_own_sessions_load(tmp_path, git_repo
     assert "trust_working_directory" not in harness.session(untrusted["session_id"]).options
 
 
+# Repository settings a worker writes in its folder (policy.REPOSITORY_SETTINGS): Copilot loads
+# them in a trusted folder (a worktree of a trusted repository is one) from its next turn (an MCP
+# server) or start (hooks, which can approve what Chief of Staff refuses), outside its sandbox.
+
+PLANTED = {
+    ".github/hooks/p.json": '{"version": 1, "hooks": {"preToolUse": []}}',
+    ".github/mcp.json": '{"mcpServers": {"p": {"command": "sh"}}}',
+    ".mcp.json": '{"mcpServers": {"p": {"command": "sh"}}}',
+    ".github/copilot/settings.json": '{"hooks": {}}',
+    ".github/copilot/settings.local.json": '{"hooks": {}}',
+    ".github/extensions/p/extension.mjs": "export {}",
+    ".claude/settings.json": '{"hooks": {}}',
+    ".claude/settings.local.json": '{"hooks": {}}',
+}
+
+
+def trusting(tmp_path, monkeypatch, *folders) -> Path:
+    home = tmp_path / "copilot-home"
+    home.mkdir(exist_ok=True)
+    (home / "config.json").write_text(
+        "// managed by Copilot\n" + json.dumps({"trustedFolders": [str(f) for f in folders]})
+    )
+    monkeypatch.setenv("COPILOT_HOME", str(home))
+    return home
+
+
+def base_of(harness, worker: str) -> str:
+    return json.loads(harness.store.session(worker)["repos"])[0]["base_ref"][:7]
+
+
+def plant(folder: Path, name: str):
+    (folder / name).parent.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text(PLANTED[name])
+
+
+@pytest.mark.parametrize("name", PLANTED)
+async def test_a_worker_with_copilot_settings_it_changed_is_not_opened_there(
+    tmp_path, git_repo, monkeypatch, name
+):
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
+                           project=str(git_repo), isolate=True)  # fmt: skip
+        worker = info["session_id"]
+        await runtime.detach(worker)
+        plant(Path(info["cwd"]), name)
+        base = base_of(harness, worker)
+        line = (
+            f"Copilot settings in this folder changed since {base} ({name}); Chief of Staff "
+            "won't open the worker there until the change is removed."
+        )
+        with pytest.raises(RuntimeError, match="won't open the worker there"):
+            await runtime.owner_send(worker, "Go on")
+        assert ("notice", line) in harness.kinds(worker)
+        assert not runtime.states.is_live(worker)
+        with pytest.raises(RuntimeError, match="won't open the worker there"):
+            await runtime.owner_send(worker, "Again")
+        assert [t for k, t in harness.kinds(worker) if k == "notice"].count(line) == 1, "once"
+        (Path(info["cwd"]) / name).unlink()
+        await runtime.owner_send(worker, "Back")
+        assert runtime.states.is_live(worker), "as it was: it opens again"
+    finally:
+        await runtime.stop()
+
+
+async def test_copilot_settings_a_live_worker_changes_stop_it_before_its_next_turn(
+    tmp_path, git_repo, monkeypatch
+):
+    """Copilot starts a new MCP server of the repository's at its session's next turn: that
+    turn is not sent; the worker is let go of, saying why."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
+                           project=str(git_repo), isolate=True)  # fmt: skip
+        worker = info["session_id"]
+        session = harness.session(worker)
+        sent = len(session.sent)
+        plant(Path(info["cwd"]), ".github/mcp.json")
+        with pytest.raises(RuntimeError, match="won't open the worker there"):
+            await runtime.owner_send(worker, "Next")
+        assert len(session.sent) == sent, "no turn"
+        assert session.disconnected and not runtime.states.is_live(worker)
+    finally:
+        await runtime.stop()
+
+
+async def test_committed_copilot_settings_still_load(tmp_path, git_repo, monkeypatch):
+    """A repository that ships its own hooks and MCP servers keeps them for its workers."""
+    commit(git_repo, ".mcp.json", PLANTED[".mcp.json"])
+    (git_repo / ".github" / "hooks").mkdir(parents=True)
+    commit(git_repo, ".github/hooks/team.json", PLANTED[".github/hooks/p.json"])
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
+                           project=str(git_repo), isolate=True)  # fmt: skip
+        worker = info["session_id"]
+        assert harness.session(worker).options["trust_working_directory"] == "user"
+        await runtime.detach(worker)
+        await runtime.owner_send(worker, "Go on")
+        assert runtime.states.is_live(worker)
+        assert not [t for k, t in harness.kinds(worker) if "Copilot settings" in t]
+    finally:
+        await runtime.stop()
+
+
+async def test_copilot_settings_in_the_owners_checkout_are_compared_with_its_head(
+    tmp_path, git_repo, monkeypatch
+):
+    """The owner's own local settings, there when the worker was given the folder, are theirs;
+    a change since (uncommitted) keeps the worker closed there until it is committed or gone."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    plant(git_repo, ".claude/settings.local.json")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Look", instructions="l",
+                           project=str(git_repo), in_place=True)  # fmt: skip
+        worker = info["session_id"]
+        assert runtime.states.is_live(worker), "the owner's own local settings"
+        await runtime.detach(worker)
+        (git_repo / ".claude" / "settings.local.json").write_text('{"hooks": {"x": []}}')
+        line = (
+            "Copilot settings in this folder have changes not committed "
+            "(.claude/settings.local.json); Chief of Staff won't open the worker there until "
+            "you commit or remove the change."
+        )
+        with pytest.raises(RuntimeError, match="won't open the worker there"):
+            await runtime.owner_send(worker, "Go on")
+        assert ("notice", line) in harness.kinds(worker)
+        commit(git_repo, ".claude/settings.local.json", '{"hooks": {"x": []}}')
+        await runtime.owner_send(worker, "Go on")
+        assert runtime.states.is_live(worker), "committed: as its HEAD"
+    finally:
+        await runtime.stop()
+
+
+async def test_copilot_settings_carried_into_a_worktree_are_the_owners(
+    tmp_path, git_repo, monkeypatch
+):
+    """A gitignored settings file the repository carries into worktrees (.worktreeinclude) is
+    the owner's while it is as theirs; changed in the worktree, it is not."""
+    commit(git_repo, ".gitignore", ".claude/settings.local.json\n")
+    commit(git_repo, ".worktreeinclude", ".claude/settings.local.json\n")
+    plant(git_repo, ".claude/settings.local.json")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
+                           project=str(git_repo), isolate=True)  # fmt: skip
+        worker = info["session_id"]
+        carried = Path(info["cwd"]) / ".claude" / "settings.local.json"
+        assert carried.exists() and runtime.states.is_live(worker)
+        await runtime.detach(worker)
+        await runtime.owner_send(worker, "Go on")
+        assert runtime.states.is_live(worker), "the owner's, as carried"
+        await runtime.detach(worker)
+        carried.write_text('{"hooks": {"x": []}}')
+        with pytest.raises(RuntimeError, match=r"\(\.claude/settings\.local\.json\)"):
+            await runtime.owner_send(worker, "Go on")
+    finally:
+        await runtime.stop()
+
+
+async def test_copilot_settings_changed_between_the_top_and_its_folder_count(
+    tmp_path, git_repo, monkeypatch
+):
+    sub = git_repo / "app"
+    sub.mkdir()
+    commit(git_repo, "app/README.md", "x")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(sub)]))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
+                           project=str(sub), isolate=True)  # fmt: skip
+        worker = info["session_id"]
+        assert info["cwd"].endswith("/app")
+        await runtime.detach(worker)
+        plant(Path(info["cwd"]).parent, ".mcp.json")
+        with pytest.raises(RuntimeError, match=r"changed since \w+ \(\.mcp\.json\)"):
+            await runtime.owner_send(worker, "Go on")
+        (Path(info["cwd"]).parent / ".mcp.json").unlink()
+        plant(Path(info["cwd"]), ".github/hooks/p.json")
+        with pytest.raises(RuntimeError, match=r"\(app/\.github/hooks/p\.json\)"):
+            await runtime.owner_send(worker, "Go on")
+    finally:
+        await runtime.stop()
+
+
+async def test_copilot_settings_changed_in_an_untrusted_folder_get_it_no_trust(
+    tmp_path, git_repo, monkeypatch
+):
+    """Not trusted, Copilot loads none of them: the worker opens, is not given trust, and its
+    timeline says they are left out."""
+    trusting(tmp_path, monkeypatch, tmp_path / "elsewhere")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
+                           project=str(git_repo), isolate=True)  # fmt: skip
+        worker = info["session_id"]
+        await runtime.detach(worker)
+        plant(Path(info["cwd"]), ".mcp.json")
+        await runtime.owner_send(worker, "Go on")
+        assert runtime.states.is_live(worker)
+        notices = [t for k, t in harness.kinds(worker) if k == "notice" and "Copilot sett" in t]
+        assert notices == [
+            f"Copilot settings in this folder changed since {base_of(harness, worker)} "
+            "(.mcp.json), so Copilot won't load them for this worker."
+        ]
+    finally:
+        await runtime.stop()
+
+
+def test_workers_never_write_copilots_repository_settings(tmp_path):
+    from chiefofstaff.policy import SETTINGS_WRITE, settings_write
+
+    row = {"role": "worker", "cwd": str(tmp_path)}
+
+    def write(path):
+        return settings_write(row, SimpleNamespace(kind="write", resolved_path=str(path)))
+
+    for name in PLANTED:
+        assert write(tmp_path / name) == SETTINGS_WRITE, name
+    (tmp_path / "notes.md").symlink_to(tmp_path / ".github" / "hooks" / "x.json")
+    assert write(tmp_path / "notes.md") == SETTINGS_WRITE, "where a link leads"
+    assert write(tmp_path / "src" / "hooks.py") is None
+    assert write(tmp_path / ".github" / "workflows" / "ci.yml") is None
+    assert settings_write({"role": "router", "cwd": ""}, SimpleNamespace(kind="write")) is None
+
+
+async def test_a_sandboxed_workers_commands_cannot_write_copilots_repository_settings(
+    tmp_path, git_repo, monkeypatch
+):
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
+                           project=str(git_repo), isolate=True)  # fmt: skip
+        policy = runtime.sandbox_policy(harness.store.session(info["session_id"]))
+        assert policy is not None
+        for name in (".mcp.json", ".github/hooks", ".claude/settings.local.json"):
+            assert str(Path(info["cwd"]) / name) in policy.readonly, name
+    finally:
+        await runtime.stop()
+
+
+async def test_what_differs_is_checked_again_only_when_the_disk_or_head_changed(tmp_path, git_repo):
+    differing_now = workspaces_module.differing_now
+    commit(git_repo, ".mcp.json", "{}")
+    calls = []
+    original = workspaces_module.differing
+
+    async def counted(*arguments):
+        calls.append(arguments)
+        return await original(*arguments)
+
+    workspaces_module.differing = counted
+    try:
+        assert await differing_now(git_repo, "HEAD", [".mcp.json"]) == []
+        assert await differing_now(git_repo, "HEAD", [".mcp.json"]) == []
+        assert len(calls) == 1, "nothing changed: answered from the last check"
+        (git_repo / ".mcp.json").write_text('{"mcpServers": {}}')
+        assert await differing_now(git_repo, "HEAD", [".mcp.json"]) == [".mcp.json"]
+        commit(git_repo, ".mcp.json", '{"mcpServers": {}}')
+        assert await differing_now(git_repo, "HEAD", [".mcp.json"]) == [], "its HEAD moved"
+        assert len(calls) == 3
+    finally:
+        workspaces_module.differing = original
+
+
 def test_existing_installs_switch_to_unsandboxed_workers_once(tmp_path):
     away = tmp_path / "on-a-drive"
     away.mkdir()

@@ -2715,6 +2715,49 @@ def written_file(cwd: str, request: Any) -> str:
     return target
 
 
+# A repository's own Copilot configuration, which Copilot loads only in a folder it trusts (a
+# worktree of a trusted repository is trusted too), from the working directory up to the
+# repository's top: hooks (one can approve what Chief of Staff would refuse), MCP servers (their
+# commands run outside the worker's sandbox), plugins and extensions. Copilot also runs the
+# hooks of Claude's settings. Checked on the Copilot CLI (scripts in its security review).
+REPOSITORY_SETTINGS = (
+    ".mcp.json",
+    ".github/mcp.json",
+    ".github/hooks",
+    ".github/copilot",
+    ".github/extensions",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+)
+SETTINGS_WRITE = (
+    "Copilot loads this file as the repository's own settings (hooks, MCP servers), outside "
+    "Chief of Staff's checks: workers don't write it. Leave that change to the owner."
+)
+
+
+def repository_settings(path: str) -> bool:
+    """Whether a path is (or is in) one of the repository settings Copilot loads in a trusted
+    folder, by its path or where its links lead."""
+    for spelled in {path, os.path.realpath(path)}:
+        parts = Path(spelled).parts
+        for name in REPOSITORY_SETTINGS:
+            gated = tuple(name.split("/"))
+            if any(parts[i : i + len(gated)] == gated for i in range(len(parts))):
+                return True
+    return False
+
+
+def settings_write(row: dict, request: Any) -> str | None:
+    """Why a worker may not write this file: it is a repository setting Copilot would load from
+    its next turn or start (any worker, also one acting without permission checks)."""
+    if row["role"] != WORKER or getattr(request, "kind", "") != "write":
+        return None
+    target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "") or ""
+    if target and not Path(target).is_absolute():
+        target = str(Path(row["cwd"] or ".") / target)
+    return SETTINGS_WRITE if target and repository_settings(target) else None
+
+
 def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | None:
     """Why a worker may not write this file: it is in a git checkout of the owner's it was given
     only to read (a task that changes no code, see Workspaces.writes). Also when it acts without
