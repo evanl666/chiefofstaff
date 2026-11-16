@@ -5390,3 +5390,171 @@ def shell_denial(command: str, cwd: str, reads_slack: bool, request: Any) -> str
     if reads_slack and getattr(request, "possible_urls", None):
         return "network access from a worker that can read Slack"
     return None
+
+
+# A shepherd step (shepherd.py) runs in its worker under the step profile: an OS sandbox with no
+# GitHub credentials and no route to GitHub, no MCP servers or plugins, a tool allowlist. These
+# checks are its second line, applied while the step runs whatever the worker's mode: anything
+# that could publish or reach GitHub is refused, however the line is written (quotes and
+# backslashes are read through). Loose on purpose: a refusal costs the step one command.
+STEP_GH = re.compile(r"(?:^|[\s;&|(`$/=!{])gh(?=$|[\s;&|)`}])")
+STEP_SSH = re.compile(r"(?:^|[\s;&|(`$/=!{])(?:ssh|scp|sftp|ssh-add|ssh-agent)(?=$|[\s;&|)`}])")
+STEP_GIT = re.compile(r"(?:^|[\s;&|(`$/=!{])git(?=$|[\s;&|)`}])")
+STEP_GIT_WRITES = re.compile(
+    r"\b(?:push|send-pack|remote|credential|insteadof|pushinsteadof|pushurl|subtree|"
+    r"request-pull|http\.\S*extraheader|url\.)"
+)
+STEP_GITHUB = re.compile(
+    r"(?:^|[^a-z0-9-])(?:[a-z0-9-]+\.)*(?:github\.com|githubusercontent\.com|github\.io|"
+    r"githubassets\.com|ghcr\.io)(?![a-z0-9-])"
+)
+STEP_TOOLS = frozenset({"shepherd_result", "draft_github_review"})
+# What a step never reads, besides what its sandbox denies: GitHub's and git's credentials.
+STEP_SECRETS = (".config/gh", ".git-credentials", ".netrc", ".ssh", "Library/Keychains")
+
+
+def step_denial(request: Any, folders: list[str]) -> str | None:
+    """Why a session in a shepherd step may not do this, or None. `folders`: where it may write
+    (the worktree in use, the frozen worktrees, its step folder; temp is added)."""
+    kind = getattr(request, "kind", "")
+    if kind == "shell":
+        command = getattr(request, "full_command_text", "") or ""
+        if len(command) > MOST_LINE:
+            return f"Denied in a shepherd step: {TOO_LONG}."
+        words = squashed(command)
+        if STEP_GH.search(words):
+            return "Denied in a shepherd step: gh is not available (Chief of Staff publishes)."
+        if STEP_SSH.search(words):
+            return "Denied in a shepherd step: ssh is not available."
+        if STEP_GITHUB.search(words):
+            return "Denied in a shepherd step: GitHub is not reachable from a step."
+        if STEP_GIT.search(words) and (
+            STEP_GIT_WRITES.search(words) or may_push(command) or may_alias(words)
+        ):
+            return (
+                "Denied in a shepherd step: commit only; pushing, remotes and git's credentials "
+                "are Chief of Staff's."
+            )
+        return None
+    if kind == "write":
+        target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "") or ""
+        allowed = [*folders, tempfile.gettempdir()]
+        if not target or not any(within(target, folder) for folder in allowed if folder):
+            return "Denied in a shepherd step: write only in the step's own folders."
+        return None
+    if kind == "read":
+        target = getattr(request, "resolved_path", None) or getattr(request, "path", "") or ""
+        home = str(Path.home())
+        if any(within(target, str(Path(home) / secret)) for secret in STEP_SECRETS):
+            return "Denied in a shepherd step: credentials are not readable."
+        return None
+    if kind == "custom-tool":
+        if getattr(request, "tool_name", "") in STEP_TOOLS:
+            return None
+        return "Denied in a shepherd step: that tool is not available."
+    # MCP servers, URLs, memories, hooks, extensions, workflows: none in a step.
+    return f"Denied in a shepherd step: {kind or 'that'} is not available."
+
+
+# Chief of Staff's own operations for the shepherd, checked before each is sent, in every mode:
+# exactly the commands it means to run, never more. A push is a fast-forward of one ref to a
+# commit by its full SHA, with an exact lease on the head it was planned on, to the head
+# repository's https URL, hooks off; never a default or protected branch, never forced, never a
+# deletion. A merge is head-matched and never `--admin`. GitHub writes go only to the endpoints
+# a plan's operations use.
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+GITHUB_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+REF_NAME = re.compile(r"(?!-)(?!.*\.\.)(?!.*//)[A-Za-z0-9._/-]{1,250}(?<![./])")
+MERGE_METHODS = frozenset({"--squash", "--merge", "--rebase"})
+NEVER_FLAGS = frozenset(
+    {"--admin", "--delete", "-d", "--force", "-f", "--mirror", "--all", "--tags", "--prune",
+     "--delete-branch", "--auto", "--force-if-includes", "--set-upstream", "-u"}
+)  # fmt: skip
+API_WRITES = (
+    re.compile(r"repos/[\w.-]+/[\w.-]+/pulls/\d+/comments/\d+/replies"),
+    re.compile(r"repos/[\w.-]+/[\w.-]+/issues/\d+/comments"),
+    re.compile(r"repos/[\w.-]+/[\w.-]+/pulls/\d+/requested_reviewers"),
+    re.compile(r"repos/[\w.-]+/[\w.-]+/actions/runs/\d+/rerun-failed-jobs"),
+)
+RESOLVE_MUTATION = re.compile(
+    r"mutation\(\$id:ID!\)\{resolveReviewThread\(input:\{threadId:\$id\}\)\{thread\{isResolved\}\}\}"
+)
+
+
+def operation_denial(operation: dict, argv: list[str]) -> str | None:
+    """Why Chief of Staff may not run this for a shepherd operation, or None. `operation`: what
+    the plan bound (its kind; for a push the head repository, ref, planned head and commit, the
+    repository's default branch and whether the branch is protected, as just read)."""
+    kind = operation.get("kind")
+    words = [str(word) for word in argv]
+    if kind in {"push", "merge"} and any(word in NEVER_FLAGS for word in words):
+        return "refused: no deletion, force, --admin or auto-merge"
+    if kind == "push":
+        return push_denial(operation, words)
+    if kind == "merge":
+        if words[:3] != ["gh", "pr", "merge"] or len(words) != 7:
+            return "refused: not a plain merge"
+        url = f"https://github.com/{operation.get('repo')}/pull/{int(operation.get('number', 0))}"
+        if words[3] != url or words[4] not in MERGE_METHODS or words[5] != "--match-head-commit":
+            return "refused: a merge is of this PR, matched to its head"
+        if not FULL_SHA.fullmatch(words[6]) or words[6] != operation.get("head"):
+            return "refused: the merge must match the accepted head"
+        return None
+    if kind == "rerun":
+        if (
+            words[:3] == ["gh", "run", "rerun"]
+            and len(words) == 7
+            and words[3].isdigit()
+            and words[4:6] == ["--failed", "--repo"]
+            and GITHUB_NAME.fullmatch(words[6])
+        ):
+            return None
+        return "refused: a rerun is of a run's failed jobs only"
+    if kind in {"reply", "conversation-reply", "request-review", "resolve"}:
+        if words[:2] != ["gh", "api"]:
+            return "refused: not a GitHub API call"
+        if kind == "resolve":
+            if "graphql" in words and any(RESOLVE_MUTATION.fullmatch(w.removeprefix("query="))
+                                          for w in words):  # fmt: skip
+                return None
+            return "refused: only a review thread is resolved"
+        method = next((w.split("=", 1)[1] for w in words if w.startswith("--method=")), "GET")
+        if method.upper() != "POST":
+            return "refused: only new comments and review requests are written"
+        paths = [w for w in words[2:] if w.startswith("repos/")]
+        if len(paths) != 1 or not any(pattern.fullmatch(paths[0]) for pattern in API_WRITES):
+            return "refused: not an endpoint a plan writes to"
+        return None
+    return f"refused: {kind or 'that'} is not an operation"
+
+
+def push_denial(operation: dict, words: list[str]) -> str | None:
+    repo, ref = str(operation.get("head_repo") or ""), str(operation.get("ref") or "")
+    lease, commit = str(operation.get("lease") or ""), str(operation.get("commit") or "")
+    if not (GITHUB_NAME.fullmatch(repo) and REF_NAME.fullmatch(ref)):
+        return "refused: the head repository or branch is not known"
+    if ref in DEFAULT_BRANCHES or ref == operation.get("default_branch"):
+        return f"refused: {ref} is the repository's default branch"
+    if operation.get("protected") is not False:
+        return (
+            "refused: the branch is protected"
+            if operation.get("protected")
+            else "refused: protection unknown (push it yourself)"
+        )
+    if not (FULL_SHA.fullmatch(lease) and FULL_SHA.fullmatch(commit)) or lease == commit:
+        return "refused: a push needs the planned head and a new commit, by their full SHAs"
+    if "push" not in words:
+        return "refused: not a push"
+    at = words.index("push")
+    before, after = words[:at], words[at + 1 :]
+    if before[:1] != ["git"] or "core.hooksPath=/dev/null" not in before:
+        return "refused: hooks must be off"
+    expected = [
+        "--no-verify",
+        f"--force-with-lease=refs/heads/{ref}:{lease}",
+        f"https://github.com/{repo}.git",
+        f"{commit}:refs/heads/{ref}",
+    ]
+    if after != expected:
+        return "refused: a push is one commit, leased, to the head repository's branch"
+    return None
