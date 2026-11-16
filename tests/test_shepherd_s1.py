@@ -2,6 +2,7 @@
 it may spend, what stops it, where it can't run, what pauses a PR, a push the lease refuses,
 what a crash leaves, the Router's handing over, and the owner's other PRs found and handed."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -269,10 +270,14 @@ async def test_a_pr_that_became_stacked_or_a_fork_pauses(world):
 async def test_a_check_gone_after_its_push_pauses(world):
     runtime = await claimed(world)
     step, sha = await fixed(world, runtime)
+    world.github.checks[sha] = [
+        {"name": "lint", "status": "IN_PROGRESS", "conclusion": "", "required": False}
+    ]
     await approve(runtime.shepherd, step["id"], {})
     await settle(runtime)
     await settle(runtime)
     assert world.github.head() == sha
+    assert runtime.shepherd.control.claim(TARGET)["state"] == "idle"  # Read while CI runs.
     world.github.checks[sha] = [
         {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "required": False}
     ]
@@ -751,7 +756,9 @@ async def test_a_branch_that_requires_signed_commits_is_refused_with_why(world):
     await settle(runtime)
     assert world.github.head() == world.h0
     [push] = runtime.shepherd.control.actions(step["id"])
-    assert push["state"] == "failed" and push["outcome"] == "the branch requires signed commits"
+    assert push["state"] == "failed" and push["outcome"] == "the branch requires signed commits", (
+        push
+    )
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
     assert view["line"] == "Not published: the branch requires signed commits"
     assert view["action"] == {"kind": "look", "label": "Look"}
@@ -864,3 +871,67 @@ async def test_after_the_merge_the_claim_ends_and_accept_stays_the_owners(world)
     assert runtime.shepherd.control.claim(TARGET)["state"] == "ended"
     task = runtime.tasks.get(world.task)
     assert task["status"] == "review"  # Its result still waits for the owner's Accept.
+
+
+# What is kept, and for how long; a downgrade.
+
+
+async def test_a_plans_diff_and_replies_go_after_30_days_its_journal_stays(world):
+    runtime = await claimed(world)
+    step, _ = await fixed(world, runtime)
+    control = runtime.shepherd.control
+    control.prune_plans(30)
+    assert control.step(step["id"])["plan"]["diff"]  # Its outcome is today's.
+    runtime.store.execute(
+        "UPDATE shepherd_steps SET ended_at='2020-01-01T00:00:00+00:00' WHERE id=?", (step["id"],)
+    )
+    control.prune_plans(30)
+    plan = control.step(step["id"])["plan"]
+    assert "diff" not in plan and "threads" not in plan and "findings" not in plan
+    assert plan["kind"] == "fix" and plan["h1"] and plan["summary"] == "timeout() returned 31."
+    assert plan["evidence"] == {
+        "words": "`test_timeout` failed before and passes now; 2 tests ran on both"
+    }
+    [entry] = runtime.shepherd.journal_view(TARGET)
+    assert entry["summary"] == "timeout() returned 31." and entry["evidence"]
+
+
+async def test_what_a_pr_kept_beside_its_claim_goes_when_it_merges(world):
+    from test_shepherd import green
+
+    runtime = await claimed(world)
+    for prefix in ("acceptnote", "clickfirst", "mergewhy", "signedbranch"):
+        runtime.store.set(f"{prefix}:{TARGET}", "1")
+    runtime.store.set(f"stopped:{TARGET}", json.dumps({"kind": "fix-ci", "why": "x", "at": ""}))
+    await runtime.shepherd.accept_head(TARGET, world.h0)
+    runtime.store.delete(f"signedbranch:{TARGET}")
+    await runtime.shepherd.merge_when_ready(TARGET, True)
+    green(world, world.h0)
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert world.github.merged
+    await runtime.shepherd.read(TARGET)
+    assert runtime.shepherd.control.claim(TARGET)["state"] == "ended"
+    for prefix in ("acceptnote", "clickfirst", "mergewhy", "stopped"):
+        assert runtime.store.get(f"{prefix}:{TARGET}") is None, prefix
+
+
+async def test_a_downgrade_lets_go_of_a_worker_left_in_a_step(world, capsys, monkeypatch):
+    """SY13: an earlier version would continue its turn in its normal profile: prepared, it is
+    idle, unmarked, its attempt interrupted."""
+    from chiefofstaff import __main__ as entry
+
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "running" and runtime.store.get(f"step:{world.worker}")
+    monkeypatch.setattr(entry, "lock_data_file", lambda handle: None)
+    code = entry.prepare_downgrade(None, runtime.store.directory)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out.strip() == "Stopped preparing fixes in 1 worker(s): “Fix the login timeout”."
+    assert runtime.store.get(f"step:{world.worker}") is None
+    assert runtime.store.session(world.worker)["status"] == "idle"
+    ended = runtime.shepherd.control.step(step["id"])
+    assert ended["state"] == "interrupted" and ended["why"] == "Stopped before a downgrade"

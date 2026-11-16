@@ -179,14 +179,20 @@ export function taskItem(task, phase = phaseOf(task)) {
   const made = [task.artifacts, task.links, task.files, task.made_links, task.link_names, task.watch_kind, task.watch_changed_at, task.deliverables, task.monitoring, state.snapshot?.artifacts_hidden];
   const asked = askedOf(task);
   return {
-    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}${choosing(task, phase)}`,
+    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}${choosing(task, phase)}${keptKey(task)}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}${task.progress_updates?.length ? `:${keptWords(task.progress_updates).map((item) => item.at).join(",")}` : ""}`,
+    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}${task.progress_updates?.length ? `:${keptWords(task.progress_updates).map((item) => item.at).join(",")}` : ""}:${task.shepherd ? `${task.shepherd.line}|${task.shepherd.accept_note}` : ""}`,
     build: () => taskCard(task, phase),
     refresh: (node) => refreshTaskCard(node, task, phase),
   };
 }
+// Prepared for you: what its one action and its menu offer (the head to accept among them).
+const keptKey = (task) => {
+  const kept = task.shepherd;
+  if (!kept) return "";
+  return `:kept:${kept.action?.kind || ""}:${kept.action?.step || ""}:${kept.keep ? 1 : 0}:${kept.merge_when_ready ? 1 : 0}:${kept.head}:${kept.accepted}:${kept.journal?.length || 0}`;
+};
 // A queued card's reason changes as other workers start and stop.
 const queuedKey = () => `${sessions().filter(busy).length}/${state.snapshot.settings.max_workers}`;
 // A row's whole card (its body, receipts, report) is drawn once it is shown, and only then: a

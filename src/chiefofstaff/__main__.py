@@ -164,7 +164,7 @@ def default_data_dir() -> Path:
 def prepare_downgrade(parser: argparse.ArgumentParser, data_dir: Path) -> int:
     """--prepare-downgrade (more-agents.md 8), with Chief of Staff not running on this data
     directory: 0 when no process of another agent is left, else 1, saying which."""
-    from . import agents
+    from . import agents, shepherd
     from .store import Store
 
     directory = data_dir.expanduser().resolve()
@@ -182,9 +182,15 @@ def prepare_downgrade(parser: argparse.ArgumentParser, data_dir: Path) -> int:
         )
     try:
         store = Store(directory)
+        # Prepared for you: a worker left preparing a fix is let go of first.
+        preparing = shepherd.prepare_downgrade(store)
+        if preparing:
+            named = ", ".join(f"“{title}”" for title in preparing)
+            print(f"Stopped preparing fixes in {len(preparing)} worker(s): {named}.", flush=True)
         if not agents.ever_used(store):
             # Bug E80: no "close the workers on other agents" when there never were any.
-            print("Nothing to prepare: no workers ran on another agent.", flush=True)
+            if not preparing:
+                print("Nothing to prepare: no workers ran on another agent.", flush=True)
             return 0
         stopped, left = agents.prepare_downgrade(store)
     finally:

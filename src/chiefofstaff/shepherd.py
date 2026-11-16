@@ -94,6 +94,11 @@ READ_SECONDS = 300
 # Steps at once, across workers (a background slot each).
 STEPS_AT_ONCE = 1
 # Each step's folder, in its worker's own folder.
+# What a PR's claim keeps beside it (kv `<prefix>:<target>`), gone when the PR merges or closes.
+TARGET_KEYS = ("acceptnote", "capped", "checksbefore", "clickfirst", "mergewhy", "stopped",
+               "signedbranch", "noteligible")  # fmt: skip
+# A plan's diff and replies are kept this long after its outcome (its journal for good).
+PLAN_DAYS = 30
 # Said of any action while it is off.
 OFF_WORDS = "Prepared for you is off: turn on Keep my PRs moving in Settings → General."
 # Why an attempt waits (not refused) while this Copilot version gets its safety check.
@@ -379,7 +384,8 @@ class Shepherd(Keeping, Steps):
             return "this computer has no sandbox for it"
         if why := await self.probe_refusal():
             return why
-        if step and (self.control.claim(step["target"]) or {}).get("details", {}).get("signed"):
+        signed = float(self.store.get(f"signedbranch:{step['target']}") or 0) if step else 0
+        if signed > time.time() - 86400:
             return "the branch requires signed commits"
         return ""
 
@@ -564,6 +570,9 @@ class Shepherd(Keeping, Steps):
     async def tick(self):
         if not self.active():
             return
+        if self.store.get("proactive:pruned") != (day := today()):
+            self.store.set("proactive:pruned", day)
+            self.control.prune_plans(PLAN_DAYS)
         settings = self.store.settings()
         if settings.proactive_worker_prs:
             await self.claim_worker_prs()
@@ -672,7 +681,10 @@ class Shepherd(Keeping, Steps):
             self.read_at[target] = time.time()
             self.control.update_claim(target, head=details["head"], details=details,
                                       read_at=time.time())  # fmt: skip
+            moved = details["head"] != (claim.get("details") or {}).get("head")
             claim = self.control.claim(target) or claim
+            if moved:
+                self.publish_holder(claim)  # Its row offers what it is at now (Accept this head).
             task = self.runtime.tasks.find(claim["holder"]) if claim["holder"] else None
             if details["merged"] or details["state"] == "MERGED":
                 await self.ended(claim, "merged")
@@ -739,6 +751,8 @@ class Shepherd(Keeping, Steps):
         await self.stop_target(claim["target"], f"The PR was {how}.")
         self.control.end(claim["target"], how)
         self.drop_step_logs(claim["target"])
+        for prefix in TARGET_KEYS:
+            self.store.delete(f"{prefix}:{claim['target']}")
 
     def drop_step_logs(self, target: str):
         """The logs a step read go once the PR merges or closes."""
@@ -1032,6 +1046,29 @@ def token_values() -> list[str]:
         if re.search(r"TOKEN|SECRET|KEY|PASSWORD|AUTH", key, re.IGNORECASE)
         and integrity.TOKEN_LIKE.fullmatch(value)
     ]
+
+
+def prepare_downgrade(store) -> list[str]:
+    """--prepare-downgrade, with Chief of Staff not running: a worker left in a step is let go
+    of (an earlier version would continue its turn in its normal profile), its attempt
+    interrupted. Returns their titles."""
+    from .control import Control
+
+    control = Control(store)
+    stopped = []
+    for session_id, step_id in store.items("step:").items():
+        store.delete(f"step:{session_id}")
+        if control.exists():
+            control.move_step(step_id, RUNNING, state="interrupted", ended_at=now(),
+                              why="Stopped before a downgrade")  # fmt: skip
+        row = store.find_session(session_id)
+        if row and row["status"] in {"working", "queued", "starting"}:
+            store.update_session(session_id, status="idle", activity="")
+            store.add_message(session_id, "notice", "Stopped preparing it, before a downgrade.",
+                              {"shepherd_step": step_id})  # fmt: skip
+        if row:
+            stopped.append(row["title"])
+    return stopped
 
 
 def step_denied() -> tuple[str, ...]:
