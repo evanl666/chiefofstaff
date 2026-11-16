@@ -236,3 +236,31 @@ def test_resolve_and_rerun():
         {"kind": "rerun"}, ["gh", "run", "cancel", "123", "--failed", "--repo", "acme/api"]
     )
     assert operation_denial({"kind": "delete"}, ["gh", "repo", "delete"])
+
+
+@pytest.mark.parametrize(
+    ("given", "kept"),
+    [
+        ("registry.acme.dev", "registry.acme.dev"),
+        ("https://Registry.Acme.dev/simple/", "registry.acme.dev"),
+        ("*.acme.dev", "*.acme.dev"),
+        ("api.github.com", "GitHub's"),
+        ("*.github.com", "GitHub's"),
+        ("objects.githubusercontent.com", "GitHub's"),
+        ("ghcr.io", "GitHub's"),
+        ("com", "GitHub's"),  # It covers github.com.
+        ("*.com", "GitHub's"),
+        ("not a host", "not a host name"),
+        ("https://", "not a host name"),
+    ],
+)
+def test_other_hosts_fixes_may_download_from_are_host_names_never_githubs(given, kept):
+    from pydantic import ValidationError
+
+    from chiefofstaff.models import Settings
+
+    if "." in kept and " " not in kept:
+        assert Settings(step_hosts=[given, given]).step_hosts == [kept]
+    else:
+        with pytest.raises(ValidationError, match=f"Other hosts fixes may download from: .*{kept}"):
+            Settings(step_hosts=[given])
