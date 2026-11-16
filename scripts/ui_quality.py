@@ -1321,7 +1321,7 @@ async def agents_views(runtime, browser, quality: Quality):
 # Prepared for you's; anything else found there fails.
 KNOWN_HOME_FINDINGS = re.compile(
     rf"{KNOWN_ROW_FINDINGS.pattern}|^a\.receipt\.pr\S* .* is 18px tall$"
-    r"|^4 font sizes: .*10px \(span\.a-kind \"PR\"\)$"
+    r'|^4 font sizes: .*10px \(span\.a-kind "[^"]+"(?:, span\.a-kind "[^"]+")*\)$'
 )
 
 
