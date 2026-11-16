@@ -17,8 +17,8 @@ Settings → General (*Keep my PRs moving*); see
 - **A fix that changes tests, CI or checks is marked**, its parts shown first.
 - **Any commit it didn't push pauses the PR** until you resume it; your message or *Stop* ends
   an attempt at once, and your new tasks come before it.
-- **Merge when ready**, per PR (its ⋯): merged only at the head you accepted, or approved fixes
-  on top of it, once checks pass and reviews approve.
+- **Merge when ready**, per PR (its ⋯): merged only at the commit you accepted, or approved
+  fixes on top of it, once checks pass and reviews approve.
 - **Your other open PRs that need something** are listed on Home under *Prepared for you* (no
   credits), three at a time; *Hand to a worker* starts a task that keeps one moving. You can
   also ask the Router to keep a PR moving.

@@ -48,7 +48,7 @@ makes a mistake.
 | Workers stay on their task, don't merge PRs, don't speak publicly as you | **The model**, guided by instructions; the Watchdog flags drift | As far as the model follows its instructions |
 | While a worker prepares a fix for *Prepared for you*, its commands reach no GitHub host and no credentials (no `gh` or `git` sign-in, no SSH keys, no keychain), only its project's package registries and the hosts you list; its session has no MCP servers, no Slack and only the tools that turn needs | **OS sandbox**, always on for that turn, and **Copilot** (that turn's tool allowlist); Chief of Staff's permission check refuses the rest | *Prepared for you* is on (off by default) and this Copilot version passed Chief of Staff's check of those limits on this computer; until then no fix is prepared |
 | What *Prepared for you* publishes (a push, replies, a resolved conversation, a review asked again, a CI run again) is exactly what you approved, sent by Chief of Staff as your account: a push only to the PR's own branch, only if that branch is still at the commit the plan was made on, never with git hooks | **Chief of Staff** (each operation journaled before it is sent, checked against the plan, and read back on GitHub after a stop, never sent twice) | Always while it is on. Branches that are protected, require signed commits or have rules a push might not meet are left to you |
-| *Merge when ready* merges only a head you accepted, or fixes you approved on top of it, once required checks pass and reviews approve | **Chief of Staff** (`gh pr merge --match-head-commit` with that exact commit, every condition read again just before) | You turned it on for that PR. A commit nobody approved pauses the PR until you accept its new head |
+| *Merge when ready* merges only a commit you accepted, or fixes you approved on top of it, once required checks pass and reviews approve | **Chief of Staff** (`gh pr merge --match-head-commit` with that exact commit, every condition read again just before) | You turned it on for that PR. A commit nobody approved pauses the PR until you accept it |
 
 **Folder settings without the sandbox.** With the worker sandbox off (the default), a worker
 already runs its commands as you: whatever it could put in its folder's settings (a hook, an MCP
@@ -317,10 +317,10 @@ replies for your PRs in their worker, and publishes only what you approve:
   expected to work) and prepares nothing on a version that did not pass.
 - **What goes out is the plan you approved.** The plan's operations are journaled before any is
   sent, in order, one writer per account, within GitHub's limits. A push is exactly the commit
-  that was checked, to the PR's own branch, leased on the head the plan was made on, with hooks
+  that was checked, to the PR's own branch, leased on the commit the plan was made on, with hooks
   off; replies are the text you saw (or edited). After a stop mid-send, each operation is read
   back on GitHub before anything else happens, and none is sent again blindly.
-- **A head nobody explains stops it.** Any commit on the PR that Chief of Staff did not push
+- **A commit nobody explains stops it.** Any commit on the PR that Chief of Staff did not push
   from an approved plan (a teammate's, yours, a worker's in an ordinary turn) pauses the PR
   until you resume it, and is never merged before you accept it.
 - **Limits:** the check runs your installed Copilot's sandbox on this computer and trusts it as

@@ -10780,8 +10780,8 @@ async def round_shepherd(runtime, browser, failures: list[str]):
     """Prepared for you (shepherd.py): off, one line in Settings → General and nothing else;
     turned on, its tab comes at once, and saved; Home's section with three rows, All found with
     why not, Hand to a worker; a worker PR's row: the fix's review (Request changes… and back,
-    Push), its line after, Resume on a paused one, its menu (Stop keeping it moving, Accept this
-    head…, What it did); the tab's choices saved; turned off, everything of it goes."""
+    Push), its line after, Resume on a paused one, its menu (Stop looking after this PR, Accept
+    this commit…, What it did); the tab's choices saved; turned off, everything of it goes."""
     from shepherd_world import TARGET, seed_page
 
     from chiefofstaff import discovery
@@ -10883,11 +10883,11 @@ async def round_shepherd(runtime, browser, failures: list[str]):
         )
         await expect(paused.get_by_role("button", name="Resume")).to_have_count(0)
 
-        # Its menu: Accept this head… (the head it pushed, read again at once), What it did,
-        # Stop keeping it moving.
+        # Its menu: Accept this commit… (the one it pushed, read again at once), What it did,
+        # Stop looking after this PR.
         await until(lambda: runtime.shepherd.control.claim(TARGET)["head"] == world.github.head())
         await row.locator(".more-button").click()
-        await row.get_by_role("menuitem", name="Accept this head…").click()
+        await row.get_by_role("menuitem", name="Accept this commit…").click()
         confirm = page.locator(".confirm-dialog")
         await expect(confirm.locator("h2")).to_have_text(
             f"Accept api#12 at {world.github.head()[:7]}?"
@@ -10906,12 +10906,12 @@ async def round_shepherd(runtime, browser, failures: list[str]):
         await expect(journal.locator(".journal-ops")).to_contain_text("Pushed the fix")
         await journal.get_by_role("button", name="Close").click()
         await row.locator(".more-button").click()
-        await row.get_by_role("menuitem", name="Stop keeping it moving").click()
+        await row.get_by_role("menuitem", name="Stop looking after this PR").click()
         await until(lambda: not runtime.shepherd.control.claim(TARGET)["keep"], 15)
         await row.locator(".more-button").click()
-        await expect(row.get_by_role("menuitem", name="Keep it moving")).to_be_visible()
+        await expect(row.get_by_role("menuitem", name="Look after this PR")).to_be_visible()
         await page.keyboard.press("Escape")
-        log("a kept PR's row: Resume, Accept this head…, What it did, Stop keeping it moving")
+        log("a kept PR's row: Resume, Accept this commit…, What it did, Stop looking after this PR")
 
         # The tab's choices, saved.
         await page.locator("#settings-button").click()

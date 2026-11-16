@@ -247,7 +247,7 @@ class Steps:
         )  # fmt: skip
         fetched = (await git("-C", top, "rev-parse", "FETCH_HEAD")).strip()
         if fetched != step["h0"]:
-            raise ValueError(f"the PR's head moved to {fetched[:7]}")
+            raise ValueError(f"the PR has a new commit ({fetched[:7]})")
         head = (await checkout_git(checkout, path, "rev-parse", "HEAD")).strip()
         dirty = (
             await checkout_git(checkout, path, "status", "--porcelain", "--untracked-files=no")

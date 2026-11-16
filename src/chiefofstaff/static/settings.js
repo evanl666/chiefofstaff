@@ -1517,9 +1517,9 @@ function renderProactiveTab() {
     el("h4", { text: "What it does" }),
     el("div", { class: "row" }, ...KIND_NAMES.map(([kind, name]) => level(kind, name))),
     el("small", { text: "Suggest: it offers Fix it. Prepare: it prepares the fix or replies right away, within the day's credits. Either way, you approve what is published." }),
-    el("label", { class: "short" }, el("span", { text: "Credits a day it may spend unasked" }), el("input", { name: "proactive_budget", type: "number", min: "0", max: "10000", step: "1", placeholder: "0 = only when you ask", value: settings.proactive_budget ? String(settings.proactive_budget) : "" })),
+    el("label", { class: "short" }, el("span", { text: "Credits it may spend a day without asking" }), el("input", { name: "proactive_budget", type: "number", min: "0", max: "10000", step: "1", placeholder: "0 = only when you ask", value: settings.proactive_budget ? String(settings.proactive_budget) : "" })),
     spent ? el("small", { text: spent }) : null,
-    el("label", {}, el("span", { text: "Hosts its fixes may reach" }), el("textarea", { name: "step_hosts", rows: 2, placeholder: "registry.example.com — one per line" }), el("small", { text: "Package registries your projects install from, beyond the public ones (PyPI, npm, crates.io, Go). GitHub is never reachable while a fix is prepared." })),
+    el("label", {}, el("span", { text: "Other hosts fixes may download from" }), el("textarea", { name: "step_hosts", rows: 2, placeholder: "registry.example.com — one per line" }), el("small", { text: "PyPI, npm, crates.io and Go's proxy are allowed already. Never GitHub." })),
     repos.length ? el("h4", { text: "Repositories" }) : null,
     repos.length ? el("ul", { class: "repo-list" }, ...repos) : null,
   ].filter(Boolean);
