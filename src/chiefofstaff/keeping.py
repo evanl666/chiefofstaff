@@ -205,8 +205,9 @@ class Keeping:
     def accepted(self: Shepherd, task: dict) -> list[str]:  # type: ignore[misc]
         """The owner accepted a task's result: for each of its kept PRs, the head its card
         showed is recorded as accepted when it is the commit its checkout holds (the diff they
-        reviewed); otherwise the result is accepted but no head is (said on its card)."""
-        if not self.active():
+        reviewed); otherwise the result is accepted but no head is (said on its card). Paused
+        too: the owner's review stands (only what it does waits)."""
+        if not (self.on() and self.control.exists()):
             return []
         evidence = {}
         run = self.store.one(
