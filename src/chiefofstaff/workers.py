@@ -15,7 +15,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import agents, catalog, machine
+from . import agents, caches, catalog, machine
 from .backend import COPILOT_AGENT, stop_background
 from .envelope import clean_title, owner_text, sendable, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
@@ -789,6 +789,8 @@ class Workers:
             row = self.store.session(session_id)
             if row["closed_at"]:
                 await self.workspaces.release(row)
+                # Its own temporary folder (caches.worker_temp): made again if it is reopened.
+                await asyncio.to_thread(caches.remove_temp, session_id)
 
     def recently_closed(self, limit: int | None, helpers: bool = True) -> list[dict]:
         """Closed workers, the latest first (None: all of them); `helpers`: Chief of Staff's own

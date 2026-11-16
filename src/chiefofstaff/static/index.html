@@ -148,7 +148,7 @@
               <textarea name="sandbox_writable" rows="2" placeholder="One folder per line, e.g. a Copilot plugin's own folder"></textarea>
               <small>For tools that must write outside a worker's folders, such as a Copilot plugin hook that keeps a journal.</small>
             </label>
-            <label class="check"><input name="shared_caches" type="checkbox" /> Share your npm and Yarn package stores, so installs are as fast as in your terminal</label>
+            <label class="check"><input name="shared_caches" type="checkbox" /> Start workers' caches from yours (read-only to them), so installs are as fast as in your terminal</label>
             <div class="check-row"><label class="check"><input name="watchdog_enabled" type="checkbox" /> Watchdog: check workers for stalls and drift</label><button id="watchdog-activity" type="button" class="link quiet" hidden>View activity</button></div>
             <label class="short"><span>Credit limit per worker</span><input name="worker_credit_limit" type="number" min="0" step="1" placeholder="0 = none, or 30 and up" /></label>
           </section>

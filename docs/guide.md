@@ -333,18 +333,32 @@ your own Gradle daemons and Jupyter servers stay unreadable to them (their folde
 `~/.gradle/daemon` and Jupyter's `runtime`, are created empty if they do not exist yet). Workers that read Slack
 cannot reach localhost.
 
-So that installs and builds are as fast as in your terminal, sandboxed workers use your package
-caches. Copilot's own sandbox opens them read-write in a project of their kind (npm's, pnpm's,
-Yarn's and Bun's stores, pip's, uv's and poetry's caches, Go's, Cargo's, Gradle's and Maven's,
-Playwright's browsers), and Chief of Staff adds npm's and Yarn's stores: a worker on your own
-tasks could change what your later builds run. 0.1.47 gives workers caches of their own, with
-yours read-only beneath them. Workers that read Slack already get your caches read-only, and
-can't read the registry and credential files build tools use (`~/.npmrc`,
-`~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.pypirc`, `~/.netrc`,
-`~/.git-credentials`, `~/.aws/credentials`…). No worker can change Chief of Staff's own code or
-the Python it runs on, unless you asked it to work in place in Chief of Staff's own checkout.
-Before a worker's worktree is made,
-only origin's default branch is fetched, once for workers that start together.
+**Workers' caches.** Sandboxed workers keep their package caches in a folder of their own
+(`~/Library/Caches/chiefofstaff/workers` on macOS, `~/.cache/chiefofstaff/workers` elsewhere),
+which they all share: what one worker downloads, the next one finds. Your own caches are
+read-only to them, so a worker can never change what your builds run, yet nothing you already
+have is downloaded again: Gradle reads your dependency cache, Maven your local repository and Go
+your module downloads directly; Playwright finds your browsers through links; the rest (npm's,
+pnpm's, Yarn's, Bun's, pip's, uv's, poetry's, pre-commit's, corepack's and Cargo's caches,
+Gradle's and Maven's distributions, Go's build cache) is copied from yours in the background as
+copy-on-write clones, which take next to no disk space (on Linux, only on a file system with
+reflinks, such as Btrfs or XFS). Each worker's shell gets the tools pointed there, and its own
+temporary folder, before each command (nothing in its instructions): installs and builds work as
+in your terminal, including uv's Pythons and tools (pre-commit, poetry), corepack's pnpm and Yarn,
+Maven's wrapper and Gradle (in the sandbox, Gradle runs without its native libraries and with
+the worker's own daemon). *Start workers' caches from yours* off (Settings) keeps your caches
+out of theirs. The folder can be deleted at any time no worker runs. Workers that read Slack have
+caches of their own in their workspace, and can't read the registry and credential files build
+tools use (`~/.npmrc`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.pypirc`,
+`~/.netrc`, `~/.git-credentials`, `~/.aws/credentials`…). No worker can change Chief of Staff's
+own code or the Python it runs on, unless you asked it to work in place in Chief of Staff's own
+checkout. Before a worker's worktree is made, only origin's default branch is fetched, once for
+workers that start together.
+
+Some tools behave differently inside the sandbox on macOS: Playwright's Chromium runs in a single
+process (the sandbox refuses the others it would start; Firefox, WebKit and full Chrome can't
+start there), Java reaches github.com only if you have run `copilot sandbox ca create` (Copilot's
+proxy answers for it), and uv older than 0.13 may crash there (`brew upgrade uv`).
 
 Hooks of your Copilot plugins run in the sandbox too. One that writes elsewhere (a journal, say)
 fails there; the worker carries on and its timeline notes it once. To let it write, add its

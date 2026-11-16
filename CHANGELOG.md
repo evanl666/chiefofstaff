@@ -157,6 +157,21 @@ questions stay listed (QA round on 0.1.45).
 - On Linux, processes are known by their whole command lines: `ps` there cut each line to the
   width `COLUMNS` gave, even into a pipe, so a process Chief of Staff started could be taken
   for another one when it was looked for again; `ps -ww` never cuts.
+- **Sandboxed workers have package caches of their own, and never download again what you or
+  another worker already have.** Copilot's sandbox let them write your caches, so a worker could
+  plant code your own builds then ran; and many tools failed in it: pnpm and Yarn through
+  corepack, uv (your uv-installed Pythons were unreadable), poetry and pre-commit installed with
+  `uv tool`, Maven's wrapper, and Gradle (its native libraries, and Java never reached the
+  sandbox's proxy, so each worker downloaded Gradle again, 140 MB, when it could at all). Now
+  every sandboxed worker shares a cache folder of workers' own, with yours read-only beneath it:
+  Gradle, Maven and Go read yours directly, Playwright's browsers are linked, and the rest is
+  copied from yours in the background as copy-on-write clones (about two seconds, never while a
+  worker waits). Each worker's shell gets its tools pointed there (and a temporary folder of its
+  own) before each command, at a cost of about 1 ms; the Gradle instructions workers were given
+  are gone. Every one of those tools now installs, builds and tests in the sandbox; a second
+  worker downloads nothing. Playwright's Chromium runs in a single process there (the sandbox
+  refuses the processes it would start). Workers that read Slack get caches of their own in their
+  workspace.
 - **No sandboxed worker can change Chief of Staff's own code.** Its environment, wherever `uvx`
   or `uv tool install` put it (`uvx` keeps it in uv's cache, which Copilot's sandbox opens
   read-write to commands in a Python project), the Python it runs on, every folder it imports

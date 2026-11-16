@@ -821,32 +821,54 @@ async def test_list_sessions_stays_readable_with_many_sessions(tmp_path):
     assert "terminal_sessions" in data and len(data["sessions"]) >= 40
 
 
-async def test_workers_share_only_caches_whose_contents_are_checked(tmp_path, monkeypatch):
+async def test_workers_write_a_cache_of_their_own_and_read_the_owners(tmp_path, monkeypatch):
+    for name in MOVED:
+        monkeypatch.delenv(name, raising=False)
     home = tmp_path / "home"
     names = (".gradle/caches", ".gradle/daemon", ".gradle/wrapper", ".npm/_cacache")
-    for name in (*names, ".m2/repository", ".cache/pre-commit"):
+    for name in (*names, ".m2/repository", ".cache/pre-commit", ".local/share/uv/python"):
         (home / name).mkdir(parents=True)
     monkeypatch.setattr(Path, "home", lambda: home)
     harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Build")
     policy = runtime.sandbox_policy(harness.store.session(worker))
-    assert str(home / ".npm/_cacache") in policy.readwrite, "npm checks each package"
-    assert str(home / ".npm") not in policy.readwrite, "not _npx: npx runs what is there"
-    for unchecked in (".gradle/caches", ".gradle/wrapper", ".m2/repository", ".cache/pre-commit"):
-        assert str(home / unchecked) not in policy.readwrite, f"{unchecked} runs as it is"
+    tier = str(tmp_path / "worker-caches")
+    assert tier in policy.readwrite, "workers' own caches"
+    for owner in (
+        ".npm",
+        ".gradle/caches",
+        ".gradle/wrapper",
+        ".m2/repository",
+        ".cache/pre-commit",
+    ):
+        assert str(home / owner) in policy.readonly, f"{owner}: read, never written"
+        assert not any(str(home / owner).startswith(path) for path in policy.readwrite), owner
+    assert str(home / ".local/share/uv/python") in policy.readonly, "uv's Pythons run"
+    assert str(home / ".cargo/registry") in policy.denied, "none yet: none made"
     assert str(home / ".gradle/daemon") in policy.denied, "not the owner's own daemons"
     prompt = harness.session(worker).options["system_message"]["content"]
-    assert "GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches" in prompt, "Gradle's cache, read-only"
-    harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
-    assert (
-        str(home / ".npm/_cacache")
-        not in runtime.sandbox_policy(harness.store.session(worker)).readwrite
+    assert "GRADLE_RO_DEP_CACHE" not in prompt, "set in its shell, not asked of the model"
+    assert "a folder of workers' own" in prompt
+    # Its shell gets the tools pointed there, at every open.
+    scripts = harness.session(worker).shell_scripts
+    assert len(scripts) == 1 and scripts[0][0].startswith(str(tmp_path / "data")), scripts
+    assert scripts[0][0] in policy.readonly or any(
+        scripts[0][0].startswith(path + "/") for path in policy.readonly
+    ), "its init script: read, never written"
+    text = Path(scripts[0][0]).read_text()  # noqa: ASYNC240
+    assert f"npm_config_cache={tier}/npm" in text
+    assert f"GRADLE_RO_DEP_CACHE={home}/.gradle/caches" in text
+    await harness.session(worker).send("Go on")
+    runtime.states[worker].handle = None
+    await runtime.session_for(worker)
+    assert harness.client.resumed and harness.session(worker).shell_scripts == scripts, (
+        "given again when resumed"
     )
-    harness.store.execute("UPDATE sessions SET slack=0 WHERE id=?", (worker,))
     harness.store.save_settings(Settings(shared_caches=False, worker_sandbox=True))
     policy = runtime.sandbox_policy(harness.store.session(worker))
-    assert str(home / ".npm/_cacache") not in policy.readwrite
+    assert tier in policy.readwrite and str(home / ".npm") in policy.readonly
+    assert "GRADLE_RO_DEP_CACHE" not in runtime.cache_plan(harness.store.session(worker)).text
     assert str(home / "Library/Jupyter/runtime") in policy.denied, "denied before it exists"
 
 
@@ -1043,8 +1065,8 @@ async def test_workers_that_read_slack_get_the_owners_caches_read_only(tmp_path,
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Build")
     policy = runtime.sandbox_policy(harness.store.session(worker))
-    assert str(home / ".npm/_cacache") in policy.readwrite, "unchanged for the owner's own tasks"
-    assert str(home / ".npmrc") not in policy.denied
+    assert str(home / ".npm") in policy.readonly, "the owner's own tasks: read-only too"
+    assert str(home / ".npmrc") not in policy.denied, "their registry, as in a terminal"
 
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
     policy = runtime.sandbox_policy(harness.store.session(worker))
@@ -1053,6 +1075,9 @@ async def test_workers_that_read_slack_get_the_owners_caches_read_only(tmp_path,
         assert not any(str(home / cache).startswith(path) for path in policy.readwrite), cache
     for secret in (*secrets, ".azure"):
         assert str(home / secret) in policy.denied, secret
+    own = str(runtime.workspaces.workspace(harness.store.session(worker)) / ".caches")
+    assert own in policy.readwrite, "a cache of its own, in its workspace"
+    assert str(tmp_path / "worker-caches") not in policy.readwrite, "not the others'"
     assert str(home / ".pypirc") not in policy.denied, "no folder left where a file belongs"
     assert str(home / ".gradle/caches") in policy.denied, "nor a cache made where there is none"
     assert str(home / ".cache/pip") not in policy.denied, "Linux's place, on macOS: left alone"

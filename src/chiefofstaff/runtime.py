@@ -39,7 +39,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from . import agents, prompts, threads
+from . import agents, caches, prompts, threads
 from .abilities import Abilities
 from .asks import Asks
 from .backend import (
@@ -48,6 +48,7 @@ from .backend import (
     AgentBackend,
     SandboxPolicy,
     copilot_backend,
+    copilot_home,
     copilot_orphans,
     copilot_ours,
     copilot_records,
@@ -56,6 +57,7 @@ from .backend import (
     end_processes,
     older,
     sandbox_supported,
+    shell_init,
     switch_model,
 )
 from .bus import Bus
@@ -122,7 +124,6 @@ from .workspaces import (
     protected_git_paths,
     registry_secrets,
     service_secrets,
-    shared_caches,
     too_broad,
 )
 
@@ -492,6 +493,13 @@ class Runtime:
         self.send_command = shell_command()
         # Chief of Staff's own code, read-only for sandboxed workers (see own_code).
         self.own_code_paths: list[str] | None = None
+        # Sandboxed workers' caches (caches.py): their tier, their init scripts, what was found
+        # about the owner's tools (GOPROXY, a Java truststore), and the background seeding.
+        self.cache_tier = caches.default_tier()
+        self.cache_scripts = store.directory / caches.SCRIPTS
+        self.cache_facts: dict[str, Any] = {}
+        self.cache_seeding = False
+        self.cache_seeded = 0.0
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -522,6 +530,8 @@ class Runtime:
         await self.habits.start()
         await self.connector.start()
         self.background(self.abilities.sync())
+        if self.store.settings().worker_sandbox and self.sandbox_host:
+            self.seed_caches_soon()
         if self.store.drafts("uncertain"):
             self.background(self.drafts.check_uncertain())
 
@@ -1723,10 +1733,9 @@ class Runtime:
         settings = self.store.settings()
         writes = self.workspaces.writes(row)
         writable = [*writes, *repositories, *settings.sandbox_writable]
-        if settings.shared_caches and not row["slack"]:
-            # Packages its installs need are what the owner's installs already have (checked
-            # against lockfiles before use). Not for workers that read Slack.
-            writable += shared_caches()
+        # Its tools' caches: workers' own, the owner's read-only beneath (see caches.py).
+        cached = self.cache_plan(row)
+        writable += cached.readwrite
         readonly = [
             path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
         ]
@@ -1735,9 +1744,10 @@ class Runtime:
         if agent := os.environ.get("SSH_AUTH_SOCK"):
             writable.append(agent)  # Signing through the agent; key files stay unreadable.
         readonly += self.own_code(writes)
-        closed: list[str] = []
+        readonly += cached.readonly
+        closed = list(cached.denied)
         if row["slack"]:
-            closed = self.slack_closed(readonly)
+            closed += self.slack_closed(readonly)
         return SandboxPolicy(
             readwrite=tuple(dict.fromkeys(path for path in writable if path)),
             readonly=tuple(dict.fromkeys(readonly)),
@@ -1749,6 +1759,61 @@ class Runtime:
             # Its own daemons, yes; the owner's (their tokens are in these files), no.
             denied=tuple(dict.fromkeys([*service_secrets(), *closed])),
         )
+
+    def cache_plan(self, row: dict) -> caches.Plan:
+        """A sandboxed worker's caches (caches.plan): what they add to its sandbox, and its
+        shell's init script."""
+        return caches.plan(
+            self.cache_tier,
+            self.workspaces.workspace(row),
+            row["id"],
+            self.cache_scripts,
+            slack=bool(row["slack"]),
+            read_through=self.store.settings().shared_caches,
+            goproxy=self.cache_facts.get("goproxy", ""),
+            truststore_path=self.cache_facts.get("truststore"),
+        )
+
+    async def apply_cache_env(self, row: dict, session: Any):
+        """A sandboxed worker's shell gets its tools pointed at its caches: an init script
+        Copilot sources before each of its commands (set at every open, created or resumed)."""
+        found = self.cache_plan(row)
+        try:
+            path = await asyncio.to_thread(caches.prepare, found, row["id"], self.cache_scripts)
+            if path is None or not await shell_init(session, [str(path)]):
+                logger.warning("Worker %s's tools could not be given their caches", row["id"])
+        except Exception:
+            logger.warning("Worker %s's tools could not be given their caches", row["id"],
+                           exc_info=True)  # fmt: skip
+        if not row["slack"]:
+            self.seed_caches_soon()
+
+    def seed_caches_soon(self):
+        """Fill workers' caches from the owner's, in the background (at most every
+        caches.SEED_EVERY seconds): never on a worker's way."""
+        if (
+            not self.store.settings().shared_caches
+            or self.cache_seeding
+            or (self.cache_seeded and time.monotonic() - self.cache_seeded < caches.SEED_EVERY)
+        ):
+            return
+        self.cache_seeding = True
+        self.background(self.seed_caches())
+
+    async def seed_caches(self):
+        try:
+            if "goproxy" not in self.cache_facts:
+                self.cache_facts["goproxy"] = await asyncio.to_thread(caches.go_proxy)
+                self.cache_facts["truststore"] = await asyncio.to_thread(
+                    caches.truststore, self.cache_tier, copilot_home()
+                )
+            timings = await asyncio.to_thread(
+                caches.seed, self.cache_tier, caches.Owner(Path.home())
+            )
+            logger.info("Workers' caches filled from yours: %s", timings)
+        finally:
+            self.cache_seeding = False
+            self.cache_seeded = time.monotonic()
 
     def own_code(self, writes: list[str]) -> list[str]:
         """Chief of Staff's own code and Python, read-only for every sandboxed worker
@@ -2124,9 +2189,8 @@ class Runtime:
                 self.workspaces.checkouts(row),
                 self.yolo(row),
                 ("on-no-gh" if self.sandbox_gh is False else "on") if sandbox else "",
-                caches=bool(sandbox) and settings.shared_caches and not row["slack"],
+                caches=bool(sandbox) and not row["slack"],
                 local=bool(sandbox and sandbox.local_network),
-                gradle=bool(sandbox) and (Path.home() / ".gradle" / "caches").is_dir(),
                 gh_accounts=self.github.accounts_cache[1],
                 gh_acting=self.store.items("ghaccount:"),
                 slack=bool(sandbox) and bool(row["slack"]),
@@ -2851,6 +2915,8 @@ class Runtime:
             if agent == COPILOT_AGENT:
                 raise RuntimeError("Copilot reconnected meanwhile; try again.")
             raise RuntimeError(f"{agents.display(agent)} started again meanwhile; try again.")
+        if agent == COPILOT_AGENT and row["role"] == WORKER and self.sandbox_policy(row):
+            await self.apply_cache_env(row, session)
         session_id = row["id"]
         loop = self.loop or asyncio.get_running_loop()
 

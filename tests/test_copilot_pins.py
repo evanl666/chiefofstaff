@@ -31,6 +31,7 @@ from test_runtime import at, logged
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff import tools as tools_module
 from chiefofstaff import watchdog as watchdog_module
+from chiefofstaff import caches as caches_module
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.backend import CopilotBackend
 from chiefofstaff.models import Settings
@@ -73,6 +74,7 @@ def machine(tmp_path, monkeypatch):
     chief = tmp_path / "chief"
     chief.mkdir()
     monkeypatch.setattr(runtime_module, "own_code", lambda: [str(chief)])
+    monkeypatch.setattr(caches_module, "worker_temp", lambda session: tmp_path / f"t-{session[:8]}")
     caches = workspaces_module.PLATFORM_CACHES["darwin"]
     monkeypatch.setattr(workspaces_module, "PLATFORM_CACHES", {"darwin": caches, "linux": caches})
     return SimpleNamespace(root=tmp_path, home=home, copilot=copilot)
@@ -103,10 +105,17 @@ MACOS = (
 )
 
 
+MACOS_SANDBOX = (
+    "\nPlaywright's Chromium runs in a single process in this sandbox (it refuses more); "
+    "Firefox, WebKit and full Chrome cannot start in it: if a test needs them, say so in your "
+    "report, with the command for the owner."
+)
+
+
 def neutral(value, machine: SimpleNamespace) -> str:
     """The value's canonical JSON, with this run's folders made the same in every run."""
     text = json.dumps(plain(value), sort_keys=True, ensure_ascii=False, indent=1)
-    text = text.replace(json.dumps(MACOS)[1:-1], "")
+    text = text.replace(json.dumps(MACOS)[1:-1], "").replace(json.dumps(MACOS_SANDBOX)[1:-1], "")
     return text.replace(str(machine.home), "<home>").replace(str(machine.root), "<tmp>")
 
 
@@ -302,18 +311,18 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "slack, created": (4501, "45e96f706f8f884c1ad15e268e2717480a4482bd75697b9db1a83afe2a21275f"),
     "slack, resumed": (4466, "90e994a20c3bcaadb98e628effd8a48499f866cc408d11fc19b63cbcb3fed734"),
     "the Copilot sandbox of a worker asking first": (
-        948,
-        "ced32e3bdc2e3a415ed127a6a9398419e034e413723e6ca90a9c462c66c9c5ad",
+        1881,
+        "0225cf167e01b754ff725d415afc49d9c4a42f0a23eea82d445d498d7ce2d09d",
     ),
     "watchdog, created": (3317, "74c2464eda92b08d7c0c2f0be7e9c18d5b80e0b4d7d7db7c5cbf22099bd3f111"),
     "watchdog, resumed": (3279, "3211b0fe48200b7a8b7e24baa9eca2c19608f7f40a7c4282665e9ca51f11ca54"),
     "worker asking first, sandboxed, created": (
-        20001,
-        "89a7ea0a4464f5fc1174a8ac147ea097e588a02484a43da00b180ff181c1e7f7",
+        20590,
+        "1e2528af5b55af34bf8cab126e69d152d1a3162f909c402beb4709ac64aace27",
     ),
     "worker asking first, sandboxed, resumed": (
-        19956,
-        "d9790dcb93947c09887b6ebaa092d7246d1ef30dfffdd5125e566094cd7a480f",
+        20545,
+        "3908f14756bdd11e48f034105eab11018db361ff2ca83f7803ce8f733f88692a",
     ),
     "worker in a trusted worktree, created": (
         18688,
@@ -324,12 +333,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "975d250bcb72472a04af36a9893065147566a7f2f0c36c4f60f2ce192f3b28d3",
     ),
     "worker that reads Slack, created": (
-        21498,
-        "e52cbe8b8b7d99f421483293c02f707fb48becfc11b80ed33253302c1198a444",
+        21086,
+        "f50aac348cfa9e6190e77a47465ae45f98d9ce385e35a6879dda24f46da661e7",
     ),
     "worker that reads Slack, resumed": (
-        21451,
-        "e7d38410fd3cec924c0bc0455b9d52c955064b74450856083792c9e0c272c45b",
+        21039,
+        "0aa5ed98b630561318a401b849c4759fb887c2b8ad5953c5ba644230da088522",
     ),
     "worker with its model, created": (
         18222,
