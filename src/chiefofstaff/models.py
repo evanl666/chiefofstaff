@@ -301,6 +301,54 @@ class Watch(StrictModel):
     enabled: bool = True
 
 
+ShepherdKind = Literal["fix-ci", "address-review"]
+Level = Literal["off", "suggest", "prepare"]
+# Hosts GitHub serves from: never reachable from a shepherd step (it has no GitHub write path).
+GITHUB_DOMAINS = ("github.com", "githubusercontent.com", "github.io", "githubassets.com")
+GITHUB_EXACT = frozenset({"ghcr.io"})
+HOST = re.compile(r"(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*")
+
+
+def github_host(host: str) -> bool:
+    """Whether a host (or a `*.` pattern) is one of GitHub's, or covers one."""
+    name = host.lower().strip().rstrip(".").removeprefix("*.")
+    return name in GITHUB_EXACT or any(
+        name == domain or name.endswith("." + domain) or domain.endswith("." + name)
+        for domain in GITHUB_DOMAINS
+    )
+
+
+def step_host(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    host = value.strip().lower().rstrip(".")
+    if "://" in host:
+        host = urlsplit(host).hostname or ""
+    if not host or not HOST.fullmatch(host) or len(host) > 253:
+        raise ValueError(
+            f"Hosts steps may reach: {value} is not a host name (like registry.npmjs.org)."
+        )
+    if github_host(host):
+        raise ValueError(
+            f"Hosts steps may reach: {host} is GitHub's. Steps never reach GitHub; Chief of Staff "
+            "publishes what you approve."
+        )
+    return host
+
+
+StepHost = Annotated[str, BeforeValidator(step_host)]
+
+
+class RepositoryChoices(StrictModel):
+    """What the owner chose for one repository's shepherd steps."""
+
+    # A line saying replies are drafted with an AI assistant: "yes", "no", or "" (ask before
+    # the first reply there).
+    disclosure: Literal["", "yes", "no"] = ""
+    # Steps may reach this computer's own servers (tests that start one).
+    localhost: bool = False
+
+
 class Settings(StrictModel):
     copilot_command: str = "copilot"
     model: str = Field(default="", max_length=100)
@@ -400,6 +448,35 @@ class Settings(StrictModel):
     # Send to Chief: `chiefofstaff send` hands the Router a note, a link or text through a socket
     # in the data directory only the owner's user can use (see sendsocket.py); none while off.
     send_to_chief: bool = False
+    # Prepared for you (shepherd.py): Chief of Staff keeps the owner's PRs moving (failing CI
+    # and review comments prepared for their approval, a merge of a head they accepted on PRs
+    # they opt in) and lists what it finds on their other PRs. Off: nothing of it runs or shows.
+    proactive: bool = False
+    # What it looks at while on: PRs the owner's workers made, and the owner's other open PRs in
+    # the repositories they work in.
+    proactive_worker_prs: bool = True
+    proactive_my_prs: bool = True
+    # Each kind's level; a kind not listed is at Suggest.
+    proactive_levels: dict[ShepherdKind, Level] = Field(default_factory=dict)
+    # Credits a day for steps nobody clicked (0: none; a click is charged, never held back).
+    proactive_budget: float = Field(default=0, ge=0, le=10000)
+    # Package registries and the like that steps may reach (never GitHub's hosts).
+    step_hosts: list[StepHost] = Field(default_factory=list, max_length=30)
+    proactive_repos: dict[Repository, RepositoryChoices] = Field(
+        default_factory=dict, max_length=200
+    )
+
+    @field_validator("step_hosts")
+    @classmethod
+    def unique_hosts(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
+
+    @field_validator("proactive_repos", mode="before")
+    @classmethod
+    def lower_repositories(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key).lower(): choice for key, choice in value.items()}
+        return value
 
     @field_validator("regenerable_patterns", "never_clean_patterns")
     @classmethod
