@@ -318,8 +318,9 @@ A repository's own Copilot settings load for a worker only as they were when Chi
 gave it the folder: their hooks and MCP servers (`.github/hooks/`, `.mcp.json`,
 `.github/mcp.json`, `.github/copilot/`, `.github/extensions/`, custom agents in
 `.github/agents/` and `.claude/agents/`, and the hooks of `.claude/settings.json` and
-`settings.local.json`, which Copilot runs too) would run outside the worker's sandbox and Chief
-of Staff's checks. Chief of Staff keeps what those files held when it made the worker's
+`settings.local.json`, which Copilot runs too) would run outside Chief of Staff's checks (a
+hook can approve a command a check refuses; an MCP server runs outside the worker's sandbox).
+Chief of Staff keeps what those files held when it made the worker's
 worktree or clone, or first gave a worker your checkout, and reads them again before each turn
 and each start. If one changed (a worker wrote it, a merge brought a teammate's change, you
 edited your local settings), the worker starts no turn there and its timeline says what
