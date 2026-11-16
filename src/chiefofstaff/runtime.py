@@ -1763,15 +1763,18 @@ class Runtime:
     def cache_plan(self, row: dict) -> caches.Plan:
         """A sandboxed worker's caches (caches.plan): what they add to its sandbox, and its
         shell's init script."""
+        workspace = self.workspaces.workspace(row)
+        folders = [workspace, *(Path(c["path"]) for c in self.workspaces.checkouts(row))]
         return caches.plan(
             self.cache_tier,
-            self.workspaces.workspace(row),
+            workspace,
             row["id"],
             self.cache_scripts,
             slack=bool(row["slack"]),
             read_through=self.store.settings().shared_caches,
             goproxy=self.cache_facts.get("goproxy", ""),
             truststore_path=self.cache_facts.get("truststore"),
+            rust=caches.rust_project(folders),
         )
 
     async def apply_cache_env(self, row: dict, session: Any):

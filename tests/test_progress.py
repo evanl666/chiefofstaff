@@ -914,12 +914,15 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
         policy = runtime.sandbox_policy(row)
         assert CopilotBackend(None).sandbox(policy).allow_dev_tool_access is False  # type: ignore[arg-type]
         tools = (
-            ".rustup/toolchains", ".rustup/settings.toml", ".cargo/bin", ".nvm/versions",
-            ".pyenv/versions", ".sdkman/candidates", "Library/Java/JavaVirtualMachines", "jdk",
-            "tools/maven", "Library/Caches/copilot/pkg",
+            ".cargo/bin", ".nvm/versions", ".pyenv/versions", ".sdkman/candidates",
+            "Library/Java/JavaVirtualMachines", "jdk", "tools/maven", "Library/Caches/copilot/pkg",
         )  # fmt: skip
         for tool in tools:
             assert str(home / tool) in policy.readonly, (slack, tool)
+        assert str(home / ".rustup/toolchains") not in policy.readonly, (
+            "Rust's toolchains: for a Rust project (pip runs `rustc --version` for its user agent,"
+            " waiting up to 0.5 s for it; Copilot granted them to Rust's commands only)"
+        )
         config = (".npmrc", ".m2/settings.xml", ".config/go/env")
         for name in config:
             assert (str(home / name) in policy.readonly) == (not slack), (slack, name)
@@ -948,6 +951,16 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
             assert f"export {variable}={own.tier}/" in text or f" {variable}={own.tier}/" in text, (
                 variable
             )
+    crate = tmp_path / "crate"
+    (crate / "cli").mkdir(parents=True)
+    (crate / "cli" / "Cargo.toml").write_text("[package]\n")
+    checkout = {"project": str(crate), "path": str(crate), "branch": "", "shared": False}
+    harness.store.execute(
+        "UPDATE sessions SET repos=? WHERE id=?", (json.dumps([checkout]), worker)
+    )
+    policy = runtime.sandbox_policy(harness.store.session(worker))
+    for tool in (".rustup/toolchains", ".rustup/settings.toml"):
+        assert str(home / tool) in policy.readonly, f"{tool}: a Rust project's"
 
 
 MOVED = (

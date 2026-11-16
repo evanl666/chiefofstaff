@@ -350,8 +350,8 @@ the worker's own daemon). *Start workers' caches from yours* off (Settings) keep
 out of theirs. The folder can be deleted at any time no worker runs. Copilot's own *dev-tool
 access* (which opened your caches read-write) is off for sandboxed workers: nothing in your home
 is writable to them but that folder, and they read only what Chief of Staff names: their
-toolchains (what is on your `PATH`, rustup's, nvm's, pyenv's, SDKMAN's toolchains, JDKs, uv's
-Pythons…) and, for workers on your own tasks, your package caches and registry settings
+toolchains (what is on your `PATH`, nvm's, pyenv's, SDKMAN's toolchains, JDKs, uv's Pythons,
+rustup's for a Rust project…) and, for workers on your own tasks, your package caches and registry settings
 (`~/.npmrc`, `~/.m2/settings.xml`, pip's, uv's and Go's configuration…). Workers that read Slack
 have caches of their own in their workspace, can't read yours, and can't read the registry and
 credential files build tools use (`~/.npmrc`, `~/.m2/settings.xml`,

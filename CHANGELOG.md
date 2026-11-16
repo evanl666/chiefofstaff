@@ -180,9 +180,11 @@ questions stay listed (QA round on 0.1.45).
   read-write in a project of their kind, and a folder of them deeper than one held read-only
   stayed writable (`~/.gradle/wrapper/dists` under `~/.gradle/wrapper`: a worker could have
   replaced the Gradle your `./gradlew` runs; also deno's and node's caches). Chief of Staff now
-  names everything a worker reads: its toolchains (every folder on your `PATH`, rustup's, nvm's,
-  pyenv's, SDKMAN's, asdf's, mise's and Volta's toolchains, JDKs, uv's Pythons and tools, Copilot's
-  own ripgrep, the homes `JAVA_HOME`, `GOROOT` and the like name), and for workers on your own
+  names everything a worker reads: its toolchains (every folder on your `PATH`, nvm's, pyenv's,
+  SDKMAN's, asdf's, mise's and Volta's toolchains, JDKs, uv's Pythons and tools, Copilot's own
+  ripgrep, the homes `JAVA_HOME`, `GOROOT` and the like name; rustup's for a Rust project, as
+  Copilot had it: elsewhere pip waited up to 0.5 s at each install for `rustc --version`, for
+  its user agent), and for workers on your own
   tasks your package caches and the registry settings their builds read (`~/.npmrc`,
   `~/.m2/settings.xml`, pip's, uv's and Go's configuration…), all read-only. Nothing in your home
   is writable to a worker but workers' caches; the other caches Copilot opened (deno's,

@@ -168,7 +168,7 @@ class Owner:
 # in home, the toolchain homes the environment names, every folder on PATH; its read-write
 # caches are workers' own (script). Never a folder holding credentials (~/.cargo).
 TOOLCHAINS = (
-    ".rustup/toolchains", ".rustup/settings.toml", ".cargo/bin", "go/bin", ".nvm/versions",
+    ".cargo/bin", "go/bin", ".nvm/versions",
     ".nvm/alias", ".deno/bin", ".volta/bin", ".volta/tools", ".asdf/bin", ".asdf/libexec",
     ".asdf/installs", ".asdf/shims", ".local/share/mise/installs", ".local/share/mise/shims",
     "Library/Application Support/fnm", ".local/share/fnm", ".local/share/pipx", ".local/pipx",
@@ -180,8 +180,8 @@ TOOLCHAINS = (
 )  # fmt: skip
 # The variable, and the folders under it (none: the whole folder it names).
 TOOL_HOMES = {
-    "JAVA_HOME": (), "GOROOT": (), "GOPATH": (), "GOBIN": (), "RUSTUP_HOME": ("toolchains",
-    "settings.toml"), "CARGO_HOME": ("bin",), "NVM_DIR": (), "NVM_SYMLINK": (), "NODE_PATH": (),
+    "JAVA_HOME": (), "GOROOT": (), "GOPATH": (), "GOBIN": (), "CARGO_HOME": ("bin",),
+    "NVM_DIR": (), "NVM_SYMLINK": (), "NODE_PATH": (),
     "VOLTA_HOME": (), "FNM_DIR": (), "PNPM_HOME": (), "BUN_INSTALL": ("bin",), "DENO_INSTALL": (),
     "PYENV_ROOT": (), "PIPX_HOME": (), "CONDA_PREFIX": (), "VIRTUAL_ENV": (), "PYTHONPATH": (),
     "PYTHONHOME": (), "SDKMAN_DIR": ("candidates",), "DOTNET_ROOT": (), "RBENV_ROOT": (),
@@ -189,6 +189,12 @@ TOOL_HOMES = {
     "ANDROID_HOME": (), "ANDROID_SDK_ROOT": (), "FLUTTER_ROOT": (), "VCPKG_ROOT": (),
     "GIT_EXEC_PATH": (), "LD_LIBRARY_PATH": (),
 }  # fmt: skip
+# rustup's toolchains, as Copilot granted them: to a Rust project's commands only. Elsewhere,
+# rustup's `rustc` fails at once, as it did: pip runs `rustc --version` for its user agent at
+# every install, and waits up to 0.5 s for it (a first rustc in a sandbox takes about that).
+RUST_TOOLCHAINS = (".rustup/toolchains", ".rustup/settings.toml")
+RUST_HOMES = {"RUSTUP_HOME": ("toolchains", "settings.toml")}
+RUST_MARKERS = ("Cargo.toml", "rust-toolchain", "rust-toolchain.toml")
 # The owner's registry and proxy settings in home it granted to read too: for workers on the
 # owner's own tasks (a private registry), never for one that reads Slack. Gradle's and Cargo's
 # are linked into the tier (owner_settings).
@@ -204,10 +210,13 @@ MOVED_CONFIG = {
 }  # fmt: skip
 
 
-def tool_paths(owner: Owner) -> list[str]:
-    """What workers' commands run, read-only: the toolchains above, uv's Pythons and tools,
-    the Copilot CLI's own tools, the folders on PATH (path_folders)."""
+def tool_paths(owner: Owner, rust: bool = False) -> list[str]:
+    """What workers' commands run, read-only: the toolchains above (rustup's for a Rust
+    project), uv's Pythons and tools, the Copilot CLI's own tools, the folders on PATH
+    (path_folders)."""
     found = [*named(owner.home, TOOLCHAINS, TOOL_HOMES), *owner.toolchains()]
+    if rust:
+        found += named(owner.home, RUST_TOOLCHAINS, RUST_HOMES)
     found.append(owner.copilot_tools())
     found += path_folders(owner.home)
     secrets = [owner.home / name for name in REGISTRY_SECRETS]
@@ -218,6 +227,16 @@ def tool_paths(owner: Owner) -> list[str]:
         and not too_broad(str(path))
         and not any(secret.is_relative_to(path) for secret in secrets)
     ]
+
+
+def rust_project(folders: list[Path]) -> bool:
+    """Whether one of these folders is a Rust project, or has one up to two folders down."""
+    for folder in folders:
+        for pattern in ("", "*/", "*/*/"):
+            with suppress(OSError):
+                if any(next(folder.glob(pattern + marker), None) for marker in RUST_MARKERS):
+                    return True
+    return False
 
 
 def path_folders(home: Path) -> list[Path]:
@@ -730,6 +749,7 @@ def plan(
     goproxy: str = "",
     truststore_path: Path | None = None,
     home: Path | None = None,
+    rust: bool = False,
 ) -> Plan:
     """A worker's caches: the shared tier (a tier of its own in its workspace when it reads
     Slack, nothing of the owner's copied there), its toolchains read-only, the owner's caches
@@ -738,7 +758,7 @@ def plan(
     owner = Owner(home or Path.home())
     own = workspace / PRIVATE if slack else tier
     temporary = worker_temp(session_id)
-    readonly = tool_paths(owner)
+    readonly = tool_paths(owner, rust)
     readonly.append(str(scripts))
     if not slack:
         # The owner's caches, read through (Gradle's, Maven's, Go's, Playwright's) or not; one
