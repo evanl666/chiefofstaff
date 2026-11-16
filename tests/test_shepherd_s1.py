@@ -592,6 +592,8 @@ def test_a_fix_reviewed_and_approved_through_its_routes(served, tmp_path):
         ({"git push over HTTPS"}, "git push over HTTPS got through"),
         ({"tell_session"}, "calling tell_session got through"),
         ({"no install"}, "an install from pypi.org did not work"),
+        ({"mcp tool"}, "the tools probe-user-ping got through"),
+        ({"no listing"}, "listing its tools (no such method) got through"),
     ],
 )
 async def test_the_probe_passes_only_when_every_forbidden_action_fails(harness, through, why):
@@ -622,7 +624,18 @@ async def test_the_probe_passes_only_when_every_forbidden_action_fails(harness, 
                 result_type=SimpleNamespace(value="success"),
             )
 
-        session.rpc.tools = SimpleNamespace(execute=execute)
+        async def validate(**options):
+            pass
+
+        async def metadata(**options):
+            if "no listing" in through:
+                raise RuntimeError("no such method")
+            names = [*STEP_TOOLS, *(["probe-user-ping"] if "mcp tool" in through else [])]
+            return SimpleNamespace(tools=[SimpleNamespace(name=name) for name in names])
+
+        session.rpc.tools = SimpleNamespace(
+            execute=execute, initialize_and_validate=validate, get_current_metadata=metadata
+        )
         return session
 
     client.resume_session = resume

@@ -3,10 +3,11 @@ shepherd step runs on it, on this computer, with no model call (each action is r
 session's own tool pipeline, `session.rpc.tools.execute`, as a model's call would be) and with
 every permission request approved (the operating system, not the permission check, must hold).
 
-A throwaway session is created and then resumed with the step profile, and every one of these
-must fail: a `git push` over HTTPS and over SSH, `gh api -X POST`, `curl -X POST` to GitHub's
-API, a raw socket to github.com on ports 443 and 22, reading gh's hosts.yml, calling a tool of a
-configured MCP server, and calling `tell_session`. An install from an allowed host must
+A throwaway session is created and then resumed with the step profile. Its tools, as Copilot
+lists them, must be the profile's only (no MCP server's, no cross-session tool), and every one
+of these must fail: a `git push` over HTTPS and over SSH, `gh api -X POST`, `curl -X POST` to
+GitHub's API, a raw socket to github.com on ports 443 and 22, reading gh's hosts.yml, calling a
+tool of a configured MCP server, and calling `tell_session`. An install from an allowed host must
 succeed. Only a version whose probe passed gets steps; the result is kept per version
 (kv `stepprobe:<version>`)."""
 
@@ -98,6 +99,23 @@ async def run_tool(session: Any, name: str, arguments: dict) -> tuple[bool, str]
     return kind not in {"failure", "rejected", "denied"}, text
 
 
+async def extra_tools(session: Any) -> list[str]:
+    """The session's tools beyond the step's allowlist (an MCP server's, a cross-session one),
+    as Copilot lists them once built: none, or what failed. Unlisted fails too (fail-closed)."""
+    from .shepherd import STEP_TOOLS
+
+    try:
+        with contextlib.suppress(Exception):
+            await session.rpc.tools.initialize_and_validate(timeout=60)
+        listed = await session.rpc.tools.get_current_metadata(timeout=60)
+    except Exception as exc:
+        return [f"listing its tools ({str(exc)[:200]})"]
+    if listed.tools is None:
+        return ["listing its tools (none were built)"]
+    extra = sorted({tool.name for tool in listed.tools} - set(STEP_TOOLS))
+    return [f"the tools {', '.join(extra[:5])}"] if extra else []
+
+
 def fixture(folder: Path):
     """A repository with one commit, for the pushes (nothing in it is ever sent)."""
     folder.mkdir(parents=True, exist_ok=True)
@@ -156,6 +174,7 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
         with contextlib.suppress(Exception):
             await created.disconnect()
         session = await backend.resume_session(session_id, **options)
+        failed += await extra_tools(session)
         for what, line in actions(folder):
             ran, text = await run_tool(session, "bash", {"command": line, "description": what})
             if ran and REACHED in text:
