@@ -991,3 +991,202 @@ async def test_unpushed_work_in_the_worker_is_left_as_it_is(world):
     assert world.github.head() == sha
     assert run("git", "rev-parse", f"{sha}^", cwd=world.remote) == world.h0
     assert run("git", "rev-parse", "HEAD", cwd=checkout) == mine
+
+
+# The owner's other answers to a plan: Request changes…, Dismiss.
+
+
+async def test_request_changes_sends_the_owners_words_to_a_new_attempt(world):
+    from chiefofstaff.publish import redo
+
+    runtime = await claimed(world)
+    step, _ = await fixed(world, runtime)
+    new = await redo(runtime.shepherd, step, "Keep 31 and fix the test instead.")
+    await settle(runtime)
+    control = runtime.shepherd.control
+    old = control.step(step["id"])
+    assert old["state"] == "dismissed" and old["why"] == "You asked for changes."
+    assert control.step(new["id"])["state"] == "running" and new["clicked"] == 1
+    sent = world.session().sent[-1]
+    assert '<message from="owner" type="changes">\nKeep 31 and fix the test instead.' in sent
+    with pytest.raises(ValueError, match="decided already"):
+        await redo(runtime.shepherd, old, "Again.")
+    verdicts = runtime.store.all("SELECT verdict FROM verdicts ORDER BY id")
+    assert [row["verdict"] for row in verdicts] == ["request-changes"]
+
+
+async def test_a_dismissed_plan_is_not_prepared_again_on_that_head(world):
+    from chiefofstaff.publish import dismiss
+
+    runtime = await claimed(world)
+    step, _ = await fixed(world, runtime)
+    dismiss(runtime.shepherd, step["id"], "Not now")
+    control = runtime.shepherd.control
+    assert control.step(step["id"])["state"] == "dismissed"
+    with pytest.raises(ValueError, match="decided already"):
+        dismiss(runtime.shepherd, step["id"])
+    with pytest.raises(ValueError, match="decided already"):
+        await approve(runtime.shepherd, step["id"], {})
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["action"] is None
+    with pytest.raises(ValueError, match="tried already on this commit"):
+        await runtime.shepherd.fix_it(TARGET)
+    assert not world.github.writes and world.github.head() == world.h0
+    verdicts = runtime.store.all("SELECT verdict FROM verdicts ORDER BY id")
+    assert [row["verdict"] for row in verdicts] == ["dismissed:Not now"]
+
+
+# Reconciliation of each kind of operation, read on GitHub.
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload", "github", "state"),
+    [
+        ("reply", {"in_reply_to": 501, "text": "Done."}, {"posted": "Done."}, "sent"),
+        ("reply", {"in_reply_to": 501, "text": "Done."}, {}, "failed"),
+        ("resolve", {"thread": "PRRT_1"}, {"resolved": True}, "sent"),
+        ("resolve", {"thread": "PRRT_1"}, {}, "failed"),
+        ("request-review", {"reviewers": ["maya"]}, {"requested": ["maya"]}, "sent"),
+        ("request-review", {"reviewers": ["maya"]}, {}, "failed"),
+        ("rerun", {"run": 501, "attempt": 1}, {}, "sent"),
+        ("rerun", {"run": 501, "attempt": 2}, {}, "failed"),
+        ("merge", {}, {"merged": True}, "sent"),
+        ("merge", {}, {}, "failed"),
+        ("merge", {}, {"broken": True}, "uncertain"),
+    ],
+)
+async def test_each_operation_is_read_back_on_github(world, kind, payload, github, state):
+    from chiefofstaff.publish import reconcile
+
+    runtime = await claimed(world)
+    fake = world.github
+    if "posted" in github:
+        fake.posted.append({"id": 7001, "body": github["posted"], "in_reply_to_id": 501,
+                            "html_url": "https://x/7001", "user": {"login": "me"}})  # fmt: skip
+    if "resolved" in github:
+        fake.threads = [{"id": "PRRT_1", "isResolved": True, "isOutdated": False, "path": "a",
+                         "line": 1, "comments": {"nodes": []}}]  # fmt: skip
+    if github.get("merged"):
+        fake.merged, fake.state = True, "MERGED"
+    if github.get("broken"):
+        fake.raw_broken = True
+    requested = github.get("requested", [])
+    answer = fake.__call__
+
+    async def gh(*arguments, **options):
+        text = " ".join(arguments)
+        if fake.__dict__.get("raw_broken"):
+            raise RuntimeError("GitHub request failed: HTTP 502")
+        if "requested_reviewers" in text:
+            return json.dumps({"users": [{"login": login} for login in requested]})
+        return await answer(*arguments, **options)
+
+    runtime.github.raw = gh
+    operation = {"kind": kind, "repo": REPO, "number": 12, **payload}
+    found, _ = await reconcile(runtime.shepherd, {"id": "a1", "payload": operation})
+    assert found == state
+
+
+MINE = [
+    {"repository": {"nameWithOwner": REPO}, "number": 12, "title": "Fix the login timeout",
+     "url": f"https://github.com/{REPO}/pull/12", "isDraft": False,
+     "updatedAt": "2026-11-16T08:00:00Z", "createdAt": "2026-11-15T08:00:00Z"},
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("found", ["changes", "comments", "nothing", "unreadable", "out of scope"])
+async def test_what_discovery_says_of_each_pr(world, found):
+    from test_shepherd import comments
+
+    from chiefofstaff import discovery
+
+    repos = ["acme/other"] if found == "out of scope" else [REPO]
+    runtime = await world.start(worker=False, proactive_my_prs=True, github_repos=repos)
+    world.github.mine = MINE
+    run("git", "remote", "set-url", "origin", "https://github.com/acme/elsewhere.git",
+        cwd=world.clone)  # fmt: skip
+    if found in {"changes", "comments"}:
+        comments(world)
+        if found == "comments":
+            world.github.review = ""
+    elif found == "nothing":
+        world.github.default_checks = [
+            {"name": "ci / test", "status": "COMPLETED", "conclusion": "SUCCESS", "required": True}
+        ]
+    elif found == "unreadable":
+        answer = world.github.__call__
+
+        async def gh(*arguments, **options):
+            if arguments[:2] == ("api", "graphql"):
+                raise RuntimeError("GitHub request failed: HTTP 502")
+            return await answer(*arguments, **options)
+
+        runtime.github.raw = gh
+    await discovery.discover(runtime.shepherd, force=True)
+    view = discovery.rows_view(runtime.shepherd)
+    rows, others = view["rows"], [item for item in view["all"] if item.get("why")]
+    if found == "changes":
+        assert [row["what"] for row in rows] == ["Changes requested by maya"]
+    elif found == "comments":
+        assert [row["what"] for row in rows] == ["2 comments to answer"]
+    elif found == "nothing":
+        assert rows == [] and [item["why"] for item in others] == ["nothing to do now"]
+    elif found == "unreadable":
+        assert rows == [] and [item["why"] for item in others] == ["could not be read"]
+    else:
+        assert rows == [] and others == []
+
+
+async def test_a_found_pr_is_read_again_only_after_a_while(world):
+    from chiefofstaff import discovery
+
+    runtime = await world.start(worker=False, proactive_my_prs=True, github_repos=[REPO])
+    world.github.mine = MINE
+    first = await discovery.discover(runtime.shepherd, force=True)
+    calls = len(world.github.calls)
+    again = await discovery.discover(runtime.shepherd)
+    assert again == first and len(world.github.calls) == calls
+
+
+# The owner's actions on a kept PR, refused when they can't apply.
+
+
+async def test_owner_actions_say_why_they_cant_apply(world):
+    runtime = await claimed(world)
+    shepherd = runtime.shepherd
+    with pytest.raises(ValueError, match="It is not paused"):
+        await shepherd.resume(TARGET)
+    with pytest.raises(ValueError, match="doesn't keep this PR moving"):
+        await shepherd.fix_it("github:acme/api#99")
+    with pytest.raises(ValueError, match="Accept its head first"):
+        await shepherd.merge_when_ready(TARGET, True)
+    with pytest.raises(ValueError, match="The PR moved since you looked"):
+        await shepherd.accept_head(TARGET, "f" * 40)
+    world.github.permission = "READ"
+    await shepherd.accept_head(TARGET, world.h0)
+    with pytest.raises(ValueError, match="Your account can't merge this PR"):
+        await shepherd.merge_when_ready(TARGET, True)
+    world.github.permission = "WRITE"
+    world.github.base_rules = None
+    with pytest.raises(ValueError, match="rules could not be read"):
+        await shepherd.merge_when_ready(TARGET, True)
+    world.github.base_rules = []
+    world.github.draft = True
+    with pytest.raises(ValueError, match="Not this PR: a draft"):
+        await shepherd.merge_when_ready(TARGET, True)
+    world.github.draft = False
+    await shepherd.merge_when_ready(TARGET, True)
+    assert shepherd.control.claim(TARGET)["merge_when_ready"]
+    await shepherd.merge_when_ready(TARGET, False)
+    assert not shepherd.control.claim(TARGET)["merge_when_ready"]
+    # Kept off: the owner's again; on: its task's, paused until Resume.
+    await shepherd.keep(TARGET, False)
+    claim = shepherd.control.claim(TARGET)
+    assert claim["holder_kind"] == "owner" and claim["reason"] == "you stopped keeping it moving"
+    await shepherd.keep(TARGET, True)
+    claim = shepherd.control.claim(TARGET)
+    assert claim["holder"] == world.task and claim["keep"]
+    old = runtime.store.settings()
+    runtime.store.save_settings(old.model_copy(update={"paused": True}))
+    with pytest.raises(ValueError, match="Chief of Staff is paused"):
+        await shepherd.fix_it(TARGET)
