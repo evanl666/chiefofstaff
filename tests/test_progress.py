@@ -849,6 +849,114 @@ async def test_workers_share_only_caches_whose_contents_are_checked(tmp_path, mo
     assert str(home / "Library/Jupyter/runtime") in policy.denied, "denied before it exists"
 
 
+MOVED = (
+    *("UV_CACHE_DIR", "XDG_CACHE_HOME", "GRADLE_USER_HOME", "CARGO_HOME", "GOPATH"),
+    *("NPM_CONFIG_USERCONFIG", "npm_config_userconfig", "npm_config_cache", "PIP_CONFIG_FILE"),
+)
+
+
+def test_chiefs_own_code_includes_where_uv_made_it(tmp_path, monkeypatch):
+    from chiefofstaff import workspaces
+
+    for name in MOVED:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    archive = tmp_path / "cache" / "uv" / "archive-v0"
+    env = archive / "ENV"  # What uvx made for this run.
+    site = Path(workspaces.sysconfig_purelib(str(env)))
+    for name in ("chiefofstaff", "chiefofstaff-1.0.dist-info", "fastapi-0.1.dist-info"):
+        (site / name).mkdir(parents=True)
+    (env / "pyvenv.cfg").write_text("")
+    for entry, name in [
+        ("WHEEL", "chiefofstaff-1.0.dist-info"),
+        ("DEP", "fastapi-0.1.dist-info"),
+        ("NEWER", "fastapi-0.2.dist-info"),
+        ("NOPE", "requests-2.0.dist-info"),
+    ]:
+        (archive / entry / name).mkdir(parents=True)
+    other = archive / "OTHER"  # Another tool's environment, with the same fastapi.
+    (Path(workspaces.sysconfig_purelib(str(other))) / "fastapi-0.1.dist-info").mkdir(parents=True)
+    (other / "pyvenv.cfg").write_text("")
+    link = tmp_path / "cache" / "uv" / "environments-v2" / "spec" / "env"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(env)
+    (tmp_path / "cache" / "uv" / "environments-v2" / "elsewhere").mkdir()
+    command = tmp_path / "bin" / "chiefofstaff"
+    command.parent.mkdir()
+    command.symlink_to(site / "chiefofstaff")
+    python = tmp_path / "python"
+    python.mkdir()
+
+    found = workspaces.own_code(str(env), str(python), site / "chiefofstaff", [str(command)])
+    kept_paths = [env, python, site / "chiefofstaff", command, archive / "WHEEL", archive / "DEP"]
+    for kept in (*kept_paths, other, link.parent):
+        assert str(kept) in found, kept
+    for left in ("NEWER", "NOPE"):
+        assert str(archive / left) not in found, "another version, another package: not ours"
+    assert str(link.parent.parent / "elsewhere") not in found
+    assert not workspaces.own_code(str(tmp_path / "gone"), "/", tmp_path / "gone", []), (
+        "nothing that does not exist, never the root"
+    )
+
+
+async def test_chiefs_own_code_is_read_only_for_every_sandboxed_worker(tmp_path, monkeypatch):
+    import sys
+
+    from chiefofstaff import workspaces
+
+    for name in MOVED:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    package = str(Path(workspaces.__file__).parent)
+    for slack in (0, 1):
+        harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
+        policy = runtime.sandbox_policy(harness.store.session(worker))
+        for path in (sys.prefix, package):
+            assert path in policy.readonly, (slack, path)
+            assert path not in policy.readwrite
+
+
+async def test_workers_that_read_slack_get_the_owners_caches_read_only(tmp_path, monkeypatch):
+    import sys
+
+    for name in MOVED:
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    for name in (".npm/_cacache", ".cache/uv", ".m2/repository", "Library/Caches/pip", "gh/caches"):
+        (home / name).mkdir(parents=True)
+    for name in (".npmrc", ".m2/settings.xml", "gh/gradle.properties"):
+        (home / name).write_text("token")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("GRADLE_USER_HOME", str(home / "gh"))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    policy = runtime.sandbox_policy(harness.store.session(worker))
+    assert str(home / ".npm/_cacache") in policy.readwrite, "unchanged for the owner's own tasks"
+    assert str(home / ".npmrc") not in policy.denied
+
+    harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
+    policy = runtime.sandbox_policy(harness.store.session(worker))
+    for cache in (".npm", ".cache/uv", ".m2/repository", "Library/Caches/pip", "gh/caches"):
+        assert str(home / cache) in policy.readonly, cache
+        assert not any(str(home / cache).startswith(path) for path in policy.readwrite), cache
+    for secret in (".npmrc", ".m2/settings.xml", "gh/gradle.properties"):
+        assert str(home / secret) in policy.denied, secret
+    assert str(home / ".pypirc") not in policy.denied, "no folder left where a file belongs"
+    assert str(home / ".gradle/caches") in policy.denied, "nor a cache made where there is none"
+    assert str(home / ".cache/pip") not in policy.denied, "Linux's place, on macOS: left alone"
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    policy = runtime.sandbox_policy(harness.store.session(worker))
+    assert str(home / ".cache/pip") in policy.denied
+    assert str(home / "Library/Caches/pip") in policy.readonly, "there: held all the same"
+    assert str(home / "Library/Caches/Yarn") not in policy.denied
+
+
 def with_origin(repo: Path):
     origin = repo.parent / "origin.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(origin)], check=True)

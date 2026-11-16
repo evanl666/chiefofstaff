@@ -117,7 +117,10 @@ from .workspaces import (
     Workspaces,
     common_git_dir,
     git_dirs,
+    held_caches,
+    own_code,
     protected_git_paths,
+    registry_secrets,
     service_secrets,
     shared_caches,
 )
@@ -486,6 +489,8 @@ class Runtime:
         # Send to Chief's socket, while the setting is on, and its command in the owner's shell.
         self.send = SendSocket(self)
         self.send_command = shell_command()
+        # Chief of Staff's own code, read-only for sandboxed workers (see own_code).
+        self.own_code_paths: list[str] | None = None
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -1725,17 +1730,37 @@ class Runtime:
         readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
         if agent := os.environ.get("SSH_AUTH_SOCK"):
             writable.append(agent)  # Signing through the agent; key files stay unreadable.
+        readonly += self.own_code()
+        closed: list[str] = []
+        if row["slack"]:
+            closed = self.slack_closed(readonly)
         return SandboxPolicy(
             readwrite=tuple(dict.fromkeys(path for path in writable if path)),
-            readonly=tuple(readonly),
+            readonly=tuple(dict.fromkeys(readonly)),
             # Workers that read Slack must not carry what they read anywhere but GitHub.
             allowed_hosts=GITHUB_HOSTS if row["slack"] else (),
             # Tests that start a server, Gradle's daemon and the like need localhost; not for
             # workers that read Slack, whose content must not reach the owner's local services.
             local_network=not row["slack"],
             # Its own daemons, yes; the owner's (their tokens are in these files), no.
-            denied=tuple(service_secrets()),
+            denied=tuple(dict.fromkeys([*service_secrets(), *closed])),
         )
+
+    def own_code(self) -> list[str]:
+        """Chief of Staff's own code and Python, read-only for every sandboxed worker
+        (workspaces.own_code): looked up once a run, in uv's cache too."""
+        if self.own_code_paths is None:
+            self.own_code_paths = own_code()
+        return self.own_code_paths
+
+    @staticmethod
+    def slack_closed(readonly: list[str]) -> list[str]:
+        """For a worker that reads Slack: the owner's package caches join `readonly` (it never
+        writes what the owner's builds run), and what it may not read at all is returned: the
+        caches that do not exist yet, and the owner's registry credentials."""
+        caches, absent = held_caches()
+        readonly += caches
+        return [*absent, *registry_secrets()]
 
     def yolo(self, row: dict) -> bool:
         """Whether this worker acts without permission checks (a session choice, else Settings)."""

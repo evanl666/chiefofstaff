@@ -1937,6 +1937,197 @@ def service_secrets(home: Path | None = None) -> list[str]:
     return found
 
 
+# Package caches Copilot's dev-tool access opens read-write to sandboxed commands in a project
+# of their kind (seen in its policy files, CLI 1.0.111), and the like, by their default place in
+# home: what the owner's builds later run, unsandboxed. Workers that read Slack get them
+# read-only; to the others they stay open until they get caches of their own.
+OWNER_CACHES = (
+    ".npm", ".yarn/berry", ".pnpm-store", ".bun/install/cache", ".cache/uv", ".cache/pre-commit",
+    ".cache/node/corepack", ".local/share/virtualenv", ".m2/repository", ".m2/wrapper",
+    ".gradle/caches", ".gradle/wrapper", ".gradle/native", "go/pkg/mod", ".cargo/registry",
+    ".cargo/git", ".node-gyp", ".electron-gyp", ".nuget/packages",
+)  # fmt: skip
+# Where the others are on each system; held there only when they exist elsewhere.
+PLATFORM_CACHES = {
+    "darwin": (
+        "Library/pnpm", "Library/Caches/pip", "Library/Caches/pypoetry", "Library/Caches/go-build",
+        "Library/Caches/Yarn", "Library/Caches/ms-playwright", "Library/Caches/electron",
+        "Library/Caches/node-gyp", "Library/Caches/ccache", "Library/Caches/Mozilla.sccache",
+    ),
+    "linux": (
+        ".local/share/pnpm", ".cache/pip", ".cache/pypoetry", ".cache/go-build", ".cache/yarn",
+        ".cache/ms-playwright", ".cache/electron", ".cache/node-gyp", ".cache/ccache",
+        ".cache/sccache",
+    ),
+}  # fmt: skip
+# The same caches moved by an environment variable (Copilot opens those too): the variable, and
+# the folders under it (none: the variable names the cache itself).
+MOVED_CACHES = {
+    "npm_config_cache": (), "NPM_CONFIG_CACHE": (), "UV_CACHE_DIR": (), "PIP_CACHE_DIR": (),
+    "POETRY_CACHE_DIR": (), "PRE_COMMIT_HOME": (), "GOMODCACHE": (), "GOCACHE": (),
+    "PLAYWRIGHT_BROWSERS_PATH": (), "BUN_INSTALL_CACHE_DIR": (), "YARN_CACHE_FOLDER": (),
+    "NUGET_PACKAGES": (), "COREPACK_HOME": (), "GOPATH": ("pkg/mod",),
+    "CARGO_HOME": ("registry", "git"), "GRADLE_USER_HOME": ("caches", "wrapper", "native"),
+    "XDG_CACHE_HOME": ("uv", "pip", "pypoetry", "pre-commit", "go-build", "ms-playwright", "yarn"),
+}  # fmt: skip
+# Files where registry and other credentials live, which Copilot's dev-tool access lets sandboxed
+# commands read (registry configuration): unreadable for workers that read Slack, which must not
+# carry a token anywhere.
+REGISTRY_SECRETS = (
+    ".npmrc", ".yarnrc", ".yarnrc.yml", ".bunfig.toml", ".m2/settings.xml",
+    ".m2/settings-security.xml", ".gradle/gradle.properties", ".gradle/init.d", ".pypirc",
+    ".cargo/credentials", ".cargo/credentials.toml", ".config/pip/pip.conf", ".pip/pip.conf",
+    "Library/Application Support/pip/pip.conf", ".config/uv/uv.toml",
+    ".config/pypoetry/auth.toml", "Library/Application Support/pypoetry/auth.toml", ".netrc",
+    ".docker/config.json", ".gem/credentials", ".nuget/NuGet/NuGet.Config",
+    ".config/NuGet/NuGet.Config",
+)  # fmt: skip
+# The same, where an environment variable puts them: the variable, and the file under it (none:
+# the variable names the file itself).
+MOVED_SECRETS = {
+    "NPM_CONFIG_USERCONFIG": (), "npm_config_userconfig": (), "PIP_CONFIG_FILE": (),
+    "UV_CONFIG_FILE": (), "NETRC": (), "DOCKER_CONFIG": ("config.json",),
+    "GRADLE_USER_HOME": ("gradle.properties", "init.d"),
+    "CARGO_HOME": ("credentials", "credentials.toml"), "POETRY_CONFIG_DIR": ("auth.toml",),
+}  # fmt: skip
+
+
+def named(home: Path, names: Sequence[str], moved: dict[str, tuple[str, ...]]) -> list[Path]:
+    """These paths in home, and where the environment moved them."""
+    found = [home / name for name in names]
+    for variable, parts in moved.items():
+        value = os.environ.get(variable, "").strip()
+        if value and (base := Path(value).expanduser()).is_absolute():
+            found += [base / part for part in parts] if parts else [base]
+    return list(dict.fromkeys(found))
+
+
+def held_caches(home: Path | None = None) -> tuple[list[str], list[str]]:
+    """(read-only, denied): the owner's package caches for a worker that reads Slack. One of
+    this system's that does not exist yet is denied, so that it cannot make one the owner's
+    builds would then use (Copilot leaves an empty folder there: an empty cache changes
+    nothing); another system's is held only where it exists."""
+    home = home or Path.home()
+    system = "darwin" if sys.platform == "darwin" else "linux"
+    ours = named(home, [*OWNER_CACHES, *PLATFORM_CACHES[system]], MOVED_CACHES)
+    others = [
+        home / name for kind, names in PLATFORM_CACHES.items() if kind != system for name in names
+    ]
+    readonly: list[str] = []
+    denied: list[str] = []
+    for path in [*ours, *others]:
+        if too_broad(str(path)) or str(path) in readonly or str(path) in denied:
+            continue
+        if path.exists():
+            readonly.append(str(path))
+        elif path in ours:
+            denied.append(str(path))
+    return readonly, denied
+
+
+def registry_secrets(home: Path | None = None) -> list[str]:
+    """The owner's registry and credential files that exist, to deny a worker that reads Slack.
+    Not one that does not exist: the sandbox would leave an empty folder in its place, which
+    breaks the tool that later looks for a file there."""
+    return [
+        str(path)
+        for path in named(home or Path.home(), REGISTRY_SECRETS, MOVED_SECRETS)
+        if os.path.lexists(path) and not too_broad(str(path))
+    ]
+
+
+def own_code(
+    prefix: str = sys.prefix,
+    base: str = sys.base_prefix,
+    package: Path = Path(__file__).parent,
+    launchers: Sequence[str] | None = None,
+) -> list[str]:
+    """Chief of Staff's own code and the Python it runs on, read-only for every sandboxed
+    worker, so that no worker's command changes what Chief of Staff (unsandboxed, with the
+    owner's tokens) runs: its environment and Python, its package, its command (a uv tool's
+    link to it, as found on PATH and as started), and where in uv's cache they come from
+    (uv_sources)."""
+    if launchers is None:
+        started = sys.argv[0] if sys.argv and Path(sys.argv[0]).is_absolute() else ""
+        launchers = [shutil.which("chiefofstaff") or "", started]
+    found = [prefix, base, str(package)]
+    for launcher in launchers:
+        if launcher:
+            found += [launcher, os.path.realpath(launcher)]
+    found += uv_sources(prefix)
+    return [
+        path
+        for path in dict.fromkeys(path for path in found if path and Path(path).is_absolute())
+        if os.path.lexists(path) and not too_broad(path)
+    ]
+
+
+def uv_sources(prefix: str) -> list[str]:
+    """Where in uv's cache Chief of Staff's environment and packages come from: uvx's
+    environment for this run (an entry of uv's archive) and the link uv follows to reuse it next
+    time, and every archive entry holding one of the distributions installed in it: the unpacked
+    wheels uv links into new environments (on Linux by hard links, so they are the same files as
+    this environment's), and other environments with the same files."""
+    site = Path(sysconfig_purelib(prefix))
+    try:
+        installed = {entry.name for entry in site.iterdir() if entry.name.endswith(".dist-info")}
+    except OSError:
+        return []
+    caches = {Path(part) for part in uv_caches(prefix)}
+    found: list[str] = []
+    real = os.path.realpath(prefix)
+    for cache in caches:
+        for archive in sorted(cache.glob("archive-v*")):
+            with suppress(OSError):
+                for entry in os.scandir(archive):
+                    if entry.is_dir() and holds(Path(entry.path), installed):
+                        found.append(entry.path)
+        for link in cache.glob("environments-v*/*/*"):
+            if os.path.realpath(link) == real:
+                found.append(str(link.parent))
+    return found
+
+
+def holds(entry: Path, installed: set[str]) -> bool:
+    """Whether an entry of uv's archive holds one of these distributions: an unpacked wheel
+    (its .dist-info at the top) or an environment (in its site-packages)."""
+    with suppress(OSError):
+        names = {child.name for child in entry.iterdir()}
+        if names & installed:
+            return True
+        if "pyvenv.cfg" in names:
+            return any(
+                {child.name for child in site.iterdir()} & installed
+                for site in entry.glob("lib*/python*/site-packages")
+            )
+    return False
+
+
+def sysconfig_purelib(prefix: str) -> str:
+    """The site-packages folder of the environment at this prefix."""
+    import sysconfig
+
+    scheme = "nt" if os.name == "nt" else "posix_prefix"
+    return sysconfig.get_path("purelib", scheme, vars={"base": prefix, "platbase": prefix})
+
+
+def uv_caches(prefix: str) -> list[str]:
+    """uv's cache folders that may hold this environment's sources: the one it runs from (uvx),
+    and the one uv uses ($UV_CACHE_DIR, else $XDG_CACHE_HOME/uv, else ~/.cache/uv)."""
+    found = []
+    parts = Path(prefix).parts
+    for index, part in enumerate(parts):
+        if part.startswith("archive-v") and index:
+            found.append(str(Path(*parts[:index])))
+    if value := os.environ.get("UV_CACHE_DIR", "").strip():
+        found.append(value)
+    elif (xdg := os.environ.get("XDG_CACHE_HOME", "").strip()) and Path(xdg).is_absolute():
+        found.append(str(Path(xdg) / "uv"))
+    else:
+        found.append(str(Path.home() / ".cache" / "uv"))
+    return [path for path in dict.fromkeys(found) if Path(path).is_dir()]
+
+
 def too_broad(path: str) -> bool:
     """The filesystem root, home, or a folder above home."""
     try:

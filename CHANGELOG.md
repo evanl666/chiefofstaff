@@ -157,6 +157,20 @@ questions stay listed (QA round on 0.1.45).
 - On Linux, processes are known by their whole command lines: `ps` there cut each line to the
   width `COLUMNS` gave, even into a pipe, so a process Chief of Staff started could be taken
   for another one when it was looked for again; `ps -ww` never cuts.
+- **No sandboxed worker can change Chief of Staff's own code.** Its environment, wherever `uvx`
+  or `uv tool install` put it (`uvx` keeps it in uv's cache, which Copilot's sandbox opens
+  read-write to commands in a Python project), the Python it runs on, its `chiefofstaff`
+  command and the entries of uv's cache its packages come from are read-only to every sandboxed
+  worker. A worker could otherwise have changed what Chief of Staff runs at its next start.
+- **Workers that read Slack get your package caches read-only, and none of your registry
+  credentials.** Copilot's sandbox opened npm's, pip's, uv's, Go's, Cargo's, Gradle's, Maven's
+  and other caches read-write to them too, and let them read `~/.npmrc`, `~/.m2/settings.xml`,
+  `~/.gradle/gradle.properties` and the like. Now those caches are read-only to them (one that
+  does not exist yet stays closed), and those files, `~/.pypirc`, Cargo's credentials, pip's and
+  uv's configuration, `~/.netrc` and Docker's `config.json` are unreadable.
+- **SECURITY.md says what holds today**: with the sandbox on, workers on your own tasks can write
+  your package caches (Copilot's dev-tool access), so they could plant code your own builds later
+  run. 0.1.47 gives them caches of their own.
 
 ## 0.1.45 (2026-11-14)
 

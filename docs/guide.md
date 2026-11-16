@@ -333,13 +333,16 @@ your own Gradle daemons and Jupyter servers stay unreadable to them (their folde
 `~/.gradle/daemon` and Jupyter's `runtime`, are created empty if they do not exist yet). Workers that read Slack
 cannot reach localhost.
 
-So that installs and builds are as fast as in your terminal: npm's package store and Yarn's
-archives are shared (checked against the lockfile before use; Copilot already shares pip's and
-uv's), and Gradle builds read your dependency cache without writing it, with the worker's own
-daemon. Caches whose contents would run as they are (Gradle and Maven jars, pre-commit hooks,
-npx's installs) stay out of reach; add one under *Also writable in the sandbox* only if you accept that. Workers
-that read Slack share no caches. Before a worker's worktree is made, only origin's default branch
-is fetched, once for workers that start together.
+So that installs and builds are as fast as in your terminal, sandboxed workers use your package
+caches. Copilot's own sandbox opens them read-write in a project of their kind (npm's, pnpm's,
+Yarn's and Bun's stores, pip's, uv's and poetry's caches, Go's, Cargo's, Gradle's and Maven's,
+Playwright's browsers), and Chief of Staff adds npm's and Yarn's stores: a worker on your own
+tasks could change what your later builds run. 0.1.47 gives workers caches of their own, with
+yours read-only beneath them. Workers that read Slack already get your caches read-only, and
+can't read the registry and credential files build tools use (`~/.npmrc`,
+`~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.pypirc`, `~/.netrc`…). No worker can
+change Chief of Staff's own code or the Python it runs on. Before a worker's worktree is made,
+only origin's default branch is fetched, once for workers that start together.
 
 Hooks of your Copilot plugins run in the sandbox too. One that writes elsewhere (a journal, say)
 fails there; the worker carries on and its timeline notes it once. To let it write, add its
