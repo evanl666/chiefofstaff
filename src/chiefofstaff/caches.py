@@ -49,6 +49,25 @@ def default_tier() -> Path:
     return base / "chiefofstaff" / "workers"
 
 
+def ours(path: Path, root: Path) -> bool:
+    """Whether `path` is `root` or under it with no link on the way (nothing a worker made can
+    send Chief of Staff, which runs unsandboxed, to write elsewhere). A part that does not
+    exist yet is fine: it is made as a folder."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    here = root
+    for part in ("", *relative.parts):
+        here = here / part if part else here
+        try:
+            if here.is_symlink():
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def system() -> str:
     return "darwin" if sys.platform == "darwin" else "linux"
 
@@ -251,6 +270,9 @@ def fill(source: Path, target: Path, depth: int) -> int:
         here = Path(root)
         level = len(here.relative_to(source).parts)
         into = target / here.relative_to(source)
+        if not ours(into, target):
+            folders[:] = []
+            continue
         into.mkdir(parents=True, exist_ok=True)
         names = files if not depth or level < depth - 1 else [*folders, *files]
         if depth and level == depth - 1:
@@ -270,6 +292,9 @@ def seed(tier: Path, owner: Owner) -> dict:
     started = time.monotonic()
     for name, source, into, depth in seeds(owner):
         began = time.monotonic()
+        if not ours(tier / into, tier):
+            logger.warning("Workers' %s cache is a link: not filled", name)
+            continue
         try:
             count = fill(source, tier / into, depth)
         except CannotCloneError as exc:
@@ -291,10 +316,13 @@ def link_browsers(tier: Path, owner: Owner) -> None:
     lacks downloads into the tier. Cheap: done as each worker starts. On macOS, Chromium's
     headless shell gets a launcher instead (single_process_shell)."""
     source, target = owner.playwright(), tier / "ms-playwright"
+    if not ours(target, tier):
+        return
     target.mkdir(parents=True, exist_ok=True)
     if system() == "darwin":
         for own in target.glob("chromium_headless_shell-*/*/chrome-headless-shell"):
-            launch_downloaded(own)
+            if ours(own, target):
+                launch_downloaded(own)
     if not source.is_dir() or source.resolve() == target.resolve():
         return
     for entry in source.iterdir():
@@ -339,6 +367,8 @@ def single_process_shell(source: Path, target: Path) -> None:
     for folder in [path for path in source.iterdir() if path.is_dir()]:
         program = folder / "chrome-headless-shell"
         mirror = target / folder.name
+        if not ours(mirror, target):
+            continue
         mirror.mkdir(parents=True, exist_ok=True)
         for item in folder.iterdir():
             link = mirror / item.name
@@ -369,6 +399,8 @@ def owner_settings(tier: Path, owner: Owner) -> list[tuple[Path, Path]]:
 
 def link_settings(tier: Path, owner: Owner) -> None:
     for source, link in owner_settings(tier, owner):
+        if not ours(link.parent, tier):
+            continue
         link.parent.mkdir(parents=True, exist_ok=True)
         if link.is_symlink() and link.readlink() != source:
             link.unlink()  # A worker pointed it elsewhere: put back.
@@ -585,6 +617,8 @@ def prepare(found: Plan, session_id: str, scripts: Path, home: Path | None = Non
     init script (in `scripts`, read-only to workers). The script's path; None when its
     temporary folder could not be made its own."""
     owner = Owner(home or Path.home())
+    if found.tier.is_symlink():
+        found.tier.unlink()  # Its own folder only, never where a link leads.
     found.tier.mkdir(parents=True, exist_ok=True)
     link_browsers(found.tier, owner)
     if not found.slack:

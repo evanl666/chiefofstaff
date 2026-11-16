@@ -133,3 +133,34 @@ def test_a_workers_temporary_folder_is_made_only_as_its_own(tmp_path):
     planted.symlink_to(tmp_path)
     assert not caches.make_temp(planted), "a link someone put there is not taken"
     assert len(str(caches.worker_temp("0123456789abcdef"))) <= 80, "room for a socket's name"
+
+
+def test_chief_of_staff_never_writes_where_a_link_a_worker_made_leads(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    for name in ("PLAYWRIGHT_BROWSERS_PATH", "GRADLE_USER_HOME", "CARGO_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    shell = home / "Library" / "Caches" / "ms-playwright" / "chromium_headless_shell-1"
+    (shell / "chrome-headless-shell-mac-arm64").mkdir(parents=True)
+    program = shell / "chrome-headless-shell-mac-arm64" / "chrome-headless-shell"
+    program.write_bytes(b"\0" * 8192)
+    (shell / "INSTALLATION_COMPLETE").write_text("")
+    (home / ".gradle").mkdir()
+    (home / ".gradle" / "gradle.properties").write_text("x=1")
+    owner, tier = caches.Owner(home), tmp_path / "tier"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    # A worker links folders of the tier to the owner's browsers and to another folder.
+    (tier / "ms-playwright").mkdir(parents=True)
+    (tier / "ms-playwright" / "chromium_headless_shell-2").symlink_to(shell)
+    (tier / "gradle").symlink_to(elsewhere)
+    caches.link_browsers(tier, owner)
+    caches.link_settings(tier, owner)
+    assert program.stat().st_size == 8192 and not program.with_name("x.real").exists()
+    assert not list(shell.rglob("*.real")), "the owner's program is never moved"
+    assert not list(elsewhere.iterdir()), "nothing written where a link leads"
+    (tier / "npm").symlink_to(elsewhere)
+    (home / ".npm" / "_cacache").mkdir(parents=True)
+    (home / ".npm" / "_cacache" / "blob").write_text("x")
+    SEED(tier, owner)
+    assert not list(elsewhere.iterdir()), "nor filled"
