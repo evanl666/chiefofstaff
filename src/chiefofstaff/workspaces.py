@@ -497,6 +497,27 @@ def git_dirs(checkouts: list[dict]) -> list[str]:
     return found
 
 
+def git_writes(git_dir: str, checkouts: list[dict]) -> tuple[list[str], list[str]]:
+    """(writable, read-only) of a repository's .git for a worker's commands: the whole folder
+    writable (its protected parts held, protected_git_paths); on Linux, for a repository it works
+    on in worktrees, the folder read-only and only what their commits write writable (objects,
+    refs, logs, worktrees, lfs): Linux's sandbox holds no path that does not exist yet (a
+    commondir there would send the owner's git elsewhere), a read-only folder holds them all.
+    Not where it works in the owner's checkout itself (its HEAD, index and locks are there)."""
+    root = Path(git_dir)
+    in_place = any(
+        checkout.get("shared") and Path(checkout.get("git_dir", "")).resolve() == root.resolve()
+        for checkout in checkouts
+    )
+    if SANDBOX_PLATFORM != "linux" or in_place:
+        return [git_dir], []
+    with suppress(OSError):
+        (root / "logs").mkdir(exist_ok=True)  # (Its commits' reflogs: an empty one is harmless.)
+    parts = [root / name for name in ("objects", "refs", "logs", "worktrees")]
+    parts += [root / "lfs"] if (root / "lfs").is_dir() else []
+    return [str(part) for part in parts], [git_dir]
+
+
 def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
     """Parts of a repository's .git that a worker must not change, though it commits there.
 
@@ -517,10 +538,22 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
                 own.add(Path(text.removeprefix("gitdir:").strip()).resolve())
     # Pointers that tell git where a repository is: a worker that rewrites them sends git (the
     # owner's, or Chief of Staff's) to a config it wrote. A repository's own .git has no
-    # commondir; a worker must not make one.
-    paths = [root / "hooks", root / "config", root / "commondir"]
+    # commondir; a worker must not make one. Nor the other files git reads for configuration
+    # (config.worktree, with extensions.worktreeConfig), attributes (info/), which commits are
+    # whole (shallow) or where else objects come from (alternates): absent ones are held too
+    # (sandbox_paths).
+    paths = [
+        root / "hooks",
+        root / "config",
+        root / "commondir",
+        root / "config.worktree",
+        root / "info",
+        root / "shallow",
+        root / "objects" / "info" / "alternates",
+        root / "objects" / "info" / "http-alternates",
+    ]
     for admin in sorted(own):
-        paths += [admin / "commondir", admin / "gitdir"]
+        paths += [admin / "commondir", admin / "gitdir", admin / "config.worktree"]
     for checkout in checkouts:
         pointer = Path(checkout.get("worktree") or "") / ".git"
         if checkout.get("worktree") and pointer.is_file():
@@ -529,8 +562,7 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
         # The owner's own checkout: its branch and staged changes are theirs. (A worker that
         # works in the owner's checkout itself needs them.)
         paths += [root / name for name in ("HEAD", "index") if (root / name).exists()]
-    if (root / "modules").is_dir():
-        paths.append(root / "modules")
+    paths.append(root / "modules")  # Its submodules' git folders (a worktree's are its own).
     if (root / "worktrees").is_dir():
         paths += sorted(
             path
@@ -538,6 +570,58 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
             if path.is_dir() and path.resolve() not in own
         )
     return [str(path) for path in paths]
+
+
+# Copilot's sandbox holds a listed path only if it exists when the session starts (CLI 1.0.112,
+# checked on macOS: a command creates one that does not, in a read-only folder's place or not).
+# Denied, an absent path is held on macOS, and nothing is left behind; on Linux the sandbox
+# mounts an empty folder in its place and leaves it on the disk, which breaks git where it reads
+# a file (.git/commondir). So on Linux an absent path gets an empty placeholder, read-only, where
+# an empty one changes nothing for git or the agents (PLACEHOLDER_FOLDERS, PLACEHOLDER_FILES); the
+# others (commondir, shallow, a repository's JSON settings) are not held there (SECURITY.md).
+SANDBOX_PLATFORM = sys.platform
+PLACEHOLDER_FOLDERS = (
+    "hooks",
+    "info",
+    "modules",
+    ".github/hooks",
+    ".github/copilot",
+    ".github/extensions",
+    ".codex",
+)
+PLACEHOLDER_FILES = ("config.worktree", "objects/info/alternates", "objects/info/http-alternates")
+
+
+def sandbox_paths(paths: Sequence[str]) -> tuple[list[str], list[str]]:
+    """(read-only, denied): the paths a worker's commands must not change, as Copilot's sandbox
+    holds them here: those that exist read-only, absent ones denied (macOS) or, on Linux, made
+    as empty placeholders and read-only where that is harmless."""
+    readonly: list[str] = []
+    denied: list[str] = []
+    for path in dict.fromkeys(paths):
+        if Path(path).exists():
+            readonly.append(path)
+        elif SANDBOX_PLATFORM == "darwin":
+            # (A link to nowhere: where it leads too.)
+            denied += dict.fromkeys([path, os.path.realpath(path)])
+        elif placeholder(Path(path)):
+            readonly.append(path)
+    return readonly, denied
+
+
+def placeholder(path: Path) -> bool:
+    """An empty folder or file of the owner's where one changes nothing; False otherwise."""
+    name = path.as_posix()
+    try:
+        if any(name.endswith(f"/{kind}") for kind in PLACEHOLDER_FOLDERS):
+            path.mkdir(parents=True, exist_ok=True)
+            return True
+        if any(name.endswith(f"/{kind}") for kind in PLACEHOLDER_FILES) and path.parent.is_dir():
+            with path.open("x"):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def locate(checkout: dict) -> tuple[str, str, bool]:

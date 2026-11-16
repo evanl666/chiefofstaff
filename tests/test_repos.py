@@ -649,7 +649,82 @@ async def test_a_sandboxed_workers_commands_cannot_write_copilots_repository_set
         policy = runtime.sandbox_policy(harness.store.session(info["session_id"]))
         assert policy is not None
         for name in (".mcp.json", ".github/hooks", ".claude/settings.local.json"):
-            assert str(Path(info["cwd"]) / name) in policy.readonly, name
+            held = (*policy.readonly, *policy.denied)  # (Absent ones: denied, on macOS.)
+            assert str(Path(info["cwd"]) / name) in held, name
+    finally:
+        await runtime.stop()
+
+
+def git_paths(cwd: str) -> tuple[Path, Path]:
+    common = run("git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=cwd).strip()
+    admin = run("git", "rev-parse", "--path-format=absolute", "--git-dir", cwd=cwd).strip()
+    return Path(common), Path(admin)
+
+
+async def test_absent_protected_paths_are_denied_to_sandboxed_commands_on_macos(
+    tmp_path, git_repo, monkeypatch
+):
+    """Copilot's sandbox holds a read-only path only if it exists (a command made .git/commondir
+    there, sending the owner's git to a config of its own): one that does not is denied."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
+                           project=str(git_repo), isolate=True)  # fmt: skip
+        policy = runtime.sandbox_policy(harness.store.session(info["session_id"]))
+        assert policy is not None
+        common, admin = git_paths(info["cwd"])
+        absent = [common / "commondir", common / "config.worktree", common / "shallow",
+                  common / "objects" / "info" / "alternates", common / "modules",
+                  admin / "config.worktree", Path(info["cwd"]) / ".github" / "hooks",
+                  Path(info["cwd"]) / ".codex", Path(info["cwd"]) / ".mcp.json"]  # fmt: skip
+        for path in absent:
+            assert not path.exists(), path
+            assert str(path) in policy.denied and str(path) not in policy.readonly, path
+        for path in (common / "hooks", common / "config", common / "info", admin / "gitdir"):
+            assert str(path) in policy.readonly, path
+        assert all(map(os.path.lexists, policy.readonly))
+    finally:
+        await runtime.stop()
+
+
+async def test_on_linux_absent_protected_paths_get_harmless_placeholders(
+    tmp_path, git_repo, monkeypatch
+):
+    """Linux's sandbox leaves an empty folder where an absent path is denied (one at
+    .git/commondir breaks git): an empty placeholder, read-only, where that is harmless; none
+    where it is not."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "linux")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
+                           project=str(git_repo), isolate=True)  # fmt: skip
+        cwd = Path(info["cwd"])
+        common, admin = git_paths(info["cwd"])
+        policy = runtime.sandbox_policy(harness.store.session(info["session_id"]))
+        assert policy is not None
+        made = {common / "config.worktree": "file", admin / "config.worktree": "file",
+                common / "objects" / "info" / "alternates": "file", common / "modules": "folder",
+                cwd / ".github" / "hooks": "folder", cwd / ".codex": "folder"}  # fmt: skip
+        for path, kind in made.items():
+            assert (
+                (path.is_file() and path.stat().st_size == 0)
+                if kind == "file"
+                else (path.is_dir() and not any(path.iterdir()))
+            ), path
+            assert str(path) in policy.readonly, path
+        for path in (common / "commondir", common / "shallow", cwd / ".mcp.json"):
+            assert not path.exists(), path
+            assert str(path) not in policy.denied and str(path) not in policy.readonly, path
+        # Its .git read-only, but what its commits write: commondir and shallow cannot be made.
+        assert str(common) in policy.readonly and str(common) not in policy.readwrite
+        for name in ("objects", "refs", "logs", "worktrees"):
+            assert str(common / name) in policy.readwrite, name
+        assert run("git", "status", "--porcelain", cwd=cwd) == ""
+        assert run("git", "status", "--porcelain", cwd=git_repo) == ""
+        run("git", "fsck", "--no-progress", cwd=git_repo)
     finally:
         await runtime.stop()
 

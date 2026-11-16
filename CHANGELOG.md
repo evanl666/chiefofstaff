@@ -22,6 +22,16 @@
   worker whose settings changed is stopped and not opened there until the change is removed, and
   says so. Workers' edits to those files are refused.
 
+- **Security: a sandboxed worker could create git files that run code for you.** Copilot's
+  sandbox holds a read-only path only once it exists. A sandboxed worker could create
+  `.git/commondir` in your repository, sending your git to a configuration of its own whose
+  hooks or file-system monitor then ran as you, outside any sandbox; or a `.git/hooks` folder
+  where your repository had none, `config.worktree`, `info/attributes`, `shallow` or object
+  alternates. Chief of Staff now denies such paths while they don't exist (macOS); on Linux it
+  makes a worktree's repository `.git` read-only but for what commits write, and puts empty
+  placeholders where they change nothing. On Linux, a worker working in your own checkout itself
+  can still create `.git/commondir` and `.git/shallow` there.
+
 ## 0.1.45 (2026-11-14)
 
 Workers can run on Codex, with your own Codex sign-in (off by default); more pushes to the

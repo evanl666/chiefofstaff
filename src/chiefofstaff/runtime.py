@@ -119,8 +119,10 @@ from .workspaces import (
     content_key,
     gated_present,
     git_dirs,
+    git_writes,
     nearest_top,
     protected_git_paths,
+    sandbox_paths,
     service_secrets,
     settings_differing,
     settings_snapshot,
@@ -1724,12 +1726,18 @@ class Runtime:
         checkouts = self.workspaces.checkouts(row)
         repositories = git_dirs(checkouts)
         settings = self.store.settings()
-        writable = [*self.workspaces.writes(row), *repositories, *settings.sandbox_writable]
+        git_writable: list[str] = []
+        git_readonly: list[str] = []
+        for git_dir in repositories:
+            parts, held = git_writes(git_dir, checkouts)
+            git_writable += parts
+            git_readonly += held
+        writable = [*self.workspaces.writes(row), *git_writable, *settings.sandbox_writable]
         if settings.shared_caches and not row["slack"]:
             # Packages its installs need are what the owner's installs already have (checked
             # against lockfiles before use). Not for workers that read Slack.
             writable += shared_caches()
-        readonly = [
+        readonly = git_readonly + [
             path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
         ]
         # Repository settings Copilot would load (hooks, MCP servers), in each of its folders and
@@ -1739,13 +1747,16 @@ class Runtime:
             top = nearest_top(folder) or folder
             places = [folder, *[p for p in folder.parents if p.is_relative_to(top)]]
             gated |= dict.fromkeys(
-                str(place / name) for place in places for name in REPOSITORY_SETTINGS
+                str(place / name) for place in places for name in (*REPOSITORY_SETTINGS, ".codex")
             )
         readonly += list(gated)
         ssh = Path.home() / ".ssh"
         readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
         if agent := os.environ.get("SSH_AUTH_SOCK"):
             writable.append(agent)  # Signing through the agent; key files stay unreadable.
+        # Held as Copilot's sandbox can hold them: one that does not exist yet is denied, or on
+        # Linux made as an empty placeholder where that is harmless (sandbox_paths).
+        readonly, absent = sandbox_paths(readonly)
         return SandboxPolicy(
             readwrite=tuple(dict.fromkeys(path for path in writable if path)),
             readonly=tuple(readonly),
@@ -1755,7 +1766,7 @@ class Runtime:
             # workers that read Slack, whose content must not reach the owner's local services.
             local_network=not row["slack"],
             # Its own daemons, yes; the owner's (their tokens are in these files), no.
-            denied=tuple(service_secrets()),
+            denied=(*service_secrets(), *absent),
         )
 
     def yolo(self, row: dict) -> bool:

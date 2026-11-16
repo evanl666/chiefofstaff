@@ -327,7 +327,8 @@ change if it is yours. Workers don't edit those files.
 
 With the **sandbox** on (Settings; always for workers that read Slack), workers' shell commands can write only to their
 workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
-`HEAD` and index), never see your
+`HEAD` and index, nor files git would read in their place, such as `.git/commondir`; on Linux,
+for a worktree, only what its commits write), never see your
 GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot
 sandbox ca trust` once so `gh` works inside the sandbox; Settings tells you when it is needed.
 The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed.

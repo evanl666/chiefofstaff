@@ -31,6 +31,7 @@ from test_runtime import at, logged
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff import tools as tools_module
 from chiefofstaff import watchdog as watchdog_module
+from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.backend import CopilotBackend
 from chiefofstaff.models import Settings
 from chiefofstaff.roles import WORKER
@@ -57,6 +58,8 @@ def machine(tmp_path, monkeypatch):
 
     for module in (runtime_module, tools_module, watchdog_module):
         monkeypatch.setattr(module, "uuid4", numbered)
+    # How the sandbox holds paths that do not exist yet: as on macOS (Linux makes placeholders).
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
     for name in (
         "SSH_AUTH_SOCK",
         "GRADLE_USER_HOME",
@@ -292,18 +295,18 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "slack, created": (4501, "45e96f706f8f884c1ad15e268e2717480a4482bd75697b9db1a83afe2a21275f"),
     "slack, resumed": (4466, "90e994a20c3bcaadb98e628effd8a48499f866cc408d11fc19b63cbcb3fed734"),
     "the Copilot sandbox of a worker asking first": (
-        1475,
-        "0ca2ba6cd74e3959081a01c3c78d772c9a1c8fe5fd59b4cfe9290fbe4a3b5f04",
+        1542,
+        "c0b558c0bd020828cf4403b011cf819dfcfea93d231a6c6d0b1298497046161c",
     ),
     "watchdog, created": (3317, "74c2464eda92b08d7c0c2f0be7e9c18d5b80e0b4d7d7db7c5cbf22099bd3f111"),
     "watchdog, resumed": (3279, "3211b0fe48200b7a8b7e24baa9eca2c19608f7f40a7c4282665e9ca51f11ca54"),
     "worker asking first, sandboxed, created": (
-        20522,
-        "10e8a946ed97d9ceee4039520b80dffbd6931993946c37ea3e7334aeeba00c5f",
+        20588,
+        "43983656d0f98424e37159df544f06376b11c76efc49150edf1cb6ba957d071d",
     ),
     "worker asking first, sandboxed, resumed": (
-        20477,
-        "7a27a4f79a8c0fb91f0cdffbc2e19d6a903df230ea411dc1ada10b9d28c87839",
+        20543,
+        "5ebf79a73b0b34bab659abd0b4bdd5398d17277311ce5d5c04e8c9db03519641",
     ),
     "worker in a trusted worktree, created": (
         18688,
@@ -314,12 +317,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "975d250bcb72472a04af36a9893065147566a7f2f0c36c4f60f2ce192f3b28d3",
     ),
     "worker that reads Slack, created": (
-        21137,
-        "52daea22034274122bcc7224028825a947e48df70828d5f539fa8cba67ab3e57",
+        21203,
+        "d7a374cca29f3ade7cc093f350f34e1f201689be971e57add4f827b2317597cc",
     ),
     "worker that reads Slack, resumed": (
-        21090,
-        "81cc70cf422a73de7cd51565525f922c2275f51f27e3087cae3713f355ee5e60",
+        21156,
+        "61f37d3a25f1c9134db04577705cdf29e1bbf719c0dca9e2857525ec750ff94f",
     ),
     "worker with its model, created": (
         18222,
