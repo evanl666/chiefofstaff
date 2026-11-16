@@ -94,6 +94,8 @@ READ_SECONDS = 300
 # Steps at once, across workers (a background slot each).
 STEPS_AT_ONCE = 1
 # Each step's folder, in its worker's own folder.
+# Why an attempt waits (not refused) while this Copilot version gets its safety check.
+PROBING = "is being checked first"
 STEP_FOLDER = ".shepherd"
 # The tools a step has: Copilot's file and shell tools, and its own two.
 STEP_TOOLS = (
@@ -368,10 +370,10 @@ class Shepherd(Keeping, Steps):
         if not row or row["closed_at"]:
             return "its worker was closed"
         if self.runtime.agent(row["id"]) != COPILOT_AGENT:
-            return "Shepherd steps don't run on Codex workers yet"
+            return "its worker runs on Codex, not Copilot"
         if not (self.runtime.sandbox_host and self.runtime.backend
                 and self.runtime.backend.capabilities.sandbox):  # fmt: skip
-            return "this computer has no sandbox for its steps"
+            return "this computer has no sandbox for it"
         if why := await self.probe_refusal():
             return why
         if step and (self.control.claim(step["target"]) or {}).get("details", {}).get("signed"):
@@ -400,9 +402,9 @@ class Shepherd(Keeping, Steps):
         if found and found.get("passed"):
             return ""
         if found and found.get("why"):
-            return f"Copilot {version} did not pass the step check: {found['why']}"
+            return f"Copilot {version} failed the safety check: {found['why']}"
         self.runtime.background(self.run_probe(version))
-        return f"Copilot {version} is being checked for steps"
+        return f"Copilot {version} {PROBING}"
 
     async def run_probe(self, version: str):
         from .step_probe import probe
@@ -543,8 +545,8 @@ class Shepherd(Keeping, Steps):
             return ""
         failed = next((item for item in found if item.get("why")), None)
         if failed:
-            return f"This Copilot version did not pass the check for steps: {failed['why']}"
-        return "Copilot is checked before the first step."
+            return f"This Copilot version failed the safety check for fixes: {failed['why']}"
+        return "Copilot gets a safety check before the first fix is prepared."
 
     def repositories(self) -> list[str]:
         """The repositories with PRs it keeps moving (Settings → their choices)."""
@@ -686,7 +688,7 @@ class Shepherd(Keeping, Steps):
                     self.control.give(target, task["id"], head)
                     claim = self.control.claim(target) or claim
                 elif claim["state"] != PAUSED:
-                    await self.pause(claim, f"new commits not from a plan: {head[:7]}", head)
+                    await self.pause(claim, f"new commits it didn't push ({head[:7]})", head)
                     claim = self.control.claim(target) or claim
             if claim["state"] != PAUSED:
                 mine = await self.runtime.github.logins()

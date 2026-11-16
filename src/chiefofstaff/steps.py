@@ -59,6 +59,8 @@ class Steps:
                 await self.admit(step)
 
     async def admit(self: Shepherd, step: dict):  # type: ignore[misc]
+        from .shepherd import PROBING
+
         claim = self.control.claim(step["target"])
         consent = self.control.generation()
         if (
@@ -76,7 +78,7 @@ class Steps:
         row = self.store.find_session(step["session_id"])
         why = await self.executor_refusal(row, step)
         if why or row is None:
-            if why and not why.endswith("being checked for steps"):
+            if why and not why.endswith(PROBING):
                 self.end_step(step, "refused", why)
             return
         if self.busy(row):

@@ -617,11 +617,11 @@ def compare(
     if run0 is None or run1 is None:
         holds = exit1 == 0 and exit0 not in (None, 0)
         words = (
-            "failing → passing; identities not checked"
+            "its tests failed before and pass now; which tests ran was not checked"
             if holds
-            else "the command still fails on the fixed commit"
+            else "its tests still fail with the fix"
             if exit1 not in (None, 0)
-            else "identities not checked"
+            else "which tests ran was not checked"
         )
         return Comparison(holds=exit1 == 0, checked=False, words=words)
     failed0 = run0.failed or set()
@@ -636,25 +636,33 @@ def compare(
     added = sorted((collected1 or set()) - (collected0 or set())) if checked else []
     holds = exit1 == 0 and not still and not broke and run1.failed is not None
     parts = []
-    if checked:
-        parts.append(f"{len(collected0 or ())} → {len(collected1 or ())} tests")
-    for name in fixed[:3]:
-        parts.append(f"`{short_test(name)}` ✗→✓")
-    if len(fixed) > 3:
-        parts.append(f"{len(fixed) - 3} more fixed")
+    if fixed:
+        parts.append(
+            f"{named(fixed)} failed before and {'passes' if len(fixed) == 1 else 'pass'} now"
+        )
     if still:
-        parts.append(f"still failing: {', '.join(short_test(n) for n in still[:3])}")
+        parts.append(f"{named(still)} still {'fails' if len(still) == 1 else 'fail'}")
     if broke:
-        parts.append(f"now failing: {', '.join(short_test(n) for n in broke[:3])}")
+        parts.append(f"{named(broke)} {'fails' if len(broke) == 1 else 'fail'} now")
     if missing:
-        parts.append(f"{len(missing)} no longer collected")
-    if not checked:
-        parts.append("identities not checked")
+        parts.append(f"{len(missing)} {'test' if len(missing) == 1 else 'tests'} no longer run")
+    if checked:
+        count0, count1 = len(collected0 or ()), len(collected1 or ())
+        parts.append(f"{count0} tests ran on both" if count0 == count1 and not missing
+                     else f"{count0} tests before, {count1} with the fix")  # fmt: skip
+    else:
+        parts.append("which tests ran was not checked")
     return Comparison(
         holds=holds, checked=checked, words="; ".join(parts) or "no failing tests named",
         failing_fixed=fixed, still_failing=still, broke=broke, missing=missing, added=added,
         before=len(collected0 or ()), after=len(collected1 or ()),
     )  # fmt: skip
+
+
+def named(names: list[str]) -> str:
+    """Up to three tests by name (in backticks), and how many more."""
+    shown = ", ".join(f"`{short_test(name)}`" for name in names[:3])
+    return shown + (f" and {len(names) - 3} more" if len(names) > 3 else "")
 
 
 def short_test(name: str) -> str:
