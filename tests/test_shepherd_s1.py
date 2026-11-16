@@ -1029,8 +1029,10 @@ async def test_a_dismissed_plan_is_not_prepared_again_on_that_head(world):
         await approve(runtime.shepherd, step["id"], {})
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
     assert view["action"] is None
-    with pytest.raises(ValueError, match="tried already on this commit"):
-        await runtime.shepherd.fix_it(TARGET)
+    # Nothing tries it again by itself on that head (the owner's own click still could).
+    claim = control.claim(TARGET)
+    task = runtime.tasks.get(world.task)
+    assert await runtime.shepherd.signals(claim, task, claim["details"]) == []
     assert not world.github.writes and world.github.head() == world.h0
     verdicts = runtime.store.all("SELECT verdict FROM verdicts ORDER BY id")
     assert [row["verdict"] for row in verdicts] == ["dismissed:Not now"]
@@ -1190,3 +1192,78 @@ async def test_owner_actions_say_why_they_cant_apply(world):
     runtime.store.save_settings(old.model_copy(update={"paused": True}))
     with pytest.raises(ValueError, match="Chief of Staff is paused"):
         await shepherd.fix_it(TARGET)
+
+
+# Suggest: a look at why, no change; a fix that does not hold is not offered.
+
+
+async def test_at_suggest_it_looks_at_why_and_offers_fix_it(world):
+    runtime = await claimed(world, budget=20.0, levels={"fix-ci": "suggest"})
+    control = runtime.shepherd.control
+    claim = control.claim(TARGET)
+    control.update_claim(TARGET, delivered=1)
+    [step] = await runtime.shepherd.signals(claim, runtime.tasks.get(world.task), claim["details"])
+    await runtime.shepherd.pump()
+    await settle(runtime)
+    step = control.step(step["id"])
+    assert step["state"] == "running" and step["level"] == "suggest"
+    sent = world.session().sent[-1]
+    assert "Find the cause; change no file." in sent and "Never weaken" not in sent
+    sha = world.commit_fix(step["tree"])
+    refused = await step_result(
+        runtime, world.worker, step=step["id"], outcome="fixed", summary="x", commit=sha
+    )
+    assert "This step is a diagnosis" in said(refused)
+    await step_result(
+        runtime, world.worker, step=step["id"], outcome="diagnosis",
+        summary="timeout() returns 31; the test expects 30.\nThe gateway allows 30.",
+    )  # fmt: skip
+    world.session().emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    plan = control.step(step["id"])["plan"]
+    assert plan["kind"] == "diagnosis"
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["line"] == "timeout() returns 31; the test expects 30."
+    assert view["action"]["label"] == "Fix it"
+    with pytest.raises(ValueError, match="A diagnosis has nothing to publish"):
+        await approve(runtime.shepherd, step["id"], {})
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    again = control.open_step(TARGET)
+    assert again["id"] != step["id"] and again["level"] == "prepare" and again["clicked"]
+
+
+async def test_a_fix_that_does_not_hold_on_its_own_commit_is_not_offered(world):
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    tree = __import__("pathlib").Path(step["tree"])
+    (tree / "notes.md").write_text("not a fix")
+    run("git", "add", "-A", cwd=tree)
+    run("git", "commit", "-qm", "Not a fix", cwd=tree)
+    sha = run("git", "rev-parse", "HEAD", cwd=tree)
+    answer = await step_result(
+        runtime, world.worker, step=step["id"], outcome="fixed", summary="Fixed it.",
+        commit=sha, test_command="python -m pytest -q -p no:cacheprovider",
+    )  # fmt: skip
+    from test_shepherd import NUMBERED
+
+    lines = [line.split(". ", 1)[1] for line in said(answer).splitlines() if line[:2] in NUMBERED]
+    for index, line in enumerate(lines):
+        await world.ran(line, f"c{index}")
+    await step_result(runtime, world.worker, step=step["id"], outcome="checked", summary="ran")
+    world.session().emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    plan = runtime.shepherd.control.step(step["id"])["plan"]
+    assert plan["kind"] == "diagnosis"
+    assert "Not offered: it did not pass on its own commit" in plan["summary"]
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["action"]["label"] == "Fix it"
+    # The row's Fix it works: another attempt, the owner's.
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    again = runtime.shepherd.control.open_step(TARGET)
+    assert again["id"] != step["id"] and again["state"] == "running" and again["clicked"]

@@ -193,6 +193,16 @@ async def test_a_secret_in_the_commit_is_refused_and_the_step_told_why(world):
         test_command="pytest",
     )
     assert "a GitHub token" in said(answer) and "Refused" in said(answer)
+    # Removed in a commit on top: still in the history a push would publish.
+    (__import__("pathlib").Path(tree) / "config.py").write_text("TOKEN = ''\n")
+    run("git", "commit", "-qam", "no token", cwd=tree)
+    sha = run("git", "rev-parse", "HEAD", cwd=tree)
+    answer = await step_result(
+        runtime, world.worker, step=step["id"], outcome="fixed", summary="x", commit=sha,
+        test_command="pytest",
+    )  # fmt: skip
+    assert "a GitHub token" in said(answer) and f"git reset --hard {world.h0[:12]}" in said(answer)
+    assert not runtime.shepherd.control.step(step["id"])["h1"]
 
 
 async def test_a_commit_not_on_the_head_is_refused(world):

@@ -411,11 +411,13 @@ class Steps:
                 raise ValueError(
                     f"Your worktree is at {head[:7]}, not {full[:7]}: report its HEAD."
                 )
-            diff = await git("-C", tree, "diff", "--no-color", "--find-renames", step["h0"], full,
-                             limit=120)  # fmt: skip
+            # Every commit it would push, each on its own: a secret added in one and removed
+            # in the next is still in the history a push publishes.
+            history = await git("-C", tree, "log", "--format=", "-p", "--no-color",
+                                "--find-renames", f"{step['h0']}..{full}", limit=120)  # fmt: skip
             from .shepherd import token_values
 
-            files = integrity.parse_diff(diff)
+            files = integrity.parse_diff(history)
             secret = integrity.secrets_in(
                 [line for item in files for hunk in item.hunks for line in hunk.added]
                 + [item.path for item in files],
@@ -423,8 +425,9 @@ class Steps:
             )
             if secret:
                 raise ValueError(
-                    f"Refused: the commit holds what looks like {secret}. Remove it in a new "
-                    "commit (never a secret in code), and report again."
+                    f"Refused: a commit holds what looks like {secret}. Start again from the "
+                    f"PR's head (`git reset --hard {step['h0'][:12]}` is allowed for this) and "
+                    "commit the fix without it: never a secret in code. Then report again."
                 )
             result["commit"] = full
             self.control.move_step(step["id"], RUNNING, h1=full, result=result)

@@ -497,18 +497,25 @@ class Control:
         )
 
     def cap_reached(
-        self, target: str, kind: str, fingerprint: str, h0: str, threads: Iterable[str] = ()
-    ) -> str:
-        """Why another attempt may not start, "" when it may: three a kind and PR a day, one
-        per check fingerprint and head, two per review thread."""
+        self, target: str, kind: str, fingerprint: str, h0: str, threads: Iterable[str] = (),
+        clicked: bool = False,
+    ) -> str:  # fmt: skip
+        """Why another attempt may not start, "" when it may: three a kind and PR a day; one
+        fix per check fingerprint and head unless the owner clicks for another (a look at why,
+        at Suggest, is not a fix); two per review thread."""
         tried = [step for step in self.steps(target) if step["started_at"] and step["kind"] == kind]
         if sum(1 for step in tried if step["day"] == today()) >= PER_DAY:
             return f"{PER_DAY} attempts today"
         if (
             fingerprint
-            and sum(1 for step in tried if step["fingerprint"] == fingerprint and step["h0"] == h0)
+            and not clicked
+            and sum(
+                1 for step in tried
+                if step["fingerprint"] == fingerprint and step["h0"] == h0
+                and step["level"] == "prepare"
+            )
             >= PER_FINGERPRINT
-        ):
+        ):  # fmt: skip
             return "tried already on this commit"
         wanted = set(threads)
         if wanted:
