@@ -135,6 +135,9 @@ class Delivery:
         row = self.store.session(session_id)
         if row["closed_at"]:
             raise ValueError("That session is closed.")
+        if row["role"] == WORKER and self.runtime.shepherd.marked(session_id):
+            # In a shepherd step: it stops first; nothing else reaches the step's session.
+            await self.runtime.shepherd.yield_to(session_id)
         if row["role"] == WORKER and not self.states.handle(session_id):
             # Not attached: what it did in a terminal meanwhile goes first, before this.
             await self.runtime.workers.catch_up(row)

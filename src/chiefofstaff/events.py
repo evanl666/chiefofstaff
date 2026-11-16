@@ -603,7 +603,10 @@ class Events:
             # flow, often run again there) are receipts all the same.
             self.observe_shell(row, name, call, arguments)
             return
-        if row["role"] == WORKER and not self.states[row["id"]].after_abort:
+        if row["role"] == WORKER and self.runtime.shepherd.marked(row["id"]):
+            # A shepherd step's call: its frozen runs' evidence holds only on what was asked.
+            self.runtime.shepherd.saw(row["id"], name, arguments)
+        elif row["role"] == WORKER and not self.states[row["id"]].after_abort:
             # Working again after a stop (told to go on in its chat, by the Router, nudged): the
             # task it was stopped on runs again.
             self.runtime.task_actions.resume_stopped(row["id"])
@@ -699,11 +702,14 @@ class Events:
             # Sub-agents and sessions we pinned to a model do not show the default.
             self.store.set("copilot_default_model", model)
         run = self.tasks.run(session_id) if row["role"] == WORKER else None
+        spent = (getattr(getattr(data, "copilot_usage", None), "total_nano_aiu", 0) or 0) / 1e9
+        if row["role"] == WORKER and self.runtime.shepherd.marked(session_id):
+            self.runtime.shepherd.usage(session_id, spent)  # Interrupted at its permitted spend.
         self.store.record_usage(
             session_id,
             row["role"],
             model,
-            (getattr(getattr(data, "copilot_usage", None), "total_nano_aiu", 0) or 0) / 1e9,
+            spent,
             getattr(data, "cost", 0) or 0,
             getattr(data, "input_tokens", 0) or 0,
             getattr(data, "output_tokens", 0) or 0,
@@ -855,6 +861,10 @@ class Events:
             # task left running.
             status = "idle"
         self.runtime.update_session(session_id, status=status, activity="")
+        if row["role"] == WORKER and self.runtime.shepherd.marked(session_id):
+            # A shepherd step's turn: its end is the step's (a plan), never a report owed.
+            self.runtime.background(self.runtime.shepherd.turn_ended(session_id))
+            return
         if (
             state.close_after_turn
             and row["role"] == WORKER
@@ -933,6 +943,11 @@ class Events:
             # A hook of one of the owner's Copilot plugins failed (in a sandboxed session it
             # cannot write outside the session's folders). Copilot goes on with the turn.
             self.hook_failed(row, message)
+            return
+        if row["role"] == WORKER and self.runtime.shepherd.marked(session_id):
+            # A shepherd step's turn failed: the step ends, failed; its task does not.
+            self.states[session_id].steps.clear()
+            self.runtime.background(self.runtime.shepherd.failed(session_id, message))
             return
         self.states[session_id].busy = False
         self.states[session_id].retuned = False
@@ -1165,10 +1180,12 @@ class Events:
         row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
         if not row:
             return PermissionDecisionReject(feedback="Unknown session.")
+        stepping = row["role"] == WORKER and self.runtime.shepherd.marked(row["id"])
         if (
             (reason := private_denial(request, self.runtime.private_folders()))
             or (reason := owners_checkout(row, request, self.workspaces.checkouts(row)))
             or (reason := settings_write(row, request, self.runtime.held_run_files(row)))
+            or (stepping and (reason := self.runtime.shepherd.denial(row, request)))
             or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
         ):
             if reason in OWNERS_CHECKOUTS and getattr(request, "kind", "") == "shell":

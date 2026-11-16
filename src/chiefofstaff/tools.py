@@ -322,6 +322,17 @@ class MessageSession(BaseModel):
     )
 
 
+# The Router's field, while Prepared for you is on, for a PR the owner asks to keep moving.
+SHEPHERD_FIELD: Any = (
+    str,
+    Field(
+        default="",
+        description="A PR of the owner's to keep moving (owner/repo#n), when they ask for that: "
+        "its failing CI and review comments are then prepared in this worker for their approval",
+    ),
+)
+
+
 class ListSessions(BaseModel):
     pass
 
@@ -653,6 +664,43 @@ class InlineComment(BaseModel):
     start_line: int = Field(default=0, description="For a range of lines: its first. 0: one line")
     side: Literal["RIGHT", "LEFT"] = "RIGHT"
     body: str = Field(description="The comment (markdown)")
+
+
+class ShepherdThread(BaseModel):
+    comment: int = Field(
+        description="The review comment it is about: its `comment` id in threads.json"
+    )
+    stance: Literal["fix", "answer", "push-back", "leave"] = Field(
+        description="fix: changed in your commit; answer: a reply only; push-back: a reply with "
+        "your reasons; leave: for the owner (with why)"
+    )
+    reply: str = Field(
+        default="",
+        description="Your reply, in the owner's voice (for fix: what you changed, e.g. 'Done: …')",
+    )
+    why: str = Field(default="", description="For leave: why it is the owner's to answer")
+
+
+class ShepherdResult(NestedArguments):
+    step: str = Field(description="The step's id, from its message")
+    outcome: Literal["fixed", "addressed", "diagnosis", "cannot", "checked"] = Field(
+        description="fixed (a CI fix committed), addressed (review comments: replies, and a "
+        "commit when any is fixed), diagnosis (what you found; nothing changed), cannot (it "
+        "can't be done safely here: why), checked (you ran the commands it asked you to run)"
+    )
+    summary: str = Field(description="What you found and did, in two or three sentences")
+    commit: str = Field(default="", description="Your new commit's SHA (fixed, addressed)")
+    test_command: str = Field(
+        default="",
+        description="The test command you ran to reproduce the failure, exactly as you ran it "
+        "(no `cd`): it is run again on the commit before and after",
+    )
+    failing_tests: list[str] = Field(
+        default_factory=list, max_length=50, description="The failing tests, by name"
+    )
+    threads: list[ShepherdThread] = Field(
+        default_factory=list, max_length=50, description="One stance per review comment"
+    )
 
 
 class DraftGitHubReview(BaseModel):
@@ -1136,6 +1184,8 @@ class Tools:
         self.refused_notes: set[str] = set()
         # spawn_worker with `agent`, by the agents on (spawn_on).
         self.spawn_tools: dict[tuple[str, ...], Any] = {}
+        # A shepherd step's own tool, once a step ran (step_tools).
+        self.step_made: dict[str, Any] = {}
 
     async def t_add_repo(self, params: AddRepo, caller: str):
         self.caller(caller, WORKER)
@@ -1563,17 +1613,21 @@ class Tools:
             "what it changed) and say which you would keep.",
         }
 
-    def spawn_on(self, names: Sequence[str], chooses: bool = False) -> Any:
+    def spawn_on(self, names: Sequence[str], chooses: bool = False, shepherd: bool = False) -> Any:
         """spawn_worker as the Router has it while other coding agents are on: with `agent`,
         set only when the owner named one (more-agents.md 5.9); `chooses` (the owner lets the
-        Router choose): for every worker, saying whether the owner named it (owner_named).
-        Without them, the tool is as it always was (definitions)."""
-        key = (*names, "chooses") if chooses else tuple(names)
+        Router choose): for every worker, saying whether the owner named it (owner_named); and
+        while Prepared for you is on, with `shepherd`. Without them, the tool is as it always
+        was (definitions)."""
+        key = (*names, *(["chooses"] if chooses else []), *(["+shepherd"] if shepherd else []))
+        if not names and not shepherd:
+            return self.runtime.tools["spawn_worker"]
         if key not in self.spawn_tools:
-            choices: Any = Literal.__getitem__(("", agents.COPILOT, *names))  # type: ignore[attr-defined]
-            named = ", ".join(agents.display(name) for name in (agents.COPILOT, *names))
-            fields: dict[str, Any] = {
-                "agent": (
+            fields: dict[str, Any] = {}
+            if names:
+                choices: Any = Literal.__getitem__(("", agents.COPILOT, *names))  # type: ignore[attr-defined]
+                named = ", ".join(agents.display(name) for name in (agents.COPILOT, *names))
+                fields["agent"] = (
                     choices,
                     Field(
                         default="",
@@ -1587,33 +1641,34 @@ class Tools:
                         ),
                     ),
                 )
-            }
-            others: Any = Literal.__getitem__((agents.COPILOT, *names))  # type: ignore[attr-defined]
-            fields["compare_with"] = (
-                list[others],
-                Field(
-                    default_factory=list,
-                    description="Compare, only when the owner asks for the same task on several "
-                    'agents ("do this with Codex and Claude"): the agents beside `agent` it also '
-                    "runs on, a worker each in a worktree of its own",
-                ),
-            )
-            if chooses:
-                fields["owner_named"] = (
-                    bool,
+                others: Any = Literal.__getitem__((agents.COPILOT, *names))  # type: ignore[attr-defined]
+                fields["compare_with"] = (
+                    list[others],
                     Field(
-                        default=False,
-                        description="True when the owner named this agent for the task (one "
-                        "they named that can't run is never replaced; one you chose is)",
+                        default_factory=list,
+                        description="Compare, only when the owner asks for the same task on "
+                        'several agents ("do this with Codex and Claude"): the agents beside '
+                        "`agent` it also runs on, a worker each in a worktree of its own",
                     ),
                 )
+                if chooses:
+                    fields["owner_named"] = (
+                        bool,
+                        Field(
+                            default=False,
+                            description="True when the owner named this agent for the task (one "
+                            "they named that can't run is never replaced; one you chose is)",
+                        ),
+                    )
+            if shepherd:
+                fields["shepherd"] = SHEPHERD_FIELD
             params = create_model("SpawnWorker", __base__=SpawnWorker, **fields)
             params.__doc__ = SpawnWorker.__doc__
             self.spawn_tools[key] = define_tool(
                 "spawn_worker",
                 description=SPAWN_WORKER,
                 params_type=leak_proof(params),
-                handler=self.handler(self.t_spawn_worker),
+                handler=self.handler(self.t_spawn_kept if shepherd else self.t_spawn_worker),
                 skip_permission=True,
                 defer="never",
             )
@@ -1647,6 +1702,57 @@ class Tools:
             f"“{row['title']}” goes on with a new worker on {agents.display(params.agent)} "
             f"(session {made['session_id']}, task {made['task_id']}); the old one is closed."
         )
+    async def t_spawn_kept(self, params: Any, caller: str):
+        """spawn_worker with `shepherd`: the new task keeps that PR moving (as Hand to a
+        worker does), when it is the owner's own and eligible."""
+        result = await self.t_spawn_worker(params, caller)
+        if kept := (getattr(params, "shepherd", "") or "").strip():
+            result["shepherd"] = await self.runtime.shepherd.take(kept, result["task_id"])
+        return result
+
+    async def t_message_kept(self, params: Any, caller: str):
+        result = await self.t_message_session(params, caller)
+        if kept := (getattr(params, "shepherd", "") or "").strip():
+            row = self.store.session(params.session_id)
+            task = self.tasks.current(row["id"])
+            if not task:
+                raise ValueError("That worker has no task to keep the PR moving for.")
+            words = await self.runtime.shepherd.take(kept, task["id"])
+            if isinstance(result, dict):
+                return {**result, "shepherd": words}
+            return f"{result}\nPrepared for you: {words}"
+        return result
+
+    def message_on(self, shepherd: bool) -> Any:
+        """message_session as the Router has it: with `shepherd` while Prepared for you is on."""
+        if not shepherd:
+            return self.runtime.tools["message_session"]
+        if ("message", "+shepherd") not in self.spawn_tools:
+            params = create_model("MessageSession", __base__=MessageSession,
+                                  shepherd=SHEPHERD_FIELD)  # fmt: skip
+            params.__doc__ = MessageSession.__doc__
+            description = self.runtime.tools["message_session"].description
+            self.spawn_tools[("message", "+shepherd")] = define_tool(
+                "message_session",
+                description=description,
+                params_type=leak_proof(params),
+                handler=self.handler(self.t_message_kept),
+                skip_permission=True,
+            )
+        return self.spawn_tools[("message", "+shepherd")]
+
+    def step_tools(self) -> list:
+        """A shepherd step's own tools (shepherd.py): shepherd_result, made on first use (no
+        other session ever has it), and draft_github_review (its step mode)."""
+        if "shepherd_result" not in self.step_made:
+            self.step_made["shepherd_result"] = define_tool(
+                "shepherd_result",
+                description="End a shepherd step with its outcome (see the step's message).",
+                params_type=leak_proof(ShepherdResult),
+                handler=self.handler(self.t_shepherd_result),
+                skip_permission=True,
+            )
+        return [self.step_made["shepherd_result"], self.runtime.tools["draft_github_review"]]
 
     def handler(self, handler):
         async def run(params, invocation):
@@ -3015,6 +3121,8 @@ class Tools:
                     "mergeable": view.get("mergeable", ""),
                     "updated": view.get("updatedAt", ""),
                 }
+                # Where Prepared for you stands on it, only for a PR it keeps moving.
+                | self.runtime.shepherd.router_words(f"github:{repo.lower()}#{number}")
             )
             # Task cards with this PR show it as it is now too.
             self.runtime.background(self.runtime.task_actions.refresh_open_prs(f"{repo}#{number}"))
@@ -3091,6 +3199,12 @@ class Tools:
                     "status": self.looked_at(task, task_words(task, found)),
                     "worker": short(task["session_id"]),
                     **({"prs": prs} if (prs := self.runtime.task_actions.pr_urls(task)) else {}),
+                    # Only for a task whose PR Prepared for you keeps moving: where it stands.
+                    **(
+                        {"kept_moving": kept["line"] or "kept moving"}
+                        if (kept := self.runtime.shepherd.task_view(task))
+                        else {}
+                    ),
                     **(
                         {"after": after}
                         if (after := [d["id"] for d in self.tasks.deps(task["id"])])
@@ -4678,8 +4792,17 @@ class Tools:
         branches = {branch for branch in branches | {row["branch"] or ""} if branch}
         return bool(branches) and (pull.get("head") or {}).get("ref") in branches
 
+    async def t_shepherd_result(self, params: ShepherdResult, caller: str):
+        self.caller(caller, WORKER)
+        if not self.runtime.shepherd.marked(caller):
+            raise ValueError("No shepherd step of yours is running.")
+        return await self.runtime.shepherd.result(params, caller)
+
     async def t_draft_github_review(self, params: DraftGitHubReview, caller: str):
         self.caller(caller, WORKER)
+        if self.runtime.shepherd.marked(caller):
+            # In a shepherd step: a reply to one of this PR's threads, kept for its plan.
+            return self.runtime.shepherd.step_reply(params, caller)
         settings = self.store.settings()
         repo = params.repo.lower().strip()
         github = self.runtime.github

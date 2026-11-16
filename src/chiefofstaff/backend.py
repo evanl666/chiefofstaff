@@ -39,6 +39,7 @@ from copilot.generated.rpc import (
     SandboxConfigUserPolicy,
     SandboxConfigUserPolicyFilesystem,
     SandboxConfigUserPolicyNetwork,
+    SandboxConfigUserPolicySeatbelt,
     SessionUpdateOptionsParams,
     ShellInitScript,
     ShellInitScriptShell,
@@ -196,6 +197,20 @@ class SandboxPolicy:
     local_network: bool = False
     # Neither readable nor writable.
     denied: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class StepSandboxPolicy(SandboxPolicy):
+    """A shepherd step's (shepherd.py): what a worker's sandbox has, and less."""
+
+    # git and gh get no GitHub credentials through Copilot's proxy.
+    credentials: bool = False
+    # Any outbound traffic at all (the hosts above narrow it).
+    outbound: bool = False
+    # Never reachable, whatever else allows them.
+    blocked_hosts: tuple[str, ...] = ()
+    # macOS keychains: never.
+    keychain: bool | None = False
 
 
 # The agent a session runs on unless its row names another (Runtime.agent): every session today.
@@ -808,6 +823,9 @@ class CopilotBackend:
         return copilot_home() / "session-state" / session_id / "events.jsonl"
 
     def sandbox(self, policy: SandboxPolicy) -> SandboxConfig:
+        # A shepherd step's policy has no credentials, and may have no outbound traffic.
+        credentials = getattr(policy, "credentials", True)
+        keychain = getattr(policy, "keychain", None)
         return SandboxConfig(
             enabled=True,
             # Its folders are listed in the policy: a working directory such as home is not
@@ -822,7 +840,7 @@ class CopilotBackend:
             sandbox_mcp_servers=False,
             # git and gh get the owner's GitHub credentials through Copilot's local proxy;
             # commands only ever see stand-in values.
-            auth=SandboxConfigAuth(gh=True, git=True),
+            auth=SandboxConfigAuth(gh=credentials, git=credentials),
             user_policy=SandboxConfigUserPolicy(
                 filesystem=SandboxConfigUserPolicyFilesystem(
                     readwrite_paths=list(policy.readwrite),
@@ -830,10 +848,14 @@ class CopilotBackend:
                     denied_paths=list(policy.denied) or None,
                 ),
                 network=SandboxConfigUserPolicyNetwork(
-                    allow_outbound=True,
+                    allow_outbound=getattr(policy, "outbound", True),
                     allow_local_network=policy.local_network,
                     allowed_hosts=list(policy.allowed_hosts) or None,
+                    blocked_hosts=list(getattr(policy, "blocked_hosts", ())) or None,
                 ),
+                seatbelt=None
+                if keychain is None
+                else SandboxConfigUserPolicySeatbelt(keychain_access=keychain),
             ),
         )
 
