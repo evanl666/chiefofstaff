@@ -1704,7 +1704,9 @@ def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(shell, 
     cases = [generator.line() for _ in range(1000)]
     cases += [(line, start) for line in oracle.seeds() for start in ("main", "feat")]
     cases += oracle.FOUND + (oracle.FOUND_ZSH if shell == "zsh" else [])
-    outcomes = oracle.run(policy, cases, tmp_path, shell=shell)
+    mark = f"ci-{shell}-{os.getpid()}-{time.monotonic_ns()}"
+    outcomes = oracle.run(policy, cases, tmp_path, shell=shell, mark=mark)
+    assert not oracle.marked(mark), "a line left something running"
     unsound = [(outcome.start, outcome.preset, outcome.line, sorted(outcome.targets))
                for outcome in outcomes if outcome.unsound]  # fmt: skip
     allowed = sum(outcome.allowed for outcome in outcomes)
@@ -1785,6 +1787,34 @@ def test_a_line_that_ends_as_the_oracle_stops_it_is_no_error(tmp_path, monkeypat
     assert box.run("git push origin feat", "feat") == [
         f"PUSH\t{box.folder('feat')}\tfeat\t\t\tpush\x1forigin\x1ffeat"
     ]
+
+
+@pytest.mark.parametrize(
+    ("line", "shell", "grouped"),
+    [
+        ("while :; do sleep 1; done &", "bash", True),
+        ("( while :; do sleep 1; done & ); exit 0", "bash", True),
+        ("while :; do sleep 1; done & disown", "bash", True),
+        ("while :; do sleep 1; done &!", "zsh", True),
+        ("until git -C repo push origin main; do sleep 1; done", "bash", True),
+        (f"{sys.executable} -c 'import os, time; os.setsid(); time.sleep(600)' &", "bash", False),
+    ],
+)
+def test_a_line_that_leaves_a_loop_running_leaves_nothing(line, shell, grouped, tmp_path):
+    """Four `until git -C repo push origin main; do sleep 1; done` of the oracle's test lived
+    18 hours: macOS answered EPERM for their process group (a process of it had ended and was
+    not yet reaped), taken for "none left". What a line leaves in its process group ends with
+    it (a job, a double fork, `disown`, past its 10 seconds); what left the group (`setsid`),
+    by its mark."""
+    import policy_oracle as oracle
+
+    if shell == "zsh" and not oracle.ZSH:
+        pytest.skip("no zsh here")
+    box = oracle.Sandbox(tmp_path / "box")
+    box.run(line, "feat", shell)
+    assert bool(oracle.marked(box.last_mark)) != grouped
+    oracle.end_marked(box.last_mark)
+    assert not oracle.marked(box.last_mark)
 
 
 def commands_of(text: str) -> list[tuple[str, list[str]]]:
