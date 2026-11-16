@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -115,6 +115,8 @@ def loaded(row: dict | None, *fields: str) -> dict | None:
 
 
 CLAIM_JSON = ("accepted", "approved", "details")
+# What a plan keeps past its retention (control.prune_plans): what its journal shows.
+PLAN_KEPT = ("kind", "h0", "h1", "summary", "change", "repo", "number")
 STEP_JSON = ("signal", "threads", "plan", "evidence", "result")
 ACTION_JSON = ("payload",)
 
@@ -607,6 +609,24 @@ class Control:
             "UPDATE actions SET state=?, outcome=?, link=?, updated_at=? WHERE id=?",
             (state, outcome[:500], link[:500], now(), action_id),
         )
+
+    def prune_plans(self, days: int):
+        """Plans whose outcome is older than `days`: their diff, findings and replies go; what
+        the journal shows of them (kind, heads, summary, evidence in words) stays."""
+        if not self.exists():
+            return
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        for row in self.store.all(
+            "SELECT id, plan FROM shepherd_steps WHERE ended_at != '' AND ended_at < ? "
+            "AND json_extract(plan, '$.diff') IS NOT NULL",
+            (cutoff,),
+        ):
+            plan = json.loads(row["plan"] or "{}")
+            kept = {key: plan[key] for key in PLAN_KEPT if key in plan}
+            kept["evidence"] = {"words": (plan.get("evidence") or {}).get("words") or ""}
+            self.store.execute(
+                "UPDATE shepherd_steps SET plan=? WHERE id=?", (json.dumps(kept), row["id"])
+            )
 
     def withdraw_planned(self, step_id: str, why: str):
         self.store.execute(

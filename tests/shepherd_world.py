@@ -550,7 +550,11 @@ async def seed_page(runtime, root: Path) -> dict:
     shepherd = runtime.shepherd
     await shepherd.tick()
     await settle(runtime)
-    step, _ = await fixed(world, runtime)
+    step, sha = await fixed(world, runtime)
+    # Once pushed, its CI runs (as GitHub has it right after a push).
+    world.github.checks[sha] = [
+        {"name": "ci / test", "status": "IN_PROGRESS", "conclusion": "", "required": True}
+    ]
     store = runtime.store
     extra = {}
     for title, label in (

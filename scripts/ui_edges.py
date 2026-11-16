@@ -5134,7 +5134,8 @@ async def main():
                           round_ten, round_scale, round_qa, round_eleven, round_twelve,
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
-                          round_send, round_agents, round_qa6, round_qa7_life):  # fmt: skip
+                          round_send, round_agents, round_qa6, round_qa7_life,
+                          round_shepherd):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -7438,6 +7439,186 @@ async def agents_stopped_by_settings(runtime, browser, spawned):
     assert not errors, errors
     await context.close()
     log("agents: turned off while a worker works: one toast says how many stopped, and why")
+
+
+async def round_shepherd(runtime, browser, failures: list[str]):
+    """Prepared for you (shepherd.py): off, one line in Settings → General and nothing else;
+    turned on, its tab comes at once, and saved; Home's section with three rows, All found with
+    why not, Hand to a worker; a worker PR's row: the fix's review (Request changes… and back,
+    Push), its line after, Resume on a paused one, its menu (Stop keeping it moving, Accept this
+    head…, What it did); the tab's choices saved; turned off, everything of it goes."""
+    from shepherd_world import TARGET, seed_page
+
+    from chiefofstaff import discovery
+
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    # Off: the switch's line in General, no tab, no section.
+    await page.locator("#settings-button").click()
+    await page.locator("#settings-tabs [data-tab=general]").click()
+    line = page.locator("#proactive-line")
+    await expect(line).to_contain_text("Keep my PRs moving")
+    await expect(line.locator("input")).not_to_be_checked()
+    await expect(page.locator("#settings-tabs [data-tab=proactive]")).to_have_count(0)
+    # On: its tab comes before it is saved, and goes if unticked.
+    await line.locator("input").check()
+    tab = page.locator("#settings-tabs [data-tab=proactive]")
+    await expect(tab).to_have_text("Prepared for you")
+    await line.locator("input").uncheck()
+    await expect(tab).to_have_count(0)
+    await line.locator("input").check()
+    await page.locator("#settings-form footer button[type=submit]").click()
+    await until(lambda: runtime.store.settings().proactive, 15)
+    await expect(page.locator("#settings-dialog")).not_to_be_visible()
+    await context.close()
+    log("Prepared for you: one line in General while off; its tab once ticked")
+
+    root = Path(tempfile.mkdtemp(prefix="cos-ui-shepherd-", dir=runtime.store.directory.parent))
+    seeded = await seed_page(runtime, root)
+    handed = []
+
+    async def hand(shepherd, target):
+        handed.append(target)
+        return {"task_id": "", "session_id": "", "claim": {}}
+
+    real_hand = discovery.hand
+    discovery.hand = hand
+    try:
+        context = await browser.new_context(viewport={"width": 1280, "height": 900})
+        page = await context.new_page()
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        prepared = page.locator("#prepared")
+        await expect(prepared.locator(".prepared-row")).to_have_count(3, timeout=10000)
+        await prepared.get_by_role("button", name="1 more · All found…").click()
+        await expect(prepared.locator(".prepared-row")).to_have_count(6)
+        await expect(prepared.locator(".prepared-row", has_text="web#88")).to_contain_text(
+            "from a fork: not yet"
+        )
+        await expect(
+            prepared.locator(".prepared-row", has_text="web#88").get_by_role("button")
+        ).to_have_count(0)
+        await prepared.get_by_role("button", name="Done").click()
+        await expect(prepared.locator(".prepared-row")).to_have_count(3)
+        await (
+            prepared.locator(".prepared-row", has_text="web#117")
+            .get_by_role("button", name="Hand to a worker")
+            .click()
+        )
+        await expect(page.locator(".toast", has_text="Handed web#117 to a worker.")).to_be_visible()
+        assert handed == ["github:acme/web#117"], handed
+        log("Home's section: three rows, All found with why not, Hand to a worker")
+
+        # The fix's review: Request changes… and back, then Push.
+        row = page.locator("#needs .card.task", has_text="Fix the login timeout")
+        await row.get_by_role("button", name="Review fix").click()
+        dialog = page.locator(".plan-dialog")
+        await expect(dialog.locator("h2")).to_have_text("A fix for api#12")
+        await expect(dialog.locator(".plan-evidence")).to_contain_text(
+            "test_timeout failed before and passes now"
+        )
+        await dialog.get_by_role("button", name="Request changes…").click()
+        await expect(dialog.locator("footer textarea")).to_be_focused()
+        await dialog.locator("footer").get_by_role("button", name="Cancel").click()
+        await expect(dialog.get_by_role("button", name="Push")).to_be_visible()
+        await dialog.get_by_role("button", name="Push").click()
+        await expect(dialog).to_have_count(0)
+        world = seeded["world"]
+        step = seeded["step"]
+        await until(lambda: runtime.shepherd.control.step(step["id"])["state"] == "published", 15)
+        await until(lambda: world.github.head() == step["plan"]["h1"], 15)
+        # Its row's own words (what GitHub says of its PR) stay; unfolded, what was done.
+        await row.locator(".head .title").click()
+        await expect(row).to_have_class(re.compile(r"\bunfolded\b"))
+        await expect(row.locator(".kept-line")).to_contain_text(
+            f"Pushed {step['plan']['h1'][:7]}", timeout=10000
+        )
+        await row.locator(".head .title").click()
+        log("the fix's review: Request changes… and back; Push publishes it")
+
+        # Paused: Resume.
+        paused = page.locator("#needs .card.task", has_text="Add the export endpoint")
+        await paused.get_by_role("button", name="Resume").click()
+        await expect(page.locator(".toast", has_text="It keeps moving again.")).to_be_visible()
+        await until(
+            lambda: runtime.shepherd.control.claim("github:acme/api#31")["state"] == "idle", 15
+        )
+        await expect(paused.get_by_role("button", name="Resume")).to_have_count(0)
+
+        # Its menu: Accept this head… (the head it pushed, read again at once), What it did,
+        # Stop keeping it moving.
+        await until(lambda: runtime.shepherd.control.claim(TARGET)["head"] == world.github.head())
+        await row.locator(".more-button").click()
+        await row.get_by_role("menuitem", name="Accept this head…").click()
+        confirm = page.locator(".confirm-dialog")
+        await expect(confirm.locator("h2")).to_have_text(
+            f"Accept api#12 at {world.github.head()[:7]}?"
+        )
+        await confirm.get_by_role("button", name=re.compile(r"^Accept ")).click()
+        await until(
+            lambda: (
+                (runtime.shepherd.control.claim(TARGET)["accepted"] or {}).get("sha")
+                == world.github.head()
+            ),
+            15,
+        )
+        await row.locator(".more-button").click()
+        await row.get_by_role("menuitem", name="What it did").click()
+        journal = page.locator(".journal-dialog")
+        await expect(journal.locator(".journal-ops")).to_contain_text("Pushed the fix")
+        await journal.get_by_role("button", name="Close").click()
+        await row.locator(".more-button").click()
+        await row.get_by_role("menuitem", name="Stop keeping it moving").click()
+        await until(lambda: not runtime.shepherd.control.claim(TARGET)["keep"], 15)
+        await row.locator(".more-button").click()
+        await expect(row.get_by_role("menuitem", name="Keep it moving")).to_be_visible()
+        await page.keyboard.press("Escape")
+        log("a kept PR's row: Resume, Accept this head…, What it did, Stop keeping it moving")
+
+        # The tab's choices, saved.
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=proactive]").click()
+        pane = page.locator('#settings-pane .tab[data-tab="proactive"]')
+        await pane.locator("select[name=level_fix-ci]").select_option("prepare")
+        await pane.locator("input[name=proactive_budget]").fill("12")
+        await pane.locator("textarea[name=step_hosts]").fill("registry.acme.dev")
+        repo = pane.locator('.repo-row[data-repo="acme/api"]')
+        await repo.locator("select.disclosure").select_option("yes")
+        await repo.locator("input.localhost").check()
+        await page.locator("#settings-form footer button[type=submit]").click()
+        await until(lambda: runtime.store.settings().proactive_budget == 12, 15)
+        settings = runtime.store.settings()
+        assert settings.proactive_levels["fix-ci"] == "prepare", settings.proactive_levels
+        assert settings.step_hosts == ["registry.acme.dev"], settings.step_hosts
+        choice = settings.proactive_repos["acme/api"]
+        assert choice.disclosure == "yes" and choice.localhost, choice
+        # GitHub is never a host steps may reach: said where it was typed.
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=proactive]").click()
+        await pane.locator("textarea[name=step_hosts]").fill("api.github.com")
+        await page.locator("#settings-form footer button[type=submit]").click()
+        await expect(page.locator("#settings-error")).to_contain_text("api.github.com is GitHub's")
+        assert runtime.store.settings().step_hosts == ["registry.acme.dev"]
+        await page.locator("#settings-cancel").click()
+        log("the tab's choices saved; GitHub refused as a host")
+
+        # Off: its tab, its section and its words on rows go.
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=general]").click()
+        await page.locator("#proactive-line input").uncheck()
+        await expect(page.locator("#settings-tabs [data-tab=proactive]")).to_have_count(0)
+        await page.locator("#settings-form footer button[type=submit]").click()
+        await until(lambda: not runtime.store.settings().proactive, 15)
+        await expect(page.locator("#prepared")).to_have_count(0)
+        await expect(row.locator(".kept-line")).to_have_count(0)
+        await expect(row.get_by_role("button", name="Review fix")).to_have_count(0)
+        await context.close()
+        log("turned off: its tab, its section and its words on rows go")
+    finally:
+        discovery.hand = real_hand
 
 
 if __name__ == "__main__":

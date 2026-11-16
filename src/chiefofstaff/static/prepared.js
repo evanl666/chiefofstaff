@@ -301,6 +301,15 @@ function diffView(plan) {
 // What was tried on a PR, attempt by attempt (Look, What it did).
 const STATES = { published: "Published", partly: "Partly published", prepared: "Waiting for you", applying: "Publishing", running: "Running", queued: "Waiting", diagnosis: "Diagnosis", dismissed: "Dismissed", withdrawn: "Withdrawn", stale: "Out of date", interrupted: "Stopped", failed: "Failed", refused: "Not run", nothing: "Nothing came of it" };
 const KINDS = { "fix-ci": "CI", "address-review": "Review", merge: "Merge" };
+// Each operation, done or not, in words.
+const OPS = { push: ["Pushed the fix", "The push"], reply: ["Posted a reply", "A reply"], resolve: ["Resolved a conversation", "Resolving a conversation"], "request-review": ["Asked for a review again", "Asking for a review again"], rerun: ["Ran CI again", "Running CI again"], merge: ["Merged", "The merge"] };
+export function operationWords(op) {
+  const [done, doing] = OPS[op.kind] || [op.kind, op.kind];
+  if (op.state === "sent") return done;
+  if (op.state === "uncertain") return `${doing}: not known whether it went out`;
+  if (["planned", "dispatching"].includes(op.state)) return `${doing}: on its way`;
+  return `${doing}: not done`;
+}
 export function openJournal(task) {
   const kept = task.shepherd;
   const rows = (kept?.journal || []).slice().reverse().map((entry) => el(
@@ -310,7 +319,7 @@ export function openJournal(task) {
     entry.summary ? el("div", { class: "muted", text: entry.summary }) : "",
     entry.evidence ? el("div", { html: markdown(entry.evidence) }) : "",
     entry.why && !entry.summary ? el("div", { class: "muted", text: entry.why }) : "",
-    entry.operations.length ? el("ul", { class: "journal-ops" }, ...entry.operations.map((op) => el("li", {}, `${op.kind}: ${op.state}`, op.link ? el("a", { href: op.link, target: "_blank", rel: "noreferrer", text: " ↗" }) : "", op.outcome ? el("span", { class: "muted", text: ` ${op.outcome}` }) : ""))) : "",
+    entry.operations.length ? el("ul", { class: "journal-ops" }, ...entry.operations.map((op) => el("li", {}, operationWords(op), op.link ? el("a", { href: op.link, target: "_blank", rel: "noreferrer", text: " ↗" }) : "", op.outcome ? el("span", { class: "muted", text: ` ${op.outcome}` }) : ""))) : "",
   ));
   const dialog = el(
     "dialog",
