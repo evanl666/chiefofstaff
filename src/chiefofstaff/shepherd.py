@@ -355,13 +355,18 @@ class Shepherd(Keeping, Steps):
                            "on_user_input_request", "on_elicitation_request", "tool_search"}
         }  # fmt: skip
         settings = self.store.settings()
-        configured = sorted(set(self.copilot_mcp_servers()) | set(settings.mcp_servers))
+        # Every MCP server the worker could have, by name: one already running in its session
+        # stays, so each is also left out of its tools (available_tools).
+        configured = sorted(
+            set(self.copilot_mcp_servers()) | set(settings.mcp_servers)
+            | set(base.get("mcp_servers") or {})
+        )  # fmt: skip
         options["sandbox_config"] = self.runtime.connected().sandbox(self.step_policy(row, step))
         options["tools"] = self.runtime.toolset.step_tools()
         options["available_tools"] = list(STEP_TOOLS)
         options["enable_config_discovery"] = False
         options["enable_session_store"] = False
-        options["disabled_mcp_servers"] = [GITHUB_MCP, *configured, "slack"]
+        options["disabled_mcp_servers"] = list(dict.fromkeys([GITHUB_MCP, *configured, "slack"]))
         return options
 
     @staticmethod
