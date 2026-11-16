@@ -719,7 +719,12 @@ def worker_context(
             "Your shell commands run in an OS sandbox: they can write only in your workspace and "
             'checkouts (and temporary folders); elsewhere they fail with "Operation not '
             "permitted\". The repositories' hooks and config are read-only: when your task "
-            "asks you to push, use `git push origin HEAD`, without -u. git and gh use the "
+            "asks you to push, use `git push origin HEAD`, without -u. So are their agent "
+            "settings (`.mcp.json`, `.github/hooks/`, `.github/agents/`, `.claude/settings*.json`, "
+            "`.codex/`…) and the scripts those run: if updating your branch (a merge, rebase or "
+            'pull) needs to change them, stop and tell the owner in one line, such as "main '
+            "changed .mcp.json; I can't update the branch's agent settings, so please update the "
+            'branch yourself or let me continue without it". git and gh use the '
             "owner's GitHub sign-in through Copilot's proxy. When the task needs access the "
             'sandbox denies, report(status="blocked") saying what; never work around it.'
         )

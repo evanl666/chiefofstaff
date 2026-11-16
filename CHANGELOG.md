@@ -20,26 +20,31 @@
   `.github/mcp.json`) and language servers (`.github/lsp.json`), loaded from its next turn or
   resume. A hook could approve commands Chief of Staff would refuse, and a server ran outside
   the worker sandbox. Now Chief of Staff keeps what those files hold, with the scripts and
-  servers they name, when it makes a worker's folder, in its own data, and reads them again
-  before each start and each turn, without running git there. A folder it didn't make, seen
-  for the first time with such files (your checkout, a folder workers used before this version,
-  your own session taken up from a terminal), waits for you to look once. A worker whose
-  settings changed starts no turn until you click **Use these settings** on the line its
-  timeline shows (news for it waits too), or until they are as they were again; it shows
-  *waiting for you*, and the Router hears it once. One stopped mid-task goes on with it after
-  the click. A setting linked out of its folder, or a special file, is never used. Workers'
-  edits to those files are refused, whatever their case. Agent homes (`~/.codex`, `~/.claude`)
-  are never read as a folder's settings.
+  servers they name, when it makes a worker's folder or first hands a worker your checkout, in
+  its own data, and reads them again before each start and each turn (and when a quick look as
+  each tool or sub-agent starts sees a change), without running git there. A folder of a
+  checkout workers already had, one workers used before this version, or a file a worktree
+  carries from your checkout that isn't as your checkout holds it, waits for you to look once.
+  A worker whose settings changed starts no turn until you click **Use these settings** on the
+  line its timeline shows (news for it waits too), or until they are as they were again; it
+  shows *waiting for you*, and the Router hears it once. One stopped mid-task goes on with it
+  after the click. With the sandbox on, workers' commands can't change those settings or the
+  files they run, in your checkout or their own worktree; a worker whose branch update needs to
+  tells you. A setting linked into a folder workers can write, or a special file, is never
+  used. Workers' edits to those files are refused, whatever their case. Agent homes
+  (`~/.codex`, `~/.claude`) are never read as your home folder's settings.
 
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create
   `.git/commondir` in your repository, sending your git to a configuration of its own whose
   hooks or file-system monitor then ran as you, outside any sandbox; or a `.git/hooks` folder
-  where your repository had none, `config.worktree`, `info/attributes`, `shallow` or object
-  alternates. Chief of Staff now denies such paths while they don't exist (macOS). Linux's
-  sandbox can't hold them, so there Chief of Staff looks for them after each of the worker's
-  turns, as it stops or closes, and before it runs git itself: one it finds is moved aside
-  (never deleted) and the worker waits for you, with **Use it anyway** and **Keep it removed**.
+  where your repository had none, a `config.worktree` or a submodule's folder. Chief of Staff
+  now denies such paths while they don't exist (macOS). Linux's sandbox can't hold them, so
+  there Chief of Staff looks for them after each of the worker's turns, as it stops or closes,
+  and before it runs git itself: if one appeared, the worker waits for you and Chief of Staff
+  runs no git there until you click **Use it**. A worker that replaced a whole `.git` folder (a
+  folder moved into place gets past the sandbox's paths) waits the same way, until **Use this
+  .git**.
 
 ## 0.1.45 (2026-11-14)
 

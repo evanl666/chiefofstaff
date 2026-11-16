@@ -742,8 +742,7 @@ class Workers:
         self.states[session_id].steps.clear()
         if self.store.get(f"gitwatch:{session_id}"):
             # (Linux: what it made in a .git, looked for once more; then not again.)
-            self.runtime.git_watch_check(session_id, hold=False)
-            self.store.delete(f"gitwatch:{session_id}")
+            self.runtime.background(self.runtime.git_watch_after(session_id, closing=True))
         self.store.unfollow_session(session_id)
         self.runtime.decisions.drop_asker(session_id)
         self.states[session_id].last_output = ""
@@ -1043,7 +1042,8 @@ class Workers:
         self.states[session_id].busy = False
         self.states[session_id].steps.clear()
         if self.store.get(f"gitwatch:{session_id}"):
-            self.runtime.git_watch_check(session_id)  # (Linux: what it made in a .git.)
+            # (Linux: what it made in a .git.)
+            self.runtime.background(self.runtime.git_watch_after(session_id))
         if row["role"] == WORKER:
             # What it was sent during the turn and never saw (Copilot drops it with the turn),
             # and its task given and not received: for its next message, not a turn now. Events

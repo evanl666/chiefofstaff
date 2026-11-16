@@ -33,9 +33,10 @@ import shlex
 import stat
 import tomllib
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple, cast
 
 from .policy import AGENT_SETTINGS
 
@@ -44,8 +45,11 @@ MOST_BYTES = 16 * 1024 * 1024
 KEY = "settingssnap:"
 # An entry for a file a setting runs: "<setting's entry>" + RUN + "<that file>".
 RUN = "\0run:"
-# A kind never taken as unchanged: a link out of the top, a special file.
+# A kind never taken as unchanged: a link where workers can write, a special file.
 REFUSED = "!"
+# A program a setting runs through a link out of the folder: [PROGRAM, where it leads, "w" when
+# that is where workers can write]. Like a program found on PATH, only the second kind counts.
+PROGRAM = "p"
 
 
 class SettingsChangedError(RuntimeError):
@@ -121,15 +125,24 @@ def repository(dot_git: Path) -> bool:
     one (`gitdir: …`)."""
     try:
         if dot_git.is_dir():
-            return (dot_git / "HEAD").is_file()
+            return git_folder(dot_git)
         if dot_git.is_file():
             named = dot_git.read_text(errors="replace").strip()
             if named.startswith("gitdir:"):
-                target = dot_git.parent / named.removeprefix("gitdir:").strip()
-                return (target / "HEAD").is_file()
+                return git_folder(dot_git.parent / named.removeprefix("gitdir:").strip())
     except OSError:
         pass
     return False
+
+
+def git_folder(folder: Path) -> bool:
+    """As git tells a repository's folder: a HEAD with objects and refs (or a worktree's own
+    folder, which names the repository's: commondir)."""
+    if not (folder / "HEAD").is_file():
+        return False
+    return (folder / "commondir").is_file() or (
+        (folder / "objects").is_dir() and (folder / "refs").is_dir()
+    )
 
 
 def agent_homes() -> set[str]:
@@ -145,12 +158,17 @@ def agent_homes() -> set[str]:
 
 
 def scan(
-    top: Path, cwd: Path, names: tuple[str, ...] = AGENT_SETTINGS, code: list | None = None
+    top: Path,
+    cwd: Path,
+    names: tuple[str, ...] = AGENT_SETTINGS,
+    code: list | None = None,
+    writable: Callable[[], tuple[str, ...]] | tuple[str, ...] = (),
 ) -> dict[str, dict]:
     """What the settings named (one agent's, or policy.AGENT_SETTINGS) hold now in each folder
     of the chain, with the files they run; the agents' own folders left out (agent_homes).
-    `code`: where to note the commands that run project code no entry holds."""
-    budget: list = [MOST_ENTRIES, MOST_BYTES, {}]
+    `code`: where to note the commands that run project code no entry holds. `writable`: the
+    folders workers can write (real paths; or what says them, asked only for a link out)."""
+    budget: list = [MOST_ENTRIES, MOST_BYTES, {}, writable]
     found: dict[str, dict] = {}
     wanted = [name.split("/") for name in names]
     homes = agent_homes()
@@ -158,10 +176,68 @@ def scan(
         entries: dict[str, list] = {}
         seek(top, folder, wanted, "", entries, budget, homes)
         for entry in list(entries):
-            entries |= runs(top, folder, entry, entries[entry], budget, code, entries)
+            entries |= runs(top, folder, entry, entries[entry], budget, code, entries, cwd)
         if entries:
             found[folder_key(top, folder)] = entries
     return found
+
+
+def signature(top: Path, cwd: Path, names: tuple[str, ...], also: list[str]) -> str:
+    """What the file system says of these settings (each entry's kind, inode, size and change
+    times, no content read) and of `also` (the files they run): cheap enough to look at before
+    every tool a worker runs; a change means the full check (scan) runs."""
+    seen: list = []
+
+    def note(path: Path, depth: int):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return
+        seen.append((str(path), info.st_mode, info.st_ino, info.st_size, info.st_mtime_ns,
+                     info.st_ctime_ns))  # fmt: skip
+        if stat.S_ISDIR(info.st_mode) and depth < 4 and len(seen) < MOST_ENTRIES:
+            for entry in listed(path):
+                note(path / entry.name, depth + 1)
+
+    for folder in chain(top, cwd):
+        note(folder, 4)
+        for name in {name.split("/")[0] for name in names}:
+            note(folder / name, 0)
+    for path in also:
+        note(Path(path), 4)
+    return hashlib.sha256(repr(seen).encode()).hexdigest()[:16]
+
+
+def glimpse(top: Path, cwd: Path, names: tuple[str, ...]) -> str:
+    """Of settings too many or too large to check (TooLargeError), what can be read: each
+    entry's name and size, and the content of each file up to a few MB; what the owner said to
+    use unchecked is that, in those folders, and nothing else."""
+    seen: list = []
+    budget = [MOST_ENTRIES * 20, MOST_BYTES * 4]
+
+    def note(path: Path, name: str, depth: int):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return
+        found: list = [name, info.st_mode, info.st_size]
+        if stat.S_ISREG(info.st_mode) and info.st_size <= 4 * 1024 * 1024 and budget[1] > 0:
+            budget[1] -= info.st_size
+            with suppress(OSError):
+                found.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        elif stat.S_ISLNK(info.st_mode):
+            found.append(os.path.realpath(path))
+        seen.append(found)
+        budget[0] -= 1
+        if stat.S_ISDIR(info.st_mode) and depth < 8 and budget[0] > 0:
+            with suppress(OSError):
+                for entry in listed(path):
+                    note(path / entry.name, f"{name}/{nfc(entry.name)}", depth + 1)
+
+    for folder in chain(top, cwd):
+        for name in names:
+            note(folder / name, f"{folder_key(top, folder)}/{name}", 0)
+    return hashlib.sha256(repr(seen).encode()).hexdigest()[:16]
 
 
 def listed(folder: Path) -> list[os.DirEntry]:
@@ -196,6 +272,8 @@ def seek(
         name = f"{prefix}{nfc(entry.name)}"
         path = folder / entry.name
         if os.path.realpath(path) in homes:
+            if entry.is_symlink() and os.path.realpath(folder) != os.path.realpath(Path.home()):
+                entries[name] = [REFUSED, "leads to an agent's own folder"]
             continue
         rest = [parts[1:] for parts in group if len(parts) > 1]
         if len(rest) < len(group) or entry.is_symlink():
@@ -232,6 +310,16 @@ def record(top: Path, path: Path, name: str, entries: dict, budget: list):
         entries[key] = [REFUSED, "is a special file"]
 
 
+def workers_write(path: Path, budget: list) -> bool:
+    """Whether a path is in a folder some worker can write (Runtime.writable_roots)."""
+    if len(budget) < 4:
+        return False
+    roots: Any = budget[3]
+    if callable(roots):
+        roots = budget[3] = tuple(cast(Callable[[], tuple[str, ...]], roots)())
+    return any(path == Path(root) or path.is_relative_to(root) for root in roots)
+
+
 def content(path: Path, size: int, budget: list) -> str:
     budget[1] -= size
     if budget[1] < 0:
@@ -246,12 +334,12 @@ def content(path: Path, size: int, budget: list) -> str:
 
 
 def inside(top: Path, link: Path, budget: list) -> tuple[str, str]:
-    """("l", what a link leads to: a file's content, a folder's), or (REFUSED, why) when it
-    leads out of the top (what is there can change with nothing in the folder changing) or to
-    a special file."""
+    """("l", what a link leads to: a file's content, a folder's, wherever it is: a settings file
+    the owner keeps in a dotfiles repository), or (REFUSED, why) when it leads where workers
+    can write (what is there could change with nothing here changing) or to a special file."""
     target = Path(os.path.realpath(link))
-    if not target.is_relative_to(os.path.realpath(top)):
-        return REFUSED, "leads out of the folder"
+    if not target.is_relative_to(os.path.realpath(top)) and workers_write(target, budget):
+        return REFUSED, "leads to a folder workers can write"
     try:
         info = target.stat()
     except FileNotFoundError:
@@ -275,6 +363,7 @@ def inside(top: Path, link: Path, budget: list) -> tuple[str, str]:
 # a custom agent's front matter (its mcp-servers), an extension's relative imports.
 COMMAND_KEYS = {"command", "bash", "powershell", "pwsh", "sh", "cmd"}
 SHELLS = {"bash", "sh", "zsh", "dash", "pwsh", "powershell"}
+SESSION_DIR = re.compile(r"\$\{COPILOT_SESSION_CWD\}|\$COPILOT_SESSION_CWD\b")
 PROJECT_DIR = re.compile(
     r"\$\{(?:CLAUDE_PROJECT_DIR|workspaceFolder|workspaceRoot|PWD)\}|\$(?:CLAUDE_PROJECT_DIR|PWD)\b"
 )
@@ -305,9 +394,11 @@ def runs(
     budget: list,
     code: list | None,
     held_already: dict | None = None,
+    cwd: Path | None = None,
 ) -> dict[str, list]:
     """The RUN entries of one setting's file: what its commands run, held as files are (but
-    for a file held as a setting itself, in `held_already`)."""
+    for a file held as a setting itself, in `held_already`). A word naming what runs that is
+    found nowhere is said in `code` (project code no entry holds), never waited for."""
     name = entry.split("\0")[0]
     if value[0] not in {"f", "l"} or RUN in entry or not name.lower().endswith(PARSED):
         return {}
@@ -321,9 +412,15 @@ def runs(
     held: dict[str, list] = {}
     extension = nfc(entry).casefold().startswith(".github/extensions/")
     place = real.parent if extension else folder
-    for token, folders in references(real, text, top, code, f"{folder_key(top, folder)}/{entry}"):
-        target = located(top, place, token)
-        if target is None or target == Path(top) or Path(top).is_relative_to(target):
+    setting = f"{folder_key(top, folder)}/{entry}".removeprefix("./")
+    for ref in references(real, text, code, setting):
+        target = located(top, place, ref, cwd or top)
+        if target is None:
+            note = f"{setting} runs `{ref.said}`"
+            if code is not None and ref.kind in {"script", "module"} and note not in code:
+                code.append(note)
+            continue
+        if target == Path(top) or Path(top).is_relative_to(target):
             continue
         if target.is_relative_to(folder) and nfc(target.relative_to(folder).as_posix()) in (
             held_already or {}
@@ -332,12 +429,10 @@ def runs(
         shown = (
             nfc(target.relative_to(top).as_posix()) if target.is_relative_to(top) else str(target)
         )
-        key = f"{entry.split(chr(0))[0]}{RUN}{shown}"
+        key = f"{name}{RUN}{shown}"
         if key in held:
             continue
         if target.is_dir() and not target.is_symlink():
-            if not folders:
-                continue  # A folder an argument names (a root, data): not what runs.
             nested: dict[str, list] = {}
             for child in sorted(item.name for item in target.iterdir()):
                 record(top, target / child, nfc(child), nested, budget)
@@ -347,75 +442,242 @@ def runs(
                 if refused
                 else ["d", hashlib.sha256(json.dumps(nested, sort_keys=True).encode()).hexdigest()]
             )
+        elif target.is_symlink() and not (real := Path(os.path.realpath(target))).is_relative_to(
+            os.path.realpath(top)
+        ):
+            # A program out of the folder (a virtualenv's python): as one found on PATH, what
+            # it leads to is noted, never what is there; held only where workers can write.
+            held[key] = [PROGRAM, str(real), "w" if workers_write(real, budget) else ""]
         else:
             record(top, target, key, held, budget)
     return held
 
 
-def located(top: Path, place: Path, token: str) -> Path | None:
-    """The file or folder a command's word names, if it names one there: relative to the
-    setting's folder or the top; an absolute one only inside the top."""
-    token = PROJECT_DIR.sub(
-        lambda _: str(top), token.split("=", 1)[-1] if token.startswith("-") else token
-    )
+class Ref(NamedTuple):
+    """A word of a setting's command that names what runs: `kind` "file" (the command, a
+    script by its extension, a file a variable runs), "script" (an interpreter's: a folder is
+    its entry point, `node server` is server.js), "module" (`python -m x`, `import x`),
+    "folder" (a plugin marketplace's); `base` where it is looked up from (a hook's `cwd`, a
+    `cd` before it); `said`: the command, for the owner, when it is found nowhere."""
+
+    word: str
+    kind: str
+    base: str = ""
+    said: str = ""
+    runner: str = ""
+
+
+def located(top: Path, place: Path, ref: Ref, cwd: Path) -> Path | None:
+    """The file or folder a reference names, if there: from its base (a hook's cwd, a `cd`),
+    the setting's folder or the top; an absolute one only inside the top; a module as Python
+    finds it there; an interpreter's folder, by its entry point."""
+    token = ref.word
+    if token.startswith("-"):
+        token = token.split("=", 1)[-1]
+    token = expanded(token, top, cwd)
     if not token or token in {".", ".."} or "://" in token or token.startswith(("~", "-")):
         return None
+    base = expanded(ref.base, top, cwd)
+    if base and Path(base).is_absolute():
+        bases = [Path(base)] if Path(base).is_relative_to(top) else []
+    else:
+        bases = [place / base, top / base] if base else [place, top]
+    if ref.kind == "module":
+        stem = token.replace(".", "/")
+        names = [f"{stem}.py", f"{stem}/__init__.py", f"{stem}/__main__.py"]
+    else:
+        names = [token]
+        if ref.kind == "script" and not Path(token).suffix and ref.runner in NODE_LIKE:
+            names += [f"{token}{ext}" for ext in (".js", ".mjs", ".cjs", ".ts")]
     if Path(token).is_absolute():
         candidates = [Path(token)] if Path(token).is_relative_to(top) else []
     else:
-        candidates = [place / token, top / token]
+        candidates = [base / name for base in bases for name in names]
     for candidate in candidates:
-        if os.path.lexists(candidate):
-            return Path(os.path.normpath(candidate))
+        if not os.path.lexists(candidate):
+            continue
+        found = Path(os.path.normpath(candidate))
+        if found.is_dir() and not found.is_symlink() and ref.kind != "folder":
+            entry = entry_point(found, ref.runner)
+            if entry is None:
+                continue  # A folder an argument names (a root, data): not what runs.
+            found = entry
+        return found
     return None
 
 
-def references(
-    path: Path, text: str, top: Path, code: list | None, setting: str
-) -> Iterator[tuple[str, bool]]:
-    """(word, whether a folder it names is what runs) for each word of a setting's commands
-    that may name a file; commands that run project code otherwise go to `code`."""
+def expanded(word: str, top: Path, cwd: Path) -> str:
+    """A word with the project's and the session's folders put in (`$CLAUDE_PROJECT_DIR`,
+    `${COPILOT_SESSION_CWD}`, `$PWD`)."""
+    return SESSION_DIR.sub(lambda _: str(cwd), PROJECT_DIR.sub(lambda _: str(top), word))
+
+
+def entry_point(folder: Path, runner: str) -> Path | None:
+    """What an interpreter runs for a folder: Python's `__main__.py`; Node's package `main`,
+    else `index.js`."""
+    if runner.startswith("python"):
+        return folder / "__main__.py" if (folder / "__main__.py").is_file() else None
+    if runner in NODE_LIKE:
+        with suppress(OSError, ValueError, AttributeError):
+            main = json.loads((folder / "package.json").read_text()).get("main")
+            if isinstance(main, str) and (folder / main).is_file():
+                return Path(os.path.normpath(folder / main))
+        for name in ("index.js", "index.mjs", "index.cjs"):
+            if (folder / name).is_file():
+                return folder / name
+    return None
+
+
+def references(path: Path, text: str, code: list | None, setting: str) -> Iterator[Ref]:
+    """What a setting's commands run (held_words), from its JSON, TOML, a custom agent's front
+    matter (block or flow style), an extension's relative imports; commands that run project
+    code by a name (`npm run`) go to `code`."""
     suffix = path.suffix.lower()
     if suffix in {".mjs", ".cjs", ".js"}:
         for found in IMPORTS.finditer(text):
-            yield found[1], False
+            yield Ref(found[1], "file")
         return
     if suffix == ".md":
-        commands = front_matter(text)
+        data: Any = front_matter(text)
     else:
         try:
             data = tomllib.loads(text) if suffix == ".toml" else json.loads(text)
         except (ValueError, tomllib.TOMLDecodeError):
             return
-        commands = list(walked(data))
-    for line, arguments, folders in commands:
-        words = split(line) + arguments
-        for segment in segments(words):
-            if code is not None and (said := project_code(segment)):
-                code.append(f"{setting.removeprefix('./')} runs `{said}`")
-        for word in words:
-            if (
-                folders
-                or "/" in word
-                or word.startswith(".")
-                or Path(word).suffix.lower() in SCRIPTS
-            ):
-                yield word, folders
+    for command in walked(data):
+        if command.folders:
+            yield from (Ref(word, "folder") for word in command.arguments)
+            continue
+        base = command.cwd
+        for word in command.files:
+            yield Ref(word, "file", base)
+        for segment in segments(split(command.line) + command.arguments):
+            if segment[:1] == ["cd"] and len(segment) == 2:
+                base = str(Path(base) / segment[1]) if base else segment[1]
+                continue
+            note = f"{setting} runs `{said}`" if (said := project_code(segment)) else ""
+            if code is not None and note and note not in code:
+                code.append(note)
+            yield from (ref._replace(base=base) for ref in held_words(segment))
 
 
-def walked(data: Any) -> Iterator[tuple[str, list[str], bool]]:
-    """(command line, its arguments, whether folders count) in a parsed setting: each command
-    (a hook's `command`/`bash`, a server's `command` with its `args`), each `path` (a plugin
-    marketplace's own folder)."""
+INTERPRETERS = {"python", "python2", "python3", "node", "bash", "sh", "zsh", "dash", "ruby",
+                "perl", "php", "deno", "bun", "pwsh", "powershell", "tsx", "ts-node",
+                "lua"}  # fmt: skip
+NODE_LIKE = {"node", "deno", "bun", "tsx", "ts-node"}
+# An interpreter's options whose value is not its script (python -W x, node --env-file .env).
+VALUED = {"-W", "-X", "-Q", "-o", "-O", "-I", "-r", "--require", "--import", "--loader",
+          "--env-file", "--inspect-port", "--title", "--config", "-C", "--cwd"}  # fmt: skip
+# Options after which no script follows (python -m module, sh -c line, node -e code).
+NO_SCRIPT = {"-m", "-c", "-e", "-p", "--eval", "--print", "-Command", "-EncodedCommand"}
+REDIRECT = re.compile(r"^(?:[0-9&]?>>?|<)")
+# Variables whose value is a file the shell or interpreter runs first.
+RUN_VARIABLES = {"BASH_ENV", "ENV", "PYTHONSTARTUP"}
+IMPORTED = re.compile(r"(?:^|[;\n])\s*(?:import\s+([\w.]+)|from\s+([\w.]+)\s+import)")
+
+
+def held_words(words: list[str]) -> list[Ref]:
+    """What one command runs: itself when it is a path, an interpreter's script (its first
+    word that is no option: `python tools/x.py`, `node tools/server`, `uv run --script x.py`),
+    the modules of `python -m x` or `python -c "import x"`, a file a variable runs
+    (`BASH_ENV=x.sh`), and any word naming a script by its extension. Never where its output
+    goes (`>> logs/x.log`, `tee`), nor an option's value that is no script (`--db ./dev.db`)."""
+    refs: list[Ref] = []
+    while words and "=" in words[0] and not words[0].startswith("-"):
+        name, _, value = words[0].partition("=")
+        if name in RUN_VARIABLES and value:
+            refs.append(Ref(value, "file"))
+        words = words[1:]  # Variables set for it.
+    if words[:1] == ["env"]:
+        return refs + held_words(words[1:])
+    kept: list[str] = []
+    skip = False
+    for word in words:
+        if skip:
+            skip = False
+        elif REDIRECT.match(word):
+            skip = word in {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>", "<"}
+        else:
+            kept.append(word)
+    if not kept or Path(kept[0]).name == "tee":
+        return refs
+    if "/" in kept[0] or kept[0].startswith("."):
+        refs.append(Ref(kept[0], "file"))
+    runner = Path(kept[0]).name.removesuffix(".exe").lower()
+    said = " ".join(kept)
+    said = said if len(said) <= 60 else said[:59] + "…"
+    refs += interpreted(runner, kept[1:], said)
+    named = {ref.word for ref in refs}
+    refs += [
+        Ref(word, "file") for word in kept[1:]
+        if Path(word.split("=", 1)[-1]).suffix.lower() in SCRIPTS and word not in named
+    ]  # fmt: skip
+    return refs
+
+
+def interpreted(runner: str, rest: list[str], said: str) -> list[Ref]:
+    """What an interpreter runs: its script (`node --import x server.js`: server.js), the
+    module of `python -m x`, those `python -c "…"` imports."""
+    if runner == "uv":
+        if rest[:1] != ["run"]:
+            return []
+        rest = rest[1:]
+        found = first_operand(rest)
+        script = "--script" in rest or Path(found).suffix.lower() in SCRIPTS
+        return [Ref(found, "script", said=said, runner="python")] if found and script else []
+    if not (runner in INTERPRETERS or runner.startswith("python")):
+        return []
+    if runner in {"deno", "bun"} and rest[:1] == ["run"]:
+        rest = rest[1:]
+    if runner.startswith("python"):
+        if "-m" in rest[:-1]:
+            return [Ref(rest[rest.index("-m") + 1], "module", said=said, runner=runner)]
+        if "-c" in rest[:-1]:
+            line = rest[rest.index("-c") + 1]
+            return [
+                Ref(found[1] or found[2], "module", said=said, runner=runner)
+                for found in IMPORTED.finditer(line)
+            ]
+    if any(word in NO_SCRIPT for word in rest[:4]):
+        return []
+    found = first_operand(rest)
+    return [Ref(found, "script", said=said, runner=runner)] if found else []
+
+
+def first_operand(words: list[str]) -> str:
+    skip = False
+    for word in words:
+        if skip:
+            skip = False
+        elif word.startswith("-"):
+            skip = word in VALUED
+        else:
+            return word
+    return ""
+
+
+class Command(NamedTuple):
+    line: str
+    arguments: list[str]
+    folders: bool = False
+    cwd: str = ""
+    files: tuple[str, ...] = ()
+
+
+def walked(data: Any) -> Iterator[Command]:
+    """The commands in a parsed setting: each command (a hook's `command`/`bash`, with its
+    `cwd` and the files its `env` runs; a server's `command` with its `args`), each `path` (a
+    plugin marketplace's own folder)."""
     if isinstance(data, dict):
         arguments = [a for a in data.get("args") or [] if isinstance(a, str)]
-        lines = [data[k] for k in COMMAND_KEYS if isinstance(data.get(k), str)]
-        for line in lines:
-            yield line, arguments, False
-        if arguments and not lines:
-            yield "", arguments, False
+        cwd = str(data["cwd"]) if isinstance(data.get("cwd"), str) else ""
+        environment: dict = data["env"] if isinstance(data.get("env"), dict) else {}
+        files = tuple(str(v) for k, v in environment.items() if k in RUN_VARIABLES and v)
+        for key in COMMAND_KEYS:
+            if isinstance(data.get(key), str):
+                yield Command(data[key], arguments, cwd=cwd, files=files)
         if isinstance(data.get("path"), str):
-            yield "", [data["path"]], True
+            yield Command("", [data["path"]], folders=True)
         for value in data.values():
             yield from walked(value)
     elif isinstance(data, list):
@@ -423,31 +685,88 @@ def walked(data: Any) -> Iterator[tuple[str, list[str], bool]]:
             yield from walked(value)
 
 
-def front_matter(text: str) -> list[tuple[str, list[str], bool]]:
-    """A custom agent's commands (its mcp-servers), read from its front matter's lines."""
+def front_matter(text: str) -> Any:
+    """A custom agent's front matter, as far as its commands go: YAML's flow style (`{s:
+    {command: node, args: [x]}}`) read as such, block style line by line ({command, args})."""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return []
-    found: list[tuple[str, list[str], bool]] = []
+    found: list = []
     listing = False
     for line in lines[1:]:
         if line.strip() == "---":
             break
         key, colon, value = line.strip().partition(":")
-        value = value.strip().strip("\"'")
+        value = value.strip()
+        if colon and value.startswith(("{", "[")):
+            with suppress(ValueError):
+                found.append(flow(value))
+                listing = False
+                continue
+        value = value.strip("\"'")
         if colon and key.strip("- ") in COMMAND_KEYS and value:
-            found.append((value, [], False))
+            found.append({"command": value, "args": []})
             listing = False
-        elif colon and key.strip("- ") == "args":
+        elif colon and key.strip("- ") == "args" and found and isinstance(found[-1], dict):
             listing = not value
             if value.startswith("["):
-                items = [item.strip().strip("\"'") for item in value.strip("[]").split(",")]
-                found.append(("", [item for item in items if item], False))
-        elif listing and line.strip().startswith("- "):
-            found.append(("", [line.strip()[2:].strip().strip("\"'")], False))
+                with suppress(ValueError):
+                    found[-1].setdefault("args", []).extend(map(str, flow(value)))
+        elif listing and line.strip().startswith("- ") and isinstance(found[-1], dict):
+            found[-1].setdefault("args", []).append(line.strip()[2:].strip().strip("\"'"))
         else:
             listing = False
     return found
+
+
+def flow(text: str) -> Any:
+    """A YAML flow collection (`{a: [b, "c d"]}`), as Python values; ValueError when it isn't
+    one this reads."""
+    value, rest = flow_value(text.strip())
+    if rest.strip():
+        raise ValueError(rest)
+    return value
+
+
+def flow_value(text: str) -> tuple[Any, str]:
+    text = text.lstrip()
+    if text.startswith("{"):
+        found: dict = {}
+        text = text[1:].lstrip()
+        while not text.startswith("}"):
+            key, text = flow_value(text)
+            text = text.lstrip()
+            if not text.startswith(":"):
+                raise ValueError(text)
+            found[str(key)], text = flow_value(text[1:])
+            text = text.lstrip()
+            if text.startswith(","):
+                text = text[1:].lstrip()
+            elif not text.startswith("}"):
+                raise ValueError(text)
+        return found, text[1:]
+    if text.startswith("["):
+        items: list = []
+        text = text[1:].lstrip()
+        while not text.startswith("]"):
+            item, text = flow_value(text)
+            items.append(item)
+            text = text.lstrip()
+            if text.startswith(","):
+                text = text[1:].lstrip()
+            elif not text.startswith("]"):
+                raise ValueError(text)
+        return items, text[1:]
+    if text[:1] in {"'", '"'}:
+        end = text.find(text[0], 1)
+        if end < 0:
+            raise ValueError(text)
+        return text[1:end], text[end + 1 :]
+    match = re.match(r"[^,:{}\[\]]*(?::(?=\S)[^,:{}\[\]]*)*", text)
+    word = match[0] if match else ""
+    if not word.strip():
+        raise ValueError(text)
+    return word.strip(), text[len(word) :]
 
 
 def split(line: str) -> list[str]:
@@ -482,8 +801,8 @@ def project_code(words: list[str]) -> str:
     name = Path(words[0]).name.removesuffix(".exe").removesuffix(".cmd")
     rest = [word for word in words[1:] if not word.startswith("-")]
     if name.startswith("python") or name in {"node", "deno", "bun"}:
-        runs_module = "-m" in words[1:] or (name == "deno" and rest[:1] == ["task"])
-        if not runs_module:
+        # (A Python module is looked for, as a file: said only when it isn't found, by runs.)
+        if not (name == "deno" and rest[:1] == ["task"]):
             return ""
     elif name not in RUNNERS or (
         (wanted := RUNNERS[name]) is not None and not (rest and rest[0] in wanted)
@@ -524,6 +843,14 @@ def shown_entry(folder: str, entry: str) -> str:
     return prefix + setting.split("\0")[0]
 
 
+def named(folders: dict[str, dict]) -> list[str]:
+    """The settings a snapshot holds, by path from the top (not the files they run)."""
+    return sorted(
+        {shown_entry(folder, entry) for folder, entries in folders.items() for entry in entries
+         if RUN not in entry}
+    )  # fmt: skip
+
+
 def changes(now: dict[str, dict], then: dict[str, dict]) -> list[tuple[str, str]]:
     """(what, path) for each entry added, changed, removed, or never taken as unchanged
     ("refused": a link out of the folder, a special file, said with why)."""
@@ -532,6 +859,9 @@ def changes(now: dict[str, dict], then: dict[str, dict]) -> list[tuple[str, str]
         current, saved = now.get(folder, {}), then.get(folder, {})
         for entry in sorted(current.keys() | saved.keys()):
             shown = shown_entry(folder, entry)
+            value = current.get(entry) or saved[entry]
+            if value[0] == PROGRAM and (entry not in current or not current[entry][2]):
+                continue  # (Out of every worker's reach: as a program on PATH.)
             if entry in current and current[entry][0] == REFUSED:
                 found.append(("refused", f"{shown} {current[entry][1]}"))
             elif entry not in saved:
@@ -574,12 +904,17 @@ def top_key(top: Path) -> str:
 
 # A snapshot, as kept: {"folders": {folder: {entry: [kind, digest]}}, "known": {folder:
 # [setting names it holds what was there of]}, "first": {folder: [setting names first seen
-# there, not looked at by the owner yet]}, "unchecked": [setting names the owner said to use
-# unchecked (too many)], "code": digest of the project code lines said (code_line)}.
+# there, not looked at by the owner yet]}, "unchecked": {what of settings too many to check
+# the owner said to use as they were (unchecked_key: their names, those folders): glimpse},
+# "code": digest of the project code lines said (code_line)}.
+
+
+def unchecked_key(names: tuple[str, ...], folders: list[str]) -> str:
+    return json.dumps([sorted(names), sorted(folders)])
 
 
 def fresh() -> dict:
-    return {"folders": {}, "known": {}, "first": {}, "unchecked": [], "code": ""}
+    return {"folders": {}, "known": {}, "first": {}, "unchecked": {}, "code": ""}
 
 
 def load(store: Any, top: Path) -> dict | None:
@@ -592,6 +927,8 @@ def load(store: Any, top: Path) -> dict | None:
     if not isinstance(found, dict) or not isinstance(found.get("folders"), dict):
         return None
     found.pop("since", None)  # (Of an earlier build: a change time, no longer used.)
+    if not isinstance(found.get("unchecked"), dict):
+        found["unchecked"] = {}  # (Of an earlier build: names alone.)
     return {**fresh(), **found}
 
 
@@ -637,6 +974,8 @@ def first_seen(snapshot: dict, now: dict[str, dict], then: dict[str, dict]) -> b
         first = snapshot["first"].get(folder, [])
         for entry in current.keys() | saved.keys():
             value = current.get(entry)
+            if (value or saved[entry])[0] == PROGRAM and not (value and value[2]):
+                continue
             if value is None or value[0] == REFUSED:
                 return False
             if entry in saved:
@@ -667,11 +1006,11 @@ def keep(store: Any, top: Path, cwd: Path, names_by_agent: tuple[tuple[str, ...]
 def refresh(store: Any, top: Path, paths: list[str]):
     """Files Chief of Staff itself put in a folder again (carried from the owner's checkout as
     a worktree is made again): kept as they are now, with what they run, where its snapshot
-    knows them."""
+    knows them; vetted as they were at first (vet)."""
     snapshot = load(store, top)
     if snapshot is None or not paths:
         return
-    budget = [MOST_ENTRIES, MOST_BYTES]
+    budget: list = [MOST_ENTRIES, MOST_BYTES, {}]
     for path in paths:
         folder, setting = split_setting(path)
         if setting == path and not any(under(path, name) for name in AGENT_SETTINGS):
@@ -690,6 +1029,45 @@ def refresh(store: Any, top: Path, paths: list[str]):
         except TooLargeError:
             continue
     save(store, top, snapshot)
+
+
+def vet(store: Any, tree: Path, owner: Path, carried: list[str], untouched: bool):
+    """Of the settings (and files they run) Chief of Staff carried into a worktree it made
+    from the owner's checkout (their gitignored local settings), those the owner's checkout
+    holds as its snapshot holds them, or as they are (`untouched`: no worker could have
+    written that checkout) stay taken; any other is left out of the worktree's snapshot, so
+    the worker waits for the owner ("added since workers had this checkout"): a worker in the
+    owner's checkout could have planted it."""
+    snapshot = load(store, tree)
+    if snapshot is None or not carried:
+        return
+    theirs = load(store, owner)
+    wanted = set(carried)
+    budget: list = [MOST_ENTRIES, MOST_BYTES, {}]
+    changed = False
+    for folder, entries in snapshot["folders"].items():
+        prefix = "" if folder == "." else f"{folder}/"
+        for entry in list(entries):
+            setting, _, ran = entry.partition(RUN)
+            path = ran or prefix + setting.split("\0")[0]
+            if path not in wanted and not any(path.startswith(f"{c}/") for c in wanted):
+                continue
+            owned = (theirs or {}).get("folders", {}).get(folder, {}).get(entry)
+            if owned is None and untouched:
+                held: dict = {}
+                with suppress(TooLargeError):
+                    record(
+                        owner, owner / (ran or prefix + setting.split("\0")[0]), "x", held, budget
+                    )
+                owned = held.get("x")
+            if owned == entries[entry]:
+                continue
+            del entries[entry]
+            name = next((n for n in AGENT_SETTINGS if under(setting, n)), setting)
+            snapshot["first"][folder] = sorted({*snapshot["first"].get(folder, []), name})
+            changed = True
+    if changed:
+        save(store, tree, snapshot)
 
 
 def split_setting(path: str) -> tuple[str, str]:

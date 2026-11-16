@@ -22,6 +22,7 @@ from .models import (
     DraftDecision,
     FocusRequest,
     FollowRetry,
+    GitIdentity,
     GitQuarantine,
     NewLesson,
     OpenFolder,
@@ -624,6 +625,11 @@ def create_app(
     async def use_agent_settings(session_id: str, payload: AgentSettings):
         """The owner's word only: no tool, Slack or Send to Chief reaches this."""
         return {"ok": True, "said": await runtime.accept_settings(session_id, payload.digest)}
+
+    @app.post("/api/sessions/{session_id}/git-identity")
+    async def use_git_identity(session_id: str, payload: GitIdentity):
+        """The owner's word only, as for agent-settings."""
+        return {"ok": True, "said": await runtime.accept_git(session_id, payload.digest)}
 
     @app.post("/api/sessions/{session_id}/git-quarantine")
     async def answer_git_quarantine(session_id: str, payload: GitQuarantine):

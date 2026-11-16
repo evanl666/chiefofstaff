@@ -180,6 +180,7 @@ class Events:
             "assistant.message": self.assistant_message,
             "assistant.turn_start": self.turn_start,
             "tool.execution_start": self.tool_start,
+            "subagent.started": self.subagent_started,
             "tool.execution_complete": self.tool_complete,
             "assistant.usage": self.usage,
             # Another agent's usage, in its own ledger (never Copilot's), and its turns' end.
@@ -479,7 +480,13 @@ class Events:
             # folder's agent settings changed meanwhile (Runtime.settings_refusal).
             self.runtime.background(self.runtime.settings_backstop(row["id"]))
 
+    def subagent_started(self, row: dict, event: Any):
+        if row["role"] == WORKER:
+            self.runtime.settings_glance(row["id"])  # (A custom agent's servers start now.)
+
     def tool_start(self, row: dict, event: Any):
+        if row["role"] == WORKER:
+            self.runtime.settings_glance(row["id"])  # (What it runs may load settings.)
         data = event.data
         name = getattr(data, "tool_name", "") or "tool"
         self.states[row["id"]].turn_tools += 1
@@ -656,7 +663,10 @@ class Events:
         state.busy = False
         self.delivery.handled(session_id)
         if row["role"] == WORKER and self.store.get(f"gitwatch:{session_id}"):
-            self.runtime.git_watch_check(session_id)  # (Linux: what its turn made in a .git.)
+            # (Linux: what its turn made in a .git.)
+            self.runtime.background(self.runtime.git_watch_after(session_id))
+        if row["role"] == WORKER:
+            self.runtime.git_after_turn(session_id)  # (A .git it replaced.)
         # Its session is free again: messages queue as usual. A turn that ended because it was
         # aborted (stopped, its task cancelled) owes no report.
         aborted, state.after_abort = state.after_abort, False
@@ -873,7 +883,7 @@ class Events:
             return PermissionDecisionReject(feedback="Unknown session.")
         if (
             (reason := owners_checkout(row, request, self.workspaces.checkouts(row)))
-            or (reason := settings_write(row, request))
+            or (reason := settings_write(row, request, self.runtime.held_run_files(row)))
             or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
         ):
             self.runtime.add_message(row["id"], "notice", reason)

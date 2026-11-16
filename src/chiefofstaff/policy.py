@@ -16,7 +16,7 @@ import re
 import subprocess
 import tempfile
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -2738,6 +2738,11 @@ REPOSITORY_SETTINGS = (
 CODEX_SETTINGS = (".codex",)
 # Every agent's: what a folder's snapshot holds (settings_guard).
 AGENT_SETTINGS = REPOSITORY_SETTINGS + CODEX_SETTINGS
+RUN_WRITE = (
+    "The repository's agent settings run this file (a hook's script, a server's): a change to it "
+    "would run outside Chief of Staff's checks, so workers don't write it. Leave that change to "
+    "the owner."
+)
 SETTINGS_WRITE = (
     "A coding agent loads this file as the repository's own settings (hooks, MCP servers, "
     "agents), outside Chief of Staff's checks: workers don't write it. Leave that change to "
@@ -2758,15 +2763,24 @@ def repository_settings(path: str) -> bool:
     return False
 
 
-def settings_write(row: dict, request: Any) -> str | None:
+def settings_write(row: dict, request: Any, ran: Iterable[str] = ()) -> str | None:
     """Why a worker may not write this file: it is a repository setting Copilot would load from
-    its next turn or start (any worker, also one acting without permission checks)."""
+    its next turn or start, or a file such a setting runs (`ran`: a hook's script, held with
+    them), which a hook would run at once (any worker, also one acting without permission
+    checks)."""
     if row["role"] != WORKER or getattr(request, "kind", "") != "write":
         return None
     target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "") or ""
     if target and not Path(target).is_absolute():
         target = str(Path(row["cwd"] or ".") / target)
-    return SETTINGS_WRITE if target and repository_settings(target) else None
+    if not target:
+        return None
+    if repository_settings(target):
+        return SETTINGS_WRITE
+    real = os.path.realpath(target)
+    if any(real == os.path.realpath(path) for path in ran):
+        return RUN_WRITE
+    return None
 
 
 def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | None:

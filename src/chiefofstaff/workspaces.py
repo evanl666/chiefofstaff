@@ -66,23 +66,22 @@ async def command(
 
 
 async def git(*arguments: str, limit: float = 60, stdin_data: bytes | None = None) -> str:
-    guarded()
+    where = arguments[arguments.index("-C") + 1] if "-C" in arguments[:-1] else ""
+    await guarded(where)
     return await command("git", *SAFE_GIT, *arguments, limit=limit, stdin_data=stdin_data)
 
 
-# Linux: what the runtime looks for in .git folders its workers may write before Chief of Staff
-# runs git (Runtime.git_watch_check: a commondir or config.worktree a worker made would send
-# that git elsewhere).
+# What the runtime looks at before Chief of Staff runs git (Runtime.git_guard): on Linux, the
+# files a worker must not make in a .git (a commondir would send that git elsewhere); anywhere,
+# a .git (or a folder of one) a worker replaced. It refuses (ValueError) git there until the
+# owner says so.
 GIT_GUARD: weakref.WeakMethod | None = None
 
 
-def guarded():
-    if SANDBOX_PLATFORM != "linux" or not GIT_GUARD or not (guard := GIT_GUARD()):
-        return
-    try:
-        guard()
-    except Exception:
-        logger.warning("Could not look for what workers made in .git folders.", exc_info=True)
+async def guarded(where: str = "", roots: tuple[str, ...] = ()):
+    """Off the event loop (some lstat calls); ValueError where it may not run."""
+    if GIT_GUARD and (guard := GIT_GUARD()):
+        await asyncio.to_thread(guard, where, roots)
 
 
 # Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
@@ -232,7 +231,7 @@ async def checkout_git(
     """git in one of a worker's checkouts, as Chief of Staff: the repository pinned (git_pins),
     nothing in its config run, and a clone in the worker's own folder (whose config it can
     write) refused if its config would run code."""
-    guarded()
+    await guarded(path, (checkout.get("git_dir") or "", checkout.get("admin") or ""))
     pins = await asyncio.to_thread(git_pins, checkout, path)
     if pins is None:
         raise ValueError(f"Not reading {path}: its worktree cannot be found in its repository.")
@@ -513,6 +512,113 @@ def git_dirs(checkouts: list[dict]) -> list[str]:
         if git_dir and git_dir not in found:
             found.append(git_dir)
     return found
+
+
+def pointed(tree: Path) -> str:
+    """Where a worktree's `.git` file points (its own folder in the repository), "" for none."""
+    try:
+        named = (tree / ".git").read_text(errors="replace").strip()
+    except OSError:
+        return ""
+    return (
+        os.path.realpath(named.removeprefix("gitdir:").strip())
+        if named.startswith("gitdir:")
+        else ""
+    )
+
+
+def watched_git_paths(
+    repositories: list[str], checkouts: list[dict], modules: bool = True
+) -> list[str]:
+    """The files of a repository's .git that, made by a worker, would change what git runs or
+    which repository it uses: a `commondir` (git then reads another .git), a `config.worktree`
+    where the repository reads one (extensions.worktreeConfig), a `hooks` folder where it had
+    none, and (`modules`: where the sandbox holds them, so no owner's own git is mistaken for a
+    worker's) a submodules' folder, which the owner's `git submodule update` would reuse, in a
+    repository with submodules. Not a `shallow`, alternates, `info/`: what objects git has, each
+    checked by its hash."""
+    found: list[str] = []
+    admins = [c.get("admin") or "" for c in checkouts if c.get("worktree")]
+    trees = [Path(c["path"]) for c in checkouts if c.get("path")]
+    for common in repositories:
+        root = Path(common)
+        found += [str(root / "commondir"), str(root / "hooks")]
+        if modules and any((tree / ".gitmodules").exists() for tree in [root.parent, *trees]):
+            found.append(str(root / "modules"))
+        if worktree_config(root):
+            found.append(str(root / "config.worktree"))
+            found += [str(Path(a) / "config.worktree") for a in admins if a.startswith(common)]
+    return found
+
+
+def worktree_config(root: Path) -> bool:
+    """Whether a repository reads worktrees' own config (extensions.worktreeConfig)."""
+    try:
+        text = (root / "config").read_text(errors="replace")
+    except OSError:
+        return False
+    section = ""
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].split(";", 1)[0].strip()
+        if line.startswith("["):
+            section = line.strip("[]").strip().lower()
+        elif section == "extensions" and "=" in line:
+            key, _, value = line.partition("=")
+            if key.strip().lower() == "worktreeconfig":
+                return value.strip().lower() in {"true", "yes", "on", "1"}
+    return False
+
+
+def replaceable_git_paths(checkouts: list[dict], writable: list[str]) -> list[str]:
+    """The folders of a repository's .git a worker's commands may write whose replacing would
+    put what it wrote where git reads it. Copilot's sandbox holds paths, not folders: a folder
+    moved into place brings what is in it past those paths (a `.git` of its own with a config
+    that runs code, an `objects/info` with alternates, a worktree's private folder with its
+    own commondir). Each is told by its identity (identity_of), looked at before each turn,
+    after each, and before Chief of Staff runs git: the `.git` of an owner's checkout it works
+    in itself, and in each repository it commits to, `objects`, `objects/info` and the private
+    folders of the worktrees there."""
+    found: dict[str, None] = {}
+    reals = [os.path.realpath(path) for path in writable]
+    for checkout in checkouts:
+        common = checkout.get("git_dir") or ""
+        if not common or checkout.get("remote"):
+            continue
+        if checkout.get("shared"):
+            top = Path(checkout.get("top") or Path(common).parent)
+            if any(os.path.realpath(top) == real for real in reals):
+                found[str(top / ".git")] = None
+        found[str(Path(common) / "objects")] = None
+        found[str(Path(common) / "objects" / "info")] = None
+        with suppress(OSError):
+            found |= dict.fromkeys(
+                str(entry) for entry in sorted((Path(common) / "worktrees").iterdir())
+                if entry.is_dir()
+            )  # fmt: skip
+    return list(dict.fromkeys(os.path.realpath(path) for path in found))
+
+
+def holds_alternates(path: str) -> bool:
+    """Whether an `objects/info` holds what makes git take objects from elsewhere."""
+    return any(os.path.lexists(Path(path) / n) for n in ("alternates", "http-alternates"))
+
+
+def identity_of(path: str) -> list:
+    """What is at a path now: [kind, device, inode] (a .git file's pointer, a link's target
+    too); [] when nothing is. A folder moved into its place is another."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return []
+    if stat.S_ISDIR(info.st_mode):
+        return ["d", info.st_dev, info.st_ino]
+    if stat.S_ISLNK(info.st_mode):
+        with suppress(OSError):
+            return ["l", info.st_dev, info.st_ino, str(Path(path).readlink())]
+    if stat.S_ISREG(info.st_mode) and info.st_size <= 4096:
+        with suppress(OSError):
+            return ["f", info.st_dev, info.st_ino, Path(path).read_text(errors="replace")]
+    return ["o", info.st_dev, info.st_ino]
 
 
 def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
@@ -2295,10 +2401,14 @@ class Workspaces:
                     "-C", repo, "worktree", "add", "-b", checkout["branch"], tree,
                     checkout.get("base_ref") or "HEAD",
                 )  # fmt: skip
+            if admin := await asyncio.to_thread(pointed, Path(tree)):
+                self.store.delete(f"gitid:{admin}")  # (Made now, by Chief of Staff.)
             if not row["slack"]:
                 carried = await carry_ignored_files(Path(repo), Path(tree))
-                # What it carries is the owner's, as at its first making: kept as now.
+                # What it carries is the owner's, as at its first making: kept as now, as far
+                # as the owner's checkout holds it so (vet_carried).
                 await asyncio.to_thread(settings_guard.refresh, self.store, Path(tree), carried)
+                await asyncio.to_thread(self.vet_carried, Path(tree), Path(repo), carried)
 
     def roots(self) -> list[Path]:
         """The folders Chief of Staff makes workers' own folders in: the configured one, and
@@ -2469,6 +2579,7 @@ class Workspaces:
         # Its own folder in the repository, read now, before a worker could change where its
         # .git points.
         admin = (await git("-C", str(tree), "rev-parse", "--absolute-git-dir")).strip()
+        self.store.delete(f"gitid:{await asyncio.to_thread(os.path.realpath, admin)}")
         repos.add(str(top))
         checkout = {
             "project": str(path),
@@ -2482,8 +2593,10 @@ class Workspaces:
             "admin": admin,
             "carried": await carry_ignored_files(top, tree) if carry else [],
         }
-        # The agent settings it is given, as Chief of Staff made it (settings_guard).
+        # The agent settings it is given, as Chief of Staff made it (settings_guard), what it
+        # carried from the owner's checkout only as the owner's checkout holds it.
         await asyncio.to_thread(self.keep_settings, tree, Path(checkout["path"]))
+        await asyncio.to_thread(self.vet_carried, tree, top, checkout["carried"])
         return checkout
 
     @staticmethod
@@ -2495,6 +2608,22 @@ class Workspaces:
             await git("-C", checkout["repo"], "worktree", "remove", "--force", checkout["worktree"])
         with suppress(ValueError):
             await git("-C", checkout["repo"], "branch", "-D", checkout["branch"])
+
+    def vet_carried(self, tree: Path, owner: Path, carried: list[str]):
+        settings_guard.vet(self.store, tree, owner, carried, not self.touched(owner))
+
+    def touched(self, top: Path, besides: str = "") -> bool:
+        """Whether a worker other than `besides` could have written in this folder, or above
+        it: one that ran (had a turn) with a folder it writes there, above or below."""
+        for other in self.store.all(
+            "SELECT * FROM sessions WHERE role=? AND id!=?", (WORKER, besides)
+        ):
+            if not self.store.get(f"sent:{other['id']}"):
+                continue  # (Handed out, never run.)
+            for place in map(os.path.realpath, self.writable(other)):
+                if within(place, str(top)) or within(str(top), place):
+                    return True
+        return False
 
     def keep_settings(self, top: Path, cwd: Path):
         """A folder Chief of Staff just made for a worker: the agent settings in it are its own

@@ -796,8 +796,10 @@ function renderMessage(original) {
         : meta.agent_settings
           ? useSettingsButton(message.session_id, meta.agent_settings)
           : meta.git_quarantine
-            ? quarantineButtons(message.session_id)
-            : null;
+            ? quarantineButtons(message.session_id, meta.git_quarantine.removable)
+            : meta.git_replaced
+              ? useGitButton(message.session_id, meta.git_replaced.digest)
+              : null;
       // A stop its task's card says more of (another agent's spend): that, in full, on hover.
       const title = meta.full ? `${meta.full}\n${clock(time)}` : clock(time);
       return el("div", { class: `line notice${open ? " link" : ""}${settings ? " wide" : ""}`, title, onclick: open }, el("span", { text: message.text }), settings);
@@ -824,8 +826,24 @@ function useSettingsButton(sessionId, { digest, changes }) {
   } });
   return button;
 }
-// What a worker made in a .git, moved aside: put back, or kept removed; the worker goes on.
-function quarantineButtons(sessionId) {
+// A .git a worker's folder had replaced: the owner says to use it as it is; the worker goes on.
+function useGitButton(sessionId, digest) {
+  const button = el("button", { type: "button", class: "link", text: "Use this .git", onclick: async (event) => {
+    event.stopPropagation();
+    button.disabled = true;
+    try {
+      const { said } = await api(`/api/sessions/${sessionId}/git-identity`, { method: "POST", body: { digest } });
+      toast(said);
+    } catch (error) {
+      toast(error.message, "error");
+      button.disabled = false;
+    }
+  } });
+  return button;
+}
+// A git file that appeared in a .git a worker can write: used, or (in Chief of Staff's own
+// worktree folders) kept removed; the worker goes on.
+function quarantineButtons(sessionId, removable) {
   const answer = (use) => async (event) => {
     event.stopPropagation();
     buttons.forEach((button) => (button.disabled = true));
@@ -837,10 +855,8 @@ function quarantineButtons(sessionId) {
       buttons.forEach((button) => (button.disabled = false));
     }
   };
-  const buttons = [
-    el("button", { type: "button", class: "link", text: "Use it anyway", onclick: answer(true) }),
-    el("button", { type: "button", class: "link", text: "Keep it removed", onclick: answer(false) }),
-  ];
+  const buttons = [el("button", { type: "button", class: "link", text: "Use it", onclick: answer(true) })];
+  if (removable) buttons.push(el("button", { type: "button", class: "link", text: "Keep it removed", onclick: answer(false) }));
   return buttons;
 }
 // The owner's message: long ones fold, images show small and open full size; under it, whether

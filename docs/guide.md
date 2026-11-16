@@ -322,26 +322,36 @@ and MCP and language servers (`.github/hooks/`, `.mcp.json`, `.github/mcp.json`,
 hook can approve a command a check refuses; a server runs outside the worker's sandbox).
 Chief of Staff keeps what those files hold, and the scripts and servers they name (a hook's
 `check.sh`, an MCP server's `tools/server.py`), when it makes a worker's worktree, clone or
-workspace. Any other folder it sees for the first time with such files in it (your checkout, a
-folder of it no worker had before, one workers used before this version, your own session
-taken up from a terminal) waits for you to look once: "Chief of Staff sees the Copilot settings
-in this folder for the first time (.mcp.json); it won't start the worker there until you say to
-use them." It reads them again before each turn and each start. If one changed (a worker wrote
+workspace, and when it first hands a worker your checkout (no worker had it before; your own
+session taken up from a terminal counts): the worker's timeline says once which ones workers
+there use ("Workers in ~/code/app use the agent settings there: .mcp.json."). A file a worktree
+carries from your checkout (`.worktreeinclude`) counts only as your checkout holds it. Any other
+folder it sees with such files in it (a folder of a checkout workers already had, a planted copy,
+one workers used before this version) waits for you to look once: "Copilot settings added since
+workers had this checkout (sub/.mcp.json); Chief of Staff won't start the worker there until you
+say to use them." It reads them again before each turn and each start, and when a quick look as
+each of the worker's tools and sub-agents starts sees a change. If one changed (a worker wrote
 it, a merge brought a teammate's change, you edited your local settings), the worker starts no
-turn there and its timeline says what changed: "Copilot settings in this folder changed (added
-.mcp.json); Chief of Staff won't start the worker there until you say to use them." If the
-change is yours or you trust it, click **Use these settings** on that line: the worker goes on
-with what waited for it, and one the change stopped mid-task goes on with that task too. If you
-undo the change instead (delete what the worker wrote), the worker goes on by itself once it's
-as it was (or click the button). A worker waiting for this shows *waiting for you* and the
-Router hears it once. Settings too many or too large to check ("can't be checked") wait the
-same way, and the button lets the worker use them unchecked until they can be checked again. A
-setting that's a link out of its folder, or a special file, is never used: the worker waits
-until it's removed. When a setting runs project code Chief of Staff can't hold (`uv run …`,
-`npm run …`, `npx …`, `python -m …`), the worker's timeline says so once: a change to that code
-isn't caught. Workers don't edit those files with their tools, but a merge, a rebase or checking
-out a PR in their own worktree can change them: the same line then asks you. Agent homes
-(`~/.codex`, `~/.claude`, `~/.copilot`) are yours and are never read as a folder's settings.
+turn there (one at work is stopped) and its timeline says what changed: "Copilot settings in
+this folder changed (added .mcp.json); Chief of Staff won't start the worker there until you say
+to use them." If the change is yours or you trust it, click **Use these settings** on that line:
+the worker goes on with what waited for it, and one the change stopped mid-task goes on with that
+task too. If you undo the change instead (delete what the worker wrote), the worker goes on by
+itself once it's as it was (or click the button). A worker waiting for this shows *waiting for
+you* and the Router hears it once. Settings too many or too large to check ("can't be checked")
+wait the same way, and the button lets the worker use them unchecked as they are; if they change,
+it asks again. A settings file that's a link out of its folder is compared by what it leads to,
+and is never used if that's a folder workers can write; a link to an agent's own folder
+(`~/.claude`), or a special file, is never used: the worker waits until it's removed. A program a
+setting runs through a link (a virtualenv's `python`) is like one on your PATH. When a setting
+runs project code Chief of Staff can't hold (`uv run …`, `npm run …`, `npx …`, a module or
+script it can't find), the worker's timeline says so once: a change to that code isn't caught.
+Workers don't edit those files with their tools; with the sandbox on, their commands can't change
+them either, in your checkout or their own worktree: if a merge, a rebase or a pull needs to,
+the worker tells you in one line ("main changed .mcp.json; I can't update the branch's agent
+settings, so please update the branch yourself or let me continue without it"). Without the
+sandbox, their commands can: the same line then asks you. In your home folder, agent homes
+(`~/.codex`, `~/.claude`, `~/.copilot`) are yours and are never read as its settings.
 
 With the **sandbox** on (Settings; always for workers that read Slack), workers' shell commands can write only to their
 workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
@@ -350,11 +360,21 @@ GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create
 sandbox ca trust` once so `gh` works inside the sandbox; Settings tells you when it is needed.
 The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed.
 On Linux the sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for
-those git files after each of a worker's turns (and before it runs git itself): one the worker
-made is moved aside into Chief of Staff's data folder, never deleted, and the worker waits with
-"… appeared in a .git folder this worker can write; git would read it as configuration. Moved
-aside: the worker waits for you." **Use it anyway** puts it back (say, it was your own
-`git submodule update`); **Keep it removed** leaves it aside. Either way the worker goes on.
+the git files that change what git runs (a `.git/commondir`, a `hooks/` folder where there was
+none, a `config.worktree` where the repository reads one) after each of a worker's turns and
+before it runs git itself. If one appeared, the worker waits, Chief of Staff runs no git in that
+repository, and the timeline says "A git file appeared in .git (commondir). If you made it, use
+it." **Use it** lets the worker go on; in the private folder of a worktree Chief of Staff made,
+**Keep it removed** moves the file aside into Chief of Staff's data folder. Nothing is moved out
+of your own repository.
+
+The sandbox holds paths, so a worker that moves a whole folder into place (its own `.git` in
+your checkout, say) gets past it: Chief of Staff remembers each such `.git` folder as it first
+sees it and looks again before and after each turn and before it runs git there. If one was
+replaced, the worker waits, Chief of Staff runs no git there, and the timeline says "… /.git was
+replaced since Chief of Staff first saw it, so git there could run what this worker put in its
+place …". Look at it first (`ls -la .git`, its `config` and `hooks/`), then click **Use this
+.git** if it's fine.
 
 Workers can start servers on localhost (a test's server, Gradle's daemon); the token files of
 your own Gradle daemons and Jupyter servers stay unreadable to them (their folders,

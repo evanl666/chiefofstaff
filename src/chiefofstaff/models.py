@@ -765,9 +765,16 @@ class AgentSettings(StrictModel):
     digest: str = Field(min_length=1, max_length=64)
 
 
+class GitIdentity(StrictModel):
+    """The owner's word on a .git (or a folder of one) a worker's folder had replaced: what
+    they were shown (its digest)."""
+
+    digest: str = Field(min_length=1, max_length=64)
+
+
 class GitQuarantine(StrictModel):
-    """The owner's word on what a worker made in a .git and Chief of Staff moved aside: put it
-    back ("Use it anyway") or keep it removed."""
+    """The owner's word on a git file that appeared in a .git a worker can write: use it, or
+    (in Chief of Staff's own worktree folders) keep it removed."""
 
     use: bool
 
