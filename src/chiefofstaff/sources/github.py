@@ -1512,3 +1512,304 @@ class GitHubSource:
                         f"github:reviewcomment:{comment['id']}", comment.get("body", ""), target
                     )
         return review.get("html_url", "Review published.") + note
+
+    # The shepherd's reads and writes (shepherd.py), used only while Prepared for you is on.
+
+    DETAILS = (
+        "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){"
+        "databaseId nameWithOwner viewerPermission defaultBranchRef{name} "
+        "pullRequest(number:NUMBER){number state isDraft merged title url updatedAt createdAt "
+        "author{login} headRefName headRefOid baseRefName baseRefOid isCrossRepository "
+        "mergeStateStatus reviewDecision "
+        "headRepository{databaseId nameWithOwner defaultBranchRef{name}} "
+        "labels(first:30){nodes{name}} "
+        "reviewRequests(first:30){nodes{requestedReviewer{... on User{login}}}} "
+        "latestOpinionatedReviews(first:30){nodes{author{login} state submittedAt "
+        "commit{oid}}} "
+        "reviewThreads(first:100){nodes{id isResolved isOutdated path line "
+        "comments(first:50){nodes{databaseId author{login} body createdAt url}}}} "
+        "commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:100){nodes{"
+        "__typename ... on CheckRun{name status conclusion detailsUrl databaseId "
+        "isRequired(pullRequestNumber:NUMBER) checkSuite{workflowRun{databaseId}}} "
+        "... on StatusContext{context state targetUrl isRequired(pullRequestNumber:NUMBER)}"
+        "}}}}}}}}}"
+    )
+
+    async def pr_details(self, repo: str, number: int) -> dict:
+        """A PR as the shepherd reads it, in one GraphQL query: its state, head and base (with
+        their repositories), checks (each by its latest run, with isRequired), review decision
+        and threads, merge state, labels, and the account's permission on the repository.
+        Unknown stays unknown: a field GitHub did not give is None, never a guess."""
+        owner, name = repo.split("/", 1)
+        query = self.DETAILS.replace("NUMBER", str(int(number)))
+        found = await self.graphql(repo, query, owner=owner, name=name)
+        if found.get("errors") and not (found.get("data") or {}).get("repository"):
+            raise RuntimeError(str(found["errors"][0].get("message", "GitHub refused"))[:300])
+        repository = (found.get("data") or {}).get("repository") or {}
+        pull = repository.get("pullRequest")
+        if not pull:
+            raise RuntimeError(f"HTTP 404: {repo}#{number} not found")
+        head_repo = pull.get("headRepository") or {}
+        commit = ((pull.get("commits") or {}).get("nodes") or [{}])[-1].get("commit") or {}
+        rollup = commit.get("statusCheckRollup") or {}
+        checks = []
+        for node in (rollup.get("contexts") or {}).get("nodes") or []:
+            if node.get("__typename") == "CheckRun":
+                run = ((node.get("checkSuite") or {}).get("workflowRun") or {}).get("databaseId")
+                checks.append({
+                    "name": node.get("name") or "", "kind": "check",
+                    "status": (node.get("status") or "").upper(),
+                    "conclusion": (node.get("conclusion") or "").upper(),
+                    "required": node.get("isRequired"), "url": node.get("detailsUrl") or "",
+                    "id": node.get("databaseId"), "run": run,
+                })  # fmt: skip
+            elif node.get("__typename") == "StatusContext":
+                state = (node.get("state") or "").upper()
+                checks.append({
+                    "name": node.get("context") or "", "kind": "status",
+                    "status": "COMPLETED" if state not in {"PENDING", "EXPECTED"} else "PENDING",
+                    "conclusion": {"SUCCESS": "SUCCESS", "FAILURE": "FAILURE",
+                                   "ERROR": "ERROR"}.get(state, ""),
+                    "required": node.get("isRequired"), "url": node.get("targetUrl") or "",
+                    "id": None, "run": None,
+                })  # fmt: skip
+        threads_found = []
+        for node in (pull.get("reviewThreads") or {}).get("nodes") or []:
+            comments = [
+                {
+                    "id": item.get("databaseId"),
+                    "author": ((item.get("author") or {}).get("login") or "").lower(),
+                    "body": unmarked(item.get("body"))[:4000],
+                    "at": item.get("createdAt") or "",
+                    "url": item.get("url") or "",
+                }
+                for item in (node.get("comments") or {}).get("nodes") or []
+            ]
+            threads_found.append({
+                "id": node.get("id") or "", "resolved": bool(node.get("isResolved")),
+                "outdated": bool(node.get("isOutdated")), "path": node.get("path") or "",
+                "line": node.get("line"), "comments": comments,
+            })  # fmt: skip
+        reviews = [
+            {
+                "author": ((node.get("author") or {}).get("login") or "").lower(),
+                "state": node.get("state") or "",
+                "commit": (node.get("commit") or {}).get("oid") or "",
+                "at": node.get("submittedAt") or "",
+            }
+            for node in (pull.get("latestOpinionatedReviews") or {}).get("nodes") or []
+        ]
+        return {
+            "repo": (repository.get("nameWithOwner") or repo).lower(),
+            "repo_id": repository.get("databaseId"),
+            "permission": repository.get("viewerPermission"),
+            "default_branch": (repository.get("defaultBranchRef") or {}).get("name"),
+            "number": pull.get("number") or int(number),
+            "state": pull.get("state") or "",
+            "merged": bool(pull.get("merged")),
+            "draft": bool(pull.get("isDraft")),
+            "title": (pull.get("title") or "")[:200],
+            "url": pull.get("url") or f"https://github.com/{repo}/pull/{number}",
+            "updated": pull.get("updatedAt") or "",
+            "created": pull.get("createdAt") or "",
+            "author": ((pull.get("author") or {}).get("login") or "").lower(),
+            "head": pull.get("headRefOid") or "",
+            "head_ref": pull.get("headRefName") or "",
+            "head_repo": (head_repo.get("nameWithOwner") or "").lower(),
+            "head_repo_id": head_repo.get("databaseId"),
+            "head_default": (head_repo.get("defaultBranchRef") or {}).get("name"),
+            "base": pull.get("baseRefOid") or "",
+            "base_ref": pull.get("baseRefName") or "",
+            "fork": bool(pull.get("isCrossRepository")),
+            "merge_state": pull.get("mergeStateStatus") or "",
+            "review": pull.get("reviewDecision") or "",
+            "labels": [n.get("name") or "" for n in (pull.get("labels") or {}).get("nodes") or []],
+            "requested": [
+                ((n.get("requestedReviewer") or {}).get("login") or "").lower()
+                for n in (pull.get("reviewRequests") or {}).get("nodes") or []
+                if (n.get("requestedReviewer") or {}).get("login")
+            ],
+            "reviews": reviews,
+            "threads": threads_found,
+            "checks": checks,
+            "checks_head": commit.get("oid") or "",
+        }
+
+    async def stacked_on(self, repo: str, branch: str) -> int | None:
+        """How many open PRs are based on this branch (a PR on it is stacked under them); None
+        when it could not be read."""
+        path = f"repos/{repo}/pulls?base={quote(branch, safe='')}&state=open&per_page=5"
+        try:
+            return len(json.loads(await self.gh("api", path)) or [])
+        except (RuntimeError, ValueError):
+            return None
+
+    async def branch_protected(self, repo: str, branch: str) -> bool | None:
+        """Whether GitHub says the branch is protected; None when it could not be read."""
+        path = f"repos/{repo}/branches/{quote(branch, safe='')}"
+        try:
+            found = json.loads(await self.gh("api", path))
+        except (RuntimeError, ValueError):
+            return None
+        value = found.get("protected") if isinstance(found, dict) else None
+        return value if isinstance(value, bool) else None
+
+    async def branch_rules(self, repo: str, branch: str) -> list[dict] | None:
+        """The rules of rulesets that apply to the branch ([] for none); None when unreadable."""
+        path = f"repos/{repo}/rules/branches/{quote(branch, safe='')}"
+        try:
+            found = json.loads(await self.gh("api", path))
+        except (RuntimeError, ValueError):
+            return None
+        return (
+            [rule for rule in found if isinstance(rule, dict)] if isinstance(found, list) else None
+        )
+
+    async def permission(self, repo: str, login: str) -> str | None:
+        """Someone's permission on the repository (admin, maintain, write, triage, read, none);
+        None when it could not be read."""
+        path = f"repos/{repo}/collaborators/{quote(login, safe='')}/permission"
+        try:
+            found = json.loads(await self.gh("api", path))
+        except (RuntimeError, ValueError):
+            return None
+        role = (
+            (found.get("role_name") or found.get("permission")) if isinstance(found, dict) else None
+        )
+        return str(role).lower() if role else None
+
+    async def failed_runs(self, repo: str, sha: str) -> list[dict]:
+        """The workflow runs on a commit that failed, each with its failed jobs."""
+        found = json.loads(
+            await self.gh("api", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=50")
+        )
+        runs = []
+        for run in (found or {}).get("workflow_runs") or []:
+            if run.get("conclusion") not in FAILED:
+                continue
+            jobs = json.loads(
+                await self.gh(
+                    "api", f"repos/{repo}/actions/runs/{int(run['id'])}/jobs?filter=latest"
+                )
+            )
+            runs.append({
+                "id": int(run["id"]), "name": run.get("name") or "",
+                "attempt": run.get("run_attempt") or 1, "conclusion": run.get("conclusion"),
+                "event": run.get("event") or "", "path": run.get("path") or "",
+                "url": run.get("html_url") or "",
+                "jobs": [
+                    {"id": job.get("id"), "name": job.get("name") or "",
+                     "conclusion": job.get("conclusion") or "",
+                     "steps": [
+                         {"name": step.get("name") or "", "conclusion": step.get("conclusion")}
+                         for step in job.get("steps") or []
+                         if step.get("conclusion") in FAILED
+                     ]}
+                    for job in (jobs or {}).get("jobs") or []
+                    if job.get("conclusion") in FAILED
+                ],
+            })  # fmt: skip
+        return runs
+
+    async def failed_log(self, repo: str, run_id: int, most: int = 2000) -> str:
+        """The logs of a run's failed jobs, at most `most` lines per job."""
+        text = await self.gh("run", "view", str(int(run_id)), "--log-failed", "--repo", repo)
+        kept: dict[str, list[str]] = {}
+        for line in text.splitlines():
+            job = line.split("\t", 1)[0]
+            lines = kept.setdefault(job, [])
+            if len(lines) < most:
+                lines.append(line)
+        return "\n".join(line for lines in kept.values() for line in lines)
+
+    async def annotations(self, repo: str, check_id: int) -> list[dict]:
+        found = json.loads(
+            await self.gh("api", f"repos/{repo}/check-runs/{int(check_id)}/annotations")
+        )
+        return [
+            {
+                "path": item.get("path") or "",
+                "line": item.get("start_line"),
+                "level": item.get("annotation_level") or "",
+                "message": (item.get("message") or "")[:1000],
+            }
+            for item in found or []
+            if isinstance(item, dict)
+        ][:50]
+
+    async def run_attempt(self, repo: str, run_id: int) -> int | None:
+        try:
+            found = json.loads(await self.gh("api", f"repos/{repo}/actions/runs/{int(run_id)}"))
+        except (RuntimeError, ValueError):
+            return None
+        return int(found.get("run_attempt") or 1) if isinstance(found, dict) else None
+
+    async def ref_head(self, repo: str, branch: str) -> str | None:
+        """The commit a branch is at on GitHub; None when it could not be read."""
+        path = f"repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
+        try:
+            found = json.loads(await self.gh("api", path))
+        except (RuntimeError, ValueError):
+            return None
+        return ((found or {}).get("object") or {}).get("sha") if isinstance(found, dict) else None
+
+    async def requested_reviewers(self, repo: str, number: int) -> list[str]:
+        found = json.loads(
+            await self.gh("api", f"repos/{repo}/pulls/{int(number)}/requested_reviewers")
+        )
+        return [(user.get("login") or "").lower() for user in (found or {}).get("users") or []]
+
+    async def search_mine(self) -> list[dict]:
+        """The owner's open PRs on github.com, as each signed-in account sees them (its own
+        search), newest first: {repo, number, title, url, draft, updated, account}."""
+        found: dict[str, dict] = {}
+        fields = "repository,number,title,url,isDraft,updatedAt,createdAt"
+        for account in await self.signed_in():
+            login = account["login"]
+            try:
+                token = "" if account["active"] else await self.token(login)
+                text = await self.raw(
+                    "search", "prs", "--author=@me", "--state=open", "--sort=updated",
+                    "--limit", "100", "--json", fields, **({"token": token} if token else {}),
+                )  # fmt: skip
+            except RuntimeError:
+                logger.info("Could not search %s's open PRs.", login, exc_info=True)
+                continue
+            for item in json.loads(text or "[]"):
+                repo = ((item.get("repository") or {}).get("nameWithOwner") or "").lower()
+                if not repo:
+                    continue
+                key = f"{repo}#{int(item['number'])}"
+                found.setdefault(key, {
+                    "repo": repo, "number": int(item["number"]),
+                    "title": (item.get("title") or "")[:200], "url": item.get("url") or "",
+                    "draft": bool(item.get("isDraft")), "updated": item.get("updatedAt") or "",
+                    "created": item.get("createdAt") or "", "account": login.lower(),
+                })  # fmt: skip
+        return sorted(found.values(), key=lambda pr: pr["updated"], reverse=True)
+
+    async def bound(self, login: str, *arguments: str, payload: dict | None = None) -> str:
+        """A write as exactly this account: its token asked of gh afresh, its identity checked
+        with GitHub, and never another account tried (the shared routing is not used)."""
+        if not login:
+            raise RuntimeError("No account is bound to this write.")
+        try:
+            token = (
+                await self.raw("auth", "token", "--hostname", "github.com", "--user", login)
+            ).strip()
+        except RuntimeError as exc:
+            raise RuntimeError(f"{login} is not signed in to gh on this computer.") from exc
+        me = json.loads(await self.raw("api", "user", "--jq", "{login: .login}", token=token))
+        if (me.get("login") or "").lower() != login.lower():
+            raise RuntimeError(f"gh's token for {login} is another account's.")
+        return await self.raw(*arguments, payload=payload, token=token)
+
+    async def bound_token(self, login: str) -> str:
+        """The bound account's token, its identity checked (for git's push)."""
+        token = (
+            await self.raw("auth", "token", "--hostname", "github.com", "--user", login)
+        ).strip()
+        me = json.loads(await self.raw("api", "user", "--jq", "{login: .login}", token=token))
+        if (me.get("login") or "").lower() != login.lower():
+            raise RuntimeError(f"gh's token for {login} is another account's.")
+        return token
