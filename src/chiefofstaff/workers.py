@@ -473,6 +473,14 @@ class Workers:
         """Start queued workers while fewer than max_workers are running a turn."""
         if not self.runtime.ready():
             return
+        for held in list(self.runtime.settings_held):
+            # One waiting for its folder's settings: as they were again (the owner removed a
+            # change, say), it goes on (Runtime.settings_unsaid).
+            row = self.store.find_session(held)
+            if row and not row["closed_at"]:
+                await self.runtime.settings_refusal(row)
+            else:
+                self.runtime.settings_held.discard(held)
         starting = []
         async with self.pump_lock:
             limit = self.store.settings().max_workers
@@ -732,6 +740,10 @@ class Workers:
                     await session.disconnect()
         self.states[session_id].busy = False
         self.states[session_id].steps.clear()
+        if self.store.get(f"gitwatch:{session_id}"):
+            # (Linux: what it made in a .git, looked for once more; then not again.)
+            self.runtime.git_watch_check(session_id, hold=False)
+            self.store.delete(f"gitwatch:{session_id}")
         self.store.unfollow_session(session_id)
         self.runtime.decisions.drop_asker(session_id)
         self.states[session_id].last_output = ""
@@ -1030,6 +1042,8 @@ class Workers:
             await stop_background(session)
         self.states[session_id].busy = False
         self.states[session_id].steps.clear()
+        if self.store.get(f"gitwatch:{session_id}"):
+            self.runtime.git_watch_check(session_id)  # (Linux: what it made in a .git.)
         if row["role"] == WORKER:
             # What it was sent during the turn and never saw (Copilot drops it with the turn),
             # and its task given and not received: for its next message, not a turn now. Events
@@ -1108,8 +1122,13 @@ class Workers:
             "idle",
             cwd=cwd or str(self.runtime.role_dir("scratch")),
         )
+        waits = False
         try:
             await self.runtime.open_live(row)
+        except SettingsChangedError:
+            # Its folder's agent settings changed since workers last had it: adopted, at rest,
+            # its line there with Use these settings; it opens once the owner says so.
+            waits = True
         except Exception as exc:
             self.store.execute("DELETE FROM sessions WHERE id=?", (session_id,))
             self.bus.publish("state")
@@ -1122,7 +1141,8 @@ class Workers:
         self.runtime.add_message(
             self.runtime.router_id(),
             "notice",
-            f"Adopted “{row['title']}”",
+            f"Adopted “{row['title']}”"
+            + (": it waits for you to look at its folder's settings" if waits else ""),
             {"session_id": session_id},
         )
         return self.store.session(session_id)
@@ -1133,8 +1153,10 @@ class Workers:
         Imported messages carry no prompt: they are never sent again, and the Watchdog does not
         take them for instructions.
         """
-        if self.store.one("SELECT id FROM messages WHERE session_id=? LIMIT 1", (row["id"],)):
-            return
+        if self.store.one(
+            "SELECT id FROM messages WHERE session_id=? AND kind!='notice' LIMIT 1", (row["id"],)
+        ):
+            return  # (A notice may come first: why it waited to open.)
         try:
             events = await session.get_events()
         except Exception:

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
@@ -65,7 +66,23 @@ async def command(
 
 
 async def git(*arguments: str, limit: float = 60, stdin_data: bytes | None = None) -> str:
+    guarded()
     return await command("git", *SAFE_GIT, *arguments, limit=limit, stdin_data=stdin_data)
+
+
+# Linux: what the runtime looks for in .git folders its workers may write before Chief of Staff
+# runs git (Runtime.git_watch_check: a commondir or config.worktree a worker made would send
+# that git elsewhere).
+GIT_GUARD: weakref.WeakMethod | None = None
+
+
+def guarded():
+    if SANDBOX_PLATFORM != "linux" or not GIT_GUARD or not (guard := GIT_GUARD()):
+        return
+    try:
+        guard()
+    except Exception:
+        logger.warning("Could not look for what workers made in .git folders.", exc_info=True)
 
 
 # Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
@@ -215,6 +232,7 @@ async def checkout_git(
     """git in one of a worker's checkouts, as Chief of Staff: the repository pinned (git_pins),
     nothing in its config run, and a clone in the worker's own folder (whose config it can
     write) refused if its config would run code."""
+    guarded()
     pins = await asyncio.to_thread(git_pins, checkout, path)
     if pins is None:
         raise ValueError(f"Not reading {path}: its worktree cannot be found in its repository.")
@@ -497,27 +515,6 @@ def git_dirs(checkouts: list[dict]) -> list[str]:
     return found
 
 
-def git_writes(git_dir: str, checkouts: list[dict]) -> tuple[list[str], list[str]]:
-    """(writable, read-only) of a repository's .git for a worker's commands: the whole folder
-    writable (its protected parts held, protected_git_paths); on Linux, for a repository it works
-    on in worktrees, the folder read-only and only what their commits write writable (objects,
-    refs, logs, worktrees, lfs): Linux's sandbox holds no path that does not exist yet (a
-    commondir there would send the owner's git elsewhere), a read-only folder holds them all.
-    Not where it works in the owner's checkout itself (its HEAD, index and locks are there)."""
-    root = Path(git_dir)
-    in_place = any(
-        checkout.get("shared") and Path(checkout.get("git_dir", "")).resolve() == root.resolve()
-        for checkout in checkouts
-    )
-    if SANDBOX_PLATFORM != "linux" or in_place:
-        return [git_dir], []
-    with suppress(OSError):
-        (root / "logs").mkdir(exist_ok=True)  # (Its commits' reflogs: an empty one is harmless.)
-    parts = [root / name for name in ("objects", "refs", "logs", "worktrees")]
-    parts += [root / "lfs"] if (root / "lfs").is_dir() else []
-    return [str(part) for part in parts], [git_dir]
-
-
 def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
     """Parts of a repository's .git that a worker must not change, though it commits there.
 
@@ -574,56 +571,30 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
 
 # Copilot's sandbox holds a listed path only if it exists when the session starts (CLI 1.0.112,
 # checked on macOS: a command creates one that does not, in a read-only folder's place or not).
-# Denied, an absent path is held on macOS, and nothing is left behind; on Linux the sandbox
-# mounts an empty folder in its place and leaves it on the disk, which breaks git where it reads
-# a file (.git/commondir). So on Linux an absent path gets an empty placeholder, read-only, where
-# an empty one changes nothing for git or the agents (PLACEHOLDER_FOLDERS, PLACEHOLDER_FILES); the
-# others (commondir, shallow, a repository's JSON settings) are not held there (SECURITY.md).
+# Denied, an absent path is held on macOS, and nothing is left behind. On Linux the sandbox
+# mounts an empty folder in its place and leaves it on the disk (which breaks git where it reads
+# a file, .git/commondir): an absent path is not listed there; Chief of Staff looks for those it
+# must not find after each turn (Runtime.git_watch_check, SECURITY.md).
 SANDBOX_PLATFORM = sys.platform
-PLACEHOLDER_FOLDERS = (
-    "hooks",
-    "info",
-    "modules",
-    ".github/hooks",
-    ".github/copilot",
-    ".github/extensions",
-    ".github/agents",
-    ".claude/agents",
-    ".codex",
-)
-PLACEHOLDER_FILES = ("config.worktree", "objects/info/alternates", "objects/info/http-alternates")
+
+
+def sandbox_platform() -> str:
+    return SANDBOX_PLATFORM
 
 
 def sandbox_paths(paths: Sequence[str]) -> tuple[list[str], list[str]]:
     """(read-only, denied): the paths a worker's commands must not change, as Copilot's sandbox
-    holds them here: those that exist read-only, absent ones denied (macOS) or, on Linux, made
-    as empty placeholders and read-only where that is harmless."""
+    holds them here: those that exist read-only, absent ones denied on macOS (not held on
+    Linux: absent_paths)."""
     readonly: list[str] = []
     denied: list[str] = []
     for path in dict.fromkeys(paths):
-        if Path(path).exists():
+        if os.path.lexists(path):
             readonly.append(path)
         elif SANDBOX_PLATFORM == "darwin":
             # (A link to nowhere: where it leads too.)
             denied += dict.fromkeys([path, os.path.realpath(path)])
-        elif placeholder(Path(path)):
-            readonly.append(path)
     return readonly, denied
-
-
-def placeholder(path: Path) -> bool:
-    """An empty folder or file of the owner's where one changes nothing; False otherwise."""
-    name = path.as_posix()
-    try:
-        if any(name.endswith(f"/{kind}") for kind in PLACEHOLDER_FOLDERS):
-            path.mkdir(parents=True, exist_ok=True)
-            return True
-        if any(name.endswith(f"/{kind}") for kind in PLACEHOLDER_FILES) and path.parent.is_dir():
-            with path.open("x"):
-                return True
-    except OSError:
-        return False
-    return False
 
 
 def locate(checkout: dict) -> tuple[str, str, bool]:
@@ -2333,7 +2304,9 @@ class Workspaces:
                     checkout.get("base_ref") or "HEAD",
                 )  # fmt: skip
             if not row["slack"]:
-                await carry_ignored_files(Path(repo), Path(tree))
+                carried = await carry_ignored_files(Path(repo), Path(tree))
+                # What it carries is the owner's, as at its first making: kept as now.
+                await asyncio.to_thread(settings_guard.refresh, self.store, Path(tree), carried)
 
     def roots(self) -> list[Path]:
         """The folders Chief of Staff makes workers' own folders in: the configured one, and
@@ -2527,9 +2500,8 @@ class Workspaces:
 
     def keep_settings(self, top: Path, cwd: Path):
         """A folder Chief of Staff just made for a worker: the agent settings in it are its own
-        (settings_guard), kept as they are now; too many or too large ones are not."""
-        with suppress(settings_guard.TooLargeError):
-            settings_guard.save(self.store, top, settings_guard.scan(top, cwd))
+        (settings_guard.keep), as they are now."""
+        settings_guard.keep(self.store, top, cwd, time.time())
 
     async def clone_checkout(self, workspace: Path, slug: str, repo: str) -> dict:
         """Clone a repository that is not on this machine into a worker's workspace."""

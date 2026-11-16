@@ -655,6 +655,8 @@ class Events:
         state.held = held
         state.busy = False
         self.delivery.handled(session_id)
+        if row["role"] == WORKER and self.store.get(f"gitwatch:{session_id}"):
+            self.runtime.git_watch_check(session_id)  # (Linux: what its turn made in a .git.)
         # Its session is free again: messages queue as usual. A turn that ended because it was
         # aborted (stopped, its task cancelled) owes no report.
         aborted, state.after_abort = state.after_abort, False

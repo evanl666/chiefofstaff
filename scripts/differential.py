@@ -188,10 +188,14 @@ EXAMPLE = Feature(
 )
 
 # Deliberate fixes of how the baseline looks, not any feature's: allowed in every run (the plain
-# one, and each feature's off and on), each with why. None against v0.1.44: those of 0.1.41 to
-# 0.1.44 (the one-line heading, workers' batch CLI line, learning from talked sessions, the runs
-# kept, role rules, the Router's title rule, a check-back's runs) are its own behaviour.
-FIXES: list[Allow] = []
+# one, and each feature's off and on), each with why. Those of 0.1.41 to 0.1.44 (the one-line
+# heading, workers' batch CLI line, learning from talked sessions, the runs kept, role rules, the
+# Router's title rule, a check-back's runs) are the baseline's own behaviour.
+FIXES: list[Allow] = [
+    # 0.1.46 (security): what the agent settings in each folder handed to a worker held then,
+    # kept in Chief of Staff's own data (settings_guard), empty ones too. Nothing is shown.
+    Allow("agent settings snapshots", data=r"\.db\.kv\.settingssnap:"),
+]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
 # by default (the owner agreed), so it is compared switched off against the baseline. On, the

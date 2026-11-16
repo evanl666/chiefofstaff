@@ -7,13 +7,16 @@ A worker can write them in its own folder. So Chief of Staff keeps, for each fol
 worker (by the folder's top: a worktree, a clone, the owner's checkout, a workspace), what those
 files held then: a snapshot, in its own store, never in the folder. Before every turn and start
 it reads them again (plain file reads, no git: a repository's git config can run code) and
-compares; a difference is the worker's until the owner says to use them (accept).
+compares; a difference is the worker's until the owner says to use them
+(Runtime.accept_settings).
 
-A snapshot: {folder (relative to the top, "." for it): {entry (relative to the folder): [kind,
-digest]}} for every file, link or other entry under a setting's path (not folders: an empty one
-loads nothing), found by its name compared as the file system may (case-insensitively, NFC),
-links recorded with where they lead (and what is there, inside the folder). Only snapshots with
-something in them are stored: none is an empty one.
+A snapshot's folders: {folder (relative to the top, "." for it): {entry (relative to the
+folder): [kind, digest]}} for every file, link or other entry under a setting's path (not
+folders: an empty one loads nothing), found by its name compared as the file system may
+(case-insensitively, NFC), links recorded with where they lead (and what is there, inside the
+folder). It is stored from the first time a folder is handed out or checked, empty or not: a
+folder with none is one Chief of Staff knows (see `fresh` for the rest of what it holds). Agent
+homes (~/.codex, ~/.claude, ~/.copilot) are never a project's settings.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -48,9 +52,6 @@ def nfc(name: str) -> str:
     return unicodedata.normalize("NFC", name)
 
 
-MIGRATED = "/"  # A snapshot's mark that it was made from what was there before (no folder's).
-
-
 def same_name(found: str, wanted: str) -> bool:
     """As a case-insensitive file system (macOS's, Windows') resolves a name, NFC or NFD."""
     return nfc(found).casefold() == nfc(wanted).casefold()
@@ -67,14 +68,28 @@ def folder_key(top: Path, folder: Path) -> str:
     return "." if folder == top else nfc(folder.relative_to(top).as_posix())
 
 
+def agent_homes() -> set[str]:
+    """The agents' own folders (Codex's, Claude's, Copilot's: their sessions, logs and the
+    owner's own settings), as real paths: never a folder's settings, though a session in home
+    finds one by such a name (~/.codex)."""
+    home = Path.home()
+    found = {home / ".codex", home / ".claude", home / ".copilot"}
+    for variable in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME"):
+        if value := os.environ.get(variable):
+            found.add(Path(value).expanduser())
+    return {os.path.realpath(path) for path in found}
+
+
 def scan(top: Path, cwd: Path, names: tuple[str, ...] = AGENT_SETTINGS) -> dict[str, dict]:
-    """What the settings named (policy.AGENT_SETTINGS) hold now in each folder of the chain."""
+    """What the settings named (one agent's, or policy.AGENT_SETTINGS) hold now in each folder
+    of the chain; the agents' own folders left out (agent_homes)."""
     budget = [MOST_ENTRIES, MOST_BYTES]
     found: dict[str, dict] = {}
     wanted = [name.split("/") for name in names]
+    homes = agent_homes()
     for folder in chain(top, cwd):
         entries: dict[str, list] = {}
-        seek(top, folder, wanted, "", entries, budget)
+        seek(top, folder, wanted, "", entries, budget, homes)
         if entries:
             found[folder_key(top, folder)] = entries
     return found
@@ -91,10 +106,17 @@ def listed(folder: Path) -> list[os.DirEntry]:
 
 
 def seek(
-    top: Path, folder: Path, wanted: list[list[str]], prefix: str, entries: dict, budget: list
+    top: Path,
+    folder: Path,
+    wanted: list[list[str]],
+    prefix: str,
+    entries: dict,
+    budget: list,
+    homes: set[str],
 ):
     """Each entry named by one of `wanted` (a setting's path, by its names) under `folder`,
-    the folder read once; a link on the way is recorded, not followed."""
+    the folder read once; a link on the way is recorded, not followed; an agent's own folder
+    (`homes`) skipped."""
     by_first: dict[str, list[list[str]]] = {}
     for parts in wanted:
         by_first.setdefault(nfc(parts[0]).casefold(), []).append(parts)
@@ -104,11 +126,13 @@ def seek(
             continue
         name = f"{prefix}{nfc(entry.name)}"
         path = folder / entry.name
+        if os.path.realpath(path) in homes:
+            continue
         rest = [parts[1:] for parts in group if len(parts) > 1]
         if len(rest) < len(group) or entry.is_symlink():
             record(top, path, name, entries, budget)
         elif entry.is_dir(follow_symlinks=False):
-            seek(top, path, rest, f"{name}/", entries, budget)
+            seek(top, path, rest, f"{name}/", entries, budget, homes)
 
 
 def record(top: Path, path: Path, name: str, entries: dict, budget: list):
@@ -226,53 +250,104 @@ def top_key(top: Path) -> str:
     return KEY + nfc(os.path.realpath(top))
 
 
-def load(store: Any, top: Path) -> dict[str, dict] | None:
+# A snapshot, as kept: {"since": when Chief of Staff first handed the folder (its top) out,
+# "folders": {folder: {entry: [kind, digest]}}, "known": {folder: [setting names it holds what
+# was there of]}, "unchecked": [setting names the owner said to use unchecked (too many)]}.
+
+
+def fresh(since: float) -> dict:
+    return {"since": since, "folders": {}, "known": {}, "unchecked": []}
+
+
+def load(store: Any, top: Path) -> dict | None:
+    """Its snapshot; None before Chief of Staff first handed it out or checked it (a folder
+    a worker of an older version had)."""
     raw = store.get(top_key(top))
-    return json.loads(raw) if raw else None
+    try:
+        found = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    if not isinstance(found, dict) or not isinstance(found.get("folders"), dict):
+        return None
+    return {**fresh(float(found.get("since") or 0)), **found}
 
 
-def save(store: Any, top: Path, snapshot: dict[str, dict]):
-    """Kept only when there is something in it (none: an empty one)."""
-    if snapshot:
-        store.set(top_key(top), json.dumps(snapshot, sort_keys=True))
-    else:
-        store.delete(top_key(top))
+def save(store: Any, top: Path, snapshot: dict):
+    store.set(top_key(top), json.dumps(snapshot, sort_keys=True))
 
 
-def accept(
-    store: Any, top: Path, cwd: Path, names: tuple[str, ...], now: dict[str, dict]
-) -> dict[str, dict]:
-    """The settings named, as `now` (a scan of the chain) has them, become the snapshot's (the
-    owner said to use them); the rest of the snapshot stays."""
-    saved = load(store, top) or {}
-    folders = {folder_key(top, folder) for folder in chain(top, cwd)}
-    merged: dict[str, dict] = {}
-    for folder in folders | saved.keys():
+def taken(snapshot: dict, now: dict[str, dict], folders: list[str], names: tuple[str, ...]):
+    """What `now` holds of these settings in these folders becomes the snapshot's, known."""
+    for folder in folders:
         kept = {
             entry: value
-            for entry, value in saved.get(folder, {}).items()
-            if folder not in folders or not any(under(entry, name) for name in names)
+            for entry, value in snapshot["folders"].get(folder, {}).items()
+            if not any(under(entry, name) for name in names)
         }
-        if folder in folders:
-            kept |= restricted({folder: now.get(folder, {})}, names).get(folder, {})
-        if kept or folder == MIGRATED:
-            merged[folder] = kept
-    save(store, top, merged)
-    return merged
+        kept |= restricted({folder: now.get(folder, {})}, names).get(folder, {})
+        snapshot["folders"][folder] = kept
+        snapshot["known"][folder] = sorted({*snapshot["known"].get(folder, []), *names})
 
 
-def older_than(top: Path, snapshot: dict[str, dict], moment: float) -> bool:
-    """Whether every entry of a snapshot last changed before `moment` (its inode's ctime, which
-    no worker can set back): it was there before Chief of Staff first handed the folder out."""
-    for folder, entries in snapshot.items():
-        base = top if folder == "." else top / folder
-        for entry in entries:
-            try:
-                if os.lstat(base / entry.split("\0")[0]).st_ctime >= moment:
-                    return False
-            except OSError:
-                return False
-    return True
+def keep(store: Any, top: Path, cwd: Path, since: float):
+    """A folder Chief of Staff just made for a worker (a worktree, a clone): the agent settings
+    in it are its own, as they are now. Too many or too large ones: nothing kept (checked as they
+    are found)."""
+    snapshot = load(store, top) or fresh(since)
+    snapshot["since"] = since
+    try:
+        now = scan(top, cwd)
+    except TooLargeError:
+        now = None
+    if now is not None:
+        taken(
+            snapshot, now, [folder_key(top, folder) for folder in chain(top, cwd)], AGENT_SETTINGS
+        )
+    save(store, top, snapshot)
+
+
+def refresh(store: Any, top: Path, paths: list[str]):
+    """Files Chief of Staff itself put in a folder again (carried from the owner's checkout as
+    a worktree is made again): kept as they are now, where its snapshot knows them."""
+    snapshot = load(store, top)
+    if snapshot is None or not paths:
+        return
+    for path in paths:
+        folder, setting = split_setting(path)
+        if setting == path and not any(under(path, name) for name in AGENT_SETTINGS):
+            continue  # Not a setting.
+        if folder not in snapshot["known"]:
+            continue
+        entry = path if folder == "." else path[len(folder) + 1 :]
+        where = top / path
+        try:
+            info = os.lstat(where)
+        except OSError:
+            snapshot["folders"].get(folder, {}).pop(entry, None)
+            continue
+        if stat.S_ISREG(info.st_mode):
+            budget = [MOST_ENTRIES, MOST_BYTES]
+            snapshot["folders"].setdefault(folder, {})[entry] = [
+                "f",
+                content(where, info.st_size, budget),
+            ]
+    save(store, top, snapshot)
+
+
+# Windows' st_ctime is a file's creation time, which its owner can set back.
+CHANGE_TIME_KNOWN = sys.platform != "win32"
+
+
+def older_than(path: Path, moment: float) -> bool:
+    """Whether an entry last changed before `moment` (its inode's change time, which no worker
+    can set back): it was there before Chief of Staff first handed the folder out. Unknown on
+    Windows (CHANGE_TIME_KNOWN): never then."""
+    if not CHANGE_TIME_KNOWN:
+        return False
+    try:
+        return os.lstat(path).st_ctime < moment
+    except OSError:
+        return False
 
 
 def epoch(iso: str) -> float:

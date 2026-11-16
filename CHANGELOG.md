@@ -21,18 +21,21 @@
   keeps what those files held when it gave the worker its folder, in its own data, and reads
   them again before each start and each turn, without running git there. A worker whose
   settings changed starts no turn until you click **Use these settings** on the line its
-  timeline shows (news for it waits too). Workers' edits to those files are refused, whatever
-  their case.
+  timeline shows (news for it waits too), or until they are as they were again; it shows
+  *waiting for you*, and the Router hears it once. One stopped mid-task goes on with it after
+  the click. Workers' edits to those files are refused, whatever their case. Your own session
+  taken up from a terminal waits the same way. Agent homes (`~/.codex`, `~/.claude`) are never
+  read as a folder's settings.
 
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create
   `.git/commondir` in your repository, sending your git to a configuration of its own whose
   hooks or file-system monitor then ran as you, outside any sandbox; or a `.git/hooks` folder
   where your repository had none, `config.worktree`, `info/attributes`, `shallow` or object
-  alternates. Chief of Staff now denies such paths while they don't exist (macOS); on Linux it
-  makes a worktree's repository `.git` read-only but for what commits write, and puts empty
-  placeholders where they change nothing. On Linux, a worker working in your own checkout itself
-  can still create `.git/commondir` and `.git/shallow` there.
+  alternates. Chief of Staff now denies such paths while they don't exist (macOS). Linux's
+  sandbox can't hold them, so there Chief of Staff looks for them after each of the worker's
+  turns, as it stops or closes, and before it runs git itself: one it finds is moved aside
+  (never deleted) and the worker waits for you, with **Use it anyway** and **Keep it removed**.
 
 ## 0.1.45 (2026-11-14)
 

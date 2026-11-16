@@ -326,16 +326,28 @@ edited your local settings), the worker starts no turn there and its timeline sa
 changed: "Copilot settings in this folder changed (added .mcp.json); Chief of Staff won't start
 the worker there until you say to use them." If the change is yours or you trust it, click
 **Use these settings** on that line: the worker goes on with what waited for it, and one the
-change stopped mid-task goes on with that task too. Workers don't edit those files. The first time workers use
-one of your checkouts, their timeline names the settings there they use.
+change stopped mid-task goes on with that task too. If you undo the change instead (delete what
+the worker wrote), the worker goes on by itself once it's as it was (or click the button). A
+worker waiting for this shows *waiting for you* and the Router hears it once. Settings too many
+or too large to check ("can't be checked") wait the same way, and the button lets the worker
+use them unchecked until they can be checked again. Workers don't edit those files, but a
+merge, a rebase or checking out a PR in their own worktree can bring new ones: the same line
+then asks you. The first time workers use one of your checkouts (or a folder of it no worker
+had before), their timeline names the settings there they use. Agent homes (`~/.codex`,
+`~/.claude`, `~/.copilot`) are yours and are never read as a folder's settings.
 
 With the **sandbox** on (Settings; always for workers that read Slack), workers' shell commands can write only to their
 workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
-`HEAD` and index, nor files git would read in their place, such as `.git/commondir`; on Linux,
-for a worktree, only what its commits write), never see your
+`HEAD` and index, nor files git would read in their place, such as `.git/commondir`), never see your
 GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot
 sandbox ca trust` once so `gh` works inside the sandbox; Settings tells you when it is needed.
 The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed.
+On Linux the sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for
+those git files after each of a worker's turns (and before it runs git itself): one the worker
+made is moved aside into Chief of Staff's data folder, never deleted, and the worker waits with
+"… appeared in a .git folder this worker can write; git would read it as configuration. Moved
+aside: the worker waits for you." **Use it anyway** puts it back (say, it was your own
+`git submodule update`); **Keep it removed** leaves it aside. Either way the worker goes on.
 
 Workers can start servers on localhost (a test's server, Gradle's daemon); the token files of
 your own Gradle daemons and Jupyter servers stay unreadable to them (their folders,
