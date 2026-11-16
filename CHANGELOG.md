@@ -159,15 +159,21 @@ questions stay listed (QA round on 0.1.45).
   for another one when it was looked for again; `ps -ww` never cuts.
 - **No sandboxed worker can change Chief of Staff's own code.** Its environment, wherever `uvx`
   or `uv tool install` put it (`uvx` keeps it in uv's cache, which Copilot's sandbox opens
-  read-write to commands in a Python project), the Python it runs on, its `chiefofstaff`
-  command and the entries of uv's cache its packages come from are read-only to every sandboxed
-  worker. A worker could otherwise have changed what Chief of Staff runs at its next start.
+  read-write to commands in a Python project), the Python it runs on, every folder it imports
+  from, its `chiefofstaff` command, the `pyproject.toml` and `uv.lock` of a source checkout it
+  runs from, and the entries of uv's cache its packages come from are read-only to every
+  sandboxed worker. A worker could otherwise have changed what Chief of Staff runs at its next
+  start. They are looked up once, when Copilot connects, off the event loop. Other environments
+  uv makes (`uvx` of another tool, `uv run --with`) still work in a sandboxed worker. A worker
+  you asked to work in place in Chief of Staff's own checkout may still change what is in it.
 - **Workers that read Slack get your package caches read-only, and none of your registry
   credentials.** Copilot's sandbox opened npm's, pip's, uv's, Go's, Cargo's, Gradle's, Maven's
   and other caches read-write to them too, and let them read `~/.npmrc`, `~/.m2/settings.xml`,
   `~/.gradle/gradle.properties` and the like. Now those caches are read-only to them (one that
   does not exist yet stays closed), and those files, `~/.pypirc`, Cargo's credentials, pip's and
-  uv's configuration, `~/.netrc` and Docker's `config.json` are unreadable.
+  uv's configuration, `~/.netrc`, Docker's `config.json`, `~/.git-credentials`, `gh`'s
+  `hosts.yml`, Bundler's, RubyGems', Go's, AWS's, Azure's, gcloud's and Kubernetes'
+  configuration and npm's global `npmrc` are unreadable.
 - **SECURITY.md says what holds today**: with the sandbox on, workers on your own tasks can write
   your package caches (Copilot's dev-tool access), so they could plant code your own builds later
   run. 0.1.47 gives them caches of their own.

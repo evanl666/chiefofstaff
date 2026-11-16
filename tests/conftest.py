@@ -474,6 +474,16 @@ def plenty_of_memory(monkeypatch):
     monkeypatch.setattr(machine, "_cached", (0.0, None))
 
 
+@pytest.fixture(autouse=True)
+def own_code_unscanned(request, monkeypatch):
+    """Chief of Staff's own code is not looked up in this machine's uv cache at each connect
+    (tests of it pass `own_code` explicitly, or mark themselves `own_code`)."""
+    if request.node.get_closest_marker("own_code") is None:
+        from chiefofstaff import runtime
+
+        monkeypatch.setattr(runtime, "own_code", list)
+
+
 @pytest.fixture
 def harness(tmp_path):
     return Harness(tmp_path / "data")

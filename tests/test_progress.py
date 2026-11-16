@@ -3,6 +3,7 @@ plus the failures a real setup throws at sessions (plugin hooks, efforts, late r
 
 import asyncio
 import json
+import os
 import subprocess
 import time
 from dataclasses import replace
@@ -864,8 +865,10 @@ def test_chiefs_own_code_includes_where_uv_made_it(tmp_path, monkeypatch):
     archive = tmp_path / "cache" / "uv" / "archive-v0"
     env = archive / "ENV"  # What uvx made for this run.
     site = Path(workspaces.sysconfig_purelib(str(env)))
-    for name in ("chiefofstaff", "chiefofstaff-1.0.dist-info", "fastapi-0.1.dist-info"):
+    for name in ("chiefofstaff", "chiefofstaff-1.0.dist-info", "fastapi", "fastapi-0.1.dist-info"):
         (site / name).mkdir(parents=True)
+    (site / "fastapi" / "__init__.py").write_text("fastapi")
+    (site / "fastapi-0.1.dist-info" / "RECORD").write_text("fastapi/__init__.py,sha256=x,7\n")
     (env / "pyvenv.cfg").write_text("")
     for entry, name in [
         ("WHEEL", "chiefofstaff-1.0.dist-info"),
@@ -874,31 +877,124 @@ def test_chiefs_own_code_includes_where_uv_made_it(tmp_path, monkeypatch):
         ("NOPE", "requests-2.0.dist-info"),
     ]:
         (archive / entry / name).mkdir(parents=True)
-    other = archive / "OTHER"  # Another tool's environment, with the same fastapi.
-    (Path(workspaces.sysconfig_purelib(str(other))) / "fastapi-0.1.dist-info").mkdir(parents=True)
+    other = archive / "OTHER"  # Another tool's environment, with the same fastapi copied in.
+    other_site = Path(workspaces.sysconfig_purelib(str(other)))
+    (other_site / "fastapi-0.1.dist-info").mkdir(parents=True)
+    (other_site / "fastapi").mkdir()
+    (other_site / "fastapi" / "__init__.py").write_text("fastapi")
     (other / "pyvenv.cfg").write_text("")
-    link = tmp_path / "cache" / "uv" / "environments-v2" / "spec" / "env"
+    shared = archive / "SHARED"  # One whose fastapi is the same file (a hard link, uv on Linux).
+    shared_site = Path(workspaces.sysconfig_purelib(str(shared)))
+    (shared_site / "fastapi-0.1.dist-info").mkdir(parents=True)
+    (shared_site / "fastapi").mkdir()
+    (shared_site / "fastapi" / "__init__.py").hardlink_to(site / "fastapi" / "__init__.py")
+    (shared / "pyvenv.cfg").write_text("")
+    link = tmp_path / "cache" / "uv" / "environments-v2" / "python" / "spec"
     link.parent.mkdir(parents=True)
     link.symlink_to(env)
-    (tmp_path / "cache" / "uv" / "environments-v2" / "elsewhere").mkdir()
     command = tmp_path / "bin" / "chiefofstaff"
     command.parent.mkdir()
     command.symlink_to(site / "chiefofstaff")
     python = tmp_path / "python"
     python.mkdir()
 
-    found = workspaces.own_code(str(env), str(python), site / "chiefofstaff", [str(command)])
+    found = workspaces.own_code(
+        str(env), str(python), site / "chiefofstaff", [str(command)], paths=[str(site)]
+    )
     kept_paths = [env, python, site / "chiefofstaff", command, archive / "WHEEL", archive / "DEP"]
-    for kept in (*kept_paths, other, link.parent):
+    for kept in (*kept_paths, shared):
         assert str(kept) in found, kept
-    for left in ("NEWER", "NOPE"):
-        assert str(archive / left) not in found, "another version, another package: not ours"
-    assert str(link.parent.parent / "elsewhere") not in found
-    assert not workspaces.own_code(str(tmp_path / "gone"), "/", tmp_path / "gone", []), (
+    for left in ("NEWER", "NOPE", "OTHER"):
+        assert str(archive / left) not in found, (
+            f"{left}: not where Chief of Staff's code comes from"
+        )
+    assert str(link.parent) not in found, "every environment uv makes on that Python goes there"
+    assert not workspaces.own_code(str(tmp_path / "gone"), "/", tmp_path / "gone", [], paths=[]), (
         "nothing that does not exist, never the root"
     )
 
 
+def test_chiefs_own_code_from_a_checkout_includes_what_it_imports_and_builds_from(tmp_path):
+    from chiefofstaff import workspaces
+
+    checkout = tmp_path / "work-buddy"
+    package = checkout / "src" / "chiefofstaff"
+    package.mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text('[project]\nname = "chiefofstaff"\n')
+    (checkout / "uv.lock").write_text("")
+    venv = checkout / ".venv"
+    site = Path(workspaces.sysconfig_purelib(str(venv)))
+    site.mkdir(parents=True)
+    elsewhere = tmp_path / "user-site"
+    elsewhere.mkdir()
+    linked = tmp_path / "linked-src"
+    linked.symlink_to(checkout / "src")
+    found = workspaces.own_code(
+        str(venv), str(tmp_path), package, [], paths=["", str(site), str(linked), str(elsewhere)]
+    )
+    for kept in (
+        checkout / "src",
+        site,
+        elsewhere,
+        checkout / "pyproject.toml",
+        checkout / "uv.lock",
+    ):
+        assert str(kept) in found, kept
+    assert "" not in found and str(linked) not in found, "real paths only"
+
+
+async def test_chiefs_own_code_is_found_once_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    from chiefofstaff import runtime as runtime_module
+
+    calls = []
+
+    def counted():
+        calls.append(threading.current_thread() is threading.main_thread())
+        return [str(tmp_path / "chief")]
+
+    monkeypatch.setattr(runtime_module, "own_code", counted)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    for _ in range(3):
+        assert (
+            str(tmp_path / "chief")
+            in runtime.sandbox_policy(harness.store.session(worker)).readonly
+        )
+    assert calls == [False], "once, in a thread"
+
+
+async def test_a_worker_working_in_place_in_chiefs_own_checkout_can_change_it(
+    tmp_path, monkeypatch
+):
+    checkout = tmp_path / "work-buddy"
+    (checkout / ".git").mkdir(parents=True)
+    package, venv = checkout / "src" / "chiefofstaff", checkout / ".venv"
+    package.mkdir(parents=True)
+    venv.mkdir()
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    runtime.own_code_paths = [str(package), str(venv), str(tmp_path / "python")]
+    in_place = await spawn(runtime, harness.router_id, "Fix it here")
+    isolated = await spawn(runtime, harness.router_id, "Fix it in a worktree")
+    shared = {"project": str(checkout), "path": str(checkout), "branch": "", "shared": True,
+              "git_dir": str(checkout / ".git"), "in_place": True}  # fmt: skip
+    harness.store.execute(
+        "UPDATE sessions SET repos=?, cwd=? WHERE id=?",
+        (json.dumps([shared]), str(checkout), in_place),
+    )
+    policy = runtime.sandbox_policy(harness.store.session(in_place))
+    assert str(package) not in policy.readonly and str(venv) not in policy.readonly, (
+        "the owner asked for it to work there"
+    )
+    assert str(tmp_path / "python") in policy.readonly, "what is not in its checkout stays held"
+    policy = runtime.sandbox_policy(harness.store.session(isolated))
+    assert str(package) in policy.readonly and str(venv) in policy.readonly
+
+
+@pytest.mark.own_code
 async def test_chiefs_own_code_is_read_only_for_every_sandboxed_worker(tmp_path, monkeypatch):
     import sys
 
@@ -927,8 +1023,19 @@ async def test_workers_that_read_slack_get_the_owners_caches_read_only(tmp_path,
     home = tmp_path / "home"
     for name in (".npm/_cacache", ".cache/uv", ".m2/repository", "Library/Caches/pip", "gh/caches"):
         (home / name).mkdir(parents=True)
-    for name in (".npmrc", ".m2/settings.xml", "gh/gradle.properties"):
+    secrets = (
+        ".npmrc", ".m2/settings.xml", "gh/gradle.properties", ".bundle/config", ".gemrc",
+        ".config/go/env", "Library/Application Support/go/env", ".git-credentials",
+        ".config/gh/hosts.yml", ".aws/credentials", ".kube/config", "node/etc/npmrc",
+    )  # fmt: skip
+    for name in secrets:
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
         (home / name).write_text("token")
+    (home / ".azure").mkdir()
+    (home / "node" / "bin").mkdir()
+    (home / "node" / "bin" / "node").write_text("")
+    (home / "node" / "bin" / "node").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{home / 'node' / 'bin'}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setenv("GRADLE_USER_HOME", str(home / "gh"))
     monkeypatch.setattr(sys, "platform", "darwin")
@@ -944,7 +1051,7 @@ async def test_workers_that_read_slack_get_the_owners_caches_read_only(tmp_path,
     for cache in (".npm", ".cache/uv", ".m2/repository", "Library/Caches/pip", "gh/caches"):
         assert str(home / cache) in policy.readonly, cache
         assert not any(str(home / cache).startswith(path) for path in policy.readwrite), cache
-    for secret in (".npmrc", ".m2/settings.xml", "gh/gradle.properties"):
+    for secret in (*secrets, ".azure"):
         assert str(home / secret) in policy.denied, secret
     assert str(home / ".pypirc") not in policy.denied, "no folder left where a file belongs"
     assert str(home / ".gradle/caches") in policy.denied, "nor a cache made where there is none"

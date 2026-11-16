@@ -123,6 +123,7 @@ from .workspaces import (
     registry_secrets,
     service_secrets,
     shared_caches,
+    too_broad,
 )
 
 logger = logging.getLogger(__name__)
@@ -589,6 +590,8 @@ class Runtime:
                 # their loader was killed, or this app stopped abruptly) hold sessions open. Only
                 # those still this data directory's to stop: never an original's processes that
                 # a copy of its data directory names (backend.copilot_orphans).
+                if self.own_code_paths is None:
+                    self.own_code_paths = await asyncio.to_thread(own_code)
                 records = self.recorded_processes()
                 directory = self.store.directory
                 if started := await asyncio.to_thread(copilot_orphans, records, directory):
@@ -1718,7 +1721,8 @@ class Runtime:
         checkouts = self.workspaces.checkouts(row)
         repositories = git_dirs(checkouts)
         settings = self.store.settings()
-        writable = [*self.workspaces.writes(row), *repositories, *settings.sandbox_writable]
+        writes = self.workspaces.writes(row)
+        writable = [*writes, *repositories, *settings.sandbox_writable]
         if settings.shared_caches and not row["slack"]:
             # Packages its installs need are what the owner's installs already have (checked
             # against lockfiles before use). Not for workers that read Slack.
@@ -1730,7 +1734,7 @@ class Runtime:
         readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
         if agent := os.environ.get("SSH_AUTH_SOCK"):
             writable.append(agent)  # Signing through the agent; key files stay unreadable.
-        readonly += self.own_code()
+        readonly += self.own_code(writes)
         closed: list[str] = []
         if row["slack"]:
             closed = self.slack_closed(readonly)
@@ -1746,12 +1750,19 @@ class Runtime:
             denied=tuple(dict.fromkeys([*service_secrets(), *closed])),
         )
 
-    def own_code(self) -> list[str]:
+    def own_code(self, writes: list[str]) -> list[str]:
         """Chief of Staff's own code and Python, read-only for every sandboxed worker
-        (workspaces.own_code): looked up once a run, in uv's cache too."""
+        (workspaces.own_code; found at connect, here only if that failed), but for what is in
+        a folder the worker writes: Chief of Staff's own checkout, which the owner asked it to
+        change in place."""
         if self.own_code_paths is None:
             self.own_code_paths = own_code()
-        return self.own_code_paths
+        theirs = [os.path.realpath(path) for path in writes if not too_broad(path)]
+        return [
+            path
+            for path in self.own_code_paths
+            if not any(Path(os.path.realpath(path)).is_relative_to(folder) for folder in theirs)
+        ]
 
     @staticmethod
     def slack_closed(readonly: list[str]) -> list[str]:

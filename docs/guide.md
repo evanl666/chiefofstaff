@@ -340,8 +340,10 @@ Playwright's browsers), and Chief of Staff adds npm's and Yarn's stores: a worke
 tasks could change what your later builds run. 0.1.47 gives workers caches of their own, with
 yours read-only beneath them. Workers that read Slack already get your caches read-only, and
 can't read the registry and credential files build tools use (`~/.npmrc`,
-`~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.pypirc`, `~/.netrc`…). No worker can
-change Chief of Staff's own code or the Python it runs on. Before a worker's worktree is made,
+`~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.pypirc`, `~/.netrc`,
+`~/.git-credentials`, `~/.aws/credentials`…). No worker can change Chief of Staff's own code or
+the Python it runs on, unless you asked it to work in place in Chief of Staff's own checkout.
+Before a worker's worktree is made,
 only origin's default branch is fetched, once for workers that start together.
 
 Hooks of your Copilot plugins run in the sandbox too. One that writes elsewhere (a journal, say)

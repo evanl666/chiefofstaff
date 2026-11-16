@@ -1980,7 +1980,10 @@ REGISTRY_SECRETS = (
     "Library/Application Support/pip/pip.conf", ".config/uv/uv.toml",
     ".config/pypoetry/auth.toml", "Library/Application Support/pypoetry/auth.toml", ".netrc",
     ".docker/config.json", ".gem/credentials", ".nuget/NuGet/NuGet.Config",
-    ".config/NuGet/NuGet.Config",
+    ".config/NuGet/NuGet.Config", ".bundle/config", ".gemrc", ".config/go/env",
+    "Library/Application Support/go/env", ".git-credentials", ".config/git/credentials",
+    ".config/gh/hosts.yml", ".aws/credentials", ".aws/config", ".azure", ".kube/config",
+    ".config/gcloud",
 )  # fmt: skip
 # The same, where an environment variable puts them: the variable, and the file under it (none:
 # the variable names the file itself).
@@ -1989,6 +1992,10 @@ MOVED_SECRETS = {
     "UV_CONFIG_FILE": (), "NETRC": (), "DOCKER_CONFIG": ("config.json",),
     "GRADLE_USER_HOME": ("gradle.properties", "init.d"),
     "CARGO_HOME": ("credentials", "credentials.toml"), "POETRY_CONFIG_DIR": ("auth.toml",),
+    "NPM_CONFIG_GLOBALCONFIG": (), "npm_config_globalconfig": (), "BUNDLE_USER_CONFIG": (),
+    "GEMRC": (), "GOENV": (), "GH_CONFIG_DIR": ("hosts.yml",), "AWS_SHARED_CREDENTIALS_FILE": (),
+    "AWS_CONFIG_FILE": (), "AZURE_CONFIG_DIR": (), "KUBECONFIG": (),
+    "CLOUDSDK_CONFIG": (),
 }  # fmt: skip
 
 
@@ -1996,9 +2003,9 @@ def named(home: Path, names: Sequence[str], moved: dict[str, tuple[str, ...]]) -
     """These paths in home, and where the environment moved them."""
     found = [home / name for name in names]
     for variable, parts in moved.items():
-        value = os.environ.get(variable, "").strip()
-        if value and (base := Path(value).expanduser()).is_absolute():
-            found += [base / part for part in parts] if parts else [base]
+        for value in os.environ.get(variable, "").split(os.pathsep):  # KUBECONFIG: a list.
+            if value.strip() and (base := Path(value.strip()).expanduser()).is_absolute():
+                found += [base / part for part in parts] if parts else [base]
     return list(dict.fromkeys(found))
 
 
@@ -2026,12 +2033,17 @@ def held_caches(home: Path | None = None) -> tuple[list[str], list[str]]:
 
 
 def registry_secrets(home: Path | None = None) -> list[str]:
-    """The owner's registry and credential files that exist, to deny a worker that reads Slack.
-    Not one that does not exist: the sandbox would leave an empty folder in its place, which
-    breaks the tool that later looks for a file there."""
+    """The owner's registry and credential files that exist, to deny a worker that reads Slack:
+    in home, where the environment puts them, and npm's global configuration (beside the node
+    on PATH). Not one that does not exist: the sandbox would leave an empty folder in its place,
+    which breaks the tool that later looks for a file there."""
+    found = named(home or Path.home(), REGISTRY_SECRETS, MOVED_SECRETS)
+    if node := shutil.which("node"):
+        for binary in (node, os.path.realpath(node)):
+            found.append(Path(binary).parent.parent / "etc" / "npmrc")
     return [
         str(path)
-        for path in named(home or Path.home(), REGISTRY_SECRETS, MOVED_SECRETS)
+        for path in dict.fromkeys(found)
         if os.path.lexists(path) and not too_broad(str(path))
     ]
 
@@ -2041,12 +2053,18 @@ def own_code(
     base: str = sys.base_prefix,
     package: Path = Path(__file__).parent,
     launchers: Sequence[str] | None = None,
+    paths: Sequence[str] | None = None,
 ) -> list[str]:
     """Chief of Staff's own code and the Python it runs on, read-only for every sandboxed
     worker, so that no worker's command changes what Chief of Staff (unsandboxed, with the
-    owner's tokens) runs: its environment and Python, its package, its command (a uv tool's
-    link to it, as found on PATH and as started), and where in uv's cache they come from
-    (uv_sources)."""
+    owner's tokens) runs: its environment and Python, its package, every folder it imports from
+    (sys.path, as real paths), its command (a uv tool's link to it, as found on PATH and as
+    started), what a source checkout it runs from is built from (pyproject.toml, uv.lock), and
+    where in uv's cache its packages come from (uv_sources). Not uv's link to uvx's environment
+    (environments-v2/<python>/<hash>): the sandbox resolves links, so holding it holds its
+    environment, which already is, and holding its folder would hold every environment uv makes
+    for that Python (uvx, uv run --with). Slow on a big uv cache: looked up once a run, off the
+    event loop (Runtime.connect)."""
     if launchers is None:
         started = sys.argv[0] if sys.argv and Path(sys.argv[0]).is_absolute() else ""
         launchers = [shutil.which("chiefofstaff") or "", started]
@@ -2054,6 +2072,8 @@ def own_code(
     for launcher in launchers:
         if launcher:
             found += [launcher, os.path.realpath(launcher)]
+    found += [os.path.realpath(path) for path in (sys.path if paths is None else paths) if path]
+    found += built_from(package)
     found += uv_sources(prefix)
     return [
         path
@@ -2062,44 +2082,72 @@ def own_code(
     ]
 
 
+def built_from(package: Path) -> list[str]:
+    """The project files of the source checkout Chief of Staff runs from (an editable install,
+    uv run), which uv syncs its environment from: none for an installed package."""
+    for folder in (package.parent, package.parent.parent):
+        project = folder / "pyproject.toml"
+        with suppress(OSError, UnicodeDecodeError):
+            if re.search(r'^name\s*=\s*"chiefofstaff"', project.read_text(), re.MULTILINE):
+                return [str(project), str(folder / "uv.lock")]
+    return []
+
+
 def uv_sources(prefix: str) -> list[str]:
-    """Where in uv's cache Chief of Staff's environment and packages come from: uvx's
-    environment for this run (an entry of uv's archive) and the link uv follows to reuse it next
-    time, and every archive entry holding one of the distributions installed in it: the unpacked
-    wheels uv links into new environments (on Linux by hard links, so they are the same files as
-    this environment's), and other environments with the same files."""
+    """Where in uv's cache Chief of Staff's packages come from, which uv links into a new
+    environment when it makes Chief of Staff's again: the unpacked wheels of the distributions
+    installed in its environment (by name and version), and, where uv installed them by hard
+    links (Linux), other environments holding the same files, which a write through them would
+    change in Chief of Staff's too."""
     site = Path(sysconfig_purelib(prefix))
     try:
         installed = {entry.name for entry in site.iterdir() if entry.name.endswith(".dist-info")}
     except OSError:
         return []
-    caches = {Path(part) for part in uv_caches(prefix)}
-    found: list[str] = []
+    linked = hard_links(site, installed)
     real = os.path.realpath(prefix)
-    for cache in caches:
-        for archive in sorted(cache.glob("archive-v*")):
+    found: list[str] = []
+    for cache in uv_caches(prefix):
+        for archive in sorted(Path(cache).glob("archive-v*")):
             with suppress(OSError):
                 for entry in os.scandir(archive):
-                    if entry.is_dir() and holds(Path(entry.path), installed):
-                        found.append(entry.path)
-        for link in cache.glob("environments-v*/*/*"):
-            if os.path.realpath(link) == real:
-                found.append(str(link.parent))
+                    folder = Path(entry.path)
+                    if entry.is_dir() and str(folder.resolve()) != real:
+                        found += [entry.path] if holds(folder, installed, linked) else []
     return found
 
 
-def holds(entry: Path, installed: set[str]) -> bool:
-    """Whether an entry of uv's archive holds one of these distributions: an unpacked wheel
-    (its .dist-info at the top) or an environment (in its site-packages)."""
+def hard_links(site: Path, installed: set[str]) -> dict[str, tuple[str, tuple[int, int]]]:
+    """For each distribution installed by hard links: one of its files (as its RECORD names
+    it, from site-packages) and that file's identity."""
+    found = {}
+    for name in installed:
+        with suppress(OSError, UnicodeDecodeError):
+            for line in (site / name / "RECORD").read_text().splitlines():
+                relative = line.split(",", 1)[0]
+                if not relative or relative.startswith(name):
+                    continue
+                status = (site / relative).stat()
+                if status.st_nlink > 1:
+                    found[name] = (relative, (status.st_dev, status.st_ino))
+                break
+    return found
+
+
+def holds(entry: Path, installed: set[str], linked: dict[str, tuple[str, tuple[int, int]]]) -> bool:
+    """Whether an entry of uv's archive is an unpacked wheel of one of these distributions (its
+    .dist-info at the top), or an environment sharing files with them."""
     with suppress(OSError):
         names = {child.name for child in entry.iterdir()}
         if names & installed:
             return True
-        if "pyvenv.cfg" in names:
-            return any(
-                {child.name for child in site.iterdir()} & installed
-                for site in entry.glob("lib*/python*/site-packages")
-            )
+        if linked and "pyvenv.cfg" in names:
+            for site in entry.glob("lib*/python*/site-packages"):
+                for relative, identity in linked.values():
+                    with suppress(OSError):
+                        status = (site / relative).stat()
+                        if (status.st_dev, status.st_ino) == identity:
+                            return True
     return False
 
 
