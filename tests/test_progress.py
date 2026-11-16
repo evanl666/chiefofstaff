@@ -1064,6 +1064,33 @@ async def test_what_workers_caches_need_to_know_is_found_at_connect_whatever_the
     )
 
 
+async def test_a_worker_never_waits_for_the_java_truststore(tmp_path, monkeypatch):
+    """The Java truststore (keytool, about a second) was built before the first sandboxed
+    worker could open. It is built in the background: the worker's script uses it once it is
+    there, in a folder its sandbox reads."""
+    import threading
+
+    from chiefofstaff import caches
+
+    release = threading.Event()
+
+    def slow(tier, copilot_home):
+        release.wait(10)
+
+    monkeypatch.setattr(caches, "authority_stamp", lambda copilot_home: 7)
+    monkeypatch.setattr(caches, "truststore", slow)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        worker = await asyncio.wait_for(spawn(runtime, harness.router_id, "Build"), 5)
+        found = runtime.cache_plan(harness.store.session(worker))
+        store = caches.truststore_file(runtime.cache_tier, 7)
+        assert f"[ -s {store} ]" in found.text
+        assert str(store.parent) in found.readonly
+    finally:
+        release.set()
+
+
 MOVED = (
     *("UV_CACHE_DIR", "XDG_CACHE_HOME", "GRADLE_USER_HOME", "CARGO_HOME", "GOPATH"),
     *("NPM_CONFIG_USERCONFIG", "npm_config_userconfig", "npm_config_cache", "PIP_CONFIG_FILE"),

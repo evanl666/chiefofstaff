@@ -959,13 +959,31 @@ def script(
     return "\n".join(lines) + "\n"
 
 
+JAVA = "java"  # Beside the tier, read-only to workers: their Java truststores.
+
+
+def truststore_file(tier: Path, stamp: int) -> Path:
+    """Where the truststore for the authority made at `stamp` (authority_stamp) is (once made:
+    workers' scripts use it when it is there)."""
+    return tier.parent / JAVA / f"truststore-{stamp}.p12"
+
+
+def java_folder(tier: Path) -> Path:
+    """The truststores' folder, made now: a worker's sandbox reads it from its start, before
+    its truststore is made in it."""
+    with open_folder(tier.parent / JAVA, tier.parent, create=True, mode=0o755) as folder:
+        return folder.path
+
+
 def truststore(tier: Path, copilot_home: Path) -> Path | None:
     """A Java truststore for workers: the JDK's own roots and the certificate authority Copilot
     keeps (`copilot sandbox ca create`), whose proxy answers for github.com in the sandbox
-    (where Gradle's distributions download from). Made once per authority; None without a
-    lasting one (Copilot then makes one for each command, which no truststore can follow)."""
+    (where Gradle's distributions download from). Made once per authority (about a second,
+    in the background); None without a lasting one (Copilot then makes one for each command,
+    which no truststore can follow)."""
     authority = copilot_home / "credential-proxy-ca" / "ca.pem"
-    if not authority.is_file():
+    stamp = authority_stamp(copilot_home)
+    if not stamp:
         return None
     java_home = os.environ.get("JAVA_HOME") or ""
     if not java_home and Path("/usr/libexec/java_home").exists():
@@ -977,11 +995,10 @@ def truststore(tier: Path, copilot_home: Path) -> Path | None:
     keytool = Path(java_home) / "bin" / "keytool"
     if not roots.is_file() or not keytool.is_file():
         return None
-    stamp = int(authority.stat().st_mtime)
     # Beside the tier, where no worker writes (read-only to them), not in it: keytool writes by
     # path, which must lead nowhere a worker chose.
-    name = f"truststore-{stamp}.p12"
-    with open_folder(tier.parent / "java", tier.parent, create=True, mode=0o755) as folder:
+    name = truststore_file(tier, stamp).name
+    with open_folder(tier.parent / JAVA, tier.parent, create=True, mode=0o755) as folder:
         if folder.lstat(name) is not None:
             return folder.path / name
         partial = folder.temporary_name(name)
@@ -1098,7 +1115,7 @@ def plan(
         readonly += unsecret([owner.maven_repository(), owner.go_modules()], owner.home)
         readonly += registry_config(owner)
         readonly += [str(source) for source, _ in owner_settings(own, owner)]
-        readonly += [str(truststore_path)] if truststore_path else []
+        readonly += [str(truststore_path.parent)] if truststore_path else []
     readwrite = [str(own), str(temporary)]
     # Nothing of the owner's is read through for a worker that reads Slack: it can't read it.
     text = script(

@@ -498,6 +498,7 @@ class Runtime:
         self.cache_scripts = store.directory / caches.SCRIPTS
         self.cache_facts: dict[str, Any] = {}
         self.cache_facts_job: asyncio.Task | None = None
+        self.truststore_job: asyncio.Task | None = None
         # Whether a worker's folders hold a Rust project (rustup's toolchains), per worker,
         # looked at once as it opens (ready_caches).
         self.cache_rust: dict[str, bool] = {}
@@ -1807,11 +1808,29 @@ class Runtime:
             "node_headers": await asyncio.to_thread(caches.node_headers),
             "ca": await asyncio.to_thread(caches.authority_stamp, copilot_home()),
         }
-        if found["ca"]:
-            found["truststore"] = await asyncio.to_thread(
-                caches.truststore, self.cache_tier, copilot_home()
-            )
         self.cache_facts.update(found)
+        await self.new_truststore(found["ca"])
+
+    async def new_truststore(self, authority: int):
+        """Workers' Java truststore for Copilot's authority made at `authority`: named now (in
+        their scripts, which use it once it is there) and made in the background (keytool takes
+        about a second), so that no worker waits for it."""
+        self.cache_facts["truststore"] = None
+        if not authority:
+            return
+        try:
+            await asyncio.to_thread(caches.java_folder, self.cache_tier)
+        except OSError as error:
+            logger.warning("workers' Java truststore: %s", error)
+            return
+        self.cache_facts["truststore"] = caches.truststore_file(self.cache_tier, authority)
+        self.truststore_job = asyncio.create_task(self.make_truststore())
+
+    async def make_truststore(self):
+        try:
+            await asyncio.to_thread(caches.truststore, self.cache_tier, copilot_home())
+        except Exception as error:  # Java's tools go without it.
+            logger.warning("workers' Java truststore: %s", error)
 
     async def ready_caches(self, row: dict):
         """Before a worker's session opens: the facts its caches need (waited for: they take
@@ -1831,9 +1850,7 @@ class Runtime:
         authority = await asyncio.to_thread(caches.authority_stamp, copilot_home())
         if authority != self.cache_facts.get("ca"):
             self.cache_facts["ca"] = authority
-            self.cache_facts["truststore"] = await asyncio.to_thread(
-                caches.truststore, self.cache_tier, copilot_home()
-            )
+            await self.new_truststore(authority)
         self.cache_rust[row["id"]] = await asyncio.to_thread(
             caches.rust_project, self.project_folders(row)
         )
