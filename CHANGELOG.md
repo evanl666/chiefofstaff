@@ -187,7 +187,8 @@ questions stay listed (QA round on 0.1.45).
   `~/.m2/settings.xml`, pip's, uv's and Go's configuration…), all read-only. Nothing in your home
   is writable to a worker but workers' caches; the other caches Copilot opened (deno's,
   node-gyp's, Electron's, virtualenv's, NuGet's, ccache's, sccache's, gh's…) are workers' own
-  too. Every tool measured works as before, as fast.
+  too, and so is uv's tool folder, so `uvx` works in the sandbox (it could not write yours).
+  Every tool measured works as before, as fast.
 - **Sandboxed workers run quick read-only commands together.** Each command starts in about
   0.3 s in Copilot's sandbox (its credential proxy starts anew for each); they are asked to join
   quick checks in one call (`git status --short && git log -3 --oneline && ls`). Measured: a

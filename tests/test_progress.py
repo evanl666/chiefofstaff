@@ -938,7 +938,13 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
             if Path(path).is_relative_to(home):
                 assert any(Path(path).is_relative_to(mine) for mine in theirs), (slack, path)
         text = own.text
-        for variable in ("XDG_CACHE_HOME", "DENO_DIR", "npm_config_devdir", "CCACHE_DIR"):
+        for variable in (
+            "XDG_CACHE_HOME",
+            "DENO_DIR",
+            "npm_config_devdir",
+            "CCACHE_DIR",
+            "UV_TOOL_DIR",
+        ):
             assert f"export {variable}={own.tier}/" in text or f" {variable}={own.tier}/" in text, (
                 variable
             )

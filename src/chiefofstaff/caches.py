@@ -585,6 +585,9 @@ def script(
         f"export YARN_GLOBAL_FOLDER={q(str(t / 'yarn-berry'))}",
         f"export BUN_INSTALL_CACHE_DIR={q(str(t / 'bun'))}",
         f"export PIP_CACHE_DIR={q(str(t / 'pip'))} UV_CACHE_DIR={q(str(t / 'uv'))}",
+        # uvx and `uv tool` work in uv's tool folder (the owner's: read-only, its tools run).
+        f"export UV_TOOL_DIR={q(str(t / 'uv-tools'))}"
+        f" UV_TOOL_BIN_DIR={q(str(t / 'uv-tools' / 'bin'))}",
         f"export POETRY_CACHE_DIR={q(str(t / 'poetry'))} POETRY_VIRTUALENVS_IN_PROJECT=true",
         f"export PRE_COMMIT_HOME={q(str(t / 'pre-commit'))} COREPACK_HOME={q(str(t / 'corepack'))}",
         f"export CARGO_HOME={q(str(t / 'cargo'))}",
