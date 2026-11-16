@@ -32,6 +32,7 @@ from copilot import define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
 
+from chiefofstaff import settings_guard
 from chiefofstaff.backend import (
     SandboxPolicy,
     copilot_backend,
@@ -1110,11 +1111,16 @@ async def test_codex_settings_a_worker_wrote_in_its_folder_never_load(tmp_path, 
         asked.append(request.full_command_text)
         return PermissionDecisionApproveOnce()
 
-    options = {
-        "on_permission_request": check,
-        "folders": [str(wt)],
-        "bases": {str(wt): base},
-    }
+    # What Chief of Staff kept of its settings when it handed the folder out (settings_guard);
+    # Runtime.codex_settings says which folders now differ.
+    kept = settings_guard.scan(wt, wt)
+    assert kept, base
+
+    async def changed():
+        found = settings_guard.changes(settings_guard.scan(wt, wt), kept)
+        return sorted({str(wt / settings_guard.split_setting(path)[0]) for _, path in found})
+
+    options = {"on_permission_request": check, "folders": [str(wt)], "settings_changed": changed}
     codex = CodexBackend(shutil.which("codex") or "codex")
     codex.needs_sign_in = False
     codex.created = []

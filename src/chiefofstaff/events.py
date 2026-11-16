@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from . import prompts, receipts, threads
-from .backend import running_background, stop_background
+from .backend import COPILOT_AGENT, running_background, stop_background
 from .delivery import digest
 from .envelope import from_owner, news_tasks, tasks_named, wrap
 from .policy import owners_checkout, permission_denial, settings_write, written_file
@@ -474,6 +474,10 @@ class Events:
             # Another agent's worker that may not run now (a change came as its turn began);
             # not one stopped already (its turn's start said late).
             self.runtime.background(self.runtime.stop_blocked(row["id"], why))
+        if row["role"] == WORKER and not stopped and self.runtime.agent(row["id"]) == COPILOT_AGENT:
+            # A turn Copilot started from its own queue (or any other): stopped at once if its
+            # folder's agent settings changed meanwhile (Runtime.settings_refusal).
+            self.runtime.background(self.runtime.settings_backstop(row["id"]))
 
     def tool_start(self, row: dict, event: Any):
         data = event.data

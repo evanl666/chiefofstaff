@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import tempfile
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2726,22 +2727,30 @@ REPOSITORY_SETTINGS = (
     ".github/hooks",
     ".github/copilot",
     ".github/extensions",
+    ".github/agents",
     ".claude/settings.json",
     ".claude/settings.local.json",
+    ".claude/agents",
 )
+# Codex's own (a trusted folder's rules, MCP servers, environment, model, hooks).
+CODEX_SETTINGS = (".codex",)
+# Every agent's: what a folder's snapshot holds (settings_guard).
+AGENT_SETTINGS = REPOSITORY_SETTINGS + CODEX_SETTINGS
 SETTINGS_WRITE = (
-    "Copilot loads this file as the repository's own settings (hooks, MCP servers), outside "
-    "Chief of Staff's checks: workers don't write it. Leave that change to the owner."
+    "A coding agent loads this file as the repository's own settings (hooks, MCP servers, "
+    "agents), outside Chief of Staff's checks: workers don't write it. Leave that change to "
+    "the owner."
 )
 
 
 def repository_settings(path: str) -> bool:
-    """Whether a path is (or is in) one of the repository settings Copilot loads in a trusted
-    folder, by its path or where its links lead."""
+    """Whether a path is (or is in) one of the repository settings an agent loads in a trusted
+    folder, by its path or where its links lead; names compared as a case-insensitive file
+    system compares them (macOS's, Windows'), NFC or NFD."""
     for spelled in {path, os.path.realpath(path)}:
-        parts = Path(spelled).parts
-        for name in REPOSITORY_SETTINGS:
-            gated = tuple(name.split("/"))
+        parts = tuple(unicodedata.normalize("NFC", part).casefold() for part in Path(spelled).parts)
+        for name in AGENT_SETTINGS:
+            gated = tuple(name.casefold().split("/"))
             if any(parts[i : i + len(gated)] == gated for i in range(len(parts))):
                 return True
     return False

@@ -17,6 +17,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import agents
 from .bus import Bus
 from .models import (
+    AgentSettings,
     ArtifactHide,
     DraftDecision,
     FocusRequest,
@@ -617,6 +618,11 @@ def create_app(
     @app.post("/api/sessions/{session_id}/yolo")
     async def session_yolo(session_id: str, payload: SessionYolo):
         return await runtime.set_session_yolo(session_id, payload.mode)
+
+    @app.post("/api/sessions/{session_id}/agent-settings")
+    async def use_agent_settings(session_id: str, payload: AgentSettings):
+        """The owner's word only: no tool, Slack or Send to Chief reaches this."""
+        return {"ok": True, "said": await runtime.accept_settings(session_id, payload.digest)}
 
     @app.post("/api/sessions/{session_id}/open")
     async def open_folder(session_id: str, payload: OpenFolder):

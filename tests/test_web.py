@@ -2,6 +2,7 @@ import asyncio
 import json
 import socket
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -318,6 +319,47 @@ def test_the_owner_requests_changes_and_sees_where_a_message_stands(app_client):
     refused = app_client.post(f"/api/sessions/{worker}/follow-retry",
                               json={"key": "github:acme/app#7"}, headers=ORIGIN)  # fmt: skip
     assert refused.status_code == 400, "a PR it does not follow"
+
+
+def test_the_owner_lets_a_worker_use_the_settings_in_its_folder(app_client):
+    """Only the owner's page says to use a worker's changed agent settings, as it was shown
+    them: a change since is refused."""
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+    result = app_client.portal.call(
+        lambda: call_tool(runtime, "spawn_worker", router, title="Docs", instructions="Write docs")
+    )
+    spawned = json.loads(result.text_result_for_llm)
+    worker, cwd = spawned["session_id"], Path(spawned["cwd"])
+    app_client.portal.call(
+        lambda: call_tool(runtime, "report", worker, status="done", summary="Docs written")
+    )
+    (cwd / ".mcp.json").write_text('{"mcpServers": {}}')
+    sent = len(app_client.fake.sessions[worker].sent)
+    posted = app_client.post(
+        f"/api/sessions/{worker}/messages", json={"text": "And a FAQ"}, headers=ORIGIN
+    )
+    assert posted.status_code == 200 and len(app_client.fake.sessions[worker].sent) == sent
+    shown = app_client.get(f"/api/sessions/{worker}/messages").json()
+    (line,) = [m for m in shown if m["meta"].get("agent_settings")]
+    assert line["meta"]["agent_settings"]["changes"] == "added .mcp.json"
+    digest = line["meta"]["agent_settings"]["digest"]
+    path = f"/api/sessions/{worker}/agent-settings"
+    assert app_client.post(path, json={"digest": digest}).status_code == 403, "another page's"
+    forged = {**ORIGIN, "X-Chief-Key": "a guess"}
+    assert app_client.post(path, json={"digest": digest}, headers=forged).status_code == 401
+    (cwd / ".mcp.json").write_text('{"mcpServers": {"x": {"command": "sh"}}}')
+    stale = app_client.post(path, json={"digest": digest}, headers=ORIGIN)
+    assert stale.status_code == 400 and "changed again" in stale.json()["detail"]
+    (cwd / ".mcp.json").write_text('{"mcpServers": {}}')
+    used = app_client.post(path, json={"digest": digest}, headers=ORIGIN)
+    assert used.json() == {
+        "ok": True,
+        "said": "You let this worker use these settings (added .mcp.json).",
+    }
+    app_client.portal.call(lambda: asyncio.sleep(0.05))
+    assert "And a FAQ" in app_client.fake.sessions[worker].sent[-1]
 
 
 async def test_closing_the_bus_ends_every_event_stream():

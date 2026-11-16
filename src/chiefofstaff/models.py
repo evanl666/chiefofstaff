@@ -758,6 +758,13 @@ class SessionYolo(StrictModel):
     mode: Literal["", "on", "off"] = ""  # "" follows Settings.
 
 
+class AgentSettings(StrictModel):
+    """The owner's "Use these settings" on a worker's line about its folder's agent settings:
+    those it was shown (their digest)."""
+
+    digest: str = Field(min_length=1, max_length=64)
+
+
 class OpenFolder(StrictModel):
     app: Literal["finder", "vscode"]
 

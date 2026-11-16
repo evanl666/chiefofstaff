@@ -790,9 +790,12 @@ function renderMessage(original) {
     case "notice": {
       const open = meta.session_id ? () => select(meta.session_id) : undefined;
       // What Chief of Staff learned or changed on its own: where to see it in Settings.
+      // Agent settings in a worker's folder that changed: the owner's to use (theirs, say).
       const settings = meta.settings
         ? el("button", { type: "button", class: "link", text: "Open Settings", onclick: (event) => { event.stopPropagation(); openSettings(meta.settings); } })
-        : null;
+        : meta.agent_settings
+          ? useSettingsButton(message.session_id, meta.agent_settings)
+          : null;
       // A stop its task's card says more of (another agent's spend): that, in full, on hover.
       const title = meta.full ? `${meta.full}\n${clock(time)}` : clock(time);
       return el("div", { class: `line notice${open ? " link" : ""}${settings ? " wide" : ""}`, title, onclick: open }, el("span", { text: message.text }), settings);
@@ -803,6 +806,21 @@ function renderMessage(original) {
     default:
       return el("div", { class: "line", text: message.text, title: clock(time) });
   }
+}
+// "Use these settings": what changed is in its line; the worker goes on with them.
+function useSettingsButton(sessionId, { digest, changes }) {
+  const button = el("button", { type: "button", class: "link", text: "Use these settings", title: changes, onclick: async (event) => {
+    event.stopPropagation();
+    button.disabled = true;
+    try {
+      const { said } = await api(`/api/sessions/${sessionId}/agent-settings`, { method: "POST", body: { digest } });
+      toast(said);
+    } catch (error) {
+      toast(error.message, "error");
+      button.disabled = false;
+    }
+  } });
+  return button;
 }
 // The owner's message: long ones fold, images show small and open full size; under it, whether
 // it reached its session (`delivery`), in a word.

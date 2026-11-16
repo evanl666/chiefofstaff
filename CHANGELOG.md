@@ -8,19 +8,21 @@
   without asking Chief of Staff (under *Ask first* too, and past its refusals, such as pushes to
   the default branch), an MCP server there ran its command at every start, and settings there
   could change its commands' environment and its model. Now Codex loads a folder's `.codex/` for
-  a worker only while it is as committed (in the worker's worktree, as it was when the worktree
-  was made; in your own checkout, as its last commit), and the worker's timeline says when it
-  doesn't. Workers' edits to `.codex/` folders and to Codex's own settings folder are refused.
+  a worker only while it is as it was when Chief of Staff gave the worker that folder, and the
+  worker's timeline says when it isn't, with **Use these settings** for you. Workers' edits to
+  `.codex/` folders and to Codex's own settings folder are refused.
 - **Security: a Copilot worker could plant hooks and MCP servers for itself.** In a repository
   you trust in Copilot (a worktree of it is trusted too), a worker could write the repository's
   own Copilot settings in its folder: hooks (`.github/hooks/`, `.github/copilot/settings.json`,
-  and `.claude/settings.json`, whose hooks Copilot runs too) from its next resume, and MCP
-  servers (`.mcp.json`, `.github/mcp.json`) from its next turn. A hook could approve commands
-  Chief of Staff would refuse, and an MCP server ran outside the worker sandbox. Now, before
-  each start and each turn, those settings are compared with the worker's base (its worktree's
-  base commit; in your own checkout, its last commit and the local settings you had there): a
-  worker whose settings changed is stopped and not opened there until the change is removed, and
-  says so. Workers' edits to those files are refused.
+  and `.claude/settings.json`, whose hooks Copilot runs too), custom agents with their own hooks
+  and MCP servers (`.github/agents/`, `.claude/agents/`) and MCP servers (`.mcp.json`,
+  `.github/mcp.json`), loaded from its next turn or resume. A hook could approve commands Chief
+  of Staff would refuse, and an MCP server ran outside the worker sandbox. Now Chief of Staff
+  keeps what those files held when it gave the worker its folder, in its own data, and reads
+  them again before each start and each turn, without running git there. A worker whose
+  settings changed starts no turn until you click **Use these settings** on the line its
+  timeline shows (news for it waits too). Workers' edits to those files are refused, whatever
+  their case.
 
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create

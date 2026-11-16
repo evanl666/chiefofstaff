@@ -45,12 +45,13 @@ import shlex
 import shutil
 import sys
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from stat import S_ISDIR, S_ISREG
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
@@ -60,7 +61,6 @@ from . import codex_check
 from .backend import Capabilities, descendants, end_processes, process_table
 from .envelope import inert, wrap
 from .policy import GITHUB_MCP
-from .workspaces import differing
 
 logger = logging.getLogger(__name__)
 
@@ -432,74 +432,46 @@ def trust_levels(
 # or resumed there, Codex loads its rules (`prefix_rule(..., decision="allow")`: commands that
 # then run without asking Chief of Staff), its MCP servers (their commands, run at the thread's
 # start), its shell_environment_policy (every command's environment) and its model. Such a
-# folder is untrusted for the worker's threads until it is as committed at its base (a
-# worktree's base commit, else HEAD: the owner's checkout); its AGENTS.md is then given as text.
+# folder (Runtime.codex_settings: what Chief of Staff last saw of it, settings_guard) is
+# untrusted for the worker's threads until the owner says to use them; its AGENTS.md is then
+# given as text.
 SETTINGS = ".codex"
 
 
-def settings_places(projects: dict[str, dict], folders: list[str]) -> list[Path]:
-    """The folders whose `.codex/` a thread in these folders may load (those `projects` names,
-    and each folder's own and those above it up to its checkout's top): those that have one."""
-    places: dict[str, Path] = {}
-    for folder in map(Path, folders):
-        top = project_root(folder, [".git"]) or folder
-        chain = [folder, *folder.parents]
-        for place in [*chain[: chain.index(top) + 1], *map(Path, projects)]:
-            if os.path.lexists(place / SETTINGS):
-                places.setdefault(canonical(place) or str(place), place)
-    return list(places.values())
-
-
-def settings_base(place: Path, bases: dict[str, str]) -> tuple[Path | None, str]:
-    """The checkout a folder is in, and the commit its settings are compared with: Chief of
-    Staff's worktree's base, else the checkout's HEAD; (None, "") outside any checkout."""
-    real = canonical(place) or str(place)
-    tops = [
-        Path(top) for top in bases if real == top or real.startswith(top.rstrip(os.sep) + os.sep)
-    ]
-    if tops:
-        top = max(tops, key=lambda found: len(str(found)))
-        return top, bases[str(top)]
-    top = project_root(Path(real), [".git"])
-    return (top, "HEAD") if top else (None, "")
-
-
-async def changed_settings(
-    projects: dict[str, dict], folders: list[str], bases: dict[str, str]
-) -> dict[str, tuple[str, list[str]]]:
-    """Each folder whose `.codex/` differs from its base: folder -> (the base, what differs,
-    relative to the folder; `.codex` itself when it can't be told). One git call per checkout,
-    none when no folder has a `.codex/`."""
-    bases = {canonical(top) or top: base for top, base in bases.items() if base}
-    checked: dict[tuple[Path, str], list[Path]] = {}
-    changed: dict[str, tuple[str, list[str]]] = {}
-    for place in await asyncio.to_thread(settings_places, projects, folders):
-        top, base = settings_base(place, bases)
-        if top is None:
-            changed[str(place)] = ("", [SETTINGS])
-        else:
-            checked.setdefault((top, base), []).append(place)
-    for (top, base), places in checked.items():
-        top_real = Path(canonical(top) or top)
-        relative = {
-            place: Path(canonical(place) or place).relative_to(top_real).as_posix()
-            for place in places
-        }
-        paths = [
-            f"{folder}/{SETTINGS}" if folder != "." else SETTINGS for folder in relative.values()
+def cased(path: str) -> str:
+    """A path as its folders are spelled on the disk (a case-insensitive file system finds
+    `/x/casedir` for `/x/CaseDir`): "" when it is not there. Codex 0.167.2 keys a folder as its
+    path was given (checked); one that keys it as the disk spells it finds the same."""
+    found = Path(path).anchor
+    for part in Path(path).parts[1:]:
+        try:
+            with os.scandir(found) as entries:
+                names = [entry.name for entry in entries]
+        except OSError:
+            return ""
+        if part in names:
+            found = str(Path(found) / part)
+            continue
+        same = [
+            name
+            for name in names
+            if unicodedata.normalize("NFC", name).casefold()
+            == unicodedata.normalize("NFC", part).casefold()
         ]
-        found = await differing(top_real, base, paths)
-        for place, folder in relative.items():
-            prefix = f"{folder}/" if folder != "." else ""
-            own = prefix + SETTINGS
-            mine = [
-                path.removeprefix(prefix)
-                for path in found
-                if path == own or path.startswith(f"{own}/")
-            ]
-            if mine:
-                changed[str(place)] = (base, mine)
-    return changed
+        if len(same) != 1:
+            return ""
+        found = str(Path(found) / same[0])
+    return found
+
+
+def every_key(place: str) -> list[str]:
+    """Each spelling Codex may key a folder's trust by: as given, its real path, and both as
+    the disk spells them."""
+    keys = trust_keys(place)
+    for key in list(keys):
+        if (spelled := cased(key)) and spelled not in keys:
+            keys.append(spelled)
+    return keys
 
 
 def without_layers(read: dict, skipped: set[str]) -> dict:
@@ -529,22 +501,6 @@ def merged_into(config: dict, layer: dict):
             config[key] = json.loads(json.dumps(value)) if isinstance(value, dict | list) else value
 
 
-def settings_line(cwd: str, changed: dict[str, tuple[str, list[str]]]) -> str:
-    """What the worker's timeline says of its changed folders' Codex settings (one line)."""
-    said = []
-    for place, (base, paths) in changed.items():
-        where = "this folder" if canonical(place) == canonical(cwd) else place
-        listed = ", ".join(paths[:3]) + (f" and {len(paths) - 3} more" if len(paths) > 3 else "")
-        if not base:
-            said.append(f"Codex settings in {where} can't be checked (it isn't in a git checkout)")
-        elif base == "HEAD":
-            said.append(f"Codex settings in {where} have changes not committed ({listed})")
-        else:
-            short = base[:7] if re.fullmatch(r"[0-9a-f]{40,64}", base) else base
-            said.append(f"Codex settings in {where} changed since {short} ({listed})")
-    return "; ".join(said) + ", so Codex won't load them for this worker."
-
-
 def codex_home() -> str:
     given = os.environ.get("CODEX_HOME")
     return os.path.realpath(Path(given).expanduser() if given else Path.home() / SETTINGS)
@@ -552,24 +508,20 @@ def codex_home() -> str:
 
 def codex_settings_path(path: str) -> bool:
     """Whether an edit would write Codex's own settings: in a `.codex` folder (a repository's,
-    the owner's), or in CODEX_HOME, by its path or where its links lead."""
-    home = codex_home()
+    the owner's), or in CODEX_HOME, by its path or where its links lead; names compared as a
+    case-insensitive file system compares them, NFC or NFD."""
+
+    def folded(text: str) -> str:
+        return unicodedata.normalize("NFC", text).casefold()
+
+    home = folded(codex_home())
     for spelled in {path, os.path.realpath(path)}:
-        if SETTINGS in Path(spelled).parts:
+        if SETTINGS in map(folded, Path(spelled).parts):
             return True
-        if home and (spelled == home or spelled.startswith(home.rstrip(os.sep) + os.sep)):
+        lowered = folded(spelled)
+        if home and (lowered == home or lowered.startswith(home.rstrip(os.sep) + os.sep)):
             return True
     return False
-
-
-def note_settings(options: dict):
-    """The worker's timeline says once that its folder's Codex settings are left out (and
-    forgets it once they are as committed): on_settings_noted keeps what it said last."""
-    digest, line = options.get("settings_changed") or ("", "")
-    if callable(note := options.get("on_settings_noted")) and digest != (
-        options.get("settings_noted") or ""
-    ):
-        note(digest, line)
 
 
 SETTINGS_EDIT = (
@@ -1220,7 +1172,6 @@ class CodexBackend:
             session = self.opened(answer, options)
             session.docs_given = ""  # A new thread: nothing given to it yet.
             await session.give_docs()
-            note_settings(options)
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
                 with suppress(Exception):
@@ -1246,7 +1197,6 @@ class CodexBackend:
             await self.read_back(answer, options)
             session = self.opened(answer, options)
             await session.give_docs()
-            note_settings(options)
         except RuntimeError:
             if thread := (answer.get("thread") or {}).get("id"):
                 with suppress(Exception):
@@ -1489,20 +1439,19 @@ class CodexBackend:
             owner.get("project_root_markers"),
             trust_answered(read.get("layers")),
         )
-        # A folder whose Codex settings a worker changed is not trusted for its threads, and
-        # what Chief of Staff reads of the owner's configuration leaves them out too.
-        changed = await changed_settings(projects, folders, mapping(options.get("bases")))
+        # A folder whose Codex settings changed since Chief of Staff last saw them is not
+        # trusted for its threads (under each spelling Codex may key it by), and what Chief of
+        # Staff reads of the owner's configuration leaves them out too.
+        check = cast("Callable[[], Awaitable[list[str]]] | None", options.get("settings_changed"))
+        changed = list(await check()) if check else []
         if changed:
             for place in changed:
-                for key in trust_keys(place):
+                for key in every_key(place):
                     projects[key] = {"trust_level": "untrusted"}
             skipped = {canonical(Path(place) / SETTINGS) for place in changed}
+            skipped |= {cased(canonical(Path(place) / SETTINGS)) for place in changed} - {""}
             read = without_layers(read, skipped)
             owner = mapping(read.get("config"))
-            line = settings_line(cwd, changed)
-            options["settings_changed"] = (hashlib.sha256(line.encode()).hexdigest()[:16], line)
-        else:
-            options["settings_changed"] = ("", "")
         # The MCP servers the owner added in Chief of Staff's Settings, as Codex has one.
         provided = {
             str(name): found
