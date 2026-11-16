@@ -52,6 +52,26 @@ logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
 
 
+class ShepherdDecision(BaseModel):
+    """The owner's decision on a prepared plan (shepherd.py)."""
+
+    action: Literal["approve", "dismiss", "changes"]
+    replies: dict[str, str] = {}
+    resolve: list[str] = []
+    choice: dict[str, Literal["post", "their-way", "leave"]] = {}
+    disclosure: Literal["", "yes", "no"] = ""
+    text: str = ""
+
+
+class ShepherdAction(BaseModel):
+    """The owner's action on a PR Prepared for you keeps moving, or on a row it found."""
+
+    target: str
+    action: Literal["fix", "resume", "keep", "merge-when-ready", "accept-head", "hand"]
+    on: bool = True
+    sha: str = ""
+
+
 class Login(BaseModel):
     token: str
 
@@ -712,6 +732,57 @@ def create_app(
 
     # One save at a time: each merges into what the one before saved.
     settings_lock = asyncio.Lock()
+
+    @app.get("/api/shepherd/steps/{step_id}")
+    async def shepherd_step(step_id: str):
+        """A prepared plan, as the owner reviews it."""
+        return runtime.shepherd.plan_view(step_id)
+
+    @app.post("/api/shepherd/steps/{step_id}")
+    async def shepherd_decide(step_id: str, decision: ShepherdDecision):
+        from .publish import approve, dismiss, redo
+
+        shepherd = runtime.shepherd
+        if decision.action == "approve":
+            await approve(shepherd, step_id, decision.model_dump())
+        elif decision.action == "dismiss":
+            dismiss(shepherd, step_id, decision.text.strip()[:300])
+        else:
+            step = shepherd.control.step(step_id)
+            if not step or not decision.text.strip():
+                raise ValueError("Say what should change.")
+            await redo(shepherd, step, decision.text.strip()[:2000])
+        return shepherd.plan_view(step_id)
+
+    @app.post("/api/shepherd/pr")
+    async def shepherd_pr(payload: ShepherdAction):
+        from .discovery import hand
+
+        shepherd = runtime.shepherd
+        target = payload.target.strip().lower()
+        if payload.action == "hand":
+            return await hand(shepherd, target)
+        if payload.action == "fix":
+            await shepherd.fix_it(target)
+        elif payload.action == "resume":
+            await shepherd.resume(target)
+        elif payload.action == "keep":
+            await shepherd.keep(target, payload.on)
+        elif payload.action == "merge-when-ready":
+            await shepherd.merge_when_ready(target, payload.on)
+        else:
+            await shepherd.accept_head(target, payload.sha.strip().lower())
+        return {"ok": True}
+
+    @app.post("/api/shepherd/scan")
+    async def shepherd_scan():
+        """Look again now for what the owner's other PRs need."""
+        from .discovery import discover
+
+        if not runtime.shepherd.active():
+            raise ValueError("Prepare work for me is off (Settings → General).")
+        await discover(runtime.shepherd, force=True)
+        return runtime.shepherd.snapshot()
 
     @app.post("/api/settings")
     async def save_settings(changes: Annotated[dict[str, Any], Body()]):

@@ -2303,9 +2303,12 @@ class TaskActions:
                 or not any(branch in self.committed_branches(other) for other in others)
             )
             # What it opened is its own, whatever else it drafted on it; so is a branch it
-            # pushed to (by its commands' output, wherever its checkout was).
+            # pushed to (by its commands' output, wherever its checkout was), and a PR handed
+            # to it to keep moving (Prepared for you).
             if label in opened:
                 roles[label] = "created"
+            elif self.runtime.shepherd.handed_to(f"github:{label}") == task["id"]:
+                roles[label] = "modified"
             elif branch and (repo, branch) in pushed:
                 made = new and maker in {"", task["id"]}
                 roles[label] = "created" if made else "modified"
@@ -2980,6 +2983,9 @@ class TaskActions:
         # A failed one is dismissed (bug E89: refused, Retry was the only way out, and it
         # reopened its worker): nothing of its worker is stopped or reopened.
         failed = task["status"] == "failed"
+        if self.runtime.shepherd.control.exists():
+            # Its kept PRs go to the owner, paused (drained first).
+            await self.runtime.shepherd.task_cancelled(task)
         row = self.store.find_session(task["session_id"])
         # At work on it now: the task its turn is on (not merely the one it was given last).
         on_it = (
@@ -3769,6 +3775,8 @@ class TaskActions:
         self.store.delete(f"news:{task_id}")  # Seen with the result.
         self.store.delete(f"setaside:{task_id}")
         task = self.tasks.move(task_id, "done")
+        # Prepared for you: the head of each PR it keeps moving that the owner reviewed.
+        self.runtime.shepherd.accepted(task)
         self.runtime.background(self.runtime.workers.pump())  # Tasks waiting for its check.
         if as_is:
             scope = self.runtime.learning.scope_of(task["session_id"])
@@ -4424,6 +4432,8 @@ class TaskActions:
             # from another task, until when that can be undone.
             "splittable": task["status"] in {"review", "done"} and self.splittable(task),
             "split_from": self.split_from(task["id"]),
+            # Only for a task whose PR Chief of Staff keeps moving (Prepared for you is on).
+            **({"shepherd": kept} if (kept := self.runtime.shepherd.task_view(task)) else {}),
         }
 
     def execution(self, task: dict) -> str:
@@ -4499,6 +4509,10 @@ class TaskActions:
             return "update", clip(" ".join((news.get("text") or "").split()), 300)
         if marker in PR_TO_FIX:
             return marker, why
+        kept = self.runtime.shepherd.task_view(task) if self.runtime.shepherd.on() else None
+        if kept and (kept.get("action") or {}).get("kind") in {"review", "resume", "look"}:
+            # Prepared for you: a plan to review, or a kept PR paused or stopped for the owner.
+            return "prepared", kept["line"]
         watched = self.monitoring(task, prs) if watched is None else watched
         if watched and all(item.get("unknown") for item in watched):
             # All it is monitored for is runs nothing tells of now (bug E56): the owner says

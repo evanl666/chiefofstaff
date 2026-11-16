@@ -110,6 +110,7 @@ from .sendsocket import parts as sent_parts
 from .sendsocket import prompt as sent_prompt
 from .sendsocket import shown as sent_shown
 from .settings_guard import SettingsChangedError, checkout_top, outermost_top, read_regular
+from .shepherd import Shepherd
 from .sources import Source
 from .sources.github import GitHubSource
 from .sources.slack import SlackSource, describe
@@ -680,6 +681,8 @@ class Runtime:
         self.cache_rust: dict[str, bool] = {}
         self.cache_seeding = False
         self.cache_seeded = 0.0
+        # Prepared for you: keeping the owner's PRs moving, while the setting is on.
+        self.shepherd = Shepherd(self)
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -702,6 +705,8 @@ class Runtime:
         self.task_actions.settle_old_reports(TASKS_SHOWN_HOURS)
         await self.connect()
         self.after_update()
+        # Before anything else resumes: a worker left in a shepherd step is not continued.
+        await self.shepherd.start()
         await self.recover_agents()
         for source in self.all_sources():
             await source.start()
@@ -2349,7 +2354,14 @@ class Runtime:
         ]
 
     def yolo(self, row: dict) -> bool:
-        """Whether this worker acts without permission checks (a session choice, else Settings)."""
+        """Whether this worker acts without permission checks (a session choice, else Settings).
+        Never while it is in a shepherd step: its checks apply then, whatever its mode."""
+        if row["role"] == WORKER and self.shepherd.marked(row["id"]):
+            return False
+        return self.yolo_choice(row)
+
+    def yolo_choice(self, row: dict) -> bool:
+        """The worker's own mode: a session choice, else Settings."""
         if row["role"] != WORKER:
             return False
         if row.get("yolo") in {"on", "off"}:
@@ -2696,7 +2708,7 @@ class Runtime:
                 row["cwd"],
                 str(self.workspaces.workspace(row)),
                 self.workspaces.checkouts(row),
-                self.yolo(row),
+                self.yolo_choice(row),
                 ("on-no-gh" if self.sandbox_gh is False else "on") if sandbox else "",
                 caches=bool(sandbox) and not row["slack"],
                 local=bool(sandbox and sandbox.local_network),
@@ -2711,6 +2723,8 @@ class Runtime:
             prompt = prompts.with_send_rule(prompt)
         if row["role"] == ROUTER and (on := self.agents_on()):
             prompt = prompts.with_agents_rule(prompt, [agents.display(name) for name in on])
+        if row["role"] == ROUTER and self.shepherd.on():
+            prompt = prompts.with_shepherd_rule(prompt)
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
         prompt += self.learning.block(row)
@@ -2724,14 +2738,25 @@ class Runtime:
     def options(self, row: dict) -> dict:
         if self.special(row) in TOOLLESS:
             return self.helper_options(row)
+        if row["role"] == WORKER and self.shepherd.marked(row["id"]):
+            # A shepherd step runs now: its own options over the worker's (shepherd.py).
+            return self.shepherd.step_options(row, self.worker_options(row))
+        return self.worker_options(row)
+
+    def worker_options(self, row: dict) -> dict:
         settings = self.store.settings()
         sandbox = self.sandbox_policy(row)
         prompt = self.session_prompt(row, sandbox)
         tools = [self.tools[name] for name in self.tool_names(row)]
-        if row["role"] == ROUTER and (on := self.agents_on()):
-            # Its spawn_worker names the agents on (as without them otherwise).
-            spawn = self.toolset.spawn_on(on)
-            tools = [spawn if tool.name == "spawn_worker" else tool for tool in tools]
+        if row["role"] == ROUTER and ((on := self.agents_on()) or self.shepherd.on()):
+            # Its spawn_worker names the agents on (as without them otherwise), and with
+            # Prepared for you on, spawn_worker and message_session take a PR to keep moving.
+            kept = self.shepherd.on()
+            variants = {
+                "spawn_worker": self.toolset.spawn_on(on, shepherd=kept),
+                "message_session": self.toolset.message_on(kept),
+            }
+            tools = [variants.get(tool.name) or tool for tool in tools]
         options: dict[str, Any] = {
             # Copilot's record of past sessions, which the owner's own sessions can search: for
             # workers that do not read Slack. Sessions that read Slack are not recorded in it,
@@ -5151,6 +5176,10 @@ class Runtime:
         for row in rows:
             if row["id"] not in mine:
                 continue
+            if self.shepherd.marked(row["id"]):
+                # Left in a shepherd step: never continued in its normal profile.
+                await self.shepherd.crashed(row["id"])
+                continue
             if row["role"] == SLACK and not self.slack.configured():
                 continue
             if row["status"] != "working":
@@ -6011,6 +6040,8 @@ class Runtime:
         for task in self.tasks.for_session(session_id):
             self.task_actions.publish(task)
         follows = self.store.follows(session_id)
+        if thread.startswith("github:") and self.shepherd.control.exists():
+            self.background(self.shepherd.unfollowed(session_id, thread))
         for task in affected:
             if (
                 task["status"] == "running"
@@ -6135,6 +6166,13 @@ class Runtime:
         fresh = [key for key in keys if self.store.add_trigger(source, key, text[:4000])]
         if not fresh:
             return False
+        if thread.startswith("github:") and await self.shepherd.signal(
+            thread, fresh, text, display
+        ):
+            # Kept for the PR's shepherd step (it rides along with its worker's next message).
+            self.store.touch(thread)
+            self.background(self.task_actions.refresh_open_prs(thread.removeprefix("github:")))
+            return True
         self.store.touch(thread)
         if thread.startswith("github:"):
             # CI or a review came in: the PR's chips change now, not at the next round.
@@ -6259,6 +6297,8 @@ class Runtime:
                 self.workers.refresh_elsewhere,
                 # Disk space: read, measured and cleaned in the background (see storage.py).
                 self.storage.tick,
+                # Prepared for you, while on (shepherd.py).
+                self.shepherd.tick,
             )
             for job in jobs:
                 try:
@@ -6332,6 +6372,8 @@ class Runtime:
                 if self.agents and (agent := self.agent(row["id"])) != COPILOT_AGENT
                 else {}
             ),
+            # Only while it runs a shepherd step: its work then is the step's, not a task's.
+            **({"shepherd_step": True} if self.shepherd.marked(row["id"]) else {}),
         }
 
     async def read_file(self, raw: str, session_id: str = "") -> dict:
@@ -6839,6 +6881,8 @@ class Runtime:
                 for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
             ],
             "settings": self.store.settings().model_dump(),
+            # Only once Prepared for you was turned on: its rows, and where steps can run.
+            **({"shepherd": found} if (found := self.shepherd.snapshot()) else {}),
             # Only while another coding agent is on: Settings → Models shows its group.
             **({"agents": self.agents_view()} if self.agents_on() else {}),
             # Configured projects and the code folder's repositories (where a habit applies).
@@ -6874,6 +6918,10 @@ class Runtime:
     async def settings_changed(self, old: Settings, new: Settings) -> list[str]:
         """Returns why each worker it stopped stopped (another agent's, made ineligible)."""
         stopped: list[str] = []
+        if (old.proactive, old.paused) != (new.proactive, new.paused):
+            await self.shepherd.settings_changed(old, new)
+        if old.proactive != new.proactive:
+            await self.refresh(ROUTER)  # Its one rule and its tools' shepherd field.
         if old.other_sessions != new.other_sessions:
             # First, before anything awaits: once the save returns, nothing more is told.
             self.others.switch(new.other_sessions)

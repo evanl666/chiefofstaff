@@ -1008,6 +1008,21 @@ def with_agents_rule(prompt: str, names: list[str]) -> str:
     return f"{head}\n{rule}{end}{tail}"
 
 
+SHEPHERD_RULE = (
+    "- Prepared for you is on: Chief of Staff keeps the owner's own PRs moving (failing CI and "
+    "review comments are prepared in their worker for the owner's approval; workers never "
+    "publish them). When the owner asks you to keep one of their PRs moving, pass it as "
+    "shepherd (owner/repo#n) on spawn_worker or message_session. Its attempts and plans are "
+    "never yours to report or act on."
+)
+
+
+def with_shepherd_rule(prompt: str) -> str:
+    """The Router's role while Prepared for you is on: one rule, after its others."""
+    head, end, tail = prompt.rpartition("\n</chiefofstaff_role>")
+    return f"{head}\n{SHEPHERD_RULE}{end}{tail}"
+
+
 def with_send_rule(prompt: str) -> str:
     """The Router's role with Send to Chief's rule after its others."""
     head, end, tail = prompt.rpartition("\n</chiefofstaff_role>")
