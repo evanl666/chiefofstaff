@@ -31,6 +31,7 @@ NEEDS_WORDS = {
     "pr-changes": "changes requested on its PR",
     "pr-conflicts": "merge conflicts on its PR",
     "runs-unknown": "a run's status unknown: Ended or Stop tracking",
+    "prepared": "a fix or replies prepared for its PR",
 }
 # A delivered task's own PR to fix (board.js PR_TO_FIX): it goes under Needs you.
 PR_TO_FIX = {"pr-changes", "pr-conflicts", "pr-failing"}

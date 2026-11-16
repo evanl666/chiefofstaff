@@ -210,6 +210,8 @@ class Watchdog:
                 continue  # It is done and closes after this turn.
             if row["id"] in self.runtime.settings_held:
                 continue  # Its hold has its card under Needs you: nothing to review (E119).
+            if self.runtime.shepherd.marked(row["id"]):
+                continue  # A shepherd step: its own limits and its own end.
             # A task it said when to look at again (check_back) is not owed until then.
             running = any(
                 task["status"] == "running" and not self.store.get(f"checkback:{task['id']}")

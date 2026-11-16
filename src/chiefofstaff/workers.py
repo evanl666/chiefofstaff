@@ -219,6 +219,8 @@ class Workers:
 
     async def claim_slot(self, session_id: str) -> bool:
         """Reserve a worker slot for a new turn, or leave the message pending (queued)."""
+        if self.runtime.shepherd.stepping and not self.runtime.shepherd.marked(session_id):
+            await self.yield_steps(self.store.session(session_id))
         async with self.pump_lock:
             row = self.store.session(session_id)
             if row["status"] in {"queued", "starting"}:
@@ -618,6 +620,40 @@ class Workers:
                 meta={"wait_nudge": True, "task_id": task["id"]},
             )
 
+    async def yield_steps(self, row: dict):
+        """The owner's work needs a slot a shepherd step holds: the step stops first (it is the
+        lowest priority, and is admitted again later if still current)."""
+        if self.runtime.special(row) or row["role"] != WORKER:
+            return
+        if self.running() < self.store.settings().max_workers:
+            return
+        for session_id in list(self.runtime.shepherd.stepping):
+            if self.running() < self.store.settings().max_workers:
+                return
+            await self.runtime.shepherd.stop_step(
+                session_id, "interrupted", "Stopped its step: your work needed the slot."
+            )
+
+    async def grant_step(self, session_id: str) -> bool:
+        """A background slot for a shepherd step in this idle worker: only when none of the
+        owner's work waits for a slot, within the owner's limit, and with memory and disk to
+        spare. True when granted (its worker then holds the slot)."""
+        async with self.pump_lock:
+            row = self.store.session(session_id)
+            if row["closed_at"] or self.states[session_id].busy:
+                return False
+            if any(
+                other["status"] in {"queued", "starting"} and not self.runtime.special(other)
+                for other in self.store.open_sessions(WORKER)
+            ):
+                return False
+            if self.running() >= self.store.settings().max_workers:
+                return False
+            if machine.short_of_memory() is not None or machine.short_of_disk() is not None:
+                return False
+            self.states[session_id].busy = True
+            return True
+
     async def pump(self):
         """Start queued workers while fewer than max_workers are running a turn."""
         if not self.runtime.ready():
@@ -634,6 +670,11 @@ class Workers:
                     logger.warning("Could not look at %s's folder.", held, exc_info=True)
             else:
                 self.runtime.settings_held.discard(held)
+        if self.runtime.shepherd.stepping:
+            for row in self.store.open_sessions(WORKER):
+                if row["status"] == "queued" and not self.runtime.special(row):
+                    await self.yield_steps(row)  # The owner's queued work goes first.
+                    break
         starting = []
         async with self.pump_lock:
             limit = self.store.settings().max_workers
@@ -888,6 +929,9 @@ class Workers:
             raise ValueError("The Router cannot be closed.")
         if row["closed_at"]:
             return
+        if row["role"] == WORKER and self.runtime.shepherd.control.exists():
+            # Its kept PRs go to the owner, paused (drained first: its step stopped).
+            await self.runtime.shepherd.worker_closed(session_id)
         # Its schedules (Claude's) end with it, deleted in Claude first where it is not at work
         # (its process opened for that if none runs): its conversation would bring them back.
         if self.runtime.drop_schedules(session_id, delete=False) and row["status"] != "working":
@@ -1192,6 +1236,8 @@ class Workers:
                 )
             else:
                 self.runtime.add_message(self.runtime.router_id(), "notice", display, meta)
+        if self.runtime.shepherd.control.exists():
+            await self.runtime.shepherd.worker_reopened(session_id)
         return self.runtime.view(row)
 
     def mark_stopped(self, row: dict, by: str, notice: str, full: str):
@@ -1238,6 +1284,10 @@ class Workers:
     async def interrupt(self, session_id: str, by: str = "you", notice: str = "", full: str = ""):
         """`notice`: what its timeline and its stopped task say instead of "Stopped by <by>.";
         `full`: what its task's card says of it, in full (the notice's tooltip)."""
+        if self.runtime.shepherd.marked(session_id):
+            # In a shepherd step: the step stops (no task of it was at work).
+            await self.runtime.shepherd.stop_step(session_id, "interrupted", f"Stopped by {by}.")
+            return
         row = self.store.session(session_id)
         self.runtime.asks.cancel_requests(session_id, f"Stopped by {by}.")
         self.states[session_id].after_refresh = ""  # Not "go on" once it is stopped.
