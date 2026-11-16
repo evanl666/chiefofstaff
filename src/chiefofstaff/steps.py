@@ -141,7 +141,8 @@ class Steps:
                 prepared = await self.prepare(step, row)
         except Exception as exc:
             logger.info("Could not prepare step %s.", step_id, exc_info=True)
-            await self.give_up(session_id, step, "failed", f"It could not start: {exc}"[:300])
+            why = f"Couldn't start preparing it: {exc}"
+            await self.give_up(session_id, step, "failed", why[:300])
             return
         step = self.control.step(step_id)
         if not step or step["state"] != RUNNING or self.stepping.get(session_id) != step_id:
@@ -172,7 +173,8 @@ class Steps:
             await session.send(self.message(step, prepared), mode="enqueue")
         except Exception as exc:
             logger.info("Could not start step %s.", step_id, exc_info=True)
-            await self.give_up(session_id, step, "failed", f"It could not start: {exc}"[:300])
+            why = f"Couldn't start preparing it: {exc}"
+            await self.give_up(session_id, step, "failed", why[:300])
             return
         self.publish_task(step)
 
@@ -488,7 +490,7 @@ class Steps:
             await self.conclude(step)
         except Exception:
             logger.exception("Could not make a plan of step %s.", step["id"])
-            self.end_step(step, "failed", "Its result could not be read.")
+            self.end_step(step, "failed", "Its result couldn't be read.")
         self.runtime.background(self.settle(step["id"]))
         state = self.runtime.states[session_id]
         if state.close_after_turn and self.runtime.workers.finished(session_id):
@@ -520,10 +522,10 @@ class Steps:
     async def yield_to(self: Shepherd, session_id: str):  # type: ignore[misc]
         """Something else for the worker (the owner's message, the Router's): its step stops
         first; an ordinary message never reaches a session in the step profile."""
-        await self.stop_step(session_id, "interrupted", "Stopped its step for your message.")
+        await self.stop_step(session_id, "interrupted", "Stopped preparing it for your message.")
 
     async def failed(self: Shepherd, session_id: str, why: str):  # type: ignore[misc]
-        await self.stop_step(session_id, "failed", f"Its step failed: {why[:300]}")
+        await self.stop_step(session_id, "failed", f"Preparing it failed: {why[:300]}")
 
     async def settle(self: Shepherd, step_id: str):  # type: ignore[misc]
         """What the attempt spent, from its worker's own log: the usage events from its start to
