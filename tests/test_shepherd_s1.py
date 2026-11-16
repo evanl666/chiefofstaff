@@ -551,8 +551,12 @@ def served(tmp_path):
         async def notifier(title, text):
             pass
 
+        async def signed_in(fresh: bool = False) -> list[dict]:
+            return []  # Not this computer's gh (its run would outlive the app's loop).
+
         runtime = Runtime(store, bus, backend_factory=lambda settings: client, notifier=notifier)
         runtime.slack = SlackSource(store, runtime, tokens=FakeTokens(""), mcp=FakeSlackMcp())
+        runtime.github.signed_in = signed_in
         return runtime
 
     app = create_app(tmp_path / "data", TOKEN, 8765, runtime_factory=factory)
