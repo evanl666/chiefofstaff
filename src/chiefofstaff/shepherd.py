@@ -961,7 +961,8 @@ class Shepherd(Keeping, Steps):
                 return self.rerun_plan(claim, task, signal, details, runs, why, print_)
         else:
             threads_asked = [ask["thread"] for ask in signal.get("threads") or [] if ask["writer"]]
-        if why := self.control.cap_reached(target, kind, print_, head, threads_asked):
+        if why := self.control.cap_reached(target, kind, print_, head, threads_asked,
+                                           clicked=clicked):  # fmt: skip
             logger.info("No attempt on %s (%s): %s.", target, kind, why)
             self.store.set(f"capped:{target}", json.dumps({"kind": kind, "why": why, "head": head}))
             self.runtime.task_actions.publish(task)

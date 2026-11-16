@@ -245,11 +245,23 @@ def test_caps_count_every_attempt_whatever_its_end(control):
     first = step_of(control, fingerprint="f1", started_at="x")
     control.move_step(first["id"], QUEUED, state="interrupted")
     assert control.cap_reached(T, "fix-ci", "f1", H0) == "tried already on this commit"
+    assert control.cap_reached(T, "fix-ci", "f1", H0, clicked=True) == ""  # The owner's click.
     assert control.cap_reached(T, "fix-ci", "f1", H1) == ""
     for sha in (H1, H2):
         step_of(control, fingerprint=sha, started_at="x", h0=sha)
     assert control.cap_reached(T, "fix-ci", "f9", "d" * 40) == "3 attempts today"
+    assert control.cap_reached(T, "fix-ci", "f9", "d" * 40, clicked=True) == "3 attempts today"
     assert control.cap_reached(T, "address-review", "", H0) == ""
+
+
+def test_a_look_at_why_is_not_a_fix(control):
+    control.give(T, "t1", H0)
+    claim = control.claim(T)
+    control.add_step(
+        T, "fix-ci", "suggest", holder=claim["holder"], generation=claim["generation"],
+        consent=control.generation(), fingerprint="f1", started_at="x", h0=H0,
+    )  # fmt: skip
+    assert control.cap_reached(T, "fix-ci", "f1", H0) == ""
 
 
 def test_two_rounds_per_review_thread(control):
