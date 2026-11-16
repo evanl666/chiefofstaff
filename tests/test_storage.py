@@ -893,8 +893,10 @@ async def test_a_folder_being_deleted_is_whole_or_gone_and_leftovers_are_counted
 
     def slow_rmtree(path, *args, **kwargs):
         path = Path(path)
-        # Deleted from trash only, never in place: the worktree has it whole, or not at all.
-        assert path.parent == trash, path
+        # Deleted from trash only, never in place: the worktree has it whole, or not at all;
+        # by name in trash opened (never following a link).
+        assert kwargs.get("dir_fd") is not None and len(path.parts) == 1, path
+        assert (trash / path.name).exists(), path
         # All of them out of the worktree before any is deleted.
         assert not any((tree / name).exists() for name in ("node_modules", ".pytest_cache"))
         assert not (tree / "build" / "out.o").exists()
@@ -1072,25 +1074,28 @@ async def test_new_files_hidden_by_git_config_are_never_deleted(tmp_path, monkey
     assert exists(Path(raced["cwd"]) / "src" / "feature.py"), "git refused to remove it"
 
 
-async def test_a_half_removed_worktree_with_a_new_file_is_not_forced(tmp_path, monkeypatch):
+async def test_a_worktree_a_file_appeared_in_while_it_was_removed_is_put_back(
+    tmp_path, monkeypatch
+):
+    """Found clean, it goes into trash in one rename (out of every worker's reach) and is
+    checked again there: a file written just before is never deleted with it."""
     app = project(tmp_path)
     harness = await harnessed(tmp_path)
     runtime = harness.runtime
     info = await spawn(runtime, harness.router_id, "Closing", project=str(app), isolate=True)
     await settle(runtime)
-    real_git = workspaces_module.checkout_git
+    real_trash = workspaces_module.to_trash
 
-    async def stopped(checkout, path, *arguments, **options):
-        if "remove" in arguments:
-            tree = Path(arguments[-1])
-            write(tree / "src" / "appeared.py", "written while git was removing")
-            raise TimedOutError("git timed out.")
-        return await real_git(checkout, path, *arguments, **options)
+    def late(path, trash):
+        moved = real_trash(path, trash)
+        if moved and moved.name.endswith("-app"):
+            write(moved / "src" / "appeared.py", "written as it was being removed")
+        return moved
 
-    monkeypatch.setattr(workspaces_module, "checkout_git", stopped)
+    monkeypatch.setattr(workspaces_module, "to_trash", late)
     await runtime.workers.close(info["session_id"])
     await settle(runtime)
-    assert exists(Path(info["cwd"]) / "src" / "appeared.py"), "not finished with --force"
+    assert exists(Path(info["cwd"]) / "src" / "appeared.py"), "put back, never deleted"
 
 
 async def test_a_submodules_own_commits_show_whatever_git_config_ignores(tmp_path):

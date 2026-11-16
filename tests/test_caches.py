@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from chiefofstaff import caches
+from chiefofstaff import caches, safefs
 
 # The real functions (tests' autouse fixture stubs them for every other test).
 SEED = caches.seed
@@ -16,10 +16,11 @@ REAL_OLD_UV = caches.old_uv
 
 def clones(tmp_path: Path) -> bool:
     """Whether this file system clones (APFS; Btrfs or XFS with reflinks)."""
-    source, target = tmp_path / "probe", tmp_path / "probe-clone"
+    source = tmp_path / "probe"
     source.write_text("x")
     try:
-        return caches.clone(source, target)
+        with safefs.open_folder(tmp_path, tmp_path) as folder:
+            return folder.clone(source, "probe-clone")
     except caches.CannotCloneError:
         return False
 
@@ -37,7 +38,11 @@ def test_the_tier_gets_what_it_lacks_whole_never_over_what_it_has(tmp_path):
     (tier / "def").mkdir(parents=True)
     (tier / "def" / "mine").write_text("a worker's")
 
-    assert caches.fill(owner / "archive-v0", tier, 1) == 1, "abc whole; def is the tier's own"
+    def fill(source, target, depth):
+        with safefs.open_folder(target, tmp_path, create=True) as folder:
+            return caches.fill(source, folder, depth)
+
+    assert fill(owner / "archive-v0", tier, 1) == 1, "abc whole; def is the tier's own"
     assert (tier / "abc" / "pkg" / "mod.py").read_text() == "owner's"
     assert not (tier / "def" / "x").exists() and (tier / "def" / "mine").exists()
     assert not (tier / ".lock").exists()
@@ -46,12 +51,12 @@ def test_the_tier_gets_what_it_lacks_whole_never_over_what_it_has(tmp_path):
     assert (owner / "archive-v0" / "abc" / "pkg" / "mod.py").read_text() == "owner's", (
         "a copy: what a worker writes never reaches the owner's"
     )
-    assert caches.fill(owner / "archive-v0", tier, 1) == 0, "nothing again"
+    assert fill(owner / "archive-v0", tier, 1) == 0, "nothing again"
 
     files = tmp_path / "npm"
     (files / "index-v5" / "aa").mkdir(parents=True)
     (files / "index-v5" / "aa" / "bucket").write_text("index")
-    assert caches.fill(files, tmp_path / "tier-npm", 0) == 1
+    assert fill(files, tmp_path / "tier-npm", 0) == 1
     assert (tmp_path / "tier-npm" / "index-v5" / "aa" / "bucket").read_text() == "index"
 
 
@@ -156,13 +161,15 @@ def test_the_owners_browsers_and_settings_are_linked_not_copied(tmp_path, monkey
     (home / ".gradle").mkdir()
     (home / ".gradle" / "gradle.properties").write_text("systemProp.https.proxyHost=corp")
     owner, tier = caches.Owner(home), tmp_path / "tier"
-    caches.link_browsers(tier, owner)
-    caches.link_settings(tier, owner)
+    with caches.tier_folder(tier) as folder:
+        caches.link_browsers(folder, owner)
+        caches.link_settings(folder, owner)
     assert (tier / "ms-playwright" / "chromium-1255").resolve() == browser.resolve()
     assert (tier / "gradle" / "gradle.properties").read_text().endswith("corp")
     (tier / "gradle" / "gradle.properties").unlink()
     (tier / "gradle" / "gradle.properties").symlink_to(tmp_path)
-    caches.link_settings(tier, owner)
+    with caches.tier_folder(tier) as folder:
+        caches.link_settings(folder, owner)
     assert (tier / "gradle" / "gradle.properties").resolve() == (
         home / ".gradle" / "gradle.properties"
     ).resolve(), "pointed elsewhere by a worker: put back"
@@ -171,14 +178,36 @@ def test_the_owners_browsers_and_settings_are_linked_not_copied(tmp_path, monkey
     ]
 
 
-def test_a_workers_temporary_folder_is_made_only_as_its_own(tmp_path):
-    folder = tmp_path / "cos-12345678"
+def test_a_workers_temporary_folder_is_made_only_as_its_own(tmp_path, monkeypatch):
+    tier = tmp_path / "chief" / "workers"
+    folder = caches.worker_temp("12345678-abcd", tier)
+    assert folder.parent.parent == tier.parent, "beside the tier, where no worker writes"
     assert caches.make_temp(folder) and caches.make_temp(folder), "made, then found as made"
     assert folder.stat().st_mode & 0o777 == 0o700
-    planted = tmp_path / "cos-planted"
-    planted.symlink_to(tmp_path)
-    assert not caches.make_temp(planted), "a link someone put there is not taken"
-    assert len(str(caches.worker_temp("0123456789abcdef"))) <= 80, "room for a socket's name"
+    (folder / "jest-cache").mkdir()
+    assert caches.make_temp(folder) and (folder / "jest-cache").is_dir(), "its own, kept"
+    folder.chmod(0o755)
+    assert caches.make_temp(folder) and folder.stat().st_mode & 0o777 == 0o700
+    # The worker (none other can write there) puts a link in its place: never followed.
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("x")
+    (folder / "jest-cache").rmdir()
+    folder.rmdir()
+    folder.symlink_to(victim)
+    assert caches.make_temp(folder) and folder.is_dir() and not folder.is_symlink()
+    assert victim.stat().st_mode & 0o777 == 0o755 and (victim / "keep").exists()
+    folder.rmdir()
+    folder.symlink_to(victim)
+    caches.remove_temp("12345678-abcd", tier)
+    assert not os.path.lexists(folder) and (victim / "keep").exists(), "the link alone goes"
+    monkeypatch.undo()
+    real = caches.worker_temp("0123456789abcdef", caches.default_tier())
+    inside = real.relative_to(Path.home())
+    assert len(f"/Users/someone/{inside}") <= 80, "room for a socket's name"
+    assert inside.parts[-2:] == ("temp", "01234567") and "chiefofstaff" in inside.parts, (
+        "not the system's temporary folder, where every worker writes"
+    )
 
 
 def test_chief_of_staff_never_writes_where_a_link_a_worker_made_leads(tmp_path, monkeypatch):
@@ -200,8 +229,9 @@ def test_chief_of_staff_never_writes_where_a_link_a_worker_made_leads(tmp_path, 
     (tier / "ms-playwright").mkdir(parents=True)
     (tier / "ms-playwright" / "chromium_headless_shell-2").symlink_to(shell)
     (tier / "gradle").symlink_to(elsewhere)
-    caches.link_browsers(tier, owner)
-    caches.link_settings(tier, owner)
+    with caches.tier_folder(tier) as folder:
+        caches.link_browsers(folder, owner)
+        caches.link_settings(folder, owner)
     assert program.stat().st_size == 8192 and not program.with_name("x.real").exists()
     assert not list(shell.rglob("*.real")), "the owner's program is never moved"
     assert not list(elsewhere.iterdir()), "nothing written where a link leads"
@@ -210,6 +240,12 @@ def test_chief_of_staff_never_writes_where_a_link_a_worker_made_leads(tmp_path, 
     (home / ".npm" / "_cacache" / "blob").write_text("x")
     SEED(tier, owner)
     assert not list(elsewhere.iterdir()), "nor filled"
+    # The tier itself, replaced by a link to one of the owner's folders: the link goes.
+    tier.rename(tmp_path / "old-tier")
+    tier.symlink_to(elsewhere)
+    with caches.tier_folder(tier) as folder:
+        caches.link_settings(folder, owner)
+    assert tier.is_dir() and not tier.is_symlink() and not list(elsewhere.iterdir())
 
 
 def test_an_old_uv_is_named_for_workers(tmp_path, monkeypatch):

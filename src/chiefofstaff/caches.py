@@ -18,22 +18,21 @@ A worker that reads Slack gets a tier of its own in its workspace, nothing copie
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import json
 import logging
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
 
+from .safefs import CannotCloneError, Folder, UnsafePathError, open_folder
 from .workspaces import REGISTRY_SECRETS, held_caches, named, too_broad
 
 logger = logging.getLogger(__name__)
@@ -50,25 +49,6 @@ def default_tier() -> Path:
     home = Path.home()
     base = home / "Library" / "Caches" if system() == "darwin" else xdg_cache(home)
     return base / "chiefofstaff" / "workers"
-
-
-def ours(path: Path, root: Path) -> bool:
-    """Whether `path` is `root` or under it with no link on the way (nothing a worker made can
-    send Chief of Staff, which runs unsandboxed, to write elsewhere). A part that does not
-    exist yet is fine: it is made as a folder."""
-    try:
-        relative = path.relative_to(root)
-    except ValueError:
-        return False
-    here = root
-    for part in ("", *relative.parts):
-        here = here / part if part else here
-        try:
-            if here.is_symlink():
-                return False
-        except OSError:
-            return False
-    return True
 
 
 def system() -> str:
@@ -405,103 +385,64 @@ def seeds(owner: Owner) -> list[tuple[str, Path, str, int]]:
     ]
 
 
-# Copy-on-write clones. macOS: clonefile(2), which clones a folder whole. Linux: the FICLONE
-# ioctl, file by file, where the file system has reflinks (Btrfs, XFS); elsewhere nothing is
-# copied (no full copies: the tier fills from the network once, for every worker).
-CLONE_NOFOLLOW = 0x0001
-FICLONE = 0x40049409
-_libc = None
+# Copy-on-write clones (safefs.Folder.clone): APFS clonefile on macOS, a Linux reflink where the
+# file system has them; elsewhere nothing is copied (no full copies: the tier fills from the
+# network once, for every worker). Everything Chief of Staff writes in the tier, which every
+# sandboxed worker writes too, goes through safefs: never through a link a worker made.
 
 
-def clone(source: Path, target: Path) -> bool:
-    """A copy-on-write copy of a file or folder at `target` (which must not exist). False when
-    this file system cannot clone (nothing is left at `target` then)."""
-    global _libc
-    if sys.platform == "darwin":
-        if _libc is None:
-            _libc = ctypes.CDLL("libc.dylib", use_errno=True)
-        if _libc.clonefile(os.fsencode(source), os.fsencode(target), CLONE_NOFOLLOW) == 0:
-            return True
-        code = ctypes.get_errno()
-        if code in (errno.EXDEV, errno.ENOTSUP):
-            raise CannotCloneError(os.strerror(code))
+def place(source: Path, into: Folder, name: str) -> bool:
+    """Clone `source` to `name` in `into` whole: under another name first, then renamed, so
+    that no tool ever finds half of it. Nothing is overwritten."""
+    if into.lstat(name) is not None:
         return False
-    return reflink_tree(source, target)
-
-
-class CannotCloneError(OSError):
-    """The tier's file system cannot clone the owner's files (another volume, no reflinks)."""
-
-
-def reflink_tree(source: Path, target: Path) -> bool:
-    import fcntl  # Not on Windows (where nothing is sandboxed).
-
-    if source.is_symlink():
-        target.symlink_to(source.readlink())
-        return True
-    if source.is_dir():
-        target.mkdir()
-        for child in source.iterdir():
-            reflink_tree(child, target / child.name)
-        return True
-    with source.open("rb") as src, target.open("xb") as dst:
-        try:
-            fcntl.ioctl(dst.fileno(), FICLONE, src.fileno())
-        except OSError as exc:
-            target.unlink(missing_ok=True)
-            if exc.errno in (errno.EXDEV, errno.EOPNOTSUPP, errno.EINVAL, errno.ENOTTY):
-                raise CannotCloneError(os.strerror(exc.errno)) from None
-            return False
-    shutil.copystat(source, target, follow_symlinks=False)
-    return True
-
-
-def place(source: Path, target: Path) -> bool:
-    """Clone `source` to `target` whole: under another name first, then renamed, so that no
-    tool ever finds half of it. Nothing is overwritten."""
-    if os.path.lexists(target):
-        return False
-    temporary = target.with_name(f".cos-seed-{uuid4().hex[:8]}-{target.name}")
+    temporary = into.temporary_name(name).replace(".cos-", ".cos-seed-", 1)
     try:
-        if not clone(source, temporary):
+        if not into.clone(source, temporary):
             return False
-        if os.path.lexists(target):
+        if into.lstat(name) is not None:
             return False  # A worker made it meanwhile: its own stays.
-        temporary.rename(target)
+        into.move(temporary, name)
         return True
     except CannotCloneError:
         raise
     except OSError:
         return False
     finally:
-        if temporary.is_dir() and not temporary.is_symlink():
-            shutil.rmtree(temporary, ignore_errors=True)
-        elif os.path.lexists(temporary):
-            temporary.unlink()
+        with suppress(OSError):
+            into.remove(temporary)
 
 
-def fill(source: Path, target: Path, depth: int) -> int:
-    """Clone into `target` each unit of `source` it lacks (see seeds); how many."""
+def fill(source: Path, target: Folder, depth: int) -> int:
+    """Clone into the `target` folder each unit of `source` it lacks (see seeds); how many."""
     if not source.is_dir() or source.is_symlink():
         return 0
     copied = 0
     for root, folders, files in os.walk(source):
         here = Path(root)
-        level = len(here.relative_to(source).parts)
-        into = target / here.relative_to(source)
-        if not ours(into, target):
-            folders[:] = []
+        relative = here.relative_to(source).parts
+        level = len(relative)
+        try:
+            into = target.descend(relative, create=True)
+        except (UnsafePathError, NotADirectoryError):
+            folders[:] = []  # A worker's link or file there: not filled through.
             continue
-        into.mkdir(parents=True, exist_ok=True)
-        names = files if not depth or level < depth - 1 else [*folders, *files]
-        if depth and level == depth - 1:
-            folders[:] = []
-        folders[:] = [name for name in folders if not name.startswith(".cos-seed-")]
-        for name in names:
-            if name.startswith((".cos-seed-", ".tmp", "tmp")) or name.endswith(".lock"):
-                continue
-            copied += place(here / name, into / name)
+        with into:
+            names = files if not depth or level < depth - 1 else [*folders, *files]
+            if depth and level == depth - 1:
+                folders[:] = []
+            folders[:] = [name for name in folders if not name.startswith(".cos-")]
+            for name in names:
+                if name.startswith((".cos-", ".tmp", "tmp")) or name.endswith(".lock"):
+                    continue
+                copied += place(here / name, into, name)
     return copied
+
+
+def tier_folder(tier: Path, trusted: Path | None = None) -> Folder:
+    """The tier, opened from the folder above it, which no worker can change (a link a worker
+    put in its place is removed: never followed)."""
+    return open_folder(tier, trusted or tier.parent, create=True, relink=True)
 
 
 def seed(tier: Path, owner: Owner) -> dict:
@@ -509,49 +450,58 @@ def seed(tier: Path, owner: Owner) -> dict:
     in seconds, and whether this file system can clone at all."""
     timings: dict = {}
     started = time.monotonic()
-    for name, source, into, depth in seeds(owner):
-        began = time.monotonic()
-        if not ours(tier / into, tier):
-            logger.warning("Workers' %s cache is a link: not filled", name)
-            continue
-        try:
-            count = fill(source, tier / into, depth)
-        except CannotCloneError as exc:
-            logger.info("Workers' caches are not copied from yours here: %s", exc)
-            timings["cannot_clone"] = str(exc)
-            break
-        except OSError:
-            logger.warning("Copying your %s cache for workers stopped", name, exc_info=True)
-            continue
-        timings[name] = round(timings.get(name, 0) + time.monotonic() - began, 2)
-        timings[f"{name}_copied"] = timings.get(f"{name}_copied", 0) + count
+    with tier_folder(tier) as root:
+        for name, source, into, depth in seeds(owner):
+            began = time.monotonic()
+            try:
+                with root.descend(Path(into).parts, create=True) as folder:
+                    count = fill(source, folder, depth)
+            except UnsafePathError:
+                logger.warning("Workers' %s cache is a link: not filled", name)
+                continue
+            except CannotCloneError as exc:
+                logger.info("Workers' caches are not copied from yours here: %s", exc)
+                timings["cannot_clone"] = str(exc)
+                break
+            except OSError:
+                logger.warning("Copying your %s cache for workers stopped", name, exc_info=True)
+                continue
+            timings[name] = round(timings.get(name, 0) + time.monotonic() - began, 2)
+            timings[f"{name}_copied"] = timings.get(f"{name}_copied", 0) + count
     timings["total"] = round(time.monotonic() - started, 2)
     return timings
 
 
-def link_browsers(tier: Path, owner: Owner) -> None:
+def link_browsers(tier: Folder, owner: Owner) -> None:
     """Each browser Playwright installed for the owner, as a link in the tier (the owner's own
     folder, read-only to workers): found at once, never downloaded again; a version the owner
     lacks downloads into the tier. Cheap: done as each worker starts. On macOS, Chromium's
     headless shell gets a launcher instead (single_process_shell)."""
-    source, target = owner.playwright(), tier / "ms-playwright"
-    if not ours(target, tier):
+    source = owner.playwright()
+    try:
+        target = tier.child("ms-playwright", create=True)
+    except UnsafePathError:
         return
-    target.mkdir(parents=True, exist_ok=True)
-    if system() == "darwin":
-        for own in target.glob("chromium_headless_shell-*/*/chrome-headless-shell"):
-            if ours(own, target):
-                launch_downloaded(own)
-    if not source.is_dir() or source.resolve() == target.resolve():
-        return
-    for entry in source.iterdir():
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
-        if system() == "darwin" and entry.name.startswith("chromium_headless_shell-"):
-            single_process_shell(entry, target / entry.name)
-        else:
-            with suppress(FileExistsError):
-                (target / entry.name).symlink_to(entry)
+    with target:
+        if system() == "darwin":
+            for name in target.names():
+                if name.startswith("chromium_headless_shell-"):
+                    with suppress(OSError), target.child(name) as shell:
+                        for kind in shell.names():
+                            if shell.is_folder(kind):
+                                with shell.child(kind) as folder:
+                                    launch_downloaded(shell, folder, "chrome-headless-shell")
+        with suppress(OSError):
+            if not source.is_dir() or os.path.samestat(source.stat(), os.fstat(target.fd or 0)):
+                return
+        for entry in sorted(source.iterdir()) if source.is_dir() else []:
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if system() == "darwin" and entry.name.startswith("chromium_headless_shell-"):
+                single_process_shell(entry, target)
+            else:
+                with suppress(FileExistsError):
+                    target.symlink(entry.name, entry)
 
 
 # Chromium checks in a Mach service when it starts its other processes, which Copilot's macOS
@@ -564,43 +514,55 @@ SHELL_LAUNCHER = (
 )
 
 
-def launch_downloaded(program: Path) -> None:
+def launch_downloaded(shell: Folder, folder: Folder, name: str) -> None:
     """A headless shell a worker downloaded into the tier: its program moved aside, with the
-    launcher in its place (from the next worker's start)."""
-    if program.is_symlink() or not program.is_file() or program.stat().st_size < 4096:
-        return  # A launcher already, or the owner's program linked.
-    if not (program.parent.parent / "INSTALLATION_COMPLETE").exists():
+    launcher in its place (from the next worker's start). By name in the folders opened: what
+    a worker puts there meanwhile is replaced, never written through."""
+    found = folder.lstat(name)
+    if not found or not stat.S_ISREG(found.st_mode) or found.st_size < 4096:
+        return  # A launcher already, a link, or the owner's program linked.
+    if shell.lstat("INSTALLATION_COMPLETE") is None:
         return  # Still being installed.
-    real = program.with_name(program.name + ".real")
-    if not real.exists():
-        program.rename(real)
-        program.write_text(SHELL_LAUNCHER.format(binary=shlex.quote(str(real))))
-        program.chmod(0o755)
+    real = f"{name}.real"
+    if folder.lstat(real) is None:
+        folder.move(name, real)
+        folder.write(
+            name, SHELL_LAUNCHER.format(binary=shlex.quote(str(folder.path / real))), 0o755
+        )
 
 
-def single_process_shell(source: Path, target: Path) -> None:
+def single_process_shell(source: Path, target: Folder) -> None:
     """The owner's headless shell, linked file by file, with a launcher in place of its program
     that runs it in a single process."""
-    if target.is_symlink():
-        target.unlink()  # A link to the owner's folder: never written through.
-    for folder in [path for path in source.iterdir() if path.is_dir()]:
-        program = folder / "chrome-headless-shell"
-        mirror = target / folder.name
-        if not ours(mirror, target):
-            continue
-        mirror.mkdir(parents=True, exist_ok=True)
-        for item in folder.iterdir():
-            link = mirror / item.name
-            if os.path.lexists(link):
+    name = source.name
+    found = target.lstat(name)
+    if found and stat.S_ISLNK(found.st_mode):
+        target.delete(name)  # A link to the owner's folder: never written through.
+    try:
+        mirrored = target.child(name, create=True)
+    except UnsafePathError:
+        return
+    with mirrored:
+        for folder in sorted(path for path in source.iterdir() if path.is_dir()):
+            program = folder / "chrome-headless-shell"
+            try:
+                mirror = mirrored.child(folder.name, create=True)
+            except UnsafePathError:
                 continue
-            if item == program:
-                link.write_text(SHELL_LAUNCHER.format(binary=shlex.quote(str(item))))
-                link.chmod(0o755)
-            else:
-                link.symlink_to(item)
-    for item in source.iterdir():
-        if not item.is_dir() and not os.path.lexists(target / item.name):
-            (target / item.name).symlink_to(item)
+            with mirror:
+                for item in sorted(folder.iterdir()):
+                    if mirror.lstat(item.name) is not None:
+                        continue
+                    if item == program:
+                        launcher = SHELL_LAUNCHER.format(binary=shlex.quote(str(item)))
+                        mirror.write(item.name, launcher, 0o755)
+                    else:
+                        with suppress(FileExistsError):
+                            mirror.symlink(item.name, item)
+        for item in sorted(source.iterdir()):
+            if not item.is_dir() and mirrored.lstat(item.name) is None:
+                with suppress(FileExistsError):
+                    mirrored.symlink(item.name, item)
 
 
 def owner_settings(tier: Path, owner: Owner) -> list[tuple[Path, Path]]:
@@ -616,15 +578,20 @@ def owner_settings(tier: Path, owner: Owner) -> list[tuple[Path, Path]]:
     return [(source, link) for source, link in pairs if source.exists()]
 
 
-def link_settings(tier: Path, owner: Owner) -> None:
-    for source, link in owner_settings(tier, owner):
-        if not ours(link.parent, tier):
+def link_settings(tier: Folder, owner: Owner) -> None:
+    for source, link in owner_settings(tier.path, owner):
+        try:
+            parent = tier.descend(link.parent.relative_to(tier.path).parts, create=True)
+        except (UnsafePathError, NotADirectoryError):
             continue
-        link.parent.mkdir(parents=True, exist_ok=True)
-        if link.is_symlink() and link.readlink() != source:
-            link.unlink()  # A worker pointed it elsewhere: put back.
-        if not os.path.lexists(link):
-            link.symlink_to(source)
+        with parent:
+            found = parent.lstat(link.name)
+            if found and stat.S_ISLNK(found.st_mode) and parent.readlink(link.name) != str(source):
+                parent.delete(link.name)  # A worker pointed it elsewhere: put back.
+                found = None
+            if found is None:
+                with suppress(FileExistsError):
+                    parent.symlink(link.name, source)
 
 
 # uv before 0.9.29 panics in Copilot's macOS sandbox: its HTTP client reads the system's proxy
@@ -775,59 +742,69 @@ def truststore(tier: Path, copilot_home: Path) -> Path | None:
     if not roots.is_file() or not keytool.is_file():
         return None
     stamp = int(authority.stat().st_mtime)
-    store = tier / "java" / f"truststore-{stamp}.p12"
-    if store.is_file():
-        return store
-    store.parent.mkdir(parents=True, exist_ok=True)
-    partial = store.with_suffix(".tmp")
-    partial.unlink(missing_ok=True)
-    quiet = {"capture_output": True, "check": True, "timeout": 120, "env": java_env()}
-    try:
-        copy = ["-importkeystore", "-noprompt", "-srckeystore", str(roots), "-srcstorepass",
-                "changeit", "-destkeystore", str(partial), "-deststoretype", "PKCS12",
-                "-deststorepass", "changeit"]  # fmt: skip
-        add = ["-importcert", "-noprompt", "-alias", "copilot-sandbox", "-file", str(authority),
-               "-keystore", str(partial), "-storepass", "changeit"]  # fmt: skip
-        for arguments in (copy, add):
-            subprocess.run([str(keytool), *arguments], **quiet)  # noqa: S603  (the JDK's keytool)
-    except (OSError, subprocess.SubprocessError):
-        partial.unlink(missing_ok=True)
-        return None
-    partial.rename(store)
-    return store
+    # Beside the tier, where no worker writes (read-only to them), not in it: keytool writes by
+    # path, which must lead nowhere a worker chose.
+    name = f"truststore-{stamp}.p12"
+    with open_folder(tier.parent / "java", tier.parent, create=True, mode=0o755) as folder:
+        if folder.lstat(name) is not None:
+            return folder.path / name
+        partial = folder.temporary_name(name)
+        quiet = {"capture_output": True, "check": True, "timeout": 120, "env": java_env()}
+        try:
+            copy = ["-importkeystore", "-noprompt", "-srckeystore", str(roots), "-srcstorepass",
+                    "changeit", "-destkeystore", str(folder.path / partial), "-deststoretype",
+                    "PKCS12", "-deststorepass", "changeit"]  # fmt: skip
+            add = ["-importcert", "-noprompt", "-alias", "copilot-sandbox", "-file",
+                   str(authority), "-keystore", str(folder.path / partial), "-storepass",
+                   "changeit"]  # fmt: skip
+            for arguments in (copy, add):
+                subprocess.run([str(keytool), *arguments], **quiet)  # noqa: S603  (the JDK's keytool)
+            folder.move(partial, name)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        finally:
+            with suppress(OSError):
+                folder.remove(partial)
+        return folder.path / name
 
 
 def java_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key != "JAVA_TOOL_OPTIONS"}
 
 
-def worker_temp(session_id: str) -> Path:
-    """A worker's own temporary folder: short (Unix sockets made there must fit 104 bytes), in
-    the owner's own temporary folder (which only they can enter), made only by Chief of Staff."""
-    import tempfile
+TEMP = "temp"  # Beside the tier: each worker's temporary folder.
 
-    base = Path(tempfile.gettempdir())
-    return base / f"cos-{session_id[:8]}"
+
+def worker_temp(session_id: str, tier: Path | None = None) -> Path:
+    """A worker's own temporary folder: short (Unix sockets made there must fit 104 bytes), in
+    a folder beside the tier that no worker can write (not the system's temporary folder, which
+    Copilot's sandbox lets every worker write), so that only Chief of Staff makes it."""
+    return (tier or default_tier()).parent / TEMP / session_id[:8]
 
 
 def make_temp(path: Path) -> bool:
-    """Make a worker's temporary folder, the owner's alone; False if something else is there."""
+    """Make a worker's temporary folder, the owner's alone (0700); False when it cannot be.
+    One there already is that worker's own from before (no other can make it there): kept as
+    it is if it is a folder, made again if it is a link or a file."""
     try:
-        path.mkdir(mode=0o700)
+        with (
+            open_folder(path.parent, path.parent.parent, create=True, mode=0o700) as parent,
+            parent.child(path.name, create=True, mode=0o700, relink=True) as own,
+        ):
+            if own.fd is not None and own.fd >= 0:
+                if os.fstat(own.fd).st_uid != os.getuid():
+                    return False
+                os.fchmod(own.fd, 0o700)
         return True
-    except FileExistsError:
-        info = path.lstat()
-        return path.is_dir() and not path.is_symlink() and info.st_uid == os.getuid()
     except OSError:
         return False
 
 
-def remove_temp(session_id: str) -> None:
-    """A closed worker's temporary folder goes (only one Chief of Staff made: the owner's)."""
-    path = worker_temp(session_id)
-    with suppress(OSError):
-        if path.is_dir() and not path.is_symlink() and path.lstat().st_uid == os.getuid():
-            shutil.rmtree(path, ignore_errors=True)
+def remove_temp(session_id: str, tier: Path | None = None) -> None:
+    """A closed worker's temporary folder goes, never through a link."""
+    path = worker_temp(session_id, tier)
+    with suppress(OSError), open_folder(path.parent, path.parent.parent) as parent:
+        parent.remove(path.name)
 
 
 @dataclass
@@ -835,6 +812,7 @@ class Plan:
     """What a sandboxed worker's caches add to its sandbox, and its init script's text."""
 
     tier: Path  # Its tools' caches: the shared tier, or its own when it reads Slack.
+    trusted: Path  # The folder above the tier, which no worker can write.
     temporary: Path
     readwrite: list[str]
     readonly: list[str]
@@ -862,7 +840,7 @@ def plan(
     go = go or {}
     owner = Owner(home or Path.home(), go.get("GOMODCACHE", ""), go.get("GOCACHE", ""))
     own = workspace / PRIVATE if slack else tier
-    temporary = worker_temp(session_id)
+    temporary = worker_temp(session_id, tier)
     readonly = tool_paths(owner, rust)
     readonly.append(str(scripts))
     if not slack:
@@ -874,6 +852,7 @@ def plan(
         readonly += unsecret([owner.maven_repository(), owner.go_modules()], owner.home)
         readonly += registry_config(owner)
         readonly += [str(source) for source, _ in owner_settings(own, owner)]
+        readonly += [str(truststore_path)] if truststore_path else []
     readwrite = [str(own), str(temporary)]
     # Nothing of the owner's is read through for a worker that reads Slack: it can't read it.
     text = script(
@@ -881,7 +860,8 @@ def plan(
         None if slack else truststore_path,
     )  # fmt: skip
     readonly = [path for path in dict.fromkeys(readonly) if not too_broad(path)]
-    return Plan(own, temporary, readwrite, readonly, text, slack)
+    trusted = workspace.parent if slack else tier.parent
+    return Plan(own, trusted, temporary, readwrite, readonly, text, slack)
 
 
 def prepare(found: Plan, session_id: str, scripts: Path, home: Path | None = None) -> Path | None:
@@ -889,23 +869,20 @@ def prepare(found: Plan, session_id: str, scripts: Path, home: Path | None = Non
     init script (in `scripts`, read-only to workers). The script's path; None when its
     temporary folder could not be made its own."""
     owner = Owner(home or Path.home())
-    if found.tier.is_symlink():
-        found.tier.unlink()  # Its own folder only, never where a link leads.
-    found.tier.mkdir(parents=True, exist_ok=True)
-    link_browsers(found.tier, owner)
-    if not found.slack:
-        link_settings(found.tier, owner)
+    with tier_folder(found.tier, found.trusted) as tier:
+        link_browsers(tier, owner)
+        if not found.slack:
+            link_settings(tier, owner)
     if not make_temp(found.temporary):
         return None
     return write_script(scripts, session_id, found.text)
 
 
 def write_script(folder: Path, session_id: str, text: str) -> Path:
-    """A worker's init script, where workers can read it and never write it."""
-    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = folder / f"{session_id}.sh"
-    if not path.is_file() or path.read_text() != text:
-        partial = path.with_suffix(".tmp")
-        partial.write_text(text)
-        partial.replace(path)
-    return path
+    """A worker's init script, in Chief of Staff's data folder, where workers can read it and
+    never write it."""
+    name = f"{session_id}.sh"
+    with open_folder(folder, folder.parent, create=True, mode=0o700) as scripts:
+        if scripts.read(name) != text.encode():
+            scripts.write(name, text, 0o644)
+    return folder / name

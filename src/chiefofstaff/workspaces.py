@@ -1,6 +1,8 @@
 """Where workers work: a workspace folder each, with worktrees or clones of their repositories."""
 
 import asyncio
+import contextlib
+import errno
 import fnmatch
 import hashlib
 import itertools
@@ -19,7 +21,7 @@ from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
-from . import machine, receipts
+from . import machine, receipts, safefs
 from .models import Settings
 from .policy import within
 from .roles import WORKER
@@ -370,7 +372,7 @@ MAX_CARRIED = 200
 MAX_CARRIED_BYTES = 50_000_000
 
 
-async def carry_ignored_files(top: Path, tree: Path) -> list[str]:
+async def carry_ignored_files(top: Path, tree: Path, under: Path | None = None) -> list[str]:
     """Copy the main checkout's gitignored files that a worktree should have (like .env) into
     it; tracked files are there already. Returns their paths relative to the repository."""
     include = top / WORKTREE_INCLUDE
@@ -396,22 +398,67 @@ async def carry_ignored_files(top: Path, tree: Path) -> list[str]:
         )  # fmt: skip
     except ValueError:
         return []
-    return await asyncio.to_thread(copy_files, top, tree, [p for p in ignored.split("\0") if p])
+    paths = [p for p in ignored.split("\0") if p]
+    return await asyncio.to_thread(copy_files, top, tree, paths, under)
 
 
-def copy_files(source: Path, target: Path, paths: list[str]) -> list[str]:
+def copy_files(
+    source: Path, target: Path, paths: list[str], under: Path | None = None
+) -> list[str]:
+    """Copy these files of the owner's checkout `source` into the worktree `target` (made in
+    `under`, which no worker can write: see place_tree), never through a link there."""
     copied, size = [], 0
     for relative in paths:
-        origin, copy = source / relative, target / relative
-        if not origin.is_file() or copy.exists():
+        origin, parts = source / relative, Path(relative).parts
+        if not parts or ".." in parts or not origin.is_file():
             continue
-        size += origin.stat().st_size
-        if size > MAX_CARRIED_BYTES:
-            break
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(origin, copy)
+        try:
+            with safefs.open_folder(
+                target.joinpath(*parts[:-1]), under or target.parent, create=True
+            ) as folder:
+                if folder.lstat(parts[-1]) is not None:
+                    continue
+                size += origin.stat().st_size
+                if size > MAX_CARRIED_BYTES:
+                    break
+                folder.copy_in(origin, parts[-1])
+        except OSError:
+            continue
         copied.append(relative)
     return copied
+
+
+def place_tree(staged: Path, workspace: Path, under: Path, name: str, exact: bool = False) -> Path:
+    """Move a checkout made in Chief of Staff's own staging folder (no worker writes there:
+    git, the copies and carried files are made out of every worker's reach) into a worker's
+    workspace in one rename, from folders opened without following a link. Named `name`, or
+    the first of name-2, name-3… that is free (`exact`: that name or nothing). Its path."""
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-.") or "repo"
+    with (
+        safefs.open_folder(staged.parent, staged.parent.parent) as source,
+        safefs.open_folder(workspace, under, create=True) as into,
+    ):
+        for number in range(1, 200):
+            candidate = name if number == 1 else f"{name}-{number}"
+            if into.lstat(candidate) is None:
+                try:
+                    source.move(staged.name, candidate, into)
+                    return workspace / candidate
+                except OSError as exc:
+                    if exact or exc.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR):
+                        raise
+            if exact:
+                break
+    raise FileExistsError(errno.EEXIST, f"{workspace / name} is taken")
+
+
+def repoint(tree: Path, under: Path, admin: str, repository: Path) -> None:
+    """A worktree moved into place (place_tree) and its repository told where it is, as git
+    worktree move does, never through a link: its .git file and its folder's gitdir."""
+    with safefs.open_folder(tree, under) as folder:
+        folder.write(".git", f"gitdir: {admin}\n")
+    with safefs.open_folder(Path(admin), repository) as folder:
+        folder.write("gitdir", f"{tree / '.git'}\n")
 
 
 def free_child(parent: Path, name: str) -> Path:
@@ -811,6 +858,18 @@ def too_large(top: str, names: list[str]) -> list[str]:
     return found
 
 
+# A folder of Chief of Staff's own for its temporary files, where no worker writes (the
+# system's temporary folder is every sandboxed worker's to write): set by Workspaces.
+PRIVATE_TEMP: list[Path] = []
+
+
+def private_temp() -> str | None:
+    if not PRIVATE_TEMP:
+        return None
+    PRIVATE_TEMP[0].mkdir(parents=True, exist_ok=True, mode=0o700)
+    return str(PRIVATE_TEMP[0])
+
+
 async def snapshot(checkout: dict) -> dict | None:
     """What a checkout holds now, all of it: its commit, and a tree of its files as they are
     (edited, new; not ignored ones). Written to the repository's objects only, through an index
@@ -833,7 +892,7 @@ async def snapshot(checkout: dict) -> dict | None:
             return {"commit": commit, "tree": "", "large": []}  # Its commit all the same.
         index = (await checkout_git(checkout, top, "rev-parse", "--git-path", "index")).strip()
         index = str(Path(top) / index) if not Path(index).is_absolute() else index
-        with tempfile.TemporaryDirectory(prefix="cos-snap-") as folder:
+        with tempfile.TemporaryDirectory(prefix="cos-snap-", dir=private_temp()) as folder:
             own = str(Path(folder) / "index")
             with suppress(FileNotFoundError):
                 await asyncio.to_thread(shutil.copyfile, index, own)
@@ -1576,6 +1635,7 @@ MAX_LOOKED_INSIDE = 500_000
 # Chief of Staff uses (the workspaces folder may be one the owner chose); what an earlier version
 # called it, of which only its own entries are taken; and the names to_trash gives those.
 TRASH = ".chiefofstaff-trash"
+STAGING = ".chiefofstaff-staging"  # Beside workers' folders: Workspaces.staging.
 OLD_TRASH = ".trash"
 TRASHED = re.compile(r"^[0-9a-f]{12}-")
 # How long git may take to remove a worktree (a huge one, a slow disk).
@@ -1738,46 +1798,83 @@ def move_ignored(tree: str, entry: str, trash: Path) -> Path | bool:
     """Take one ignored file or folder out of a worktree (in a thread): a file or a link is
     removed (a link is never followed); a folder is moved into `trash` in one step (on the same
     disk only), to be deleted from there. Only inside the worktree, never through a linked folder
-    that leads out of it, never a repository of its own (its commits may be nowhere else). The
-    folder's place in trash, True for a file removed, False for nothing done."""
-    root = Path(tree).resolve()
+    that leads out of it (each folder is opened from the workspaces folder without following a
+    link: one a worker swaps in meanwhile is refused), never a repository of its own (its
+    commits may be nowhere else). The folder's place in trash, True for a file removed, False
+    for nothing done."""
     relative = entry.rstrip("/")
-    if not relative or ".." in relative.split("/"):
-        return False
-    path = root / relative
-    if not path.parent.resolve().is_relative_to(root):
+    parts = relative.split("/")
+    if not relative or {"", ".", ".."} & set(parts):
         return False
     try:
-        if path.is_symlink() or not path.is_dir():
-            path.unlink()
-            return True
-        if (path / ".git").exists() or (path / ".git").is_symlink():
-            return False
-    except FileNotFoundError:
+        with safefs.open_folder(Path(tree, *parts[:-1]), trash.parent) as parent:
+            found = parent.lstat(parts[-1])
+            if found is None:
+                return False
+            if not stat.S_ISDIR(found.st_mode):
+                parent.delete(parts[-1])
+                return True
+            with parent.child(parts[-1]) as folder:
+                if folder.lstat(".git") is not None:
+                    return False
+            return trash_in(parent, parts[-1], trash) or False
+    except (FileNotFoundError, NotADirectoryError, ValueError, safefs.UnsafePathError):
         return False
     except OSError as exc:
-        logger.warning("Could not delete %s: %s", path, exc)
+        logger.warning("Could not delete %s: %s", Path(tree, relative), exc)
         return False
-    return to_trash(path, trash) or False
 
 
 def to_trash(path: Path, trash: Path) -> Path | None:
     """Move a folder into trash in one step (in a thread): only on the same disk, where that is
-    one rename. Its place there, or None (gone already, another disk, an error)."""
+    one rename, from its folder opened without following a link. Its place there, or None (gone
+    already, another disk, a link on the way, an error)."""
     try:
-        trash.mkdir(exist_ok=True)
-        if trash.stat().st_dev != path.lstat().st_dev:
-            logger.warning("Not deleting %s: it is on another disk than %s.", path, trash)
-            return None
-        target = trash / f"{uuid4().hex[:12]}-{path.name}"
-        path.rename(target)
-    except FileNotFoundError:
+        with safefs.open_folder(path.parent, trash.parent) as parent:
+            return trash_in(parent, path.name, trash)
+    except (FileNotFoundError, NotADirectoryError, ValueError, safefs.UnsafePathError):
         return None
     except OSError as exc:
         logger.warning("Could not delete %s: %s", path, exc)
         return None
-    DELETING.add(target)  # Its own cleanup deletes it: not a leftover for another to take.
-    return target
+
+
+def trash_in(parent: safefs.Folder, name: str, trash: Path) -> Path | None:
+    """What is at `name` in the opened folder `parent`, moved into trash (see to_trash)."""
+    try:
+        with safefs.open_folder(trash, trash.parent, create=True) as kept:
+            found = parent.lstat(name)
+            if found is None:
+                return None
+            if trash.stat().st_dev != found.st_dev:
+                logger.warning("Not deleting %s: it is on another disk than %s.", name, trash)
+                return None
+            target = f"{uuid4().hex[:12]}-{name}"
+            parent.move(name, target, kept)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning("Could not delete %s: %s", parent.path / name, exc)
+        return None
+    DELETING.add(trash / target)  # Its own cleanup deletes it: not a leftover for another.
+    return trash / target
+
+
+def untrash(moved: Path, place: Path) -> bool:
+    """Put back what trash_in moved (when it changed meanwhile), if its place is still free."""
+    DELETING.discard(moved)
+    try:
+        with (
+            safefs.open_folder(moved.parent, moved.parent) as kept,
+            safefs.open_folder(place.parent, moved.parent.parent) as parent,
+        ):
+            if parent.lstat(place.name) is not None:
+                return False
+            kept.move(moved.name, place.name, parent)
+            return True
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not put %s back in its place: %s", moved, exc)
+        return False
 
 
 # What is in trash because a cleanup running now moved it there (until it is deleted).
@@ -1788,44 +1885,59 @@ DELETING: set[Path] = set()
 RETRYING: set[str] = set()
 
 
-def writable(function: Callable, path: str, _error: object):
+def writable(function: Callable, path: str, _error: object, under: Path | None = None):
     """rmtree's handler: what it could not delete or open because it or its folder is read-only
     or unreadable (Go's module cache, a tool's locked cache, a folder at mode 000) is made
     writable and readable and tried once more: a file or an empty folder is removed again, a
-    folder it could not open or list is deleted with all in it. Never raises (that would stop
-    the whole delete): one owned by another user stays, and what is left is measured after."""
+    folder it could not open or list is deleted with all in it. All from folders opened from
+    `under` (trash) without following a link. Never raises (that would stop the whole delete):
+    one owned by another user stays, and what is left is measured after."""
     target = Path(path)
+    anchor = Path(under) if under is not None else target.parent
     try:
         for each in {target.parent, target}:
-            if not each.is_symlink():
-                each.chmod(each.lstat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-        if function in {os.unlink, os.remove, os.rmdir}:
-            function(path)
-        elif path not in RETRYING and target.is_dir() and not target.is_symlink():
-            RETRYING.add(path)
-            try:
-                rmtree_writable(target)
-            finally:
-                RETRYING.discard(path)
+            if each != anchor and each.is_relative_to(anchor):
+                with safefs.open_folder(each.parent, anchor) as folder:
+                    folder.add_mode(each.name, stat.S_IRWXU)
+        with safefs.open_folder(target.parent, anchor) as folder:
+            found = folder.lstat(target.name)
+            if found is None:
+                return
+            if not stat.S_ISDIR(found.st_mode):
+                folder.delete(target.name)
+            elif function is os.rmdir:
+                folder.delete_empty(target.name)
+            elif path not in RETRYING:
+                RETRYING.add(path)
+                try:
+                    rmtree_writable(target, anchor)
+                finally:
+                    RETRYING.discard(path)
     except Exception as exc:
         logger.debug("Could not delete %s: %s", path, exc)
 
 
-def rmtree_writable(folder: Path):
-    """shutil.rmtree with writable() for what it cannot delete at first."""
-    if sys.version_info >= (3, 12):
-        shutil.rmtree(folder, onexc=writable)
-    else:
-        shutil.rmtree(folder, onerror=writable)
+def rmtree_writable(folder: Path, under: Path | None = None):
+    """A folder deleted with all in it, never following a link (shutil.rmtree by folder
+    descriptors), with writable() for what it cannot delete at first."""
+    anchor = Path(under) if under is not None else folder.parent
+
+    def retry(function: Callable, path: str, error: object):
+        writable(function, str(folder.parent / path), error, anchor)
+
+    with safefs.open_folder(folder.parent, anchor) as parent:
+        parent.remove(folder.name, onexc=retry)
 
 
 def delete_moved(item: Path) -> bool:
     """Delete a file or folder moved into trash (in a thread): whether it is all gone."""
     try:
-        if item.is_symlink() or not item.is_dir():
-            item.unlink(missing_ok=True)
-        else:
-            rmtree_writable(item)
+        with safefs.open_folder(item.parent, item.parent) as kept:
+            found = kept.lstat(item.name)
+            if found is not None and not stat.S_ISDIR(found.st_mode):
+                kept.delete(item.name)
+            elif found is not None:
+                rmtree_writable(item)
     except OSError as exc:
         logger.warning("Could not delete all of %s: %s", item, exc)
     finally:
@@ -2227,6 +2339,7 @@ class Workspaces:
     def __init__(self, store: Store, work_root: Path):
         self.store = store
         self.work_root = work_root
+        PRIVATE_TEMP[:] = [work_root / "tmp"]
         self.project_cache: dict[str, tuple[float, dict]] = {}
         self.known: tuple[float, tuple, list[str]] = (0.0, (), [])
         self.clone_lock = asyncio.Lock()
@@ -2408,43 +2521,34 @@ class Workspaces:
 
     async def remove_tree(self, checkout: dict, tree: str, trash: Path) -> bool:
         """Remove a worktree git status found clean (nothing uncommitted, no ignored file that
-        may matter), by git. git stopped halfway (a huge tree, a slow disk) is finished, not
-        taken for changes: what is left goes too, out of its place in one step, and git forgets
-        it, so a reopened worker gets it back whole from its branch. False when git refuses
-        (changes made meanwhile)."""
-        repo = checkout["repo"]
-        try:
-            await checkout_git(
-                checkout, repo, *SHOW_UNTRACKED, "worktree", "remove", tree, limit=REMOVE_SECONDS
-            )
-            return True
-        except TimedOutError:
-            logger.warning("Removing %s took too long: finishing it.", tree)
-        except ValueError:
+        may matter). It goes out of its place into trash in one rename first (no worker can
+        write there: what it holds stays as it is), is checked again there, and is deleted
+        from there, never following a link; git then forgets it, so a reopened worker gets it
+        back whole from its branch. Not git's own removal, which deletes in place by paths a
+        worker's leftover program could redirect. False, and put back, when a file changed or
+        appeared meanwhile."""
+        moved = await asyncio.to_thread(to_trash, Path(tree), trash)
+        if not moved:
             return False
-        # Only what git itself deleted may be missing: a file that appeared or changed since
-        # it was found clean is kept (the worktree stays, half removed, for the owner to see).
-        lines = await status_lines(checkout, tree)
-        if lines is None or any(not line.startswith(" D ") for line in lines):
-            logger.warning("Not finishing the removal of %s: files changed meanwhile.", tree)
+        lines = await status_lines({**checkout, "worktree": str(moved)}, str(moved))
+        if lines != []:
+            logger.warning("Not removing %s: files changed meanwhile.", tree)
+            await asyncio.to_thread(untrash, moved, Path(tree))
             return False
-        return await self.force_remove(checkout, tree, trash)
+        await asyncio.to_thread(delete_moved, moved)
+        with suppress(ValueError):
+            await checkout_git(checkout, checkout["repo"], "worktree", "prune")
+        return not await asyncio.to_thread(os.path.lexists, tree)
 
     @staticmethod
     async def force_remove(checkout: dict, tree: str, trash: Path) -> bool:
-        """Remove a worktree with whatever is in it (`git worktree remove --force`). What git
-        leaves (stopped for taking too long) goes out of its place in one step and is deleted
-        from trash, and git forgets the worktree: never a half tree for a reopened worker to
-        resume in (restore() makes it again from its branch)."""
-        repo = checkout["repo"]
-        with suppress(ValueError):
-            await checkout_git(
-                checkout, repo, "worktree", "remove", "--force", tree, limit=REMOVE_SECONDS
-            )
+        """Remove a worktree with whatever is in it: out of its place into trash in one rename,
+        deleted from there (never following a link), and forgotten by git: never a half tree
+        for a reopened worker to resume in (restore() makes it again from its branch)."""
         if moved := await asyncio.to_thread(to_trash, Path(tree), trash):
             await asyncio.to_thread(delete_moved, moved)
         with suppress(ValueError):
-            await checkout_git(checkout, repo, "worktree", "prune")
+            await checkout_git(checkout, checkout["repo"], "worktree", "prune")
         return not await asyncio.to_thread(os.path.lexists, tree)
 
     def others(self, row: dict) -> list[tuple[str, list[str]]]:
@@ -2469,16 +2573,33 @@ class Workspaces:
                 continue
             repo = checkout["repo"]
             await git("-C", repo, "worktree", "prune")
-            try:
-                await git("-C", repo, "worktree", "add", tree, checkout["branch"])
-            except ValueError:
-                # The branch is gone (merged and deleted): start it again where it started.
-                await git(
-                    "-C", repo, "worktree", "add", "-b", checkout["branch"], tree,
-                    checkout.get("base_ref") or "HEAD",
-                )  # fmt: skip
-            if not row["slack"]:
-                await carry_ignored_files(Path(repo), Path(tree))
+            async with self.staging() as staging:
+                staged = staging / Path(tree).name
+                try:
+                    await git("-C", repo, "worktree", "add", str(staged), checkout["branch"])
+                except ValueError:
+                    # The branch is gone (merged and deleted): start it again where it started.
+                    await git(
+                        "-C", repo, "worktree", "add", "-b", checkout["branch"], str(staged),
+                        checkout.get("base_ref") or "HEAD",
+                    )  # fmt: skip
+                admin = (await git("-C", str(staged), "rev-parse", "--absolute-git-dir")).strip()
+                if not row["slack"]:
+                    await carry_ignored_files(Path(repo), staged, staging)
+                try:
+                    placed = await asyncio.to_thread(
+                        place_tree, staged, Path(tree).parent, workspace.parent, Path(tree).name,
+                        True,
+                    )  # fmt: skip
+                    common = checkout.get("git_dir") or str(Path(repo) / ".git")
+                    await asyncio.to_thread(
+                        repoint, placed, workspace.parent, admin, Path(common).parent
+                    )
+                except BaseException:
+                    with suppress(ValueError):
+                        await git("-C", repo, "worktree", "remove", "--force", str(staged))
+                    raise
+                checkout["admin"] = admin
 
     def roots(self) -> list[Path]:
         """The folders Chief of Staff makes workers' own folders in: the configured one, and
@@ -2635,14 +2756,30 @@ class Workspaces:
         if str(top) in repos:
             return None
         ref, base = await base_ref(top)
-        tree = free_child(workspace, top.name)
         branch = f"{BRANCH_PREFIX}{slug}"
         # --no-track: the branch must never push to the default branch it started from.
         start = (await git("-C", str(top), "rev-parse", ref)).strip()  # Fixed, unlike ref.
-        await git("-C", str(top), "worktree", "add", "--no-track", "-b", branch, str(tree), start)
-        # Its own folder in the repository, read now, before a worker could change where its
-        # .git points.
-        admin = (await git("-C", str(tree), "rev-parse", "--absolute-git-dir")).strip()
+        common = await common_git_dir(top) or str(top / ".git")
+        async with self.staging() as staging:
+            staged = staging / top.name
+            await git(
+                "-C", str(top), "worktree", "add", "--no-track", "-b", branch, str(staged), start
+            )  # fmt: skip
+            try:
+                # Its own folder in the repository, read now, before a worker could change
+                # where its .git points.
+                admin = (await git("-C", str(staged), "rev-parse", "--absolute-git-dir")).strip()
+                carried = await carry_ignored_files(top, staged, staging) if carry else []
+                tree = await asyncio.to_thread(
+                    place_tree, staged, workspace, workspace.parent, top.name
+                )
+                await asyncio.to_thread(repoint, tree, workspace.parent, admin, Path(common).parent)
+            except BaseException:
+                with suppress(ValueError):
+                    await git("-C", str(top), "worktree", "remove", "--force", str(staged))
+                with suppress(ValueError):
+                    await git("-C", str(top), "branch", "-D", branch)
+                raise
         repos.add(str(top))
         return {
             "project": str(path),
@@ -2652,10 +2789,28 @@ class Workspaces:
             "branch": branch,
             "base": base,
             "base_ref": start,
-            "git_dir": await common_git_dir(top) or str(top / ".git"),
+            "git_dir": common,
             "admin": admin,
-            "carried": await carry_ignored_files(top, tree) if carry else [],
+            "carried": carried,
         }
+
+    def staging(self) -> contextlib.AbstractAsyncContextManager[Path]:
+        """A folder of Chief of Staff's own, beside workers' folders (the same disk, so one
+        rename moves what it makes there into a workspace) where none of them can write: git
+        checks out, clones and carried files are made there, out of every worker's reach, then
+        moved into place (place_tree). Removed after (empty by then)."""
+        root = self.scratch_root() / STAGING
+
+        @contextlib.asynccontextmanager
+        async def made():
+            folder = root / uuid4().hex[:12]
+            await asyncio.to_thread(folder.mkdir, parents=True, mode=0o700)
+            try:
+                yield folder
+            finally:
+                await asyncio.to_thread(rmtree_writable, folder, root)
+
+        return made()
 
     @staticmethod
     async def remove_checkout(checkout: dict):
@@ -2670,16 +2825,20 @@ class Workspaces:
     async def clone_checkout(self, workspace: Path, slug: str, repo: str) -> dict:
         """Clone a repository that is not on this machine into a worker's workspace."""
         url, name = clone_source(repo)
-        destination = free_child(workspace, name)
-        if GITHUB_NAME.fullmatch(repo) and shutil.which("gh"):
-            # gh uses the owner's GitHub sign-in, so private repositories work too.
-            await self.gh_clone(repo, destination)
-        else:
-            await git("clone", "--quiet", url, str(destination), limit=900)
-        default = (await git("-C", str(destination), "rev-parse", "--abbrev-ref", "HEAD")).strip()
-        start = (await git("-C", str(destination), "rev-parse", "HEAD")).strip()
         branch = f"{BRANCH_PREFIX}{slug}"
-        await git("-C", str(destination), "checkout", "--quiet", "-b", branch)
+        async with self.staging() as staging:
+            staged = staging / "clone"
+            if GITHUB_NAME.fullmatch(repo) and shutil.which("gh"):
+                # gh uses the owner's GitHub sign-in, so private repositories work too.
+                await self.gh_clone(repo, staged)
+            else:
+                await git("clone", "--quiet", url, str(staged), limit=900)
+            default = (await git("-C", str(staged), "rev-parse", "--abbrev-ref", "HEAD")).strip()
+            start = (await git("-C", str(staged), "rev-parse", "HEAD")).strip()
+            await git("-C", str(staged), "checkout", "--quiet", "-b", branch)
+            destination = await asyncio.to_thread(
+                place_tree, staged, workspace, workspace.parent, name
+            )
         return {
             "project": "",
             "repo": str(destination),

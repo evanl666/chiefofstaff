@@ -40,6 +40,7 @@ from .store import now
 from .tasks import FINISHED, OPEN
 from .workspaces import (
     OLD_TRASH,
+    STAGING,
     TRASH,
     clean_tree,
     delete_moved,
@@ -386,7 +387,7 @@ class Storage:
                         entry.path
                         for entry in os.scandir(root)
                         if entry.is_dir(follow_symlinks=False)
-                        and entry.name != TRASH
+                        and entry.name not in {TRASH, STAGING}
                         and os.path.realpath(entry.path) not in known
                     ]
             return found[:MAX_LISTED]

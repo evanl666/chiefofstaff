@@ -76,7 +76,9 @@ def machine(tmp_path, monkeypatch):
     chief = tmp_path / "chief"
     chief.mkdir()
     monkeypatch.setattr(runtime_module, "own_code", lambda: [str(chief)])
-    monkeypatch.setattr(caches_module, "worker_temp", lambda session: tmp_path / f"t-{session[:8]}")
+    monkeypatch.setattr(
+        caches_module, "worker_temp", lambda session, tier=None: tmp_path / f"t-{session[:8]}"
+    )
     monkeypatch.setattr(caches_module, "path_folders", lambda home: [])
     monkeypatch.setattr(caches_module, "global_npmrc", list)
     caches = workspaces_module.PLATFORM_CACHES["darwin"]
