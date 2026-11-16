@@ -563,7 +563,7 @@ class Workers:
             if self.running() < self.store.settings().max_workers:
                 return
             await self.runtime.shepherd.stop_step(
-                session_id, "interrupted", "Stopped its step: your work needed the slot."
+                session_id, "interrupted", "Stopped preparing it: your work needed the slot."
             )
 
     async def grant_step(self, session_id: str) -> bool:

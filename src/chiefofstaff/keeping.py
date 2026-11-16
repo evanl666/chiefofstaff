@@ -405,6 +405,19 @@ class Keeping:
         elif last and last["state"] in {"published", "partly"} and last["kind"] != "merge":
             view["line"] = self.published_words(last)
             view["rank"] = 3
+            if last["state"] == "partly":
+                view["action"] = {"kind": "look", "label": "Look"}
+                view["rank"] = 1
+        elif last and last["state"] == "failed":
+            failed = [a for a in self.control.actions(last["id"]) if a["state"] != "sent"]
+            if failed:
+                # The owner approved it, and it did not go out: theirs to look at.
+                view["line"] = f"Not published: {failed[0]['outcome'] or 'it failed'}"
+                view["action"] = {"kind": "look", "label": "Look"}
+                view["rank"] = 1
+            elif last["why"]:
+                view["line"] = last["why"]
+                view["rank"] = 3
         if claim["merge_when_ready"] and not view["line"]:
             why = self.store.get(f"mergewhy:{target}") or ""
             view["line"] = f"Merges when ready{': ' + why if why else ''}"

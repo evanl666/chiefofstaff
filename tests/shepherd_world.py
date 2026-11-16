@@ -115,6 +115,7 @@ class FakeGitHub:
         self.author = "me"
         self.head_repo = REPO
         self.fail_push_reads = False
+        self.signed_out = False
 
     def head(self) -> str:
         return run("git", "rev-parse", f"refs/heads/{BRANCH}", cwd=self.remote)
@@ -199,6 +200,8 @@ class FakeGitHub:
                 {"hosts": {"github.com": [{"login": "me", "active": True, "state": "success"}]}}
             )
         if text.startswith("auth token"):
+            if self.signed_out:
+                raise RuntimeError("no oauth token found for github.com account me")
             return "tok-me\n"
         if text.startswith("api user"):
             return json.dumps({"login": "me"})
