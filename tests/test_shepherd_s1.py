@@ -630,21 +630,31 @@ def test_a_fix_reviewed_and_approved_through_its_routes(served, tmp_path):
         ({"git push over HTTPS"}, "git push over HTTPS got through"),
         ({"tell_session"}, "calling tell_session got through"),
         ({"no install"}, "an install from pypi.org did not work"),
+        ({"no commit"}, "a commit in its worktree did not work"),
         ({"mcp tool"}, "the tools probe-user-ping got through"),
         ({"no listing"}, "listing its tools (no such method) got through"),
+        ({"a socket to github.com's address (140.82.112.3):443"},
+         "a socket to github.com's address (140.82.112.3):443 got through"),
         (
             {"unsandboxed"},
             "git push over HTTPS (unsandboxed), git push over SSH (unsandboxed), gh api -X POST "
             "(unsandboxed), curl -X POST to api.github.com (unsandboxed), a socket to "
             "github.com:443 (unsandboxed), a socket to github.com:22 (unsandboxed), reading gh's "
-            "hosts.yml (unsandboxed) got through",
+            "hosts.yml (unsandboxed), a socket to github.com's address (140.82.112.3):443 "
+            "(unsandboxed) got through",
         ),
+        # A command that could not start (its interpreter blocked) shows nothing either way,
+        # even with the shell printing its whole line: tried again, never a false "got through".
+        ({"crash: a socket to github.com:443"}, "a socket to github.com:443 could not be tried"),
     ],
-)
-async def test_the_probe_passes_only_when_every_forbidden_action_fails(harness, through, why):
+)  # fmt: skip
+async def test_the_probe_passes_only_when_every_forbidden_action_fails(
+    harness, monkeypatch, through, why
+):
     from chiefofstaff import step_probe
     from chiefofstaff.shepherd import BLOCKED_HOSTS, STEP_TOOLS
 
+    monkeypatch.setattr(step_probe, "github_address", lambda: "140.82.112.3")
     await harness.connect()
     runtime = harness.runtime
     client = harness.client
@@ -664,11 +674,22 @@ async def test_the_probe_passes_only_when_every_forbidden_action_fails(harness, 
                     "textResultForLlm": "" if ok else "Tool 'tell_session' does not exist.",
                     "resultType": "success" if ok else "failure",
                 }
-            allowed = what == step_probe.ALLOWED[0] and "no install" not in through
+            command = request.arguments.get("command", "")
+            commands.append(command)
+            allowed = (what == "an install from pypi.org" and "no install" not in through) or (
+                what == "a commit in its worktree" and "no commit" not in through
+            )
             reached = what in through or allowed
             applied = "unsandboxed" not in through
+            if f"crash: {what}" in through:
+                # As bash says when what it runs is killed: the command line, whole.
+                text = f"/bin/bash: line 1: 78173 Abort trap: 6           {command}"
+            else:
+                text = f"{step_probe.RAN}\n" + (
+                    step_probe.REACHED if reached else "Operation not permitted"
+                )
             return {
-                "textResultForLlm": step_probe.REACHED if reached else "Operation not permitted",
+                "textResultForLlm": text,
                 "resultType": "success",
                 "toolTelemetry": {"properties": {"sandboxApplied": str(applied).lower()}},
             }
@@ -687,9 +708,14 @@ async def test_the_probe_passes_only_when_every_forbidden_action_fails(harness, 
         )
         return session
 
+    commands: list[str] = []
     client.resume_session = resume
     result = await step_probe.probe(runtime)
     assert result["passed"] == (not why) and result["why"] == why
+    # Neither marker is ever in a command's own text.
+    assert commands and not any(
+        step_probe.REACHED in command or step_probe.RAN in command for command in commands
+    )
     policy = resumed["sandbox_config"]
     assert policy.blocked_hosts == BLOCKED_HOSTS and not policy.credentials
     assert resumed["available_tools"] == list(STEP_TOOLS)
@@ -1293,3 +1319,23 @@ async def test_a_fix_that_does_not_hold_on_its_own_commit_is_not_offered(world):
     await settle(runtime)
     again = runtime.shepherd.control.open_step(TARGET)
     assert again["id"] != step["id"] and again["state"] == "running" and again["clicked"]
+
+
+def test_a_steps_git_reads_the_owners_git_configuration_and_its_includes(tmp_path, monkeypatch):
+    """Without Copilot's credential proxy, its sandbox keeps the owner's git configuration out
+    of reach, and git then refuses to run (seen on Copilot 1.0.111): the files git reads for
+    it, includes and its XDG folder too, are readable in the step."""
+    from chiefofstaff.shepherd import git_config_files
+
+    home = tmp_path / "home"
+    (home / ".config" / "git").mkdir(parents=True)
+    extra = home / "work.gitconfig"
+    extra.write_text("[user]\n\temail = owner@acme.dev\n")
+    (home / ".gitconfig").write_text(f"[user]\n\tname = Owner\n[include]\n\tpath = {extra}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    found = git_config_files()
+    assert found == [str(home / ".gitconfig"), str(extra), str(home / ".config" / "git")]
+    (home / ".gitconfig").unlink()
+    assert git_config_files() == [str(home / ".config" / "git")]

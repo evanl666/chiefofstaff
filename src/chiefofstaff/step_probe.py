@@ -19,7 +19,6 @@ import logging
 import os
 import shlex
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -34,51 +33,83 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# What a forbidden action prints only when it got through.
+# What an action prints: RAN as it starts (else it proves nothing), REACHED only when it got
+# through. Neither is ever in a command's text (the shell prints a command line that fails to
+# run: it would be read as reached): commands print them with printf's %s.
 REACHED = "STEP-PROBE-REACHED"
+RAN = "STEP-PROBE-RAN"
 FIXTURE = "octocat/Hello-World"
 ALLOWED_HOST = "pypi.org"
-PYTHON = shlex.quote(sys.executable)
 
 
-def actions(folder: Path) -> list[tuple[str, str]]:
-    """(what, command): each must not print REACHED. Their output is never trusted otherwise."""
+def say(marker: str) -> str:
+    """A command that prints a marker, without the marker in its text."""
+    head, tail = marker.rsplit("-", 1)
+    return f"printf '{head}-%s\\n' {tail}"
+
+
+def actions(folder: Path, github_ip: str = "") -> list[tuple[str, str]]:
+    """(what, command): each must print RAN and must not print REACHED. Sockets are opened by
+    the shell itself (bash's /dev/tcp): no interpreter that might not start in the sandbox."""
     gh_hosts = Path.home() / ".config" / "gh" / "hosts.yml"
-    socket = (
-        f"{PYTHON} -c \"import socket; socket.create_connection(('github.com', {{port}}), 5); "
-        f"print('{REACHED}')\""
-    )
-    return [
+    where = shlex.quote(str(folder))
+
+    def socket(host: str, port: int) -> str:
+        return f"( exec 3<>/dev/tcp/{host}/{port} ) && {say(REACHED)}"
+
+    found = [
         (
             "git push over HTTPS",
-            f"cd {shlex.quote(str(folder))} && git push --dry-run "
-            f"https://github.com/{FIXTURE}.git HEAD:refs/heads/step-probe && echo {REACHED}",
+            f"cd {where} && git push --dry-run https://github.com/{FIXTURE}.git "
+            f"HEAD:refs/heads/step-probe && {say(REACHED)}",
         ),
         (
             "git push over SSH",
-            f"cd {shlex.quote(str(folder))} && GIT_SSH_COMMAND='ssh -o "
-            f"BatchMode=yes -o ConnectTimeout=5' git push --dry-run git@github.com:{FIXTURE}.git "
-            f"HEAD:refs/heads/step-probe && echo {REACHED}",
+            f"cd {where} && GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=5' git push "
+            f"--dry-run git@github.com:{FIXTURE}.git HEAD:refs/heads/step-probe && {say(REACHED)}",
         ),
         # Endpoints that change nothing (they render markdown), reached only with a route.
-        ("gh api -X POST", f"gh api -X POST markdown -f text=probe && echo {REACHED}"),
+        ("gh api -X POST", f"gh api -X POST markdown -f text=probe && {say(REACHED)}"),
         (
             "curl -X POST to api.github.com",
             "curl -sSf --max-time 10 -X POST -o /dev/null -d "
-            f'\'{{"text":"probe"}}\' https://api.github.com/markdown && echo {REACHED}',
+            f'\'{{"text":"probe"}}\' https://api.github.com/markdown && {say(REACHED)}',
         ),
-        ("a socket to github.com:443", socket.format(port=443)),
-        ("a socket to github.com:22", socket.format(port=22)),
+        ("a socket to github.com:443", socket("github.com", 443)),
+        ("a socket to github.com:22", socket("github.com", 22)),
         (
             "reading gh's hosts.yml",
             f"test -e {shlex.quote(str(gh_hosts))} || exit 1; cat "
-            f"{shlex.quote(str(gh_hosts))} > /dev/null && echo {REACHED}",
+            f"{shlex.quote(str(gh_hosts))} > /dev/null && {say(REACHED)}",
         ),
     ]
+    if github_ip:
+        found.append(
+            (f"a socket to github.com's address ({github_ip}):443", socket(github_ip, 443))
+        )
+    return [(what, f"{say(RAN)}; {line}") for what, line in found]
 
 
-ALLOWED = ("an install from an allowed host", f"curl -sS --max-time 20 -o /dev/null "
-           f"https://{ALLOWED_HOST}/simple/pip/ && echo {REACHED}")  # fmt: skip
+def github_address() -> str:
+    """github.com's address, looked up here (outside the sandbox): a socket to it by number."""
+    import socket
+
+    try:
+        return socket.getaddrinfo("github.com", 443, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+    except OSError:
+        return ""
+
+
+def allowed(folder: Path) -> list[tuple[str, str]]:
+    """(what, command): what a step needs, each of which must print REACHED: an install from
+    its project's registry, and a commit in its worktree."""
+    where = shlex.quote(str(folder))
+    return [
+        ("an install from pypi.org", f"{say(RAN)}; curl -sS --max-time 20 -o /dev/null "
+         f"https://{ALLOWED_HOST}/simple/pip/ && {say(REACHED)}"),
+        ("a commit in its worktree", f"{say(RAN)}; cd {where} && git -c user.name=probe -c "
+         f"user.email=probe@example.com commit -q --allow-empty -m probe && {say(REACHED)}"),
+    ]  # fmt: skip
 
 
 def field(result: Any, *names: str) -> Any:
@@ -149,7 +180,7 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
     from copilot.generated.rpc import PermissionDecisionApproveOnce
 
     from .policy import GITHUB_MCP
-    from .shepherd import BLOCKED_HOSTS, STEP_TOOLS, step_denied
+    from .shepherd import BLOCKED_HOSTS, STEP_TOOLS, git_config_files, step_denied
 
     backend = runtime.connected()
     version = await backend.version()
@@ -158,7 +189,8 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
     await asyncio.to_thread(fixture, folder)
     # The steps' own policy (shepherd.step_policy), with the allowed host to install from.
     policy = StepSandboxPolicy(
-        readwrite=(str(base),), credentials=False, outbound=True,
+        readwrite=(str(base),), readonly=tuple(await asyncio.to_thread(git_config_files)),
+        credentials=False, outbound=True,
         allowed_hosts=(ALLOWED_HOST, "files.pythonhosted.org"), blocked_hosts=BLOCKED_HOSTS,
         denied=step_denied(), keychain=False,
     )  # fmt: skip
@@ -182,6 +214,8 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
     }
     session_id = str(uuid4())
     failed: list[str] = []
+    unchecked: list[str] = []
+    missing: list[str] = []
     session = None
     try:
         name = "Chief of Staff · step check"
@@ -190,11 +224,14 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
             await created.disconnect()
         session = await backend.resume_session(session_id, **options)
         failed += await extra_tools(session)
-        for what, line in actions(folder):
+        address = await asyncio.to_thread(github_address)
+        for what, line in actions(folder, address):
             ran, text, sandboxed = await run_tool(
                 session, "bash", {"command": line, "description": what}
             )
-            if ran and (REACHED in text or not sandboxed):
+            if not ran or RAN not in text:
+                unchecked.append(what)  # It never ran: it shows nothing either way.
+            elif REACHED in text or not sandboxed:
                 failed.append(what if REACHED in text else f"{what} (unsandboxed)")
         ran, _, _ = await run_tool(session, "tell_session", {"session": "x", "text": "probe"})
         if ran:
@@ -203,9 +240,10 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
             ran, _, _ = await run_tool(session, mcp_tool, {})
             if ran:
                 failed.append(f"calling the MCP tool {mcp_tool}")
-        what, line = ALLOWED
-        ran, text, _ = await run_tool(session, "bash", {"command": line, "description": what})
-        allowed = ran and REACHED in text
+        for what, line in allowed(folder):
+            ran, text, _ = await run_tool(session, "bash", {"command": line, "description": what})
+            if not (ran and RAN in text and REACHED in text):
+                missing.append(what)
     finally:
         if session is not None:
             with contextlib.suppress(Exception):
@@ -218,10 +256,12 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
     why = ""
     if failed:
         why = f"{', '.join(failed)} got through"
-    elif not allowed:
-        why = f"an install from {ALLOWED_HOST} did not work"
-    return {"passed": not why, "why": why, "failed": failed, "version": version, "at": now(),
-            "checked": time.time()}  # fmt: skip
+    elif unchecked:
+        why = f"{', '.join(unchecked)} could not be tried"
+    elif missing:
+        why = f"{' and '.join(missing)} did not work"
+    return {"passed": not why, "why": why, "failed": failed, "unchecked": unchecked,
+            "version": version, "at": now(), "checked": time.time()}  # fmt: skip
 
 
 def _remove(path: Path):

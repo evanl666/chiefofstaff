@@ -156,7 +156,7 @@ class Steps:
                 offset = log.stat().st_size
         run = self.runtime.tasks.start_run(task["id"], f"shepherd:{step['kind']}")
         evidence = {**(step["evidence"] or {}), "hosts": prepared["hosts"], "log_offset": offset,
-                    "reused": prepared["reused"]}  # fmt: skip
+                    "reused": prepared["reused"], "git_config": prepared["git_config"]}  # fmt: skip
         self.control.move_step(
             step_id, RUNNING, tree=prepared["tree"], folder=prepared["folder"],
             evidence=evidence, run_id=run["id"],
@@ -266,8 +266,11 @@ class Steps:
             for host in found
         ]
         await asyncio.to_thread(self.write_folder, step, folder, details)
+        from .shepherd import git_config_files
+
         return {"tree": tree, "folder": str(folder), "hosts": list(dict.fromkeys(hosts)),
-                "reused": reused, "top": top}  # fmt: skip
+                "reused": reused, "top": top,
+                "git_config": await asyncio.to_thread(git_config_files)}  # fmt: skip
 
     async def checkout_for(self: Shepherd, row: dict, repo: str) -> tuple[dict, str]:  # type: ignore[misc]
         """The worker's checkout of this GitHub repository (by its origin)."""
