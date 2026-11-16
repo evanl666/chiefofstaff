@@ -1,0 +1,707 @@
+"""Prepared for you, S1's gate (tests/shepherd_world.py): the news that starts an attempt, what
+it may spend, what stops it, where it can't run, what pauses a PR, a push the lease refuses,
+what a crash leaves, the Router's handing over, and the owner's other PRs found and handed."""
+
+from types import SimpleNamespace
+
+import pytest
+from conftest import call_tool, settle
+from shepherd_world import BRANCH, REPO, TARGET, World, run
+from test_shepherd import claimed, fixed, said, step_result
+
+from chiefofstaff import publish
+from chiefofstaff.publish import approve, reconcile_all
+
+
+@pytest.fixture
+def world(harness, tmp_path):
+    return World(harness, tmp_path)
+
+
+def teammate_pushes(world) -> str:
+    seed = world.root / "seed"
+    (seed / "notes.md").write_text("teammate")
+    run("git", "add", "-A", cwd=seed)
+    run("git", "commit", "-qm", "teammate", cwd=seed)
+    run("git", "push", "-q", str(world.remote), BRANCH, cwd=seed)
+    return world.github.head()
+
+
+# The news that starts an attempt.
+
+
+async def test_ci_news_read_by_the_poller_starts_an_attempt_and_rides_along(world):
+    """A followed PR's failing CI, read as today: held from the worker for the attempt (no turn
+    of its own), carried in the attempt's message, and the Router told in a line."""
+    runtime = await claimed(world, budget=20.0, levels={"fix-ci": "prepare"})
+    runtime.shepherd.control.update_claim(TARGET, delivered=1)
+    assert await runtime.github.read_followed(TARGET, 0)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step and step["kind"] == "fix-ci" and step["state"] == "running", step
+    assert step["level"] == "prepare" and not step["clicked"]
+    assert "CI on" in step["signal"]["news"]["text"]
+    sent = world.session().sent[-1]
+    assert f'step="{step["id"]}"' in sent and "failed: ci / test" in sent
+    held = [
+        message
+        for message in runtime.store.messages(world.worker)
+        if message["kind"] == "inbound" and message["meta"].get("source") == "github"
+    ]
+    assert len(held) == 1 and held[0]["meta"]["deferred"]
+    notices = [m["text"] for m in runtime.store.messages(runtime.router_id())]
+    assert any("(a fix is being prepared)" in text for text in notices), notices
+
+
+async def test_off_the_same_news_reaches_the_worker_as_today(harness, tmp_path):
+    world = World(harness, tmp_path)
+    world.build()
+    runtime = harness.runtime
+    runtime.github.raw = world.github
+    runtime.github.gh = runtime.github.routed
+    await harness.connect()
+    world.worker = await world.make_worker()
+    runtime.store.update_session(world.worker, status="idle")
+    assert await runtime.github.read_followed(TARGET, 0)
+    await settle(runtime)
+    assert not runtime.shepherd.control.exists()
+    inbound = [m for m in runtime.store.messages(world.worker) if m["kind"] == "inbound"]
+    assert len(inbound) == 1 and not inbound[0]["meta"].get("deferred")
+    assert "failed: ci / test" in world.session().sent[-1]
+
+
+async def test_kind_off_and_keep_off_deliver_news_as_today(world):
+    runtime = await claimed(world, budget=20.0, levels={"fix-ci": "off"})
+    runtime.shepherd.control.update_claim(TARGET, delivered=1)
+    key = f"github:ci:{REPO}#12@{world.h0}:failed-ci / test"
+    assert not await runtime.shepherd.signal(TARGET, [key], "CI failed", None)
+    await runtime.shepherd.keep(TARGET, False)
+    old = runtime.store.settings()
+    new = old.model_copy(update={"proactive_levels": {"fix-ci": "prepare"}})
+    runtime.store.save_settings(new)
+    assert not await runtime.shepherd.signal(TARGET, [key], "CI failed", None)
+    assert runtime.shepherd.control.open_step(TARGET) is None
+
+
+# What an attempt may spend, and what it spent.
+
+
+async def test_an_attempt_is_interrupted_at_its_permitted_spend(world):
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "running" and step["permitted"] == 8.0
+    session = world.session()
+    usage = SimpleNamespace(total_nano_aiu=5e9)
+    session.emit("assistant.usage", model="m", copilot_usage=usage)
+    await settle(runtime)
+    assert runtime.shepherd.control.step(step["id"])["state"] == "running"
+    session.emit("assistant.usage", model="m", copilot_usage=usage)
+    await settle(runtime)
+    ended = runtime.shepherd.control.step(step["id"])
+    assert ended["state"] == "interrupted" and "credits it may spend" in ended["why"]
+    assert session.aborted and not runtime.shepherd.marked(world.worker)
+
+
+async def test_what_it_spent_is_settled_from_its_log_each_record_once(world):
+    runtime = await claimed(world)
+    step, _ = await fixed(world, runtime)
+    copilot = runtime.copilot_id(world.worker)
+    record = {
+        "type": "session.usage_record",
+        "id": "u1",
+        "timestamp": step["started_at"],
+        "data": {"usage": {"copilotUsage": {"totalNanoAiu": 3_500_000_000}}},
+    }
+    old = {**record, "id": "u0", "timestamp": "2020-01-01T00:00:00+00:00"}
+    harness_client = runtime.backend
+    harness_client.logs[copilot] = [old, record, record]
+    await runtime.shepherd.settle(step["id"])
+    await runtime.shepherd.settle(step["id"])
+    assert runtime.shepherd.control.step(step["id"])["settled"] == pytest.approx(3.5)
+    assert runtime.shepherd.control.spent_today()["clicked"] == pytest.approx(3.5)
+
+
+async def test_spend_past_the_limit_and_margin_raises_the_margin(world):
+    runtime = await claimed(world)
+    step, _ = await fixed(world, runtime)
+    record = {
+        "type": "session.usage_record",
+        "id": "u1",
+        "timestamp": step["started_at"],
+        "data": {"usage": {"copilotUsage": {"totalNanoAiu": 13_000_000_000}}},
+    }
+    runtime.backend.logs[runtime.copilot_id(world.worker)] = [record]
+    await runtime.shepherd.settle(step["id"])
+    assert runtime.store.get("proactive:margin") == "5.00"
+    assert runtime.shepherd.margin() == 5.0
+
+
+@pytest.mark.parametrize(("budget", "state"), [(9.0, "queued"), (10.0, "running")])
+async def test_an_unclicked_attempt_runs_only_with_room_for_its_reserve(world, budget, state):
+    """Its reserve is what it may spend (8) and the margin (2): a budget of 9 leaves it waiting
+    for a click (its row offers Fix it), 10 runs it."""
+    runtime = await claimed(world, budget=budget, levels={"fix-ci": "prepare"})
+    control = runtime.shepherd.control
+    claim = control.claim(TARGET)
+    task = runtime.tasks.get(world.task)
+    control.update_claim(TARGET, delivered=1)
+    [step] = await runtime.shepherd.signals(claim, task, claim["details"])
+    await runtime.shepherd.pump()
+    await settle(runtime)
+    step = control.step(step["id"])
+    assert step["state"] == state
+    if state == "queued":
+        assert step["why"] == "today's budget is used"
+        view = runtime.task_actions.view(task)["shepherd"]
+        assert view["action"]["label"] == "Fix it"
+        assert not runtime.shepherd.marked(world.worker)
+    else:
+        assert step["reserved"] == 10.0 and control.spent_today()["reserved"] == 10.0
+
+
+# What stops an attempt.
+
+
+async def test_the_owners_stop_ends_the_attempt_and_its_turn(world):
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "running"
+    await runtime.workers.interrupt(world.worker, by="you")
+    await settle(runtime)
+    ended = runtime.shepherd.control.step(step["id"])
+    assert ended["state"] == "interrupted" and ended["why"] == "Stopped by you."
+    assert world.session().aborted and not runtime.shepherd.marked(world.worker)
+    assert runtime.store.session(world.worker)["status"] == "idle"
+
+
+async def test_the_owners_queued_work_preempts_an_attempt(world):
+    runtime = await claimed(world, max_workers=1)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "running"
+    await call_tool(
+        runtime, "spawn_worker", runtime.router_id(), title="Another", instructions="Do it."
+    )
+    await settle(runtime)
+    ended = runtime.shepherd.control.step(step["id"])
+    assert ended["state"] == "interrupted", ended
+    assert not runtime.shepherd.stepping
+
+
+async def test_an_attempt_waits_for_a_busy_worker(world):
+    runtime = await claimed(world)
+    runtime.store.update_session(world.worker, status="working")
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "queued" and not runtime.shepherd.marked(world.worker)
+    runtime.store.update_session(world.worker, status="idle")
+    await runtime.shepherd.pump()
+    await settle(runtime)
+    assert runtime.shepherd.control.step(step["id"])["state"] == "running"
+
+
+# Where it can't run.
+
+
+async def test_on_a_codex_worker_it_is_refused_in_the_rows_words(world, monkeypatch):
+    runtime = await claimed(world)
+    monkeypatch.setattr(runtime, "agent", lambda session_id: "codex")
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    [step] = runtime.shepherd.control.steps(TARGET)
+    assert step["state"] == "refused"
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["line"] == "Can't prepare fixes here: its worker runs on Codex, not Copilot"
+    assert view["refused"] and view["action"] is None
+
+
+async def test_without_a_sandbox_it_is_refused(world):
+    runtime = await claimed(world)
+    runtime.sandbox_host = None
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    [step] = runtime.shepherd.control.steps(TARGET)
+    assert step["state"] == "refused" and step["why"] == "this computer has no sandbox for it"
+    assert "no sandbox" in runtime.shepherd.snapshot()["steps_here"]
+
+
+async def test_until_its_safety_check_passes_an_attempt_waits(world, monkeypatch):
+    from chiefofstaff.backend import TESTED_CLI
+
+    runtime = await claimed(world)
+    runtime.store.delete(f"stepprobe:{TESTED_CLI}")
+    probed = []
+
+    async def probe(runtime):
+        probed.append(True)
+        return {"passed": False, "why": "its shell reached GitHub", "at": "now"}
+
+    monkeypatch.setattr("chiefofstaff.step_probe.probe", probe)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert probed and step is not None
+    await runtime.shepherd.pump()
+    await settle(runtime)
+    [step] = runtime.shepherd.control.steps(TARGET)
+    assert step["state"] == "refused"
+    assert step["why"] == f"Copilot {TESTED_CLI} failed the safety check: its shell reached GitHub"
+
+
+# What pauses a PR, and what stops trying.
+
+
+async def test_a_pr_that_became_stacked_or_a_fork_pauses(world):
+    runtime = await claimed(world)
+    runtime.shepherd.control.update_claim(TARGET, delivered=1)
+    world.github.stacked = 1
+    await runtime.shepherd.read(TARGET)
+    claim = runtime.shepherd.control.claim(TARGET)
+    assert claim["state"] == "paused" and claim["reason"].startswith("stacked")
+
+
+async def test_a_check_gone_after_its_push_pauses(world):
+    runtime = await claimed(world)
+    step, sha = await fixed(world, runtime)
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    assert world.github.head() == sha
+    world.github.checks[sha] = [
+        {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "required": False}
+    ]
+    await runtime.shepherd.read(TARGET)
+    claim = runtime.shepherd.control.claim(TARGET)
+    assert claim["state"] == "paused"
+    assert claim["reason"] == "a check vanished after the push: ci / test"
+
+
+async def test_the_same_failure_after_its_fix_stops_trying(world):
+    runtime = await claimed(world)
+    step, _ = await fixed(world, runtime)
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    # CI fails again on the pushed head, the same way.
+    claim = runtime.shepherd.control.claim(TARGET)
+    task = runtime.tasks.get(world.task)
+    details = await runtime.github.pr_details(REPO, 12)
+    queued = await runtime.shepherd.signals(claim, task, details)
+    assert queued == []
+    view = runtime.task_actions.view(task)["shepherd"]
+    assert view["line"] == "Stopped: the same failure came back after its fix"
+    assert view["action"] == {"kind": "look", "label": "Look"}
+
+
+# A push the lease refuses; what a crash leaves.
+
+
+async def test_a_teammates_push_between_the_check_and_the_push_is_kept(world, monkeypatch):
+    """The head check passed, then a teammate pushed: the leased push is refused, their commit
+    stays, and the PR pauses at its next read."""
+    runtime = await claimed(world)
+    step, sha = await fixed(world, runtime)
+    checked = publish.head_checked
+
+    async def raced(shepherd, operation):
+        details = await checked(shepherd, operation)
+        teammate_pushes(world)
+        return details
+
+    monkeypatch.setattr(publish, "head_checked", raced)
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    theirs = world.github.head()
+    assert theirs != sha
+    [push] = runtime.shepherd.control.actions(step["id"])
+    assert push["state"] == "failed", push
+    assert runtime.shepherd.control.step(step["id"])["state"] == "failed"
+    await runtime.shepherd.read(TARGET)
+    claim = runtime.shepherd.control.claim(TARGET)
+    assert claim["state"] == "paused" and theirs[:7] in claim["reason"]
+
+
+async def test_the_push_carries_no_credentials_of_the_owners_and_skips_hooks(world, monkeypatch):
+    runtime = await claimed(world)
+    step, sha = await fixed(world, runtime)
+    seen = {}
+    sent = publish.command
+
+    async def command(*argv, **options):
+        if "push" in argv:
+            seen.update(argv=argv, env=options.get("env") or {})
+        return await sent(*argv, **options)
+
+    monkeypatch.setattr(publish, "command", command)
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    argv, env = seen["argv"], seen["env"]
+    assert "--no-verify" in argv
+    assert f"--force-with-lease=refs/heads/{BRANCH}:{world.h0}" in argv
+    assert argv[-1] == f"{sha}:refs/heads/{BRANCH}"
+    pairs = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"]
+        for index in range(int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert pairs["credential.helper"] == ""
+    assert "tok-me" not in " ".join(argv)
+
+
+@pytest.mark.parametrize("went_out", ["yes", "no", "under", "unreadable"])
+async def test_after_a_crash_a_push_is_read_on_github_never_sent_again(
+    world, monkeypatch, went_out
+):
+    """Journaled as dispatching, then the app stopped: at the next start, the branch read on
+    GitHub tells whether it went out (published) or not (failed, never pushed blindly); with a
+    teammate's commit on top of it, it went out; when GitHub can't say, it stays uncertain."""
+    runtime = await claimed(world)
+    step, sha = await fixed(world, runtime)
+    control = runtime.shepherd.control
+
+    async def stopped(shepherd, step_id):
+        pass
+
+    monkeypatch.setattr(publish, "dispatch", stopped)
+    await approve(runtime.shepherd, step["id"], {})
+    [push] = control.actions(step["id"])
+    claim = control.claim(TARGET)
+    assert control.dispatching(push["id"], claim["holder"], claim["generation"], 0) == ""
+    if went_out != "no":
+        run("git", "push", "-q", str(world.remote), f"{sha}:refs/heads/{BRANCH}", cwd=world.clone)
+    if went_out in {"under", "unreadable"}:
+        run("git", "pull", "-q", str(world.remote), BRANCH, cwd=world.root / "seed")
+        teammate_pushes(world)
+    if went_out == "unreadable":
+        answer = world.github.__call__
+
+        async def flaky(*arguments, **options):
+            if "/compare/" in " ".join(arguments):
+                raise RuntimeError("GitHub request failed: HTTP 502")
+            return await answer(*arguments, **options)
+
+        runtime.github.raw = flaky
+    head = world.github.head()
+    before = len(world.github.calls)
+    await reconcile_all(runtime.shepherd)
+    [push] = control.actions(step["id"])
+    state = {"yes": "sent", "no": "failed", "under": "sent", "unreadable": "uncertain"}[went_out]
+    assert push["state"] == state
+    assert control.step(step["id"])["state"] == ("published" if state == "sent" else "failed")
+    assert world.github.head() == (world.h0 if went_out == "no" else head)
+    assert not any("push" in call[0] for call in world.github.calls[before:])
+    if state == "sent":
+        assert control.explains(control.claim(TARGET), sha)
+
+
+# The Router hands a PR over; the owner's other PRs found and handed.
+
+
+async def test_the_router_hands_a_pr_over_with_spawn_workers_field(world):
+    from copilot.tools import ToolInvocation
+
+    runtime = await world.start(worker=False)
+    router = runtime.router_id()
+    tools = {tool.name: tool for tool in runtime.options(runtime.store.session(router))["tools"]}
+    answer = await tools["spawn_worker"].handler(
+        ToolInvocation(
+            session_id=router,
+            tool_call_id="t1",
+            tool_name="spawn_worker",
+            arguments={
+                "title": "Keep api#12 moving",
+                "instructions": "Keep acme/api#12 moving.",
+                "shepherd": "acme/api#12",
+            },
+        )
+    )
+    text = said(answer)
+    assert "Kept moving" in text, text
+    claim = runtime.shepherd.control.claim(TARGET)
+    task = runtime.tasks.get(claim["holder"])
+    assert task["title"] == "Keep api#12 moving" and claim["holder_kind"] == "task"
+    assert runtime.store.get(f"clickfirst:{TARGET}") == "1"
+    assert TARGET in runtime.store.follows(task["session_id"])
+
+
+async def test_a_pr_already_kept_by_another_task_is_not_taken(world):
+    runtime = await claimed(world)
+    other = runtime.tasks.create(world.worker, "Something else", "Do it.")
+    assert await runtime.shepherd.take("acme/api#12", other["id"]) == (
+        "Another task keeps it moving already."
+    )
+    assert runtime.shepherd.control.claim(TARGET)["holder"] == world.task
+
+
+async def test_the_owners_other_prs_are_found_and_one_handed_to_a_worker(world):
+    from chiefofstaff import discovery
+
+    runtime = await world.start(worker=False, proactive_my_prs=True, github_repos=[REPO])
+    world.github.mine = [
+        {
+            "repository": {"nameWithOwner": REPO},
+            "number": 12,
+            "title": "Fix the login timeout",
+            "url": f"https://github.com/{REPO}/pull/12",
+            "isDraft": False,
+            "updatedAt": "2026-11-16T08:00:00Z",
+            "createdAt": "2026-11-15T08:00:00Z",
+        }
+    ]
+    await discovery.discover(runtime.shepherd, force=True)
+    view = discovery.rows_view(runtime.shepherd)
+    [row] = view["rows"]
+    assert row["target"] == TARGET and row["kind"] == "fix-ci"
+    assert row["what"].startswith("CI failing since") and row["label"] == "api#12"
+    assert runtime.snapshot()["shepherd"]["prepared"]["rows"] == [row]
+    started = await discovery.hand(runtime.shepherd, TARGET)
+    task = runtime.tasks.get(started["task_id"])
+    assert task["title"] == f"Keep {REPO}#12 moving"
+    assert "gh pr checkout 12" in task["goal"] and "don't change" in task["goal"]
+    claim = runtime.shepherd.control.claim(TARGET)
+    assert claim["holder"] == task["id"] and runtime.store.get(f"clickfirst:{TARGET}") == "1"
+    assert discovery.rows_view(runtime.shepherd)["rows"] == []
+    with pytest.raises(ValueError, match="A worker has it already"):
+        await discovery.hand(runtime.shepherd, TARGET)
+
+
+async def test_a_fork_or_draft_is_listed_with_why_not(world):
+    from chiefofstaff import discovery
+
+    runtime = await world.start(worker=False, proactive_my_prs=True, github_repos=[REPO])
+    world.github.draft = True
+    world.github.mine = [
+        {"repository": {"nameWithOwner": REPO}, "number": 12, "title": "WIP",
+         "url": f"https://github.com/{REPO}/pull/12", "isDraft": True,
+         "updatedAt": "2026-11-16T08:00:00Z", "createdAt": "2026-11-15T08:00:00Z"}
+    ]  # fmt: skip
+    await discovery.discover(runtime.shepherd, force=True)
+    view = discovery.rows_view(runtime.shepherd)
+    assert view["rows"] == [] and [item["why"] for item in view["all"]] == ["a draft: not yet"]
+    with pytest.raises(ValueError, match="Not this PR: a draft"):
+        await discovery.hand(runtime.shepherd, TARGET)
+
+
+# Its routes, as the page calls them.
+
+
+@pytest.fixture
+def served(tmp_path):
+    from conftest import FakeClient, FakeSlackMcp, FakeTokens
+    from fastapi.testclient import TestClient
+    from test_web import TOKEN
+
+    from chiefofstaff.runtime import Runtime
+    from chiefofstaff.sources.slack import SlackSource
+    from chiefofstaff.web import create_app
+
+    client = FakeClient()
+
+    def factory(store, bus):
+        async def notifier(title, text):
+            pass
+
+        runtime = Runtime(store, bus, backend_factory=lambda settings: client, notifier=notifier)
+        runtime.slack = SlackSource(store, runtime, tokens=FakeTokens(""), mcp=FakeSlackMcp())
+        return runtime
+
+    app = create_app(tmp_path / "data", TOKEN, 8765, runtime_factory=factory)
+    with TestClient(app, base_url="http://127.0.0.1:8765") as http:
+        http.runtime = app.state.runtime
+        yield http
+
+
+def test_off_its_routes_refuse_in_plain_words(served):
+    from test_web import ORIGIN, sign_in
+
+    from chiefofstaff.shepherd import OFF_WORDS
+
+    sign_in(served)
+    assert served.get("/api/shepherd/steps/s1").status_code == 404
+    for path, body in (
+        ("/api/shepherd/pr", {"target": TARGET, "action": "fix"}),
+        ("/api/shepherd/pr", {"target": TARGET, "action": "hand"}),
+        ("/api/shepherd/steps/s1", {"action": "approve"}),
+        ("/api/shepherd/scan", {}),
+    ):
+        answer = served.post(path, json=body, headers=ORIGIN)
+        assert answer.status_code == 400 and answer.json()["detail"] == OFF_WORDS, path
+    wrong = served.post(
+        "/api/shepherd/pr", json={"target": TARGET, "action": "push"}, headers=ORIGIN
+    )
+    assert wrong.status_code == 422
+    assert "shepherd" not in served.get("/api/state").json()
+    assert not served.runtime.shepherd.control.exists()
+
+
+def test_a_fix_reviewed_and_approved_through_its_routes(served, tmp_path):
+    from test_web import ORIGIN, sign_in
+
+    sign_in(served)
+    runtime = served.runtime
+    world = World(None, tmp_path / "world", runtime=runtime)
+    (tmp_path / "world").mkdir()
+    served.portal.call(world.start)
+    served.portal.call(runtime.shepherd.tick)
+    served.portal.call(settle, runtime)
+    state = served.get("/api/state").json()
+    assert state["shepherd"]["on"] is True
+    step, sha = served.portal.call(fixed, world, runtime)
+    task = next(t for t in served.get("/api/state").json()["tasks"] if t["id"] == world.task)
+    assert task["shepherd"]["action"]["kind"] == "review"
+    view = served.get(f"/api/shepherd/steps/{step['id']}").json()
+    assert view["plan"]["kind"] == "fix" and view["plan"]["h1"] == sha
+    assert "return 30" in view["plan"]["diff"]
+    approved = served.post(
+        f"/api/shepherd/steps/{step['id']}", json={"action": "approve"}, headers=ORIGIN
+    )
+    assert approved.status_code == 200, approved.text
+    for _ in range(3):
+        served.portal.call(settle, runtime)
+    assert world.github.head() == sha
+    again = served.post(
+        f"/api/shepherd/steps/{step['id']}", json={"action": "approve"}, headers=ORIGIN
+    )
+    assert again.status_code == 400 and again.json()["detail"] == "This was decided already."
+    kept = served.post(
+        "/api/shepherd/pr", json={"target": TARGET, "action": "keep", "on": False}, headers=ORIGIN
+    )
+    assert kept.status_code == 200
+    assert not runtime.shepherd.control.claim(TARGET)["keep"]
+
+
+# The step profile's probe, on a stand-in for the sandbox.
+
+
+@pytest.mark.parametrize(
+    ("through", "why"),
+    [
+        (set(), ""),
+        ({"git push over HTTPS"}, "git push over HTTPS got through"),
+        ({"tell_session"}, "calling tell_session got through"),
+        ({"no install"}, "an install from pypi.org did not work"),
+    ],
+)
+async def test_the_probe_passes_only_when_every_forbidden_action_fails(harness, through, why):
+    from chiefofstaff import step_probe
+    from chiefofstaff.shepherd import BLOCKED_HOSTS, STEP_TOOLS
+
+    await harness.connect()
+    runtime = harness.runtime
+    client = harness.client
+    resumed = {}
+    original = client.resume_session
+
+    async def resume(session_id, **options):
+        session = await original(session_id, **options)
+        resumed.update(options)
+
+        async def execute(request, **options):
+            what = request.arguments.get("description", request.name)
+            if request.name == "tell_session":
+                kind = "success" if "tell_session" in through else "failure"
+                return SimpleNamespace(
+                    text_result_for_llm="", result_type=SimpleNamespace(value=kind)
+                )
+            allowed = what == step_probe.ALLOWED[0] and "no install" not in through
+            reached = what in through or allowed
+            return SimpleNamespace(
+                text_result_for_llm=step_probe.REACHED if reached else "Operation not permitted",
+                result_type=SimpleNamespace(value="success"),
+            )
+
+        session.rpc.tools = SimpleNamespace(execute=execute)
+        return session
+
+    client.resume_session = resume
+    result = await step_probe.probe(runtime)
+    assert result["passed"] == (not why) and result["why"] == why
+    policy = resumed["sandbox_config"]
+    assert policy.blocked_hosts == BLOCKED_HOSTS and not policy.credentials
+    assert resumed["available_tools"] == list(STEP_TOOLS)
+    assert [tool.name for tool in resumed["tools"]] == ["shepherd_result", "draft_github_review"]
+    assert resumed["enable_config_discovery"] is False
+
+
+# Who holds a PR when its worker, its task or its follow ends.
+
+
+async def test_a_cancelled_task_gives_its_pr_to_the_owner_and_attempts_stop(world):
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "running"
+    # Its result came just now: the first cancel only asks; the PR stays its task's.
+    with pytest.raises(ValueError, match="cancel again to set it aside"):
+        await runtime.task_actions.cancel(world.task)
+    assert runtime.shepherd.control.claim(TARGET)["holder_kind"] == "task"
+    assert runtime.shepherd.control.step(step["id"])["state"] == "running"
+    await runtime.task_actions.cancel(world.task)
+    await settle(runtime)
+    claim = runtime.shepherd.control.claim(TARGET)
+    assert claim["holder_kind"] == "owner" and claim["reason"] == "its task was cancelled"
+    ended = runtime.shepherd.control.step(step["id"])
+    assert ended["state"] == "withdrawn" and ended["why"] == "its task was cancelled"
+    assert not runtime.shepherd.marked(world.worker)
+    key = f"github:ci:{REPO}#12@{world.h0}:failed-x"
+    assert not await runtime.shepherd.signal(TARGET, [key], "CI failed", None)
+
+
+async def test_a_worker_that_stops_following_its_pr_gives_it_to_the_owner(world):
+    runtime = await claimed(world)
+    assert runtime.unfollow_for(world.worker, TARGET)
+    await settle(runtime)
+    claim = runtime.shepherd.control.claim(TARGET)
+    assert claim["holder_kind"] == "owner"
+    assert claim["reason"] == "its worker stopped following it"
+
+
+# What a step may draft: replies to its own PR's threads, kept for its plan.
+
+
+async def test_a_steps_drafted_reply_is_kept_for_its_plan_and_nothing_else_is(world):
+    from test_shepherd import comments
+
+    runtime = await world.start()
+    comments(world)
+    await runtime.shepherd.tick()
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["kind"] == "address-review" and step["state"] == "running"
+    worker = world.worker
+
+    async def draft(**arguments):
+        return said(await call_tool(runtime, "draft_github_review", worker, **arguments))
+
+    kept = await draft(repo=REPO, number=12, in_reply_to=502, body="30 matches the gateway.")
+    assert kept.startswith("Kept for the plan")
+    for arguments, why in (
+        ({"repo": "acme/web", "number": 12, "in_reply_to": 502}, "only on its own PR"),
+        ({"repo": REPO, "number": 12, "in_reply_to": 999}, "only to the comments"),
+        ({"repo": REPO, "number": 12, "in_reply_to": 502, "verdict": "approve"}, "no verdict"),
+    ):
+        answer = await draft(body="x", **arguments)
+        assert why in answer, answer
+    sha = world.commit_fix(step["tree"])
+    await step_result(
+        runtime, worker, step=step["id"], outcome="addressed", summary="Renamed it.",
+        commit=sha, test_command="", threads=[
+            {"comment": 501, "stance": "fix", "reply": "Done."},
+            {"comment": 502, "stance": "push-back"},
+        ],
+    )  # fmt: skip
+    world.session().emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    plan = runtime.shepherd.control.step(step["id"])["plan"]
+    assert [t["reply"] for t in plan["threads"]] == ["Done.", "30 matches the gateway."]
+    assert not [w for w in world.github.writes if w[0] == "reply"]

@@ -3023,9 +3023,12 @@ class TaskActions:
         # A failed one is dismissed (bug E89: refused, Retry was the only way out, and it
         # reopened its worker): nothing of its worker is stopped or reopened.
         failed = task["status"] == "failed"
-        if self.runtime.shepherd.control.exists():
-            # Its kept PRs go to the owner, paused (drained first).
-            await self.runtime.shepherd.task_cancelled(task)
+
+        async def kept_to_owner():
+            if self.runtime.shepherd.control.exists():
+                # Its kept PRs go to the owner, paused (drained first).
+                await self.runtime.shepherd.task_cancelled(task)
+
         row = self.store.find_session(task["session_id"])
         # At work on it now: the task its turn is on (not merely the one it was given last).
         on_it = (
@@ -3057,6 +3060,7 @@ class TaskActions:
                 )
             # Finished already: nothing to stop, its result stands.
             self.store.delete(f"cancelask:{task_id}")
+            await kept_to_owner()
             return self.set_aside(task, why, reason, by)
         if was := self.reopened(task_id):
             # Only the follow-up on finished work is cancelled: its result stands.
@@ -3067,6 +3071,7 @@ class TaskActions:
             self.withdraw_drafts(task, why, since=started or "")
             task = self.tasks.move(task_id, was, progress=f"Follow-up cancelled ({why})")
         else:
+            await kept_to_owner()
             self.withdraw_drafts(task, why)
             self.end_follows(task)
             task = self.tasks.move(task_id, "cancelled", progress=why)

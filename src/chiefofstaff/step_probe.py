@@ -115,32 +115,37 @@ async def probe(runtime: Runtime, mcp_tool: str = "") -> dict:
     `mcp_tool`: a configured MCP server's tool to try (the first one Copilot offers otherwise)."""
     from copilot.generated.rpc import PermissionDecisionApproveOnce
 
+    from .policy import GITHUB_MCP
+    from .shepherd import BLOCKED_HOSTS, STEP_TOOLS, step_denied
+
     backend = runtime.connected()
     version = await backend.version()
     base = Path(tempfile.mkdtemp(prefix="cos-step-probe-"))
     folder = base / "repo"
     await asyncio.to_thread(fixture, folder)
+    # The steps' own policy (shepherd.step_policy), with the allowed host to install from.
     policy = StepSandboxPolicy(
         readwrite=(str(base),), credentials=False, outbound=True,
-        allowed_hosts=(ALLOWED_HOST, "files.pythonhosted.org"),
-        blocked_hosts=("github.com", "*.github.com", "githubusercontent.com",
-                       "*.githubusercontent.com", "ghcr.io"),
-        denied=(str(Path.home() / ".config" / "gh"), str(Path.home() / ".ssh")),
-        keychain=False,
+        allowed_hosts=(ALLOWED_HOST, "files.pythonhosted.org"), blocked_hosts=BLOCKED_HOSTS,
+        denied=step_denied(), keychain=False,
     )  # fmt: skip
 
     async def approve(request: Any, invocation: dict):
         return PermissionDecisionApproveOnce()
 
+    # The step profile's options (shepherd.step_options), for a session of its own.
+    configured = sorted(set(runtime.shepherd.copilot_mcp_servers())
+                        | set(runtime.store.settings().mcp_servers))  # fmt: skip
     options = {
         "on_permission_request": approve,
         "working_directory": str(folder),
         "client_name": "chiefofstaff",
         "sandbox_config": backend.sandbox(policy),
         "enable_config_discovery": False,
-        "available_tools": ["bash", "view", "shepherd_result"],
-        "tools": runtime.toolset.step_tools()[:1],
-        "disabled_mcp_servers": ["github-mcp-server"],
+        "enable_session_store": False,
+        "available_tools": list(STEP_TOOLS),
+        "tools": runtime.toolset.step_tools(),
+        "disabled_mcp_servers": [GITHUB_MCP, *configured, "slack"],
     }
     session_id = str(uuid4())
     failed: list[str] = []
