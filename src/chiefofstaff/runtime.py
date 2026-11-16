@@ -452,10 +452,27 @@ def file_bytes(path: Path) -> bytes | None:
         return None
 
 
-async def committed_bytes(tree: str, commit: str, name: str) -> bytes | None:
-    """A file as a commit has it (None: not in it)."""
+async def committed_bytes(common: str, commit: str, name: str) -> bytes | None:
+    """A file as a commit has it (None: not in it), read from the owner's repository's own .git
+    (`common`, as Chief of Staff recorded it) with a git that runs nothing of a repository's: a
+    worker can change where its worktree's .git points, and a config there can run code (a
+    partial clone's lazy fetch, a transport of its own, a file-system monitor)."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("GIT_", "CHIEFOFSTAFF_"))
+    } | {
+        "GIT_DIR": common,
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
     process = await asyncio.create_subprocess_exec(
-        "git", "-C", tree, "show", f"{commit}:{name}",
+        "git", "-c", "protocol.allow=never", "-c", "core.fsmonitor=",
+        "-c", "core.hooksPath=/dev/null", "--no-replace-objects", "show", f"{commit}:{name}",
+        cwd=common, env=environment,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )  # fmt: skip
     output, _ = await process.communicate()
@@ -3644,13 +3661,14 @@ class Runtime:
             tree, base = checkout.get("worktree"), checkout.get("base_ref")
             if not tree or not base:
                 continue
+            common = checkout.get("git_dir") or str(Path(checkout["repo"]) / ".git")
             carried = set(checkout.get("carried") or [])
             for name in CLAUDE_CONFIG_FILES:
                 now = await asyncio.to_thread(file_bytes, Path(tree) / name)
                 if name in carried:
                     was = await asyncio.to_thread(file_bytes, Path(checkout["repo"]) / name)
                 else:
-                    was = await committed_bytes(tree, base, name)
+                    was = await committed_bytes(common, base, name)
                 if now != was:
                     changed.append(f"{Path(tree).name}/{name}")
         return ", ".join(changed)
