@@ -33,7 +33,7 @@ export function bindStorage() {
   $("#storage-uv-measure").addEventListener("click", () => act("/api/storage/uv-measure"));
   $("#storage-caches-measure").addEventListener("click", () => act("/api/storage/caches-measure"));
   $("#storage-caches-clear").addEventListener("click", () => {
-    if (confirm("Delete sandboxed workers' own caches? They are made again from yours.")) act("/api/storage/caches-clear", undefined, "Clearing workers' caches…");
+    if (confirm("Delete sandboxed workers' own caches? They are made again from yours; a worker installing right now may have to install again.")) act("/api/storage/caches-clear", undefined, "Clearing workers' caches…");
   });
   $("#storage-settings").addEventListener("submit", saveSettings);
   refreshStorageLink();

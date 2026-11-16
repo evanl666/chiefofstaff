@@ -199,6 +199,8 @@ FIXES: list[Allow] = [
         element="#settings-dialog label:has(> input[name=shared_caches])",
         views=r"^settings-workers-",
     ),
+    # 0.1.46: Storage reports sandboxed workers' own caches (measured and cleared when asked).
+    Allow("Storage's report of workers' caches", data=r"/api/storage\.caches"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
