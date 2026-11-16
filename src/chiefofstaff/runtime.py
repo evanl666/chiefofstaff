@@ -1733,9 +1733,14 @@ class Runtime:
             path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
         ]
         # Repository settings Copilot would load (hooks, MCP servers), in each of its folders and
-        # those above them up to their checkout's top: its commands never write them.
+        # those above them up to their checkout's top: its commands never write them. Not in
+        # its own workspace when it works in a checkout there: nothing loads them from that
+        # folder of Chief of Staff's (each rule more costs every command a little).
         gated: dict[str, None] = {}
+        workspace = os.path.realpath(self.workspaces.workspace(row))
         for folder in map(Path, self.workspaces.writes(row)):
+            if os.path.realpath(folder) == workspace != os.path.realpath(row["cwd"]):
+                continue
             top = nearest_top(folder) or folder
             places = [folder, *[p for p in folder.parents if p.is_relative_to(top)]]
             gated |= dict.fromkeys(str(place / name) for place in places for name in AGENT_SETTINGS)
