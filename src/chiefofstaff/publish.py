@@ -281,7 +281,9 @@ def finish_applying(shepherd: Shepherd, step_id: str):
         claim = control.claim(step["target"])
         if claim and claim["state"] == "stepping":
             control.set_state(step["target"], (claim["holder"], claim["generation"]), IDLE)
+        # Read again at once: its row shows the PR as GitHub has it now (its new head).
         shepherd.read_at[step["target"]] = 0
+        shepherd.runtime.background(shepherd.read(step["target"]))
         shepherd.publish_task(step)
 
 
@@ -325,8 +327,9 @@ async def head_checked(shepherd: Shepherd, operation: dict) -> dict:
     if protected:
         raise RefusedError("the branch is protected: push it yourself")
     if any(rule.get("type") == "required_signatures" for rule in rules):
-        shepherd.control.update_claim(f"github:{operation['repo']}#{operation['number']}",
-                                      details={**details, "signed": True})  # fmt: skip
+        # Its attempts are refused for a day, then the rules are read again at the next push.
+        target = f"github:{operation['repo']}#{operation['number']}"
+        shepherd.store.set(f"signedbranch:{target}", str(time.time()))
         raise RefusedError("the branch requires signed commits")
     if other := sorted({str(rule.get("type") or "") for rule in rules} - PUSH_RULES - {""}):
         raise RefusedError(f"the branch has rules a push may not meet ({', '.join(other)})")
