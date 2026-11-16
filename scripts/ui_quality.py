@@ -1325,6 +1325,14 @@ KNOWN_HOME_FINDINGS = re.compile(
 )
 
 
+# Prepared for you's lines on Home that are cut off (an ellipsis hides part of them).
+CUT_LINES = r"""
+() => [...document.querySelectorAll("#prepared .prepared-title, #prepared .prepared-line > *, #needs .card.task.marker-kept-paused .row-line .why, #needs .card.task.marker-prepared .row-line .why, #needs .card.task.marker-review .row-line .why")]
+  .filter((node) => node.getBoundingClientRect().width > 0 && node.scrollWidth > node.clientWidth + 1)
+  .map((node) => node.textContent.trim())
+"""
+
+
 async def shepherd_views(runtime, browser, quality: Quality):
     """Prepared for you (shepherd.py): Home with its section (three rows, then All found), a
     worker PR's row with a fix ready (its line, Review fix), one paused, one that can't run
@@ -1355,6 +1363,17 @@ async def shepherd_views(runtime, browser, quality: Quality):
                 if width < 1100:
                     await page.locator("#home-tabs [data-tab=needs]").click()
                 await page.wait_for_timeout(150)
+                if width == 800:
+                    # Its lines are whole at 800 px: nothing of their meaning cut off.
+                    cut = await page.evaluate(CUT_LINES)
+                    quality.failures += [f"shepherd 800 {scheme}: cut off: {text}" for text in cut]
+                    # Its rows, as the owner reads them there.
+                    rows = page.locator("#needs .card.task.marker-kept-paused")
+                    await rows.scroll_into_view_if_needed()
+                    await page.screenshot(path=folder / f"rows-800-{scheme}.png")
+                    await page.locator("#prepared").scroll_into_view_if_needed()
+                    await page.screenshot(path=folder / f"prepared-800-{scheme}.png")
+                    await page.locator("#needs").scroll_into_view_if_needed()
                 name = f"home-{width}-{scheme}"
                 await page.screenshot(path=folder / f"{name}.png")
                 await quality.check(page, f"shepherd {name}", known=KNOWN_HOME_FINDINGS)
@@ -1382,12 +1401,21 @@ async def shepherd_views(runtime, browser, quality: Quality):
             await row.locator(".more-button").click()
             menu = row.locator(".menu")
             await expect(menu).to_be_visible()
-            for item in ("Stop keeping it moving", "Merge when ready", "What it did"):
+            for item in ("Stop looking after this PR", "Merge when ready", "What it did"):
                 await expect(menu.get_by_role("menuitem", name=item)).to_be_visible()
             await page.wait_for_timeout(150)
             await page.screenshot(path=folder / f"row-menu-1280-{scheme}.png")
             await quality.check(page, f"shepherd row menu {scheme}", "#needs", KNOWN_HOME_FINDINGS)
             await page.keyboard.press("Escape")
+            await row.locator(".more-button").click()
+            await row.get_by_role("menuitem", name="Accept this commit…").click()
+            confirm = page.locator(".confirm-dialog")
+            await expect(confirm).to_be_visible()
+            await page.wait_for_timeout(250)
+            await page.screenshot(path=folder / f"accept-commit-1280-{scheme}.png")
+            await quality.check(page, f"shepherd accept {scheme}", ".confirm-dialog")
+            await quality.contrast(page, f"shepherd accept {scheme}", ".confirm-dialog")
+            await confirm.get_by_role("button", name="Cancel").click()
             await page.locator("#settings-button").click()
             await page.locator("#settings-tabs [data-tab=general]").click()
             await page.screenshot(path=folder / f"settings-general-1280-{scheme}.png")

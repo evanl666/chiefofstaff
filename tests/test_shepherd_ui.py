@@ -7,6 +7,7 @@ from test_round9_ui import DOM
 from test_ui_text import STATIC, run_js
 
 BOARD = f"const b = await import({json.dumps((STATIC / 'board.js').as_uri())});\n"
+TASKS = f"const k = await import({json.dumps((STATIC / 'tasks.js').as_uri())});\n"
 PREPARED = f"const p = await import({json.dumps((STATIC / 'prepared.js').as_uri())});\n" + DOM
 # A node's words, all of them, in order.
 TEXT = (
@@ -16,7 +17,7 @@ TEXT = (
 KEPT = {
     "target": "github:acme/api#12",
     "label": "api#12",
-    "line": "A fix is ready: test_timeout passes now",
+    "line": "A fix for the failing CI is ready: test_timeout passes now.",
     "action": {"kind": "review", "label": "Review fix", "step": "s1"},
     "keep": True,
     "merge_when_ready": False,
@@ -37,14 +38,18 @@ def test_a_kept_prs_row_says_what_it_needs_by_its_one_action():
         const done = (kind, line) => ({ id: "t", status: "done", attention: "prepared",
           attention_why: line, shepherd: { ...kept, line, action: { kind } } });
         return [place(done("review", "A fix is ready")),
-          place(done("resume", "Paused: new commits it didn't push (9f8e7d6)")),
+          place(done("resume", "Someone else pushed 9f8e7d6, so it's waiting for you.")),
           place(done("look", "Stopped: two attempts in a row made no progress")),
           place({ id: "t", status: "review", shepherd: kept }),
           place({ id: "t", status: "review", shepherd: { ...kept, action: null } })];
         """
     )
     assert found[0] == ["needs", "prepared", "A fix is ready", "Prepared for you"]
-    assert found[1][1:] == ["kept-paused", "Paused: new commits it didn't push (9f8e7d6)", "Paused"]
+    assert found[1][1:] == [
+        "kept-paused",
+        "Someone else pushed 9f8e7d6, so it's waiting for you.",
+        "Paused",
+    ]
     assert found[2][1] == "kept-stopped" and found[2][3] == "Stopped"
     # Awaiting acceptance: what it prepared says more than the PR's standing.
     assert found[3] == ["needs", "review", KEPT["line"], "Awaiting acceptance"]
@@ -74,7 +79,7 @@ def test_its_one_action_and_its_menu():
           accepted: menu(task({ head: "a".repeat(40) })),
           running: menu(task({}, "running")),
           line: text(p.keptLine(task({
-            accept_note: "Accepted; the PR's head is not what you reviewed" }))),
+            accept_note: "Accepted, but the PR changed after what you reviewed" }))),
           noLine: p.keptLine(task({ line: "" })),
         };
         """
@@ -82,17 +87,18 @@ def test_its_one_action_and_its_menu():
     assert found["labels"] == ["Fix it", "Review & post", "Resume", "Look"]
     assert found["refused"] is None and found["none"] is None
     assert found["menu"] == [
-        "Stop keeping it moving",
+        "Stop looking after this PR",
         "Merge when ready",
-        "Accept this head…",
+        "Accept this commit…",
         "What it did",
     ]
     assert found["enrolled"][1] == "Don't merge it by itself"
-    assert found["off"] == ["Keep it moving", "Accept this head…", "What it did"]
-    assert "Accept this head…" not in found["accepted"]
+    assert found["off"] == ["Look after this PR", "Accept this commit…", "What it did"]
+    assert "Accept this commit…" not in found["accepted"]
     assert found["running"] == []
     assert found["line"] == (
-        "A fix is ready: test_timeout passes now · Accepted; the PR's head is not what you reviewed"
+        "A fix for the failing CI is ready: test_timeout passes now. Accepted, but the PR "
+        "changed after what you reviewed"
     )
     assert found["noLine"] is None
 
@@ -151,3 +157,30 @@ def test_the_journal_says_each_operation_in_words():
         "Asking for a review again: on its way",
         "Merged",
     ]
+
+
+def test_a_kept_rows_line_is_its_one_line():
+    """Its words, once: not with the task's result beside them, and no warning mark."""
+    found = run_js(
+        BOARD
+        + TASKS
+        + f"const kept = {json.dumps(KEPT)};\n"
+        + """
+        s.state.snapshot = { settings: { max_workers: 3 }, sessions: [], tasks: [] };
+        const line = (task) => { const p = b.taskPhase(task, null);
+          return [k.rowWhy(task, null, p), k.rowLatest(task, null, p).text]; };
+        const result = "Fixed it: PR acme/api#12.";
+        return [line({ id: "t", status: "review", result, shepherd: kept }),
+          line({ id: "t", status: "done", result, attention: "prepared",
+            attention_why: "Someone else pushed 9f8e7d6, so it's waiting for you.",
+            shepherd: { ...kept, action: { kind: "resume" } } }),
+          line({ id: "t", status: "review", result, shepherd: { ...kept, action: null } })];
+        """
+    )
+    review, paused, plain = found
+    assert review == [{"text": KEPT["line"], "help": ""}, ""]
+    assert paused == [
+        {"text": "Someone else pushed 9f8e7d6, so it's waiting for you.", "help": ""},
+        "",
+    ]
+    assert plain[1] == "Fixed it: PR acme/api#12."  # Not kept moving: as today.

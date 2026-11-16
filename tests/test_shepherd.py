@@ -248,7 +248,7 @@ async def test_a_head_the_journal_does_not_explain_pauses_it(world):
     assert claim["state"] == "paused" and head[:7] in claim["reason"]
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
     assert view["action"] == {"kind": "resume", "label": "Resume"}
-    assert view["line"] == f"Paused: new commits it didn't push ({head[:7]})"
+    assert view["line"] == f"Someone else pushed {head[:7]}, so it's waiting for you."
     await runtime.shepherd.resume(TARGET)
     claim = runtime.shepherd.control.claim(TARGET)
     assert claim["state"] == "idle" and runtime.shepherd.control.explains(claim, head)
@@ -339,7 +339,9 @@ async def test_accept_of_a_head_that_is_not_what_was_reviewed_records_none(world
     claim = runtime.shepherd.control.claim(TARGET)
     assert not claim["accepted"].get("sha")
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
-    assert view["accept_note"].startswith("Accepted; the PR's head is not what you reviewed")
+    assert view["accept_note"] == (
+        "Accepted, but the PR changed after what you reviewed: it won't merge by itself."
+    )
 
 
 def green(world, head):

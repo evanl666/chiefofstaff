@@ -1,7 +1,7 @@
 """Who holds each kept PR, and what the owner sees and does about it (shepherd.py): the claim's
 transitions (a worker closed or reopened, a task cancelled, a PR no longer followed, the owner's
-Resume, Keep it moving, Merge when ready, Accept this head), durable acceptance, and each task's
-`shepherd` field on its card (its words and its one action)."""
+Resume, Look after this PR, Merge when ready, Accept this commit), durable acceptance, and each
+task's `shepherd` field on its card (its words and its one action)."""
 
 from __future__ import annotations
 
@@ -137,11 +137,11 @@ class Keeping:
         return self.control.claim(target) or {}
 
     async def keep(self: Shepherd, target: str, on: bool) -> dict:  # type: ignore[misc]
-        """Keep it moving, on or off for this PR. Off: the owner's; its news comes as today."""
+        """Look after this PR, on or off. Off: the owner's; its news comes as today."""
         claim = self.require(target)
         if not on:
             self.control.update_claim(target, keep=0, merge_when_ready=0)
-            await self.to_owner(target, "you stopped keeping it moving")
+            await self.to_owner(target, "you stopped looking after it")
         else:
             self.control.update_claim(target, keep=1)
             if claim["holder_kind"] == "owner":
@@ -169,7 +169,9 @@ class Keeping:
         if any(rule.get("type") == "merge_queue" for rule in rules):
             raise ValueError("Its base merges through a queue: not yet.")
         if not (claim.get("accepted") or {}).get("sha"):
-            raise ValueError("Accept its head first (Accept on the task, or Accept this head).")
+            raise ValueError(
+                "Accept it first: Accept on its task, or Accept this commit in its menu."
+            )
         self.control.update_claim(target, merge_when_ready=1, details=details)
         self.publish_holder(claim)
         self.read_at[target] = 0
@@ -183,7 +185,7 @@ class Keeping:
         repo, number = target.removeprefix("github:").rsplit("#", 1)
         details = await self.runtime.github.pr_details(repo, int(number))
         if details["head"] != sha:
-            raise ValueError("The PR moved since you looked: look at its new head.")
+            raise ValueError("The PR has new commits since you looked: look at them first.")
         self.record_acceptance(target, sha, claim["holder"] or claim["origin_task"], details)
         self.publish_holder(claim)
         self.read_at[target] = 0
@@ -228,7 +230,8 @@ class Keeping:
                 self.store.delete(f"acceptnote:{claim['target']}")
             else:
                 note = (
-                    "Accepted; the PR's head is not what you reviewed, so it won't merge by itself"
+                    "Accepted, but the PR changed after what you reviewed: it won't merge by "
+                    "itself."
                 )
                 self.store.set(f"acceptnote:{claim['target']}", note)
                 notes.append(note)
@@ -382,11 +385,7 @@ class Keeping:
             view["rank"] = 4
             return view
         if claim["state"] == PAUSED:
-            head = (claim.get("paused_head") or "")[:7]
-            words = claim["reason"] or "paused"
-            view["line"] = f"Paused: {words[0].lower()}{words[1:]}" if words else "Paused"
-            if head and head not in view["line"]:
-                view["line"] += f" ({head})"
+            view["line"] = paused_words(claim["reason"], claim.get("paused_head") or "")
             view["action"] = {"kind": "resume", "label": "Resume"}
             view["rank"] = 1
             return view
@@ -395,7 +394,7 @@ class Keeping:
             view["step"] = self.step_view(step)
             view.update(self.step_words(step, label))
         elif stopped:
-            view["line"] = f"Stopped: {stopped['why']}"
+            view["line"] = sentence(stopped["why"])  # Its status says Stopped.
             view["action"] = {"kind": "look", "label": "Look"}
             view["rank"] = 1
         elif last and last["state"] == "refused":
@@ -421,6 +420,7 @@ class Keeping:
         if claim["merge_when_ready"] and not view["line"]:
             why = self.store.get(f"mergewhy:{target}") or ""
             view["line"] = f"Merges when ready{': ' + why if why else ''}"
+        view["line"] = sentence(view["line"], capital=False)
         view["kinds"] = {kind: self.level(kind) for kind in KIND_WORDS}
         return view
 
@@ -447,14 +447,19 @@ class Keeping:
                     "action": {"kind": "fix", "label": "Fix it", "step": step["id"]}}  # fmt: skip
         if plan.get("kind") == "rerun":
             action = {"kind": "review", "label": "Run it again", "step": step["id"]}
-            return {"line": f"CI failed: {plan.get('why')}", "rank": 1, "action": action}
+            return {"line": sentence(f"CI failed: {plan.get('why')}"), "rank": 1, "action": action}
         replies = any(
             t.get("reply") and t.get("stance") != "leave" for t in plan.get("threads") or []
         )
         words = "Review & post" if replies else "Review fix"
         evidence = plan.get("evidence") or {}
         fixed = evidence.get("fixed") or []
-        line = "A fix is ready" if plan.get("h1") else "Replies are ready"
+        if step["kind"] == "fix-ci":
+            line = "A fix for the failing CI is ready"
+        elif plan.get("h1"):
+            line = "A fix and replies for the review are ready"
+        else:
+            line = "Replies to the review are ready"
         if plan.get("change") == "approval":
             line += ": it changes tests or checks"
         elif plan.get("h1") and not (evidence.get("holds") and not evidence.get("void")):
@@ -463,6 +468,7 @@ class Keeping:
             line += f": {short_test(fixed[0])} passes now"
         elif fixed:
             line += f": {len(fixed)} failing tests pass now"
+        line += "."
         return {"line": line, "rank": 0,
                 "action": {"kind": "review", "label": words, "step": step["id"]}}  # fmt: skip
 
@@ -523,6 +529,34 @@ class Keeping:
             "operations": self.control.actions(step_id),
             "account": "",
         }  # fmt: skip
+
+
+def sentence(words: str, capital: bool = True) -> str:
+    """Words as a sentence: a full stop last, and a capital first (`capital`: not for words that
+    may start with code, `timeout()`)."""
+    words = words.strip()
+    if not words:
+        return ""
+    if capital:
+        words = words[0].upper() + words[1:]
+    return words if words.endswith((".", "!", "?", "…")) else f"{words}."
+
+
+def paused_words(reason: str, head: str) -> str:
+    """Why a PR waits for the owner's Resume, in a line (its status says Paused)."""
+    if reason.startswith("new commits it didn't push"):
+        pushed = head[:7] or reason.rsplit("(", 1)[-1].rstrip(")")
+        return f"Someone else pushed {pushed}, so it's waiting for you."
+    if reason.startswith("stacked"):
+        return "Another PR now builds on this one, so it's waiting for you."
+    if reason.startswith("from a fork"):
+        return "It comes from a fork now, so it's waiting for you."
+    if reason.startswith("a check vanished after the push: "):
+        checks = reason.split(": ", 1)[1]
+        return f"{checks} didn't run after its fix, so it's waiting for you."
+    if not reason:
+        return "It's waiting for you."
+    return sentence(f"{reason}, so it's waiting for you")
 
 
 def _now() -> str:
