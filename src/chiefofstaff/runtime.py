@@ -93,7 +93,7 @@ from .sendsocket import headline as sent_headline
 from .sendsocket import parts as sent_parts
 from .sendsocket import prompt as sent_prompt
 from .sendsocket import shown as sent_shown
-from .settings_guard import SettingsChangedError
+from .settings_guard import SettingsChangedError, checkout_top, outermost_top
 from .sources import Source
 from .sources.github import GitHubSource
 from .sources.slack import SlackSource, describe
@@ -119,7 +119,6 @@ from .workspaces import (
     Workspaces,
     common_git_dir,
     git_dirs,
-    nearest_top,
     protected_git_paths,
     sandbox_paths,
     sandbox_platform,
@@ -1741,26 +1740,22 @@ class Runtime:
             # Not held there when absent (sandbox_paths): looked for after its turns.
             self.git_watch(row["id"], [path for path in protected if not os.path.lexists(path)])
         readonly = list(protected)
-        # Repository settings Copilot would load (hooks, MCP servers), in each of its folders and
-        # those above them up to their checkout's top: its commands never change them. One that
-        # is not there yet only in the owner's own checkouts (in its own folders, a merge or a
-        # PR checkout may bring one: the check before each turn sees it, for the owner to say).
-        # Not in its own workspace when it works in a checkout there: nothing loads them from
-        # that folder of Chief of Staff's (each rule more costs every command a little).
+        # Repository settings an agent would load (hooks, MCP and language servers), in the
+        # owner's own checkouts it may write (one it works in, in place) and those above them up
+        # to their top: its commands never change them, nor (macOS) make one. In its own
+        # worktree or workspace they are its to change (a merge, a rebase or a PR's checkout
+        # may bring one): the check before each turn shows the owner what differs there.
         gated: dict[str, None] = {}
         workspace = os.path.realpath(self.workspaces.workspace(row))
-        for folder in map(Path, self.workspaces.writes(row)):
-            if os.path.realpath(folder) == workspace != os.path.realpath(row["cwd"]):
+        recorded = {os.path.realpath(c.get("path") or ""): c for c in checkouts}
+        for folder in map(os.path.realpath, self.workspaces.writes(row)):
+            if within(folder, workspace):
                 continue
-            own = within(str(folder), workspace)
-            top = nearest_top(folder) or folder
-            places = [folder, *[p for p in folder.parents if p.is_relative_to(top)]]
-            gated |= dict.fromkeys(
-                str(place / name)
-                for place in places
-                for name in AGENT_SETTINGS
-                if not own or os.path.lexists(place / name)
-            )
+            real = Path(folder)
+            checkout = recorded.get(folder)
+            top = (checkout_top(checkout) if checkout else None) or outermost_top(real)
+            places = [real, *[p for p in real.parents if p.is_relative_to(top)]]
+            gated |= dict.fromkeys(str(place / name) for place in places for name in AGENT_SETTINGS)
         readonly += list(gated)
         ssh = Path.home() / ".ssh"
         readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
@@ -2891,124 +2886,45 @@ class Runtime:
     # saw them, before every open and every turn.
 
     def settings_place(self, row: dict) -> tuple[Path, Path, dict | None]:
-        """(top, cwd, checkout): whose agent settings a worker's turns load: the checkout its
-        folder is in (a worktree, a clone, the owner's checkout), else its workspace, else the
-        nearest git checkout above it, else the folder itself."""
+        """(top, cwd, checkout): whose agent settings a worker's turns load: from the top Chief
+        of Staff recorded as it handed the folder out (checkout_top), never from what is in the
+        folder now (a worker can make a `.git` folder that is no repository, where an agent
+        looks past it); else its workspace; else the outermost top an agent would take."""
         cwd = Path(os.path.realpath(row["cwd"]))
         for checkout in json.loads(row.get("repos") or "[]"):
-            path = checkout.get("path") or ""
-            if checkout.get("worktree"):
-                top = Path(os.path.realpath(checkout["worktree"]))
-            elif path:
-                real = Path(os.path.realpath(path))
-                top = nearest_top(real) or real
-            else:
-                continue
-            if cwd == top or cwd.is_relative_to(top):
+            top = checkout_top(checkout)
+            if top and (cwd == top or cwd.is_relative_to(top)):
                 return top, cwd, checkout
         workspace = Path(os.path.realpath(self.workspaces.workspace(row)))
         if cwd == workspace or cwd.is_relative_to(workspace):
             return workspace, cwd, None
-        return nearest_top(cwd) or cwd, cwd, None
+        return outermost_top(cwd), cwd, None
 
     def settings_read(
         self, row: dict, names: tuple[str, ...]
-    ) -> tuple[Path, Path, dict | None, dict, str]:
+    ) -> tuple[Path, Path, dict | None, dict, str, list[str]]:
         """(top, cwd, checkout, what these settings (one agent's) hold now, why they can't be
-        read: "" when they can). Blocking: in a thread, once per check."""
+        read ("" when they can), the project code they run that nothing holds). Blocking: in a
+        thread, once per check."""
         top, cwd, checkout = self.settings_place(row)
+        code: list[str] = []
         try:
-            return top, cwd, checkout, settings_guard.scan(top, cwd, names), ""
+            return top, cwd, checkout, settings_guard.scan(top, cwd, names, code), "", code
         except settings_guard.TooLargeError as exc:
-            return top, cwd, checkout, {}, str(exc)
-
-    def handed_since(self, top: Path) -> float:
-        """When Chief of Staff first gave a worker a folder in this top (that worker's start);
-        0 for never."""
-        times = []
-        for each in self.store.all(
-            "SELECT cwd, repos, created_at FROM sessions WHERE role=?", (WORKER,)
-        ):
-            checkouts = json.loads(each["repos"] or "[]")
-            places = [
-                each["cwd"] or "",
-                *(c.get("worktree") or c.get("path") or "" for c in checkouts),
-            ]
-            if any(place and within(place, str(top)) for place in places):
-                times.append(settings_guard.epoch(each["created_at"]))
-        return min((moment for moment in times if moment), default=0.0)
-
-    def settings_baseline(
-        self,
-        row: dict,
-        top: Path,
-        checkout: dict | None,
-        now: dict,
-        snapshot: dict | None,
-        missing: dict[str, tuple[str, ...]],
-    ) -> dict:
-        """What of these settings, in folders whose snapshot does not hold them yet (`missing`:
-        folder -> names), is the owner's; kept from now on (saved). A folder handed out before
-        snapshots were kept (`snapshot` None), a worktree with its base commit: what that commit
-        holds (read once with a git that runs nothing of the repository's) and what it was given
-        from the owner's checkout (as it is there). Otherwise what was there before Chief of
-        Staff first handed the folder out (its inode's change time, which no worker can set
-        back; unknown on Windows: none); its timeline says once what it uses."""
-        kept: dict[str, dict] = {}
-        base = checkout.get("base_ref") if checkout else ""
-        if snapshot is None:
-            snapshot = settings_guard.fresh(self.handed_since(top) or time.time())
-            if (
-                checkout
-                and checkout.get("worktree")
-                and base
-                and re.fullmatch(r"[0-9a-f]{40,64}", base)
-            ):
-                common = Path(checkout.get("git_dir") or "")
-                # Not a .git any worker may write (one changing that checkout in place).
-                writable = [
-                    folder
-                    for each in self.store.open_sessions(WORKER)
-                    for folder in self.workspaces.writes(each)
-                ]
-                if common.is_dir() and not any(within(str(common), folder) for folder in writable):
-                    kept = settings_guard.committed(
-                        top, now, common, base, Path(checkout.get("repo") or top),
-                        checkout.get("carried") or [],
-                    )  # fmt: skip
-                    for folder, names in missing.items():
-                        settings_guard.taken(snapshot, kept, [folder], names)
-                    missing = {}
-        older: dict[str, dict] = {}
-        for folder, names in missing.items():
-            place = top if folder == "." else top / folder
-            found = settings_guard.restricted({folder: now.get(folder, {})}, names)
-            for entry, value in found.get(folder, {}).items():
-                if settings_guard.older_than(place / entry.split("\0")[0], snapshot["since"]):
-                    older.setdefault(folder, {})[entry] = value
-            settings_guard.taken(snapshot, older, [folder], names)
-        settings_guard.save(self.store, top, snapshot)
-        if older:
-            shown = settings_guard.shown(older)
-            listed = ", ".join(shown[:5]) + (
-                f" and {len(shown) - 5} more" if len(shown) > 5 else ""
-            )
-            home = str(Path.home())
-            where = f"~{str(top)[len(home) :]}" if str(top).startswith(home + os.sep) else str(top)
-            self.add_message(
-                row["id"], "notice", f"Workers in {where} use the agent settings there: {listed}."
-            )
-        return snapshot
+            return top, cwd, checkout, {}, str(exc), []
 
     async def settings_verdict(self, row: dict, names: tuple[str, ...]) -> dict | None:
-        """What of these agent settings (one agent's) changed in a worker's folder since
-        Chief of Staff last saw them: {"top", "cwd", "changes", "now", "digest", "unreadable"},
-        or None for nothing. Read from the files every time: they are few and small."""
-        top, cwd, checkout, now, unreadable = await asyncio.to_thread(
-            self.settings_read, row, names
-        )
-        snapshot = settings_guard.load(self.store, top)
-        unchecked = [n for n in names if snapshot and n in snapshot["unchecked"]]
+        """What of these agent settings (one agent's) differs in a worker's folder from what
+        Chief of Staff last saw: {"top", "cwd", "changes", "now", "digest", "unreadable",
+        "first" (only settings seen there for the first time), "refused" (some it can never
+        take as unchanged), "folders" (where they differ)}, or None for nothing. Read from the
+        files every time: they are few and small. A folder (or setting) seen for the first
+        time that Chief of Staff did not make is known from then on with nothing in it taken:
+        what is there is the owner's to look at once."""
+        top, cwd, _, now, unreadable, code = await asyncio.to_thread(self.settings_read, row, names)
+        stored = settings_guard.load(self.store, top)
+        snapshot = stored or settings_guard.fresh()
+        unchecked = [n for n in names if n in snapshot["unchecked"]]
         folders = [settings_guard.folder_key(top, f) for f in settings_guard.chain(top, cwd)]
         if unreadable:
             if unchecked:
@@ -3016,42 +2932,70 @@ class Runtime:
             return {
                 "top": top, "cwd": cwd, "changes": [], "now": {}, "unreadable": unreadable,
                 "digest": settings_guard.digest({"unreadable": {unreadable: []}}),
+                "first": False, "refused": False, "folders": folders,
             }  # fmt: skip
-        if snapshot is not None and unchecked:
+        if unchecked:
             # Checkable again: as they are now (the owner took them unchecked).
             snapshot["unchecked"] = [n for n in snapshot["unchecked"] if n not in names]
             settings_guard.taken(snapshot, now, folders, names)
-            settings_guard.save(self.store, top, snapshot)
-        known = snapshot["known"] if snapshot else {}
         missing = {
             folder: wanted
             for folder in folders
-            if (wanted := tuple(n for n in names if n not in known.get(folder, [])))
+            if (wanted := tuple(n for n in names if n not in snapshot["known"].get(folder, [])))
         }
-        if snapshot is None or missing:
-            snapshot = await asyncio.to_thread(
-                self.settings_baseline, row, top, checkout, now, snapshot, missing
-            )
-        then = {folder: snapshot["folders"].get(folder, {}) for folder in folders}
+        if missing or unchecked or stored is None:
+            settings_guard.unseen(snapshot, now, missing)
+            settings_guard.save(self.store, top, snapshot)
+        then = settings_guard.restricted(
+            {folder: snapshot["folders"].get(folder, {}) for folder in folders}, names
+        )
         now_named = settings_guard.restricted(now, names)
-        found = settings_guard.changes(now_named, settings_guard.restricted(then, names))
+        self.settings_code(row, top, snapshot, code, names)
+        found = settings_guard.changes(now_named, then)
         if not found:
             return None
         return {
-            "top": top, "cwd": cwd, "changes": found, "now": now,
-            "digest": settings_guard.digest(now_named), "unreadable": "",
+            "top": top, "cwd": cwd, "changes": found, "now": now, "unreadable": "",
+            "digest": settings_guard.digest(now_named),
+            "first": settings_guard.first_seen(snapshot, now_named, then),
+            "refused": any(what == "refused" for what, _ in found),
+            "folders": sorted(
+                folder for folder in now_named.keys() | then.keys()
+                if now_named.get(folder) != then.get(folder)
+            ),
         }  # fmt: skip
+
+    def settings_code(
+        self, row: dict, top: Path, snapshot: dict, code: list[str], names: tuple[str, ...]
+    ):
+        """Its timeline says once (for the folder, while they stay the same) which commands of
+        its settings run project code no snapshot holds (`uv run`, `npm run`, `python -m`): a
+        change to that code is not caught."""
+        said = settings_guard.digest({"code": {line: [] for line in sorted(set(code))}})
+        if not code or snapshot.get("code") == said:
+            return
+        snapshot["code"] = said
+        settings_guard.save(self.store, top, snapshot)
+        agent = "Codex" if names == CODEX_SETTINGS else "Copilot"
+        unique = sorted(set(code))
+        listed = "; ".join(unique[:2]) + (f" and {len(unique) - 2} more" if len(unique) > 2 else "")
+        self.add_message(
+            row["id"],
+            "notice",
+            f"{agent} settings in {home_shown(str(top))} run project code Chief of Staff can't "
+            f"check ({listed}): a change to that code takes effect without asking you.",
+        )
 
     def settings_said(self, session_id: str, line: str, verdict: dict, alert: bool = True):
         """Its timeline says it once for each change, with "Use these settings" (the owner's to
-        choose: accept_settings) when they could be read; the owner hears of it when the worker
-        waits for them (`alert`)."""
+        choose: accept_settings) when they could be read and may be used; the owner hears of it
+        when the worker waits for them (`alert`)."""
         said = settings_guard.digest({"line": {line: [verdict.get("digest") or ""]}})
         if self.store.get(f"settingssaid:{session_id}") == said:
             return
         self.store.set(f"settingssaid:{session_id}", said)
         meta = {}
-        if verdict.get("digest"):
+        if verdict.get("digest") and not verdict.get("refused"):
             meta["agent_settings"] = {
                 "digest": verdict["digest"],
                 "changes": settings_guard.described(verdict["changes"]),
@@ -3082,23 +3026,44 @@ class Runtime:
                 self.background(self.settings_go_on(row))
             self.background(self.workers.pump())
 
+    @staticmethod
+    def settings_reason(agent: str, verdict: dict) -> str:
+        """Why its folder's settings stop it, in a few words (`agent`: "Copilot", "Codex")."""
+        if verdict["unreadable"]:
+            return f"{agent} settings in this folder can't be checked ({verdict['unreadable']})"
+        if verdict["refused"]:
+            refused = [path for what, path in verdict["changes"] if what == "refused"]
+            return f"{agent} settings in this folder can't be used ({', '.join(refused[:3])})"
+        if verdict["first"]:
+            listed = settings_guard.listed_entries(verdict["changes"])
+            return (
+                f"Chief of Staff sees the {agent} settings in this folder for the first time "
+                f"({listed})"
+            )
+        changed = settings_guard.described(verdict["changes"])
+        return f"{agent} settings in this folder changed ({changed})"
+
     async def settings_refusal(self, row: dict) -> str:
         """Before a Copilot worker opens or starts a turn: why not (its folder's Copilot
-        settings changed: Copilot would load them), "" when it may; said in its timeline."""
+        settings differ from what the owner last let it use: Copilot would load them), "" when
+        it may; said in its timeline."""
         if row["role"] != WORKER or not row["cwd"] or self.agent(row["id"]) != COPILOT_AGENT:
             return ""
         if pending := json.loads(self.store.get(f"gitquarantine:{row['id']}") or "{}"):
-            return f"{self.git_quarantine_line(pending)} It waits for your word."
+            return f"{self.git_quarantine_line(pending)}. It waits for your word."
         verdict = await self.settings_verdict(row, REPOSITORY_SETTINGS)
         if verdict is None:
             self.settings_unsaid(row["id"])
             return ""
-        if verdict["unreadable"]:
-            reason = f"Copilot settings in this folder can't be checked ({verdict['unreadable']})"
+        reason = self.settings_reason("Copilot", verdict)
+        if verdict["refused"]:
+            line = f"{reason}; Chief of Staff won't start the worker there until that's removed."
+        elif verdict["first"]:
+            line = f"{reason}; it won't start the worker there until you say to use them."
         else:
-            changed = settings_guard.described(verdict["changes"])
-            reason = f"Copilot settings in this folder changed ({changed})"
-        line = f"{reason}; Chief of Staff won't start the worker there until you say to use them."
+            line = (
+                f"{reason}; Chief of Staff won't start the worker there until you say to use them."
+            )
         self.settings_reasons[row["id"]] = reason
         self.settings_said(row["id"], line, verdict)
         return line
@@ -3230,30 +3195,21 @@ class Runtime:
             await self.settings_stop(session_id)
 
     async def codex_settings(self, row: dict) -> list[str]:
-        """The folders whose Codex settings changed since Chief of Staff last saw them (a Codex
+        """The folders whose Codex settings differ from what Chief of Staff last saw (a Codex
         thread is not to trust them); its timeline says so."""
         verdict = await self.settings_verdict(row, CODEX_SETTINGS)
         if verdict is None:
             self.settings_unsaid(row["id"])
             return []
+        reason = self.settings_reason("Codex", verdict)
         if verdict["unreadable"]:
-            line = (
-                f"Codex settings in this folder can't be checked ({verdict['unreadable']}), so "
-                "Codex won't load them for this worker."
-            )
-            folders = [str(f) for f in settings_guard.chain(verdict["top"], verdict["cwd"])]
+            line = f"{reason}, so Codex won't load them for this worker."
+        elif verdict["refused"]:
+            line = f"{reason}, so Codex won't load them for this worker until that's removed."
         else:
-            changed = settings_guard.described(verdict["changes"])
-            line = (
-                f"Codex settings in this folder changed ({changed}), so Codex won't load them "
-                "for this worker until you say to use them."
-            )
-            folders = sorted(
-                {
-                    str(verdict["top"] / settings_guard.split_setting(path)[0])
-                    for _, path in verdict["changes"]
-                }
-            )
+            line = f"{reason}, so Codex won't load them for this worker until you say to use them."
+        top = verdict["top"]
+        folders = [str(top if folder == "." else top / folder) for folder in verdict["folders"]]
         self.settings_said(row["id"], line, verdict, alert=False)  # It goes on without them.
         return folders
 
@@ -3269,9 +3225,11 @@ class Runtime:
             said = "They are as they were: nothing to change."
         elif verdict["digest"] != digest:
             raise ValueError("They changed again since: look at the latest line and try again.")
+        elif verdict["refused"]:
+            raise ValueError(f"{self.settings_reason('These', verdict)}: remove that first.")
         else:
             top, cwd = verdict["top"], verdict["cwd"]
-            snapshot = settings_guard.load(self.store, top) or settings_guard.fresh(time.time())
+            snapshot = settings_guard.load(self.store, top) or settings_guard.fresh()
             if verdict["unreadable"]:
                 snapshot["unchecked"] = sorted({*snapshot["unchecked"], *names})
                 said = f"You let this worker use them unchecked ({verdict['unreadable']})."

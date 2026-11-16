@@ -63,6 +63,62 @@ MODEL = os.environ.get("CHIEFOFSTAFF_TEST_MODEL", "claude-haiku-5.5")
 REAL_CODEX = os.environ.get("CHIEFOFSTAFF_TEST_CODEX") == "1"
 
 
+# Files of a repository the installed Copilot CLI's help names that load nothing that runs: its
+# instructions, skills (their own MCP servers and hooks don't load; their tools still ask), what
+# only the owner's own command reads. Every other one it names must be held
+# (policy.REPOSITORY_SETTINGS).
+KNOWN_UNGATED = {
+    ".github": "the folder: its files are named one by one",
+    ".copilot": "Copilot's own folder (~/.copilot), not a repository's",
+    ".github/copilot-instructions.md": "instructions",
+    ".github/instructions": "instructions",
+    ".claude/CLAUDE.md": "instructions",
+    ".claude/rules": "instructions",
+    ".github/skills": "skills: instructions",
+    ".claude/skills": "skills: instructions",
+    ".agents/skills": "skills: instructions",
+    ".claude/commands": "slash commands: only the owner types one",
+    ".claude-plugin/plugin.json": "read by `copilot plugin install`, the owner's command",
+    ".claude-plugin/marketplace.json": "read by `copilot plugin marketplace add`, the owner's",
+    ".vscode/mcp.json": "not read, the help says",
+}
+NAMED = re.compile(
+    r"(?<![~\w/$.*-])\.(?:github|claude|claude-plugin|vscode|copilot|codex|agents|mcp)[\w./*-]*"
+)
+
+
+@pytest.mark.skipif(not REAL, reason="Set CHIEFOFSTAFF_TEST_COPILOT=1 to read the real CLI's help.")
+def test_every_repository_file_the_installed_copilot_reads_is_held_or_known():
+    """The installed CLI's help names each file of a repository it reads: one a new version
+    names fails this until it is held (policy.REPOSITORY_SETTINGS) or known to run nothing."""
+    from chiefofstaff.policy import REPOSITORY_SETTINGS
+
+    copilot = shutil.which("copilot")
+    assert copilot, "the Copilot CLI is not installed"
+    topics = ("config", "mcp", "lsp", "extensions", "permissions", "commands", "environment")
+    commands = ("plugin", "mcp", "skill", "instruction", "lsp")
+    asked = [["help"], *(["help", t] for t in topics), *([c, "--help"] for c in commands)]
+    text = ""
+    for words in asked:
+        done = subprocess.run([copilot, *words], capture_output=True, text=True, timeout=120)
+        text += done.stdout
+    named = set()
+    for found in NAMED.findall(text):
+        parts = []
+        for part in found.rstrip(".,)").split("/"):
+            if not part or "*" in part:
+                break
+            parts.append(part)
+        named.add("/".join(parts))
+    assert {".mcp.json", ".github/hooks", ".github/lsp.json"} <= named, "the help, as read"
+    held = [
+        name for name in named
+        if any(name == s or name.startswith(s + "/") for s in REPOSITORY_SETTINGS)
+    ]  # fmt: skip
+    unknown = sorted(named - set(held) - KNOWN_UNGATED.keys())
+    assert not unknown, f"Files the installed Copilot reads, neither held nor known: {unknown}"
+
+
 async def contract_brain(session, prompt):
     """A tiny stand-in for a model: it understands the prompts these tests send."""
     if match := re.search(r"Call the (\w+) tool with text '([^']*)'", prompt):

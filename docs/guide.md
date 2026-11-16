@@ -314,28 +314,34 @@ worker in a worktree of a repository you trust in Copilot is trusted too, so tha
 MCP servers load there as well. If you use Copilot's own sandbox, workers follow your settings
 for it.
 
-A repository's own Copilot settings load for a worker only as they were when Chief of Staff
-gave it the folder: their hooks and MCP servers (`.github/hooks/`, `.mcp.json`,
-`.github/mcp.json`, `.github/copilot/`, `.github/extensions/`, custom agents in
+A repository's own Copilot settings load for a worker only as you last let them: their hooks
+and MCP and language servers (`.github/hooks/`, `.mcp.json`, `.github/mcp.json`,
+`.github/lsp.json`, `.github/copilot/`, `.github/extensions/`, custom agents in
 `.github/agents/` and `.claude/agents/`, and the hooks of `.claude/settings.json` and
 `settings.local.json`, which Copilot runs too) would run outside Chief of Staff's checks (a
-hook can approve a command a check refuses; an MCP server runs outside the worker's sandbox).
-Chief of Staff keeps what those files held when it made the worker's
-worktree or clone, or first gave a worker your checkout, and reads them again before each turn
-and each start. If one changed (a worker wrote it, a merge brought a teammate's change, you
-edited your local settings), the worker starts no turn there and its timeline says what
-changed: "Copilot settings in this folder changed (added .mcp.json); Chief of Staff won't start
-the worker there until you say to use them." If the change is yours or you trust it, click
-**Use these settings** on that line: the worker goes on with what waited for it, and one the
-change stopped mid-task goes on with that task too. If you undo the change instead (delete what
-the worker wrote), the worker goes on by itself once it's as it was (or click the button). A
-worker waiting for this shows *waiting for you* and the Router hears it once. Settings too many
-or too large to check ("can't be checked") wait the same way, and the button lets the worker
-use them unchecked until they can be checked again. Workers don't edit those files, but a
-merge, a rebase or checking out a PR in their own worktree can bring new ones: the same line
-then asks you. The first time workers use one of your checkouts (or a folder of it no worker
-had before), their timeline names the settings there they use. Agent homes (`~/.codex`,
-`~/.claude`, `~/.copilot`) are yours and are never read as a folder's settings.
+hook can approve a command a check refuses; a server runs outside the worker's sandbox).
+Chief of Staff keeps what those files hold, and the scripts and servers they name (a hook's
+`check.sh`, an MCP server's `tools/server.py`), when it makes a worker's worktree, clone or
+workspace. Any other folder it sees for the first time with such files in it (your checkout, a
+folder of it no worker had before, one workers used before this version, your own session
+taken up from a terminal) waits for you to look once: "Chief of Staff sees the Copilot settings
+in this folder for the first time (.mcp.json); it won't start the worker there until you say to
+use them." It reads them again before each turn and each start. If one changed (a worker wrote
+it, a merge brought a teammate's change, you edited your local settings), the worker starts no
+turn there and its timeline says what changed: "Copilot settings in this folder changed (added
+.mcp.json); Chief of Staff won't start the worker there until you say to use them." If the
+change is yours or you trust it, click **Use these settings** on that line: the worker goes on
+with what waited for it, and one the change stopped mid-task goes on with that task too. If you
+undo the change instead (delete what the worker wrote), the worker goes on by itself once it's
+as it was (or click the button). A worker waiting for this shows *waiting for you* and the
+Router hears it once. Settings too many or too large to check ("can't be checked") wait the
+same way, and the button lets the worker use them unchecked until they can be checked again. A
+setting that's a link out of its folder, or a special file, is never used: the worker waits
+until it's removed. When a setting runs project code Chief of Staff can't hold (`uv run …`,
+`npm run …`, `npx …`, `python -m …`), the worker's timeline says so once: a change to that code
+isn't caught. Workers don't edit those files with their tools, but a merge, a rebase or checking
+out a PR in their own worktree can change them: the same line then asks you. Agent homes
+(`~/.codex`, `~/.claude`, `~/.copilot`) are yours and are never read as a folder's settings.
 
 With the **sandbox** on (Settings; always for workers that read Slack), workers' shell commands can write only to their
 workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
@@ -1036,10 +1042,11 @@ new workers use cannot run, they start on Copilot and their chat says why.
   them, and Chief of Staff gives the worker the repository's `AGENTS.md` files as text: a
   message marked as the repository's, with any tag in it escaped, so it can't pass as yours or
   as Chief of Staff's. Trust the repository in Codex to load its `.codex/` settings and skills
-  in Codex workers. They load only as they were when Chief of Staff gave the worker the
-  folder: a `.codex/` folder that changed since is not loaded for it, and its timeline says
-  "Codex settings in this folder changed (changed .codex/config.toml), so Codex won't load them
-  for this worker until you say to use them". **Use these settings** on that line loads them
+  in Codex workers. They load only as you last let them, as for Copilot's: a `.codex/` folder
+  that changed since (or that Chief of Staff sees for the first time, outside a folder it made)
+  is not loaded for the worker, and its timeline says "Codex settings in this folder changed
+  (changed .codex/config.toml), so Codex won't load them for this worker until you say to use
+  them". **Use these settings** on that line loads them
   from its next turn (after the one under way, if it is at work). Workers don't edit `.codex/` folders or Codex's settings folder.
 - **Questions:** a Codex worker asks you with a report's question (Codex has no `ask_user` here).
   An MCP server that needs a sign-in is signed in with `codex mcp login <name>`.

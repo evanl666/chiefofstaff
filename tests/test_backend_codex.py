@@ -418,6 +418,13 @@ def codex_line(changes: str) -> str:
     )
 
 
+def codex_first(listed: str) -> str:
+    return (
+        f"Chief of Staff sees the Codex settings in this folder for the first time ({listed}), "
+        "so Codex won't load them for this worker until you say to use them."
+    )
+
+
 def settings_lines(harness) -> list[dict]:
     return [m for m in harness.store.messages("w1") if m["meta"].get("agent_settings")]
 
@@ -448,8 +455,8 @@ async def test_codex_settings_a_worker_changed_are_not_loaded(tmp_path, monkeypa
 
 async def test_codex_settings_as_handed_out_stay_trusted(tmp_path, monkeypatch):
     """A repository that ships its own `.codex/` keeps it for its workers: as its worktree was
-    made, or (one made before that was kept) as its base commit holds it, git's checkout having
-    made its line ends CRLF."""
+    made (git's checkout having made its line ends CRLF). One made before that was kept: the
+    owner looks once."""
     main, wt, base = trusted_worktree(tmp_path, monkeypatch)
     rules = wt / ".codex" / "rules" / "team.rules"
     rules.write_bytes(rules.read_bytes().replace(b"\n", b"\r\n"))
@@ -464,7 +471,12 @@ async def test_codex_settings_as_handed_out_stay_trusted(tmp_path, monkeypatch):
             if key.startswith("settingssnap:"):
                 harness.store.delete(key)
         told = await configured(tmp_path, monkeypatch, runtime.agent_options(row), wt)
-        assert level(told["projects"], wt) == "trusted" and not settings_lines(harness)
+        assert level(told["projects"], wt) == "untrusted"
+        (line,) = settings_lines(harness)
+        assert line["text"] == codex_first(".codex/config.toml, .codex/rules/team.rules")
+        await runtime.accept_settings("w1", line["meta"]["agent_settings"]["digest"])
+        told = await configured(tmp_path, monkeypatch, runtime.agent_options(row), wt)
+        assert level(told["projects"], wt) == "trusted"
         (wt / ".codex" / "config.toml").write_text(PLANTS["model"][1])
         told = await configured(tmp_path, monkeypatch, runtime.agent_options(row), wt)
         assert level(told["projects"], wt) == "untrusted"
@@ -475,20 +487,24 @@ async def test_codex_settings_as_handed_out_stay_trusted(tmp_path, monkeypatch):
 async def test_codex_settings_changed_in_the_owners_checkout_wait_for_the_owner(
     tmp_path, monkeypatch
 ):
-    """The owner's own checkout: what was there when a worker was first given it is theirs;
+    """The owner's own checkout: what is there the first time is the owner's to look at once;
     a change since, committed or not, waits for their word ("Use these settings")."""
     main, _, _ = trusted_worktree(tmp_path, monkeypatch)
-    await asyncio.sleep(0.01)
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
         row = handed(harness, runtime, main, main)
+        told = await configured(tmp_path, monkeypatch, runtime.agent_options(row), main)
+        assert level(told["projects"], main) == "untrusted"
+        (line,) = settings_lines(harness)
+        assert line["text"] == codex_first(".codex/config.toml, .codex/rules/team.rules")
+        await runtime.accept_settings("w1", line["meta"]["agent_settings"]["digest"])
         told = await configured(tmp_path, monkeypatch, runtime.agent_options(row), main)
         assert level(told["projects"], main) == "trusted"
         (main / ".codex" / "config.toml").write_text('model = "planted-model"\n')
         git(main, "commit", "-qam", "a worker's, committed")
         told = await configured(tmp_path, monkeypatch, runtime.agent_options(row), main)
         assert level(told["projects"], main) == "untrusted"
-        (line,) = settings_lines(harness)
+        line = settings_lines(harness)[-1]
         assert line["text"] == codex_line("changed .codex/config.toml")
         said = await runtime.accept_settings("w1", line["meta"]["agent_settings"]["digest"])
         assert said == "You let this worker use these settings (changed .codex/config.toml)."

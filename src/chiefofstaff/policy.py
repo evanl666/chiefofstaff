@@ -2718,12 +2718,14 @@ def written_file(cwd: str, request: Any) -> str:
 
 # A repository's own Copilot configuration, which Copilot loads only in a folder it trusts (a
 # worktree of a trusted repository is trusted too), from the working directory up to the
-# repository's top: hooks (one can approve what Chief of Staff would refuse), MCP servers (their
-# commands run outside the worker's sandbox), plugins and extensions. Copilot also runs the
-# hooks of Claude's settings. Checked on the Copilot CLI (scripts in its security review).
+# repository's top: hooks (one can approve what Chief of Staff would refuse), MCP and language
+# servers (their commands run outside the worker's sandbox), plugins and extensions. Copilot also
+# runs the hooks of Claude's settings. Checked on the Copilot CLI (scripts in its security
+# review); the contract test reads the installed CLI's help for others (KNOWN_UNGATED there).
 REPOSITORY_SETTINGS = (
     ".mcp.json",
     ".github/mcp.json",
+    ".github/lsp.json",
     ".github/hooks",
     ".github/copilot",
     ".github/extensions",

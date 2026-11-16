@@ -8,24 +8,28 @@
   without asking Chief of Staff (under *Ask first* too, and past its refusals, such as pushes to
   the default branch), an MCP server there ran its command at every start, and settings there
   could change its commands' environment and its model. Now Codex loads a folder's `.codex/` for
-  a worker only while it is as it was when Chief of Staff gave the worker that folder, and the
-  worker's timeline says when it isn't, with **Use these settings** for you. Workers' edits to
+  a worker only while it is as you last let it (as Chief of Staff made the folder, or as you
+  looked at it once), and the worker's timeline says when it isn't, with **Use these settings**
+  for you. Workers' edits to
   `.codex/` folders and to Codex's own settings folder are refused.
 - **Security: a Copilot worker could plant hooks and MCP servers for itself.** In a repository
   you trust in Copilot (a worktree of it is trusted too), a worker could write the repository's
   own Copilot settings in its folder: hooks (`.github/hooks/`, `.github/copilot/settings.json`,
   and `.claude/settings.json`, whose hooks Copilot runs too), custom agents with their own hooks
-  and MCP servers (`.github/agents/`, `.claude/agents/`) and MCP servers (`.mcp.json`,
-  `.github/mcp.json`), loaded from its next turn or resume. A hook could approve commands Chief
-  of Staff would refuse, and an MCP server ran outside the worker sandbox. Now Chief of Staff
-  keeps what those files held when it gave the worker its folder, in its own data, and reads
-  them again before each start and each turn, without running git there. A worker whose
+  and MCP servers (`.github/agents/`, `.claude/agents/`), MCP servers (`.mcp.json`,
+  `.github/mcp.json`) and language servers (`.github/lsp.json`), loaded from its next turn or
+  resume. A hook could approve commands Chief of Staff would refuse, and a server ran outside
+  the worker sandbox. Now Chief of Staff keeps what those files hold, with the scripts and
+  servers they name, when it makes a worker's folder, in its own data, and reads them again
+  before each start and each turn, without running git there. A folder it didn't make, seen
+  for the first time with such files (your checkout, a folder workers used before this version,
+  your own session taken up from a terminal), waits for you to look once. A worker whose
   settings changed starts no turn until you click **Use these settings** on the line its
   timeline shows (news for it waits too), or until they are as they were again; it shows
   *waiting for you*, and the Router hears it once. One stopped mid-task goes on with it after
-  the click. Workers' edits to those files are refused, whatever their case. Your own session
-  taken up from a terminal waits the same way. Agent homes (`~/.codex`, `~/.claude`) are never
-  read as a folder's settings.
+  the click. A setting linked out of its folder, or a special file, is never used. Workers'
+  edits to those files are refused, whatever their case. Agent homes (`~/.codex`, `~/.claude`)
+  are never read as a folder's settings.
 
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create

@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from . import machine, receipts, settings_guard
 from .models import Settings
-from .policy import within
+from .policy import CODEX_SETTINGS, REPOSITORY_SETTINGS, within
 from .roles import WORKER
 from .store import Store
 
@@ -609,14 +609,6 @@ def locate(checkout: dict) -> tuple[str, str, bool]:
 
 def base_of(checkout: dict) -> str:
     return checkout.get("base_ref") or ("" if checkout.get("shared") else "origin/HEAD")
-
-
-def nearest_top(folder: Path) -> Path | None:
-    """The nearest folder (this one or above) that is a git checkout's top (has a .git)."""
-    for place in [folder, *folder.parents]:
-        if os.path.lexists(place / ".git"):
-            return place
-    return None
 
 
 async def version(checkout: dict) -> dict | None:
@@ -2457,6 +2449,12 @@ class Workspaces:
             checkout = {"project": str(path), "path": str(path), "branch": "", "shared": True}
             if git_dir := await common_git_dir(path):
                 checkout["git_dir"] = git_dir
+                # Where its agent settings are read up to (settings_guard.checkout_top), as
+                # git says now, before any worker had it.
+                with suppress(ValueError):
+                    checkout["top"] = (
+                        await git("-C", str(path), "rev-parse", "--show-toplevel")
+                    ).strip()
             return checkout
         toplevel = await git("-C", str(path), "rev-parse", "--show-toplevel")
         top = await asyncio.to_thread(Path(toplevel.strip()).resolve)
@@ -2500,8 +2498,8 @@ class Workspaces:
 
     def keep_settings(self, top: Path, cwd: Path):
         """A folder Chief of Staff just made for a worker: the agent settings in it are its own
-        (settings_guard.keep), as they are now."""
-        settings_guard.keep(self.store, top, cwd, time.time())
+        (settings_guard.keep), as they are now: each agent's."""
+        settings_guard.keep(self.store, top, cwd, (REPOSITORY_SETTINGS, CODEX_SETTINGS))
 
     async def clone_checkout(self, workspace: Path, slug: str, repo: str) -> dict:
         """Clone a repository that is not on this machine into a worker's workspace."""
