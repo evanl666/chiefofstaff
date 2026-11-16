@@ -39,7 +39,9 @@ questions stay listed (QA round on 0.1.45).
 - **Git configuration written to its files on the line** (not with `git config`) before a push
   can't tell which branch it updates either: `printf … >> .git/config`, `tee -a`, `cp`, `mv` or
   `install` onto it, `sed -i`, `perl -pi`, in `~/.gitconfig`, `~/.config/git/config`,
-  `$GIT_DIR/config` or `config.worktree`, and a file your configuration includes.
+  `$GIT_DIR/config` or `config.worktree`, and a file your configuration includes; also in a
+  script a command runs (`sh -c '…'`, `find … -exec sh -c '…'`, `xargs sh -c`, `env -S`,
+  `eval`), read as a line of its own.
 - **Aliases in your configuration are read**, the repository's and your own, in the same call to
   git that reads where pushes go, and followed to what they run: with `alias.p=push`,
   `git p origin main` is refused as a push to the default branch, and `alias.pf="push --force"`

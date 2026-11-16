@@ -1140,6 +1140,10 @@ FOUND = [
     ("(echo '$(echo git) p && <<<.. command -p '\\''re'\\''ad G' | xargs -0 sh -c)", 'main/sub', 'aliases'),  # noqa: E501
     ("echo 'git p origin main' | sh", 'feat', 'aliases'),
     ("echo 'git p' | bash", 'main', 'aliases'),
+    # Found by the 100k bash run on 408c670: git's configuration written by a script a command
+    # runs (`sh -c`, `find … -exec sh -c`), read as one word.
+    ('B="$PWD/../main" git push -n & find . -maxdepth 0 -exec sh -c \'cp .git/config .git/new && echo remote.origin.push=HEAD:main >> .git/new && cp .git/new .git/config; case x in (x) \\git push -n --no-dry-run origin;; esac\' \\;; false', 'feat'),  # noqa: E501
+    ("sh -c 'echo remote.origin.push=HEAD:main >> .git/config; git push'", 'feat'),
 ]  # fmt: skip
 
 
