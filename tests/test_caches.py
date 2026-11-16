@@ -360,10 +360,20 @@ def test_two_workers_readied_together_both_get_their_caches(tmp_path, monkeypatc
                        read_through=True, home=home)  # fmt: skip
     script = caches.prepare(plan, "99999999-x", scripts, home)
     assert script and script.is_file() and plan.temporary.is_dir(), "its tools' caches all the same"
-    yarn = plan.temporary / f".yarn-cache-{os.getuid()}"
-    assert yarn.is_symlink() and yarn.readlink() == tier / "yarn-classic", (
-        "Yarn 1 finds workers' own cache where it looks when the owner's is not writable"
-    )
+
+
+def test_yarn_classic_is_seeded_where_it_looks_under_the_workers_cache_home(tmp_path, monkeypatch):
+    """Yarn 1 looks in XDG_CACHE_HOME first, on macOS too (its own ~/Library/Caches/Yarn only
+    without it): workers' is in the tier, so the owner's Yarn 1 cache is seeded there."""
+    monkeypatch.setattr(caches, "system", lambda: "darwin")
+    home = tmp_path / "home"
+    (home / "Library" / "Caches" / "Yarn" / "v6" / "npm-left-pad-1.3.0").mkdir(parents=True)
+    tier = tmp_path / "caches" / "workers"
+    plan = caches.plan(tier, tmp_path / "ws" / "w", "12345678-x", tmp_path / "scripts",
+                       slack=False, read_through=True, home=home)  # fmt: skip
+    assert f"XDG_CACHE_HOME={tier / 'xdg'}" in plan.text
+    SEED(tier, caches.Owner(home))
+    assert (tier / "xdg" / "yarn" / "v6" / "npm-left-pad-1.3.0").is_dir()
 
 
 def test_seeding_goes_on_past_a_cache_it_cannot_clone_and_copies_within_a_budget(

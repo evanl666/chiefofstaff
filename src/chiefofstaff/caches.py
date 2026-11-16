@@ -241,7 +241,9 @@ class Owner:
         return self.caches() / mac if self.mac else xdg_cache(self.home) / linux
 
     def yarn_classic(self) -> Path:
-        return env_dir("YARN_CACHE_FOLDER", self.cache("Yarn", "yarn"))
+        # Yarn 1 looks in XDG_CACHE_HOME first, on macOS too.
+        found = xdg_cache(self.home) / "yarn" if os.environ.get("XDG_CACHE_HOME") else None
+        return env_dir("YARN_CACHE_FOLDER", found or self.cache("Yarn", "yarn"))
 
     def node_gyp(self) -> Path:
         return self.cache("node-gyp", "node-gyp")
@@ -454,9 +456,9 @@ def seeds(owner: Owner) -> list[tuple[str, Path, str, int]]:
         ("gradle", gradle / "wrapper" / "dists", "gradle/wrapper/dists", 2),
         ("maven", maven / "wrapper" / "dists", "maven/wrapper/dists", 2),
         ("go", owner.go_build(), "go/build", 0),
-        # Those the init script moves for tools Copilot's dev-tool access opened (Yarn 1's on
-        # Linux under XDG_CACHE_HOME, on macOS through the worker's temporary folder).
-        ("yarn1", owner.yarn_classic(), "xdg/yarn" if not owner.mac else "yarn-classic", 2),
+        # Those the init script moves for tools Copilot's dev-tool access opened (Yarn 1's
+        # under XDG_CACHE_HOME, which it looks in first, on macOS too).
+        ("yarn1", owner.yarn_classic(), "xdg/yarn", 2),
         ("cargo", cargo / "git" / "db", "cargo/git/db", 1),
         ("cargo", cargo / "git" / "checkouts", "cargo/git/checkouts", 2),
         ("nuget", owner.nuget(), "nuget/packages", 2),
@@ -1035,12 +1037,10 @@ def worker_temp(session_id: str, tier: Path | None = None) -> Path:
     return (tier or default_tier()).parent / TEMP / session_id[:8]
 
 
-def make_temp(path: Path, yarn: Path | None = None) -> bool:
+def make_temp(path: Path) -> bool:
     """Make a worker's temporary folder, the owner's alone (0700); False when it cannot be.
     One there already is that worker's own from before (no other can make it there): kept as
-    it is if it is a folder, made again if it is a link or a file. `yarn`: Yarn 1's cache, as
-    it finds it on macOS when its own (~/Library/Caches/Yarn, the owner's) is not writable: in
-    the temporary folder (.yarn-cache-<uid>), linked to workers' own."""
+    it is if it is a folder, made again if it is a link or a file."""
     try:
         with (
             open_folder(path.parent, path.parent.parent, create=True, mode=0o700) as parent,
@@ -1050,13 +1050,6 @@ def make_temp(path: Path, yarn: Path | None = None) -> bool:
                 if os.fstat(own.fd).st_uid != os.getuid():
                     return False
                 os.fchmod(own.fd, 0o700)
-            if (
-                yarn
-                and hasattr(os, "getuid")
-                and own.lstat(name := f".yarn-cache-{os.getuid()}") is None
-            ):
-                with suppress(OSError):
-                    own.symlink(name, yarn)
         return True
     except OSError:
         return False
@@ -1137,7 +1130,7 @@ def prepare(found: Plan, session_id: str, scripts: Path, home: Path | None = Non
     script's path; None when its temporary folder could not be made its own."""
     owner = Owner(home or Path.home())
     with PREPARING:
-        if not make_temp(found.temporary, found.tier / "yarn-classic" if owner.mac else None):
+        if not make_temp(found.temporary):
             return None
         path = write_script(scripts, session_id, found.text)
         try:
