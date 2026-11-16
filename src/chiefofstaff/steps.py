@@ -590,6 +590,8 @@ class Steps:
                 review["author"] for review in details.get("reviews") or []
                 if review.get("state") == "CHANGES_REQUESTED"
             }),
+            # Made in a copy of its own at the head: the worker's build state wasn't reused.
+            "fresh": not (step["evidence"] or {}).get("reused", True),
         }  # fmt: skip
         if plan["h1"]:
             plan.update(await self.change_evidence(step, plan["h1"]))

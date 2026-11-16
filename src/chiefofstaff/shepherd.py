@@ -476,6 +476,8 @@ class Shepherd(Keeping, Steps):
         """After a restart: what was dispatching is reconciled first; a session left in a step
         is not continued (Runtime.resume_working skips it: here its attempt ends, interrupted,
         to be admitted again if still current)."""
+        if self.on() and not self.control.exists():
+            self.control.ensure()  # On in its settings, its tables never made: made now.
         if not self.control.exists():
             return
         from .publish import reconcile_all
@@ -598,10 +600,7 @@ class Shepherd(Keeping, Steps):
         owner's account): to that task, its origin. Read once to tell eligibility; a PR found
         not eligible is not read again for a day."""
         actions = self.runtime.task_actions
-        try:
-            mine = await self.runtime.github.logins()
-        except Exception:
-            return
+        found: list[tuple[str, dict, dict]] = []
         for task in self.runtime.tasks.listed(include_ended_since=_hours_ago(72)):
             if task["status"] in {"cancelled", "failed"} or self.store.get(
                 f"setaside:{task['id']}"
@@ -616,7 +615,6 @@ class Shepherd(Keeping, Steps):
                 if (
                     not pr.get("own")
                     or target not in followed
-                    or pr.get("author") not in mine
                     or pr.get("state") not in {"OPEN", ""}
                 ):
                     continue
@@ -624,6 +622,15 @@ class Shepherd(Keeping, Steps):
                     continue
                 if float(self.store.get(f"noteligible:{target}") or 0) > time.time() - 86400:
                     continue
+                found.append((target, task, pr))
+        if not found:
+            return  # Nothing to claim: GitHub is not asked anything.
+        try:
+            mine = await self.runtime.github.logins()
+        except Exception:
+            return
+        for target, task, pr in found:
+            if pr.get("author") in mine and not self.control.claim(target):
                 await self.give_task(target, task)
 
     async def eligible(self, details: dict, mine: set[str]) -> str:

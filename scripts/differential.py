@@ -686,6 +686,61 @@ FEATURES["codex_on_claude_never"] = Feature(
     ],
 )
 
+# Prepared for you (shepherd.py, docs/guide.md): off by default. Off, its keys are in the
+# settings at their off values and one line in Settings → General is new; nothing else (no
+# table, no read of GitHub, no session's options). On, with no PR of the owner's in scope: that
+# line checked, its tab in Settings (left out of the views: a tab the baseline has not), the
+# `shepherd` part of the state (its section on Home stays empty), its tables, the day's
+# retention mark, and the Router's rule and the `shepherd` field of spawn_worker and
+# message_session.
+SHEPHERD_TABLES = r"(pr_claims|shepherd_steps|actions|ledger_events|verdicts)"
+FEATURES["proactive"] = Feature(
+    off={"proactive": False},
+    on={"proactive": True},
+    allow_off=[
+        Allow("its setting, off", setting="proactive", value=False),
+        Allow("PRs my workers made, its default", setting="proactive_worker_prs", value=True),
+        Allow("my other PRs, its default", setting="proactive_my_prs", value=True),
+        Allow("no kind's level chosen", setting="proactive_levels", value={}),
+        Allow("no credits a day unasked", setting="proactive_budget", value=0),
+        Allow("no hosts its fixes may reach", setting="step_hosts", value=[]),
+        Allow("no repository's choices", setting="proactive_repos", value={}),
+        Allow(
+            "its switch line in Settings → General",
+            element="#settings-dialog #proactive-line",
+            views=r"^settings-general-",
+        ),
+    ],
+    allow_on=[
+        Allow(
+            "its switch line in Settings → General, checked",
+            element="#settings-dialog #proactive-line",
+            views=r"^settings-general-",
+        ),
+        Allow(
+            "its tab in Settings, and its section (not photographed: the baseline has none)",
+            element="#settings-tabs [data-tab=proactive], #settings-pane .tab[data-tab=proactive]",
+            views=r"^settings-",
+        ),
+        Allow("its part of the state", data=r"\./api/state\.shepherd$"),
+        Allow("its tables", data=rf"\.db\.{SHEPHERD_TABLES}$"),
+        Allow(
+            "its tables and indexes in the schema",
+            data=rf"\.db\._schema\.{SHEPHERD_TABLES}(_by_\w+)?$",
+        ),
+        Allow("the day its old plans were last pruned", data=r"\.db\.kv\.proactive:pruned$"),
+        Allow(
+            "the Router's rule while it is on",
+            data=r"\.system_message\.content$",
+            lines=r"^- Prepared for you is on: ",
+        ),
+        Allow(
+            "the `shepherd` field of spawn_worker and message_session",
+            data=r"^backend\.sessions\.router:[^.]*\.options\.tools\[\d+\]\.parameters\.properties\.shepherd$",
+        ),
+    ],
+)
+
 # The agent picker with other coding agents installed and never decided on (the stand-ins are on
 # the PATH in every run but --copilot-alone): v0.1.48's last line of Settings → Models is gone;
 # Settings has a Coding agents tab after Models, which looks at them only when shown (left out
