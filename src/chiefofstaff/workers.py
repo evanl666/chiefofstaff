@@ -566,6 +566,14 @@ class Workers:
                 session_id, "interrupted", "Stopped preparing it: your work needed the slot."
             )
 
+    def wants_slot(self, row: dict) -> bool:
+        """The owner's work waiting for a slot to start (not one waiting for another task)."""
+        if row["status"] not in {"queued", "starting"} or self.runtime.special(row):
+            return False
+        return not (
+            row["status"] == "queued" and not self.runtime.made(row["id"]) and self.waiting_for(row)
+        )
+
     async def grant_step(self, session_id: str) -> bool:
         """A background slot for a shepherd step in this idle worker: only when none of the
         owner's work waits for a slot, within the owner's limit, and with memory and disk to
@@ -574,10 +582,7 @@ class Workers:
             row = self.store.session(session_id)
             if row["closed_at"] or self.states[session_id].busy:
                 return False
-            if any(
-                other["status"] in {"queued", "starting"} and not self.runtime.special(other)
-                for other in self.store.open_sessions(WORKER)
-            ):
+            if any(self.wants_slot(other) for other in self.store.open_sessions(WORKER)):
                 return False
             if self.running() >= self.store.settings().max_workers:
                 return False
@@ -604,7 +609,7 @@ class Workers:
                 self.runtime.settings_held.discard(held)
         if self.runtime.shepherd.stepping:
             for row in self.store.open_sessions(WORKER):
-                if row["status"] == "queued" and not self.runtime.special(row):
+                if self.wants_slot(row):
                     await self.yield_steps(row)  # The owner's queued work goes first.
                     break
         starting = []

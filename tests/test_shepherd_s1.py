@@ -196,6 +196,32 @@ async def test_the_owners_queued_work_preempts_an_attempt(world):
     assert not runtime.shepherd.stepping
 
 
+async def test_work_waiting_for_another_task_does_not_hold_an_attempt_back(world):
+    """Queued behind another task still at work, it waits for that, not for a slot: an attempt
+    may run meanwhile, and is not stopped for it."""
+    from chiefofstaff.roles import WORKER
+
+    runtime = await claimed(world, max_workers=2)
+    router = runtime.router_id()
+    first = json.loads(said(await call_tool(
+        runtime, "spawn_worker", router, title="First", instructions="Do this first.",
+    )))  # fmt: skip
+    await call_tool(
+        runtime, "spawn_worker", router, title="After it", instructions="Then this.",
+        after=[first["task_id"]],
+    )  # fmt: skip
+    await settle(runtime)
+    queued = [row for row in runtime.store.open_sessions(WORKER) if row["status"] == "queued"]
+    assert len(queued) == 1 and runtime.workers.waiting_for(queued[0])
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "running"
+    await runtime.workers.pump()
+    await settle(runtime)
+    assert runtime.shepherd.control.step(step["id"])["state"] == "running"
+
+
 async def test_an_attempt_waits_for_a_busy_worker(world):
     runtime = await claimed(world)
     runtime.store.update_session(world.worker, status="working")

@@ -61,6 +61,8 @@ SETTINGS_FIELDS |= {
     "watch_after_hours_minutes", "away_notify", "away_minutes", "away_how", "other_sessions",
     "send_to_chief", "update_notice",
 }  # fmt: skip
+# Prepared for you: its switch in General (its tab's fields come only while it is on).
+SETTINGS_FIELDS |= {"proactive"}
 FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours"} | {
     "slack_token", "profile", "setup_notes", "report_footer", "agent_new_workers",
     *(f"{kind}_{role}" for kind in ("model", "effort")
