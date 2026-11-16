@@ -935,3 +935,23 @@ async def test_a_downgrade_lets_go_of_a_worker_left_in_a_step(world, capsys, mon
     assert runtime.store.session(world.worker)["status"] == "idle"
     ended = runtime.shepherd.control.step(step["id"])
     assert ended["state"] == "interrupted" and ended["why"] == "Stopped before a downgrade"
+
+
+async def test_unpushed_work_in_the_worker_is_left_as_it_is(world):
+    """Decision 19: its checkout has a commit it hasn't pushed: the fix is made in a fresh copy
+    detached at the PR's head; the worker's branch and its commit stay; only the fix is pushed."""
+    runtime = await claimed(world)
+    checkout = world.root / "work" / "fix-login" / "api"
+    (checkout / "notes.md").write_text("mine, not pushed")
+    run("git", "add", "-A", cwd=checkout)
+    run("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "wip", cwd=checkout)
+    mine = run("git", "rev-parse", "HEAD", cwd=checkout)
+    step, sha = await fixed(world, runtime)
+    assert step["tree"] != str(checkout) and step["plan"]["fresh"] is True
+    assert run("git", "rev-parse", "HEAD", cwd=checkout) == mine
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    assert world.github.head() == sha
+    assert run("git", "rev-parse", f"{sha}^", cwd=world.remote) == world.h0
+    assert run("git", "rev-parse", "HEAD", cwd=checkout) == mine
