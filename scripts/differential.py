@@ -18,7 +18,8 @@ PATH (each run of them is captured) and a fixed clock (time-machine; time moves 
 steps). The app's periodic rounds (an asyncio.sleep of PERIODIC seconds or more in
 its code) wait for the script's tick, so they run at the same point on both sides. Sides run one
 after the other in the same folder on the same port (8810-8819, or ten from
-DIFFERENTIAL_PORT_BASE), so paths and ports match.
+DIFFERENTIAL_PORT_BASE), so paths and ports match; that folder is a short one in the system's
+temporary folder (run_folder), so a socket fits in its data directory from any checkout.
 
 Compared, after each step of the script (boot, ask, decide, slack, approve, blocked, accept,
 tick) and once more after the page was looked at:
@@ -1239,6 +1240,31 @@ def drop_worktree(path: Path):
         git("worktree", "prune")
 
 
+# A socket's path, its ending zero included, fits in this many bytes (macOS's sockaddr_un).
+SOCKET_PATH = 104
+
+
+def run_folder(port: int) -> Path:
+    """The folder both sides run in: short, as the tests' home is (tests/own_home.py), so a data
+    directory in it can hold Send to Chief's socket (`data/send/socket`) from any checkout,
+    however long its path; in folders only its owner can change. The run folder under WORK
+    when none of those is short enough."""
+    import pwd
+    import tempfile
+
+    sys.path.insert(0, str(ROOT / "tests"))
+    from own_home import owners_only
+
+    bases = [tempfile.gettempdir(), os.environ.get("XDG_RUNTIME_DIR", ""),
+             pwd.getpwuid(os.getuid()).pw_dir]  # fmt: skip
+    for base in filter(None, bases):
+        real = Path(os.path.realpath(base))
+        socket_path = real / f"d{port}-xxxxxxxx" / "data" / "send" / "socket"
+        if real.is_dir() and len(str(socket_path)) < SOCKET_PATH and owners_only(real):
+            return Path(os.path.realpath(tempfile.mkdtemp(prefix=f"d{port}-", dir=real)))
+    return WORK / f"run-{port}"
+
+
 def make_run(run: Path) -> dict:
     """A fresh run folder, the same for both sides: a git project, a fake `gh` that keeps what
     it was asked, an empty Copilot home and git config; the environment to run in."""
@@ -1924,7 +1950,7 @@ def report(
 async def run_sides(
     sides: list[Side], out: Path, allowances: dict[str, Allow], port: int
 ) -> tuple[list[dict], list[dict], list[Path], Path]:
-    run = WORK / f"run-{port}"
+    run = run_folder(port)
     captures, pages, folders = [], [], []
     try:
         for side in sides:
