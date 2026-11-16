@@ -8,6 +8,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -109,6 +110,7 @@ class FakeGitHub:
             }
         ]
         self.posted: list[dict] = []
+        self.rest_reviews: list[dict] = []
         self.mine: list[dict] = []
         self.author = "me"
         self.head_repo = REPO
@@ -280,6 +282,43 @@ class FakeGitHub:
             if "--method=POST" in arguments:
                 self.writes.append(("request-review", arguments, token, payload))
             return json.dumps({"users": []})
+        if text.startswith(f"api repos/{REPO}/pulls/{NUMBER}/reviews"):
+            return json.dumps(self.rest_reviews)
+        if text.startswith(f"api repos/{REPO}/issues/{NUMBER}/comments"):
+            return json.dumps([])
+        if text.startswith(f"api repos/{REPO}/commits/") and "/check-runs" in text:
+            checks = self.checks.get(arguments[1].split("/")[4], self.default_checks)
+            return json.dumps(
+                {
+                    "check_runs": [
+                        {
+                            "id": check.get("id"),
+                            "name": check["name"],
+                            "status": check["status"].lower(),
+                            "conclusion": (check.get("conclusion") or "").lower() or None,
+                            "completed_at": "2026-11-16T08:05:00Z",
+                        }
+                        for check in checks
+                    ]
+                }
+            )
+        if text.startswith(f"api repos/{REPO}/commits/") and text.endswith("/status"):
+            return json.dumps({"statuses": []})
+        if text == f"api repos/{REPO}/pulls/{NUMBER}":
+            return json.dumps(
+                {
+                    "number": NUMBER,
+                    "title": "Fix the login timeout",
+                    "state": "open" if self.state == "OPEN" else "closed",
+                    "merged": self.merged,
+                    "merged_at": "2026-11-16T09:00:00Z" if self.merged else None,
+                    "closed_at": None if self.state == "OPEN" else "2026-11-16T09:00:00Z",
+                    "head": {"sha": self.head(), "ref": BRANCH},
+                    "base": {"sha": self.base(), "ref": "main"},
+                    "mergeable_state": self.merge_state.lower(),
+                    "user": {"login": self.author},
+                }
+            )
         if text.startswith(f"api repos/{REPO}/compare/"):
             spec = arguments[1].rsplit("/", 1)[-1]
             old, new = spec.split("...")
@@ -308,8 +347,11 @@ class World:
     """The owner's clone of acme/api, its GitHub stand-in, and a worker whose delivered task
     made the PR and follows it."""
 
-    def __init__(self, harness: Harness, root: Path):
+    def __init__(self, harness: Harness | None, root: Path, runtime=None):
+        """`harness`: a test's (connected by start); or `runtime`, one running already (a page's,
+        scripts/ui_edges.py)."""
         self.harness = harness
+        self.runtime = harness.runtime if harness else runtime
         self.root = root
         self.remote = root / "remote.git"
         self.clone = root / "code" / "api"
@@ -337,10 +379,12 @@ class World:
 
     async def start(self, *, budget: float = 0.0, levels: dict | None = None, **settings):
         self.build()
-        harness, runtime = self.harness, self.harness.runtime
+        runtime = self.runtime
         runtime.github.raw = self.github
         runtime.github.gh = runtime.github.routed
-        await harness.connect()
+        runtime.github.accounts_cache = (0.0, [])
+        if self.harness:
+            await self.harness.connect()
         runtime.shepherd.git_config = [
             (f"url.{self.remote.as_uri()}.insteadOf", f"https://github.com/{REPO}.git")
         ]
@@ -363,7 +407,7 @@ class World:
         return runtime
 
     async def make_worker(self) -> str:
-        runtime = self.harness.runtime
+        runtime = self.runtime
         store = runtime.store
         session_id = "11111111-2222-3333-4444-555555555555"
         workspace = self.root / "work" / "fix-login"
@@ -437,7 +481,8 @@ class World:
         return session_id
 
     def session(self):
-        return self.harness.session(self.worker)
+        store, client = self.runtime.store, self.runtime.backend
+        return client.sessions[store.get(f"copilot:{self.worker}") or self.worker]
 
     def commit_fix(self, tree: str) -> str:
         path = Path(tree) / "app.py"
@@ -459,7 +504,7 @@ class World:
             result=SimpleNamespace(content=done.stdout[-500:]),
             shell_execution=SimpleNamespace(exit_code=done.returncode),
         )
-        await settle(self.harness.runtime)
+        await settle(self.runtime)
         return done.returncode
 
 
@@ -468,3 +513,71 @@ def harness_for(tmp_path: Path, **settings) -> Harness:
 
 
 TEST_COMMAND = f"{PYTHON} -m pytest -q -p no:cacheprovider"
+
+
+async def seed_page(runtime, root: Path) -> dict:
+    """Prepared for you as the page shows it (scripts/ui_edges.py, ui_quality.py): a worker PR
+    with a fix prepared for review (made the real way: an attempt in its worker, checked on
+    frozen commits), one paused by a teammate's push, one its computer can't run steps for, and
+    three of the owner's other PRs found, two more under All found."""
+    from test_shepherd import fixed
+
+    from chiefofstaff.control import PREPARED
+
+    world = World(None, root, runtime=runtime)
+    await world.start(proactive_my_prs=True, max_workers=8)
+    shepherd = runtime.shepherd
+    await shepherd.tick()
+    await settle(runtime)
+    step, _ = await fixed(world, runtime)
+    store = runtime.store
+    extra = {}
+    for title, label in (
+        ("Add the export endpoint", "api#31"),
+        ("Speed up the search index", "api#44"),
+    ):
+        session_id = f"22222222-2222-4222-8222-{len(extra) + 1:012d}"
+        store.create_session(session_id, WORKER, title, "idle", cwd=str(world.clone))
+        task = runtime.tasks.create(session_id, title, title, status="running")
+        target = f"github:acme/api#{label.split('#')[1]}"
+        runtime.follow(session_id, [target], task_id=task["id"], asked=[target])
+        runtime.tasks.move(task["id"], "done", result=f"{title}: PR acme/{label}.")
+        shepherd.control.give(target, task["id"], "a" * 40)
+        extra[label] = (task["id"], target)
+    paused_task, paused = extra["api#31"]
+    shepherd.control.pause(paused, "new commits it didn't push (9f8e7d6)", "9f8e7d6" + "0" * 33)
+    refused_task, refused = extra["api#44"]
+    claim = shepherd.control.claim(refused)
+    shepherd.control.add_step(
+        refused, "fix-ci", "suggest", state="refused", holder=claim["holder"],
+        generation=claim["generation"], h0="a" * 40, task_id=refused_task, started_at="",
+        why="its worker runs on Codex, not Copilot",
+    )  # fmt: skip
+
+    def pr(repo: str, number: int, title: str, **more) -> dict:
+        url = f"https://github.com/{repo}/pull/{number}"
+        label = f"{repo.split('/')[1]}#{number}"
+        return {"target": f"github:{repo}#{number}", "repo": repo, "number": number,
+                "label": label, "title": title, "url": url, **more}  # fmt: skip
+
+    found = [
+        pr("acme/web", 117, "Show the export button to admins only", kind="fix-ci",
+           what="CI failing since Tue", updated="2026-11-16T08:00:00Z"),
+        pr("acme/api", 120, "Retry the payment webhook on 5xx", kind="address-review",
+           what="Changes requested by maya", updated="2026-11-16T07:00:00Z"),
+        pr("acme/web", 121, "Upgrade the date picker", kind="address-review",
+           what="2 comments to answer", updated="2026-11-15T07:00:00Z"),
+        pr("acme/web", 90, "Move the settings page to the new layout", kind="fix-ci",
+           what="CI failing since 3 Nov", updated="2026-11-03T07:00:00Z"),
+    ]  # fmt: skip
+    others = [
+        pr("acme/web", 88, "Translate the onboarding emails", why="from a fork: not yet"),
+        pr("acme/api", 99, "Split the billing module, part 2", why="stacked: not yet"),
+    ]
+    seen = {"read": time.time(), "rows": found, "others": others, "scope": ["acme/api", "acme/web"]}
+    store.set("prepared:found", json.dumps(seen))
+    shepherd.publish()
+    for task_id in (world.task, paused_task, refused_task):
+        runtime.task_actions.publish(runtime.tasks.get(task_id))
+    assert shepherd.control.step(step["id"])["state"] == PREPARED
+    return {"world": world, "step": step, "paused": paused_task, "refused": refused_task}

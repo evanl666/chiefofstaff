@@ -43,6 +43,9 @@ export const MARKERS = {
   "pr-changes": "Changes requested",
   "pr-conflicts": "Merge conflicts",
   "runs-unknown": "Status unknown",
+  prepared: "Prepared for you",
+  "kept-paused": "Paused",
+  "kept-stopped": "Stopped",
   mergeable: "Ready to merge",
   reviewed: "Reviewed",
   "still-following": "Still following",
@@ -76,6 +79,8 @@ export function prStatus(pr) {
 // when none of them asks for anything (in review, awaiting approval, CI running). The server's
 // word on it (`attention`) when its receipts do not say.
 const PR_MARKERS = { "changes requested": "pr-changes", "merge conflicts": "pr-conflicts", "CI failing": "pr-failing", "ready to merge": "mergeable" };
+// Prepared for you's row markers, by the row's one action.
+const KEPT_MARKERS = { review: "prepared", resume: "kept-paused", look: "kept-stopped" };
 // Its own PR to fix: the owner asks its worker to (or acts on GitHub).
 export const PR_TO_FIX = ["pr-changes", "pr-conflicts", "pr-failing"];
 // The markers of an accepted task by where its PR stands (one row per followed PR, see boardOf).
@@ -286,10 +291,14 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
     // (changes requested, conflicts, failing CI) or news on it since is why, in its reason.
     if (task.status === "review") {
       const news = task.news ? `News: ${task.news.text || task.news.summary || "something new on it"}` : "";
-      const issue = standing && standing.marker !== "mergeable" ? standing.why : news;
+      // Prepared for you: what it prepared or why it paused says more than the PR's standing.
+      const kept = task.shepherd?.action ? task.shepherd.line : "";
+      const issue = kept || (standing && standing.marker !== "mergeable" ? standing.why : news);
       return at("needs", "review", issue || (task.attention === "acceptance" ? task.attention_why || "" : ""));
     }
     if (task.news) return at("needs", "update", "");
+    // Prepared for you: a plan to review, or its PR paused or stopped, waits for the owner.
+    if (task.attention === "prepared") return at("needs", KEPT_MARKERS[task.shepherd?.action?.kind] || "prepared", task.attention_why || "");
     // Cancelled after it finished, before it was accepted: over, not done.
     if (task.set_aside) return at("finished", "set-aside", "Cancelled after it finished: not accepted");
     // Accepted, and still waiting on what comes next (a review, the merge, a reply): monitored
@@ -418,7 +427,8 @@ export function monitoringRows(list, phases) {
 // running task shows it there instead.
 export function followingUp(workers, tasks, running, terminal = new Set()) {
   const open = new Set(tasks.filter((task) => ["running", "waiting"].includes(task.status)).map((task) => task.session_id));
-  return workers.filter((worker) => worker.status === "working" && !running.has(worker.id) && !terminal.has(worker.id) && !open.has(worker.id));
+  // Not one in a step of Prepared for you: its task's row says so.
+  return workers.filter((worker) => worker.status === "working" && !worker.shepherd_step && !running.has(worker.id) && !terminal.has(worker.id) && !open.has(worker.id));
 }
 // A worker's place in the sidebar: the most pressing of its tasks' sections.
 export function workerSection(phases, list) {
