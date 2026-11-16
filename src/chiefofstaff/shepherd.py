@@ -83,9 +83,10 @@ logger = logging.getLogger(__name__)
 KINDS = ("fix-ci", "address-review")
 KIND_WORDS = {"fix-ci": "CI failures", "address-review": "Review comments"}
 DEFAULT_LEVEL = "suggest"
-# Credits an attempt may spend until its kind has a measured history (then the 90th percentile
-# of its last 20 attempts), never more than a PR's day; and how far a turn runs past an
-# interrupt (raised when an attempt overshoots it).
+# Credits: defaults, to be tuned from live data (none measured yet). What an attempt may spend
+# until its kind has a measured history (then the 90th percentile of its last 20 attempts, never
+# more than a PR's day); a PR's day; and how far a turn runs past its interrupt (raised when an
+# attempt overshoots it, kv `proactive:margin`).
 PERMITTED = {"fix-ci": 8.0, "address-review": 8.0}
 PR_DAY_CREDITS = 30.0
 MARGIN = 2.0
@@ -93,7 +94,6 @@ MARGIN = 2.0
 READ_SECONDS = 300
 # Steps at once, across workers (a background slot each).
 STEPS_AT_ONCE = 1
-# Each step's folder, in its worker's own folder.
 # What a PR's claim keeps beside it (kv `<prefix>:<target>`), gone when the PR merges or closes.
 TARGET_KEYS = ("acceptnote", "capped", "checksbefore", "clickfirst", "mergewhy", "stopped",
                "signedbranch", "noteligible")  # fmt: skip
@@ -105,6 +105,7 @@ OFF_WORDS = "Prepared for you is off: turn on Keep my PRs moving in Settings →
 PROBE_RETRY_SECONDS = 6 * 3600
 # Why an attempt waits (not refused) while this Copilot version gets its safety check.
 PROBING = "is being checked first"
+# Each step's folder, in its worker's own folder.
 STEP_FOLDER = ".shepherd"
 # The tools a step has: Copilot's file and shell tools, and its own two.
 STEP_TOOLS = (
