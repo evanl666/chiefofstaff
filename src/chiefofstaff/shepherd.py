@@ -1,8 +1,8 @@
 """Prepared for you (docs/guide.md): Chief of Staff keeps the owner's PRs moving until they merge,
 and lists what it finds on their other PRs.
 
-One switch (Settings → *Prepare work for me*), off by default: off, nothing here runs, reads,
-shows or changes what any session gets (the hooks below return at once). On:
+One switch (Settings → General, *Keep my PRs moving*), off by default: off, nothing here runs,
+reads, shows or changes what any session gets (the hooks below return at once). On:
 
 - **Claims.** Each eligible PR (the owner's own, from a worker's task, same repository, not
   stacked, not a draft) has one holder, recorded in the control plane (control.py): the task
@@ -94,6 +94,8 @@ READ_SECONDS = 300
 # Steps at once, across workers (a background slot each).
 STEPS_AT_ONCE = 1
 # Each step's folder, in its worker's own folder.
+# Said of any action while it is off.
+OFF_WORDS = "Prepared for you is off: turn on Keep my PRs moving in Settings → General."
 # Why an attempt waits (not refused) while this Copilot version gets its safety check.
 PROBING = "is being checked first"
 STEP_FOLDER = ".shepherd"
@@ -230,6 +232,13 @@ class Shepherd(Keeping, Steps):
         settings = self.store.settings()
         return settings.proactive and not settings.paused and self.control.exists()
 
+    def refusal(self) -> str:
+        """Why the owner's actions on it do nothing now ("" when they do)."""
+        settings = self.store.settings()
+        if not settings.proactive or not self.control.exists():
+            return OFF_WORDS
+        return "Chief of Staff is paused: resume it first." if settings.paused else ""
+
     def level(self, kind: str) -> str:
         return self.store.settings().proactive_levels.get(kind, DEFAULT_LEVEL)  # type: ignore[arg-type]
 
@@ -302,12 +311,6 @@ class Shepherd(Keeping, Steps):
         readonly = [
             path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
         ]
-        home = Path.home()
-        denied = [
-            *service_secrets(),
-            *(str(home / name) for name in (".config/gh", ".git-credentials", ".netrc", ".ssh")),
-            str(home / "Library" / "Keychains"),
-        ]
         repo, _ = repo_number(step["target"])
         choice = settings.proactive_repos.get(repo)
         hosts = () if row["slack"] else self.step_hosts(step)
@@ -316,7 +319,7 @@ class Shepherd(Keeping, Steps):
             readonly=tuple(readonly),
             allowed_hosts=hosts,
             local_network=bool(choice and choice.localhost) and not row["slack"],
-            denied=tuple(dict.fromkeys(denied)),
+            denied=step_denied(),
             credentials=False,
             outbound=bool(hosts),
             blocked_hosts=BLOCKED_HOSTS,
@@ -714,18 +717,19 @@ class Shepherd(Keeping, Steps):
         await self.stop_target(claim["target"], f"Paused: {why}.")
         self.stale_plans(claim["target"], f"Paused: {why}.")
 
-    async def stop_target(self, target: str, why: str):
+    async def stop_target(self, target: str, why: str, state: str = "stale"):
         for session_id, step_id in list(self.stepping.items()):
             step = self.control.step(step_id)
             if step and step["target"] == target:
-                await self.stop_step(session_id, "stale", why)
+                await self.stop_step(session_id, state, why)
 
-    def stale_plans(self, target: str, why: str, keep: str = ""):
-        """Plans prepared on a head the PR is no longer at go stale (never published)."""
+    def stale_plans(self, target: str, why: str, keep: str = "", state: str = "stale"):
+        """Plans prepared on a head the PR is no longer at go stale (never published); those of
+        a holder that let it go are withdrawn."""
         for step in self.control.steps(target, QUEUED, PREPARED):
             if keep and step["h0"] == keep:
                 continue
-            if self.control.move_step(step["id"], (QUEUED, PREPARED), state="stale", why=why,
+            if self.control.move_step(step["id"], (QUEUED, PREPARED), state=state, why=why,
                                       ended_at=now()):  # fmt: skip
                 self.control.withdraw_planned(step["id"], why)
 
@@ -1028,6 +1032,17 @@ def token_values() -> list[str]:
         if re.search(r"TOKEN|SECRET|KEY|PASSWORD|AUTH", key, re.IGNORECASE)
         and integrity.TOKEN_LIKE.fullmatch(value)
     ]
+
+
+def step_denied() -> tuple[str, ...]:
+    """What a step's commands may neither read nor write: the services' secrets, gh's and git's
+    credentials, SSH keys and the keychains."""
+    home = Path.home()
+    return tuple(dict.fromkeys([
+        *service_secrets(),
+        *(str(home / name) for name in (".config/gh", ".git-credentials", ".netrc", ".ssh")),
+        str(home / "Library" / "Keychains"),
+    ]))  # fmt: skip
 
 
 def git_env(token: str, extra: list[tuple[str, str]]) -> dict[str, str]:

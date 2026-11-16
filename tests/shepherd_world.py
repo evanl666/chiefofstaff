@@ -322,13 +322,19 @@ class FakeGitHub:
         if text.startswith(f"api repos/{REPO}/compare/"):
             spec = arguments[1].rsplit("/", 1)[-1]
             old, new = spec.split("...")
-            shas = run("git", "rev-list", "--reverse", f"{old}..{new}", cwd=self.remote).split()
-            return json.dumps(
-                {
-                    "status": "ahead" if shas else "identical",
-                    "commits": [{"sha": sha} for sha in shas],
-                }
-            )
+            try:
+                run("git", "cat-file", "-e", f"{old}^{{commit}}", cwd=self.remote)
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(
+                    f"GitHub request failed: HTTP 404: No commit found for {old}"
+                ) from exc
+            ahead = run("git", "rev-list", "--reverse", f"{old}..{new}", cwd=self.remote).split()
+            behind = run("git", "rev-list", f"{new}..{old}", cwd=self.remote).split()
+            status = (
+                "diverged" if ahead and behind else "behind" if behind else
+                "ahead" if ahead else "identical"
+            )  # fmt: skip
+            return json.dumps({"status": status, "commits": [{"sha": sha} for sha in ahead]})
         if text.startswith(f"api repos/{REPO}"):
             return json.dumps({"allow_squash_merge": True})
         if text.startswith("pr merge"):
@@ -377,7 +383,11 @@ class World:
         run("git", "remote", "set-url", "origin", f"https://github.com/{REPO}.git", cwd=self.clone)
         self.h0 = self.github.head()
 
-    async def start(self, *, budget: float = 0.0, levels: dict | None = None, **settings):
+    async def start(
+        self, *, budget: float = 0.0, levels: dict | None = None, worker: bool = True, **settings
+    ):
+        """On, with the probe passed; `worker`: the worker whose task made the PR (else the PR
+        is one of the owner's others, for discovery)."""
         self.build()
         runtime = self.runtime
         runtime.github.raw = self.github
@@ -385,11 +395,19 @@ class World:
         runtime.github.accounts_cache = (0.0, [])
         if self.harness:
             await self.harness.connect()
+        else:
+            # A running app's own reads of gh (this computer's, signed in as nobody) may still
+            # be out: they must not say the owner isn't signed in.
+            async def signed_in(fresh: bool = False) -> list[dict]:
+                return [{"login": self.github.author, "active": True}]
+
+            runtime.github.signed_in = signed_in
         runtime.shepherd.git_config = [
             (f"url.{self.remote.as_uri()}.insteadOf", f"https://github.com/{REPO}.git")
         ]
         runtime.store.set(f"stepprobe:{TESTED_CLI}", json.dumps({"passed": True}))
-        self.worker = await self.make_worker()
+        if worker:
+            self.worker = await self.make_worker()
         old = runtime.store.settings()
         new = old.model_copy(
             update={

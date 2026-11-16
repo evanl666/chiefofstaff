@@ -492,7 +492,9 @@ async def reconcile(shepherd: Shepherd, action: dict) -> tuple[str, str]:
             found = await github.ref_head(operation["head_repo"], operation["ref"])
             if found == operation["commit"]:
                 return "sent", ""
-            return ("failed", "") if found == operation["lease"] else ("uncertain", "")
+            if found == operation["lease"] or not found:
+                return "failed", ""
+            return await pushed_under(shepherd, operation, found), ""
         if operation["kind"] == "reply":
             target = {"repo": operation["repo"], "number": operation["number"],
                       "in_reply_to": operation["in_reply_to"]}  # fmt: skip
@@ -516,6 +518,21 @@ async def reconcile(shepherd: Shepherd, action: dict) -> tuple[str, str]:
     except Exception:
         logger.info("Could not reconcile %s.", action["id"], exc_info=True)
     return "uncertain", ""
+
+
+async def pushed_under(shepherd: Shepherd, operation: dict, found: str) -> str:
+    """The branch moved on to another commit: whether the push went out under it (the commit is
+    in its history), read on GitHub. A commit GitHub doesn't know never went out."""
+    from .sources.github import NOT_FOUND
+
+    path = f"repos/{operation['head_repo']}/compare/{operation['commit']}...{found}"
+    try:
+        status = json.loads(await shepherd.runtime.github.gh("api", path)).get("status")
+    except RuntimeError as exc:
+        return "failed" if NOT_FOUND.search(str(exc)) else "uncertain"
+    if status in {"ahead", "identical"}:
+        return "sent"
+    return "failed" if status in {"behind", "diverged"} else "uncertain"
 
 
 async def reconcile_all(shepherd: Shepherd):
