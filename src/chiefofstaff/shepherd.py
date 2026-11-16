@@ -318,6 +318,9 @@ class Shepherd(Keeping, Steps):
         readonly = [
             path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
         ]
+        # The owner's git configuration, to read: without the credential proxy Copilot keeps it
+        # out of reach, and git then refuses to run at all (a commit too).
+        readonly += evidence.get("git_config") or []
         repo, _ = repo_number(step["target"])
         choice = settings.proactive_repos.get(repo)
         hosts = () if row["slack"] else self.step_hosts(step)
@@ -1091,6 +1094,27 @@ def prepare_downgrade(store) -> list[str]:
         if row:
             stopped.append(row["title"])
     return stopped
+
+
+def git_config_files() -> list[str]:
+    """The files of the owner's own git configuration that exist (as git reads them, includes
+    too) and its folder under XDG_CONFIG_HOME: what a step's git must read. Blocking: call it in
+    a thread."""
+    import subprocess
+
+    found: list[str] = []
+    with suppress(OSError, subprocess.SubprocessError):
+        listed = subprocess.run(
+            ["git", "config", "--global", "--includes", "--list", "--show-origin"],  # noqa: S607
+            capture_output=True, text=True, timeout=10, check=False,
+        ).stdout  # fmt: skip
+        for line in listed.splitlines():
+            origin = line.split("\t", 1)[0]
+            if origin.startswith("file:"):
+                found.append(str(Path(origin.removeprefix("file:")).expanduser()))
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "git"
+    candidates = [*found, str(Path.home() / ".gitconfig"), str(xdg)]
+    return [path for path in dict.fromkeys(candidates) if Path(path).exists()]
 
 
 def step_denied() -> tuple[str, ...]:

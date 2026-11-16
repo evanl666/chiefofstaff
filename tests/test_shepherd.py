@@ -109,7 +109,9 @@ async def test_a_failing_ci_fix_prepared_checked_approved_and_pushed(world):
     assert runtime.shepherd.control.explains(claim, sha)
 
 
-async def test_the_step_profile_is_the_sessions_options_while_it_runs(world):
+async def test_the_step_profile_is_the_sessions_options_while_it_runs(world, monkeypatch):
+    owners = [str(world.root / "owner.gitconfig")]
+    monkeypatch.setattr("chiefofstaff.shepherd.git_config_files", lambda: owners)
     runtime = await claimed(world)
     await runtime.shepherd.fix_it(TARGET)
     await settle(runtime)
@@ -126,6 +128,9 @@ async def test_the_step_profile_is_the_sessions_options_while_it_runs(world):
     assert any(path.endswith(".config/gh") for path in policy.denied)
     assert not policy.local_network
     assert policy.allowed_hosts == () and policy.outbound is False  # No project hosts here.
+    # The owner's git configuration is readable (git refuses to run without it); nothing else
+    # of theirs is.
+    assert step["evidence"]["git_config"] == owners and set(owners) <= set(policy.readonly)
     assert options["enable_config_discovery"] is False and options["enable_session_store"] is False
     assert "mcp_servers" not in options and "hook_directories" not in options
     assert "github-mcp-server" in options["disabled_mcp_servers"]
