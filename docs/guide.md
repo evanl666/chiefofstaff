@@ -1027,7 +1027,7 @@ new workers use cannot run, they start on Copilot and their chat says why.
   folder: a `.codex/` folder that changed since is not loaded for it, and its timeline says
   "Codex settings in this folder changed (changed .codex/config.toml), so Codex won't load them
   for this worker until you say to use them". **Use these settings** on that line loads them
-  from its next turn. Workers don't edit `.codex/` folders or Codex's settings folder.
+  from its next turn (after the one under way, if it is at work). Workers don't edit `.codex/` folders or Codex's settings folder.
 - **Questions:** a Codex worker asks you with a report's question (Codex has no `ask_user` here).
   An MCP server that needs a sign-in is signed in with `codex mcp login <name>`.
 

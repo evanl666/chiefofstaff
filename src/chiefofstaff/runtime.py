@@ -3106,8 +3106,9 @@ class Runtime:
         self.add_message(session_id, "notice", said)
         self.store.delete(f"settingssaid:{session_id}")
         if names == CODEX_SETTINGS:
-            if row["status"] != "working" and self.states.is_live(session_id):
-                await self.detach(session_id)  # Its next turn's thread trusts them.
+            if self.states.is_live(session_id):
+                # Its thread trusts them once opened again: now, or once its turn is over.
+                await self.refresh_session(row)
             return said
         # This worker goes on, and every other that waited for them (in the same folder).
         for held in dict.fromkeys([session_id, *self.settings_held]):
