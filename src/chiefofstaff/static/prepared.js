@@ -235,6 +235,7 @@ function evidenceView(plan) {
     ` ${checked ? "Checked" : "Not fully checked"} on ${shortSha(plan.h0)} and ${shortSha(plan.h1)}: `,
     el("span", { html: markdown(words).replace(/^<p>|<\/p>$/g, "") }),
     plan.stat ? el("span", { class: "muted", text: ` · ${plan.stat}` }) : "",
+    plan.fresh ? el("span", { class: "muted", text: " · made in a fresh copy of the branch (its worker's checkout had other changes)" }) : "",
   );
 }
 const shortSha = (sha) => (sha || "").slice(0, 7);

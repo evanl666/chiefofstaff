@@ -45,6 +45,9 @@ makes a mistake.
 | Only your own reaction delegates a Slack message (others reacting with the same emoji do nothing) | **Chief of Staff** (the watcher searches `hasmy::emoji:`, your reactions only) | Always |
 | A delegated message is acted on for what it asks, but risky requests in it are confirmed with you | **The model**, guided by instructions | As far as the model follows its instructions. Delegate only messages you would forward to a colleague |
 | Workers stay on their task, don't merge PRs, don't speak publicly as you | **The model**, guided by instructions; the Watchdog flags drift | As far as the model follows its instructions |
+| While a worker prepares a fix for *Prepared for you*, its commands reach no GitHub host and no credentials (no `gh` or `git` sign-in, no SSH keys, no keychain), only its project's package registries and the hosts you list; its session has no MCP servers, no Slack and only the tools that turn needs | **OS sandbox**, always on for that turn, and **Copilot** (that turn's tool allowlist); Chief of Staff's permission check refuses the rest | *Prepared for you* is on (off by default) and this Copilot version passed Chief of Staff's check of those limits on this computer; until then no fix is prepared |
+| What *Prepared for you* publishes (a push, replies, a resolved conversation, a review asked again, a CI run again) is exactly what you approved, sent by Chief of Staff as your account: a push only to the PR's own branch, only if that branch is still at the commit the plan was made on, never with git hooks | **Chief of Staff** (each operation journaled before it is sent, checked against the plan, and read back on GitHub after a stop, never sent twice) | Always while it is on. Branches that are protected, require signed commits or have rules a push might not meet are left to you |
+| *Merge when ready* merges only a head you accepted, or fixes you approved on top of it, once required checks pass and reviews approve | **Chief of Staff** (`gh pr merge --match-head-commit` with that exact commit, every condition read again just before) | You turned it on for that PR. A commit nobody approved pauses the PR until you accept its new head |
 
 **Yolo** turns off Chief of Staff's permission prompts and checks for workers. It is on by
 default, as in your own Copilot sessions, except for workers that read Slack (they keep the
@@ -168,6 +171,34 @@ Workers can also run on Codex (off by default; Settings → Models). For such a 
   Staff receives goes to GitHub Copilot under your account, as every message to the Router does.
   curl and other tools that speak HTTP over the socket do not check who answers; the command
   does.
+
+## Prepared for you
+
+Off by default (Settings → General, *Keep my PRs moving*). On, Chief of Staff prepares fixes and
+replies for your PRs in their worker, and publishes only what you approve:
+
+- **The worker's turn is restricted.** While it prepares, its session runs with a profile of its
+  own: the sandbox on whatever Settings say, no credential proxy for `git` or `gh`, GitHub's
+  hosts blocked, the network only for the registries its project installs from and the hosts
+  you list, this computer's own servers only for a repository you allow, your credentials and
+  keys unreadable, no MCP servers or Slack, and only file, shell and its own result tools. Its
+  instructions, CI logs and review comments are data, in a folder it reads; nothing it writes
+  is published by it. Before the first fix on a Copilot version, Chief of Staff runs a check
+  through that profile (a push, `gh`, `curl` and raw sockets to GitHub, reading gh's
+  credentials, a cross-session tool, all expected to fail; an install from PyPI expected to
+  work) and prepares nothing on a version that did not pass.
+- **What goes out is the plan you approved.** The plan's operations are journaled before any is
+  sent, in order, one writer per account, within GitHub's limits. A push is exactly the commit
+  that was checked, to the PR's own branch, leased on the head the plan was made on, with hooks
+  off; replies are the text you saw (or edited). After a stop mid-send, each operation is read
+  back on GitHub before anything else happens, and none is sent again blindly.
+- **A head nobody explains stops it.** Any commit on the PR that Chief of Staff did not push
+  from an approved plan (a teammate's, yours, a worker's in an ordinary turn) pauses the PR
+  until you resume it, and is never merged before you accept it.
+- **Limits:** the check runs your installed Copilot's sandbox on this computer and trusts it as
+  the worker sandbox is trusted. A fix's tests run your project's code in that sandbox. A fix
+  can change tests or CI only with your approval of those parts, which the review shows first;
+  test names are compared for pytest, Go, cargo and vitest only.
 
 ## Your data
 

@@ -18,6 +18,7 @@ bounds, see [SECURITY.md](../SECURITY.md).
 - [Focus](#focus)
 - [Slack](#slack)
 - [GitHub reviews](#github-reviews)
+- [Prepared for you: keeping your PRs moving](#prepared-for-you-keeping-your-prs-moving)
 - [Following threads](#following-threads)
 - [Watchdog](#watchdog)
 - [What runs without asking](#what-runs-without-asking)
@@ -818,6 +819,82 @@ repository, the worker tells you which accounts are signed in.
 
 Workers commit on their branch but do not push unless the task asks for it: you open the PR with
 *Create PR*. Analyses and research need no branch at all.
+
+## Prepared for you: keeping your PRs moving
+
+Off by default. Turn it on in Settings → General (*Keep my PRs moving: prepare fixes and
+replies for my approval*); its own tab, *Prepared for you*, then holds its choices.
+
+**Your worker PRs.** When a PR a worker opened for you fails CI or gets review comments, Chief of
+Staff prepares what it needs in that same worker: a fix, checked, or replies to the comments.
+Nothing reaches GitHub until you approve it. The PR keeps its row under *Needs you*; only the
+row's words and its one action change:
+
+- *Fix it*: it found what fails and can prepare a fix (each kind's level is *Suggest*: nothing
+  runs until you click);
+- *Review fix* or *Review & post*: a fix or replies are ready. The review shows what would be
+  published: the change (changes to tests, CI or checks first, marked), how the fix was checked,
+  and each reply, which you can edit. A push-back on a comment offers *Post my reply*, *Do it
+  their way* (a new plan) or *Leave it to me*. *Push* (or *Push & post*) publishes exactly that;
+  *Request changes…* sends it back with your words; *Dismiss* drops it;
+- *Resume*: it paused, because new commits it didn't push are on the PR (yours, a teammate's,
+  or its worker's in a turn you asked for), or the PR became stacked. Nothing is tried on a head
+  it can't account for until you say so;
+- *Look*: it stopped trying (the same failure came back after its fix, or two attempts made no
+  progress), or what you approved did not go out. *Look* shows what it did, attempt by attempt.
+
+The row's ⋯ adds *Stop keeping it moving* (its news then comes to its worker as before), *Merge
+when ready* and *Accept this head…*.
+
+**How a fix is checked.** The fix is a commit on the PR's head, made in the worker's checkout
+when that is at the PR's head with nothing uncommitted; otherwise in a fresh copy at that head,
+leaving the worker's branch and any unpushed work as they are (the review says so). The test
+command that
+failed runs on two frozen copies, one at the PR's head and one with the fix, and the review says
+what it showed: which tests failed before and pass now, and whether any test stopped running.
+Test names are read for pytest, Go, cargo and vitest; for other runners the review says which
+tests ran was not checked. A fix that skips or weakens a test, edits CI or changes what the
+checks check is never hidden among the rest: it is marked, and its parts come first.
+
+**While it prepares, the worker runs restricted.** For that turn only: no GitHub (no `git push`,
+no `gh`, no GitHub hosts at all), no credentials, no MCP servers, no Slack, and the network only
+for the package registries its project installs from (PyPI, npm, crates.io, Go, and the hosts you
+list under *Hosts its fixes may reach*). This computer's own servers are reachable only for a
+repository where you tick *Its tests may use this computer's servers*. Chief of Staff publishes
+what you approve itself, as your account, with git hooks off and a push that only goes out if
+the branch is still where the plan found it. Before the first fix on a new version of Copilot,
+Chief of Staff checks that those limits hold on this computer; until they do, nothing is
+prepared.
+
+**Levels and credits.** For each kind (*CI failures*, *Review comments*): *Off*, *Suggest* (it
+offers *Fix it*) or *Prepare* (it prepares at once). Work you didn't ask for spends at most
+*Credits a day it may spend unasked* (0 by default: only when you click). A fix you ask for is
+always charged to your day, and every attempt stops at a fixed amount of credits.
+
+**Your message comes first.** Write to the worker, or press *Stop*, and the attempt stops at
+once; your own new tasks take its place when workers are busy. A worker you close gives its PRs
+back to you, paused; reopened, they are its again.
+
+**Replies and the AI line.** The first time it would post a reply in a repository, the review
+asks whether replies there say they were drafted with an AI assistant; your answer is kept per
+repository (Settings → *Prepared for you* → *Repositories*). Replies you post are learned from,
+as your edits to drafts are.
+
+**Merge when ready** is per PR, in its ⋯. It merges only the head you accepted (by accepting the
+task's result, or *Accept this head…* after looking at what changed), or a head made of fixes you
+approved on top of it, once its checks pass, its reviews approve and GitHub would merge it. It
+never merges a commit nobody approved: a teammate's push pauses it until you accept the new
+head. Bases that merge through a queue are not supported yet.
+
+**Your other PRs.** With *My other open PRs* ticked, Home has a *Prepared for you* section of
+your other open PRs in your repositories that need something (CI failing, comments to answer),
+read on GitHub at no credit cost: three rows, then *All found…*, which also lists those it can't
+take yet and why (a fork, stacked, a draft). *Hand to a worker* starts a task of yours that
+checks the branch out in a worktree of its own; the PR then is that task's, and kept moving as
+above. You can also ask the Router: "keep acme/api#117 moving".
+
+Not yet: PRs from forks, stacked PRs, Codex or Claude workers, and making any change without your
+approval.
 
 ## Watches: what to look out for
 

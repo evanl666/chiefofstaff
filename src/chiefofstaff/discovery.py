@@ -76,6 +76,8 @@ async def discover(shepherd: Shepherd, force: bool = False) -> dict:
         return found
     github = shepherd.runtime.github
     repos = await scope(shepherd)
+    if not repos:
+        return found or {}  # No repository to look in: GitHub is not asked anything.
     mine = await github.logins()
     taken = worker_prs(shepherd)
     rows, others = [], []

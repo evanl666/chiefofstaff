@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+**Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
+Settings → General (*Keep my PRs moving*); see
+[the guide](docs/guide.md#prepared-for-you-keeping-your-prs-moving).
+
+- **Failing CI and review comments on your worker PRs are prepared for your approval**, in the
+  PR's own worker: a fix, checked by running the failing tests before and with it, or replies
+  to the comments. The PR keeps its row under *Needs you*; its words and its one action change
+  (*Fix it*, *Review fix*, *Review & post*, *Resume*, *Look*). Nothing reaches GitHub until you
+  approve it, and then exactly what you approved goes out, as your account.
+- **The worker runs restricted while it prepares**: no GitHub, no credentials, no MCP servers,
+  the network only for its project's registries and hosts you list. Chief of Staff checks those
+  limits on this computer before the first fix on each Copilot version.
+- **A fix that changes tests, CI or checks is marked**, its parts shown first.
+- **Any commit it didn't push pauses the PR** until you resume it; your message or *Stop* ends
+  an attempt at once, and your new tasks come before it.
+- **Merge when ready**, per PR (its ⋯): merged only at the head you accepted, or approved fixes
+  on top of it, once checks pass and reviews approve.
+- **Your other open PRs that need something** are listed on Home under *Prepared for you* (no
+  credits), three at a time; *Hand to a worker* starts a task that keeps one moving. You can
+  also ask the Router to keep a PR moving.
+- Each kind is *Off*, *Suggest* or *Prepare*; work you didn't ask for spends at most the credits
+  a day you set (none by default).
+
 ## 0.1.48 (2026-11-19)
 
 From the QA rounds on 0.1.46, a task's life: a failed task can be dismissed and only the task at
