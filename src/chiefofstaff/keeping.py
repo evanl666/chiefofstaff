@@ -41,7 +41,7 @@ class Keeping:
     async def drain_target(self: Shepherd, target: str, why: str):  # type: ignore[misc]
         """Before a claim changes holder: its attempt stopped, what is dispatching reconciled,
         its unpublished plans withdrawn."""
-        await self.stop_target(target, why)
+        await self.stop_target(target, why, "withdrawn")
         for _ in range(DRAIN_SECONDS * 10):
             if not [a for a in self.control.actions("", DISPATCHING) if a["target"] == target]:
                 break
@@ -50,7 +50,7 @@ class Keeping:
 
         with suppress(Exception):
             await reconcile_all(self)
-        self.stale_plans(target, why)
+        self.stale_plans(target, why, state="withdrawn")
 
     async def to_owner(self: Shepherd, target: str, why: str):  # type: ignore[misc]
         claim = self.control.claim(target)
@@ -235,8 +235,8 @@ class Keeping:
         return notes
 
     def require(self: Shepherd, target: str) -> dict:  # type: ignore[misc]
-        if not self.active():
-            raise ValueError("Prepare work for me is off (Settings → General).")
+        if why := self.refusal():
+            raise ValueError(why)
         claim = self.control.claim(target)
         if not claim or claim["state"] == CLAIM_ENDED:
             raise ValueError("Chief of Staff doesn't keep this PR moving.")
@@ -278,8 +278,8 @@ class Keeping:
         worker does): words for the Router, saying whether it is kept moving."""
         from . import threads
 
-        if not self.active():
-            return "Prepare work for me is off: tell the owner it is in Settings → General."
+        if why := self.refusal():
+            return f"Not kept moving: {why[0].lower()}{why[1:]} Tell the owner."
         keys = threads.pull_requests(pr) or (
             [threads.normalize(f"github:{pr.strip()}")]
             if threads.GITHUB_PR.fullmatch(threads.normalize(f"github:{pr.strip()}"))
@@ -498,7 +498,7 @@ class Keeping:
         evidence, each reply and choice, and whether disclosure must be decided."""
         step = self.control.step(step_id)
         if not step:
-            raise ValueError("Not found.")
+            raise LookupError("Not found.")
         plan = step["plan"] or {}
         repo = plan.get("repo") or step["target"].removeprefix("github:").rsplit("#", 1)[0]
         choice = self.store.settings().proactive_repos.get(repo)

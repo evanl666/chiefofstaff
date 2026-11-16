@@ -743,6 +743,8 @@ def create_app(
         from .publish import approve, dismiss, redo
 
         shepherd = runtime.shepherd
+        if why := shepherd.refusal():
+            raise ValueError(why)
         if decision.action == "approve":
             await approve(shepherd, step_id, decision.model_dump())
         elif decision.action == "dismiss":
@@ -759,6 +761,8 @@ def create_app(
         from .discovery import hand
 
         shepherd = runtime.shepherd
+        if why := shepherd.refusal():
+            raise ValueError(why)
         target = payload.target.strip().lower()
         if payload.action == "hand":
             return await hand(shepherd, target)
@@ -779,8 +783,8 @@ def create_app(
         """Look again now for what the owner's other PRs need."""
         from .discovery import discover
 
-        if not runtime.shepherd.active():
-            raise ValueError("Prepare work for me is off (Settings → General).")
+        if why := runtime.shepherd.refusal():
+            raise ValueError(why)
         await discover(runtime.shepherd, force=True)
         return runtime.shepherd.snapshot()
 

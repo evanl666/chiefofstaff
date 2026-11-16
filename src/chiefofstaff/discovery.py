@@ -155,8 +155,8 @@ async def hand(shepherd: Shepherd, target: str) -> dict:
     """Hand to a worker: a task of the owner's ("Keep acme/api#117 moving") in a worker that
     checks the branch out in a worktree of its own. The PR becomes its task's, and its first
     attempt counts as clicked (charged, not held back by the budget)."""
-    if not shepherd.active():
-        raise ValueError("Prepare work for me is off (Settings → General).")
+    if why := shepherd.refusal():
+        raise ValueError(why)
     target = threads.normalize(target)
     if target in worker_prs(shepherd):
         raise ValueError("A worker has it already.")
