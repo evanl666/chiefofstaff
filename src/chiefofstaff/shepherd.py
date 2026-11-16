@@ -101,6 +101,8 @@ TARGET_KEYS = ("acceptnote", "capped", "checksbefore", "clickfirst", "mergewhy",
 PLAN_DAYS = 30
 # Said of any action while it is off.
 OFF_WORDS = "Prepared for you is off: turn on Keep my PRs moving in Settings → General."
+# A Copilot version that failed the safety check is checked again after this long.
+PROBE_RETRY_SECONDS = 6 * 3600
 # Why an attempt waits (not refused) while this Copilot version gets its safety check.
 PROBING = "is being checked first"
 STEP_FOLDER = ".shepherd"
@@ -410,26 +412,38 @@ class Shepherd(Keeping, Steps):
         found = json.loads(self.store.get(f"stepprobe:{version}") or "null")
         if found and found.get("passed"):
             return ""
-        if found and found.get("why"):
+        if found and found.get("why") and not self.probe_due(found):
             return f"Copilot {version} failed the safety check: {found['why']}"
         self.runtime.background(self.run_probe(version))
         return f"Copilot {version} {PROBING}"
 
+    @staticmethod
+    def probe_due(found: dict | None) -> bool:
+        """A version not checked yet, or one that failed a while ago: checked (again). A pass
+        is kept for good; a failure is looked at again after PROBE_RETRY_SECONDS (a network
+        down, a sandbox fixed in the same version's settings)."""
+        if not found:
+            return True
+        if found.get("passed"):
+            return False
+        return time.time() - float(found.get("checked") or 0) >= PROBE_RETRY_SECONDS
+
     async def run_probe(self, version: str):
         from .step_probe import probe
 
-        if self.store.get(f"stepprobe:{version}") or getattr(self, "probing", False):
+        found = json.loads(self.store.get(f"stepprobe:{version}") or "null")
+        if getattr(self, "probing", False) or not self.probe_due(found):
             return
         self.probing = True
         try:
             result = await probe(self.runtime)
         except Exception as exc:
             logger.warning("The step check could not run.", exc_info=True)
-            result = {"passed": False, "why": f"it could not run ({str(exc)[:200]})", "at": now()}
+            result = {"passed": False, "why": f"it could not run ({str(exc)[:200]})", "at": now(),
+                      "checked": time.time()}  # fmt: skip
         finally:
             self.probing = False
-        if result.get("ran", True):
-            self.store.set(f"stepprobe:{version}", json.dumps(result))
+        self.store.set(f"stepprobe:{version}", json.dumps(result))
         self.publish()
 
     # Turning it on and off.
