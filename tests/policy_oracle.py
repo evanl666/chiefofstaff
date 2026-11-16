@@ -30,6 +30,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -269,8 +270,11 @@ class Sandbox:
 
     root: Path
     runs: int = 0
+    token: str = ""  # Its lines' marks: `<token>-<run>` (MARK).
+    last_mark: str = ""
 
     def __post_init__(self):
+        self.token = self.token or uuid.uuid4().hex
         bin_folder = self.root / "bin"
         bin_folder.mkdir(parents=True, exist_ok=True)
         shim = bin_folder / "git"
@@ -314,12 +318,17 @@ class Sandbox:
     def folder(self, name: str) -> Path:
         return (self.root / name).resolve()
 
-    def run(self, line: str, start: str, shell: str = "bash", preset: str = "") -> list[str]:
+    def run(
+        self, line: str, start: str, shell: str = "bash", preset: str = "", mark: str = ""
+    ) -> list[str]:
         """Run a line in bash (or zsh, without its startup files: as Codex's `zsh -lc` but for
         the owner's profile) from the folder `start`, its repositories configured as `preset`
-        says: what the shim was asked to push."""
+        says, with `mark` (MARK; its own, by default): what the shim was asked to push. What
+        is left of its process group past its time is ended; what left the group, by its
+        mark (end_marked)."""
         self.reset(preset)
         self.runs += 1  # Each run's own record (one a process left behind wrote is not read).
+        self.last_mark = mark or f"{self.token}-{self.runs}"
         pushes = self.root / f"pushes-{self.runs}"
         pushes.write_text("")
         tools = self.root / "bin"
@@ -332,6 +341,7 @@ class Sandbox:
             "GIT_CONFIG_NOSYSTEM": "1",
             "PUSHES": str(pushes),
             "LANG": "C",
+            MARK: self.last_mark,
         }
         run = (
             [ZSH, "-f", "-c", line]
@@ -358,16 +368,12 @@ class Sandbox:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 process.kill()
             process.wait()
-        for _ in range(2000):  # Its jobs (`&`), up to 10 s more.
-            try:
-                os.killpg(process.pid, 0)
-            except (ProcessLookupError, PermissionError):
-                break
+        deadline = time.monotonic() + 10  # Its jobs (`&`), up to 10 s more.
+        while alive(process.pid) and time.monotonic() < deadline:
             time.sleep(0.005)
-        else:  # (One left behind must not change the next line's repositories: a docker run
-            # on a busy machine read a branch a job of the line before had switched to.)
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
+        # (One left behind must not change the next line's repositories: a docker run on a busy
+        # machine read a branch a job of the line before had switched to.)
+        end_group(process.pid)
         records = [record for record in pushes.read_text().split("\x1e\n") if record]
         pushes.unlink()
         return records
@@ -437,6 +443,94 @@ def owners_git_configuration() -> dict[str, tuple | None]:
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
         found[str(path)] = (status.st_mode, status.st_size, status.st_mtime_ns, digest)
     return found
+
+
+# Each line runs with a mark of its own in its environment, which what it starts inherits: what
+# it leaves running, in its process group or out of it (`setsid`, a double fork, `&` and
+# `disown`), is found by it (marked) and ended (end_marked). A line has 10 seconds, its jobs
+# (`&`) 10 more; what is left of its process group then is killed (end_group).
+MARK = "ORACLE_MARK"
+PROC = Path("/proc/self/stat").exists()  # (Linux: the process table in /proc; else ps.)
+
+
+def group_members(group: int) -> list[int]:
+    """The processes of a process group that have not ended (zombies aside), as the process
+    table has them."""
+    if PROC:
+        found = []
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit():
+                with contextlib.suppress(OSError, ValueError, IndexError):
+                    fields = (entry / "stat").read_text().rpartition(")")[2].split()
+                    if fields[0] != "Z" and int(fields[2]) == group:
+                        found.append(int(entry.name))
+        return found
+    listed = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True,
+                            text=True, check=False).stdout  # fmt: skip
+    return [int(row.split()[0]) for row in listed.splitlines()
+            if len(row.split()) >= 3 and row.split()[1] == str(group)
+            and "Z" not in row.split()[2]]  # fmt: skip
+
+
+def alive(group: int) -> bool:
+    """Whether a process group has a process that has not ended: asked of the system at once,
+    and of the process table where macOS answers EPERM (it does for a group with a process
+    that ended and was not yet reaped: that answer once left lines running for 18 hours)."""
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return bool(group_members(group))
+    return True
+
+
+def end_group(group: int) -> None:
+    """Every process of a process group killed, and gone (or raises)."""
+    for _ in range(300):
+        if not alive(group) or not (members := group_members(group)):
+            return
+        for pid in members:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        time.sleep(0.01)
+    raise RuntimeError(f"processes of a line would not end: {group_members(group)}")
+
+
+def marked(prefix: str) -> dict[int, str]:
+    """The processes running with a mark (MARK) that starts with `prefix`: each one's mark."""
+    found: dict[int, str] = {}
+    needle = f"{MARK}={prefix}"
+    if PROC:
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit():
+                with contextlib.suppress(OSError):
+                    for item in (entry / "environ").read_bytes().split(b"\0"):
+                        if item.decode(errors="replace").startswith(needle):
+                            found[int(entry.name)] = item.decode(errors="replace")[len(MARK) + 1 :]
+        return found
+    listed = subprocess.run(["ps", "-ww", "-E", "-A", "-o", "pid=,command="],
+                            capture_output=True, text=True, check=False).stdout  # fmt: skip
+    for row in listed.splitlines():
+        if needle in row and (mark := re.search(rf"\b{MARK}=(\S+)", row)):
+            with contextlib.suppress(ValueError):
+                found[int(row.split(None, 1)[0])] = mark.group(1)
+    return found
+
+
+def end_marked(prefix: str, finished: set[str] | None = None) -> None:
+    """Every process running with a mark that starts with `prefix` (of those `finished`, when
+    told) killed, and gone (or raises)."""
+    for _ in range(100):
+        left = {pid: mark for pid, mark in marked(prefix).items()
+                if finished is None or mark in finished}  # fmt: skip
+        if not left:
+            return
+        for pid in left:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        time.sleep(0.05)
+    raise RuntimeError(f"processes lines left would not end: {sorted(marked(prefix))}")
 
 
 @functools.cache
@@ -1201,18 +1295,32 @@ def seeds() -> list[str]:
     return sorted({line for line in lines if not UNSAFE_SEEDS.search(line)})
 
 
+# How many lines run between two looks for what lines left running out of their process group.
+SWEEP_EVERY = 200
+
+
 def run(
-    policy, cases: list[tuple[str, ...]], root: Path, workers: int = 8, shell: str = "bash"
+    policy,
+    cases: list[tuple[str, ...]],
+    root: Path,
+    workers: int = 8,
+    shell: str = "bash",
+    mark: str = "",
 ) -> list[Outcome]:
     """Check each (line, start[, preset]) in its own sandbox, `workers` at a time, run in
     `shell` (bash, or zsh: as Codex runs a worker's commands, and as the check is told); with
     what the check asks git (current_branches, config_entries, local_branches) answered from
-    the sandbox. Stopped, and raises, the moment the owner's git configuration changes."""
+    the sandbox. Stopped, and raises, the moment the owner's git configuration changes. Each
+    line marked `<mark>-<n>` (MARK; a mark of its own by default): what lines left running is
+    ended every SWEEP_EVERY lines, and at the end (or raises)."""
     local = threading.local()
     lock = threading.Lock()
     counter = iter(range(10**9))
+    numbers = iter(range(10**9))
     owners = owners_git_configuration()
     changed: list[str] = []
+    mark = mark or uuid.uuid4().hex
+    finished: set[str] = set()
 
     def sandbox() -> Sandbox:
         if not hasattr(local, "sandbox"):
@@ -1259,15 +1367,26 @@ def run(
                 else:
                     os.environ["HOME"] = home
         targets: set[str] = set()
-        for record in box.run(line, start, shell, preset):
+        with lock:
+            number = next(numbers)
+        for record in box.run(line, start, shell, preset, f"{mark}-{number}"):
             targets |= pushed(record)
+        with lock:
+            finished.add(f"{mark}-{number}")
+            sweep = len(finished) % SWEEP_EVERY == 0
+            done = set(finished) if sweep else set()
+        if sweep:
+            end_marked(mark, done)
         if owners_git_configuration() != owners:
             changed.append(line)
             raise RuntimeError(f"the owner's git configuration changed, running {line!r}")
         return Outcome(line, start, allowed, targets, preset)
 
-    with ThreadPoolExecutor(workers) as pool:
-        return list(pool.map(one, cases))
+    try:
+        with ThreadPoolExecutor(workers) as pool:
+            return list(pool.map(one, cases))
+    finally:
+        end_marked(mark)
 
 
 def main():
