@@ -336,6 +336,13 @@ class Steps:
             )
             if not prepare:
                 lines.append("Change no file: say what you would do for each.")
+        their = (step["signal"] or {}).get("their_way") or []
+        if their:
+            lines.append(
+                "The owner chose the reviewer's way on comments "
+                f"{', '.join(str(comment) for comment in their)}: do what they asked there "
+                "(stance fix), not what you proposed before."
+            )
         if prepare:
             lines += [
                 "Never weaken a test or a check to make it pass: no skips, no removed assertions, "
@@ -352,6 +359,9 @@ class Steps:
         ]
         text = "\n".join(lines)
         message = wrap("system", "shepherd-step", text, step=step["id"])
+        if note := (step["signal"] or {}).get("owner_note"):
+            # The owner sent the last plan back: what they want changed, in their words.
+            message += "\n\n" + wrap("owner", "changes", note)
         news = (step["signal"] or {}).get("news") or {}
         if news.get("text"):
             message += "\n\n" + wrap("github", "thread", news["text"], trust=UNTRUSTED)
