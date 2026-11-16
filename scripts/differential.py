@@ -425,8 +425,8 @@ FEATURES["proactive"] = Feature(
         Allow("PRs my workers made, its default", setting="proactive_worker_prs", value=True),
         Allow("my other PRs, its default", setting="proactive_my_prs", value=True),
         Allow("no kind's level chosen", setting="proactive_levels", value={}),
-        Allow("no credits a day unasked", setting="proactive_budget", value=0),
-        Allow("no hosts its fixes may reach", setting="step_hosts", value=[]),
+        Allow("no credits it may spend a day without asking", setting="proactive_budget", value=0),
+        Allow("no other hosts fixes may download from", setting="step_hosts", value=[]),
         Allow("no repository's choices", setting="proactive_repos", value={}),
         Allow(
             "its switch line in Settings → General",
