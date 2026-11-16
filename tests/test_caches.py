@@ -102,6 +102,50 @@ def test_a_workers_init_script_starts_no_process_and_points_java_at_the_proxy(tm
     assert "GRADLE_RO_DEP_CACHE" not in plain and "GOPROXY" not in plain, "nothing read through"
 
 
+def test_the_owners_own_configuration_says_where_their_caches_are(tmp_path, monkeypatch):
+    """Copied from where the owner's tools keep their caches, and Maven's and Go's read through
+    there, as their configuration in home says (npm's cache and pnpm's store-dir in ~/.npmrc,
+    Yarn's globalFolder, pip's and uv's cache-dir, Maven's localRepository) and `go env` does."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    for name in (
+        "npm_config_cache", "NPM_CONFIG_CACHE", "npm_config_store_dir", "NPM_CONFIG_USERCONFIG",
+        "npm_config_userconfig", "YARN_GLOBAL_FOLDER", "PIP_CACHE_DIR", "PIP_CONFIG_FILE",
+        "UV_CACHE_DIR", "UV_CONFIG_FILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "GOMODCACHE",
+        "GOCACHE", "GOPATH",
+    ):  # fmt: skip
+        monkeypatch.delenv(name, raising=False)
+    home, moved = tmp_path / "home", tmp_path / "moved"
+    files = {
+        ".npmrc": f"; mine\ncache={moved}/npm\nstore-dir = ~/stores/pnpm\n",
+        ".yarnrc.yml": f"globalFolder: '{moved}/yarn'\nnpmScopes:\n  cacheFolder: /nope\n",
+        "Library/Application Support/pip/pip.conf": (
+            f"[install]\ncache-dir=/no\n[global]\ncache-dir = {moved}/pip\n"
+        ),
+        ".config/uv/uv.toml": f'cache-dir = "{moved}/uv"\n',
+        ".m2/settings.xml": "<settings><!-- <localRepository>/nope</localRepository> -->"
+        "<localRepository>${user.home}/repo</localRepository></settings>",
+    }  # fmt: skip
+    for name, text in files.items():
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
+        (home / name).write_text(text)
+    (home / "repo").mkdir()
+    owner = caches.Owner(home, go_modcache=str(moved / "gomod"), go_cache=str(moved / "gobuild"))
+    assert owner.npm() == moved / "npm"
+    assert owner.pnpm_store() == home / "stores" / "pnpm"
+    assert owner.yarn() == moved / "yarn" / "cache"
+    assert owner.pip() == moved / "pip"
+    assert owner.uv() == moved / "uv"
+    assert owner.maven_repository() == home / "repo"
+    assert (owner.go_modules(), owner.go_build()) == (moved / "gomod", moved / "gobuild")
+    sources = {source for _, source, _, _ in caches.seeds(owner)}
+    for source in (moved / "npm" / "_cacache", home / "stores" / "pnpm", moved / "pip"):
+        assert source in sources, source
+    text = caches.script(tmp_path / "tier", owner, tmp_path / "ws", tmp_path / "t", True, "", None)
+    assert f"-Dmaven.repo.local.tail={home / 'repo'}" in text
+    assert f"GOPROXY=file://{moved / 'gomod' / 'cache' / 'download'}," in text
+    assert caches.Owner(tmp_path / "other").npm() == tmp_path / "other" / ".npm", "or where it is"
+
+
 def test_the_owners_browsers_and_settings_are_linked_not_copied(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     for name in ("PLAYWRIGHT_BROWSERS_PATH", "GRADLE_USER_HOME", "CARGO_HOME"):

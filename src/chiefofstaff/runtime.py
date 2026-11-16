@@ -1772,7 +1772,7 @@ class Runtime:
             self.cache_scripts,
             slack=bool(row["slack"]),
             read_through=self.store.settings().shared_caches,
-            goproxy=self.cache_facts.get("goproxy", ""),
+            go=self.cache_facts.get("go"),
             truststore_path=self.cache_facts.get("truststore"),
             rust=caches.rust_project(folders),
         )
@@ -1805,15 +1805,15 @@ class Runtime:
 
     async def seed_caches(self):
         try:
-            if "goproxy" not in self.cache_facts:
-                self.cache_facts["goproxy"] = await asyncio.to_thread(caches.go_proxy)
+            if "go" not in self.cache_facts:
+                self.cache_facts["go"] = await asyncio.to_thread(caches.go_env)
                 self.cache_facts["old_uv"] = await asyncio.to_thread(caches.old_uv)
                 self.cache_facts["truststore"] = await asyncio.to_thread(
                     caches.truststore, self.cache_tier, copilot_home()
                 )
-            timings = await asyncio.to_thread(
-                caches.seed, self.cache_tier, caches.Owner(Path.home())
-            )
+            go = self.cache_facts.get("go") or {}
+            owner = caches.Owner(Path.home(), go.get("GOMODCACHE", ""), go.get("GOCACHE", ""))
+            timings = await asyncio.to_thread(caches.seed, self.cache_tier, owner)
             logger.info("Workers' caches filled from yours: %s", timings)
         finally:
             self.cache_seeding = False

@@ -500,7 +500,7 @@ def no_cache_seeding(monkeypatch, tmp_path):
 
     monkeypatch.setattr(caches, "seed", lambda *args, **kwargs: {})
     monkeypatch.setattr(caches, "default_tier", lambda: tmp_path / "worker-caches")
-    monkeypatch.setattr(caches, "go_proxy", lambda: "")
+    monkeypatch.setattr(caches, "go_env", dict)
     monkeypatch.setattr(caches, "old_uv", lambda: "")
     monkeypatch.setattr(caches, "truststore", lambda *args: None)
 

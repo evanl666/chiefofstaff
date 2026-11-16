@@ -963,6 +963,67 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
         assert str(home / tool) in policy.readonly, f"{tool}: a Rust project's"
 
 
+async def test_no_configuration_file_makes_a_folder_of_the_owners_writable(tmp_path, monkeypatch):
+    """Nothing of a project's configuration is read, and of the owner's only where Maven's and Go's
+    caches are (read through, read-only): a cache moved by a configuration file, the owner's or
+    a project's pointing at the owner's caches, is never writable (Copilot's dev-tool access,
+    which followed them, is off)."""
+    for name in (*MOVED, "npm_config_store_dir", "PIP_CACHE_DIR", "XDG_CONFIG_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    home, moved = tmp_path / "home", tmp_path / "home" / "moved"
+    for name in ("npm", "pnpm", "yarn", "pip", "uv", "m2", "nuget"):
+        (moved / name).mkdir(parents=True)
+    owners = (".npm", ".yarn/berry/cache", ".cache/uv", ".m2/repository", "Library/pnpm/store")
+    for name in owners:
+        (home / name).mkdir(parents=True, exist_ok=True)
+    configs = {
+        ".npmrc": f"cache={moved}/npm\nstore-dir={moved}/pnpm\n",
+        ".yarnrc.yml": f"globalFolder: {moved}/yarn\ncacheFolder: {moved}/yarn\n",
+        ".config/pip/pip.conf": f"[global]\ncache-dir = {moved}/pip\n",
+        ".config/uv/uv.toml": f'cache-dir = "{moved}/uv"\n',
+        ".m2/settings.xml": f"<settings><localRepository>{moved}/m2</localRepository></settings>",
+        ".nuget/NuGet/NuGet.Config": '<configuration><config><add key="globalPackagesFolder" '
+        f'value="{moved}/nuget" /></config></configuration>',
+    }  # fmt: skip
+    project = tmp_path / "project"
+    (project / ".mvn").mkdir(parents=True)
+    pointing = {
+        ".npmrc": f"cache={home}/.npm\nstore-dir={home}/Library/pnpm/store\n",
+        ".yarnrc.yml": f"enableGlobalCache: false\ncacheFolder: {home}/.yarn/berry/cache\n",
+        "uv.toml": f'cache-dir = "{home}/.cache/uv"\n',
+        ".mvn/maven.config": f"-Dmaven.repo.local={home}/.m2/repository\n",
+        "NuGet.Config": '<configuration><config><add key="globalPackagesFolder" '
+        f'value="{home}/.nuget/packages" /></config></configuration>',
+    }  # fmt: skip
+    for folder, files in ((home, configs), (project, pointing)):
+        for name, text in files.items():
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text(text)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    checkout = {"project": str(project), "path": str(project), "branch": "", "shared": False}
+    harness.store.execute(
+        "UPDATE sessions SET repos=? WHERE id=?", (json.dumps([checkout]), worker)
+    )
+    for slack in (0, 1):
+        harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
+        row = harness.store.session(worker)
+        policy = runtime.sandbox_policy(row)
+        own = runtime.cache_plan(row)
+        theirs = [own.tier, runtime.workspaces.workspace(row), project]
+        for path in policy.readwrite:
+            if Path(path).is_relative_to(home):
+                assert any(Path(path).is_relative_to(mine) for mine in theirs), (slack, path)
+        for name in ("npm", "pnpm", "yarn", "pip", "uv", "nuget"):
+            assert str(moved / name) not in policy.readonly, (slack, name, "not followed")
+        assert (str(moved / "m2") in policy.readonly) == (not slack), "Maven's: read through"
+        assert (f"maven.repo.local.tail={moved / 'm2'}" in own.text) == (not slack)
+        for read_through in ("GRADLE_RO_DEP_CACHE", "GOPROXY=file://"):
+            assert (read_through in own.text) == (not slack), "none of the owner's, for Slack's"
+
+
 MOVED = (
     *("UV_CACHE_DIR", "XDG_CACHE_HOME", "GRADLE_USER_HOME", "CARGO_HOME", "GOPATH"),
     *("NPM_CONFIG_USERCONFIG", "npm_config_userconfig", "npm_config_cache", "PIP_CONFIG_FILE"),

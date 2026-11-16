@@ -388,12 +388,36 @@ async def test_a_sandboxed_workers_commands_write_nothing_in_home_but_their_own(
     from chiefofstaff.backend import copilot_home
     from chiefofstaff.models import Settings
 
+    home = Path.home().resolve()
+    # Caches the owner's configuration moves (Copilot's dev-tool access followed those), and a
+    # project's pointing at the owner's caches: never writable either.
+    moved = home / "moved-caches"
+    configs = {
+        home / ".npmrc": f"cache={moved}/npm\nstore-dir={moved}/pnpm\n",
+        home / ".yarnrc.yml": f"globalFolder: {moved}/yarn\ncacheFolder: {moved}/yarn-cache\n",
+        home / ".config/pip/pip.conf": f"[global]\ncache-dir = {moved}/pip\n",
+        home / ".config/uv/uv.toml": f'cache-dir = "{moved}/uv"\n',
+        home / ".m2/settings.xml": f"<settings><localRepository>{moved}/m2</localRepository>"
+        "</settings>",
+        home / ".nuget/NuGet/NuGet.Config": "<configuration><config><add "
+        f'key="globalPackagesFolder" value="{moved}/nuget" /></config></configuration>',
+    }  # fmt: skip
+    pointing = {
+        ".npmrc": f"cache={home}/.npm\nstore-dir={home}/Library/pnpm/store\n",
+        ".yarnrc.yml": f"enableGlobalCache: false\ncacheFolder: {home}/.yarn/berry/cache\n",
+        "uv.toml": f'cache-dir = "{home}/.cache/uv"\n',
+        "NuGet.Config": "<configuration><config><add key=\"globalPackagesFolder\" "
+        f'value="{home}/.nuget/packages" /></config></configuration>',
+    }  # fmt: skip
+    kept = {path: path.read_bytes() for path in configs if path.exists()}
+    write_files(configs)
+    for name in ("npm", "pnpm", "yarn", "yarn-cache", "pip", "uv", "m2", "nuget"):
+        (moved / name).mkdir(parents=True, exist_ok=True)
     harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Build")
     backend = copilot_backend("copilot")
     await backend.start()
-    home = Path.home().resolve()
     try:
         for slack in (0, 1):
             harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
@@ -404,16 +428,18 @@ async def test_a_sandboxed_workers_commands_write_nothing_in_home_but_their_own(
             workspace = runtime.workspaces.workspace(row)
             for kind, marker in MANIFESTS.items():
                 project = workspace / kind
-                project.mkdir(parents=True, exist_ok=True)
-                (project / marker).write_text("")
+                write_files({project / marker: "", **{project / k: v for k, v in pointing.items()}})
                 session = await backend.create_session(
                     session_id=str(uuid4()), name="contract test", model=MODEL,
                     working_directory=str(project), sandbox_config=backend.sandbox(policy),
                     on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
                 )  # fmt: skip
                 try:
+                    # Each tool named, as Copilot grants by the tools a command runs.
+                    tools = ("npm", "pnpm", "yarn", "pip", "uv", "mvn", "go", "cargo", "dotnet")
+                    command = "; ".join(f"{t} --version >/dev/null 2>&1" for t in tools) + "; true"
                     await session.rpc.shell.execute_user_requested(
-                        ShellExecuteUserRequestedRequest(command="true", request_id=str(uuid4())),
+                        ShellExecuteUserRequestedRequest(command=command, request_id=str(uuid4())),
                         timeout=120,
                     )
                     folder = copilot_home() / "session-state" / session.session_id
@@ -427,6 +453,18 @@ async def test_a_sandboxed_workers_commands_write_nothing_in_home_but_their_own(
                 assert not outside(written, theirs, home), f"{kind}, slack={slack}: writable"
     finally:
         await backend.stop()
+        for path in configs:
+            path.unlink(missing_ok=True)
+        write_files(kept)
+
+
+def write_files(files: dict) -> None:
+    for path, text in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text)
 
 
 def outside(written: list[str], theirs: list, home: Path) -> list[str]:

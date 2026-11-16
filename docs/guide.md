@@ -346,7 +346,9 @@ reflinks, such as Btrfs or XFS). Each worker's shell gets the tools pointed ther
 temporary folder, before each command (nothing in its instructions): installs and builds work as
 in your terminal, including uv's Pythons and tools (pre-commit, poetry), corepack's pnpm and Yarn,
 Maven's wrapper and Gradle (in the sandbox, Gradle runs without its native libraries and with
-the worker's own daemon). *Start workers' caches from yours* off (Settings) keeps your caches
+the worker's own daemon). Your caches are found where your own configuration in home keeps them
+(`cache=` in `~/.npmrc`, pip's `cache-dir`, Maven's `localRepository`…), never where a
+project's says. *Start workers' caches from yours* off (Settings) keeps your caches
 out of theirs. The folder can be deleted at any time no worker runs. Copilot's own *dev-tool
 access* (which opened your caches read-write) is off for sandboxed workers: nothing in your home
 is writable to them but that folder, and they read only what Chief of Staff names: their

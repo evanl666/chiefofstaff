@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -83,12 +85,67 @@ def xdg_cache(home: Path) -> Path:
     return env_dir("XDG_CACHE_HOME", home / ".cache")
 
 
+def xdg_config(home: Path) -> Path:
+    return env_dir("XDG_CONFIG_HOME", home / ".config")
+
+
+def config_value(path: Path, key: str, section: str = "") -> str:
+    """A key's value in an ini-like file (.npmrc, pnpm's rc, pip.conf), in `section` when one
+    is named; "" when it has none."""
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    current = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1].strip()
+        elif line and line[0] not in "#;" and (not section or current == section):
+            name, equals, value = line.partition("=")
+            if equals and name.strip() == key:
+                return value.strip().strip("\"'")
+    return ""
+
+
+def yaml_value(path: Path, key: str) -> str:
+    """A top-level key's value in a YAML file (Yarn's .yarnrc.yml)."""
+    with suppress(OSError, UnicodeDecodeError):
+        if found := re.search(
+            rf"^{re.escape(key)}:[ \t]*(\S.*?)[ \t]*$", path.read_text(), re.MULTILINE
+        ):
+            return found.group(1).strip("\"'")
+    return ""
+
+
+def toml_value(path: Path, key: str) -> str:
+    """A top-level string's value in a TOML file (uv.toml)."""
+    import tomllib
+
+    with suppress(OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        value = tomllib.loads(path.read_text()).get(key)
+        return value if isinstance(value, str) else ""
+    return ""
+
+
+def xml_value(path: Path, tag: str) -> str:
+    """A tag's text in an XML file (Maven's settings.xml), outside comments."""
+    with suppress(OSError, UnicodeDecodeError):
+        text = re.sub(r"<!--.*?-->", "", path.read_text(), flags=re.DOTALL)
+        if found := re.search(rf"<{tag}>\s*([^<]*?)\s*</{tag}>", text):
+            return found.group(1)
+    return ""
+
+
 @dataclass(frozen=True)
 class Owner:
-    """Where the owner's caches are on this machine (defaults, or where the environment moves
-    them, as the tools themselves look)."""
+    """Where the owner's caches are on this machine, as their tools look: the environment, then
+    their own configuration in home (never a project's), then the default. Go's as `go env`
+    says (go_env, looked up in the background)."""
 
     home: Path
+    go_modcache: str = ""
+    go_cache: str = ""
 
     @property
     def mac(self) -> bool:
@@ -97,21 +154,51 @@ class Owner:
     def caches(self) -> Path:
         return self.home / "Library" / "Caches" if self.mac else xdg_cache(self.home)
 
+    def configured(self, value: str) -> Path | None:
+        """A folder a configuration file names (~, $HOME and ${user.home} its home)."""
+        for name in ("${user.home}", "${env.HOME}", "${HOME}", "$HOME"):
+            value = value.replace(name, str(self.home))
+        if value == "~" or value.startswith("~/"):
+            value = str(self.home) + value[1:]
+        path = Path(value) if value else None
+        return path if path and path.is_absolute() else None
+
+    def npmrc(self) -> Path:
+        return env_dir(
+            "NPM_CONFIG_USERCONFIG", env_dir("npm_config_userconfig", self.home / ".npmrc")
+        )
+
     def npm(self) -> Path:
-        return env_dir("npm_config_cache", env_dir("NPM_CONFIG_CACHE", self.home / ".npm"))
+        mine = self.configured(config_value(self.npmrc(), "cache")) or self.home / ".npm"
+        return env_dir("npm_config_cache", env_dir("NPM_CONFIG_CACHE", mine))
 
     def pnpm_store(self) -> Path:
         base = self.home / "Library" / "pnpm" if self.mac else self.home / ".local/share/pnpm"
-        return env_dir("npm_config_store_dir", base / "store")
+        settings = self.home / "Library" / "Preferences" if self.mac else xdg_config(self.home)
+        mine = (
+            self.configured(config_value(self.npmrc(), "store-dir"))
+            or self.configured(config_value(settings / "pnpm" / "rc", "store-dir"))
+            or base / "store"
+        )
+        return env_dir("npm_config_store_dir", mine)
 
     def uv(self) -> Path:
-        return env_dir("UV_CACHE_DIR", xdg_cache(self.home) / "uv")
+        settings = env_dir("UV_CONFIG_FILE", xdg_config(self.home) / "uv" / "uv.toml")
+        mine = self.configured(toml_value(settings, "cache-dir")) or xdg_cache(self.home) / "uv"
+        return env_dir("UV_CACHE_DIR", mine)
 
     def uv_data(self) -> Path:
         return env_dir("XDG_DATA_HOME", self.home / ".local" / "share") / "uv"
 
     def pip(self) -> Path:
-        return env_dir("PIP_CACHE_DIR", self.caches() / "pip")
+        files = [
+            env_dir("PIP_CONFIG_FILE", self.home / ".pip" / "pip.conf"),
+            self.home / "Library" / "Application Support" / "pip" / "pip.conf",
+            xdg_config(self.home) / "pip" / "pip.conf",
+            self.home / ".pip" / "pip.conf",
+        ]
+        named = (self.configured(config_value(f, "cache-dir", "global")) for f in files)
+        return env_dir("PIP_CACHE_DIR", next((p for p in named if p), self.caches() / "pip"))
 
     def poetry(self) -> Path:
         return env_dir("POETRY_CACHE_DIR", self.caches() / "pypoetry")
@@ -126,7 +213,8 @@ class Owner:
         return env_dir("BUN_INSTALL_CACHE_DIR", self.home / ".bun" / "install" / "cache")
 
     def yarn(self) -> Path:
-        return self.home / ".yarn" / "berry" / "cache"
+        mine = self.configured(yaml_value(self.home / ".yarnrc.yml", "globalFolder"))
+        return env_dir("YARN_GLOBAL_FOLDER", mine or self.home / ".yarn" / "berry") / "cache"
 
     def gradle(self) -> Path:
         return env_dir("GRADLE_USER_HOME", self.home / ".gradle")
@@ -134,13 +222,21 @@ class Owner:
     def maven(self) -> Path:
         return self.home / ".m2"
 
+    def maven_repository(self) -> Path:
+        mine = self.configured(xml_value(self.maven() / "settings.xml", "localRepository"))
+        return mine or self.maven() / "repository"
+
     def cargo(self) -> Path:
         return env_dir("CARGO_HOME", self.home / ".cargo")
 
     def go_modules(self) -> Path:
+        if self.go_modcache and Path(self.go_modcache).is_absolute():
+            return Path(self.go_modcache)
         return env_dir("GOMODCACHE", env_dir("GOPATH", self.home / "go") / "pkg" / "mod")
 
     def go_build(self) -> Path:
+        if self.go_cache and Path(self.go_cache).is_absolute():
+            return Path(self.go_cache)
         return env_dir("GOCACHE", self.caches() / "go-build")
 
     def playwright(self) -> Path:
@@ -219,10 +315,16 @@ def tool_paths(owner: Owner, rust: bool = False) -> list[str]:
         found += named(owner.home, RUST_TOOLCHAINS, RUST_HOMES)
     found.append(owner.copilot_tools())
     found += path_folders(owner.home)
-    secrets = [owner.home / name for name in REGISTRY_SECRETS]
+    return unsecret(found, owner.home)
+
+
+def unsecret(paths: list[Path], home: Path) -> list[str]:
+    """Those of these paths that exist, but none that is home or above it, nor one holding the
+    owner's credentials."""
+    secrets = [home / name for name in REGISTRY_SECRETS]
     return [
         str(path)
-        for path in dict.fromkeys(found)
+        for path in dict.fromkeys(paths)
         if path.exists()
         and not too_broad(str(path))
         and not any(secret.is_relative_to(path) for secret in secrets)
@@ -551,18 +653,20 @@ def old_uv() -> str:
     return words[1] if version < UV_FIXED else ""
 
 
-def go_proxy() -> str:
-    """The owner's GOPROXY (go env), "" when Go is not installed."""
+def go_env() -> dict[str, str]:
+    """The owner's GOPROXY, GOMODCACHE and GOCACHE, as `go env` has them (their environment
+    and Go's own configuration file); empty when Go is not installed."""
     if not shutil.which("go"):
-        return ""
+        return {}
     try:
         found = subprocess.run(
-            ["go", "env", "GOPROXY"],  # noqa: S607  (the owner's go, as their shell finds it)
+            ["go", "env", "-json", "GOPROXY", "GOMODCACHE", "GOCACHE"],  # noqa: S607  (the owner's go)
             capture_output=True, text=True, timeout=20, check=False,
         )  # fmt: skip
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return found.stdout.strip()
+        values = json.loads(found.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    return {key: value for key, value in values.items() if isinstance(value, str)}
 
 
 # Java reads neither HTTPS_PROXY nor SSL_CERT_FILE: the JVM (Gradle and its wrapper, Maven) is
@@ -635,8 +739,8 @@ def script(
     maven = f"-Dmaven.repo.local={t / 'maven' / 'repository'}"
     if read_through:
         lines.append(f"export GRADLE_RO_DEP_CACHE={q(str(owner.gradle() / 'caches'))}")
-        if (owner.maven() / "repository").is_dir():
-            maven += f" -Dmaven.repo.local.tail={owner.maven() / 'repository'}"
+        if owner.maven_repository().is_dir():
+            maven += f" -Dmaven.repo.local.tail={owner.maven_repository()}"
         downloads = owner.go_modules() / "cache" / "download"
         upstream = goproxy or "https://proxy.golang.org,direct"
         lines.append(f"export GOPROXY={q(f'file://{downloads},{upstream}')}")
@@ -746,7 +850,7 @@ def plan(
     *,
     slack: bool,
     read_through: bool,
-    goproxy: str = "",
+    go: dict[str, str] | None = None,
     truststore_path: Path | None = None,
     home: Path | None = None,
     rust: bool = False,
@@ -755,20 +859,25 @@ def plan(
     Slack, nothing of the owner's copied there), its toolchains read-only, the owner's caches
     and registry settings read-only (read through) unless it reads Slack, and its init script.
     Nothing is written here (see prepare)."""
-    owner = Owner(home or Path.home())
+    go = go or {}
+    owner = Owner(home or Path.home(), go.get("GOMODCACHE", ""), go.get("GOCACHE", ""))
     own = workspace / PRIVATE if slack else tier
     temporary = worker_temp(session_id)
     readonly = tool_paths(owner, rust)
     readonly.append(str(scripts))
     if not slack:
         # The owner's caches, read through (Gradle's, Maven's, Go's, Playwright's) or not; one
-        # that does not exist yet stays closed (Copilot grants nothing of its own here).
+        # that does not exist yet stays closed (Copilot grants nothing of its own here). Of
+        # those a configuration file moves (the owner's own, in home), only the two read
+        # through: Maven's repository and Go's modules.
         readonly += held_caches(owner.home)[0]
+        readonly += unsecret([owner.maven_repository(), owner.go_modules()], owner.home)
         readonly += registry_config(owner)
         readonly += [str(source) for source, _ in owner_settings(own, owner)]
     readwrite = [str(own), str(temporary)]
+    # Nothing of the owner's is read through for a worker that reads Slack: it can't read it.
     text = script(
-        own, owner, workspace, temporary, read_through, goproxy,
+        own, owner, workspace, temporary, read_through and not slack, go.get("GOPROXY", ""),
         None if slack else truststore_path,
     )  # fmt: skip
     readonly = [path for path in dict.fromkeys(readonly) if not too_broad(path)]
