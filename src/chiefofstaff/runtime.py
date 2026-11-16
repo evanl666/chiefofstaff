@@ -2894,6 +2894,15 @@ class Runtime:
             return workspace, cwd, None
         return nearest_top(cwd) or cwd, cwd, None
 
+    def settings_read(self, row: dict) -> tuple[Path, Path, dict | None, dict, str]:
+        """(top, cwd, checkout, what its settings hold now, why they can't be read: "" when
+        they can). Blocking: in a thread, once per check."""
+        top, cwd, checkout = self.settings_place(row)
+        try:
+            return top, cwd, checkout, settings_guard.scan(top, cwd), ""
+        except settings_guard.TooLargeError as exc:
+            return top, cwd, checkout, {}, str(exc)
+
     def handed_since(self, top: Path) -> float:
         """When Chief of Staff first gave a worker a folder in this top (that worker's start);
         0 for never."""
@@ -2970,12 +2979,10 @@ class Runtime:
         """What of these agent settings (one agent's) changed in a worker's folder since
         Chief of Staff last saw them: {"top", "cwd", "changes", "digest", "unreadable"}, or
         None for nothing. Read from the files every time: they are few and small."""
-        top, cwd, checkout = await asyncio.to_thread(self.settings_place, row)
+        top, cwd, checkout, now, unreadable = await asyncio.to_thread(self.settings_read, row)
+        if unreadable:
+            return {"top": top, "cwd": cwd, "changes": [], "digest": "", "unreadable": unreadable}
         folders = {settings_guard.folder_key(top, f) for f in settings_guard.chain(top, cwd)}
-        try:
-            now = await asyncio.to_thread(settings_guard.scan, top, cwd)
-        except settings_guard.TooLargeError as exc:
-            return {"top": top, "cwd": cwd, "changes": [], "digest": "", "unreadable": str(exc)}
         saved = settings_guard.load(self.store, top)
         if saved is None and now:
             saved = await asyncio.to_thread(self.settings_baseline, row, top, cwd, checkout, now)
