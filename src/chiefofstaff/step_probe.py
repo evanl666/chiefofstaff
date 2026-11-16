@@ -95,7 +95,9 @@ def github_address() -> str:
     import socket
 
     try:
-        return socket.getaddrinfo("github.com", 443, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+        return str(
+            socket.getaddrinfo("github.com", 443, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+        )
     except OSError:
         return ""
 
