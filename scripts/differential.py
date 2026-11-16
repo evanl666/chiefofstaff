@@ -195,6 +195,10 @@ FIXES: list[Allow] = [
     # 0.1.46 (security): what the agent settings in each folder handed to a worker held then,
     # kept in Chief of Staff's own data (settings_guard), empty ones too. Nothing is shown.
     Allow("agent settings snapshots", data=r"\.db\.kv\.settingssnap:"),
+    # 0.1.46 (security): the identity of each .git folder a worker's commands could replace, as
+    # first seen (a folder moved into its place is another), and (Linux) the git files that
+    # appeared in one a worker writes. Nothing is shown.
+    Allow(".git identities", data=r"\.db\.kv\.git(id|appeared):"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
