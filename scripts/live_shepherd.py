@@ -26,7 +26,11 @@ git gets tokens in its environment, with no credential helper):
 - OWNER (LIVE_SHEPHERD_OWNER, default evan666-lgtm): the owner Chief of Staff acts as; an admin
   of the repository (for the ruleset). Its PRs, Chief of Staff's pushes, replies and merges.
 - PEER (LIVE_SHEPHERD_PEER, default gh's other signed-in account): a collaborator with write
-  access, who reviews, comments and pushes as a teammate.
+  access, who reviews, comments and pushes as a teammate. Its token is read with
+  `gh auth token --user`, held in memory only (handed to gh and git in their environment), and
+  never given to Chief of Staff.
+Every `gh api` call either account makes is checked to be REPOSITORY's own (in_repository), and
+git only ever pushes to REPOSITORY, under the run's own branches.
 
 Copilot runs with a COPILOT_HOME of its own (its config.json copied from yours, read only). Ports
 default to 19930-19944 (LIVE_SHEPHERD_PORT_BASE moves them).
@@ -182,6 +186,8 @@ class GitHub:
     ) -> tuple[bool, str]:
         if arguments[:1] != ("api",):
             raise ValueError(f"gh {arguments[0]}: only `gh api` is used")
+        if not in_repository(arguments[1]):
+            raise ValueError(f"gh api {arguments[1]}: only {REPOSITORY} is ever touched")
         self.requests += 1
         if self.requests > GH_REQUESTS:
             raise RuntimeError(f"GitHub budget spent for {self.login} ({GH_REQUESTS} requests)")
@@ -197,6 +203,14 @@ class GitHub:
         """Every item of a listing, all its pages."""
         found = self.json("api", endpoint, "--paginate", "--slurp") or []
         return [item for page in found for item in (page if isinstance(page, list) else [page])]
+
+
+def in_repository(endpoint: str) -> bool:
+    """Whether a `gh api` endpoint is REPOSITORY's own (no other repository, no account-wide
+    call, for either account)."""
+    own = f"repos/{REPOSITORY}".lower()
+    path = endpoint.lower().lstrip("/").split("?", 1)[0]
+    return path == own or path.startswith(f"{own}/")
 
 
 def run(command: list[str], cwd: Path | None = None, env: dict | None = None) -> str:
@@ -305,6 +319,11 @@ class Repo:
         return name if name.startswith(self.prefix) else self.prefix + name
 
     def git(self, *arguments: str, who: GitHub | None = None) -> str:
+        if "push" in arguments:
+            # To origin (REPOSITORY) only, and only to one of the run's own branches.
+            target = arguments[-1].rpartition(":")[2]
+            if arguments[-2] != "origin" or not target.startswith(f"refs/heads/{self.prefix}"):
+                raise ValueError(f"git push {' '.join(arguments[-2:])}: not a run's own branch")
         env = {**os.environ, **git_env(who.token())} if who else None
         return run(["git", *arguments], cwd=self.clone, env=env)
 
@@ -2233,6 +2252,12 @@ async def dry_run():
             }  # fmt: skip
         world.labels.add(f"{LABEL}{old}")
         before = {ref: world.sha(ref) for ref in ("main", "add-greeting")}
+        for elsewhere in ("repos/evan666-lgtm/other", "user/repos", f"repos/{REPOSITORY}-x/pulls"):
+            try:
+                peer("api", elsewhere)
+            except ValueError:
+                continue
+            raise AssertionError(f"{elsewhere}: another repository reached")
         assert reap(owner) == [], "the old run's leftovers, reaped"
         assert not world.refs(f"{RUNS}/{old}/") and world.refs(f"{RUNS}/{now_running}/")
         repo = Repo(owner, peer, root, remote=str(world.bare))
@@ -2259,7 +2284,13 @@ async def dry_run():
         (repo.clone / "NOTES.md").write_text("its own way")
         repo.git("add", "-A")
         repo.git("commit", "-qm", "Its own branch name")
-        repo.git("push", "-q", "origin", "HEAD:refs/heads/worker-own-name", who=owner)
+        run(["git", "push", "-q", str(world.bare), "HEAD:refs/heads/worker-own-name"], repo.clone)
+        try:
+            repo.git("push", "-q", "origin", "HEAD:refs/heads/main", who=owner)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("the script pushed outside the run's branches")
         made = owner.json(
             "api",
             f"repos/{REPOSITORY}/pulls",
