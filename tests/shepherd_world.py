@@ -546,7 +546,9 @@ async def seed_page(runtime, root: Path) -> dict:
     from chiefofstaff.control import PREPARED
 
     world = World(None, root, runtime=runtime)
-    await world.start(proactive_my_prs=True, max_workers=8)
+    # Room for its attempt beside whatever the page's other workers are at.
+    room = max(8, runtime.workers.running() + 4)
+    await world.start(proactive_my_prs=True, max_workers=room)
     shepherd = runtime.shepherd
     await shepherd.tick()
     await settle(runtime)
