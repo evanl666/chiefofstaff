@@ -64,6 +64,8 @@ SETTINGS_FIELDS |= {
     "send_to_chief", "update_notice", "slack_delegate_reply",
 }  # fmt: skip
 # (With Copilot alone, as here: Coding agents' fields are made only where an agent is installed.)
+# Prepared for you: its switch in General (its tab's fields come only while it is on).
+SETTINGS_FIELDS |= {"proactive"}
 FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours"} | {
     "slack_token", "profile", "setup_notes", "report_footer",
     *(f"{kind}_{role}" for kind in ("model", "effort")
