@@ -326,12 +326,13 @@ def step_host(value: object) -> object:
         host = urlsplit(host).hostname or ""
     if not host or not HOST.fullmatch(host) or len(host) > 253:
         raise ValueError(
-            f"Hosts its fixes may reach: {value} is not a host name (like registry.npmjs.org)."
+            f"Other hosts fixes may download from: {value} is not a host name (like "
+            "registry.npmjs.org)."
         )
     if github_host(host):
         raise ValueError(
-            f"Hosts its fixes may reach: {host} is GitHub's. Fixes are prepared without GitHub; "
-            "Chief of Staff publishes what you approve."
+            f"Other hosts fixes may download from: {host} is GitHub's. Fixes are prepared "
+            "without GitHub; Chief of Staff publishes what you approve."
         )
     return host
 

@@ -4479,9 +4479,9 @@ def operation_denial(operation: dict, argv: list[str]) -> str | None:
             return "refused: not a plain merge"
         url = f"https://github.com/{operation.get('repo')}/pull/{int(operation.get('number', 0))}"
         if words[3] != url or words[4] not in MERGE_METHODS or words[5] != "--match-head-commit":
-            return "refused: a merge is of this PR, matched to its head"
+            return "refused: a merge is of this PR, matched to its latest commit"
         if not FULL_SHA.fullmatch(words[6]) or words[6] != operation.get("head"):
-            return "refused: the merge must match the accepted head"
+            return "refused: the merge must be of the commit you accepted"
         return None
     if kind == "rerun":
         if (
@@ -4515,7 +4515,7 @@ def push_denial(operation: dict, words: list[str]) -> str | None:
     repo, ref = str(operation.get("head_repo") or ""), str(operation.get("ref") or "")
     lease, commit = str(operation.get("lease") or ""), str(operation.get("commit") or "")
     if not (GITHUB_NAME.fullmatch(repo) and REF_NAME.fullmatch(ref)):
-        return "refused: the head repository or branch is not known"
+        return "refused: the PR's repository or branch is not known"
     if ref in DEFAULT_BRANCHES or ref == operation.get("default_branch"):
         return f"refused: {ref} is the repository's default branch"
     if operation.get("protected") is not False:
@@ -4525,7 +4525,7 @@ def push_denial(operation: dict, words: list[str]) -> str | None:
             else "refused: protection unknown (push it yourself)"
         )
     if not (FULL_SHA.fullmatch(lease) and FULL_SHA.fullmatch(commit)) or lease == commit:
-        return "refused: a push needs the planned head and a new commit, by their full SHAs"
+        return "refused: a push needs the PR's planned commit and a new one, by their full SHAs"
     if "push" not in words:
         return "refused: not a push"
     at = words.index("push")
@@ -4539,5 +4539,5 @@ def push_denial(operation: dict, words: list[str]) -> str | None:
         f"{commit}:refs/heads/{ref}",
     ]
     if after != expected:
-        return "refused: a push is one commit, leased, to the head repository's branch"
+        return "refused: a push is one commit, leased, to the PR's own branch"
     return None
