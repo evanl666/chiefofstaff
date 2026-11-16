@@ -1018,6 +1018,97 @@ async def agents_views(runtime, browser, quality: Quality):
     )
 
 
+# On Home with worker PRs, what today's rows were made with (a PR's receipt link, 18 px tall)
+# and Artifacts' known findings (KNOWN_ROW_FINDINGS, its 10 px kind label among the sizes): not
+# Prepared for you's; anything else found there fails.
+KNOWN_HOME_FINDINGS = re.compile(
+    rf"{KNOWN_ROW_FINDINGS.pattern}|^a\.receipt\.pr\S* .* is 18px tall$"
+    r"|^4 font sizes: .*10px \(span\.a-kind \"PR\"\)$"
+)
+
+
+async def shepherd_views(runtime, browser, quality: Quality):
+    """Prepared for you (shepherd.py): Home with its section (three rows, then All found), a
+    worker PR's row with a fix ready (its line, Review fix), one paused, one that can't run
+    steps here; the fix's review (checked on frozen commits, its diff); the switch in Settings →
+    General and its tab; 800 to 1440 px, light and dark (browser-shots/shepherd/)."""
+    from shepherd_world import seed_page
+
+    folder = SHOTS / "shepherd"
+    folder.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cos-shepherd-") as root:
+        seeded = await seed_page(runtime, Path(root))
+        for scheme in ("light", "dark"):
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
+            )
+            page = await context.new_page()
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            prepared = page.locator("#prepared")
+            await expect(prepared.locator(".prepared-row")).to_have_count(3, timeout=10000)
+            await expect(prepared.locator(".prepared-foot button")).to_have_text(
+                "1 more · All found…"
+            )
+            row = page.locator("#needs .card.task", has_text="Fix the login timeout")
+            await expect(row.get_by_role("button", name="Review fix")).to_be_visible()
+            for width in WIDTHS:
+                await page.set_viewport_size({"width": width, "height": 900})
+                if width < 1100:
+                    await page.locator("#home-tabs [data-tab=needs]").click()
+                await page.wait_for_timeout(150)
+                name = f"home-{width}-{scheme}"
+                await page.screenshot(path=folder / f"{name}.png")
+                await quality.check(page, f"shepherd {name}", known=KNOWN_HOME_FINDINGS)
+            await quality.contrast(page, f"shepherd home {scheme}")
+            await page.set_viewport_size({"width": 1280, "height": 900})
+            await page.locator("#needs").screenshot(path=folder / f"needs-1280-{scheme}.png")
+            await prepared.screenshot(path=folder / f"prepared-1280-{scheme}.png")
+            await prepared.locator(".prepared-foot button").click()
+            await expect(prepared.locator(".prepared-row.found")).to_have_count(6)
+            await prepared.scroll_into_view_if_needed()
+            await page.screenshot(path=folder / f"all-found-1280-{scheme}.png")
+            await quality.check(page, "shepherd all found", known=KNOWN_HOME_FINDINGS)
+            await prepared.get_by_role("button", name="Done").click()
+            await row.get_by_role("button", name="Review fix").click()
+            dialog = page.locator(".plan-dialog")
+            await expect(dialog.locator(".plan-evidence")).to_contain_text("test_timeout")
+            for width in (800, 1280):
+                await page.set_viewport_size({"width": width, "height": 900})
+                await page.wait_for_timeout(150)
+                await page.screenshot(path=folder / f"plan-{width}-{scheme}.png")
+                await quality.check(page, f"shepherd plan {width} {scheme}", ".plan-dialog")
+            await quality.contrast(page, f"shepherd plan {scheme}", ".plan-dialog")
+            await dialog.get_by_role("button", name="Close").click()
+            await page.set_viewport_size({"width": 1280, "height": 900})
+            await row.locator(".more-button").click()
+            menu = row.locator(".menu")
+            await expect(menu).to_be_visible()
+            for item in ("Stop keeping it moving", "Merge when ready", "What it did"):
+                await expect(menu.get_by_role("menuitem", name=item)).to_be_visible()
+            await page.wait_for_timeout(150)
+            await page.screenshot(path=folder / f"row-menu-1280-{scheme}.png")
+            await quality.check(page, f"shepherd row menu {scheme}", "#needs", KNOWN_HOME_FINDINGS)
+            await page.keyboard.press("Escape")
+            await page.locator("#settings-button").click()
+            await page.locator("#settings-tabs [data-tab=general]").click()
+            await page.screenshot(path=folder / f"settings-general-1280-{scheme}.png")
+            await page.locator("#settings-tabs [data-tab=proactive]").click()
+            for width in (800, 1280):
+                await page.set_viewport_size({"width": width, "height": 900})
+                await page.wait_for_timeout(100)
+                await page.screenshot(path=folder / f"settings-tab-{width}-{scheme}.png")
+                await quality.check(page, f"shepherd settings {width} {scheme}", "#settings-dialog")
+                await page.locator("#settings-pane .repo-list").scroll_into_view_if_needed()
+                await page.screenshot(path=folder / f"settings-repos-{width}-{scheme}.png")
+                await quality.check(page, f"shepherd repos {width} {scheme}", "#settings-dialog")
+            await quality.contrast(page, f"shepherd settings {scheme}", "#settings-dialog")
+            await page.locator("#settings-cancel").click()
+            await context.close()
+        assert seeded["step"]
+    log("Prepared for you: Home, a fix's review, its Settings tab (browser-shots/shepherd/)")
+
+
 async def main():
     from chiefofstaff import machine
 
@@ -1057,19 +1148,23 @@ async def main():
         quality = Quality()
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
-            await run(runtime, seeded, browser, quality, phase)
-            log("Home, a worker, Settings and Usage: 800 to 1440 px, light and dark")
-            await cards(runtime, seeded, browser, quality, phase)
-            log("every kind of card that needs the owner")
-            await others(runtime, holder["client"], browser, quality)
-            await send_views(runtime, browser, quality)
-            await runs_views(runtime, browser, quality)
-            log("runs nothing told of for a day, a task's runs under its PR (qa-e41/)")
-            await agents_views(runtime, browser, quality)
-            await life_views(runtime, browser, quality)
-            log(
-                "a task's life: its cards, a failed task out of Needs you, failing scans (qa7-life/)"
-            )
+            # `UI_QUALITY_ONLY=shepherd`: only Prepared for you's views.
+            if os.environ.get("UI_QUALITY_ONLY") != "shepherd":
+                await run(runtime, seeded, browser, quality, phase)
+                log("Home, a worker, Settings and Usage: 800 to 1440 px, light and dark")
+                await cards(runtime, seeded, browser, quality, phase)
+                log("every kind of card that needs the owner")
+                await others(runtime, holder["client"], browser, quality)
+                await send_views(runtime, browser, quality)
+                await runs_views(runtime, browser, quality)
+                log("runs nothing told of for a day, a task's runs under its PR (qa-e41/)")
+                await agents_views(runtime, browser, quality)
+                await life_views(runtime, browser, quality)
+                log(
+                    "a task's life: its cards, a failed task out of Needs you, failing scans "
+                    "(qa7-life/)"
+                )
+            await shepherd_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True
         await serving

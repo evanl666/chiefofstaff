@@ -9,6 +9,7 @@ import { renderHeader, scrollToBottom, select } from "./session.js";
 import { draftCard, draftKey, relabel, uncertainCard } from "./drafts.js";
 import { expandTask, followUpItem, inTerminal, ownTasks, questionParts, taskItem, terminalItem, unfoldTask } from "./tasks.js";
 import { artifactItems } from "./artifacts.js";
+import { preparedItems } from "./prepared.js";
 import { duck } from "./mascot.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
 // Needs you (waiting for an answer, failed, a result to accept, news, no progress); a
@@ -259,6 +260,15 @@ function renderPanel() {
   state.needKeys = new Set(needKeys);
   reconcile(needs.querySelector(".items"), steady(needs, needItems), editing);
 
+  // Prepared for you (shepherd.py): what was found on the owner's other PRs, between Needs you
+  // and Running; there only while it holds something.
+  const found = preparedItems();
+  let prepared = document.getElementById("prepared");
+  if (found.length) {
+    prepared ||= fold("prepared", "Prepared for you", { help: "Your other open PRs that need something: hand one to a worker, which prepares its fix for your approval" });
+    fill(prepared, found, editing, { words: "" });
+  } else prepared = null;
+
   // The four parts below Needs you; on a narrow window, the Tasks tab.
   const taskBox = document.getElementById("tasks") || el("section", { id: "tasks", "aria-label": "Tasks" });
   taskBox.querySelector(":scope > h2, :scope > .empty-hint")?.remove();
@@ -285,7 +295,8 @@ function renderPanel() {
   // In this order, whatever an older page had.
   const order = [running, monitoring, recent, made];
   if (order.some((node, index) => taskBox.children[index] !== node) || taskBox.children.length !== order.length) taskBox.replaceChildren(...order);
-  if (panel.children[0] !== needs || panel.children[1] !== taskBox) panel.replaceChildren(needs, taskBox);
+  const parts = [needs, prepared, taskBox].filter(Boolean);
+  if (parts.some((node, index) => panel.children[index] !== node) || panel.children.length !== parts.length) panel.replaceChildren(...parts);
   const active = runningItems.length + sections.monitoring.length;
   const tabs = document.querySelectorAll("#home-tabs .count");
   tabs[0].textContent = needCount ? String(needCount) : "";

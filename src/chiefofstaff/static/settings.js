@@ -162,6 +162,8 @@ export function bindSettings() {
     }
   });
   $("#send-on").addEventListener("click", () => saveSend(true));
+  // Prepared for you: its tab is there while its switch is on (before it is saved, to set it up).
+  $("#settings-form").proactive.addEventListener("change", renderProactiveTab);
   // Other coding agents: the last line of Models unfolds their group, which only then looks.
   $("#agents-open").addEventListener("click", () => {
     $("#agents-open").parentElement.hidden = true;
@@ -359,6 +361,8 @@ export function fillSettings() {
   form.mac_notifications.checked = settings.mac_notifications;
   form.other_sessions.checked = Boolean(settings.other_sessions);
   form.update_notice.checked = settings.update_notice !== false;
+  form.proactive.checked = Boolean(settings.proactive);
+  renderProactiveTab();
   // When none of them can say where it stands, its line says why.
   const why = settings.other_sessions ? state.othersWhy : "";
   if (why) form.other_sessions.parentElement.title = why;
@@ -857,6 +861,8 @@ export function settingsBody() {
     mac_notifications: form.mac_notifications.checked,
     other_sessions: form.other_sessions.checked,
     update_notice: form.update_notice.checked,
+    proactive: form.proactive.checked,
+    ...proactiveFields(),
     watchdog_enabled: form.watchdog_enabled.checked,
     slack_enabled: form.slack_enabled.checked,
     slack_poll_seconds: number("slack_poll_seconds"),
@@ -1201,4 +1207,87 @@ function showSlackToken() {
   $("#slack-status").textContent = slackStatusText();
   $("#slack-token-save").closest(".row").hidden = env;
   $("#slack-token-remove").hidden = env || !slack.token_saved;
+}
+
+// Prepared for you (shepherd.py): its one tab, only while its switch in General is on. What it
+// looks at, each kind's level, the day's credits for work nobody clicked, the hosts its steps may
+// reach, and per repository whether replies say they were drafted with an AI assistant.
+const LEVELS = [["off", "Off"], ["suggest", "Suggest"], ["prepare", "Prepare"]];
+const KIND_NAMES = [["fix-ci", "CI failures"], ["address-review", "Review comments"]];
+function renderProactiveTab() {
+  const form = $("#settings-form");
+  const on = form.proactive.checked;
+  let button = document.querySelector('#settings-tabs button[data-tab="proactive"]');
+  const section = document.querySelector('#settings-pane .tab[data-tab="proactive"]');
+  if (!on) {
+    const showing = section && !section.hidden;
+    button?.remove();
+    section?.remove();
+    if (showing) showSettingsTab("general");
+    return;
+  }
+  const settings = state.snapshot.settings;
+  if (!button) {
+    button = el("button", { type: "button", role: "tab", "data-tab": "proactive", text: "Prepared for you" });
+    button.addEventListener("click", () => showSettingsTab("proactive"));
+    $("#settings-tabs").insertBefore(button, document.querySelector('#settings-tabs button[data-tab="you"]'));
+  }
+  const kept = state.snapshot.shepherd || {};
+  const levels = settings.proactive_levels || {};
+  const level = (kind, name) =>
+    el("label", {}, el("span", { text: name }), el("select", { name: `level_${kind}` }, ...LEVELS.map(([value, text]) => el("option", { value, text, selected: (levels[kind] || "suggest") === value }))));
+  const spent = kept.spent && (kept.spent.settled || kept.spent.reserved || kept.spent.clicked)
+    ? `Today: ${round(kept.spent.settled + kept.spent.reserved)} of ${settings.proactive_budget || 0} for work nobody clicked${kept.spent.clicked ? `, ${round(kept.spent.clicked)} for what you clicked` : ""}.`
+    : "";
+  const repos = (kept.repositories || []).map((repo) => {
+    const choice = (settings.proactive_repos || {})[repo] || {};
+    return el(
+      "li",
+      { class: "repo-row", "data-repo": repo },
+      el("span", { class: "name", text: repo }),
+      el("label", { class: "inline" }, el("span", { text: "Replies say they were drafted with AI" }), el("select", { class: "disclosure", "aria-label": `${repo}: replies say they were drafted with an AI assistant` }, ...[["", "Ask me"], ["yes", "Yes"], ["no", "No"]].map(([value, text]) => el("option", { value, text, selected: (choice.disclosure || "") === value })))),
+      el("label", { class: "check", "data-tip": "Off: its tests can't reach a database or server running on this computer" }, el("input", { type: "checkbox", class: "localhost", checked: Boolean(choice.localhost) }), " Its tests may use this computer's servers"),
+    );
+  });
+  const content = [
+    el("p", { class: "hint", text: "When CI fails or reviewers comment on your PRs, Chief of Staff prepares a fix or replies in the PR's worker, checks them, and waits for your approval. Nothing is pushed or posted until you approve it." }),
+    kept.steps_here ? el("small", { class: "error-hint", text: kept.steps_here }) : null,
+    el("h4", { text: "Where" }),
+    el("label", { class: "check" }, el("input", { name: "proactive_worker_prs", type: "checkbox", checked: settings.proactive_worker_prs !== false }), " PRs my workers made"),
+    el("label", { class: "check" }, el("input", { name: "proactive_my_prs", type: "checkbox", checked: settings.proactive_my_prs !== false }), " My other open PRs in my repositories (under Prepared for you on Home)"),
+    el("h4", { text: "What it does" }),
+    el("div", { class: "row" }, ...KIND_NAMES.map(([kind, name]) => level(kind, name))),
+    el("small", { text: "Suggest: it offers Fix it. Prepare: it prepares the fix or replies right away, within the day's credits. Either way, you approve what is published." }),
+    el("label", { class: "short" }, el("span", { text: "Credits a day it may spend unasked" }), el("input", { name: "proactive_budget", type: "number", min: "0", max: "10000", step: "1", placeholder: "0 = only when you ask", value: settings.proactive_budget ? String(settings.proactive_budget) : "" })),
+    spent ? el("small", { text: spent }) : null,
+    el("label", {}, el("span", { text: "Hosts its fixes may reach" }), el("textarea", { name: "step_hosts", rows: 2, placeholder: "registry.example.com — one per line" }), el("small", { text: "Package registries your projects install from, beyond the public ones (PyPI, npm, crates.io, Go). GitHub is never reachable while a fix is prepared." })),
+    repos.length ? el("h4", { text: "Repositories" }) : null,
+    repos.length ? el("ul", { class: "repo-list" }, ...repos) : null,
+  ].filter(Boolean);
+  const fresh = el("section", { class: "tab", "data-tab": "proactive", hidden: true }, ...content);
+  if (section) {
+    fresh.hidden = section.hidden;
+    section.replaceWith(fresh);
+  } else {
+    $("#settings-pane").insertBefore(fresh, document.querySelector('#settings-pane .tab[data-tab="you"]'));
+  }
+  form.step_hosts.value = (settings.step_hosts || []).join("\n");
+}
+const round = (value) => Math.round((value || 0) * 10) / 10;
+function proactiveFields() {
+  const form = $("#settings-form");
+  const settings = state.snapshot.settings;
+  if (!document.querySelector('#settings-pane .tab[data-tab="proactive"]')) return {};
+  const repos = { ...(settings.proactive_repos || {}) };
+  for (const row of document.querySelectorAll("#settings-pane .repo-row")) {
+    repos[row.dataset.repo] = { disclosure: row.querySelector(".disclosure").value, localhost: row.querySelector(".localhost").checked };
+  }
+  return {
+    proactive_worker_prs: form.proactive_worker_prs.checked,
+    proactive_my_prs: form.proactive_my_prs.checked,
+    proactive_levels: Object.fromEntries(KIND_NAMES.map(([kind]) => [kind, form[`level_${kind}`].value])),
+    proactive_budget: numberField(form.proactive_budget, settings.proactive_budget || 0),
+    step_hosts: lines(form.step_hosts.value),
+    proactive_repos: repos,
+  };
 }

@@ -226,6 +226,10 @@ function handleEvent({ type, data }) {
     applyDraft(data);
   } else if (type === "toast") {
     notify(data);
+  } else if (type === "prepared") {
+    // Prepared for you (shepherd.py): what it found, and whether steps can run here.
+    if (state.snapshot) state.snapshot.shepherd = data;
+    scheduleHome();
   } else if (type === "state") {
     scheduleReload();
   }

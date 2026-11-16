@@ -10,6 +10,7 @@ import { renderSidebar } from "./sidebar.js";
 import { refreshChips, select } from "./session.js";
 import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
 import { showChanges } from "./diff.js";
+import { keptButton, keptLine, keptMenu } from "./prepared.js";
 // Chief of Staff's own helpers (learning how the owner works, checks, the profile): their
 // results come as cards to approve; the work itself is not the owner's.
 const HELPER_TITLES = new Set(["Learn how you work", "Learn checks from mistakes", "Distill owner profile"]);
@@ -420,6 +421,21 @@ function taskCard(task, phase = phaseOf(task)) {
   // The row leaves its place at once (`moves`); the task's new state puts it where it goes.
   // One request at a time: a second click (or Enter) while it is out does nothing.
   const act = (path, payload, done, moves = true, sends = false) => once(key, null, () => send(path, payload, done, moves, sends));
+  // Prepared for you's actions on its PR (they answer with no task: the state is read again).
+  const keptAct = (run, done) =>
+    once(key, null, async () => {
+      for (const button of actions.querySelectorAll("button")) button.disabled = true;
+      error.textContent = "";
+      try {
+        await run();
+        if (done) toast(done);
+        await loadState();
+      } catch (failure) {
+        error.textContent = failure.message;
+        if (!error.isConnected) toast(failure.message, "error");
+        for (const button of actions.querySelectorAll("button")) button.disabled = false;
+      }
+    });
   async function send(path, payload, done, moves, sends) {
     for (const button of actions.querySelectorAll("button")) button.disabled = true;
     error.textContent = "";
@@ -691,6 +707,17 @@ function taskCard(task, phase = phaseOf(task)) {
     } else {
       more = [named, worker];
     }
+    // Prepared for you (shepherd.py): the PR it keeps moving has its own one action (Fix it,
+    // Review fix, Resume, Look); what the row offered before stays at hand, quietly.
+    const kept = ["review", "done"].includes(task.status) ? keptButton(task, keptAct) : null;
+    if (kept) {
+      if (main) {
+        main.className = "text";
+        shown = [...shown, main];
+      }
+      main = kept;
+    }
+    more = [...keptMenu(task, keptAct), ...more];
     // Runs its worker said go on that nothing told of for a day: the owner says what became of
     // them (ended, or no longer to follow), in its menu, whatever the task's state (bug E57);
     // on its row when that is all it waits on.
@@ -721,7 +748,7 @@ function taskBody(task, phase = {}) {
     // Monitoring: what it waits on; under Needs you for its PR: what is wrong there.
     const waits = phase.section === "monitoring" || [...PR_TO_FIX, "runs-unknown"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
-    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
+    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, keptLine(task), found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
   if (task.status === "review") {
@@ -729,7 +756,7 @@ function taskBody(task, phase = {}) {
     const first = gist(task.result || task.progress || "");
     // Under Needs you for its PR: what is wrong there.
     const waits = phase.section === "monitoring" || PR_TO_FIX.includes(phase.marker) ? waitLine(task, worker, phase) : null;
-    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits].filter(Boolean);
+    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, keptLine(task)].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
   const text = task.progress || (task.blocked ? "It waits for a task that ended without finishing." : "");
