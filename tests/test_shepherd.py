@@ -560,6 +560,11 @@ async def test_do_it_their_way_prepares_a_new_plan(world):
     assert runtime.shepherd.control.step(step["id"])["state"] == "dismissed"
     assert redone["signal"]["their_way"] == ["502"] and redone["clicked"] == 1
     assert not world.github.writes
+    # Its worker is told which comments to do the reviewer's way.
+    assert runtime.shepherd.control.step(redone["id"])["state"] == "running"
+    sent = world.session().sent[-1]
+    assert f'step="{redone["id"]}"' in sent
+    assert "The owner chose the reviewer's way on comments 502" in sent
 
 
 async def test_a_comment_by_someone_without_write_permission_is_listed_not_addressed(world):
