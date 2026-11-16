@@ -325,8 +325,8 @@ and each start. If one changed (a worker wrote it, a merge brought a teammate's 
 edited your local settings), the worker starts no turn there and its timeline says what
 changed: "Copilot settings in this folder changed (added .mcp.json); Chief of Staff won't start
 the worker there until you say to use them." If the change is yours or you trust it, click
-**Use these settings** on that line: the worker goes on with what waited for it (one stopped
-mid-turn waits for your *Go on*). Workers don't edit those files. The first time workers use
+**Use these settings** on that line: the worker goes on with what waited for it, and one the
+change stopped mid-task goes on with that task too. Workers don't edit those files. The first time workers use
 one of your checkouts, their timeline names the settings there they use.
 
 With the **sandbox** on (Settings; always for workers that read Slack), workers' shell commands can write only to their

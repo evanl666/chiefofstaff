@@ -111,7 +111,7 @@ from .tasks import (
 from .tasks import migrate as migrate_tasks
 from .tools import Tools
 from .watchdog import WatchConfig, Watchdog
-from .workers import SETTINGS_WAIT, Workers
+from .workers import SETTINGS_STOP, SETTINGS_WAIT, Workers
 from .workspaces import (
     BRANCH_PREFIX,
     Workspaces,
@@ -3050,8 +3050,8 @@ class Runtime:
 
     async def settings_stop(self, session_id: str):
         """A Copilot worker whose folder's settings changed: no turn starts until the owner says
-        to use them (or they are as they were). One at work is stopped (Go on, after); one that
-        is not is let go of, and what it was sent and never saw waits for it."""
+        to use them (or they are as they were). One at work is stopped (their word goes on with
+        it); one that is not is let go of, and what it was sent and never saw waits for it."""
         self.settings_held.add(session_id)
         row = self.store.session(session_id)
         if not self.states.is_live(session_id):
@@ -3060,7 +3060,7 @@ class Runtime:
                 self.update_session(session_id, status="idle", activity="")
             return
         if row["status"] == "working" or self.states[session_id].held:
-            await self.workers.interrupt(session_id, by="Chief of Staff", notice="Stopped.")
+            await self.workers.interrupt(session_id, by=SETTINGS_STOP, notice="Stopped.")
         else:
             self.delivery.unsee(session_id)
         await self.detach(session_id)
@@ -3135,9 +3135,16 @@ class Runtime:
         return said
 
     async def settings_go_on(self, row: dict):
-        """What waited for a worker while its folder's settings were changed: news held for it,
-        then what it was sent and never received."""
-        await self.workers.closed_elsewhere(row)
+        """What waited for a worker while its folder's settings were changed: the task they
+        stopped it at goes on (as its Go on does), news held for it goes to it, then what it
+        was sent and never received."""
+        for task in self.tasks.for_session(row["id"]):
+            if (
+                task["status"] == "waiting"
+                and self.store.get(f"stopped:{task['id']}") == SETTINGS_STOP
+            ):
+                await self.task_actions.follow_up(task["id"], "Go on where you stopped.")
+        await self.workers.closed_elsewhere(self.store.session(row["id"]))
         await self.delivery.resume(row["id"])
 
     def trust(self, row: dict) -> dict:

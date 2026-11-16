@@ -513,12 +513,14 @@ async def test_agent_settings_a_live_worker_changes_stop_it_before_its_next_turn
     tmp_path, git_repo, monkeypatch
 ):
     """Copilot starts a new MCP server of the repository's at its session's next turn: that
-    turn is not sent; the worker is let go of, saying why."""
+    turn is not sent; the worker is stopped and let go of, saying why. The owner's "Use these
+    settings" goes on with it (no Go on to click after)."""
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
+        task = task_of(harness, worker)
         session = harness.session(worker)
         sent = len(session.sent)
         plant(cwd, ".github/mcp.json")
@@ -527,6 +529,15 @@ async def test_agent_settings_a_live_worker_changes_stop_it_before_its_next_turn
         assert len(session.sent) == sent, "no turn"
         assert session.disconnected and not runtime.states.is_live(worker)
         assert unsent(harness, worker) == ["Next"]
+        assert harness.store.get(f"stopped:{task}") == workers_module.SETTINGS_STOP
+        await use_them(runtime, harness, worker)
+        assert runtime.states.is_live(worker)
+        assert harness.store.session(worker)["status"] == "working"
+        assert runtime.tasks.get(task)["status"] == "running"
+        assert not harness.store.get(f"stopped:{task}")
+        went = harness.session(worker).sent[-1]
+        assert "Go on where you stopped." in went and "Next" in went, "what waited goes too"
+        assert unsent(harness, worker) == []
     finally:
         await runtime.stop()
 

@@ -33,6 +33,9 @@ RELEASE_IDLE = float(os.environ.get("CHIEFOFSTAFF_RELEASE_IDLE_MINUTES", "10")) 
 MEMORY_WAIT = "waiting for memory"
 # A worker whose folder's agent settings changed: it starts once the owner says to use them.
 SETTINGS_WAIT = "waiting for you: its folder's settings changed"
+# Who stopped a task its worker was at when they changed ("Stopped by …"): the owner's "Use
+# these settings" goes on with it.
+SETTINGS_STOP = "Chief of Staff, for its folder's settings"
 # A final answer at least this long, left in a worker's chat without report(), is its report.
 FILED_ANSWER_CHARS = 80
 # An answer in its chat this long, and twice its "done" report or more, completes that report.
