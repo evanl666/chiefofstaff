@@ -3,6 +3,7 @@ it may spend, what stops it, where it can't run, what pauses a PR, a push the le
 what a crash leaves, the Router's handing over, and the owner's other PRs found and handed."""
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from test_shepherd import claimed, fixed, said, step_result
 
 from chiefofstaff import publish
 from chiefofstaff.publish import approve, reconcile_all
+from chiefofstaff.shepherd import PROBE_RETRY_SECONDS
 
 
 @pytest.fixture
@@ -241,7 +243,9 @@ async def test_until_its_safety_check_passes_an_attempt_waits(world, monkeypatch
 
     async def probe(runtime):
         probed.append(True)
-        return {"passed": False, "why": "its shell reached GitHub", "at": "now"}
+        passed = len(probed) > 1
+        return {"passed": passed, "why": "" if passed else "its shell reached GitHub",
+                "at": "now", "checked": time.time()}  # fmt: skip
 
     monkeypatch.setattr("chiefofstaff.step_probe.probe", probe)
     await runtime.shepherd.fix_it(TARGET)
@@ -253,6 +257,14 @@ async def test_until_its_safety_check_passes_an_attempt_waits(world, monkeypatch
     [step] = runtime.shepherd.control.steps(TARGET)
     assert step["state"] == "refused"
     assert step["why"] == f"Copilot {TESTED_CLI} failed the safety check: its shell reached GitHub"
+    # Checked again only once its failure is PROBE_RETRY_SECONDS old: then it passes.
+    assert await runtime.shepherd.probe_refusal() == step["why"] and len(probed) == 1
+    key = f"stepprobe:{TESTED_CLI}"
+    old = json.loads(runtime.store.get(key))
+    runtime.store.set(key, json.dumps({**old, "checked": time.time() - PROBE_RETRY_SECONDS}))
+    assert await runtime.shepherd.probe_refusal() == f"Copilot {TESTED_CLI} is being checked first"
+    await settle(runtime)
+    assert len(probed) == 2 and await runtime.shepherd.probe_refusal() == ""
 
 
 # What pauses a PR, and what stops trying.
@@ -594,6 +606,13 @@ def test_a_fix_reviewed_and_approved_through_its_routes(served, tmp_path):
         ({"no install"}, "an install from pypi.org did not work"),
         ({"mcp tool"}, "the tools probe-user-ping got through"),
         ({"no listing"}, "listing its tools (no such method) got through"),
+        (
+            {"unsandboxed"},
+            "git push over HTTPS (unsandboxed), git push over SSH (unsandboxed), gh api -X POST "
+            "(unsandboxed), curl -X POST to api.github.com (unsandboxed), a socket to "
+            "github.com:443 (unsandboxed), a socket to github.com:22 (unsandboxed), reading gh's "
+            "hosts.yml (unsandboxed) got through",
+        ),
     ],
 )
 async def test_the_probe_passes_only_when_every_forbidden_action_fails(harness, through, why):
@@ -611,18 +630,22 @@ async def test_the_probe_passes_only_when_every_forbidden_action_fails(harness, 
         resumed.update(options)
 
         async def execute(request, **options):
+            # As Copilot answers: a mapping, the sandbox said in its telemetry.
             what = request.arguments.get("description", request.name)
             if request.name == "tell_session":
-                kind = "success" if "tell_session" in through else "failure"
-                return SimpleNamespace(
-                    text_result_for_llm="", result_type=SimpleNamespace(value=kind)
-                )
+                ok = "tell_session" in through
+                return {
+                    "textResultForLlm": "" if ok else "Tool 'tell_session' does not exist.",
+                    "resultType": "success" if ok else "failure",
+                }
             allowed = what == step_probe.ALLOWED[0] and "no install" not in through
             reached = what in through or allowed
-            return SimpleNamespace(
-                text_result_for_llm=step_probe.REACHED if reached else "Operation not permitted",
-                result_type=SimpleNamespace(value="success"),
-            )
+            applied = "unsandboxed" not in through
+            return {
+                "textResultForLlm": step_probe.REACHED if reached else "Operation not permitted",
+                "resultType": "success",
+                "toolTelemetry": {"properties": {"sandboxApplied": str(applied).lower()}},
+            }
 
         async def validate(**options):
             pass
