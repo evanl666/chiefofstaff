@@ -460,7 +460,9 @@ class Shepherd(Keeping, Steps):
     async def settings_changed(self, old: Any, new: Any) -> list[str]:
         """On: its tables (once), and a first look. Off or paused: drained (nothing it began goes
         on; nothing it prepared waits; what was dispatching is reconciled). S1 leaves nothing on
-        GitHub to undo, so off completes at once."""
+        GitHub to undo, so off completes at once. Off before and after (a pause): nothing."""
+        if not (old.proactive or new.proactive):
+            return []
         was = old.proactive and not old.paused
         now_on = new.proactive and not new.paused
         if now_on and not was:
