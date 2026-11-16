@@ -1734,10 +1734,14 @@ class Runtime:
         ]
         # Repository settings Copilot would load (hooks, MCP servers), in each of its folders and
         # those above them up to their checkout's top: its commands never write them.
+        gated: dict[str, None] = {}
         for folder in map(Path, self.workspaces.writes(row)):
             top = nearest_top(folder) or folder
             places = [folder, *[p for p in folder.parents if p.is_relative_to(top)]]
-            readonly += [str(place / name) for place in places for name in REPOSITORY_SETTINGS]
+            gated |= dict.fromkeys(
+                str(place / name) for place in places for name in REPOSITORY_SETTINGS
+            )
+        readonly += list(gated)
         ssh = Path.home() / ".ssh"
         readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
         if agent := os.environ.get("SSH_AUTH_SOCK"):
