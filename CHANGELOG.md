@@ -188,6 +188,10 @@ questions stay listed (QA round on 0.1.45).
   is writable to a worker but workers' caches; the other caches Copilot opened (deno's,
   node-gyp's, Electron's, virtualenv's, NuGet's, ccache's, sccache's, gh's…) are workers' own
   too. Every tool measured works as before, as fast.
+- **Sandboxed workers run quick read-only commands together.** Each command starts in about
+  0.3 s in Copilot's sandbox (its credential proxy starts anew for each); they are asked to join
+  quick checks in one call (`git status --short && git log -3 --oneline && ls`). Measured: a
+  turn of five such checks took 6.5 s instead of 8.2 s, with the same answers.
 - **No sandboxed worker can change Chief of Staff's own code.** Its environment, wherever `uvx`
   or `uv tool install` put it (`uvx` keeps it in uv's cache, which Copilot's sandbox opened
   read-write to commands in a Python project), the Python it runs on, every folder it imports

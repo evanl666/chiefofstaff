@@ -730,6 +730,13 @@ def worker_context(
             if local
             else "Localhost is closed to you in the sandbox."
         )
+        # Measured: a sandboxed command starts in about 0.3 s (Copilot's credential proxy), and
+        # five quick checks in one call cut a turn by a fifth, as correct.
+        lines.append(
+            "Each shell command takes about 0.3 s to start in this sandbox: run quick read-only "
+            "commands together in one call (for example `git status --short && git log -3 "
+            "--oneline && ls`) rather than one call each."
+        )
         if caches:
             lines.append(
                 "Your tools keep their caches in a folder of workers' own, set in your shell's "

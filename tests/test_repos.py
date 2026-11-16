@@ -322,6 +322,8 @@ async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
     assert policy.allowed_hosts == ()
     prompt = worker.options["system_message"]["content"]
     assert "OS sandbox" in prompt and "without -u" in prompt
+    batch = "run quick read-only commands together in one call"
+    assert batch in prompt, "each sandboxed command starts slowly (Copilot's credential proxy)"
 
     slack = await spawn(runtime, harness.router_id, title="Reply", instructions="r", slack=True)
     assert harness.session(slack["session_id"]).options["sandbox_config"].allowed_hosts == (
@@ -338,6 +340,7 @@ async def test_workers_run_sandboxed_in_their_own_folders(tmp_path, git_repo):
     options = harness.session(loose["session_id"]).options
     assert "sandbox_config" not in options
     assert "there is no sandbox" in options["system_message"]["content"]
+    assert batch not in options["system_message"]["content"], "unsandboxed, commands start fast"
 
 
 async def test_workers_load_what_the_owners_own_sessions_load(tmp_path, git_repo, monkeypatch):
