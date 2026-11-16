@@ -1043,8 +1043,15 @@ async def test_schedules_claude_did_not_delete_keep_a_worker_from_a_terminal(
         )
         assert any("Claude still lists 1 of them." in t for _, t in harness.kinds(worker))
         assert len(kept_crons(worker)) == 1
-        with pytest.raises(ValueError, match="still in its Claude conversation"):
+        # Handed to a terminal: why not, and what lets it.
+        with pytest.raises(ValueError, match="Deleting them there failed") as refused:
             await runtime.terminal_command(worker)
+        assert str(refused.value) == (
+            "Its schedules ended with its task but are still in its Claude conversation, where "
+            "they would run in your terminal. Deleting them there failed: Claude still lists 1 "
+            "of them. Chief of Staff asks it again as you try again; or tell it in its chat to "
+            "delete its schedules (CronDelete), then try again."
+        )
     finally:
         await runtime.stop()
 

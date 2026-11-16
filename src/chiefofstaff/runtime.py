@@ -2207,9 +2207,17 @@ class Runtime:
             )
         if self.store.get(f"schedulesdelete:{session_id}"):
             # Ended with its task, but still in its Claude conversation, which would bring them
-            # back in the terminal: deleted there first (delete_dropped_schedules).
+            # back in the terminal: deleted there first (delete_dropped_schedules). Why that did
+            # not happen yet, and what lets it, if it was tried and failed.
+            failed = json.loads(self.store.get(f"schedulesfailed:{session_id}") or "{}")
             if session_id not in self.deleting_schedules:
                 self.background(self.delete_dropped_schedules(session_id))
+            if failed.get("why"):
+                raise ValueError(
+                    "Its schedules ended with its task but are still in its Claude "
+                    f"conversation, where they would run in your terminal. Deleting them there "
+                    f"failed: {failed['why']} {failed['next']}"
+                )
             raise ValueError(
                 "Its schedules ended with its task but are still in its Claude conversation, "
                 "where they would run in your terminal: Chief of Staff is deleting them. Try "
@@ -3504,6 +3512,15 @@ class Runtime:
             return "Chief of Staff is deleting them now."
         self.deleting_schedules.add(session_id)
         opened, why = False, ""
+        # What lets it happen, by why it did not: its work done; Claude able to run it; or
+        # asking it again (or the owner telling it).
+        busy = "Stop it, or wait until it is done: they are deleted then."
+        unable = "They are deleted once Claude can run it again; then continue in a terminal."
+        again = (
+            "Chief of Staff asks it again as you try again; or tell it in its chat to delete its "
+            "schedules (CronDelete), then try again."
+        )
+        unblock = again
         try:
             deadline = time.monotonic() + SCHEDULES_DELETE_SECONDS
             while (row := self.store.find_session(session_id)) and not row["closed_at"]:
@@ -3513,18 +3530,25 @@ class Runtime:
                 ):
                     break
                 if time.monotonic() > deadline:
+                    unblock = busy
                     raise RuntimeError("It was still at work.")
                 await asyncio.sleep(0.2)
             if not row or row["closed_at"]:
                 return "It is closed."
             opened = not self.states.is_live(session_id)
+            unblock = unable
             session = await self.session_for(session_id)
             deleting: Any = getattr(session, "delete_schedules", None)
             if deleting is None:
                 self.store.delete(key)  # None of its agent's to delete.
                 return ""
             self.states[session_id].after_abort = True  # Its turn owes no report.
+            unblock = again
             why = await deleting(pending["ids"], bool(pending["loop"]), SCHEDULES_DELETE_SECONDS)
+            if why.startswith("It is at work"):
+                unblock = busy
+            elif why.startswith("Claude was not asked"):
+                unblock = unable
         except Exception as exc:
             why = describe(exc)
         finally:
@@ -3535,13 +3559,17 @@ class Runtime:
         if not (row := self.store.find_session(session_id)):
             return why
         if why:
+            self.store.set(
+                f"schedulesfailed:{session_id}", json.dumps({"why": why, "next": unblock})
+            )
             self.agent_notice(
                 row,
                 f"Its schedules are not deleted in Claude yet: {why} It is not handed to a "
-                "terminal until they are.",
+                f"terminal until they are. {unblock}",
             )
         else:
             self.store.delete(key)
+            self.store.delete(f"schedulesfailed:{session_id}")
             self.agent_notice(row, "Its schedules are deleted in Claude: none comes back.")
         return why
 
