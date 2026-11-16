@@ -553,9 +553,17 @@ async def reconcile_all(shepherd: Shepherd):
 # Merge when ready.
 
 
+# What GitHub's merge state says it waits for (after "waiting for").
+MERGE_STATES = {
+    "BEHIND": "its branch to catch up", "DIRTY": "its conflicts to be resolved",
+    "BLOCKED": "GitHub's merge rules to be met", "UNSTABLE": "checks to pass",
+    "DRAFT": "it to be marked ready for review",
+}  # fmt: skip
+
+
 async def merge_blockers(shepherd: Shepherd, claim: dict, details: dict) -> list[str]:
-    """What a PR enrolled in Merge when ready still waits for, in the row's words ([] when it
-    merges now). Every condition read fresh, each on its own."""
+    """What a PR enrolled in Merge when ready still waits for, each to follow "waiting for" in
+    the row's line ([] when it merges now). Every condition read fresh, each on its own."""
     found = []
     head = details.get("head") or ""
     accepted = (claim.get("accepted") or {}).get("sha") or ""
@@ -564,17 +572,17 @@ async def merge_blockers(shepherd: Shepherd, claim: dict, details: dict) -> list
     if head != accepted:
         chain = await approved_chain(shepherd, claim, details, accepted, head)
         if not chain:
-            found.append("Accept this commit (it isn't the one you accepted)")
+            found.append("you to accept this commit (it isn't the one you accepted)")
     if claim.get("state") == "paused":
-        found.append("Resume")
+        found.append("you to resume it")
     elif claim.get("holder_kind") != "task":
-        found.append("Look after this PR, turned on again")
+        found.append("you to look after this PR again")
     elif claim.get("state") != IDLE:
         found.append("what it's preparing")
     if details.get("draft"):
-        found.append("it is a draft")
+        found.append("it to be marked ready for review")
     if any(HOLD.search(label) for label in details.get("labels") or []):
-        found.append("a hold label")
+        found.append("its hold label to come off")
     checks = details.get("checks") or []
     if any(check["status"] != "COMPLETED" for check in checks):
         found.append("checks to finish")
@@ -591,12 +599,9 @@ async def merge_blockers(shepherd: Shepherd, claim: dict, details: dict) -> list
     if details.get("review") == "CHANGES_REQUESTED" or any(
         r["state"] == "CHANGES_REQUESTED" for r in reviews
     ):
-        found.append("the changes requested")
-    if details.get("merge_state") not in {"CLEAN", "HAS_HOOKS"}:
-        found.append({"BEHIND": "its branch to catch up", "DIRTY": "its conflicts resolved",
-                      "BLOCKED": "what GitHub says blocks it", "UNSTABLE": "checks to pass",
-                      "DRAFT": "it is a draft"}.get(details.get("merge_state") or "",
-                                                    "GitHub to say it can merge"))  # fmt: skip
+        found.append("the requested changes to be addressed")
+    if (state := details.get("merge_state") or "") not in {"CLEAN", "HAS_HOOKS"}:
+        found.append(MERGE_STATES.get(state, "GitHub to say it can merge"))
     return list(dict.fromkeys(found))
 
 
@@ -629,17 +634,20 @@ async def try_merge(shepherd: Shepherd, target: str):
     queue), then a head-matched merge, journaled once per head. GitHub refuses if the head
     moved."""
     control = shepherd.control
+
+    def waits(claim: dict, words: str):
+        """Its row says why it hasn't merged ("Merges when ready: …")."""
+        if shepherd.store.get(f"mergewhy:{target}") != words:
+            shepherd.store.set(f"mergewhy:{target}", words)
+            shepherd.publish_holder(claim)
+
     async with shepherd.lock(target):
         claim = control.claim(target)
         if not claim or not claim["merge_when_ready"] or claim["state"] != IDLE:
             return
         details = claim.get("details") or {}
         if blockers := await merge_blockers(shepherd, claim, details):
-            # Its row says what it waits for (the first two).
-            words = f"waiting for {' and '.join(blockers[:2])}"
-            if shepherd.store.get(f"mergewhy:{target}") != words:
-                shepherd.store.set(f"mergewhy:{target}", words)
-                shepherd.publish_holder(claim)
+            waits(claim, f"waiting for {' and '.join(blockers[:2])}")  # The first two.
             return
         if any(
             step["kind"] == "merge" and step["h0"] == details["head"]
@@ -651,13 +659,13 @@ async def try_merge(shepherd: Shepherd, target: str):
         protected = await github.branch_protected(details["repo"], details["base_ref"])
         rules = await github.branch_rules(details["repo"], details["base_ref"])
         if protected is None or rules is None:
-            shepherd.store.set(f"mergewhy:{target}", "the base's protection could not be read")
+            waits(claim, "its base branch's rules couldn't be read")
             return
         if any(rule.get("type") == "merge_queue" for rule in rules):
-            shepherd.store.set(f"mergewhy:{target}", "the base merges through a queue")
+            waits(claim, "its base branch merges through a queue, not supported yet")
             return
         if details.get("permission") not in {"ADMIN", "MAINTAIN", "WRITE"}:
-            shepherd.store.set(f"mergewhy:{target}", "your account can't merge it")
+            waits(claim, "your account can't merge it")
             return
         shepherd.store.delete(f"mergewhy:{target}")
         task = shepherd.runtime.tasks.find(claim["holder"])

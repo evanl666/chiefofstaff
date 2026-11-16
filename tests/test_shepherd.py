@@ -472,10 +472,19 @@ async def test_merge_when_ready_merges_exactly_the_accepted_head(world):
 
 
 @pytest.mark.parametrize(
-    "blocker",
-    ["draft", "label", "changes", "pending", "not approved", "state", "unreadable base"],
+    ("blocker", "words"),
+    [
+        ("draft", "waiting for it to be marked ready for review"),
+        ("label", "waiting for its hold label to come off"),
+        ("changes", "the requested changes to be addressed"),
+        ("pending", "waiting for checks to finish"),
+        ("not approved", "waiting for an approval of this commit"),
+        ("state", "waiting for GitHub's merge rules to be met"),
+        ("unreadable base", "its base branch's rules couldn't be read"),
+    ],
 )
-async def test_merge_when_ready_waits_for_each_condition(world, blocker):
+async def test_merge_when_ready_waits_for_each_condition(world, blocker, words):
+    """Not merged, and its row says what it waits for."""
     runtime = await claimed(world)
     runtime.task_actions.accept(world.task)
     await runtime.shepherd.merge_when_ready(TARGET, True)
@@ -498,6 +507,8 @@ async def test_merge_when_ready_waits_for_each_condition(world, blocker):
     await runtime.shepherd.read(TARGET)
     await settle(runtime)
     assert not github.merged
+    line = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]["line"]
+    assert line.startswith("Merges when ready: ") and words in line and line.endswith("."), line
 
 
 async def test_a_teammates_push_after_accept_is_never_merged(world):
