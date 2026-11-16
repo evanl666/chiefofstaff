@@ -944,6 +944,46 @@ async def test_a_worker_whose_folder_has_new_claude_settings_does_not_start_ther
         await runtime.stop()
 
 
+async def test_checking_claude_settings_runs_nothing_a_worker_points_git_at(
+    tmp_path, claude_on_path
+):
+    """The settings' base is read from the owner's repository's own .git: a worktree whose .git
+    a worker pointed at a repository of its own (whose config runs code as git needs an object
+    it lacks) runs nothing."""
+    from test_round7_split import published
+
+    app = published(tmp_path, "app")
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        result = await spawn_on(
+            harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
+            instructions="Report done: made",
+        )  # fmt: skip
+        worker = result["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        cwd = Path(harness.store.session(worker)["cwd"])
+        await runtime.detach(worker)
+        trap, marker = tmp_path / "trap", tmp_path / "PWNED"
+        made = [["init", "-q", str(trap)]] + [
+            ["-C", str(trap), "config", key, value]
+            for key, value in (
+                ("core.repositoryformatversion", "1"),
+                ("extensions.partialClone", "origin"),
+                ("remote.origin.url", str(trap)),
+                ("remote.origin.promisor", "true"),
+                ("remote.origin.uploadpack", f"touch {marker}; false"),
+            )
+        ]
+        for arguments in made:
+            await asyncio.to_thread(subprocess.run, ["git", *arguments], check=True)
+        (cwd / ".git").write_text(f"gitdir: {trap / '.git'}\n")
+        assert await runtime.claude_settings_changed(harness.store.session(worker)) == ""
+        assert not marker.exists()
+    finally:
+        await runtime.stop()
+
+
 async def test_a_claude_worker_resuming_is_never_another_claude_window(
     tmp_path, claude_on_path, monkeypatch
 ):
