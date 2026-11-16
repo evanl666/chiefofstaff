@@ -432,8 +432,14 @@ async def test_closing_the_worker_gives_the_pr_to_you_and_reopening_gives_it_bac
     assert claim["accepted"]["sha"] == world.h0
 
 
-async def test_accept_records_the_head_the_card_showed(world):
+@pytest.mark.parametrize("paused", [False, True])
+async def test_accept_records_the_head_the_card_showed(world, paused):
     runtime = await claimed(world)
+    if paused:
+        old = runtime.store.settings()
+        new = old.model_copy(update={"paused": True})
+        runtime.store.save_settings(new)
+        await runtime.settings_changed(old, new)
     runtime.task_actions.accept(world.task)
     claim = runtime.shepherd.control.claim(TARGET)
     assert claim["accepted"]["sha"] == world.h0 and claim["accepted"]["checks"] == ["ci / test"]
