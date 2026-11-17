@@ -543,7 +543,7 @@ def slack_view(owner: Owner, readonly: list[str]) -> tuple[list[str], list[str],
         if Path(home, "global").is_dir() and any(
             within(os.path.realpath(path), home) for path in granted
         ):
-            tools = pnpm_globals(Path(home))
+            tools = pnpm_globals(Path(home), [owner.pnpm_store(), Path(home, "store")])
             if tools is None:
                 notes.append(PNPM_GLOBALS_CLOSED)
             else:
@@ -565,27 +565,39 @@ PNPM_GLOBALS_CLOSED = (
 )
 
 
-def pnpm_globals(home: Path) -> list[str] | None:
+def pnpm_globals(home: Path, stores: list[Path]) -> list[str] | None:
     """What pnpm's global tools in this home run (pnpm 11): each install group's node_modules
     (global/v*/*), and the store's links entries their packages are in, followed through each
     one's own dependencies, resolved now (real paths): exactly those, never the rest of the
     store (the owner's private packages). None past LINKS_LIMIT entries."""
     groups = sorted({os.path.realpath(path) for path in home.glob("global/v*/*/node_modules")})
+    links = sorted({os.path.realpath(path) for store in stores for path in store.glob("v*/links")})
     found: list[str] = []
     pending = [entry for group in groups for entry in packages(Path(group))]
     while pending:
-        real = os.path.realpath(pending.pop())
-        marker = real.find("/links/")
-        if marker < 0 or (end := real.find("/node_modules/", marker)) < 0:
-            continue  # In its group (pnpm 10's own .pnpm), or not pnpm's.
-        root = real[:end]
-        if root in found:
-            continue
+        root = links_entry(os.path.realpath(pending.pop()), links)
+        if root is None or root in found:
+            continue  # In its group (pnpm 10's own .pnpm), not pnpm's, or seen.
         found.append(root)
         if len(found) > LINKS_LIMIT:
             return None
         pending += packages(Path(root, "node_modules"))
     return [*groups, *found]
+
+
+def links_entry(real: str, links: list[str]) -> str | None:
+    """The store's links entry (links/<name>/<version>/<hash>, a scoped name two folders) a
+    package's real path is in, when it is one that exists: nothing else (a dangling link, a
+    folder outside the store, the links folder itself)."""
+    for folder in links:
+        if not real.startswith(folder + "/"):
+            continue
+        parts = real[len(folder) + 1 :].split("/")
+        depth = 4 if parts[0].startswith("@") else 3
+        if len(parts) > depth and parts[depth] == "node_modules" and all(parts[:depth]):
+            root = "/".join([folder, *parts[:depth]])
+            return root if Path(root).is_dir() else None
+    return None
 
 
 def packages(folder: Path) -> list[Path]:

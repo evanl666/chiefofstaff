@@ -728,7 +728,7 @@ def test_a_slack_reader_runs_pnpms_global_tools_and_reads_no_other_package(tmp_p
     links = pnpm / "store" / "v11" / "links"
 
     def package(scope: str, name: str, version: str) -> Path:
-        root = links / scope / name / version / f"h-{name.replace('/', '-')}"
+        root = links / scope / name.split("/")[-1] / version / f"h-{name.replace('/', '-')}"
         (root / "node_modules" / name).mkdir(parents=True)
         (root / "node_modules" / name / "index.js").write_text("module.exports = 1\n")
         return root
@@ -753,7 +753,19 @@ def test_a_slack_reader_runs_pnpms_global_tools_and_reads_no_other_package(tmp_p
         return caches.plan(tmp_path / "tier", tmp_path / "ws" / "r", "22222222-b",
                            tmp_path / "s", slack=True, read_through=False, home=home)  # fmt: skip
 
+    # Neither a link whose real path names links/node_modules (nothing there) nor one to an
+    # owner folder that looks like links/…/node_modules (outside the store) is followed.
+    (group / "node_modules" / "odd").symlink_to(links / "node_modules" / "x")
+    outside = home / "work" / "links" / "proj" / "node_modules" / "thing"
+    outside.mkdir(parents=True)
+    (outside.parent.parent / "secret.txt").write_text("x")
+    (group / "node_modules" / "thing").symlink_to(outside)
     found = plan()
+    assert not any(
+        Path(path).is_relative_to(home / "work")
+        or path in {str(links), str(links / "node_modules")}
+        for path in map(os.path.realpath, found.readonly)
+    ), found.readonly
     assert str(pnpm / "bin") in found.readonly
     assert os.path.realpath(group / "node_modules") in found.readonly
     for root in (typescript, dep, scoped):
