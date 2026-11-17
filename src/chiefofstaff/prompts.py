@@ -654,6 +654,7 @@ def worker_context(
     gh_accounts: list[dict] | None = None,
     gh_acting: dict[str, str] | None = None,
     slack: bool = False,
+    notes: list[str] | None = None,
 ) -> str:
     """`sandbox`: "" (no sandbox), "on", or "on-no-gh" (gh cannot reach GitHub inside it).
     `caches`: its tools keep their caches in workers' own (caches.py), the owner's read-only
@@ -768,6 +769,7 @@ def worker_context(
                 "sandbox could not run them (not that the code failed), with the exact command "
                 "for the owner, so the Router can have a worker without Slack access run them."
             )
+        lines += notes or []  # What its sandbox cannot run (caches.Plan.notes).
         lines.append(
             "A tool whose cache is not writable here: give it a cache folder in your workspace "
             "(that is not working around the sandbox)."

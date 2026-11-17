@@ -208,7 +208,9 @@ questions stay listed (QA round on 0.1.45).
   and the folder above each `bin` on `PATH`: another node version's `etc/npmrc`, Maven's
   `conf/settings.xml`, your pnpm store (pnpm's home on `PATH`) and Go modules were readable to
   them. They now read what runs (`bin`, `lib`, `share`…; of pnpm's home, pnpm and its shims),
-  every cache of yours is checked where your tools keep it, and those files, Homebrew's `var`,
+  every cache of yours is checked where your tools keep it (pnpm's store as pnpm finds it:
+  `store-dir`, `PNPM_HOME`, `XDG_DATA_HOME`; never a pnpm home's `store`, only the store
+  entries pnpm's global tools use), and those files, Homebrew's `var`,
   the system's registry settings and mise's configuration are denied to them (git reads no
   system configuration for them). Each worker's init script is its own (another worker could read it, and it
   may name a GOPROXY with a token), deleted as the worker closes.

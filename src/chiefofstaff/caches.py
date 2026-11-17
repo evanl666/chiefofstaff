@@ -157,13 +157,21 @@ class Owner:
         mine = self.configured(config_value(self.npmrc(), "cache")) or self.home / ".npm"
         return env_dir("npm_config_cache", env_dir("NPM_CONFIG_CACHE", mine))
 
+    def pnpm_home(self) -> Path:
+        """pnpm's home, where its store is unless one is configured, in pnpm's order:
+        PNPM_HOME, XDG_DATA_HOME's pnpm, the platform's place."""
+        if (value := os.environ.get("PNPM_HOME", "")) and Path(value).is_absolute():
+            return Path(value)
+        if (value := os.environ.get("XDG_DATA_HOME", "")) and Path(value).is_absolute():
+            return Path(value) / "pnpm"
+        return self.home / "Library" / "pnpm" if self.mac else self.home / ".local/share/pnpm"
+
     def pnpm_store(self) -> Path:
-        base = self.home / "Library" / "pnpm" if self.mac else self.home / ".local/share/pnpm"
         settings = self.home / "Library" / "Preferences" if self.mac else xdg_config(self.home)
         mine = (
             self.configured(config_value(self.npmrc(), "store-dir"))
             or self.configured(config_value(settings / "pnpm" / "rc", "store-dir"))
-            or base / "store"
+            or self.pnpm_home() / "store"
         )
         return env_dir("npm_config_store_dir", mine)
 
@@ -499,20 +507,20 @@ def owner_caches(owner: Owner) -> list[Path]:
     ]  # fmt: skip
 
 
-def slack_view(owner: Owner, readonly: list[str]) -> tuple[list[str], list[str]]:
+def slack_view(owner: Owner, readonly: list[str]) -> tuple[list[str], list[str], list[str]]:
     """What a worker that reads Slack reads of these, and which of the owner's caches within
     it is denied (S2). Every cache is checked by where it really is: a folder that is a cache
     or in one is not read; of pnpm's home (on PATH, its store beside its binaries) only what
     is not a cache, each on its own (a store made later is not read either); a cache inside a
     folder read is denied (one that exists: the sandbox would leave an empty folder in place
-    of the rest)."""
+    of the rest). pnpm's global tools in a home it reads: pnpm_globals. And notes for its
+    prompt."""
 
     def within(path: str, folder: str) -> bool:
         return path == folder or path.startswith(folder.rstrip("/") + "/")
 
-    homes = {os.path.realpath(owner.home / name) for name in PNPM_HOMES}
-    if pnpm := os.environ.get("PNPM_HOME"):
-        homes.add(os.path.realpath(pnpm))
+    homes = {os.path.realpath(path) for path in [owner.home / n for n in PNPM_HOMES]}
+    homes.add(os.path.realpath(owner.pnpm_home()))
     found = [path for path in owner_caches(owner) if not too_broad(str(path))]
     caches = {os.path.realpath(path) for path in found} - homes
     granted = []
@@ -523,10 +531,23 @@ def slack_view(owner: Owner, readonly: list[str]) -> tuple[list[str], list[str]]
         if real in homes and Path(path).is_dir():
             for child in sorted(Path(path).iterdir()):
                 inside = os.path.realpath(child)
-                if not any(within(inside, cache) or within(cache, inside) for cache in caches):
+                # Never its store, whatever the owner's settings say of where the store is.
+                if child.name != "store" and not any(
+                    within(inside, cache) or within(cache, inside) for cache in caches
+                ):
                     granted.append(str(child))
             continue
         granted.append(path)
+    notes = []
+    for home in sorted(homes):
+        if Path(home, "global").is_dir() and any(
+            within(os.path.realpath(path), home) for path in granted
+        ):
+            tools = pnpm_globals(Path(home))
+            if tools is None:
+                notes.append(PNPM_GLOBALS_CLOSED)
+            else:
+                granted += tools
     held = [os.path.realpath(path) for path in granted]
     denied = [
         str(path)
@@ -534,7 +555,52 @@ def slack_view(owner: Owner, readonly: list[str]) -> tuple[list[str], list[str]]
         if os.path.lexists(path)
         and any(os.path.realpath(path).startswith(folder.rstrip("/") + "/") for folder in held)
     ]
-    return granted, denied
+    return granted, denied, notes
+
+
+LINKS_LIMIT = 40  # pnpm's global tools' packages a Slack reader reads, each on its own (a rule).
+PNPM_GLOBALS_CLOSED = (
+    "Tools the owner installed globally with pnpm do not run in your sandbox (they use too "
+    "many of the owner's packages): if your task needs one, say so in your report."
+)
+
+
+def pnpm_globals(home: Path) -> list[str] | None:
+    """What pnpm's global tools in this home run (pnpm 11): each install group's node_modules
+    (global/v*/*), and the store's links entries their packages are in, followed through each
+    one's own dependencies, resolved now (real paths): exactly those, never the rest of the
+    store (the owner's private packages). None past LINKS_LIMIT entries."""
+    groups = sorted({os.path.realpath(path) for path in home.glob("global/v*/*/node_modules")})
+    found: list[str] = []
+    pending = [entry for group in groups for entry in packages(Path(group))]
+    while pending:
+        real = os.path.realpath(pending.pop())
+        marker = real.find("/links/")
+        if marker < 0 or (end := real.find("/node_modules/", marker)) < 0:
+            continue  # In its group (pnpm 10's own .pnpm), or not pnpm's.
+        root = real[:end]
+        if root in found:
+            continue
+        found.append(root)
+        if len(found) > LINKS_LIMIT:
+            return None
+        pending += packages(Path(root, "node_modules"))
+    return [*groups, *found]
+
+
+def packages(folder: Path) -> list[Path]:
+    """The packages in a node_modules folder (in scopes too), not its dot folders."""
+    found = []
+    with suppress(OSError):
+        for entry in folder.iterdir():
+            if entry.name.startswith("."):
+                continue
+            if entry.name.startswith("@") and entry.is_dir():
+                with suppress(OSError):
+                    found += list(entry.iterdir())
+            else:
+                found.append(entry)
+    return found
 
 
 def slack_denied(owner: Owner, readonly: list[str]) -> list[str]:
@@ -1394,6 +1460,7 @@ class Plan:
     slack: bool
     owner: Owner | None = None
     denied: list[str] = field(default_factory=list)  # A Slack reader's (slack_denied).
+    notes: list[str] = field(default_factory=list)  # For its prompt: what it cannot run here.
 
 
 def plan(
@@ -1438,10 +1505,11 @@ def plan(
     readonly = [path for path in dict.fromkeys(readonly) if not too_broad(path)]
     trusted = workspace.parent if slack else tier.parent
     denied: list[str] = []
+    notes: list[str] = []
     if slack:
-        readonly, closed = slack_view(owner, readonly)
+        readonly, closed, notes = slack_view(owner, readonly)
         denied = [*slack_denied(owner, readonly), *closed]
-    return Plan(own, trusted, temporary, readwrite, readonly, text, slack, owner, denied)
+    return Plan(own, trusted, temporary, readwrite, readonly, text, slack, owner, denied, notes)
 
 
 PREPARING = threading.Lock()  # One worker readied at a time: two would race for the same links.

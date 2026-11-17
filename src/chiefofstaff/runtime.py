@@ -2286,6 +2286,7 @@ class Runtime:
                 gh_accounts=self.github.accounts_cache[1],
                 gh_acting=self.store.items("ghaccount:"),
                 slack=bool(sandbox) and bool(row["slack"]),
+                notes=self.cache_plan(row).notes if sandbox else [],
             )
         if row["role"] == ROUTER and settings.send_to_chief:
             prompt = prompts.with_send_rule(prompt)

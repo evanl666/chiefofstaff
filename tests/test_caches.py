@@ -674,3 +674,98 @@ def test_node_gyp_builds_in_workers_own_folder_with_the_owners_headers(tmp_path,
     linux = caches.plan(tier, tmp_path / "ws" / "w", "11111111-a", scripts, slack=False,
                         read_through=True, home=home)  # fmt: skip
     assert "npm_config_devdir" not in linux.text, "XDG_CACHE_HOME moves it there"
+
+
+@pytest.mark.parametrize(
+    ("pnpm_home", "xdg_data"),
+    [("Library/Application Support/pnpm", ""), ("", "Library/Application Support/data")],
+)
+def test_pnpms_store_is_found_as_pnpm_finds_it_and_never_read_by_slack(
+    pnpm_home, xdg_data, tmp_path, monkeypatch
+):
+    """pnpm looks for its store in its configured store-dir, then $PNPM_HOME/store, then
+    $XDG_DATA_HOME/pnpm/store, then the platform's place; only the last was looked at, so with
+    a PNPM_HOME of the owner's own (on PATH) the store beside pnpm was granted to a Slack
+    reader. A child named store of a pnpm home is never granted to one."""
+    monkeypatch.setattr(caches, "system", lambda: "darwin")
+    for name in ("PNPM_HOME", "XDG_DATA_HOME", "npm_config_store_dir", "NPM_CONFIG_STORE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    folder = home / pnpm_home if pnpm_home else home / xdg_data / "pnpm"
+    for name in ("pnpm", "store/v10/files/00/private.js"):
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text("x")
+    if pnpm_home:
+        monkeypatch.setenv("PNPM_HOME", str(folder))
+    if xdg_data:
+        monkeypatch.setenv("XDG_DATA_HOME", str(home / xdg_data))
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}/usr/bin")
+    owner = caches.Owner(home)
+    assert owner.pnpm_store() == folder / "store"
+    found = caches.plan(tmp_path / "tier", tmp_path / "ws" / "r", "22222222-b", tmp_path / "s",
+                        slack=True, read_through=False, home=home)  # fmt: skip
+    assert str(folder / "pnpm") in found.readonly
+    assert not any(Path(path).is_relative_to(folder / "store") or path == str(folder)
+                   for path in found.readonly), found.readonly  # fmt: skip
+    # Whatever the owner's settings say of the store, never a child named store.
+    monkeypatch.setenv("npm_config_store_dir", str(tmp_path / "elsewhere"))
+    found = caches.plan(tmp_path / "tier", tmp_path / "ws" / "r", "22222222-b", tmp_path / "s",
+                        slack=True, read_through=False, home=home)  # fmt: skip
+    assert not any(Path(path).is_relative_to(folder / "store") for path in found.readonly)
+
+
+def test_a_slack_reader_runs_pnpms_global_tools_and_reads_no_other_package(tmp_path, monkeypatch):
+    """pnpm 11 keeps a global tool's shim in its home's bin, its install group in global/v11,
+    and its packages in the store's links: a Slack reader got the shim, not what it runs. It
+    reads each install group's node_modules and exactly the links entries they use (resolved
+    as it opens), never the rest of the store; past a limit (each is a rule at every
+    command), none, and its prompt says so."""
+    monkeypatch.setattr(caches, "system", lambda: "darwin")
+    for name in ("PNPM_HOME", "XDG_DATA_HOME", "npm_config_store_dir", "NPM_CONFIG_STORE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    pnpm = home / "Library" / "Application Support" / "pnpm"
+    links = pnpm / "store" / "v11" / "links"
+
+    def package(scope: str, name: str, version: str) -> Path:
+        root = links / scope / name / version / f"h-{name.replace('/', '-')}"
+        (root / "node_modules" / name).mkdir(parents=True)
+        (root / "node_modules" / name / "index.js").write_text("module.exports = 1\n")
+        return root
+
+    typescript, dep = package("@", "typescript", "7.0.2"), package("@", "dep", "1.0.0")
+    scoped = package("@types", "@types/node", "22.0.0")
+    private = package("@acme", "@acme/private", "1.0.0")
+    (typescript / "node_modules" / "dep").symlink_to(dep / "node_modules" / "dep")
+    (typescript / "node_modules" / "@types").mkdir()
+    types = typescript / "node_modules" / "@types" / "node"
+    types.symlink_to(scoped / "node_modules" / "@types" / "node")
+    group = pnpm / "global" / "v11" / "4686-1a1e8584b5f-f7af69f5c046337f"
+    (group / "node_modules").mkdir(parents=True)
+    (group / "node_modules" / "typescript").symlink_to(typescript / "node_modules" / "typescript")
+    (pnpm / "global" / "v11" / "802682db").symlink_to(group)
+    (pnpm / "bin").mkdir()
+    (pnpm / "bin" / "tsc").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("PNPM_HOME", str(pnpm))
+    monkeypatch.setenv("PATH", f"{pnpm / 'bin'}{os.pathsep}/usr/bin")
+
+    def plan():
+        return caches.plan(tmp_path / "tier", tmp_path / "ws" / "r", "22222222-b",
+                           tmp_path / "s", slack=True, read_through=False, home=home)  # fmt: skip
+
+    found = plan()
+    assert str(pnpm / "bin") in found.readonly
+    assert os.path.realpath(group / "node_modules") in found.readonly
+    for root in (typescript, dep, scoped):
+        assert os.path.realpath(root) in found.readonly, root
+    assert not any(Path(path).is_relative_to(private) for path in found.readonly), "not used"
+    assert not [path for path in found.readonly if path in {str(links), str(pnpm / "store")}]
+    assert not found.notes
+    monkeypatch.setattr(caches, "LINKS_LIMIT", 2)
+    found = plan()
+    assert not any(Path(path).is_relative_to(links) for path in found.readonly)
+    assert found.notes == [caches.PNPM_GLOBALS_CLOSED]
+    from chiefofstaff import prompts
+
+    said = prompts.worker_context("/w", "/w", [], False, "on", slack=True, notes=found.notes)
+    assert caches.PNPM_GLOBALS_CLOSED in said
