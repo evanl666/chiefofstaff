@@ -30,6 +30,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import weakref
 from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -96,7 +97,6 @@ from .policy import (
     within,
 )
 from .provenance import ALIVE_EVERY, RUNS_KEPT, Provenance, log_of, runs_of
-from .receipts import SHELL_TOOLS
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sendsocket import LimitedError, SendSocket
 from .sendsocket import headline as sent_headline
@@ -128,7 +128,6 @@ from .workspaces import (
     BRANCH_PREFIX,
     Workspaces,
     common_git_dir,
-    git,
     git_dirs,
     holds_alternates,
     identity_of,
@@ -146,6 +145,12 @@ logger = logging.getLogger(__name__)
 # How long a look at a worker's folder (settings_refusal, the backstop) may take: past that it
 # can't be checked, and the worker waits (looked at again as workers start: Workers.pump).
 SETTINGS_SECONDS = float(os.environ.get("CHIEFOFSTAFF_SETTINGS_SECONDS", "15"))
+# The threads those looks read the file system in, and how many may be under way or waiting
+# for one at once: past that a look is not started (it can't be checked now), so looks past
+# their time never pile up. Chief of Staff's own git guard has threads of its own.
+SETTINGS_THREADS = 4
+SETTINGS_WAITING = 16
+GUARD_THREADS = 2
 
 
 def clip_words(text: str, size: int) -> str:
@@ -417,58 +422,15 @@ BRANCH_UPDATE = re.compile(
     r"\bgit\b(?:\s+(?:-[cC]\s+\S+|--[\w-]+(?:=\S+)?))*"
     r"\s+(merge|rebase|pull|cherry-pick|am|revert)(?![\w-])([^;&|\n]*)"
 )
-# What a merge, a rebase or a cherry-pick under way leaves in its .git (it can be aborted).
-UNDER_WAY = ("MERGE_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD",
-             "REVERT_HEAD", "sequencer")  # fmt: skip
-
-
-async def tree_state(cwd: str) -> dict:
-    """What a branch update could leave behind in a checkout, as it is: {"head", "untracked",
-    "deleted" (tracked files)}. Taking no lock git's own commands could meet."""
-    top = (await git("-C", cwd, "rev-parse", "--show-toplevel")).strip()
-    head = (await git("-C", top, "rev-parse", "--verify", "--quiet", "HEAD")).strip()
-    status = await git(
-        "--no-optional-locks", "-C", top, "status", "--porcelain=v1", "-z", "--untracked-files=all"
-    )
-    untracked, deleted = [], []
-    for entry in status.split("\0"):
-        if entry.startswith("?? "):
-            untracked.append(entry[3:])
-        elif entry[:2] in {" D", "D "}:
-            deleted.append(entry[3:])
-    return {"top": top, "head": head, "untracked": untracked, "deleted": deleted}
-
-
-async def half_left(cwd: str, targets: list[str], before: dict) -> dict[str, list[str]] | None:
-    """What a branch update that stopped halfway left in a checkout, of what was not there as
-    it began (`before`, tree_state): {"untracked": files of the branches it took in (or its
-    upstream), "deleted": tracked files}; None when nothing is, a merge or rebase is under way
-    (it can be aborted), or HEAD moved (it went through)."""
-    git_dir = Path((await git("-C", cwd, "rev-parse", "--absolute-git-dir")).strip())
-    if any((git_dir / name).exists() for name in UNDER_WAY):
-        return None
-    now = await tree_state(cwd)
-    if now["head"] != before["head"] or now["top"] != before["top"]:
-        return None
-    top = now["top"]
-    untracked = [path for path in now["untracked"] if path not in set(before["untracked"])]
-    deleted = [path for path in now["deleted"] if path not in set(before["deleted"])]
-    found: list[str] = []
-    if untracked:
-        refs = []
-        for word in [*dict.fromkeys(targets), "@{upstream}"]:
-            with suppress(Exception):
-                refs.append(
-                    (await git("-C", top, "rev-parse", "--verify", "--quiet", f"{word}^{{commit}}"))
-                    .strip()
-                )  # fmt: skip
-        for ref in dict.fromkeys(refs):
-            listed = await git("-C", top, "ls-tree", "-r", "--name-only", "-z", ref, "--",
-                               *untracked[:200])  # fmt: skip
-            found += [path for path in listed.split("\0") if path and path not in found]
-    if not found and not deleted:
-        return None
-    return {"untracked": sorted(found), "deleted": sorted(deleted)}
+# What a failed one's output says when git could not change a file (the sandbox holds it, or
+# its permissions): not an ordinary conflict, which the worker resolves (or aborts) itself.
+UNCHANGEABLE = re.compile(
+    r"operation not permitted|permission denied|read-only file system", re.IGNORECASE
+)
+UPDATE_FAILED = (
+    "That branch update failed partway; put your tree back as it was (e.g. `git merge --abort` / "
+    "`git rebase --abort`, or restore what it changed) before going on."
+)
 
 
 def server_labels(servers: list[str]) -> str:
@@ -567,8 +529,11 @@ class Runtime:
         self.settings_sigs: dict[str, str] = {}
         self.settings_paths: dict[str, tuple[Path, Path, tuple[str, ...]]] = {}
         # Where those looks read the file system (settings_thread): never the default pool,
-        # which the SDK and everything else share.
+        # which the SDK and everything else share; and where Chief of Staff's git guard does
+        # (guard_thread), so they never hold up its git.
         self.settings_pool: ThreadPoolExecutor | None = None
+        self.settings_room = threading.BoundedSemaphore(SETTINGS_WAITING)
+        self.guard_pool: ThreadPoolExecutor | None = None
         # Servers a Copilot worker's folder settings run whose files changed (servers_seen):
         # {session: {server: those files}}; and those its live session was opened without.
         self.servers_off: dict[str, dict[str, list[str]]] = {}
@@ -577,10 +542,8 @@ class Runtime:
         # (pre_tool_wanted): {session: whether it is sandboxed}. The others are glanced at as
         # each tool starts, not waited for.
         self.pre_tool_on: dict[str, bool] = {}
-        # The last command of each worker's looked at after its turns (half_updated); its tree
-        # as the first branch update of its turn began (half_mark).
-        self.half_seen: dict[str, int] = {}
-        self.half_before: dict[str, dict] = {}
+        # The worker commands (ids) whose failed branch update it was told of (update_failed).
+        self.updates_said: set[int] = set()
         # Sessions another program (a terminal) has open: session id -> pid. Refreshed by the
         # watch loop and before resuming a session.
         self.elsewhere: dict[str, int] = {}
@@ -714,9 +677,10 @@ class Runtime:
         for task in list(self.jobs):
             task.cancel()
         await asyncio.gather(*self.jobs, return_exceptions=True)
-        if self.settings_pool:
-            self.settings_pool.shutdown(wait=False, cancel_futures=True)
-            self.settings_pool = None
+        for pool in (self.settings_pool, self.guard_pool):
+            if pool:
+                pool.shutdown(wait=False, cancel_futures=True)
+        self.settings_pool = self.guard_pool = None
 
     async def connect(self):
         async with self.connect_lock:
@@ -2249,7 +2213,12 @@ class Runtime:
         process = await asyncio.create_subprocess_exec(
             *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
         )
-        _, error = await asyncio.wait_for(process.communicate(), 15)
+        try:
+            _, error = await asyncio.wait_for(process.communicate(), 15)
+        except BaseException:
+            with suppress(ProcessLookupError):
+                process.kill()
+            raise
         if process.returncode:
             raise RuntimeError(f"Could not open the folder: {error.decode(errors='replace')[:200]}")
         return {"ok": True}
@@ -3342,6 +3311,9 @@ class Runtime:
         except TimeoutError:
             logger.warning("No look at %s's folder in time.", row["id"])
             return self.settings_unchecked(row, f"looking at it took over {SETTINGS_SECONDS:g} s")
+        except settings_guard.SettingsBusyError:
+            logger.warning("No look at %s's folder: too many at once.", row["id"])
+            return self.settings_unchecked(row, "too many checks at once; it's looked at again")
 
     def settings_unchecked(self, row: dict, why: str) -> str:
         """Its line when its folder could not be looked at: it waits until it can (said once)."""
@@ -3615,94 +3587,30 @@ class Runtime:
             self.git_replaced_said(row, replaced)
             self.background(self.settings_stop(session_id))
 
-    async def half_mark(self, row: dict, tool: str, arguments: Any, seconds: float):
-        """Before a sandboxed worker's command that updates its branch (Events.pre_tool, which
-        Copilot waits for: only such a command pays, a git status): its tree as the update
-        begins, the first of its turn (half_updated), within `seconds` or not at all."""
-        command = arguments.get("command") if isinstance(arguments, dict) else None
-        if tool not in SHELL_TOOLS or not isinstance(command, str):
+    def update_failed(self, row: dict, ran: dict, code: int | None, output: str):
+        """A worker's command that updates its branch (a merge, a rebase, a pull) failed where
+        git could not change a file (one the sandbox holds): the worker is told at once, within
+        its turn, to put its tree back before going on. Words only: Chief of Staff runs no git
+        in a worker's repository for this (a filter or a promisor there would run as it).
+        Ordinary conflicts are the worker's own to resolve."""
+        if (
+            row["role"] != WORKER
+            or code in (0, None)
+            or ran["id"] in self.updates_said
+            or not BRANCH_UPDATE.search(ran["command"])
+            or not UNCHANGEABLE.search(output or "")
+        ):
             return
-        if row["id"] in self.half_before or not BRANCH_UPDATE.search(command):
-            return
-        try:
-            state = await asyncio.wait_for(tree_state(row["cwd"]), max(seconds, 0.1))
-        except Exception:
-            logger.info("No look at %s's tree before its update.", row["id"], exc_info=True)
-            return
-        self.half_before.setdefault(row["id"], state)
-
-    async def half_updated(self, session_id: str):
-        """After a worker's turn where a command that updates its branch (a merge, a rebase, a
-        pull: its commands as recorded) failed: a tree that update left halfway (it could not
-        change a file the sandbox holds, say), with no merge or rebase under way to abort:
-        files of the branch it took in, left untracked, or tracked ones deleted, that were not
-        so as it began (half_mark). Its timeline says so, and the worker is told how to put its
-        tree back (those files only: its own changes stay), once for what is left."""
-        before = self.half_before.pop(session_id, None)
-        ran = self.store.all(
-            "SELECT id, command, exit_code FROM commands WHERE session_id=? AND id>? ORDER BY id",
-            (session_id, self.half_seen.get(session_id, 0)),
-        )
-        if not ran:
-            return
-        self.half_seen[session_id] = ran[-1]["id"]
-        updates = [command for command in ran if BRANCH_UPDATE.search(command["command"])]
-        if before is None or not any(command["exit_code"] not in (0, None) for command in updates):
-            return
-        targets = [
-            word
-            for command in updates
-            for found in BRANCH_UPDATE.finditer(command["command"])
-            for word in (found[2] or "").split()
-            if not word.startswith("-")
-        ]
-        row = self.store.find_session(session_id)
-        if not row or row["closed_at"] or not row["cwd"]:
-            return
-        try:
-            left = await half_left(row["cwd"], targets, before)
-        except Exception:
-            logger.info("Could not look at %s's tree after its update.", session_id, exc_info=True)
-            return
-        said = f"halfupdate:{session_id}"
-        digest = hashlib.sha256(json.dumps(left).encode()).hexdigest()[:16] if left else ""
-        if not left or self.store.get(said) == digest:
-            return
-        self.store.set(said, digest)
-        untracked, deleted = left["untracked"], left["deleted"]
-
-        def listed(paths: list[str]) -> str:
-            shown = ", ".join(f"`{path}`" for path in paths[:5])
-            return shown + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
-
-        steps = []
-        if deleted:
-            steps.append(f"`git checkout HEAD -- {' '.join(deleted[:20])}`")
-        if untracked:
-            steps.append(f"remove {listed(untracked)}")
-        what = "; ".join(
-            part
-            for part in (
-                f"{listed(untracked)} left untracked" if untracked else "",
-                f"{listed(deleted)} deleted" if deleted else "",
-            )
-            if part
-        )
-        text = (
-            f"Your branch update stopped halfway and left your worktree half-updated ({what}), "
-            f"with no merge or rebase to abort. Put it back: {', then '.join(steps)} (only what "
-            "the update left: your own changes stay; keep any of those files you made yourself). "
-            "If it stopped on a file you can't change (agent settings, a hook's script), don't try "
-            "again: tell the owner in one line what the update needs."
-        )
-        with suppress(Exception):
-            await self.delivery.deliver(
-                session_id,
-                wrap("system", "half-updated", text),
+        self.updates_said.add(ran["id"])
+        self.background(
+            self.delivery.deliver(
+                row["id"],
+                wrap("system", "update-failed", UPDATE_FAILED),
                 kind="notice",
-                display=f"Its branch update stopped halfway ({what}): asked it to put its "
-                "worktree back.",
+                display="Its branch update failed partway: asked it to put its tree back first.",
+                steer=True,
             )
+        )
 
     async def accept_git(self, session_id: str, digest: str) -> str:
         """The owner's word on a .git a worker's folder had replaced (git_replaced): what is
@@ -3776,13 +3684,29 @@ class Runtime:
     async def settings_thread(self, function: Callable[..., Any], *args: Any) -> Any:
         """The blocking part of a look at a worker's folder (file system reads), in a few
         threads of its own: a file system slow to answer holds those, never the default pool
-        the SDK and the rest use."""
+        the SDK and the rest use. At most SETTINGS_WAITING under way or waiting (one whose
+        asker stopped waiting counts until it ends): past that, SettingsBusyError at once."""
         if self.settings_pool is None:
             if self.stopping:
                 return await asyncio.to_thread(function, *args)  # (Its threads ended.)
-            self.settings_pool = ThreadPoolExecutor(4, thread_name_prefix="settings")
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.settings_pool, lambda: function(*args))
+            self.settings_pool = ThreadPoolExecutor(SETTINGS_THREADS, thread_name_prefix="settings")
+        if not self.settings_room.acquire(blocking=False):
+            raise settings_guard.SettingsBusyError("too many checks at once")
+        try:
+            future = self.settings_pool.submit(function, *args)
+        except BaseException:
+            self.settings_room.release()
+            raise
+        future.add_done_callback(lambda _: self.settings_room.release())
+        return await asyncio.wrap_future(future)
+
+    async def guard_thread(self, function: Callable[..., Any], *args: Any) -> Any:
+        """Chief of Staff's git guard (workspaces.guarded), in threads of its own."""
+        if self.guard_pool is None:
+            if self.stopping:
+                return await asyncio.to_thread(function, *args)
+            self.guard_pool = ThreadPoolExecutor(GUARD_THREADS, thread_name_prefix="git-guard")
+        return await asyncio.wrap_future(self.guard_pool.submit(function, *args))
 
     def settings_signature(self, row: dict) -> str:
         """Blocking (some lstat calls): settings_guard.signature of its folder's settings, the
@@ -3973,6 +3897,8 @@ class Runtime:
             logger.warning("Could not look at %s's agent settings.", session_id, exc_info=exc)
             if isinstance(exc, TimeoutError):
                 self.settings_unchecked(row, f"looking at it took over {SETTINGS_SECONDS:g} s")
+            elif isinstance(exc, settings_guard.SettingsBusyError):
+                self.settings_unchecked(row, "too many checks at once; it's looked at again")
             else:
                 self.settings_unchecked(row, "Chief of Staff could not read it")
             await self.settings_stop(session_id)

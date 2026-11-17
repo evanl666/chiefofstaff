@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
-from . import prompts, receipts, threads
+from . import prompts, receipts, settings_guard, threads
 from .backend import COPILOT_AGENT, running_background, stop_background
 from .delivery import digest
 from .envelope import from_owner, news_tasks, tasks_named, wrap
@@ -125,6 +125,10 @@ PRE_TOOL_UNANSWERED = (
 )
 PRE_TOOL_UNCHECKED = (
     "Chief of Staff couldn't check this folder's agent settings, so this tool didn't run."
+)
+PRE_TOOL_BUSY = (
+    "Chief of Staff can't check this folder's agent settings right now, so this tool didn't run. "
+    "Try it again."
 )
 # A pre-tool answer slower than this is logged (Copilot waits for it).
 PRE_TOOL_SLOW = 0.5
@@ -294,6 +298,9 @@ class Events:
             (kind, code, output[-600:], ran["ended_at"] or now(), ran["id"]),
         )
         self.runtime.checks.on_command(session_id, ran["call_id"])
+        if row := self.store.find_session(session_id):
+            # (A branch update that failed partway: the worker is told to put its tree back.)
+            self.runtime.update_failed(row, ran, code, output)
         if code == 0 and ran["run_id"] and OPENS_PR.search(ran["command"]):
             # The PR it opened is its task's own work (not one its report only mentions).
             run = self.store.one("SELECT task_id FROM runs WHERE id=?", (ran["run_id"],))
@@ -687,8 +694,6 @@ class Events:
             self.runtime.background(self.runtime.git_watch_after(session_id))
         if row["role"] == WORKER:
             self.runtime.git_after_turn(session_id)  # (A .git it replaced.)
-            # (A branch update of its turn that stopped halfway: said, with how to undo it.)
-            self.runtime.background(self.runtime.half_updated(session_id))
         # Its session is free again: messages queue as usual. A turn that ended because it was
         # aborted (stopped, its task cancelled) owes no report.
         aborted, state.after_abort = state.after_abort, False
@@ -931,14 +936,14 @@ class Events:
                     )
                 if sandboxed:
                     why = (
-                        PRE_TOOL_UNANSWERED if isinstance(exc, TimeoutError) else PRE_TOOL_UNCHECKED
+                        PRE_TOOL_UNANSWERED
+                        if isinstance(exc, TimeoutError)
+                        else PRE_TOOL_BUSY
+                        if isinstance(exc, settings_guard.SettingsBusyError)
+                        else PRE_TOOL_UNCHECKED
                     )
             tool = str(data.get("toolName") or "")
             why = why or self.runtime.server_refusal(row, tool, data.get("toolArgs"))
-            if not why and sandboxed:
-                # (A branch update: its tree as it begins, for one that stops halfway.)
-                left = PRE_TOOL_SECONDS - (time.monotonic() - started)
-                await self.runtime.half_mark(row, tool, data.get("toolArgs"), left)
         except Exception:
             # (Asked only of a sandboxed worker, or one with a server off: not let through.)
             logger.warning("Could not answer before a tool of %s.", invocation, exc_info=True)

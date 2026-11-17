@@ -35,11 +35,19 @@
   With the sandbox on, workers' commands can't change those settings or their hooks' scripts in
   your checkout, nor in their own worktree the MCP server files Copilot loads by itself
   (`.mcp.json`, `.github/mcp.json`) and their hooks' scripts; a worker checks before a branch
-  update that would, and tells you, and one that stopped halfway anyway is said with how to undo
-  it. A setting linked into a folder workers can write, or a special file, is never used. Workers'
+  update that would, and tells you, and one that fails partway anyway is told to put its tree
+  back first. A setting linked into a folder workers can write, or a special file, is never used. Workers'
   edits to those files are refused, whatever their case. Agent homes (`~/.codex`, `~/.claude`) are
   never read as your home folder's settings.
 
+- **Security: a sandboxed worker could make Chief of Staff's own git run its code.** A worktree
+  keeps its submodules' git folders in its own folder in your repository, which its worker can
+  write: a filter configured there ran, as you, whenever Chief of Staff read the worker's changes
+  (`git status`, `git diff`, a snapshot). And learning checks from a worker's test runs ran git in
+  a repository the worker had made itself, whatever its config said. Now Chief of Staff's git
+  never looks into a submodule's files (it reads their commits, and a submodule checked out
+  counts as holding work, so its worktree is kept), and runs git only in a worker's checkouts,
+  a repository it made itself only once its config runs nothing.
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create
   `.git/commondir` in your repository, sending your git to a configuration of its own whose

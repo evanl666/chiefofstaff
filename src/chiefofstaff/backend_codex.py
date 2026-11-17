@@ -1340,6 +1340,10 @@ class CodexBackend:
                 process.kill()
             await process.wait()
             return []
+        except asyncio.CancelledError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            raise
         try:
             return await asyncio.to_thread(protocol_missing, folder)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):

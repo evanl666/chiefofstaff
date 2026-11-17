@@ -66,6 +66,11 @@ class TooLargeError(Exception):
     """More, or larger, settings than a snapshot holds: they are never taken as unchanged."""
 
 
+class SettingsBusyError(RuntimeError):
+    """Too many looks at workers' folders under way at once (Runtime.settings_thread): this one
+    is not started; what asked for it can't check now."""
+
+
 class SpecialFileError(OSError):
     """Where a file was to be read: a FIFO, a socket, a device (or, not following links, a
     link), whose read could wait forever."""
@@ -269,7 +274,7 @@ def signature(top: Path, cwd: Path, names: tuple[str, ...], also: list[str]) -> 
                      info.st_ctime_ns, target))  # fmt: skip
         if stat.S_ISDIR(info.st_mode) and depth < 4 and len(seen) < MOST_ENTRIES:
             try:
-                entries = listed(path)
+                entries = listed(path, MOST_ENTRIES - len(seen))
             except TooLargeError as exc:
                 cause = exc.__cause__
                 seen.append((str(path), "unlisted", getattr(cause, "errno", None)))
@@ -313,7 +318,7 @@ def glimpse(top: Path, cwd: Path, names: tuple[str, ...]) -> str:
         budget[0] -= 1
         if stat.S_ISDIR(info.st_mode) and depth < 8 and budget[0] > 0:
             try:
-                entries = listed(path)
+                entries = listed(path, budget[0])
             except TooLargeError:
                 found.append("unlisted")
                 return
@@ -326,14 +331,28 @@ def glimpse(top: Path, cwd: Path, names: tuple[str, ...]) -> str:
     return hashlib.sha256(repr(seen).encode()).hexdigest()[:16]
 
 
-def listed(folder: Path) -> list[os.DirEntry]:
+def listed(
+    folder: Path,
+    most: int | None = None,
+    keep: Callable[[str], bool] | None = None,
+    label: str = "",
+) -> list[os.DirEntry]:
+    """A folder's entries (those `keep` says, when given), by name. Read one by one: past `most`
+    of them, TooLargeError at once (the rest never read); "too many files"."""
+    found: list[os.DirEntry] = []
     try:
         with os.scandir(folder) as entries:
-            return sorted(entries, key=lambda entry: entry.name)
+            for entry in entries:
+                if keep is not None and not keep(entry.name):
+                    continue
+                if most is not None and len(found) >= most:
+                    raise TooLargeError("too many files")
+                found.append(entry)
     except FileNotFoundError:
         return []
     except OSError as exc:
-        raise TooLargeError(f"{folder} could not be read") from exc
+        raise TooLargeError(f"{label or folder} could not be read") from exc
+    return sorted(found, key=lambda entry: entry.name)
 
 
 def seek(
@@ -351,10 +370,8 @@ def seek(
     by_first: dict[str, list[list[str]]] = {}
     for parts in wanted:
         by_first.setdefault(nfc(parts[0]).casefold(), []).append(parts)
-    for entry in listed(folder):
-        group = by_first.get(nfc(entry.name).casefold())
-        if not group:
-            continue
+    for entry in listed(folder, keep=lambda name: nfc(name).casefold() in by_first):
+        group = by_first[nfc(entry.name).casefold()]
         name = f"{prefix}{nfc(entry.name)}"
         path = folder / entry.name
         if os.path.realpath(path) in homes:
@@ -384,12 +401,8 @@ def record(top: Path, path: Path, name: str, entries: dict, budget: list):
         entries[key] = [kind, f"{path.readlink()}\0{value}" if kind == "l" else value]
     elif stat.S_ISDIR(info.st_mode):
         # What it holds, not the folder: an empty one (a sandbox's placeholder) loads nothing.
-        try:
-            children = sorted(child.name for child in path.iterdir())
-        except OSError as exc:
-            raise TooLargeError(f"{name} could not be read") from exc
-        for child in children:
-            record(top, path / child, f"{name}/{nfc(child)}", entries, budget)
+        for child in listed(path, max(budget[0], 0), label=name):
+            record(top, path / child.name, f"{name}/{nfc(child.name)}", entries, budget)
     elif stat.S_ISREG(info.st_mode):
         entries[key] = ["f", content(path, info.st_size, budget)]
     else:
@@ -439,8 +452,8 @@ def inside(top: Path, link: Path, budget: list) -> tuple[str, str]:
     if not stat.S_ISDIR(info.st_mode):
         return REFUSED, "is a special file"
     nested: dict[str, list] = {}
-    for child in sorted(entry.name for entry in target.iterdir()):
-        record(top, target / child, nfc(child), nested, budget)
+    for child in listed(target, max(budget[0], 0), label=link.name):
+        record(top, target / child.name, nfc(child.name), nested, budget)
     if refused := next((value for kind, value in nested.values() if kind == REFUSED), ""):
         return REFUSED, refused
     return "l", "d:" + hashlib.sha256(json.dumps(nested, sort_keys=True).encode()).hexdigest()
@@ -560,8 +573,8 @@ def runs(
         held.pop(key, None)
         if target.is_dir() and not target.is_symlink():
             nested: dict[str, list] = {}
-            for child in sorted(item.name for item in target.iterdir()):
-                record(top, target / child, nfc(child), nested, budget)
+            for child in listed(target, max(budget[0], 0), label=name):
+                record(top, target / child.name, nfc(child.name), nested, budget)
             refused = next((v for kind, v in nested.values() if kind == REFUSED), "")
             held[key] = (
                 [REFUSED, refused]

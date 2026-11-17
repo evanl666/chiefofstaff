@@ -36,7 +36,18 @@ from .models import NestedArguments
 from .receipts import NO_TESTS_RAN, test_runs, words
 from .roles import WORKER
 from .store import now
-from .workspaces import NO_HOOKS, PLAIN_DIFF, base_of, command, git, locate
+from .workspaces import (
+    NO_HOOKS,
+    PLAIN_DIFF,
+    base_of,
+    checkout_git,
+    command,
+    config_runs_code,
+    git,
+    git_unlooked,
+    gitlinks,
+    locate,
+)
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -188,11 +199,21 @@ async def run_sandboxed(
             machine.kill_process_tree(process.pid)
             await process.wait()
             return None, f"Timed out after {int(limit)} s."
+        except asyncio.CancelledError:
+            machine.kill_process_tree(process.pid)  # (Nobody waits for it any more.)
+            raise
         return process.returncode, output.decode(errors="replace")[-OUTPUT_CHARS:]
     except OSError as exc:
         return None, str(exc)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def own_repository(git_dir: str, roots: list[Path]) -> bool:
+    """Whether a repository's .git is in the folders workers' own folders are made in (a clone
+    there: its config is the worker's to write)."""
+    real = Path(os.path.realpath(git_dir))
+    return any(real.is_relative_to(os.path.realpath(root)) for root in roots)
 
 
 def related(first: str, second: str) -> bool:
@@ -279,50 +300,63 @@ class Checks:
         if ran and ran["kind"] == "test" and ran["exit_code"] is not None:
             self.runtime.background(self.observe(row, ran))
 
-    async def where(self, row: dict, text: str) -> tuple[str, str, str] | None:
-        """The checkout a command ran in: (top, its shared git folder, repository identity)."""
-        paths = [c["path"] for c in self.runtime.workspaces.checkouts(row)] or [row["cwd"]]
+    async def where(self, row: dict, text: str) -> tuple[str, str, str, dict] | None:
+        """The checkout a command ran in: (top, its shared git folder, repository identity, the
+        checkout). Only one handed to the worker (or one of its own clones, taken as one): a
+        repository it made in its folder itself is its to configure, and Chief of Staff's git
+        runs nothing there (Workspaces.checkout_git)."""
+        checkouts = [c for c in self.runtime.workspaces.checkouts(row) if c.get("path")]
+        if not checkouts:
+            return None
         chosen = next(
-            (path for path in paths if path and (path in text or f"cd {Path(path).name}" in text)),
-            paths[0],
+            (c for c in checkouts if c["path"] in text or f"cd {Path(c['path']).name}" in text),
+            checkouts[0],
         )
-        return await self.repository(chosen) if chosen else None
+        return await self.repository(chosen)
 
     @staticmethod
-    async def repository(path: str) -> tuple[str, str, str] | None:
+    async def repository(checkout: dict) -> tuple[str, str, str, dict] | None:
+        path = checkout["path"]
         try:
-            top = (await git("-C", path, "rev-parse", "--show-toplevel")).strip()
+            top = (await checkout_git(checkout, path, "rev-parse", "--show-toplevel")).strip()
             git_dir = (
-                await git("-C", top, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                await checkout_git(
+                    checkout, top, "rev-parse", "--path-format=absolute", "--git-common-dir"
+                )
             ).strip()
         except ValueError:
             return None
         remote = ""
         with suppress(ValueError):
-            remote = await git("-C", top, "remote", "get-url", "origin")
-        return top, git_dir, identity(remote, git_dir)
+            remote = await checkout_git(checkout, top, "remote", "get-url", "origin")
+        return top, git_dir, identity(remote, git_dir), checkout
 
-    async def snapshot(self, top: str) -> str:
+    async def snapshot(self, checkout: dict, top: str) -> str:
         """A commit of the checkout as it is, uncommitted edits and new files included, made
         with a copy of its index: the checkout, its index and its branch are not touched."""
-        status = await git("-C", top, "status", "--porcelain")
+        status = await checkout_git(checkout, top, "status", "--porcelain")
         if len(status.splitlines()) > MAX_CHANGED_ENTRIES:
             raise ValueError("Too many changed files to keep.")
         index = (
-            await git("-C", top, "rev-parse", "--path-format=absolute", "--git-path", "index")
+            await checkout_git(
+                checkout, top, "rev-parse", "--path-format=absolute", "--git-path", "index"
+            )
         ).strip()
         temp = self.scratch() / f"index-{uuid4().hex[:8]}"
         try:
             await asyncio.to_thread(copy_index, index, temp)
             env = {"GIT_INDEX_FILE": str(temp), **IDENTITY}
-            await command("git", "-C", top, "add", "-A", env=env)
-            tree = (await command("git", "-C", top, "write-tree", env=env)).strip()
+            # Its submodules as the index holds them: git never looks into their files.
+            left_out = git_unlooked(await gitlinks(checkout, top))
+            await checkout_git(checkout, top, "add", "-A", "--", ".", *left_out, env=env)
+            tree = (await checkout_git(checkout, top, "write-tree", env=env)).strip()
             parent: list[str] = []
             with suppress(ValueError):
-                parent = ["-p", (await git("-C", top, "rev-parse", "--verify", "HEAD")).strip()]
+                head = await checkout_git(checkout, top, "rev-parse", "--verify", "HEAD")
+                parent = ["-p", head.strip()]
             message = ["-m", "Chief of Staff: a worker's checkout, kept for a check"]
             return (
-                await command("git", "-C", top, "commit-tree", tree, *parent, *message, env=env)
+                await checkout_git(checkout, top, "commit-tree", tree, *parent, *message, env=env)
             ).strip()
         finally:
             temp.unlink(missing_ok=True)
@@ -339,7 +373,7 @@ class Checks:
         found = await self.where(row, ran["command"])
         if not found:
             return
-        top, git_dir, repo = found
+        top, git_dir, repo, checkout = found
         key = f"failing:{row['id']}"
         if ran["exit_code"] == NO_TESTS_RAN:
             return  # No test ran: neither a failure to learn from nor its fix.
@@ -347,7 +381,7 @@ class Checks:
             # The latest failing version: what the fix that follows changes is the fix.
             failing = {
                 "top": top,
-                "sha": await self.snapshot(top),
+                "sha": await self.snapshot(checkout, top),
                 "command": ran["command"],
                 "output": ran["output"],
             }
@@ -357,8 +391,8 @@ class Checks:
         if not failing or failing["top"] != top or not related(failing["command"], ran["command"]):
             return
         self.store.delete(key)
-        fixed = await self.snapshot(top)
-        stat = await git("-C", top, "diff", "--numstat", failing["sha"], fixed)
+        fixed = await self.snapshot(checkout, top)
+        stat = await checkout_git(checkout, top, "diff", "--numstat", failing["sha"], fixed)
         lines = sum(
             int(part)
             for line in stat.splitlines()
@@ -449,6 +483,12 @@ class Checks:
     async def checked_out(self, git_dir: str, *commits: str):
         """Commits checked out in scratch worktrees: what checks run on, as a clean checkout
         (new files included, nothing ignored or built), whatever the worker's folder holds."""
+        if await asyncio.to_thread(own_repository, git_dir, self.runtime.workspaces.roots()) and (
+            found := await asyncio.to_thread(config_runs_code, git_dir)
+        ):
+            # A clone in a worker's folder, whose config it can write: checking it out would run
+            # what that config says (a filter), as the owner.
+            raise ValueError(f"Its git config was changed ({', '.join(found)}).")
         root = self.scratch() / f"versions-{uuid4().hex[:8]}"
         made = []
         try:
@@ -647,19 +687,24 @@ class Checks:
         names = []
         for base in dict.fromkeys([base_of(checkout) or "HEAD", "HEAD"]):
             try:  # Where the worker started; a folder with no origin: its uncommitted edits.
-                names += (await git("-C", path, "diff", "--name-only", base)).split("\n")
+                names += (await checkout_git(checkout, path, "diff", "--name-only", base)).split(
+                    "\n"
+                )
                 break
             except ValueError:
                 continue
         with suppress(ValueError):
-            names += (await git("-C", path, "ls-files", "--others", "--exclude-standard")).split(
-                "\n"
+            listed = await checkout_git(
+                checkout, path, "ls-files", "--others", "--exclude-standard"
             )
+            names += listed.split("\n")
         if since:
             # git reads whole seconds: a commit in the second the task began came before it.
             start = math.floor(datetime.fromisoformat(since).timestamp()) + 1
             with suppress(ValueError):
-                log = await git("-C", path, "log", f"--since=@{start}", "--name-only", "--format=")
+                log = await checkout_git(
+                    checkout, path, "log", f"--since=@{start}", "--name-only", "--format="
+                )
                 names += log.split("\n")
         return [name for name in dict.fromkeys(names) if name.strip()]
 
@@ -672,10 +717,10 @@ class Checks:
         sent_back = int(self.store.get(key) or 0)
         failures = []
         for checkout in self.runtime.workspaces.checkouts(row):
-            found = await self.repository(checkout["path"])
+            found = await self.repository(checkout)
             if not found:
                 continue
-            top, git_dir, repo = found
+            top, git_dir, repo, _ = found
             active = self.store.all(
                 "SELECT * FROM checks WHERE repo=? AND status='active'", (repo,)
             )
@@ -686,7 +731,7 @@ class Checks:
             if not due:
                 continue
             try:
-                now_there = await self.snapshot(top)
+                now_there = await self.snapshot(checkout, top)
                 async with self.checked_out(git_dir, now_there) as (tree,):
                     readable = [tree, Path(git_dir)]
                     results = await asyncio.gather(

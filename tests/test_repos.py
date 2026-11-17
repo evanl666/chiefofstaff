@@ -2193,56 +2193,271 @@ async def test_a_hooks_script_not_there_yet_is_held_as_missing(tmp_path, git_rep
         await runtime.stop()
 
 
-async def test_a_branch_update_left_halfway_is_said_with_how_to_undo_it(
+async def test_a_branch_update_that_failed_partway_gets_one_line_within_its_turn(
     tmp_path, git_repo, monkeypatch
 ):
-    """A merge that stopped on a file it couldn't change (the sandbox holds agent settings)
-    leaves the branch's new files untracked and no merge to abort: after its turn, its
-    timeline says so, and the worker is told how to put its tree back (those files only),
-    once. Its tree as the merge began is taken before it runs (Copilot asks first)."""
-    commit(git_repo, "base.txt", "b\n")
-    run("git", "checkout", "-q", "-b", "team", cwd=git_repo)
-    commit(git_repo, "team.txt", "t\n")
-    run("git", "checkout", "-q", "main", cwd=git_repo)
+    """A merge that failed on a file it couldn't change (the sandbox holds agent settings) and
+    left nothing to abort: the worker is told at once, within its turn, to put its tree back
+    before going on, once. Not for an ordinary conflict (its own to resolve), nor for a merge
+    that went through, nor for `git merge-base`."""
+    from chiefofstaff.runtime import UPDATE_FAILED
+
     monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
     runtime = await harness.connect()
     try:
-        worker, cwd = await isolated(runtime, harness, git_repo)
+        worker, _ = await isolated(runtime, harness, git_repo)
         await settle(runtime)
-        (cwd / "mine.txt").write_text("mine\n")  # The worker's own, untouched.
+        session = harness.session(worker)
+        session.emit("assistant.turn_start")
+        await settle(runtime)
 
-        async def merged(call: str, command: str):
-            hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
-            asked_now = {"toolName": "bash", "toolArgs": {"command": command}}
-            assert await asked(hook, asked_now, worker) is None
-            (cwd / "team.txt").write_text("t\n")  # What the merge wrote before it stopped.
-            session = harness.session(worker)
+        async def ran(call: str, command: str, code: int, output: str):
             session.emit("tool.execution_start", tool_name="bash", tool_call_id=call,
                          arguments={"command": command})  # fmt: skip
-            done = SimpleNamespace(
-                content="error: unable to create file\n<exited with exit code 1>"
-            )
-            session.emit("tool.execution_complete", tool_call_id=call, success=False, result=done)
-            await call_tool(runtime, "report", worker, status="done", summary="Merge failed.")
-            session.emit("session.idle")
+            done = SimpleNamespace(content=f"{output}\n<exited with exit code {code}>")
+            session.emit("tool.execution_complete", tool_call_id=call, success=code == 0,
+                         result=done)  # fmt: skip
             await settle(runtime)
 
-        await merged("m1", "git merge team")
-        notes = [t for k, t in harness.kinds(worker) if "stopped halfway" in t]
-        assert notes == [
-            "Its branch update stopped halfway (`team.txt` left untracked): asked it to put its "
-            "worktree back."
-        ]
-        told = harness.session(worker).sent[-1]
-        assert "remove `team.txt`" in told and "mine.txt" not in told
-        # Again after another turn, the same left: said once.
-        (cwd / "team.txt").unlink()
-        await merged("m2", "git -c a=b merge team")
-        assert len([t for k, t in harness.kinds(worker) if "stopped halfway" in t]) == 1
+        await ran("m1", "git merge-base HEAD main", 1, "")
+        await ran("m2", "git merge main", 0, "Already up to date.")
+        await ran("m3", "git merge team", 1, "CONFLICT (content): Merge conflict in a.txt\n"
+                  "Automatic merge failed; fix conflicts and then commit the result.")  # fmt: skip
+        told = [t for t in session.sent if UPDATE_FAILED in t]
+        assert told == []
+        unchangeable = "error: unable to create file .mcp.json: Operation not permitted"
+        await ran("m4", "git pull origin main", 1, unchangeable)
+        told = [i for i, t in enumerate(session.sent) if UPDATE_FAILED in t]
+        assert len(told) == 1 and session.modes[told[0]] == "immediate", "within its turn"
+        notes = [t for k, t in harness.kinds(worker) if "failed partway" in t]
+        assert notes == ["Its branch update failed partway: asked it to put its tree back first."]
+        again = SimpleNamespace(content=f"{unchangeable}\n<exited with exit code 1>")
+        session.emit("tool.execution_complete", tool_call_id="m4", success=False, result=again)
+        await settle(runtime)
+        assert len([t for t in session.sent if UPDATE_FAILED in t]) == 1, "once"
     finally:
         await runtime.stop()
+
+
+async def test_no_chief_of_staff_git_runs_in_a_workers_repository_around_its_branch_updates(
+    tmp_path, git_repo, monkeypatch
+):
+    """A repository the worker made itself (its workspace, `git init`) can hold a filter that
+    git runs as it compares files: Chief of Staff runs no git there before a worker's branch
+    update (Copilot asks first), nor as one fails, nor after its turn."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Look", instructions="l")
+        worker, cwd = info["session_id"], Path(info["cwd"])
+        await settle(runtime)
+        marker = tmp_path / "MARK"
+        g = ["git", "-c", "user.email=w@w", "-c", "user.name=w"]
+        run(*g, "init", "-q", "-b", "main", cwd=cwd)
+        (cwd / "f.txt").write_text("a\n")
+        run(*g, "add", "f.txt", cwd=cwd)
+        run(*g, "commit", "-qm", "i", cwd=cwd)
+        (cwd / ".gitattributes").write_text("* filter=x\n")
+        run(*g, "config", "filter.x.clean", f"sh -c 'touch {marker}; cat'", cwd=cwd)
+        (cwd / "f.txt").write_text("b\n")
+        seen: list[tuple] = []
+        command = workspaces_module.command
+
+        async def watched(*arguments, **kwargs):
+            seen.append(arguments)
+            return await command(*arguments, **kwargs)
+
+        monkeypatch.setattr(workspaces_module, "command", watched)
+        session = harness.session(worker)
+        merge = {"toolName": "bash", "toolArgs": {"command": "git merge feature"}}
+        assert await asked(session.options["hooks"]["on_pre_tool_use"], merge, worker) is None
+        session.emit("tool.execution_start", tool_name="bash", tool_call_id="m1",
+                     arguments={"command": "git merge feature"})  # fmt: skip
+        failed = "error: unable to unlink old 'f.txt': Operation not permitted"
+        done = SimpleNamespace(content=f"{failed}\n<exited with exit code 1>")
+        session.emit("tool.execution_complete", tool_call_id="m1", success=False, result=done)
+        await call_tool(runtime, "report", worker, status="done", summary="Merge failed.")
+        session.emit("session.idle")
+        await settle(runtime)
+        assert not marker.exists(), "the worker's filter never ran"
+        assert not [a for a in seen if a[0] == "git" and any(str(cwd) in str(w) for w in a)]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell filter")
+async def test_a_submodule_filter_a_worker_configured_never_runs_in_chief_of_staffs_git(
+    tmp_path, monkeypatch
+):
+    """A worktree of Chief of Staff's keeps its submodules' git folders in its own folder in
+    the repository (.git/worktrees/<it>/modules/), which its worker can write: a clean filter
+    (and a file-system monitor) configured there would run as the owner whenever git looks into
+    that submodule's files. Chief of Staff's git never does: what it reads of the worker's work
+    (its version, its changes, the diff, a kept snapshot for checks, its status as it is let
+    go of), while the submodule's own commit still counts and one checked out is never taken
+    for clean."""
+    gc = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always"]
+    sub, repo = tmp_path / "sub", tmp_path / "repo"
+    run("git", "init", "-q", "-b", "main", str(sub))
+    commit(sub, "s.txt", "hi\n")
+    run("git", "init", "-q", "-b", "main", str(repo))
+    commit(repo, "t.txt", "top\n")
+    run("git", *gc, "submodule", "add", "-q", str(sub), "lib", cwd=repo)
+    run("git", *gc, "commit", "-qm", "sub", cwd=repo)
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    marker = tmp_path / "RAN"
+    try:
+        worker, cwd = await isolated(runtime, harness, repo)
+        await settle(runtime)
+        run("git", *gc, "submodule", "update", "--init", "-q", cwd=cwd)  # Its command.
+        commit(cwd, "t.txt", "top, changed\n")  # Its work.
+        (cwd / "new.txt").write_text("new\n")
+        subgit = run("git", "rev-parse", "--absolute-git-dir", cwd=cwd / "lib").strip()
+        assert "/worktrees/" in subgit
+        run("git", "--git-dir", subgit, "config", "filter.x.clean", f"sh -c 'touch {marker}; cat'")
+        run("git", "--git-dir", subgit, "config", "core.fsmonitor", f"touch {marker}")
+        (cwd / "lib" / ".gitattributes").write_text("*.txt filter=x\n")
+        # Its file there as it was, written again: git must read it to tell (through the filter).
+        later = (cwd / "lib" / "s.txt").stat().st_mtime + 5
+        os.utime(cwd / "lib" / "s.txt", (later, later))
+        [checkout] = runtime.workspaces.checkouts(harness.store.session(worker))
+        assert await workspaces_module.version(checkout)
+        assert await workspaces_module.changes(checkout)
+        assert (await workspaces_module.diff(checkout))["diff"]
+        assert await workspaces_module.snapshot(checkout)
+        assert not marker.exists()
+        assert await runtime.checks.snapshot(checkout, str(cwd))
+        assert await runtime.checks.changed_files(checkout)
+        lines = await workspaces_module.status_lines(checkout, str(cwd))
+        assert " M lib" in lines, "a submodule checked out may hold work: never taken for clean"
+        assert not marker.exists()
+        await runtime.workers.close(worker, by="you")
+        await settle(runtime)
+        assert not marker.exists(), "the worker's filter never ran as the owner"
+        assert cwd.exists(), "kept: its submodule may hold work"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_look_past_the_settings_threads_room_is_denied_at_once(
+    tmp_path, git_repo, monkeypatch
+):
+    """Looks at workers' folders that don't end (a file system that doesn't answer) never pile
+    up: past the room the settings threads have, a sandboxed worker's tool is denied at once
+    ("can't check right now"), and the next look after they end goes as it would."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    freed = threading.Event()
+    try:
+        worker, _ = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
+        monkeypatch.setattr(runtime, "settings_room", threading.BoundedSemaphore(2), raising=False)
+        stuck = [asyncio.ensure_future(runtime.settings_thread(freed.wait, 10)) for _ in range(2)]
+        await asyncio.sleep(0.2)  # (Each in a thread, waiting.)
+        started = time.monotonic()
+        answer = await asked(hook, call, worker)
+        assert time.monotonic() - started < 1, "at once"
+        assert answer == {
+            "permissionDecision": "deny",
+            "permissionDecisionReason": events_module.PRE_TOOL_BUSY,
+        }
+        freed.set()
+        await asyncio.gather(*stuck)
+        assert await asked(hook, call, worker) is None
+    finally:
+        freed.set()
+        await runtime.stop()
+
+
+async def test_chief_of_staffs_git_never_waits_behind_looks_at_settings(
+    tmp_path, git_repo, monkeypatch
+):
+    """Its git guard has threads of its own: with every settings thread taken, its git runs."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    freed = threading.Event()
+    try:
+        await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        stuck = [asyncio.ensure_future(runtime.settings_thread(freed.wait, 10)) for _ in range(4)]
+        await asyncio.sleep(0.2)  # (Each in a thread, waiting.)
+        head = await asyncio.wait_for(
+            workspaces_module.git("-C", str(git_repo), "rev-parse", "HEAD"), 5
+        )
+        assert head.strip()
+        freed.set()
+        await asyncio.gather(*stuck)
+    finally:
+        freed.set()
+        await runtime.stop()
+
+
+def test_a_folder_too_full_to_check_is_not_read_past_the_cap(tmp_path, monkeypatch):
+    """listed() reads a folder's entries one by one and stops at the cap: a folder of thousands
+    is never read whole (nor sorted) only to be refused."""
+    for index in range(50):
+        (tmp_path / f"f{index}").write_text("")
+    read = []
+    scandir = os.scandir
+
+    class Counted:
+        def __init__(self, folder):
+            self.inner = scandir(folder)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.inner.close()
+
+        def __iter__(self):
+            for entry in self.inner:
+                read.append(entry.name)
+                yield entry
+
+    monkeypatch.setattr(settings_guard.os, "scandir", Counted)
+    with pytest.raises(settings_guard.TooLargeError, match="too many files"):
+        settings_guard.listed(tmp_path, 5)
+    assert len(read) == 6
+    read.clear()
+    assert len(settings_guard.listed(tmp_path, keep=lambda name: name == "f7")) == 1
+
+
+async def test_a_git_whose_waiter_stops_waiting_is_stopped_too(tmp_path):
+    """Chief of Staff stopping (or a look past its time) cancels what waits for a command: the
+    command ends with it, never left running."""
+    pid_file = tmp_path / "pid"
+    waiting = asyncio.ensure_future(
+        workspaces_module.command("sh", "-c", f"echo $$ > {pid_file}; exec sleep 30")
+    )
+    for _ in range(100):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        await asyncio.sleep(0.02)
+    pid = int(pid_file.read_text())
+    waiting.cancel()
+    with suppress(asyncio.CancelledError):
+        await waiting
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.02)
+    else:
+        raise AssertionError("still running")
 
 
 async def test_a_read_only_worker_never_makes_the_owners_local_settings_ask(
@@ -2724,53 +2939,6 @@ async def test_a_worktree_made_again_under_its_name_is_no_replaced_git(
             "/worktrees/cmp was replaced since Chief of Staff first saw it"
             in (denied["permissionDecisionReason"])
         )
-    finally:
-        await runtime.stop()
-
-
-async def test_only_what_a_failed_update_left_is_said(tmp_path, git_repo, monkeypatch):
-    """Not `git merge-base` (no update), nor a merge that went through: nothing said. Of a merge
-    that failed and left its tree halfway, only what it left: not the task's own deletions."""
-    commit(git_repo, "legacy.py", "old\n")
-    run("git", "checkout", "-q", "-b", "team", cwd=git_repo)
-    commit(git_repo, "team.txt", "t\n")
-    run("git", "checkout", "-q", "main", cwd=git_repo)
-    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
-    trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
-    runtime = await harness.connect()
-    try:
-        worker, cwd = await isolated(runtime, harness, git_repo)
-        await settle(runtime)
-        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
-        (cwd / "legacy.py").unlink()  # Its task: remove the legacy module.
-
-        async def turn(call: str, command: str, code: int, before=None):
-            asked_now = {"toolName": "bash", "toolArgs": {"command": command}}
-            assert await asked(hook, asked_now, worker) is None
-            if before:
-                before()
-            session = harness.session(worker)
-            session.emit("tool.execution_start", tool_name="bash", tool_call_id=call,
-                         arguments={"command": command})  # fmt: skip
-            done = SimpleNamespace(content=f"x\n<exited with exit code {code}>")
-            session.emit("tool.execution_complete", tool_call_id=call, success=code == 0,
-                         result=done)  # fmt: skip
-            session.emit("session.idle")
-            await settle(runtime)
-
-        def halfway():
-            (cwd / "team.txt").write_text("t\n")  # What the merge wrote before it stopped.
-
-        await turn("m1", "git merge-base HEAD main", 0)
-        await turn("m2", "git fetch -q && git merge main", 0)
-        assert not [t for k, t in harness.kinds(worker) if "stopped halfway" in t]
-        await turn("m3", "git merge team", 1, before=halfway)
-        notes = [t for k, t in harness.kinds(worker) if "stopped halfway" in t]
-        assert notes == [
-            "Its branch update stopped halfway (`team.txt` left untracked): asked it to put its "
-            "worktree back."
-        ]
     finally:
         await runtime.stop()
 

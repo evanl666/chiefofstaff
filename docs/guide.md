@@ -364,8 +364,9 @@ starts a server added there by itself, within seconds) nor the scripts the hooks
 merge, a rebase or a pull, the worker checks what it would change (`git diff --name-only
 HEAD...main`) and, if that touches those, tells you in one line ("main changed .mcp.json; I
 can't update the branch's agent settings, so please update the branch yourself or let me
-continue without it"). An update that stops halfway anyway is said on its timeline, and the
-worker is told how to put its tree back. Their other settings there, and all of them without the
+continue without it"). An update that fails partway anyway, on a file it can't change, gets the
+worker one line, within its turn, to put its tree back before going on (Chief of Staff runs no
+git in the worker's repository for this). Their other settings there, and all of them without the
 sandbox, their commands can change: the same lines then ask you. In your home folder, agent
 homes (`~/.codex`, `~/.claude`, `~/.copilot`) are yours and are never read as its settings.
 

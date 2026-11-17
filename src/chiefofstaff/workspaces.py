@@ -35,12 +35,43 @@ class TimedOutError(ValueError):
     """A command stopped for taking too long (not one that failed by itself)."""
 
 
+# What Chief of Staff's own git never does in a worker's tree: look into its submodules' work
+# trees. A submodule's git folder in a worktree of Chief of Staff's is in that worktree's own
+# folder (.git/worktrees/<it>/modules/), which its worker can write: a filter or a file-system
+# monitor configured there would run as the owner. Their commits still count (`dirty`).
+INTO_SUBMODULES = {"status": "--ignore-submodules=dirty", "diff": "--ignore-submodules=dirty",
+                   "fetch": "--no-recurse-submodules"}  # fmt: skip
+
+
+# git's own options before its command that take the next word as their value.
+VALUED_GIT_OPTIONS = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+
+
+def without_submodules(arguments: tuple[str, ...]) -> tuple[str, ...]:
+    """A git command line as Chief of Staff runs it: `status` and `diff` not looking into
+    submodules' work trees (whatever else it asked for), `fetch` not into submodules."""
+    words = list(arguments)
+    at = 1
+    while at < len(words) and words[at].startswith("-"):
+        at += 2 if words[at] in VALUED_GIT_OPTIONS else 1
+    if at >= len(words) or not (flag := INTO_SUBMODULES.get(words[at])):
+        return arguments
+    name, rest = flag.split("=")[0], words[at + 1 :]
+    paths = rest.index("--") if "--" in rest else len(rest)
+    options = [w for w in rest[:paths] if w.split("=")[0] not in {name, "--recurse-submodules"}]
+    return (*words[: at + 1], flag, *options, *rest[paths:])
+
+
 async def command(
     *arguments: str, limit: float = 60, stdin_data: bytes | None = None, env: dict | None = None
 ) -> str:
     """Run a command without a terminal (it can never wait for a password prompt), and without
     Chief of Staff's own CHIEFOFSTAFF_* variables (a token one may hold): what it runs can run code
-    a repository or a worker configured (a git filter)."""
+    a repository or a worker configured (a git filter). git never looks into submodules' work
+    trees (without_submodules). Stopped, with what it started, when it takes longer than
+    `limit` or whoever waits for it stops waiting."""
+    if arguments and arguments[0] == "git":
+        arguments = without_submodules(arguments)
     own = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
     env = {**own, **(env or {}), "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
     # ssh asks for passphrases and host keys on the terminal, not stdin: make it fail instead.
@@ -60,6 +91,10 @@ async def command(
         machine.kill_process_tree(process.pid)
         await process.wait()
         raise TimedOutError(f"{arguments[0]} timed out.") from exc
+    except asyncio.CancelledError:
+        # Whoever waited stopped (Chief of Staff stopping, a look past its time): it ends too.
+        machine.kill_process_tree(process.pid)
+        raise
     if process.returncode:
         error = stderr.decode(errors="replace").strip()[:500]
         raise ValueError(f"{arguments[0]} failed: {error}")
@@ -80,10 +115,11 @@ GIT_GUARD: weakref.WeakMethod | None = None
 
 
 async def guarded(where: str = "", roots: tuple[str, ...] = ()):
-    """Off the event loop (some lstat calls), in the runtime's own threads for its looks at
-    workers' folders (Runtime.settings_thread); ValueError where it may not run."""
+    """Off the event loop (some lstat calls), in the runtime's own threads for it
+    (Runtime.guard_thread: never behind its looks at workers' settings); ValueError where it
+    may not run."""
     if GIT_GUARD and (guard := GIT_GUARD()):
-        await guard.__self__.settings_thread(guard, where, roots)
+        await guard.__self__.guard_thread(guard, where, roots)
 
 
 # Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
@@ -212,20 +248,29 @@ def git_pins(checkout: dict, path: str) -> dict[str, str] | None:
     return {}
 
 
-def config_runs_code(common: str) -> list[str]:
-    """Keys in a repository's own config that would run code or send git elsewhere."""
+def config_runs_code(common: str, *own: str) -> list[str]:
+    """Keys in a repository's own config that would run code or send git elsewhere: its config
+    and config.worktree, and a worktree's own (`own`: its folder in the repository)."""
+    found = []
+    files = [Path(common) / "config", Path(common) / "config.worktree"]
+    files += [Path(folder) / "config.worktree" for folder in own if folder and folder != common]
+    for file in files:
+        found += [name for name in config_keys(file) if RUNS_CODE.match(name)]
+    return found
+
+
+def config_keys(file: Path) -> list[str]:
+    """The keys a git config file sets (section.name, as written)."""
     found = []
     with suppress(OSError):
-        text = read_regular(Path(common) / "config", follow=True).decode(errors="replace")
+        text = read_regular(file, follow=True).decode(errors="replace")
         section = ""
         for line in text.splitlines():
             line = line.strip()
             if match := re.match(r'^\[\s*([\w.-]+)(?:\s+"([^"]*)")?\s*\]', line):
                 section = match.group(1) + (f".{match.group(2)}" if match.group(2) else "")
             elif section and (key := re.match(r"^([\w-]+)\s*(=|$)", line)):
-                name = f"{section}.{key.group(1)}"
-                if RUNS_CODE.match(name):
-                    found.append(name)
+                found.append(f"{section}.{key.group(1)}")
     return found
 
 
@@ -240,7 +285,8 @@ async def checkout_git(
     if pins is None:
         raise ValueError(f"Not reading {path}: its worktree cannot be found in its repository.")
     if checkout.get("remote") and (found := await asyncio.to_thread(
-        config_runs_code, pins.get("GIT_COMMON_DIR") or str(Path(path) / ".git")
+        config_runs_code, pins.get("GIT_COMMON_DIR") or str(Path(path) / ".git"),
+        pins.get("GIT_DIR") or "",
     )):  # fmt: skip
         raise ValueError(f"Not reading {path}: its git config was changed ({', '.join(found)}).")
     return await command(
@@ -989,6 +1035,24 @@ def too_large(top: str, names: list[str]) -> list[str]:
     return found
 
 
+async def gitlinks(checkout: dict, top: str) -> list[str]:
+    """The submodules (and repositories added in it) a checkout's index holds, by path. `git
+    add` looks into the work tree of each (its config there runs: the worker's to write, see
+    INTO_SUBMODULES), so Chief of Staff's own adds leave them out (git_unlooked)."""
+    staged = await checkout_git(checkout, top, "ls-files", "--stage", "-z")
+    found = []
+    for entry in staged.split("\0"):
+        mode, _, path = entry.partition("\t")
+        if mode.startswith("160000 ") and path:
+            found.append(path)
+    return found
+
+
+def git_unlooked(paths: list[str]) -> list[str]:
+    """Pathspecs that leave these paths out of a git command."""
+    return [f":(exclude,literal){path}" for path in paths]
+
+
 async def snapshot(checkout: dict) -> dict | None:
     """What a checkout holds now, all of it: its commit, and a tree of its files as they are
     (edited, new; not ignored ones). Written to the repository's objects only, through an index
@@ -1016,8 +1080,9 @@ async def snapshot(checkout: dict) -> dict | None:
             with suppress(FileNotFoundError):
                 await asyncio.to_thread(shutil.copyfile, index, own)
             env = {"GIT_INDEX_FILE": own}
-            # New files too large to copy are left out (and listed: a task's large new file).
-            left_out = [f":(exclude,literal){name}" for name in large]
+            # New files too large to copy are left out (and listed: a task's large new file);
+            # submodules too, as the index holds them (git_unlooked).
+            left_out = git_unlooked([*large, *await gitlinks(checkout, top)])
             await checkout_git(checkout, top, "add", "-A", "--", ".", *left_out, limit=120, env=env)
             tree = (await checkout_git(checkout, top, "write-tree", env=env)).strip()
         return {"commit": commit, "tree": tree, "large": large}
@@ -1877,20 +1942,29 @@ async def sort_ignored(
 
 
 # git status of a worktree whatever its config hides: new files (status.showUntrackedFiles=no)
-# and changed submodules (diff.ignoreSubmodules, submodule.*.ignore).
-ALL_STATUS = ("status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
+# and submodules moved to other commits (diff.ignoreSubmodules, submodule.*.ignore). Never what
+# is in a submodule's work tree (without_submodules): status_lines says each one there is.
+ALL_STATUS = ("status", "--porcelain", "--untracked-files=normal")
 # For git's own check before it removes a worktree (a `git status` it runs without -u).
 SHOW_UNTRACKED = ("-c", "status.showUntrackedFiles=normal")
 
 
 async def status_lines(checkout: dict, tree: str) -> list[str] | None:
-    """A worktree's `git status --porcelain` lines, all of them (see ALL_STATUS); None when git
-    cannot tell."""
+    """A worktree's `git status --porcelain` lines, all of them (see ALL_STATUS), and each
+    submodule checked out in it as changed (" M lib": what is in it is never read, and it may
+    hold work); None when git cannot tell."""
     try:
         status = await checkout_git(checkout, tree, *ALL_STATUS, limit=REMOVE_SECONDS)
+        lines = [line for line in status.splitlines() if line.strip()]
+        named = {status_name(line) for line in lines}
+        for path in await gitlinks(checkout, tree):
+            if path not in named and await asyncio.to_thread(
+                os.path.lexists, Path(tree) / path / ".git"
+            ):
+                lines.append(f" M {path}")
     except ValueError:
         return None
-    return [line for line in status.splitlines() if line.strip()]
+    return lines
 
 
 async def uncommitted(checkout: dict, tree: str) -> list[str] | None:
