@@ -531,8 +531,10 @@ class Runtime:
         # settings (settings_stop): not started from the queue meanwhile; and why, in words.
         self.settings_held: set[str] = set()
         self.settings_reasons: dict[str, str] = {}
-        # A worker's settings as the file system said them at its last full check (glance).
+        # A worker's settings as the file system said them at its last full check (glance),
+        # and where those are: (top, cwd, the files their hooks run and its .git folders).
         self.settings_sigs: dict[str, str] = {}
+        self.settings_paths: dict[str, tuple[Path, Path, tuple[str, ...]]] = {}
         # Servers a Copilot worker's folder settings run whose files changed (servers_seen):
         # {session: {server: those files}}; and those its live session was opened without.
         self.servers_off: dict[str, dict[str, list[str]]] = {}
@@ -3642,10 +3644,12 @@ class Runtime:
 
     def settings_signature(self, row: dict) -> str:
         """Blocking (some lstat calls): settings_guard.signature of its folder's settings, the
-        files they run and the .git folders it could replace."""
+        files their hooks run and the .git folders it could replace; where those are is kept
+        for the glances until its next full check (settings_look)."""
         top, cwd, _ = self.settings_place(row)
         also = [*self.run_files(top)]
         also += replaceable_git_paths(self.workspaces.checkouts(row), self.workspaces.writes(row))
+        self.settings_paths[row["id"]] = (top, cwd, tuple(also))
         return settings_guard.signature(top, cwd, AGENT_SETTINGS, also)
 
     def settings_glance(self, session_id: str):
@@ -3662,7 +3666,12 @@ class Runtime:
         what the file system says of its folder's settings (some lstat calls, off the event
         loop), against its last full check's; when that changed, the full check, whose line
         says why the tool may not run ("" when it may: a script Copilot made executable)."""
-        now = await asyncio.to_thread(self.settings_signature, row)
+        if paths := self.settings_paths.get(row["id"]):
+            # (Where its last full check found them: the files' places alone, no snapshot read.)
+            now = await asyncio.to_thread(settings_guard.signature, paths[0], paths[1],
+                                          AGENT_SETTINGS, list(paths[2]))  # fmt: skip
+        else:
+            now = await asyncio.to_thread(self.settings_signature, row)
         if now == self.settings_sigs.get(row["id"]):
             return ""
         if line := await self.settings_refusal(row):
