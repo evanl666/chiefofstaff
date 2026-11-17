@@ -199,6 +199,11 @@ FIXES: list[Allow] = [
     # first seen (a folder moved into its place is another), and (Linux) the git files that
     # appeared in one a worker writes. Nothing is shown.
     Allow(".git identities", data=r"\.db\.kv\.git(id|appeared):"),
+    # 0.1.46 (security): before each tool, a worker's folder's agent settings looked at (a
+    # pre-tool hook Copilot waits for). Nothing is shown.
+    Allow(
+        "a worker's pre-tool hook", data=r"backend\.sessions\.worker:[^.]*\[\d+\]\.options\.hooks"
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
