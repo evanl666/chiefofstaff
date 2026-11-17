@@ -1465,6 +1465,7 @@ async def test_a_git_folder_a_worker_makes_does_not_shorten_what_is_checked(
         await runtime.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no FIFOs nor unreadable folders")
 async def test_a_setting_linked_out_of_its_folder_or_special_is_never_taken(
     tmp_path, git_repo, monkeypatch
 ):
@@ -2444,6 +2445,7 @@ def drained(fifo: Path, seconds: float = 20):
     threading.Thread(target=loop, daemon=True).start()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no FIFOs nor unreadable folders")
 async def test_a_folder_that_cant_be_listed_never_lets_a_tool_through(
     tmp_path, git_repo, monkeypatch
 ):
@@ -2556,6 +2558,7 @@ async def test_a_look_at_a_folder_past_its_time_makes_the_worker_wait(
         await runtime.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no FIFOs nor unreadable folders")
 async def test_a_fifo_where_the_check_reads_never_holds_copilot_nor_the_owner(
     tmp_path, git_repo, monkeypatch
 ):
@@ -2590,6 +2593,7 @@ async def test_a_fifo_where_the_check_reads_never_holds_copilot_nor_the_owner(
         await runtime.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no FIFOs nor unreadable folders")
 def test_the_checks_read_regular_files_only(tmp_path):
     """Never a FIFO (opened to read, it would wait for a writer), never through a link unless
     asked to, never past a size."""

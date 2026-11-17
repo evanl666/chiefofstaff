@@ -79,7 +79,16 @@ def read_regular(
     what was opened is what is read (no look first and read after, which a swap could come
     between). SpecialFileError for anything but a regular file; past `limit` bytes, an
     OSError (EFBIG), or (not `whole`) its first `limit` bytes."""
-    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | (0 if follow else os.O_NOFOLLOW)
+    nofollow = 0 if follow else getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | nofollow
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    if not follow and not nofollow and Path(path).is_symlink():
+        raise SpecialFileError(errno.ELOOP, "a link, not a file", str(path))  # (Windows.)
     try:
         handle = os.open(path, flags)
     except OSError as exc:
