@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from contextlib import suppress
@@ -768,12 +769,21 @@ async def test_agent_settings_in_the_owners_checkout_are_what_was_there_when_han
     plant(git_repo, ".claude/settings.local.json")
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
     runtime = await harness.connect()
+    added = runtime.add_message
+    threads = []
+
+    def add_message(*arguments, **keywords):
+        threads.append(threading.current_thread() is threading.main_thread())
+        return added(*arguments, **keywords)
+
+    monkeypatch.setattr(runtime, "add_message", add_message)
     try:
         info = await spawn(runtime, harness.router_id, title="Look", instructions="l",
                            project=str(git_repo), in_place=True)  # fmt: skip
         worker = info["session_id"]
         await settle(runtime)
         assert runtime.states.is_live(worker) and not settings_notices(harness, worker)
+        assert threads and all(threads), "said on the event loop's thread, not a reading thread"
         notes = [t for k, t in harness.kinds(worker) if t.startswith("Workers in ")]
         assert len(notes) == 1 and notes[0].endswith(
             f"/{git_repo.name} use the agent settings there: .claude/settings.local.json."
@@ -969,7 +979,13 @@ async def test_settings_too_many_to_check_are_the_owners_to_use_unchecked(
         assert said.startswith("You let this worker use them unchecked")
         assert runtime.states.is_live(worker) and unsent(harness, worker) == []
         await at_rest(runtime, harness, worker)
-        # What was said unchecked is what could be read of them then: one changed waits again.
+        # What was said unchecked is what could be read of them then: one made executable (as
+        # Copilot does a hook's script it runs) is the same; one changed waits again.
+        (cwd / ".github" / "agents" / "a2.agent.md").chmod(0o755)
+        await runtime.owner_send(worker, "Again")
+        await settle(runtime)
+        assert runtime.states.is_live(worker)
+        await at_rest(runtime, harness, worker)
         plant(cwd, ".github/agents/a1.agent.md", "---\nmcp-servers: {p: {command: sh}}\n---\n")
         await runtime.owner_send(worker, "Still")
         await settle(runtime)

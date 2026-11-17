@@ -220,7 +220,8 @@ def glimpse(top: Path, cwd: Path, names: tuple[str, ...]) -> str:
             info = os.lstat(path)
         except OSError:
             return
-        found: list = [name, info.st_mode, info.st_size]
+        # Its kind, not its permissions: Copilot makes a hook's script executable as it runs it.
+        found: list = [name, stat.S_IFMT(info.st_mode), info.st_size]
         if stat.S_ISREG(info.st_mode) and info.st_size <= 4 * 1024 * 1024 and budget[1] > 0:
             budget[1] -= info.st_size
             with suppress(OSError):

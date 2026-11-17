@@ -2982,7 +2982,9 @@ class Runtime:
         top, cwd, _, now, unreadable, code = await asyncio.to_thread(self.settings_read, row, names)
         stored = settings_guard.load(self.store, top)
         if stored is None and not unreadable:
-            stored = await asyncio.to_thread(self.settings_handout, row, top, cwd)
+            stored, said = await asyncio.to_thread(self.settings_handout, row, top, cwd)
+            if said:
+                self.add_message(row["id"], "notice", said)  # (On the event loop.)
         snapshot = stored or settings_guard.fresh()
         folders = [settings_guard.folder_key(top, f) for f in settings_guard.chain(top, cwd)]
         key = settings_guard.unchecked_key(names, folders)
@@ -3042,25 +3044,20 @@ class Runtime:
             roots += [*self.workspaces.writable(row), *git_dirs(self.workspaces.checkouts(row))]
         return tuple(dict.fromkeys(os.path.realpath(root) for root in roots if root))
 
-    def settings_handout(self, row: dict, top: Path, cwd: Path) -> dict | None:
+    def settings_handout(self, row: dict, top: Path, cwd: Path) -> tuple[dict | None, str]:
         """A folder handed to a worker for the first time, before it ran anything there, no
         other worker having had it: its settings are the owner's, kept as they are (each
-        agent's), its timeline saying once which ones its workers use. None when a worker may
-        have run there already (one handed it out before snapshots were kept, or another's)."""
+        agent's), and the line its timeline says once, of which ones its workers use. None when
+        a worker may have run there already (one handed it out before snapshots were kept, or
+        another's). Blocking (it reads them): no message is added from here."""
         if self.store.get(f"sent:{row['id']}") or self.workspaces.touched(top, row["id"]):
-            return None
+            return None, ""
         settings_guard.keep(self.store, top, cwd, (REPOSITORY_SETTINGS, CODEX_SETTINGS))
         snapshot = settings_guard.load(self.store, top)
-        if snapshot and (listed := settings_guard.named(snapshot["folders"])):
-            shown = ", ".join(listed[:5]) + (
-                f" and {len(listed) - 5} more" if len(listed) > 5 else ""
-            )
-            self.add_message(
-                row["id"],
-                "notice",
-                f"Workers in {home_shown(str(top))} use the agent settings there: {shown}.",
-            )
-        return snapshot
+        if not snapshot or not (listed := settings_guard.named(snapshot["folders"])):
+            return snapshot, ""
+        shown = ", ".join(listed[:5]) + (f" and {len(listed) - 5} more" if len(listed) > 5 else "")
+        return snapshot, f"Workers in {home_shown(str(top))} use the agent settings there: {shown}."
 
     def settings_code(
         self, row: dict, top: Path, snapshot: dict, code: list[str], names: tuple[str, ...]
