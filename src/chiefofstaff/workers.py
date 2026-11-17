@@ -789,8 +789,11 @@ class Workers:
             row = self.store.session(session_id)
             if row["closed_at"]:
                 await self.workspaces.release(row)
-                # Its own temporary folder (caches.worker_temp): made again if it is reopened.
+                # Its own temporary folder (caches.worker_temp) and init script: made again if
+                # it is reopened.
                 await asyncio.to_thread(caches.remove_temp, session_id)
+                scripts = self.runtime.cache_scripts
+                await asyncio.to_thread(caches.remove_script, scripts, session_id)
 
     def recently_closed(self, limit: int | None, helpers: bool = True) -> list[dict]:
         """Closed workers, the latest first (None: all of them); `helpers`: Chief of Staff's own

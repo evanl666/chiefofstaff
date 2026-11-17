@@ -82,6 +82,7 @@ SIZE, KEPT, KEEP = "storage:size:", "storage:kept:", "storage:keep:"
 HISTORY_KEY, LEVEL, NOTE = "storage:history", "storage:level", "storage:note"
 UV_KEY, OTHERS = "storage:uv", "storage:others"
 CACHES_KEY = "storage:worker-caches"
+CACHES_IN_USE = "Workers are using their caches; clear when they're idle."
 # What a cleanup could not delete from trash, by path: its size, since when, last tried.
 STUCK = "storage:stuck"
 STUCK_RETRY_SECONDS = 86400
@@ -969,16 +970,18 @@ class Storage:
             self.publish()
 
     async def caches_clear(self) -> dict:
-        """Delete sandboxed workers' own caches (caches.clear): made again as the next worker
-        starts, filled again from the owner's by the next seeding."""
-        if not self.caches_busy:
+        """Delete sandboxed workers' own caches (caches.clear): made again at once, filled
+        again from the owner's by the next seeding. Not while a worker uses them."""
+        if not self.caches_busy and not self.runtime.caches_in_use():
             self.caches_busy = "clearing"
             self.runtime.background(self.clear_caches())
         return self.report()
 
     async def clear_caches(self):
         try:
-            await asyncio.to_thread(caches.clear, self.runtime.cache_tier)
+            await asyncio.to_thread(
+                caches.clear, self.runtime.cache_tier, self.runtime.cache_owner()
+            )
             self.store.set(CACHES_KEY, json.dumps({"at": now(), "size": 0}))
             self.runtime.cache_seeded = 0.0  # Filled again at the next worker's start.
         except OSError as exc:
@@ -1058,6 +1061,7 @@ class Storage:
                 **json.loads(self.store.get(CACHES_KEY) or "{}"),
                 "copied": caches.copied_bytes(self.runtime.cache_tier),
                 "busy": self.caches_busy,
+                "blocked": CACHES_IN_USE if self.runtime.caches_in_use() else "",
             },
             "working": self.working,
             "measuring_all": self.measure_all,

@@ -267,7 +267,8 @@ function renderCaches(caches) {
   const measured = caches.size !== null && caches.size !== undefined ? `${sizeText(caches.size)}${copied}, measured ${since(caches.at)}` : "Not measured";
   $("#storage-caches-size").textContent = caches.busy === "measuring" ? "Measuring…" : caches.busy === "clearing" ? "Clearing…" : measured;
   $("#storage-caches-measure").disabled = Boolean(caches.busy);
-  $("#storage-caches-clear").disabled = Boolean(caches.busy);
+  $("#storage-caches-clear").disabled = Boolean(caches.busy || caches.blocked);
+  $("#storage-caches-note").textContent = caches.blocked || "";
 }
 function renderHistory(history) {
   $("#storage-history").replaceChildren(

@@ -79,8 +79,9 @@ def machine(tmp_path, monkeypatch):
     monkeypatch.setattr(
         caches_module, "worker_temp", lambda session, tier=None: tmp_path / f"t-{session[:8]}"
     )
-    monkeypatch.setattr(caches_module, "path_folders", lambda home: [])
+    monkeypatch.setattr(caches_module, "path_folders", lambda home, slack=False: [])
     monkeypatch.setattr(caches_module, "global_npmrc", list)
+    monkeypatch.setattr(caches_module, "SYSTEM_PREFIXES", ())  # Homebrew's, where it is.
     caches = workspaces_module.PLATFORM_CACHES["darwin"]
     monkeypatch.setattr(workspaces_module, "PLATFORM_CACHES", {"darwin": caches, "linux": caches})
     return SimpleNamespace(root=tmp_path, home=home, copilot=copilot)
@@ -317,18 +318,18 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "slack, created": (4501, "45e96f706f8f884c1ad15e268e2717480a4482bd75697b9db1a83afe2a21275f"),
     "slack, resumed": (4466, "90e994a20c3bcaadb98e628effd8a48499f866cc408d11fc19b63cbcb3fed734"),
     "the Copilot sandbox of a worker asking first": (
-        1048,
-        "e1944173dbbc978b3c2c60b512aff563b022de64be7c58e7368644a857fcf19a",
+        1085,
+        "fca47278898e0a33feaf7d4a96925858f1468e8c9b081954cd6e20648037916b",
     ),
     "watchdog, created": (3317, "74c2464eda92b08d7c0c2f0be7e9c18d5b80e0b4d7d7db7c5cbf22099bd3f111"),
     "watchdog, resumed": (3279, "3211b0fe48200b7a8b7e24baa9eca2c19608f7f40a7c4282665e9ca51f11ca54"),
     "worker asking first, sandboxed, created": (
-        19988,
-        "7ad082d54f547e1dd477b556cb6309ba7d79b5abdc6c60d8e2476fbc26b32327",
+        20025,
+        "03b448fdead6b6419325f91cc77e988b4df5178ed2e9c8ff68c63a98c2bbafd2",
     ),
     "worker asking first, sandboxed, resumed": (
-        19943,
-        "ba3cf6c14903df96658923d6c72d0344b96f56ddaf085b5b062606e32c4d656e",
+        19980,
+        "1f000783c49eb1c67f0d6b2e16d38520dfd6e1a43ec7819af9e395c9f534af4e",
     ),
     "worker in a trusted worktree, created": (
         18688,
@@ -339,12 +340,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "975d250bcb72472a04af36a9893065147566a7f2f0c36c4f60f2ce192f3b28d3",
     ),
     "worker that reads Slack, created": (
-        20414,
-        "6a75d122535c9cf6d2bc3bf536f493125813788fce97212274a30839e167f4a8",
+        20451,
+        "3a4f32aba3fb578f6245ef227dc0ed67c8a5fbfb24e64b7cfe36df8d65babee9",
     ),
     "worker that reads Slack, resumed": (
-        20367,
-        "03362d8b089cd460d3afe4febf0788d14938cfa85f9d29f336761f154a72c98a",
+        20404,
+        "3e8f93a98d352fc0038703d3f577a88fd9a9ff68bfbe9731a5bcaf42c51cae22",
     ),
     "worker with its model, created": (
         18222,

@@ -252,3 +252,49 @@ def test_no_other_socket_can_share_the_port_chief_listens_on(tmp_path):
     finally:
         chief.kill()
         chief.wait()
+
+
+def test_files_written_over_and_copied_in_as_windows_does_it(tmp_path, monkeypatch):
+    """Windows has no folder descriptors (safefs.SAFE is False there), its os.rename refuses a
+    name that exists and its os.utime takes no descriptor: a worktree's .git written over
+    (repoint) and the carried files copied in (copy_files) failed there, so every isolated
+    worker and every restore did."""
+    from chiefofstaff import safefs, workspaces
+
+    real_rename, real_utime = os.rename, os.utime
+
+    def rename(source, target, **kwargs):
+        if os.path.lexists(target):
+            raise FileExistsError(17, "Cannot create a file when that file already exists")
+        return real_rename(source, target, **kwargs)
+
+    def utime(path, *args, **kwargs):
+        if isinstance(path, int):
+            raise TypeError("utime: path should be string, bytes or os.PathLike, not int")
+        return real_utime(path, *args, **kwargs)
+
+    monkeypatch.setattr(safefs, "SAFE", False)
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(os, "utime", utime)
+    monkeypatch.setattr(os, "supports_fd", os.supports_fd - {real_utime})
+    workspace, repository = tmp_path / "workspace", tmp_path / "repo"
+    tree = workspace / "app"
+    admin = repository / ".git" / "worktrees" / "app"
+    tree.mkdir(parents=True)
+    admin.mkdir(parents=True)
+    (tree / ".git").write_text("gitdir: staged\n")
+    (admin / "gitdir").write_text("staged/.git\n")
+    workspaces.repoint(tree, workspace, str(admin), repository)
+    assert (tree / ".git").read_text() == f"gitdir: {admin}\n"
+    assert (admin / "gitdir").read_text() == f"{tree / '.git'}\n"
+    (repository / "config").mkdir()
+    (repository / "config" / ".env").write_bytes(b"TOKEN=1\r\nNAME=x\n")
+    os.utime(repository / "config" / ".env", ns=(1_000_000_000, 2_000_000_000))
+    assert workspaces.copy_files(repository, tree, ["config/.env"], workspace) == ["config/.env"]
+    copied = tree / "config" / ".env"
+    assert copied.read_bytes() == b"TOKEN=1\r\nNAME=x\n", "byte for byte"
+    assert copied.stat().st_mtime_ns == 2_000_000_000, "its times kept"
+    with safefs.open_folder(tree, workspace) as folder:
+        folder.write("notes.txt", "one\n")
+        folder.write("notes.txt", "two\n")
+    assert (tree / "notes.txt").read_bytes() == b"two\n"

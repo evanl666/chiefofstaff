@@ -4795,10 +4795,22 @@ async def round_storage(runtime, browser, failures: list[str]):
             await dialog.locator("#storage-caches-measure").click()
             # du runs at the lowest priority, after any other measuring.
             await expect(size).to_contain_text(re.compile(r"^3 MB, measured"), timeout=60_000)
+            in_use = runtime.caches_in_use
+            runtime.caches_in_use = lambda: True
+            try:
+                runtime.storage.publish()
+                await expect(dialog.locator("#storage-caches-clear")).to_be_disabled()
+                await expect(dialog.locator("#storage-caches-note")).to_have_text(
+                    "Workers are using their caches; clear when they're idle."
+                )
+            finally:
+                runtime.caches_in_use = in_use
+            runtime.storage.publish()
+            await expect(dialog.locator("#storage-caches-note")).to_have_text("")
             page.once("dialog", lambda asked: asyncio.ensure_future(asked.accept()))
             await dialog.locator("#storage-caches-clear").click()
             await expect(size).to_contain_text(re.compile(r"^0 KB, measured"), timeout=30_000)
-            assert not runtime.cache_tier.exists(), "workers' caches deleted"
+            assert not (runtime.cache_tier / "npm").exists(), "workers' caches deleted"
         finally:
             runtime.cache_tier = tier
         log("storage: workers' caches measured, and cleared once confirmed")

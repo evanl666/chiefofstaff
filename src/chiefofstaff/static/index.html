@@ -425,7 +425,7 @@
         </section>
         <section class="storage-caches">
           <h3>Workers' caches</h3>
-          <p><code id="storage-caches-path"></code> · <span id="storage-caches-size"></span> <button type="button" class="link" id="storage-caches-measure">Measure</button> <button type="button" class="link" id="storage-caches-clear">Clear</button></p>
+          <p><code id="storage-caches-path"></code> · <span id="storage-caches-size"></span> <button type="button" class="link" id="storage-caches-measure">Measure</button> <button type="button" class="link" id="storage-caches-clear">Clear</button> <span class="hint" id="storage-caches-note"></span></p>
           <p class="hint">Sandboxed workers' own package caches, started from yours as copy-on-write clones (where the disk cannot clone them, copies up to 8 GB). Clearing deletes them; the next worker makes them again, from yours, in the background. A worker installing at that moment may have to install again.</p>
         </section>
         <section>

@@ -1292,5 +1292,27 @@ async def test_workers_caches_are_measured_and_cleared_from_storage(tmp_path):
     assert runtime.storage.report()["caches"]["size"] >= 4096
     await runtime.storage.caches_clear()
     await settle(runtime)
-    assert not tier.exists() and runtime.storage.report()["caches"]["size"] == 0
+    assert not (tier / "npm").exists() and runtime.storage.report()["caches"]["size"] == 0
     assert caches.copied_bytes(tier) == 0
+
+
+async def test_workers_caches_are_not_cleared_while_a_sandboxed_worker_works(tmp_path):
+    """Clearing while a worker builds took its files from under it: Clear waits until no
+    sandboxed worker on the owner's tasks is working, and says why."""
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    tier = runtime.cache_tier
+    write(tier / "npm" / "_cacache" / "blob", "x")
+    worker = (await spawn(runtime, harness.router_id, "Build"))["session_id"]
+    harness.store.execute("UPDATE sessions SET status='working' WHERE id=?", (worker,))
+    report = await runtime.storage.caches_clear()
+    assert report["caches"]["blocked"] == "Workers are using their caches; clear when they're idle."
+    await settle(runtime)
+    assert (tier / "npm" / "_cacache" / "blob").exists()
+    harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
+    assert not runtime.storage.report()["caches"]["blocked"], "one that reads Slack: its own"
+    harness.store.execute("UPDATE sessions SET slack=0, status='waiting' WHERE id=?", (worker,))
+    assert not runtime.storage.report()["caches"]["blocked"]
+    await runtime.storage.caches_clear()
+    await settle(runtime)
+    assert not (tier / "npm").exists()

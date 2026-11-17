@@ -2095,13 +2095,14 @@ REGISTRY_SECRETS = (
     ".config/NuGet/NuGet.Config", ".bundle/config", ".gemrc", ".config/go/env",
     "Library/Application Support/go/env", ".git-credentials", ".config/git/credentials",
     ".config/gh/hosts.yml", ".aws/credentials", ".aws/config", ".azure", ".kube/config",
-    ".config/gcloud",
+    ".config/gcloud", ".config/mise/config.toml",
 )  # fmt: skip
 # The same, where an environment variable puts them: the variable, and the file under it (none:
 # the variable names the file itself).
 MOVED_SECRETS = {
     "NPM_CONFIG_USERCONFIG": (), "npm_config_userconfig": (), "PIP_CONFIG_FILE": (),
     "UV_CONFIG_FILE": (), "NETRC": (), "DOCKER_CONFIG": ("config.json",),
+    "MISE_CONFIG_DIR": ("config.toml",), "MISE_GLOBAL_CONFIG_FILE": (),
     "GRADLE_USER_HOME": ("gradle.properties", "init.d"),
     "CARGO_HOME": ("credentials", "credentials.toml"), "POETRY_CONFIG_DIR": ("auth.toml",),
     "NPM_CONFIG_GLOBALCONFIG": (), "npm_config_globalconfig": (), "BUNDLE_USER_CONFIG": (),

@@ -32,6 +32,8 @@ SAFE = os.name != "nt" and {
 } <= os.supports_dir_fd  # fmt: skip
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+BINARY = getattr(os, "O_BINARY", 0)  # Windows: bytes as they are, no newline translation.
+NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 FOLDER = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | NOFOLLOW | CLOEXEC
 # A link where a folder is to be opened: ELOOP (macOS may say ENOTDIR or EMLINK), a file:
 # ENOTDIR.
@@ -127,8 +129,8 @@ class Folder:
     def read(self, name: str) -> bytes | None:
         """A file's bytes (never through a link), None when there is no such file."""
         try:
-            fd = os.open(self.where(name), os.O_RDONLY | NOFOLLOW | CLOEXEC | os.O_NONBLOCK,
-                         **self.at(name))  # fmt: skip
+            flags = os.O_RDONLY | NOFOLLOW | CLOEXEC | BINARY | NONBLOCK
+            fd = os.open(self.where(name), flags, **self.at(name))
         except OSError:
             return None
         with os.fdopen(fd, "rb") as file:
@@ -143,7 +145,7 @@ class Folder:
         check_name(name)
         content = data.encode() if isinstance(data, str) else data
         temporary = self.temporary_name(name)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW | CLOEXEC
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW | CLOEXEC | BINARY
         fd = os.open(self.where(temporary), flags, mode, **self.at(temporary))
         try:
             with os.fdopen(fd, "wb") as file:
@@ -162,15 +164,19 @@ class Folder:
         check_name(name)
         found = os.stat(source)
         temporary = self.temporary_name(name)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW | CLOEXEC
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW | CLOEXEC | BINARY
         fd = os.open(self.where(temporary), flags, 0o600, **self.at(temporary))
+        times = (found.st_atime_ns, found.st_mtime_ns)
         try:
             with open(source, "rb") as origin, os.fdopen(fd, "wb") as copy:
                 shutil.copyfileobj(origin, copy, 1 << 20)
                 copy.flush()
                 if hasattr(os, "fchmod"):
                     os.fchmod(copy.fileno(), stat.S_IMODE(found.st_mode))
-                os.utime(copy.fileno(), ns=(found.st_atime_ns, found.st_mtime_ns))
+                if os.utime in os.supports_fd:
+                    os.utime(copy.fileno(), ns=times)
+            if os.utime not in os.supports_fd:  # Windows: by its path (no worker writes there).
+                os.utime(self.where(temporary), ns=times)
             self.move(temporary, name)
         except BaseException:
             with suppress(OSError):
@@ -213,8 +219,8 @@ class Folder:
         into = into or self
         if SAFE:
             os.rename(check_name(name), check_name(to), src_dir_fd=self.fd, dst_dir_fd=into.fd)
-        else:
-            os.rename(self.path / check_name(name), into.path / check_name(to))
+        else:  # os.replace: Windows' os.rename refuses a name that exists.
+            os.replace(self.path / check_name(name), into.path / check_name(to))
 
     def remove(self, name: str, onexc: Callable | None = None) -> None:
         """A file, link or folder (with all in it) removed, never following a link."""
@@ -349,11 +355,14 @@ def rmtree(name: str, onexc: Callable | None = None, dir_fd: int | None = None) 
 
 def chmod(folder: Folder, name: str, mode: int) -> None:
     """Set the mode of what is at `name` (never through a link), even one it cannot open."""
-    flags = os.O_RDONLY | NOFOLLOW | CLOEXEC | os.O_NONBLOCK
+    if not SAFE:  # Windows: by its path, as everything there.
+        os.chmod(folder.where(name), mode)
+        return
+    flags = os.O_RDONLY | NOFOLLOW | CLOEXEC | NONBLOCK
     try:
         fd = os.open(folder.where(name), flags, **folder.at(name))
     except PermissionError:
-        if sys.platform == "darwin" or not SAFE:
+        if sys.platform == "darwin":
             os.chmod(folder.where(name), mode, follow_symlinks=False, **folder.at(name))
             return
         # Linux (no lchmod): what O_PATH opened, through its descriptor's own path.

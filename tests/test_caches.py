@@ -123,6 +123,7 @@ def test_a_workers_init_script_starts_no_process_and_points_java_at_the_proxy(tm
     tier = tmp_path / "tier"
     assert f"GOPATH={tier / 'go'}" in found, "Go's checksum database state, written at go get"
     assert f"GOMODCACHE={tier / 'go' / 'mod'}" in found
+    assert f"GOBIN={tier / 'go' / 'bin'}" in found, "the owner's GOBIN (go env -w) is read-only"
     assert f"PNPM_HOME={tier / 'pnpm'}" in found
     assert "npm_config_store_dir" not in found and "npm_config_devdir" not in found, (
         "npm 11.5 and later warn about either at every command"
@@ -461,18 +462,55 @@ def test_workers_caches_can_be_cleared_even_go_s_read_only_modules(tmp_path):
     (tier / "npm").symlink_to(victim)
     (tier.parent / caches.SEEDED).mkdir()
     (tier.parent / caches.SEEDED / "state.json").write_text('{"copied": 5}')
-    caches.clear(tier)
-    assert not tier.exists() and (victim / "keep").read_text() == "the owner's"
+    caches.clear(tier, caches.Owner(tmp_path / "nobody"))
+    assert list(tier.iterdir()) == [tier / "ms-playwright"] and (victim / "keep").exists()
     assert caches.copied_bytes(tier) == 0, "seeding fills it all again"
     assert not [p for p in tier.parent.iterdir() if p.name.startswith(".clearing-")]
-    caches.clear(tier)  # Nothing there: nothing to do.
+    caches.clear(tier, caches.Owner(tmp_path / "nobody"))  # Nothing in it: nothing to do.
+
+
+def test_clearing_makes_the_links_running_workers_need_again_at_once(tmp_path, monkeypatch):
+    """Clear moved the whole tier aside and nothing made its links again until another worker
+    started: one running lost the owner's browsers and its Gradle and Cargo settings. Made
+    again at once, after any seeding pass and any worker being readied."""
+    import threading
+
+    monkeypatch.setattr(caches, "system", lambda: "linux")
+    home = tmp_path / "home"
+    (home / ".cache" / "ms-playwright" / "chromium-1200").mkdir(parents=True)
+    (home / ".gradle").mkdir()
+    (home / ".gradle" / "gradle.properties").write_text("systemProp.https.proxyHost=corp\n")
+    owner = caches.Owner(home)
+    tier = tmp_path / "chief" / "workers"
+    (tier / "npm").mkdir(parents=True)
+    (tier / "npm" / "blob").write_text("x")
+    done = threading.Event()
+
+    def clear():
+        caches.clear(tier, owner)
+        done.set()
+
+    for lock in (caches.SEEDING, caches.PREPARING):
+        with lock:
+            thread = threading.Thread(target=clear)
+            thread.start()
+            assert not done.wait(0.3), "waits for it"
+        thread.join(10)
+        assert done.is_set()
+        done.clear()
+    assert not (tier / "npm").exists()
+    assert (tier / "ms-playwright" / "chromium-1200").resolve() == (
+        home / ".cache" / "ms-playwright" / "chromium-1200"
+    )
+    settings = home / ".gradle" / "gradle.properties"
+    assert (tier / "gradle" / "gradle.properties").resolve() == settings
 
 
 def test_read_only_paths_another_one_holds_are_left_out(tmp_path, monkeypatch):
     """Every read-only path is a rule Copilot writes and the sandbox reads at each command: one
     inside another read-only folder adds nothing (a worker's commands took ~8 ms longer each),
     unless it is in a writable folder (it carves that out) or leads elsewhere (a link)."""
-    monkeypatch.setattr(caches.tempfile, "gettempdir", lambda: str(tmp_path / "temp" / "T"))
+    monkeypatch.setattr(caches, "temp_root", lambda: str(tmp_path / "temp" / "T"))
     tools, work, elsewhere = tmp_path / "tools", tmp_path / "work", tmp_path / "elsewhere"
     for folder in (tools / "go" / "bin", work / ".git" / "hooks", elsewhere):
         folder.mkdir(parents=True)
@@ -481,9 +519,78 @@ def test_read_only_paths_another_one_holds_are_left_out(tmp_path, monkeypatch):
                 str(work / ".git" / "hooks"), str(tmp_path / "missing" / "x"), str(tools / "gone"),
                 str(tmp_path / "temp" / "T" / "x")]  # fmt: skip
     kept = caches.fewest([*readonly, str(tmp_path)], [str(work)])
-    assert kept == [str(work / ".git" / "hooks"), str(tmp_path / "temp" / "T" / "x"),
-                    str(tmp_path)], "all held by tmp_path, but in what is writable"  # fmt: skip
+    assert kept == [str(tools / "linked"), str(work / ".git" / "hooks"),
+                    str(tmp_path / "temp" / "T" / "x"), str(tmp_path)], (
+        "all held by tmp_path, but in what is writable, and a link's own rule"
+    )  # fmt: skip
+    # A link in a writable folder keeps its own rule (it holds the link itself in place), even
+    # where what it leads to is held.
+    (work / "env").symlink_to(elsewhere)
+    kept = caches.fewest([str(tmp_path / "elsewhere"), str(work / "env")], [str(work)])
+    assert kept == [str(tmp_path / "elsewhere"), str(work / "env")]
     kept = caches.fewest(readonly, [str(work)])
     assert kept == [str(tools), str(tools / "linked"), str(work / ".git" / "hooks"),
                     str(tmp_path / "missing" / "x"),
                     str(tmp_path / "temp" / "T" / "x")]  # fmt: skip
+
+
+def test_the_owners_go_tools_are_found_where_a_makefile_looks(tmp_path):
+    """Workers' GOPATH is in the tier: a Makefile's `$(go env GOPATH)/bin/golangci-lint` found
+    an empty folder. The owner's Go tools are linked there (read-only to workers on the owner's
+    tasks; a tool a worker installed stays); never for a worker that reads Slack."""
+    home = tmp_path / "home"
+    gobin = tmp_path / "gopath" / "bin"
+    gobin.mkdir(parents=True)
+    (gobin / "golangci-lint").write_text("#!/bin/sh\n")
+    (gobin / "stringer").write_text("#!/bin/sh\n")
+    tier, scripts = tmp_path / "chief" / "workers", tmp_path / "data" / "worker-shell"
+    (tier / "go" / "bin").mkdir(parents=True)
+    (tier / "go" / "bin" / "stringer").write_text("a worker's own")
+    go = {"GOPATH": str(tmp_path / "gopath")}
+    found = caches.plan(tier, tmp_path / "ws" / "w", "11111111-a", scripts, slack=False,
+                        read_through=True, go=go, home=home)  # fmt: skip
+    assert str(gobin) in found.readonly
+    assert caches.prepare(found, "11111111-a", scripts)
+    assert (tier / "go" / "bin" / "golangci-lint").resolve() == gobin / "golangci-lint"
+    assert (tier / "go" / "bin" / "stringer").read_text() == "a worker's own"
+    reader = caches.plan(tier, tmp_path / "ws" / "r", "22222222-b", scripts, slack=True,
+                         read_through=False, go=go, home=home)  # fmt: skip
+    assert str(gobin) not in reader.readonly
+    assert caches.prepare(reader, "22222222-b", scripts)
+    assert not (tmp_path / "ws" / "r" / caches.PRIVATE / "go" / "bin").exists()
+
+
+def test_each_workers_init_script_is_its_own_and_goes_when_it_closes(tmp_path):
+    """Every worker could read every worker's init script, and none was ever deleted: an
+    owner-task worker's names the owner's GOPROXY, which may hold a token, and workers that
+    read Slack read it. Each is in a folder of its worker's own, the only one it reads."""
+    home = tmp_path / "home"
+    tier, scripts = tmp_path / "chief" / "workers", tmp_path / "data" / "worker-shell"
+    go = {"GOPROXY": "https://user:KEY@corp.example/go"}
+    own = caches.plan(tier, tmp_path / "ws" / "w", "11111111-a", scripts, slack=False,
+                      read_through=True, go=go, home=home)  # fmt: skip
+    path = caches.prepare(own, "11111111-a", scripts)
+    assert path == scripts / "11111111-a" / "init.sh" and "user:KEY@" in path.read_text()
+    reader = caches.plan(tier, tmp_path / "ws" / "r", "22222222-b", scripts, slack=True,
+                         read_through=False, go=go, home=home)  # fmt: skip
+    theirs = caches.prepare(reader, "22222222-b", scripts)
+    assert theirs and "KEY" not in theirs.read_text()
+    assert str(scripts / "22222222-b") in reader.readonly
+    assert not [p for p in reader.readonly if p == str(scripts) or p == str(path.parent)]
+    caches.remove_script(scripts, "11111111-a")
+    assert not path.parent.exists() and theirs.exists()
+
+
+@pytest.mark.parametrize("temp", ["/tmp", "/", "/private/var/folders/ab/cd/T"])
+def test_the_temporary_folder_never_makes_every_path_writable(temp, monkeypatch):
+    """The system's temporary folder's parent is / on Linux (and with TMPDIR=/tmp): every path
+    then counted as writable, and nothing was left out. Only macOS' per-user folder (its T
+    and C, which Copilot's sandbox writes) goes up one."""
+    monkeypatch.setattr(caches.tempfile, "gettempdir", lambda: temp)
+    root = "/nonexistent-chief-root"
+    kept = caches.fewest([root, f"{root}/go/bin", f"{temp.rstrip('/')}/cd-x"], [])
+    assert f"{root}/go/bin" not in kept and root in kept
+    if temp.startswith("/private/var/folders"):
+        assert caches.temp_root() == "/private/var/folders/ab/cd"
+    else:
+        assert caches.temp_root() in {None, os.path.realpath(temp)} and caches.temp_root() != "/"

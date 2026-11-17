@@ -893,7 +893,7 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
     )  # fmt: skip
     files = (
         ".rustup/settings.toml", ".cargo/credentials.toml", ".npmrc", ".m2/settings.xml",
-        ".config/go/env", ".netrc", ".aws/credentials", ".pypirc",
+        ".config/go/env", ".netrc", ".aws/credentials", ".pypirc", ".config/mise/config.toml",
     )  # fmt: skip
     for name in folders:
         (home / name).mkdir(parents=True)
@@ -915,7 +915,9 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
         assert CopilotBackend(None).sandbox(policy).allow_dev_tool_access is False  # type: ignore[arg-type]
         tools = (
             ".cargo/bin", ".nvm/versions", ".pyenv/versions", ".sdkman/candidates",
-            "Library/Java/JavaVirtualMachines", "jdk", "tools/maven", "Library/Caches/copilot/pkg",
+            "Library/Java/JavaVirtualMachines", "jdk", "Library/Caches/copilot/pkg",
+            # The folder above a bin on PATH: its bin only for a Slack reader (its etc, var).
+            "tools/maven/bin" if slack else "tools/maven",
         )  # fmt: skip
         for tool in tools:
             assert str(home / tool) in policy.readonly, (slack, tool)
@@ -923,7 +925,8 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
             "Rust's toolchains: for a Rust project (pip runs `rustc --version` for its user agent,"
             " waiting up to 0.5 s for it; Copilot granted them to Rust's commands only)"
         )
-        config = (".npmrc", ".m2/settings.xml", ".config/go/env")
+        # mise's [env] often holds tokens: never to a Slack reader.
+        config = (".npmrc", ".m2/settings.xml", ".config/go/env", ".config/mise/config.toml")
         for name in config:
             assert (str(home / name) in policy.readonly) == (not slack), (slack, name)
         assert (str(home / ".npm") in policy.readonly) == (not slack), "the owner's caches"
@@ -1089,6 +1092,63 @@ async def test_a_worker_never_waits_for_the_java_truststore(tmp_path, monkeypatc
         assert str(store.parent) in found.readonly
     finally:
         release.set()
+
+
+async def test_workers_that_read_slack_read_only_what_their_tools_run(tmp_path, monkeypatch):
+    """A Slack reader was granted whole tool homes and the folder above each bin on PATH: other
+    node versions' etc/npmrc, Maven's conf/settings.xml, the owner's pnpm store and Go modules
+    were readable to it. It gets what runs (bin, lib…); what holds a token in a toolchain it
+    reads, Homebrew's var and the owner's caches within are denied. Workers on the owner's own
+    tasks keep their grants."""
+    for name in (*MOVED, "NVM_DIR", "MAVEN_HOME", "PNPM_HOME", "VOLTA_HOME", "M2_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    for name in (
+        ".nvm/versions/node/v20/bin", ".nvm/versions/node/v20/lib",
+        ".nvm/versions/node/v22/bin", "gopath/bin", "gopath/pkg/mod/cache/download",
+        "maven/bin", "maven/lib", "maven/boot", "tools/acme/bin", "tools/acme/lib",
+        "tools/acme/var", "Library/pnpm/store",
+    ):  # fmt: skip
+        (home / name).mkdir(parents=True)
+    for name in (
+        ".nvm/versions/node/v20/etc/npmrc", ".nvm/versions/node/v22/etc/npmrc",
+        "maven/conf/settings.xml", ".config/mise/config.toml", "tools/acme/etc/token",
+    ):  # fmt: skip
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
+        (home / name).write_text("//registry/:_authToken=secret")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("NVM_DIR", str(home / ".nvm"))
+    monkeypatch.setenv("GOPATH", str(home / "gopath"))
+    monkeypatch.setenv("MAVEN_HOME", str(home / "maven"))
+    monkeypatch.setenv("PNPM_HOME", str(home / "Library/pnpm"))
+    on_path = [home / ".nvm/versions/node/v22/bin", home / "tools/acme/bin"]
+    monkeypatch.setenv("PATH", os.pathsep.join([*map(str, on_path), os.environ["PATH"]]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Answer in the thread")
+    harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
+    policy = runtime.sandbox_policy(harness.store.session(worker))
+    assert policy is not None
+    readable = [Path(path) for path in policy.readonly]
+
+    def reads(path: Path) -> bool:
+        held = any(path.is_relative_to(folder) for folder in readable)
+        return held and not any(path.is_relative_to(denied) for denied in policy.denied)
+
+    for runs in (".nvm/versions/node/v22/bin", "gopath/bin", "maven/bin", "tools/acme/lib"):
+        assert reads(home / runs), runs
+    for secret in (
+        ".nvm/versions/node/v20/etc/npmrc", ".nvm/versions/node/v22/etc/npmrc",
+        "maven/conf/settings.xml", ".config/mise/config.toml", "tools/acme/etc/token",
+        "tools/acme/var", "gopath/pkg/mod", "Library/pnpm/store",
+    ):  # fmt: skip
+        assert not reads(home / secret), secret
+    harness.store.execute("UPDATE sessions SET slack=0 WHERE id=?", (worker,))
+    policy = runtime.sandbox_policy(harness.store.session(worker))
+    assert policy is not None
+    for whole in ("gopath", "maven", "tools/acme", ".nvm/versions"):
+        assert str(home / whole) in policy.readonly, f"{whole}: an owner-task worker's, as before"
 
 
 MOVED = (

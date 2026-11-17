@@ -1721,17 +1721,21 @@ class Runtime:
             raise RuntimeError("The Router has not started yet.")
         return router_id
 
-    def sandbox_policy(self, row: dict) -> SandboxPolicy | None:
-        """What a worker's shell commands may touch; None when they run unsandboxed, like the
-        owner's own Copilot sessions (whose Copilot sandbox settings then apply, if any)."""
-        if not (
+    def sandboxed(self, row: dict) -> bool:
+        """Whether a worker's shell commands run in the sandbox (sandbox_policy)."""
+        return bool(
             row["role"] == WORKER
             # Workers that read Slack always: what they read must not leave through a command.
             and (self.store.settings().worker_sandbox or row["slack"])
             and self.sandbox_host
             and self.backend
             and self.backend.capabilities.sandbox
-        ):
+        )
+
+    def sandbox_policy(self, row: dict) -> SandboxPolicy | None:
+        """What a worker's shell commands may touch; None when they run unsandboxed, like the
+        owner's own Copilot sessions (whose Copilot sandbox settings then apply, if any)."""
+        if not self.sandboxed(row):
             return None
         checkouts = self.workspaces.checkouts(row)
         repositories = git_dirs(checkouts)
@@ -1763,7 +1767,7 @@ class Runtime:
             # workers that read Slack, whose content must not reach the owner's local services.
             local_network=not row["slack"],
             # Its own daemons, yes; the owner's (their tokens are in these files), no.
-            denied=tuple(dict.fromkeys([*service_secrets(), *closed])),
+            denied=tuple(dict.fromkeys([*service_secrets(), *closed, *cached.denied])),
         )
 
     def cache_plan(self, row: dict) -> caches.Plan:
@@ -1887,13 +1891,28 @@ class Runtime:
                 self.find_cache_facts()
             with suppress(Exception):
                 await asyncio.shield(self.cache_facts_job)  # type: ignore[arg-type]
-            go = self.cache_facts.get("go") or {}
-            owner = caches.Owner(Path.home(), go.get("GOMODCACHE", ""), go.get("GOCACHE", ""))
-            timings = await asyncio.to_thread(caches.seed, self.cache_tier, owner)
+            timings = await asyncio.to_thread(caches.seed, self.cache_tier, self.cache_owner())
             logger.info("Workers' caches filled from yours: %s", timings)
         finally:
             self.cache_seeding = False
             self.cache_seeded = time.monotonic()
+
+    def cache_owner(self) -> caches.Owner:
+        """Where the owner's caches and Go tools are (Go's as `go env` says, cache_facts)."""
+        go = self.cache_facts.get("go") or {}
+        return caches.Owner(
+            Path.home(), go.get("GOMODCACHE", ""), go.get("GOCACHE", ""), caches.go_bin(go)
+        )
+
+    def caches_in_use(self) -> bool:
+        """Whether a sandboxed worker on the owner's own tasks is working: its tools are in
+        workers' caches (a worker that reads Slack has its own)."""
+        rows = self.store.all(
+            "SELECT * FROM sessions WHERE role=? AND closed_at IS NULL"
+            " AND status IN ('working', 'starting')",
+            (WORKER,),
+        )
+        return any(not row["slack"] and self.sandboxed(row) for row in rows)
 
     def own_code(self, writes: list[str]) -> list[str]:
         """Chief of Staff's own code and Python, read-only for every sandboxed worker

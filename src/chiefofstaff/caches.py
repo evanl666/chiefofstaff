@@ -32,11 +32,11 @@ import tempfile
 import threading
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from .safefs import CannotCloneError, Folder, UnsafePathError, open_folder
+from .safefs import CannotCloneError, Folder, UnsafePathError, check_name, open_folder
 from .workspaces import REGISTRY_SECRETS, held_caches, named, too_broad
 
 logger = logging.getLogger(__name__)
@@ -130,6 +130,7 @@ class Owner:
     home: Path
     go_modcache: str = ""
     go_cache: str = ""
+    go_bin_dir: str = ""
 
     @property
     def mac(self) -> bool:
@@ -229,6 +230,13 @@ class Owner:
             return Path(self.go_modcache)
         return env_dir("GOMODCACHE", env_dir("GOPATH", self.home / "go") / "pkg" / "mod")
 
+    def go_bin(self) -> Path:
+        """Where the owner's `go install` puts tools: GOBIN, else GOPATH's bin."""
+        if self.go_bin_dir and Path(self.go_bin_dir).is_absolute():
+            return Path(self.go_bin_dir)
+        gopath = os.environ.get("GOPATH", "").split(os.pathsep)[0]
+        return env_dir("GOBIN", (Path(gopath) if gopath else self.home / "go") / "bin")
+
     def go_build(self) -> Path:
         if self.go_cache and Path(self.go_cache).is_absolute():
             return Path(self.go_cache)
@@ -304,7 +312,6 @@ TOOLCHAINS = (
     ".dotnet/templates", ".dotnet/sdk-manifests", ".dotnet/store", ".dotnet/tools", ".gem/ruby",
     ".rbenv/versions", ".rbenv/shims", ".rbenv/libexec", ".rbenv/version", ".rvm/rubies",
     ".bun/bin", "Library/Java/JavaVirtualMachines", ".jdks", ".tool-versions",
-    ".config/mise/config.toml",
 )  # fmt: skip
 # The variable, and the folders under it (none: the whole folder it names).
 TOOL_HOMES = {
@@ -334,6 +341,8 @@ REGISTRY_CONFIG = (
     # And the credentials a private registry needs, which it let them read as well: the
     # owner's own tasks build as in their terminal (never for one that reads Slack).
     ".netrc", ".cargo/credentials", ".cargo/credentials.toml", ".m2/settings-security.xml",
+    # mise's global versions, and its [env], which often holds tokens.
+    ".config/mise/config.toml",
     "Library/Application Support/pypoetry/auth.toml",
     "Library/Application Support/pypoetry/config.toml", ".config/pypoetry/auth.toml",
     ".config/pypoetry/config.toml", ".gradle/init.gradle", ".gradle/init.gradle.kts",
@@ -351,33 +360,120 @@ def fewest(readonly: list[str], writable: list[str]) -> list[str]:
     """The read-only paths but those another one already holds (inside it, by their real
     paths): each is a rule Copilot writes and the sandbox reads at every command. One in a
     writable folder stays (it carves that out), the system's temporary folder included
-    (Copilot's sandbox writes there); a link stays unless what it leads to is held too."""
+    (temp_root), and so does a link (its rule holds the link itself)."""
 
-    def inside(path: str, folder: str) -> bool:
-        return path.startswith(folder.rstrip("/") + "/")
+    def within(path: str, folders: list[str]) -> bool:
+        return any(
+            path == folder or path.startswith(folder.rstrip("/") + "/") for folder in folders
+        )
 
     real = {path: os.path.realpath(path) for path in readonly}
-    holders = set(real.values())
-    open_ = [os.path.realpath(path) for path in writable if path]
-    open_.append(os.path.realpath(Path(tempfile.gettempdir()).parent))
+    holders = list(dict.fromkeys(real.values()))
+    open_ = [
+        form
+        for path in writable
+        if path
+        for form in (os.path.normpath(path), os.path.realpath(path))
+    ]
+    open_ += [temp] if (temp := temp_root()) else []
     return [
         path
         for path, resolved in real.items()
-        if any(resolved == folder or inside(resolved, folder) for folder in open_)
-        or not any(inside(resolved, holder) for holder in holders)
+        if Path(path).is_symlink()
+        or within(resolved, open_)
+        or within(os.path.normpath(path), open_)
+        or not any(resolved != holder and within(resolved, [holder]) for holder in holders)
     ]
 
 
-def tool_paths(owner: Owner, rust: bool = False) -> list[str]:
+def temp_root() -> str | None:
+    """The system's temporary folder, which Copilot's sandbox lets every command write: on
+    macOS the whole per-user folder (/var/folders/xx/yy: its T and C), elsewhere the folder
+    itself; never / (it would hold every path)."""
+    temp = os.path.realpath(tempfile.gettempdir())
+    if found := re.match(r"^(/(?:private/)?var/folders/[^/]+/[^/]+)(?:/|$)", temp):
+        temp = found.group(1)
+    return None if temp in {"", "/"} else temp
+
+
+def tool_paths(owner: Owner, rust: bool = False, slack: bool = False) -> list[str]:
     """What workers' commands run, read-only: the toolchains above (rustup's for a Rust
     project), uv's Pythons and tools, the Copilot CLI's own tools, the folders on PATH
-    (path_folders)."""
-    found = [*named(owner.home, TOOLCHAINS, TOOL_HOMES), *owner.toolchains()]
+    (path_folders). For a worker that reads Slack, only what runs of a tool's home (S2)."""
+    toolchains = SLACK_TOOLCHAINS if slack else TOOLCHAINS
+    found = [*named(owner.home, toolchains, SLACK_HOMES if slack else TOOL_HOMES)]
+    found += owner.toolchains()
     if rust:
         found += named(owner.home, RUST_TOOLCHAINS, RUST_HOMES)
     found.append(owner.copilot_tools())
-    found += path_folders(owner.home)
+    found += path_folders(owner.home, slack)
     return unsecret(found, owner.home)
+
+
+# A worker that reads Slack reads of a tool's home only what runs (S2): not the folder above a
+# bin on PATH (its etc and var), nor a home's caches (GOPATH's modules, pnpm's store), nor
+# Maven's conf (settings.xml), nor a node's download cache.
+RUNS = ("lib", "libexec", "share", "include")
+SLACK_TOOLCHAINS = (*(name for name in TOOLCHAINS if name != ".volta/tools"), ".volta/tools/image")
+SLACK_HOMES = {
+    **TOOL_HOMES,
+    "GOPATH": ("bin",), "NVM_DIR": ("versions", "alias"), "VOLTA_HOME": ("bin", "tools/image"),
+    "FNM_DIR": ("node-versions", "aliases"), "MAVEN_HOME": ("bin", "boot", "lib"),
+    "M2_HOME": ("bin", "boot", "lib"), "GRADLE_HOME": ("bin", "lib"),
+    "ASDF_DATA_DIR": ("installs", "shims"), "MISE_DATA_DIR": ("installs", "shims"),
+    "PYENV_ROOT": ("versions", "shims"), "RBENV_ROOT": ("versions", "shims"),
+    "PIPX_HOME": ("venvs",), "DENO_INSTALL": ("bin",),
+}  # fmt: skip
+del SLACK_HOMES["PNPM_HOME"]  # pnpm's binaries beside its store: not for a Slack reader.
+# Where a toolchain keeps settings that may hold a token, denied to a Slack reader where a
+# folder it reads holds them (slack_denied): node's global npmrc in each node install,
+# Maven's global settings, Homebrew's var (databases, logs).
+NODE_INSTALLS = (
+    ".nvm/versions/node/*", ".volta/tools/image/node/*", ".asdf/installs/nodejs/*",
+    ".local/share/mise/installs/node/*", ".local/share/fnm/node-versions/*/installation",
+    "Library/Application Support/fnm/node-versions/*/installation",
+)  # fmt: skip
+NODE_HOMES = {
+    "NVM_DIR": "versions/node/*", "VOLTA_HOME": "tools/image/node/*",
+    "ASDF_DATA_DIR": "installs/nodejs/*", "MISE_DATA_DIR": "installs/node/*",
+    "FNM_DIR": "node-versions/*/installation",
+}  # fmt: skip
+MAVEN_INSTALLS = (
+    ".sdkman/candidates/maven/*", ".asdf/installs/maven/*", ".local/share/mise/installs/maven/*",
+)  # fmt: skip
+SYSTEM_PREFIXES = ("/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew")
+
+
+def slack_denied(owner: Owner, readonly: list[str]) -> list[str]:
+    """What a worker that reads Slack must not read where a folder it reads holds it (S2):
+    every node install's etc/npmrc, Maven's conf/settings.xml, Homebrew's var, the owner's
+    caches. Only what exists (the sandbox would leave an empty folder in place of the rest),
+    and in home only what a folder it reads holds (nothing else of home is readable)."""
+    home = owner.home
+    nodes = [path for pattern in NODE_INSTALLS for path in home.glob(pattern)]
+    mavens = [path for pattern in MAVEN_INSTALLS for path in home.glob(pattern)]
+    for variable, pattern in NODE_HOMES.items():
+        if (value := os.environ.get(variable, "")) and Path(value).is_absolute():
+            nodes += Path(value).glob(pattern)
+    mavens += [Path(os.environ[name]) for name in ("MAVEN_HOME", "M2_HOME") if os.environ.get(name)]
+    found = [path / "etc" / "npmrc" for path in nodes]
+    found += [path / "conf" / "settings.xml" for path in mavens]
+    for prefix in map(Path, SYSTEM_PREFIXES):
+        found += [prefix / "etc" / "npmrc", prefix / "var"]
+        found += [
+            path / "libexec" / "conf" / "settings.xml" for path in prefix.glob("Cellar/maven/*")
+        ]
+    found += [Path(path) for path in held_caches(home)[0]]
+    held = [os.path.realpath(path) for path in readonly]
+    return [
+        str(path)
+        for path in dict.fromkeys(found)
+        if os.path.lexists(path)
+        and (
+            not path.is_relative_to(home)
+            or any(os.path.realpath(path).startswith(folder.rstrip("/") + "/") for folder in held)
+        )
+    ]
 
 
 def unsecret(paths: list[Path], home: Path) -> list[str]:
@@ -417,9 +513,10 @@ def rust_project(folders: list[Path], depth: int = 4) -> bool:
     return False
 
 
-def path_folders(home: Path) -> list[Path]:
+def path_folders(home: Path, slack: bool = False) -> list[Path]:
     """Each folder on PATH and, for a bin folder deep enough not to be one of home's own
-    (~/.cargo), the tool's folder above it (its lib, its share)."""
+    (~/.cargo), the tool's folder above it (for a worker that reads Slack, only its lib,
+    libexec, share and include: not its etc or var)."""
     found = []
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         folder = Path(entry)
@@ -427,7 +524,7 @@ def path_folders(home: Path) -> list[Path]:
             found.append(folder)
             above = folder.parent
             if folder.name in {"bin", "shims"} and home not in {above, above.parent}:
-                found.append(above)
+                found += [above / name for name in RUNS] if slack else [above]
     return found
 
 
@@ -605,20 +702,25 @@ def fill(
     return copied
 
 
-def clear(tier: Path) -> None:
-    """Workers' caches deleted (made again as the next worker starts, filled again by the next
-    seeding): moved aside in one rename first, out of every worker's reach, then deleted by
-    folder descriptors, never following a link, made writable where a tool left them read-only
-    (Go's modules). Also what an earlier clear left, and what seeding knew it had filled."""
+def clear(tier: Path, owner: Owner) -> None:
+    """Workers' caches deleted, filled again by the next seeding. Once no seeding pass runs
+    and no worker is being readied: moved aside in one rename, out of every worker's reach,
+    and made again at once with its links to the owner's browsers, settings and Go tools
+    (workers already open keep finding them); then deleted by folder descriptors, never
+    following a link, made writable where a tool left them read-only (Go's modules). Also
+    what an earlier clear left, and what seeding knew it had filled."""
     from .workspaces import rmtree_writable
 
     parent = tier.parent
-    with open_folder(parent, parent, create=True) as folder:
-        if folder.lstat(tier.name) is not None:
-            folder.move(tier.name, f".clearing-{uuid4().hex[:8]}")
-        with suppress(OSError):
-            folder.remove(SEEDED)
-        aside = [name for name in folder.names() if name.startswith(".clearing-")]
+    with SEEDING, PREPARING:
+        with open_folder(parent, parent, create=True) as folder:
+            if folder.lstat(tier.name) is not None:
+                folder.move(tier.name, f".clearing-{uuid4().hex[:8]}")
+            with suppress(OSError):
+                folder.remove(SEEDED)
+            aside = [name for name in folder.names() if name.startswith(".clearing-")]
+        with tier_folder(tier) as made:
+            link_owner(made, owner, slack=False)
     for name in aside:
         rmtree_writable(parent / name, parent)
 
@@ -637,6 +739,7 @@ def tier_folder(tier: Path, trusted: Path | None = None) -> Folder:
 
 
 SEEDED = "seeded"  # Beside the tier: what each pass found (fill's `seen`), and what it copied.
+SEEDING = threading.Lock()  # One seeding pass at a time; clearing waits for it.
 COPY_BUDGET = 8 * 1024**3  # At most this much copied, not cloned (and a quarter of free space).
 
 
@@ -647,6 +750,7 @@ def seed(tier: Path, owner: Owner) -> dict:
     timings: dict = {}
     started = time.monotonic()
     with (
+        SEEDING,
         open_folder(tier.parent / SEEDED, tier.parent, create=True, mode=0o700) as notes,
         tier_folder(tier) as root,
     ):
@@ -795,6 +899,31 @@ def owner_settings(tier: Path, owner: Owner) -> list[tuple[Path, Path]]:
     return [(source, link) for source, link in pairs if source.exists()]
 
 
+def link_owner(tier: Folder, owner: Owner, slack: bool) -> None:
+    """What the tier links of the owner's: their browsers (every worker's), their settings and
+    Go tools (not for a worker that reads Slack), each on its own: one that fails is logged
+    and stops nothing."""
+    for link in (link_browsers, *(() if slack else (link_settings, link_go_tools))):
+        try:
+            link(tier, owner)
+        except OSError as exc:
+            logger.warning("Workers' caches: %s: %s", link.__name__, exc)
+
+
+def link_go_tools(tier: Folder, owner: Owner) -> None:
+    """The owner's Go tools (`go install`), as links in workers' GOPATH's bin: a Makefile's
+    `$(go env GOPATH)/bin/tool` finds them (read-only to workers). One a worker installed
+    there stays."""
+    source = owner.go_bin()
+    if not source.is_dir():
+        return
+    with tier.descend(("go", "bin"), create=True) as target:
+        for entry in sorted(source.iterdir()):
+            if not entry.name.startswith(".") and target.lstat(entry.name) is None:
+                with suppress(FileExistsError):
+                    target.symlink(entry.name, entry)
+
+
 def link_settings(tier: Folder, owner: Owner) -> None:
     for source, link in owner_settings(tier.path, owner):
         try:
@@ -869,19 +998,28 @@ def old_uv() -> str:
 
 
 def go_env() -> dict[str, str]:
-    """The owner's GOPROXY, GOMODCACHE and GOCACHE, as `go env` has them (their environment
-    and Go's own configuration file); empty when Go is not installed."""
+    """The owner's GOPROXY, GOMODCACHE, GOCACHE, GOPATH and GOBIN, as `go env` has them (their
+    environment and Go's own configuration file); empty when Go is not installed."""
     if not shutil.which("go"):
         return {}
     try:
         found = subprocess.run(
-            ["go", "env", "-json", "GOPROXY", "GOMODCACHE", "GOCACHE"],  # noqa: S607  (the owner's go)
+            ["go", "env", "-json", "GOPROXY", "GOMODCACHE", "GOCACHE", "GOPATH", "GOBIN"],  # noqa: S607  (the owner's go)
             capture_output=True, text=True, timeout=20, check=False,
         )  # fmt: skip
         values = json.loads(found.stdout or "{}")
     except (OSError, subprocess.SubprocessError, ValueError):
         return {}
     return {key: value for key, value in values.items() if isinstance(value, str)}
+
+
+def go_bin(go: dict[str, str]) -> str:
+    """Where the owner's `go install` puts tools, as `go env` says (go_env): GOBIN, else the
+    first GOPATH's bin; "" when it does not say."""
+    if go.get("GOBIN"):
+        return go["GOBIN"]
+    gopath = go.get("GOPATH", "").split(os.pathsep)[0]
+    return str(Path(gopath) / "bin") if gopath else ""
 
 
 # Java reads neither HTTPS_PROXY nor SSL_CERT_FILE: the JVM (Gradle and its wrapper, Maven) is
@@ -932,9 +1070,10 @@ def script(
         f"export POETRY_CACHE_DIR={q(str(t / 'poetry'))} POETRY_VIRTUALENVS_IN_PROJECT=true",
         f"export PRE_COMMIT_HOME={q(str(t / 'pre-commit'))} COREPACK_HOME={q(str(t / 'corepack'))}",
         f"export CARGO_HOME={q(str(t / 'cargo'))}",
-        # GOPATH too: Go writes its checksum database's state there (pkg/sumdb) at `go get`.
+        # GOPATH too: Go writes its checksum database's state there (pkg/sumdb) at `go get`;
+        # `go install` writes in its bin, where the owner's tools are linked (link_go_tools).
         f"export GOPATH={q(str(t / 'go'))} GOMODCACHE={q(str(t / 'go' / 'mod'))}"
-        f" GOCACHE={q(str(t / 'go' / 'build'))}",
+        f" GOCACHE={q(str(t / 'go' / 'build'))} GOBIN={q(str(t / 'go' / 'bin'))}",
         f"export GRADLE_USER_HOME={q(str(t / 'gradle'))}",
         # Gradle's native libraries would load from that writable folder, which the sandbox
         # refuses; its daemons are this worker's own (a daemon keeps the sandbox it started in).
@@ -1095,6 +1234,8 @@ class Plan:
     readonly: list[str]
     text: str
     slack: bool
+    owner: Owner | None = None
+    denied: list[str] = field(default_factory=list)  # A Slack reader's (slack_denied).
 
 
 def plan(
@@ -1116,11 +1257,11 @@ def plan(
     and registry settings read-only (read through) unless it reads Slack, and its init script.
     Nothing is written here (see prepare)."""
     go = go or {}
-    owner = Owner(home or Path.home(), go.get("GOMODCACHE", ""), go.get("GOCACHE", ""))
+    owner = Owner(home or Path.home(), go.get("GOMODCACHE", ""), go.get("GOCACHE", ""), go_bin(go))
     own = workspace / PRIVATE if slack else tier
     temporary = worker_temp(session_id, tier)
-    readonly = tool_paths(owner, rust)
-    readonly.append(str(scripts))
+    readonly = tool_paths(owner, rust, slack)
+    readonly.append(str(scripts / session_id))  # Its own script only (S1: others' are theirs).
     if not slack:
         # The owner's caches, read through (Gradle's, Maven's, Go's, Playwright's) or not; one
         # that does not exist yet stays closed (Copilot grants nothing of its own here). Of
@@ -1131,6 +1272,7 @@ def plan(
         readonly += registry_config(owner)
         readonly += [str(source) for source, _ in owner_settings(own, owner)]
         readonly += [str(truststore_path.parent)] if truststore_path else []
+        readonly += unsecret([owner.go_bin()], owner.home)  # The owner's Go tools, linked.
     readwrite = [str(own), str(temporary)]
     # Nothing of the owner's is read through for a worker that reads Slack: it can't read it.
     text = script(
@@ -1139,7 +1281,8 @@ def plan(
     )  # fmt: skip
     readonly = [path for path in dict.fromkeys(readonly) if not too_broad(path)]
     trusted = workspace.parent if slack else tier.parent
-    return Plan(own, trusted, temporary, readwrite, readonly, text, slack)
+    denied = slack_denied(owner, readonly) if slack else []
+    return Plan(own, trusted, temporary, readwrite, readonly, text, slack, owner, denied)
 
 
 PREPARING = threading.Lock()  # One worker readied at a time: two would race for the same links.
@@ -1150,26 +1293,36 @@ def prepare(found: Plan, session_id: str, scripts: Path, home: Path | None = Non
     read-only to workers) first, which its tools need; then the links into the owner's
     browsers and settings, each on its own (one that fails is logged and stops nothing). The
     script's path; None when its temporary folder could not be made its own."""
-    owner = Owner(home or Path.home())
+    owner = found.owner or Owner(home or Path.home())
     with PREPARING:
         if not make_temp(found.temporary):
             return None
         path = write_script(scripts, session_id, found.text)
         try:
             with tier_folder(found.tier, found.trusted) as tier:
-                link_browsers(tier, owner)
-                if not found.slack:
-                    link_settings(tier, owner)
+                link_owner(tier, owner, found.slack)
         except OSError as exc:
             logger.warning("Worker %s's caches folder: %s", session_id, exc)
     return path
 
 
+SCRIPT = "init.sh"
+
+
 def write_script(folder: Path, session_id: str, text: str) -> Path:
-    """A worker's init script, in Chief of Staff's data folder, where workers can read it and
-    never write it."""
-    name = f"{session_id}.sh"
-    with open_folder(folder, folder.parent, create=True, mode=0o700) as scripts:
-        if scripts.read(name) != text.encode():
-            scripts.write(name, text, 0o644)
-    return folder / name
+    """A worker's init script, in a folder of its own in Chief of Staff's data folder: only
+    that worker can read it (an owner-task worker's names the owner's GOPROXY, which may hold a
+    token), none can write it. Deleted as it closes (remove_script)."""
+    with (
+        open_folder(folder, folder.parent, create=True, mode=0o700) as scripts,
+        scripts.child(session_id, create=True, mode=0o700) as own,
+    ):
+        if own.read(SCRIPT) != text.encode():
+            own.write(SCRIPT, text, 0o600)
+    return folder / session_id / SCRIPT
+
+
+def remove_script(folder: Path, session_id: str) -> None:
+    """A closed worker's init script goes (made again if it is reopened)."""
+    with suppress(OSError), open_folder(folder, folder.parent) as scripts:
+        scripts.remove(check_name(session_id))

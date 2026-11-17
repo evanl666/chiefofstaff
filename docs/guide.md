@@ -348,12 +348,13 @@ starts may download what that left out, once, for all workers after it. Each pas
 only at folders of yours that changed. Each worker's shell gets the tools pointed there, and a
 temporary folder of its own, before each command (nothing in its instructions): installs and
 builds work as in your terminal, including uv's Pythons and tools (pre-commit, poetry, `uvx`),
-corepack's pnpm and Yarn, Maven's wrapper, `go get`, and Gradle (in the sandbox, Gradle runs
-without its native libraries and with the worker's own daemon). Your caches are found where
+corepack's pnpm and Yarn, Maven's wrapper, `go get`, your Go tools where a Makefile looks
+(`$(go env GOPATH)/bin`), and Gradle (in the sandbox, Gradle runs without its native libraries
+and with the worker's own daemon). Your caches are found where
 your own configuration in home keeps them (`cache=` in `~/.npmrc`, pip's `cache-dir`, Maven's
 `localRepository`…), never where a project's says. *Start workers' caches from yours* off
 (Settings) keeps your caches out of theirs. **Storage** shows the folder's size, and *Clear*
-deletes it (it is made again as the next worker starts, and filled again from yours).
+deletes it (made again at once, and filled again from yours), when no worker is using it.
 
 Copilot's own *dev-tool access* (which opened your caches read-write) is off for sandboxed
 workers: nothing in your home is writable to them but that folder and their own temporary
@@ -362,10 +363,14 @@ your `PATH`, so tools installed under `~/.local/bin` too; nvm's, pyenv's, asdf's
 SDKMAN's toolchains, JDKs, uv's Pythons, rustup's for a Rust project…) and, for workers on your
 own tasks, your package caches and what a private registry needs (`~/.npmrc`,
 `~/.m2/settings.xml` and `settings-security.xml`, pip's, uv's, poetry's and Go's configuration,
-`~/.netrc`, Cargo's credentials…), as in your terminal. Workers that read Slack have caches of
-their own in their workspace, can't read yours, and can't read the registry and credential files
-build tools use (`~/.npmrc`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.pypirc`,
-`~/.netrc`, `~/.git-credentials`, `~/.aws/credentials`…). Chief of Staff itself never writes
+`~/.netrc`, Cargo's credentials, mise's configuration…), as in your terminal. Workers that read
+Slack have caches of their own in their workspace, can't read yours, can't read the registry and
+credential files build tools use (`~/.npmrc`, `~/.m2/settings.xml`,
+`~/.gradle/gradle.properties`, `~/.pypirc`, `~/.netrc`, `~/.git-credentials`,
+`~/.aws/credentials`…), and read of a toolchain only what runs: its `bin`, `lib`, `share`…, never
+a node's `etc/npmrc`, Maven's `conf/settings.xml`, Homebrew's `var` or a tool home's caches
+(GOPATH's modules, pnpm's store). Each worker's shell setup is its own: no other worker reads
+it, and it goes when the worker closes. Chief of Staff itself never writes
 through a link a worker made in those folders. No worker can change Chief of Staff's own code
 or the Python it runs on, unless you asked it to work in place in Chief of Staff's own checkout.
 Before a worker's worktree is made, only origin's default branch is fetched, once for workers

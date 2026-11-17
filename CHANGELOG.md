@@ -204,6 +204,17 @@ questions stay listed (QA round on 0.1.45).
   rename, is checked again there and deleted from there (not by git in place). Workers'
   temporary folders and the Java truststore moved beside workers' caches, out of the system's
   temporary folder, which every sandboxed worker can write.
+- **Workers that read Slack read less of your toolchains.** They were granted whole tool homes
+  and the folder above each `bin` on `PATH`: another node version's `etc/npmrc`, Maven's
+  `conf/settings.xml`, your pnpm store and Go modules were readable to them. They now read what
+  runs (`bin`, `lib`, `share`…), and those files, Homebrew's `var` and mise's configuration are
+  denied to them. Each worker's init script is its own (another worker could read it, and it
+  may name a GOPROXY with a token), deleted as the worker closes.
+- **Clearing workers' caches leaves running workers their links.** *Clear* made the folder
+  again only as another worker started: one running lost your browsers and its Gradle and Cargo
+  settings. It now waits for any seeding pass, makes them again at once, and is not offered
+  while a worker on your tasks is working. Your Go tools (`go install`) are linked into
+  workers' GOPATH, where a Makefile's `$(go env GOPATH)/bin/tool` looks.
 - **Workers' caches, more robust.** Two workers starting together no longer race (the second
   went without its caches); a worker's temporary folder and init script come first, and the
   rest (browser links, settings) never stops it. What workers' caches need to know (an old uv,
