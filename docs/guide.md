@@ -331,8 +331,8 @@ Any other folder it sees with such files in it (a folder of a checkout workers a
 workers used before this version) waits for you to look once: "Copilot settings in a folder of
 this checkout workers haven't used yet (sub/.mcp.json); look at them once. Chief of Staff won't
 start the worker there until you say to use them." It reads them again before each turn and
-each start, and before each of the worker's tools when a quick look (which Copilot waits for)
-sees a change. If one changed (a worker wrote it, a merge brought a teammate's change, you
+each start, and as each of the worker's tools starts when a quick look sees a change (before the tool
+runs where the folder has hooks or the worker works without the sandbox). If one changed (a worker wrote it, a merge brought a teammate's change, you
 edited your local settings, a carried file isn't as your checkout holds it: "added since
 workers had this checkout"), the worker starts no turn there (one at work is stopped) and its
 timeline says what changed: "Copilot settings in this folder changed (added .mcp.json); Chief of

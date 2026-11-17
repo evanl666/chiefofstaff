@@ -301,12 +301,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "watchdog, created": (3317, "74c2464eda92b08d7c0c2f0be7e9c18d5b80e0b4d7d7db7c5cbf22099bd3f111"),
     "watchdog, resumed": (3279, "3211b0fe48200b7a8b7e24baa9eca2c19608f7f40a7c4282665e9ca51f11ca54"),
     "worker asking first, sandboxed, created": (
-        21458,
-        "f8e2f7ba8e665d7314d143980470c0504a5005c15601f67b759d38c9777a519a",
+        21401,
+        "ac21474d2a371a8a0effdda9cf101a8866feaf0bb8d9361299ee0101e9868e4b",
     ),
     "worker asking first, sandboxed, resumed": (
-        21413,
-        "a66c4ee85b60c750b7fbc135a3a721284ee9001a08fdedf3020d86322c71ad14",
+        21356,
+        "dcc65027fdf4650e242135c2f3cf569d0608260c4815f6cbf3c19cadcc3ff511",
     ),
     "worker in a trusted worktree, created": (
         18745,
@@ -317,12 +317,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "e94e74dece27ead284266285e1e6bfeb7fe5e944497e37e26348191c3196345a",
     ),
     "worker that reads Slack, created": (
-        22073,
-        "c110f38a1cb026c52d5d19a1815644f3a83e29a0b6157a2cdb9136632ac58b0e",
+        22016,
+        "32dabef5aecfa089a93c04153057596dfd35bcb19df8b06eeb1ca7891d333149",
     ),
     "worker that reads Slack, resumed": (
-        22026,
-        "339fd27e09ff73bcc8f3d585ca719271172b4573bf25f0b7e655d0ba9f25f0c7",
+        21969,
+        "4392d919e359698bd53e6405f6c1b8ee04b7b38e52be2434c5e8d43545853c05",
     ),
     "worker with its model, created": (
         18279,

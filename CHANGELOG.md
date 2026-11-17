@@ -21,9 +21,9 @@
   resume. A hook could approve commands Chief of Staff would refuse, and a server ran outside
   the worker sandbox. Now Chief of Staff keeps what those files hold, with the scripts their
   hooks and servers run, when it makes a worker's folder or first hands a worker your checkout,
-  in its own data, and reads them again before each start and each turn, and before each of the
-  worker's tools when a quick look (Copilot waits for it) sees a change, without running git
-  there. A folder of a checkout workers already had, one workers used before this version, or a
+  in its own data, and reads them again before each start and each turn, and as each of the
+  worker's tools starts when a quick look sees a change (before the tool runs where the folder
+  has hooks or the worker works without the sandbox), without running git there. A folder of a checkout workers already had, one workers used before this version, or a
   file a worktree carries from your checkout that isn't as your checkout holds it, waits for you
   to look once. A worker whose settings or hooks' scripts changed starts no turn until you click
   **Use these settings** on the line its timeline shows (news for it waits too), or until they

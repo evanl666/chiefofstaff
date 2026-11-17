@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
@@ -485,6 +485,10 @@ class Events:
             self.runtime.settings_glance(row["id"])  # (A custom agent's servers start now.)
 
     def tool_start(self, row: dict, event: Any):
+        if row["role"] == WORKER and row["id"] not in self.runtime.pre_tool_on:
+            # One whose tools Copilot runs without asking first (Runtime.pre_tool_wanted): what
+            # it runs may load settings (a custom agent).
+            self.runtime.settings_glance(row["id"])
         data = event.data
         name = getattr(data, "tool_name", "") or "tool"
         self.states[row["id"]].turn_tools += 1
@@ -877,23 +881,32 @@ class Events:
             return await asyncio.to_thread(permission_denial, row, request, writable)
         return permission_denial(row, request, writable)
 
-    async def pre_tool(self, data: dict, invocation: dict) -> dict | None:
-        """Before each tool a Copilot worker runs, Copilot waiting for the answer (before its
-        folder's own preToolUse hooks, whose scripts a folder moved into place could have
-        replaced: the sandbox holds paths): its folder's settings looked at (a glance, the full
-        check only when that changed: Runtime.settings_look), and a server off for it not
-        started (Runtime.server_refusal). None lets it run as it would."""
+    def pre_tool(self, data: dict, invocation: dict) -> dict | Awaitable[dict | None] | None:
+        """Before each tool a Copilot worker runs where Runtime.pre_tool_wanted, Copilot waiting
+        for the answer (after its folder's own preToolUse hooks, whose scripts a folder moved
+        into place could have replaced: the sandbox holds paths): a server off for it not
+        started (Runtime.server_refusal), and its folder's settings looked at: a glance, here
+        at once while nothing changed (Copilot waits for the event loop), the full check only
+        when that changed (Runtime.settings_look). None lets it run as it would."""
         row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
         if not row or row["role"] != WORKER or row["closed_at"] or not row["cwd"]:
             return None
         tool = str(data.get("toolName") or "")
-        why = self.runtime.server_refusal(row, tool, data.get("toolArgs"))
-        if not why:
-            try:
-                why = await self.runtime.settings_look(row)
-            except Exception:
-                logger.warning("Could not look at %s's agent settings.", row["id"], exc_info=True)
+        if why := self.runtime.server_refusal(row, tool, data.get("toolArgs")):
+            return {"permissionDecision": "deny", "permissionDecisionReason": why}
+        try:
+            if self.runtime.settings_unchanged(row):
                 return None
+        except Exception:
+            logger.warning("Could not look at %s's agent settings.", row["id"], exc_info=True)
+        return self.pre_tool_looked(row)
+
+    async def pre_tool_looked(self, row: dict) -> dict | None:
+        try:
+            why = await self.runtime.settings_look(row)
+        except Exception:
+            logger.warning("Could not look at %s's agent settings.", row["id"], exc_info=True)
+            return None
         if why:
             return {"permissionDecision": "deny", "permissionDecisionReason": why}
         return None

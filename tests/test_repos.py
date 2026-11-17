@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import shutil
@@ -468,6 +469,12 @@ def unused(listed: str) -> str:
         f"Copilot settings in a folder of this checkout workers haven't used yet ({listed}); "
         "look at them once. Chief of Staff won't start the worker there until you say to use them."
     )
+
+
+async def asked(hook, call: dict, worker: str):
+    """What Chief of Staff's pre-tool hook answers, as the SDK takes it (at once, or awaited)."""
+    answer = hook(call, {"session_id": worker})
+    return await answer if inspect.isawaitable(answer) else answer
 
 
 def held(entries: dict) -> list[str]:
@@ -1887,16 +1894,16 @@ async def test_settings_changed_mid_turn_stop_it_at_its_next_tool(tmp_path, git_
         session = harness.session(worker)
         hooks = session.options["hooks"]
         call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
-        assert await hooks["on_pre_tool_use"](call, {"session_id": worker}) is None
+        assert hooks["on_pre_tool_use"](call, {"session_id": worker}) is None, "at once"
         (cwd / "guard.sh").chmod(0o755)
-        assert await hooks["on_pre_tool_use"](call, {"session_id": worker}) is None
+        assert await asked(hooks["on_pre_tool_use"], call, worker) is None
         assert runtime.states.is_live(worker), "nothing changed but its mode: no stop"
         # A folder moved into place, past the sandbox's paths: another guard script.
         (tmp_path / "swap").mkdir()
         (tmp_path / "swap" / "guard.sh").write_text("#!/bin/sh\necho allow\n")
         (cwd / "guard.sh").unlink()
         (tmp_path / "swap" / "guard.sh").rename(cwd / "guard.sh")
-        denied = await hooks["on_pre_tool_use"](call, {"session_id": worker})
+        denied = await asked(hooks["on_pre_tool_use"], call, worker)
         assert denied["permissionDecision"] == "deny"
         assert denied["permissionDecisionReason"] == refusal(
             "changed guard.sh (run by .github/hooks/guard.json)"
@@ -2134,7 +2141,7 @@ async def test_a_language_or_agent_server_off_for_a_worker_is_never_started(
         task = {"toolName": "task", "toolArgs": {"agent_type": "a", "prompt": "hi"}}
         other = {"toolName": "task", "toolArgs": {"agent_type": "explore", "prompt": "hi"}}
         for call in (lsp, task, other):
-            assert await hook(call, {"session_id": worker}) is None
+            assert await asked(hook, call, worker) is None
         await at_rest(runtime, harness, worker)
         (cwd / "lsp" / "server.js").write_text("// edited\n")
         (cwd / "tools" / "agent.js").write_text("// edited\n")
@@ -2142,16 +2149,16 @@ async def test_a_language_or_agent_server_off_for_a_worker_is_never_started(
         await settle(runtime)
         assert runtime.states.is_live(worker)
         hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
-        denied = await hook(lsp, {"session_id": worker})
+        denied = await asked(hook, lsp, worker)
         assert denied["permissionDecision"] == "deny"
         assert denied["permissionDecisionReason"].startswith(
             "The language server x changed in this folder since the owner last let you use it"
         )
-        denied = await hook(task, {"session_id": worker})
+        denied = await asked(hook, task, worker)
         assert denied["permissionDecisionReason"].startswith(
             "The MCP server t (of the custom agent a) changed"
         )
-        assert await hook(other, {"session_id": worker}) is None
+        assert await asked(hook, other, worker) is None
         assert harness.session(worker).options["disabled_mcp_servers"] == ["t"]
     finally:
         await runtime.stop()
@@ -2299,6 +2306,98 @@ async def test_the_owner_making_their_worktree_again_is_no_replaced_git(
         await runtime.stop()
 
 
+HOOK = {"preToolUse": [{"type": "command", "bash": "echo hi"}]}
+HOOK_SOURCES = {
+    ".github/hooks/h.json": json.dumps({"version": 1, "hooks": HOOK}),
+    ".github/copilot/settings.json": json.dumps({"hooks": HOOK}),
+    ".github/copilot/settings.local.json": json.dumps({"enabledPlugins": {"p@m": True}}),
+    ".claude/settings.json": json.dumps(
+        {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"command": "echo hi"}]}]}}
+    ),
+    ".claude/settings.local.json": json.dumps({"hooks": HOOK}),
+    ".github/agents/a.agent.md": "---\nname: a\nhooks:\n  preToolUse:\n    - bash: echo hi\n---\n",
+    ".claude/agents/b.md": "---\nname: b\nhooks: {PreToolUse: [{command: echo hi}]}\n---\n",
+    ".github/extensions/x/extension.mjs": "// an extension\n",
+}
+NO_HOOKS = {
+    ".github/copilot/settings.json": json.dumps({"model": "x"}),
+    ".claude/settings.json": json.dumps({"permissions": {}}),
+    ".github/agents/a.agent.md": "---\nname: a\nmcp-servers: {}\n---\nAn agent.\n",
+    ".claude/agents/b.md": "An agent with no front matter.\n",
+    ".mcp.json": json.dumps({"mcpServers": {}}),
+}
+
+
+@pytest.mark.parametrize("name", ["", *HOOK_SOURCES])
+async def test_copilot_asks_first_only_where_the_folder_has_hooks_or_a_worker_could_add_one(
+    tmp_path, git_repo, monkeypatch, name
+):
+    """Copilot asks Chief of Staff before each tool (and waits) only where that matters: where
+    the folder runs hooks of its own as the session opens (a script of theirs swapped mid-turn
+    runs first), and where the worker could add a custom agent mid-session (Copilot loads one
+    as it is called, with its hooks): without the sandbox, or on Linux. Settings with no hooks
+    don't make it ask. Hooks added mid-session load only as it opens again (asking then)."""
+    for setting, text in NO_HOOKS.items():
+        commit(git_repo, setting, text)
+    if name:
+        commit(git_repo, name, HOOK_SOURCES[name])
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        worker, _ = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        row = harness.store.session(worker)
+        assert ("hooks" in harness.session(worker).options) == bool(name)
+        assert (worker in runtime.pre_tool_on) == bool(name)
+        if not name:
+            monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "linux")
+            assert "hooks" in runtime.options(row)
+            monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+            harness.store.save_settings(Settings(projects=[str(git_repo)], worker_sandbox=False))
+            assert "hooks" in runtime.options(row)
+            harness.store.save_settings(Settings(projects=[str(git_repo)], worker_sandbox=True))
+            assert "hooks" not in runtime.options(row)
+            runtime.servers_off[worker] = {"lsp/x": ["lsp/server.js"]}
+            assert "hooks" in runtime.options(row)
+    finally:
+        await runtime.stop()
+
+
+async def test_hooks_a_worker_adds_ask_first_once_the_owner_says_to_use_them(
+    tmp_path, git_repo, monkeypatch
+):
+    """A sandboxed worker whose folder had no hooks: Copilot doesn't ask before its tools, which
+    Chief of Staff glances at as they start (a change stops it). Hooks that came meanwhile
+    stop it before its next turn; once the owner says to use them, its session opens again,
+    Copilot asking before each tool."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        session = harness.session(worker)
+        assert "hooks" not in session.options
+        plant(cwd, ".github/hooks/h.json", json.dumps({"version": 1, "hooks": HOOK}))
+        session.emit("tool.execution_start", tool_name="bash", tool_call_id="c1",
+                     arguments={"command": "ls"})  # fmt: skip
+        await settle(runtime)
+        assert session.aborted and not runtime.states.is_live(worker)
+        await use_them(runtime, harness, worker)
+        await runtime.owner_send(worker, "Next")
+        await settle(runtime)
+        assert runtime.states.is_live(worker)
+        hooks = harness.session(worker).options["hooks"]
+        call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
+        assert await asked(hooks["on_pre_tool_use"], call, worker) is None
+        assert worker in runtime.pre_tool_on
+    finally:
+        await runtime.stop()
+
+
 async def test_a_model_round_reads_no_settings_unless_the_glance_changed(
     tmp_path, git_repo, monkeypatch
 ):
@@ -2353,7 +2452,7 @@ async def test_a_worker_stopped_for_its_settings_is_never_left_working(
         plant(cwd, ".mcp.json")
         hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
         call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
-        assert (await hook(call, {"session_id": worker}))["permissionDecision"] == "deny"
+        assert (await asked(hook, call, worker))["permissionDecision"] == "deny"
         await settle(runtime)
         assert not runtime.states.is_live(worker)
         assert harness.store.session(worker)["status"] == "idle"

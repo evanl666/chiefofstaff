@@ -539,6 +539,9 @@ class Runtime:
         # {session: {server: those files}}; and those its live session was opened without.
         self.servers_off: dict[str, dict[str, list[str]]] = {}
         self.servers_opened: dict[str, frozenset[str]] = {}
+        # Copilot workers whose session was opened with Chief of Staff's pre-tool hook
+        # (pre_tool_wanted): the others are glanced at as each tool starts, not waited for.
+        self.pre_tool_on: set[str] = set()
         # The last command of each worker's looked at after its turns (half_updated).
         self.half_seen: dict[str, int] = {}
         # Sessions another program (a terminal) has open: session id -> pid. Refreshed by the
@@ -1912,6 +1915,23 @@ class Runtime:
                     found.append(str(Path(ran) if Path(ran).is_absolute() else top / ran))
         return found
 
+    def pre_tool_wanted(self, row: dict, sandboxed: bool) -> bool:
+        """Whether Copilot asks Chief of Staff before each of a worker's tools (Events.pre_tool,
+        about 2 to 4 ms a tool): where its folder has hooks of its own as its session opens
+        (a script of theirs swapped mid-turn, past the sandbox's paths, would run first and
+        could approve what a check refuses); where a server is off for it (the tool that
+        would start it, denied); and where it could add a custom agent mid-session, which
+        Copilot (1.0.109 and later) loads as it is called, with its hooks and MCP servers:
+        without the sandbox, or on Linux, whose sandbox does not hold a folder not there.
+        Hooks added mid-session load only from its next start, which the full check precedes;
+        otherwise each tool is glanced at as it starts (Events.tool_start), not waited for."""
+        if row["role"] != WORKER or not row["cwd"]:
+            return False
+        if self.servers_off.get(row["id"]) or not sandboxed or sandbox_platform() != "darwin":
+            return True
+        top, cwd, _ = self.settings_place(row)
+        return settings_guard.hooked(top, cwd)
+
     def yolo(self, row: dict) -> bool:
         """Whether this worker acts without permission checks (a session choice, else Settings)."""
         if row["role"] != WORKER:
@@ -2333,9 +2353,10 @@ class Runtime:
                 options["mcp_servers"] = {**options.get("mcp_servers", {}), **json.loads(extra)}
             if hooks := os.environ.get("CHIEFOFSTAFF_WORKER_HOOKS"):
                 options["hook_directories"] = [hooks]  # Test hooks only (like a plugin's).
-            # Before each of its tools (and its folder's own hooks): its folder's settings
-            # looked at (Events.pre_tool); a server off for it, not started.
-            options["hooks"] = {"on_pre_tool_use": self.events.pre_tool}
+            if self.pre_tool_wanted(row, sandbox is not None):
+                # Before each of its tools (after its folder's own hooks): its folder's settings
+                # looked at (Events.pre_tool); a server off for it, not started.
+                options["hooks"] = {"on_pre_tool_use": self.events.pre_tool}
             if disabled := self.disabled_servers(row):
                 options["disabled_mcp_servers"] = disabled
         tuning = self.tuning(row)
@@ -3014,6 +3035,10 @@ class Runtime:
         self.states[session_id].handle = session
         if agent == COPILOT_AGENT and row["role"] == WORKER:
             self.servers_opened[session_id] = frozenset(self.servers_off.get(session_id, {}))
+            if "hooks" in options:
+                self.pre_tool_on.add(session_id)
+            else:
+                self.pre_tool_on.discard(session_id)
             self.servers_said(row)
         if agent != COPILOT_AGENT and self.store.get(f"agentopen:{session_id}"):
             self.store.delete(f"agentopen:{session_id}")  # Closed there: its news goes now.
@@ -3654,12 +3679,22 @@ class Runtime:
 
     def settings_glance(self, session_id: str):
         """As a Copilot worker starts a sub-agent (Copilot loads a custom agent and its MCP
-        servers there, mid-turn): what the file system says of its settings, against its last
-        full check's; the full check (stopping it) only when that changed. Off the event loop;
-        it does not wait for this (its tools wait for settings_look, Events.pre_tool)."""
+        servers there, mid-turn), or a tool when Copilot does not ask first (pre_tool_wanted):
+        what the file system says of its settings, against its last full check's; the full
+        check (stopping it) only when that changed. Off the event loop; it does not wait for
+        this."""
         if session_id not in self.settings_sigs:
             return
         self.background(self.settings_glanced(session_id))
+
+    def settings_unchanged(self, row: dict) -> bool:
+        """Whether what the file system says of a Copilot worker's settings is what it said at
+        its last full check (a glance where that check found them: some lstat calls, at once;
+        False when there was none yet)."""
+        paths, seen = self.settings_paths.get(row["id"]), self.settings_sigs.get(row["id"])
+        if not paths or seen is None:
+            return False
+        return settings_guard.signature(paths[0], paths[1], AGENT_SETTINGS, list(paths[2])) == seen
 
     async def settings_look(self, row: dict) -> str:
         """Before each tool a Copilot worker runs (Events.pre_tool, which Copilot waits for), and
