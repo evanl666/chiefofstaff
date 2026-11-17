@@ -207,8 +207,9 @@ questions stay listed (QA round on 0.1.45).
 - **Workers' caches, more robust.** Two workers starting together no longer race (the second
   went without its caches); a worker's temporary folder and init script come first, and the
   rest (browser links, settings) never stops it. What workers' caches need to know (an old uv,
-  your GOPROXY, node-gyp's headers, the Java truststore) is found as Copilot connects, whatever
-  the caches settings, and uv is looked at again after an upgrade. `go get` works (Go's
+  your GOPROXY, node-gyp's headers) is found as Copilot connects, whatever the caches
+  settings, and uv is looked at again after an upgrade; the Java truststore is made in the
+  background (no worker waits for it). `go get` works (Go's
   checksum database state was in your read-only GOPATH). A private registry works as in your
   terminal (`~/.netrc`, Cargo's credentials, poetry's auth, Maven's `settings-security.xml`,
   Gradle's `init.gradle`, read-only; never for workers that read Slack); asdf's and mise's global
@@ -217,8 +218,9 @@ questions stay listed (QA round on 0.1.45).
   Cargo's git caches too, and looks again only at folders that changed. Rust projects are found
   four folders down (not in node_modules), once per worker. npm 11.5 and later no longer warn
   about pnpm's store at every command (pnpm's own PNPM_HOME instead). The init script never
-  ends in an error (Copilot reported it before every command). Storage shows workers' caches,
-  with *Clear*.
+  ends in an error (Copilot reported it before every command). A read-only path inside another
+  is no longer passed to the sandbox (half of them; about 8 ms less per command). Storage shows
+  workers' caches, with *Clear*.
 - **Sandboxed workers run quick read-only commands together.** Each command starts in about
   0.3 s in Copilot's sandbox (its credential proxy starts anew for each); they are asked to join
   quick checks in one call (`git status --short && git log -3 --oneline && ls`). Measured: a
