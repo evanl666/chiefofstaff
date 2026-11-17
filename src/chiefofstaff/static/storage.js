@@ -86,6 +86,10 @@ async function act(path, body, okText = "") {
 }
 
 function render(data) {
+  // An action's answer can come after an event that followed it: the latest stays.
+  const [run, at] = data.order || [];
+  const [shownRun, shownAt] = (report && report.order) || [];
+  if (run && run === shownRun && at < shownAt) return;
   report = data;
   showLevel(data);
   if (!$("#storage-dialog").open) return;

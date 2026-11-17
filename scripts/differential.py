@@ -201,6 +201,8 @@ FIXES: list[Allow] = [
     ),
     # 0.1.46: Storage reports sandboxed workers' own caches (measured and cleared when asked).
     Allow("Storage's report of workers' caches", data=r"/api/storage\.caches"),
+    # 0.1.46: and its place in order (an action's answer that comes late no longer wins).
+    Allow("Storage's report's order", data=r"/api/storage\.order"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

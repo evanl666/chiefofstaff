@@ -149,6 +149,10 @@ class Storage:
         self.notes: dict[str, str] = {}
         self.sizes: dict[str, dict] | None = None
         self.published = ""
+        # Each report's place in order (this run's): the page keeps the latest it got, whether
+        # an action's answer or an event came first.
+        self.run = time.time_ns() // 10**6  # A number: one in hex reads as a commit SHA.
+        self.reports = 0
         self.titles: dict[str, tuple[float, str]] = {}
         self.titles_left = TITLES_AT_ONCE
         # Workers still following a task whose caches were cleaned: when they last did anything.
@@ -1023,7 +1027,9 @@ class Storage:
             + sum(o["size"] for o in others.values())
             + sum(value["size"] for value in stuck.values())
         )
+        self.reports += 1
         return {
+            "order": [self.run, self.reports],
             "disk": {
                 key: disk.get(key)
                 for key in ("free", "total", "used_percent", "level", "warning", "critical", "path")
@@ -1137,6 +1143,7 @@ class Storage:
         shown = {
             **report,
             "disk": {**report["disk"], "free": free},
+            "order": None,
         }
         digest = hashlib.sha1(
             json.dumps(shown, sort_keys=True, default=str).encode(), usedforsecurity=False

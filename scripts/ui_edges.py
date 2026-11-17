@@ -4793,10 +4793,11 @@ async def round_storage(runtime, browser, failures: list[str]):
             size = dialog.locator("#storage-caches-size")
             await expect(dialog.locator("#storage-caches-path")).to_contain_text("worker-caches")
             await dialog.locator("#storage-caches-measure").click()
-            await expect(size).to_contain_text(re.compile(r"^3 MB, measured"))
+            # du runs at the lowest priority, after any other measuring.
+            await expect(size).to_contain_text(re.compile(r"^3 MB, measured"), timeout=60_000)
             page.once("dialog", lambda asked: asyncio.ensure_future(asked.accept()))
             await dialog.locator("#storage-caches-clear").click()
-            await expect(size).to_contain_text(re.compile(r"^0 KB, measured"))
+            await expect(size).to_contain_text(re.compile(r"^0 KB, measured"), timeout=30_000)
             assert not runtime.cache_tier.exists(), "workers' caches deleted"
         finally:
             runtime.cache_tier = tier
