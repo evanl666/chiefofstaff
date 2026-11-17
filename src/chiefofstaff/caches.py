@@ -28,6 +28,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import suppress
@@ -344,6 +345,27 @@ MOVED_CONFIG = {
     "POETRY_CONFIG_DIR": ("auth.toml", "config.toml"),
     "GRADLE_USER_HOME": ("init.gradle", "init.gradle.kts"),
 }  # fmt: skip
+
+
+def fewest(readonly: list[str], writable: list[str]) -> list[str]:
+    """The read-only paths but those another one already holds (inside it, by their real
+    paths): each is a rule Copilot writes and the sandbox reads at every command. One in a
+    writable folder stays (it carves that out), the system's temporary folder included
+    (Copilot's sandbox writes there); a link stays unless what it leads to is held too."""
+
+    def inside(path: str, folder: str) -> bool:
+        return path.startswith(folder.rstrip("/") + "/")
+
+    real = {path: os.path.realpath(path) for path in readonly}
+    holders = set(real.values())
+    open_ = [os.path.realpath(path) for path in writable if path]
+    open_.append(os.path.realpath(Path(tempfile.gettempdir()).parent))
+    return [
+        path
+        for path, resolved in real.items()
+        if any(resolved == folder or inside(resolved, folder) for folder in open_)
+        or not any(inside(resolved, holder) for holder in holders)
+    ]
 
 
 def tool_paths(owner: Owner, rust: bool = False) -> list[str]:

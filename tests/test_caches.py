@@ -466,3 +466,24 @@ def test_workers_caches_can_be_cleared_even_go_s_read_only_modules(tmp_path):
     assert caches.copied_bytes(tier) == 0, "seeding fills it all again"
     assert not [p for p in tier.parent.iterdir() if p.name.startswith(".clearing-")]
     caches.clear(tier)  # Nothing there: nothing to do.
+
+
+def test_read_only_paths_another_one_holds_are_left_out(tmp_path, monkeypatch):
+    """Every read-only path is a rule Copilot writes and the sandbox reads at each command: one
+    inside another read-only folder adds nothing (a worker's commands took ~8 ms longer each),
+    unless it is in a writable folder (it carves that out) or leads elsewhere (a link)."""
+    monkeypatch.setattr(caches.tempfile, "gettempdir", lambda: str(tmp_path / "temp" / "T"))
+    tools, work, elsewhere = tmp_path / "tools", tmp_path / "work", tmp_path / "elsewhere"
+    for folder in (tools / "go" / "bin", work / ".git" / "hooks", elsewhere):
+        folder.mkdir(parents=True)
+    (tools / "linked").symlink_to(elsewhere)
+    readonly = [str(tools), str(tools / "go" / "bin"), str(tools / "go"), str(tools / "linked"),
+                str(work / ".git" / "hooks"), str(tmp_path / "missing" / "x"), str(tools / "gone"),
+                str(tmp_path / "temp" / "T" / "x")]  # fmt: skip
+    kept = caches.fewest([*readonly, str(tmp_path)], [str(work)])
+    assert kept == [str(work / ".git" / "hooks"), str(tmp_path / "temp" / "T" / "x"),
+                    str(tmp_path)], "all held by tmp_path, but in what is writable"  # fmt: skip
+    kept = caches.fewest(readonly, [str(work)])
+    assert kept == [str(tools), str(tools / "linked"), str(work / ".git" / "hooks"),
+                    str(tmp_path / "missing" / "x"),
+                    str(tmp_path / "temp" / "T" / "x")]  # fmt: skip

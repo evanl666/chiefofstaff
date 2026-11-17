@@ -1252,7 +1252,8 @@ async def test_chiefs_own_code_is_read_only_for_every_sandboxed_worker(tmp_path,
         harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
         policy = runtime.sandbox_policy(harness.store.session(worker))
         for path in (sys.prefix, package):
-            assert path in policy.readonly, (slack, path)
+            held = [folder for folder in policy.readonly if Path(path).is_relative_to(folder)]
+            assert held, (slack, path)  # It, or a folder it is in (caches.fewest).
             assert path not in policy.readwrite
 
 

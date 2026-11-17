@@ -1756,7 +1756,7 @@ class Runtime:
         closed = registry_secrets() if row["slack"] else []
         return SandboxPolicy(
             readwrite=tuple(dict.fromkeys(path for path in writable if path)),
-            readonly=tuple(dict.fromkeys(readonly)),
+            readonly=tuple(caches.fewest(list(dict.fromkeys(readonly)), writable)),
             # Workers that read Slack must not carry what they read anywhere but GitHub.
             allowed_hosts=GITHUB_HOSTS if row["slack"] else (),
             # Tests that start a server, Gradle's daemon and the like need localhost; not for
