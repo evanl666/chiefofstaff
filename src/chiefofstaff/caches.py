@@ -440,7 +440,13 @@ def tool_paths(owner: Owner, rust: bool = False, slack: bool = False) -> list[st
     project), uv's Pythons and tools, the Copilot CLI's own tools, the folders on PATH
     (path_folders). For a worker that reads Slack, only what runs of a tool's home (S2)."""
     toolchains = SLACK_TOOLCHAINS if slack else TOOLCHAINS
-    found = [*named(owner.home, toolchains, SLACK_HOMES if slack else TOOL_HOMES)]
+    homes = SLACK_HOMES if slack else TOOL_HOMES
+    if (venv := os.environ.get("VIRTUAL_ENV")) and os.path.realpath(venv) == os.path.realpath(
+        sys.prefix
+    ):
+        # Chief of Staff's own (`uv run` sets it): nothing workers run, a rule at each command.
+        homes = {name: parts for name, parts in homes.items() if name != "VIRTUAL_ENV"}
+    found = [*named(owner.home, toolchains, homes)]
     found += owner.toolchains()
     if rust:
         found += named(owner.home, RUST_TOOLCHAINS, RUST_HOMES)

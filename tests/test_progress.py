@@ -1365,6 +1365,7 @@ async def test_chiefs_own_code_is_read_only_for_every_sandboxed_worker(tmp_path,
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")  # Not Chief of Staff's own bin: a tool's.
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)  # `uv run` sets it: the runner's.
     harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Build")

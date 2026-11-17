@@ -587,7 +587,7 @@ def test_each_workers_init_script_is_its_own_and_goes_when_it_closes(tmp_path):
         ("linux", "/srv/scratch/t", ["/srv/scratch/t", "/tmp", "/var/tmp", "/dev/shm"]),
         ("linux", "/", ["/tmp", "/var/tmp", "/dev/shm"]),
         ("darwin", "/private/var/folders/ab/cd/T", ["/private/var/folders/ab/cd"]),
-        ("darwin", "/tmp", ["/private/tmp"]),
+        ("darwin", "/tmp", ["/tmp"]),
     ],
 )
 def test_every_temporary_folder_copilot_lets_commands_write_holds_its_carve_outs(
@@ -781,3 +781,19 @@ def test_a_slack_reader_runs_pnpms_global_tools_and_reads_no_other_package(tmp_p
 
     said = prompts.worker_context("/w", "/w", [], False, "on", slack=True, notes=found.notes)
     assert caches.PNPM_GLOBALS_CLOSED in said
+
+
+def test_chiefs_own_virtualenv_is_no_toolchain_of_workers(tmp_path, monkeypatch):
+    """`uv run` sets VIRTUAL_ENV to Chief of Staff's own environment: it was granted to workers
+    as a toolchain, a rule at every command for nothing they run. Another one stays."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("VIRTUAL_ENV", sys.prefix)
+    for slack in (False, True):
+        paths = caches.tool_paths(caches.Owner(home), slack=slack)
+        assert os.path.realpath(sys.prefix) not in map(os.path.realpath, paths), slack
+    other = tmp_path / "project" / ".venv"
+    other.mkdir(parents=True)
+    monkeypatch.setenv("VIRTUAL_ENV", str(other))
+    assert str(other) in caches.tool_paths(caches.Owner(home))
