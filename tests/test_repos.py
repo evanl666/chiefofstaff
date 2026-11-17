@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import FakeSession, Harness, call_tool, env, said, settle, task_of
 
+from chiefofstaff import events as events_module
 from chiefofstaff import policy as policy_module
 from chiefofstaff import settings_guard
 from chiefofstaff import workers as workers_module
@@ -465,10 +466,12 @@ def added_since(listed: str) -> str:
     )
 
 
-def unused(listed: str) -> str:
+def unused(listed: str, writable: bool = False) -> str:
+    could = " but could write" if writable else ""
     return (
-        f"Copilot settings in a folder of this checkout workers haven't used yet ({listed}); "
-        "look at them once. Chief of Staff won't start the worker there until you say to use them."
+        f"Copilot settings in a folder of this checkout workers haven't used yet{could} "
+        f"({listed}); look at them once. Chief of Staff won't start the worker there until you "
+        "say to use them."
     )
 
 
@@ -1422,7 +1425,7 @@ async def test_settings_a_worker_moves_into_place_are_the_owners_to_look_at(
         await settle(runtime)
         assert not runtime.states.is_live(web["session_id"])
         assert settings_notices(harness, web["session_id"])[-1]["text"] == unused(
-            "web/.claude/settings.json, web/.github/hooks/p.json"
+            "web/.claude/settings.json, web/.github/hooks/p.json", writable=True
         )
         assert await runtime.codex_settings(harness.store.session(api["session_id"])) == [
             str(git_repo.resolve())
@@ -1855,8 +1858,8 @@ async def test_settings_a_worker_put_in_a_folder_are_never_shown_as_the_owners(
     tmp_path, git_repo, monkeypatch
 ):
     """A worker in the owner's checkout plants settings one folder down; the next worker there
-    is told they were added since workers had the checkout, not that they are seen for the first
-    time (which reads as the owner's own)."""
+    is told workers could write there, not only that they are seen for the first time (which
+    reads as the owner's own)."""
     commit(git_repo, "sub/README.md", "x")
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo), str(git_repo / "sub")]))
@@ -1870,7 +1873,7 @@ async def test_settings_a_worker_put_in_a_folder_are_never_shown_as_the_owners(
                             project=str(git_repo / "sub"), in_place=True)  # fmt: skip
         await settle(runtime)
         assert settings_notices(harness, other["session_id"])[-1]["text"] == unused(
-            "sub/.github/hooks/p.json"
+            "sub/.github/hooks/p.json", writable=True
         )
     finally:
         await runtime.stop()
@@ -1896,7 +1899,7 @@ async def test_settings_changed_mid_turn_stop_it_at_its_next_tool(tmp_path, git_
         session = harness.session(worker)
         hooks = session.options["hooks"]
         call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
-        assert hooks["on_pre_tool_use"](call, {"session_id": worker}) is None, "at once"
+        assert await asked(hooks["on_pre_tool_use"], call, worker) is None
         (cwd / "guard.sh").chmod(0o755)
         assert await asked(hooks["on_pre_tool_use"], call, worker) is None
         assert runtime.states.is_live(worker), "nothing changed but its mode: no stop"
@@ -2195,25 +2198,37 @@ async def test_a_branch_update_left_halfway_is_said_with_how_to_undo_it(
     """A merge that stopped on a file it couldn't change (the sandbox holds agent settings)
     leaves the branch's new files untracked and no merge to abort: after its turn, its
     timeline says so, and the worker is told how to put its tree back (those files only),
-    once. A merge under way (it can be aborted) is the worker's own to finish."""
+    once. Its tree as the merge began is taken before it runs (Copilot asks first)."""
     commit(git_repo, "base.txt", "b\n")
     run("git", "checkout", "-q", "-b", "team", cwd=git_repo)
     commit(git_repo, "team.txt", "t\n")
     run("git", "checkout", "-q", "main", cwd=git_repo)
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
         await settle(runtime)
-        session = harness.session(worker)
-        (cwd / "team.txt").write_text("t\n")  # What the merge wrote before it stopped.
         (cwd / "mine.txt").write_text("mine\n")  # The worker's own, untouched.
-        session.emit("tool.execution_start", tool_name="bash", tool_call_id="m1",
-                     arguments={"command": "git merge team"})  # fmt: skip
-        await call_tool(runtime, "report", worker, status="done", summary="Merge failed.")
-        session.emit("session.idle")
-        await settle(runtime)
+
+        async def merged(call: str, command: str):
+            hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+            asked_now = {"toolName": "bash", "toolArgs": {"command": command}}
+            assert await asked(hook, asked_now, worker) is None
+            (cwd / "team.txt").write_text("t\n")  # What the merge wrote before it stopped.
+            session = harness.session(worker)
+            session.emit("tool.execution_start", tool_name="bash", tool_call_id=call,
+                         arguments={"command": command})  # fmt: skip
+            done = SimpleNamespace(
+                content="error: unable to create file\n<exited with exit code 1>"
+            )
+            session.emit("tool.execution_complete", tool_call_id=call, success=False, result=done)
+            await call_tool(runtime, "report", worker, status="done", summary="Merge failed.")
+            session.emit("session.idle")
+            await settle(runtime)
+
+        await merged("m1", "git merge team")
         notes = [t for k, t in harness.kinds(worker) if "stopped halfway" in t]
         assert notes == [
             "Its branch update stopped halfway (`team.txt` left untracked): asked it to put its "
@@ -2222,11 +2237,8 @@ async def test_a_branch_update_left_halfway_is_said_with_how_to_undo_it(
         told = harness.session(worker).sent[-1]
         assert "remove `team.txt`" in told and "mine.txt" not in told
         # Again after another turn, the same left: said once.
-        session = harness.session(worker)
-        session.emit("tool.execution_start", tool_name="bash", tool_call_id="m2",
-                     arguments={"command": "git -c a=b merge team"})  # fmt: skip
-        session.emit("session.idle")
-        await settle(runtime)
+        (cwd / "team.txt").unlink()
+        await merged("m2", "git -c a=b merge team")
         assert len([t for k, t in harness.kinds(worker) if "stopped halfway" in t]) == 1
     finally:
         await runtime.stop()
@@ -2352,7 +2364,7 @@ async def test_an_agent_moved_in_past_the_sandbox_is_denied_before_it_runs(
         session = harness.session(worker)
         hook = session.options["hooks"]["on_pre_tool_use"]
         task = {"toolName": "task", "toolArgs": {"agent_type": "evil", "prompt": "hi"}}
-        assert hook(task, {"session_id": worker}) is None, "at once"
+        assert await asked(hook, task, worker) is None
         shutil.copytree(cwd / ".github", cwd / "stage")
         plant(cwd / "stage", "agents/evil.agent.md", "---\nname: evil\nmcp-servers:\n  e:\n"
               "    command: sh\n---\nEvil.\n")  # fmt: skip
@@ -2363,6 +2375,398 @@ async def test_an_agent_moved_in_past_the_sandbox_is_denied_before_it_runs(
         assert denied["permissionDecisionReason"] == refusal("added .github/agents/evil.agent.md")
         await settle(runtime)
         assert session.aborted and not runtime.states.is_live(worker)
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("sandboxed", [True, False])
+@pytest.mark.parametrize("trouble", ["raises", "hangs"])
+async def test_a_pre_tool_answer_comes_in_time_whatever_happens(
+    tmp_path, git_repo, monkeypatch, trouble, sandboxed
+):
+    """Copilot waits for Chief of Staff's pre-tool answer: a look that fails or never ends must
+    not hold the worker's turn. Within PRE_TOOL_SECONDS a sandboxed worker's tool is denied,
+    with a line saying why (its turn goes on), another's runs as it would; the next tool is
+    looked at afresh."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    monkeypatch.setattr(events_module, "PRE_TOOL_SECONDS", 0.2)
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        worker, _ = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        if not sandboxed:
+            runtime.pre_tool_on[worker] = False  # (Asked first for a server off for it.)
+        call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
+        look = runtime.settings_look
+        never = asyncio.Event()
+
+        async def troubled(row):
+            if trouble == "raises":
+                raise OSError("a folder that can't be read")
+            await never.wait()
+            return ""
+
+        monkeypatch.setattr(runtime, "settings_look", troubled)
+        started = time.monotonic()
+        answer = await asked(hook, call, worker)
+        assert time.monotonic() - started < 2
+        if sandboxed:
+            assert answer == {
+                "permissionDecision": "deny",
+                "permissionDecisionReason": events_module.PRE_TOOL_UNANSWERED
+                if trouble == "hangs"
+                else events_module.PRE_TOOL_UNCHECKED,
+            }
+        else:
+            assert answer is None
+        assert runtime.states.is_live(worker)
+        monkeypatch.setattr(runtime, "settings_look", look)
+        assert await asked(hook, call, worker) is None
+        never.set()
+    finally:
+        await runtime.stop()
+
+
+def drained(fifo: Path, seconds: float = 20):
+    """Whatever opened the FIFO to read gets an end, for a while (a test's leftover threads)."""
+    stop = time.monotonic() + seconds
+
+    def loop():
+        while time.monotonic() < stop:
+            with suppress(OSError):
+                handle = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                os.close(handle)
+            time.sleep(0.01)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+async def test_a_folder_that_cant_be_listed_never_lets_a_tool_through(
+    tmp_path, git_repo, monkeypatch
+):
+    """A sandboxed worker plants a custom agent beside a folder no one can list (`chmod 000`
+    .github/agents/zz): the glance notes what it can't see (it never fails), the full check
+    says they can't be checked, and the `task` is denied; the worker stops."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    locked = None
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        session = harness.session(worker)
+        hook = session.options["hooks"]["on_pre_tool_use"]
+        task = {"toolName": "task", "toolArgs": {"agent_type": "evil", "prompt": "hi"}}
+        assert await asked(hook, task, worker) is None
+        plant(cwd, ".github/agents/evil.agent.md", "---\nname: evil\nmcp-servers:\n  e:\n"
+              "    command: sh\n---\nEvil.\n")  # fmt: skip
+        locked = cwd / ".github" / "agents" / "zz"
+        locked.mkdir()
+        locked.chmod(0)
+        denied = await asked(hook, task, worker)
+        assert denied["permissionDecision"] == "deny"
+        assert denied["permissionDecisionReason"].startswith(
+            "Copilot settings in this folder can't be checked"
+        )
+        await settle(runtime)
+        assert session.aborted and not runtime.states.is_live(worker)
+    finally:
+        if locked:
+            locked.chmod(0o755)
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("trouble", ["raises", "hangs"])
+async def test_a_model_round_whose_look_fails_stops_the_worker(
+    tmp_path, git_repo, monkeypatch, trouble
+):
+    """The look as each model round starts never fails quietly: one that fails, or takes
+    longer than it may, stops the worker with a line saying its folder can't be checked; it
+    waits until it can be, then goes on."""
+    from chiefofstaff import runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "SETTINGS_SECONDS", 0.3)
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, _ = await isolated(runtime, harness, git_repo)
+        session = harness.session(worker)
+        await settle(runtime)
+        signature = settings_guard.signature
+        freed = threading.Event()
+
+        def troubled(*args):
+            if trouble == "raises":
+                raise OSError("a folder that can't be read")
+            freed.wait(5)
+            return signature(*args)
+
+        monkeypatch.setattr(settings_guard, "signature", troubled)
+        session.emit("assistant.turn_start")
+        await settle(runtime)
+        await asyncio.sleep(0.8)
+        await settle(runtime)
+        assert session.aborted and not runtime.states.is_live(worker)
+        assert worker in runtime.settings_held
+        said = [
+            m["text"] for m in harness.store.messages(worker) if "can't be checked" in m["text"]
+        ]
+        assert said[0].startswith("This worker's folder can't be checked (")
+        freed.set()
+        monkeypatch.setattr(settings_guard, "signature", signature)
+        await runtime.workers.pump()
+        await settle(runtime)
+        assert worker not in runtime.settings_held
+    finally:
+        await runtime.stop()
+
+
+async def test_a_look_at_a_folder_past_its_time_makes_the_worker_wait(
+    tmp_path, git_repo, monkeypatch
+):
+    """Before a turn: a look at its folder that doesn't end in time (a file system that doesn't
+    answer) says the folder can't be checked; nothing waits on it forever."""
+    from chiefofstaff import runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "SETTINGS_SECONDS", 0.3)
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    never = asyncio.Event()
+    try:
+        worker, _ = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+
+        async def stuck(*args):
+            await never.wait()
+
+        monkeypatch.setattr(runtime, "settings_verdict", stuck)
+        line = await asyncio.wait_for(runtime.settings_refusal(harness.store.session(worker)), 5)
+        assert line == (
+            "This worker's folder can't be checked (looking at it took over 0.3 s); Chief of "
+            "Staff won't start the worker there until it can."
+        )
+    finally:
+        never.set()
+        await runtime.stop()
+
+
+async def test_a_fifo_where_the_check_reads_never_holds_copilot_nor_the_owner(
+    tmp_path, git_repo, monkeypatch
+):
+    """A sandboxed worker writes a hook that runs `node tools` and makes tools/package.json (where
+    node's entry point is read) a FIFO: the check never waits on it. Copilot has its answer
+    before the next tool (denied: a hook the worker made), and the owner's next message goes
+    through (it waits for them)."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    fifo = None
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        (cwd / "tools").mkdir()
+        fifo = cwd / "tools" / "package.json"
+        os.mkfifo(fifo)
+        plant(cwd, ".github/hooks/x.json", json.dumps({"version": 1, "hooks": {
+            "preToolUse": [{"type": "command", "bash": "node tools"}]}}))  # fmt: skip
+        call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
+        answer = await asyncio.wait_for(asked(hook, call, worker), 5)
+        assert answer["permissionDecision"] == "deny"
+        assert answer["permissionDecisionReason"].startswith(
+            "Copilot settings in this folder changed (added .github/hooks/x.json"
+        )
+        await asyncio.wait_for(runtime.owner_send(worker, "Next"), 5)
+    finally:
+        if fifo:
+            drained(fifo)
+        await runtime.stop()
+
+
+def test_the_checks_read_regular_files_only(tmp_path):
+    """Never a FIFO (opened to read, it would wait for a writer), never through a link unless
+    asked to, never past a size."""
+    os.mkfifo(tmp_path / "fifo")
+    (tmp_path / "file").write_text("abcdef")
+    (tmp_path / "link").symlink_to(tmp_path / "file")
+    started = time.monotonic()
+    with pytest.raises(settings_guard.SpecialFileError):
+        settings_guard.read_regular(tmp_path / "fifo")
+    with pytest.raises(settings_guard.SpecialFileError):
+        settings_guard.read_regular(tmp_path / "fifo", follow=True)
+    assert time.monotonic() - started < 1
+    with pytest.raises(settings_guard.SpecialFileError):
+        settings_guard.read_regular(tmp_path / "link")
+    assert settings_guard.read_regular(tmp_path / "link", follow=True) == b"abcdef"
+    with pytest.raises(OSError, match="too large"):
+        settings_guard.read_regular(tmp_path / "file", 3)
+    assert settings_guard.read_regular(tmp_path / "file", 3, whole=False) == b"abc"
+
+
+async def test_looks_at_a_folder_never_wait_on_the_default_pool(tmp_path, git_repo, monkeypatch):
+    """The looks at workers' folders read the file system in threads of their own: with every
+    thread of the default pool taken (the SDK writes to Copilot there), they still answer."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    held = threading.Event()
+    try:
+        worker, _ = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(1))
+        loop.run_in_executor(None, held.wait)
+        row = harness.store.session(worker)
+        assert await asyncio.wait_for(runtime.settings_refusal(row), 5) == ""
+        assert await asyncio.wait_for(runtime.settings_look(row), 5) == ""
+    finally:
+        held.set()
+        await runtime.stop()
+
+
+async def test_a_servers_file_changed_mid_turn_is_denied_at_the_tool_that_would_start_it(
+    tmp_path, git_repo, monkeypatch
+):
+    """A sandboxed worker edits the file a language server runs, or a custom agent's MCP
+    server, then calls the tool that starts it in the same turn: the look before that tool
+    sees it (the files servers run are looked at too) and the server is off for it: denied.
+    A custom agent with no name of its own is called by its file's (Copilot: `my.helper` for
+    my.helper.agent.md, as written)."""
+    server = {"command": "node", "args": ["tools/lsp.js"], "fileExtensions": {".ts": "typescript"}}
+    commit(git_repo, ".github/lsp.json", json.dumps({"lspServers": {"ts": server}}))
+    commit(git_repo, "tools/lsp.js", "// language server\n")
+    commit(git_repo, ".github/agents/my.helper.agent.md",
+           "---\ndescription: x\nmcp-servers:\n  s:\n    command: node\n"
+           "    args: [\"tools/agent_server.js\"]\n---\nBody\n")  # fmt: skip
+    commit(git_repo, "tools/agent_server.js", "// server\n")
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        lsp = {"toolName": "lsp", "toolArgs": {}}
+        task = {"toolName": "task", "toolArgs": {"agent_type": "my.helper", "prompt": "hi"}}
+        assert await asked(hook, lsp, worker) is None
+        assert await asked(hook, task, worker) is None
+        (cwd / "tools" / "lsp.js").write_text("require('child_process').execSync('id')\n")
+        denied = await asked(hook, lsp, worker)
+        assert denied["permissionDecision"] == "deny"
+        assert denied["permissionDecisionReason"].startswith("The language server ts changed")
+        assert await asked(hook, task, worker) is None
+        (cwd / "tools" / "agent_server.js").write_text("require('child_process').execSync('id')\n")
+        denied = await asked(hook, task, worker)
+        assert denied["permissionDecision"] == "deny"
+        assert denied["permissionDecisionReason"].startswith(
+            "The MCP server s (of the custom agent my.helper) changed"
+        )
+        assert runtime.states.is_live(worker), "a server off is no wait"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_worktree_made_again_under_its_name_is_no_replaced_git(
+    tmp_path, git_repo, monkeypatch
+):
+    """A worker makes a scratch worktree to compare with main, removes it and makes it again
+    (looked at in between, or in one go): its private folder in the .git is another each time,
+    made with its worktree: nothing waits. One swapped under a worktree that stays still is."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
+        scratch = tmp_path / "data" / "work" / "cmp"
+        add = ("git", "worktree", "add", "-q", "--detach", str(scratch), "main")
+
+        async def looked():
+            # Before a tool, and before a turn (which takes in the .git's folders as they are).
+            assert await asked(hook, call, worker) is None
+            assert await runtime.settings_refusal(harness.store.session(worker)) == ""
+
+        run(*add, cwd=cwd)
+        await looked()
+        run("git", "worktree", "remove", str(scratch), cwd=cwd)
+        await looked()
+        run(*add, cwd=cwd)
+        await looked()
+        run("git", "worktree", "remove", str(scratch), cwd=cwd)
+        run(*add, cwd=cwd)
+        await looked()
+        assert runtime.states.is_live(worker)
+        common = Path(run("git", "rev-parse", "--git-common-dir", cwd=cwd).strip())
+        admin = (cwd / common).resolve() / "worktrees" / "cmp"
+        shutil.copytree(admin, tmp_path / "swapped")
+        shutil.rmtree(admin)
+        (tmp_path / "swapped").rename(admin)
+        denied = await asked(hook, call, worker)
+        assert denied["permissionDecision"] == "deny"
+        assert (
+            "/worktrees/cmp was replaced since Chief of Staff first saw it"
+            in (denied["permissionDecisionReason"])
+        )
+    finally:
+        await runtime.stop()
+
+
+async def test_only_what_a_failed_update_left_is_said(tmp_path, git_repo, monkeypatch):
+    """Not `git merge-base` (no update), nor a merge that went through: nothing said. Of a merge
+    that failed and left its tree halfway, only what it left: not the task's own deletions."""
+    commit(git_repo, "legacy.py", "old\n")
+    run("git", "checkout", "-q", "-b", "team", cwd=git_repo)
+    commit(git_repo, "team.txt", "t\n")
+    run("git", "checkout", "-q", "main", cwd=git_repo)
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        (cwd / "legacy.py").unlink()  # Its task: remove the legacy module.
+
+        async def turn(call: str, command: str, code: int, before=None):
+            asked_now = {"toolName": "bash", "toolArgs": {"command": command}}
+            assert await asked(hook, asked_now, worker) is None
+            if before:
+                before()
+            session = harness.session(worker)
+            session.emit("tool.execution_start", tool_name="bash", tool_call_id=call,
+                         arguments={"command": command})  # fmt: skip
+            done = SimpleNamespace(content=f"x\n<exited with exit code {code}>")
+            session.emit("tool.execution_complete", tool_call_id=call, success=code == 0,
+                         result=done)  # fmt: skip
+            session.emit("session.idle")
+            await settle(runtime)
+
+        def halfway():
+            (cwd / "team.txt").write_text("t\n")  # What the merge wrote before it stopped.
+
+        await turn("m1", "git merge-base HEAD main", 0)
+        await turn("m2", "git fetch -q && git merge main", 0)
+        assert not [t for k, t in harness.kinds(worker) if "stopped halfway" in t]
+        await turn("m3", "git merge team", 1, before=halfway)
+        notes = [t for k, t in harness.kinds(worker) if "stopped halfway" in t]
+        assert notes == [
+            "Its branch update stopped halfway (`team.txt` left untracked): asked it to put its "
+            "worktree back."
+        ]
     finally:
         await runtime.stop()
 

@@ -33,6 +33,7 @@ import tempfile
 import time
 import weakref
 from collections.abc import Awaitable, Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -95,13 +96,14 @@ from .policy import (
     within,
 )
 from .provenance import ALIVE_EVERY, RUNS_KEPT, Provenance, log_of, runs_of
+from .receipts import SHELL_TOOLS
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sendsocket import LimitedError, SendSocket
 from .sendsocket import headline as sent_headline
 from .sendsocket import parts as sent_parts
 from .sendsocket import prompt as sent_prompt
 from .sendsocket import shown as sent_shown
-from .settings_guard import SettingsChangedError, checkout_top, outermost_top
+from .settings_guard import SettingsChangedError, checkout_top, outermost_top, read_regular
 from .sources import Source
 from .sources.github import GitHubSource
 from .sources.slack import SlackSource, describe
@@ -140,6 +142,10 @@ from .workspaces import (
 )
 
 logger = logging.getLogger(__name__)
+
+# How long a look at a worker's folder (settings_refusal, the backstop) may take: past that it
+# can't be checked, and the worker waits (looked at again as workers start: Workers.pump).
+SETTINGS_SECONDS = float(os.environ.get("CHIEFOFSTAFF_SETTINGS_SECONDS", "15"))
 
 
 def clip_words(text: str, size: int) -> str:
@@ -405,30 +411,48 @@ def home_shown(path: str) -> str:
     return "~" + path[len(home) :] if path.startswith(home + os.sep) else path
 
 
-# A command that updates a branch (and what it updates from).
+# A command that updates a branch (and what it updates from): the subcommand as a whole word
+# (not `git merge-base`, `git merge-tree`).
 BRANCH_UPDATE = re.compile(
-    r"\bgit\b(?:\s+-[cC]\s+\S+)*\s+(merge|rebase|pull|cherry-pick|am|revert)\b([^;&|\n]*)"
+    r"\bgit\b(?:\s+(?:-[cC]\s+\S+|--[\w-]+(?:=\S+)?))*"
+    r"\s+(merge|rebase|pull|cherry-pick|am|revert)(?![\w-])([^;&|\n]*)"
 )
 # What a merge, a rebase or a cherry-pick under way leaves in its .git (it can be aborted).
 UNDER_WAY = ("MERGE_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD",
              "REVERT_HEAD", "sequencer")  # fmt: skip
 
 
-async def half_left(cwd: str, targets: list[str]) -> dict[str, list[str]] | None:
-    """What a branch update that stopped halfway left in a checkout: {"untracked": files of
-    the branches it took in (or its upstream), "deleted": tracked files}; None when nothing
-    is, or a merge or rebase is under way (it can be aborted)."""
-    git_dir = Path((await git("-C", cwd, "rev-parse", "--absolute-git-dir")).strip())
-    if any((git_dir / name).exists() for name in UNDER_WAY):
-        return None
+async def tree_state(cwd: str) -> dict:
+    """What a branch update could leave behind in a checkout, as it is: {"head", "untracked",
+    "deleted" (tracked files)}. Taking no lock git's own commands could meet."""
     top = (await git("-C", cwd, "rev-parse", "--show-toplevel")).strip()
-    status = await git("-C", top, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    head = (await git("-C", top, "rev-parse", "--verify", "--quiet", "HEAD")).strip()
+    status = await git(
+        "--no-optional-locks", "-C", top, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+    )
     untracked, deleted = [], []
     for entry in status.split("\0"):
         if entry.startswith("?? "):
             untracked.append(entry[3:])
         elif entry[:2] in {" D", "D "}:
             deleted.append(entry[3:])
+    return {"top": top, "head": head, "untracked": untracked, "deleted": deleted}
+
+
+async def half_left(cwd: str, targets: list[str], before: dict) -> dict[str, list[str]] | None:
+    """What a branch update that stopped halfway left in a checkout, of what was not there as
+    it began (`before`, tree_state): {"untracked": files of the branches it took in (or its
+    upstream), "deleted": tracked files}; None when nothing is, a merge or rebase is under way
+    (it can be aborted), or HEAD moved (it went through)."""
+    git_dir = Path((await git("-C", cwd, "rev-parse", "--absolute-git-dir")).strip())
+    if any((git_dir / name).exists() for name in UNDER_WAY):
+        return None
+    now = await tree_state(cwd)
+    if now["head"] != before["head"] or now["top"] != before["top"]:
+        return None
+    top = now["top"]
+    untracked = [path for path in now["untracked"] if path not in set(before["untracked"])]
+    deleted = [path for path in now["deleted"] if path not in set(before["deleted"])]
     found: list[str] = []
     if untracked:
         refs = []
@@ -542,15 +566,21 @@ class Runtime:
         # and where those are: (top, cwd, the files their hooks run and its .git folders).
         self.settings_sigs: dict[str, str] = {}
         self.settings_paths: dict[str, tuple[Path, Path, tuple[str, ...]]] = {}
+        # Where those looks read the file system (settings_thread): never the default pool,
+        # which the SDK and everything else share.
+        self.settings_pool: ThreadPoolExecutor | None = None
         # Servers a Copilot worker's folder settings run whose files changed (servers_seen):
         # {session: {server: those files}}; and those its live session was opened without.
         self.servers_off: dict[str, dict[str, list[str]]] = {}
         self.servers_opened: dict[str, frozenset[str]] = {}
         # Copilot workers whose session was opened with Chief of Staff's pre-tool hook
-        # (pre_tool_wanted): the others are glanced at as each tool starts, not waited for.
-        self.pre_tool_on: set[str] = set()
-        # The last command of each worker's looked at after its turns (half_updated).
+        # (pre_tool_wanted): {session: whether it is sandboxed}. The others are glanced at as
+        # each tool starts, not waited for.
+        self.pre_tool_on: dict[str, bool] = {}
+        # The last command of each worker's looked at after its turns (half_updated); its tree
+        # as the first branch update of its turn began (half_mark).
         self.half_seen: dict[str, int] = {}
+        self.half_before: dict[str, dict] = {}
         # Sessions another program (a terminal) has open: session id -> pid. Refreshed by the
         # watch loop and before resuming a session.
         self.elsewhere: dict[str, int] = {}
@@ -684,6 +714,9 @@ class Runtime:
         for task in list(self.jobs):
             task.cancel()
         await asyncio.gather(*self.jobs, return_exceptions=True)
+        if self.settings_pool:
+            self.settings_pool.shutdown(wait=False, cancel_futures=True)
+            self.settings_pool = None
 
     async def connect(self):
         async with self.connect_lock:
@@ -1910,19 +1943,20 @@ class Runtime:
             return []
         return self.run_files(self.settings_place(row)[0])
 
-    def run_files(self, top: Path) -> list[str]:
+    def run_files(self, top: Path, servers: bool = False) -> list[str]:
         """The files the hooks (plugins, extensions) of a folder's top run, as its snapshot
         holds them, there or expected there: read-only to workers' commands (denied while not
-        there, macOS) and refused to their edits, as the settings are. Not what a server runs:
-        a worker developing that server builds and edits it (a change turns it off for the
-        worker, servers_off)."""
+        there, macOS) and refused to their edits, as the settings are. Not what a server runs
+        (but with `servers`, for a look): a worker developing that server builds and edits it
+        (a change turns it off for the worker, servers_off)."""
         snapshot = settings_guard.load(self.store, top)
         found = []
         for entries in (snapshot or {}).get("folders", {}).values():
             for entry, value in entries.items():
-                ran = entry.partition(settings_guard.RUN)[2]
-                if ran and value[0] != settings_guard.PROGRAM:
-                    found.append(str(Path(ran) if Path(ran).is_absolute() else top / ran))
+                _, ran, server = settings_guard.ran_of(entry)
+                if not ran or value[0] == settings_guard.PROGRAM or (server and not servers):
+                    continue
+                found.append(str(Path(ran) if Path(ran).is_absolute() else top / ran))
         return found
 
     def pre_tool_wanted(self, row: dict, sandboxed: bool) -> bool:
@@ -3046,9 +3080,9 @@ class Runtime:
         if agent == COPILOT_AGENT and row["role"] == WORKER:
             self.servers_opened[session_id] = frozenset(self.servers_off.get(session_id, {}))
             if "hooks" in options:
-                self.pre_tool_on.add(session_id)
+                self.pre_tool_on[session_id] = "sandbox_config" in options
             else:
-                self.pre_tool_on.discard(session_id)
+                self.pre_tool_on.pop(session_id, None)
             self.servers_said(row)
         if agent != COPILOT_AGENT and self.store.get(f"agentopen:{session_id}"):
             self.store.delete(f"agentopen:{session_id}")  # Closed there: its news goes now.
@@ -3104,10 +3138,12 @@ class Runtime:
         and this one has run nothing there yet) is kept as it is: the owner's. Any other folder
         (or setting) seen for the first time is known from then on with nothing in it taken:
         what is there is the owner's to look at once."""
-        top, cwd, _, now, unreadable, code = await asyncio.to_thread(self.settings_read, row, names)
+        top, cwd, _, now, unreadable, code = await self.settings_thread(
+            self.settings_read, row, names
+        )
         stored = settings_guard.load(self.store, top)
         if stored is None and not unreadable:
-            stored, said = await asyncio.to_thread(self.settings_handout, row, top, cwd)
+            stored, said = await self.settings_thread(self.settings_handout, row, top, cwd)
             if said:
                 self.add_message(row["id"], "notice", said)  # (On the event loop.)
         snapshot = stored or settings_guard.fresh()
@@ -3115,7 +3151,7 @@ class Runtime:
         key = settings_guard.unchecked_key(names, folders)
         unchecked = key in snapshot["unchecked"]
         if unreadable:
-            seen = await asyncio.to_thread(settings_guard.glimpse, top, cwd, names)
+            seen = await self.settings_thread(settings_guard.glimpse, top, cwd, names)
             if snapshot["unchecked"].get(key) == seen:
                 return None  # The owner said to use them as they are (as far as they can be read).
             return {
@@ -3151,10 +3187,12 @@ class Runtime:
             return None
         shown = now_named if servers else settings_guard.without_servers(now_named)
         before = then if servers else settings_guard.without_servers(then)
+        first = settings_guard.first_seen(snapshot, now_named, then, "first", servers)
         return {
             "top": top, "cwd": cwd, "changes": found, "now": now, "unreadable": "",
-            "digest": settings_guard.digest(shown),
-            "first": settings_guard.first_seen(snapshot, now_named, then, "first", servers),
+            "digest": settings_guard.digest(shown), "first": first,
+            # (Where a worker could have written them: said so.)
+            "touched": first and await self.settings_thread(self.workspaces.touched, top),
             "carried": settings_guard.first_seen(snapshot, now_named, then, "carried", servers),
             "untracked": bool(snapshot.get("untracked")),
             "refused": any(what == "refused" for what, _ in found),
@@ -3280,6 +3318,11 @@ class Runtime:
                     f"{agent} settings Chief of Staff hasn't checked yet, in a checkout workers "
                     f"have had ({listed})"
                 )
+            if verdict.get("touched"):
+                return (
+                    f"{agent} settings in a folder of this checkout workers haven't used yet but "
+                    f"could write ({listed}); look at them once"
+                )
             return (
                 f"{agent} settings in a folder of this checkout workers haven't used yet "
                 f"({listed}); look at them once"
@@ -3290,17 +3333,33 @@ class Runtime:
     async def settings_refusal(self, row: dict) -> str:
         """Before a Copilot worker opens or starts a turn: why not (its folder's Copilot
         settings differ from what the owner last let it use: Copilot would load them), "" when
-        it may; said in its timeline."""
+        it may; said in its timeline. Within SETTINGS_SECONDS: past that, its folder can't be
+        checked, and it waits."""
         if row["role"] != WORKER or not row["cwd"]:
             return ""
-        if replaced := await asyncio.to_thread(self.git_replaced, row):
+        try:
+            return await asyncio.wait_for(self.settings_refused(row), SETTINGS_SECONDS)
+        except TimeoutError:
+            logger.warning("No look at %s's folder in time.", row["id"])
+            return self.settings_unchecked(row, f"looking at it took over {SETTINGS_SECONDS:g} s")
+
+    def settings_unchecked(self, row: dict, why: str) -> str:
+        """Its line when its folder could not be looked at: it waits until it can (said once)."""
+        reason = f"This worker's folder can't be checked ({why})"
+        line = f"{reason}; Chief of Staff won't start the worker there until it can."
+        self.settings_reasons[row["id"]] = reason
+        self.settings_said(row["id"], line, {"digest": ""})
+        return line
+
+    async def settings_refused(self, row: dict) -> str:
+        if replaced := await self.settings_thread(self.git_replaced, row):
             return self.git_replaced_said(row, replaced)
         if self.store.get(f"gitappeared:{row['id']}") and (line := await self.git_appeared(row)):
             return line
         if self.agent(row["id"]) != COPILOT_AGENT:
             return ""
         # Taken before they are read: a change while they are is a change at the next look.
-        seen = await asyncio.to_thread(self.settings_signature, row)
+        seen = await self.settings_thread(self.settings_signature, row)
         verdict = await self.settings_verdict(row, REPOSITORY_SETTINGS)
         if verdict is None:
             self.settings_unsaid(row["id"])
@@ -3372,7 +3431,7 @@ class Runtime:
 
     async def git_watch_after(self, session_id: str, closing: bool = False):
         """Its turn over (or it stopped, or closes): what appeared, said; it waits."""
-        found = await asyncio.to_thread(self.git_watch_scan, session_id)
+        found = await self.settings_thread(self.git_watch_scan, session_id)
         if closing:
             self.store.delete(f"gitwatch:{session_id}")
         for owner in found:
@@ -3386,7 +3445,7 @@ class Runtime:
         none: one they removed is let go of). "Use it"; "Keep it removed" too where only
         Chief of Staff's own worktree folders hold them."""
         pending = json.loads(self.store.get(f"gitappeared:{row['id']}") or "[]")
-        there = [p for p in pending if await asyncio.to_thread(os.path.lexists, p)]
+        there = [p for p in pending if await self.settings_thread(os.path.lexists, p)]
         if there != pending:
             if there:
                 self.store.set(f"gitappeared:{row['id']}", json.dumps(there))
@@ -3474,9 +3533,9 @@ class Runtime:
             return False
         tree = known[-1] if known and isinstance(known[-1], dict) else None
         if not now:
-            if tree and not os.path.lexists(tree["tree"]):
-                # An owner's worktree removed (its folder with it): forgotten, so one they make
-                # again under that name is theirs.
+            if tree and not os.path.lexists(tree["tree"]) and not self.git_tree_guarded(tree):
+                # A worktree removed (its folder with it: `git worktree remove`): forgotten, so
+                # one made again under that name is new.
                 self.store.delete(f"gitid:{path}")
             return False
         if now == (known[:-1] if tree else known):
@@ -3487,27 +3546,46 @@ class Runtime:
         return True
 
     def git_served(self, path: str, now: list) -> list:
-        """Of a worktree's private folder in a repository (`.git/worktrees/x`) whose worktree
-        is out of every worker's reach (the owner's own): that worktree's folder, as it is, for
-        telling the owner making it again (git worktree remove, add) from a worker's swap."""
+        """Of a worktree's private folder in a repository (`.git/worktrees/x`): that
+        worktree's folder (where its `gitdir` leads), as it is, for telling a worktree made
+        again (git worktree remove, add) from a swap of the private folder under one that
+        stays."""
         parent = Path(path).parent
         if not now or now[0] != "d" or parent.name != "worktrees":
             return []
         try:
-            named = (Path(path) / "gitdir").read_text(errors="replace").strip()
+            named = read_regular(Path(path) / "gitdir", 65536).decode(errors="replace").strip()
         except OSError:
             return []
         tree = os.path.realpath(Path(named).parent)
-        if any(tree == root or tree.startswith(root + os.sep) for root in self.writable_roots()):
-            return []
         return [{"tree": tree, "id": identity_of(tree)}]
 
     def git_remade(self, path: str, tree: dict) -> bool:
-        """Whether a worktree's private folder was made again with its worktree (the owner's
-        `git worktree add` under the same name): its worktree, out of every worker's reach, is
-        another folder too, and the private folder still serves it."""
+        """Whether a worktree's private folder was made again with its worktree (`git worktree
+        add` under the same name, the one before removed): its worktree is another folder too,
+        and the private folder still serves it. Never for a worktree a worker could make again
+        itself that Chief of Staff or the owner run git in (git_tree_guarded): there, only the
+        private folder as it was counts."""
         served = self.git_served(path, identity_of(path))
-        return bool(served) and served[0]["tree"] == tree["tree"] and served[0]["id"] != tree["id"]
+        if not served or served[0]["tree"] != tree["tree"] or served[0]["id"] == tree["id"]:
+            return False
+        return not self.git_tree_guarded(tree)
+
+    def git_tree_guarded(self, tree: dict) -> bool:
+        """Whether a worktree is a checkout handed to an open worker (Chief of Staff runs git
+        there; the owner too, in theirs) that a worker's commands can reach: one they could
+        remove and make again, with a private folder of their own."""
+        place = tree["tree"]
+        if not any(
+            place == root or place.startswith(root + os.sep) for root in self.writable_roots()
+        ):
+            return False  # (Out of every worker's reach: made again by the owner.)
+        for row in self.store.open_sessions(WORKER):
+            for checkout in self.workspaces.checkouts(row):
+                for key in ("path", "worktree", "top"):
+                    if checkout.get(key) and os.path.realpath(checkout[key]) == place:
+                        return True
+        return False
 
     def git_replaced_said(self, row: dict, replaced: list[str]) -> str:
         outermost = [
@@ -3537,34 +3615,52 @@ class Runtime:
             self.git_replaced_said(row, replaced)
             self.background(self.settings_stop(session_id))
 
+    async def half_mark(self, row: dict, tool: str, arguments: Any, seconds: float):
+        """Before a sandboxed worker's command that updates its branch (Events.pre_tool, which
+        Copilot waits for: only such a command pays, a git status): its tree as the update
+        begins, the first of its turn (half_updated), within `seconds` or not at all."""
+        command = arguments.get("command") if isinstance(arguments, dict) else None
+        if tool not in SHELL_TOOLS or not isinstance(command, str):
+            return
+        if row["id"] in self.half_before or not BRANCH_UPDATE.search(command):
+            return
+        try:
+            state = await asyncio.wait_for(tree_state(row["cwd"]), max(seconds, 0.1))
+        except Exception:
+            logger.info("No look at %s's tree before its update.", row["id"], exc_info=True)
+            return
+        self.half_before.setdefault(row["id"], state)
+
     async def half_updated(self, session_id: str):
-        """After a worker's turn that updated its branch (a merge, a rebase, a pull: its
-        commands as recorded): a tree that update left halfway (it could not change a file
-        the sandbox holds, say), with no merge or rebase under way to abort: files of the
-        branch it took in, left untracked, or tracked ones deleted. Its timeline says so, and
-        the worker is told how to put its tree back (those files only: its own changes stay),
-        once for what is left."""
+        """After a worker's turn where a command that updates its branch (a merge, a rebase, a
+        pull: its commands as recorded) failed: a tree that update left halfway (it could not
+        change a file the sandbox holds, say), with no merge or rebase under way to abort:
+        files of the branch it took in, left untracked, or tracked ones deleted, that were not
+        so as it began (half_mark). Its timeline says so, and the worker is told how to put its
+        tree back (those files only: its own changes stay), once for what is left."""
+        before = self.half_before.pop(session_id, None)
         ran = self.store.all(
-            "SELECT id, command FROM commands WHERE session_id=? AND id>? ORDER BY id",
+            "SELECT id, command, exit_code FROM commands WHERE session_id=? AND id>? ORDER BY id",
             (session_id, self.half_seen.get(session_id, 0)),
         )
         if not ran:
             return
         self.half_seen[session_id] = ran[-1]["id"]
+        updates = [command for command in ran if BRANCH_UPDATE.search(command["command"])]
+        if before is None or not any(command["exit_code"] not in (0, None) for command in updates):
+            return
         targets = [
             word
-            for command in ran
+            for command in updates
             for found in BRANCH_UPDATE.finditer(command["command"])
             for word in (found[2] or "").split()
             if not word.startswith("-")
         ]
-        if not any(BRANCH_UPDATE.search(command["command"]) for command in ran):
-            return
         row = self.store.find_session(session_id)
         if not row or row["closed_at"] or not row["cwd"]:
             return
         try:
-            left = await half_left(row["cwd"], targets)
+            left = await half_left(row["cwd"], targets, before)
         except Exception:
             logger.info("Could not look at %s's tree after its update.", session_id, exc_info=True)
             return
@@ -3612,7 +3708,7 @@ class Runtime:
         """The owner's word on a .git a worker's folder had replaced (git_replaced): what is
         there now is what Chief of Staff compares with from now on; the worker goes on."""
         row = self.store.session(session_id)
-        replaced = await asyncio.to_thread(self.git_replaced, row)
+        replaced = await self.settings_thread(self.git_replaced, row)
         if not replaced:
             said = "It is as it was: nothing to change."
         elif identity_digest(replaced) != digest:
@@ -3677,12 +3773,23 @@ class Runtime:
             if not waited:
                 self.background(self.settings_go_on(other))
 
+    async def settings_thread(self, function: Callable[..., Any], *args: Any) -> Any:
+        """The blocking part of a look at a worker's folder (file system reads), in a few
+        threads of its own: a file system slow to answer holds those, never the default pool
+        the SDK and the rest use."""
+        if self.settings_pool is None:
+            if self.stopping:
+                return await asyncio.to_thread(function, *args)  # (Its threads ended.)
+            self.settings_pool = ThreadPoolExecutor(4, thread_name_prefix="settings")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.settings_pool, lambda: function(*args))
+
     def settings_signature(self, row: dict) -> str:
         """Blocking (some lstat calls): settings_guard.signature of its folder's settings, the
-        files their hooks run and the .git folders it could replace; where those are is kept
-        for the glances until its next full check (settings_look)."""
+        files their hooks and servers run and the .git folders it could replace; where those
+        are is kept for the glances until its next full check (settings_look)."""
         top, cwd, _ = self.settings_place(row)
-        also = [*self.run_files(top)]
+        also = [*self.run_files(top, servers=True)]
         also += replaceable_git_paths(self.workspaces.checkouts(row), self.workspaces.writes(row))
         self.settings_paths[row["id"]] = (top, cwd, tuple(also))
         return settings_guard.signature(top, cwd, AGENT_SETTINGS, also)
@@ -3697,15 +3804,6 @@ class Runtime:
             return
         self.background(self.settings_glanced(session_id))
 
-    def settings_unchanged(self, row: dict) -> bool:
-        """Whether what the file system says of a Copilot worker's settings is what it said at
-        its last full check (a glance where that check found them: some lstat calls, at once;
-        False when there was none yet)."""
-        paths, seen = self.settings_paths.get(row["id"]), self.settings_sigs.get(row["id"])
-        if not paths or seen is None:
-            return False
-        return settings_guard.signature(paths[0], paths[1], AGENT_SETTINGS, list(paths[2])) == seen
-
     async def settings_look(self, row: dict) -> str:
         """Before each tool a Copilot worker runs (Events.pre_tool, which Copilot waits for), and
         as each of its model rounds starts (settings_backstop): what the file system says of its
@@ -3714,10 +3812,10 @@ class Runtime:
         may: a script Copilot made executable)."""
         if paths := self.settings_paths.get(row["id"]):
             # (Where its last full check found them: the files' places alone, no snapshot read.)
-            now = await asyncio.to_thread(settings_guard.signature, paths[0], paths[1],
+            now = await self.settings_thread(settings_guard.signature, paths[0], paths[1],
                                           AGENT_SETTINGS, list(paths[2]))  # fmt: skip
         else:
-            now = await asyncio.to_thread(self.settings_signature, row)
+            now = await self.settings_thread(self.settings_signature, row)
         if now == self.settings_sigs.get(row["id"]):
             return ""
         if line := await self.settings_refusal(row):
@@ -3763,6 +3861,12 @@ class Runtime:
         busy, state.busy = state.busy, False  # (Its slot stays taken.)
         try:
             async with state.lifecycle:
+                if self.store.session(session_id)["status"] == "working" or state.held:
+                    # A turn Copilot started itself meanwhile: opened again after it.
+                    logger.info("%s began a turn as its servers changed.", session_id)
+                    state.stale = True
+                    return
+                logger.info("Opening %s again: its servers changed.", session_id)
                 await self.drop_handle(session_id)
         finally:
             state.busy = busy
@@ -3787,8 +3891,9 @@ class Runtime:
         if tool == "lsp":
             servers = [server for server in off if server.startswith("lsp/")]
         elif tool == "task" and isinstance(arguments, dict):
-            agent = str(arguments.get("agent_type") or "")
-            servers = [server for server in off if agent and server.endswith(f"@{agent}")]
+            # (Copilot takes the agent's name as it is written; any case here.)
+            agent = str(arguments.get("agent_type") or "").casefold()
+            servers = [s for s in off if agent and s.partition("@")[2].casefold() == agent]
         if not servers:
             return ""
         return (
@@ -3835,7 +3940,7 @@ class Runtime:
             raise ValueError("They changed again since: look at the latest line and try again.")
         if verdict and verdict["unreadable"]:
             raise ValueError(f"These can't be checked ({verdict['unreadable']}).")
-        top, _, _, now, unreadable, _ = await asyncio.to_thread(
+        top, _, _, now, unreadable, _ = await self.settings_thread(
             self.settings_read, row, REPOSITORY_SETTINGS
         )
         if unreadable:
@@ -3856,10 +3961,21 @@ class Runtime:
     async def settings_backstop(self, session_id: str):
         """A turn a Copilot worker started (from Copilot's own queue, say), each of its model
         rounds: stopped at once if its folder's settings changed meanwhile (a glance, the full
-        check only when that changed: settings_look)."""
+        check only when that changed: settings_look), or if they could not be looked at."""
         row = self.store.find_session(session_id)
-        if row and not row["closed_at"] and row["cwd"]:
-            await self.settings_look(row)
+        if not row or row["closed_at"] or not row["cwd"]:
+            return
+        try:
+            await asyncio.wait_for(self.settings_look(row), SETTINGS_SECONDS)
+        except Exception as exc:
+            if self.stopping:
+                return
+            logger.warning("Could not look at %s's agent settings.", session_id, exc_info=exc)
+            if isinstance(exc, TimeoutError):
+                self.settings_unchecked(row, f"looking at it took over {SETTINGS_SECONDS:g} s")
+            else:
+                self.settings_unchecked(row, "Chief of Staff could not read it")
+            await self.settings_stop(session_id)
 
     async def codex_settings(self, row: dict) -> list[str]:
         """The folders whose Codex settings differ from what Chief of Staff last saw (a Codex

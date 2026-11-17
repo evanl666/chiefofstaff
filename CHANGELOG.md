@@ -22,8 +22,9 @@
   worker sandbox. Now Chief of Staff keeps what those files hold, with the scripts their hooks and
   servers run, when it makes a worker's folder or first hands a worker your checkout, in its own
   data, and reads them again before each start and each turn, and as each of the worker's tools
-  starts when a quick look sees a change (with the sandbox on, before the tool runs), without
-  running git there. A folder of a checkout workers already had, one workers used before this
+  starts when a quick look sees a change (with the sandbox on, before the tool runs: Copilot has
+  that answer within 2 seconds, and a tool Chief of Staff couldn't look before is denied),
+  without running git there. A folder of a checkout workers already had, one workers used before this
   version, or a file a worktree carries from your checkout that isn't as your checkout holds it,
   waits for you to look once. A worker whose settings or hooks' scripts changed starts no turn
   until you click **Use these settings** on the line its timeline shows (news for it waits too),
@@ -49,7 +50,8 @@
   and before it runs git itself: if one appeared, the worker waits for you and Chief of Staff
   runs no git there until you click **Use it**. A worker that replaced a whole `.git` folder (a
   folder moved into place gets past the sandbox's paths) waits the same way, until **Use this
-  .git**; your own worktree removed and made again under its name is yours.
+  .git**; a worktree removed and made again under its name (yours, or a worker's scratch one) is
+  no replaced one.
 
 ## 0.1.45 (2026-11-14)
 

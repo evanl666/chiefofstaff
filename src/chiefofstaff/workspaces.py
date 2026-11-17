@@ -24,6 +24,7 @@ from . import machine, receipts, settings_guard
 from .models import Settings
 from .policy import CODEX_SETTINGS, REPOSITORY_SETTINGS, within
 from .roles import WORKER
+from .settings_guard import read_regular
 from .store import Store
 
 # Workers' branches: chief/<task-slug>-<id>.
@@ -79,9 +80,10 @@ GIT_GUARD: weakref.WeakMethod | None = None
 
 
 async def guarded(where: str = "", roots: tuple[str, ...] = ()):
-    """Off the event loop (some lstat calls); ValueError where it may not run."""
+    """Off the event loop (some lstat calls), in the runtime's own threads for its looks at
+    workers' folders (Runtime.settings_thread); ValueError where it may not run."""
     if GIT_GUARD and (guard := GIT_GUARD()):
-        await asyncio.to_thread(guard, where, roots)
+        await guard.__self__.settings_thread(guard, where, roots)
 
 
 # Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
@@ -153,7 +155,8 @@ def admin_dir(common: str, tree: str) -> str:
     with suppress(OSError):
         for child in sorted(root.iterdir()):
             with suppress(OSError):
-                if Path((child / "gitdir").read_text().strip()).resolve() == target:
+                named = read_regular(child / "gitdir", 65536, follow=True).decode()
+                if Path(named.strip()).resolve() == target:
                     return str(child)
     return ""
 
@@ -166,7 +169,8 @@ def linked_tree(common: str, path: Path) -> tuple[str, str] | None:
     with suppress(OSError):
         for child in sorted((Path(common) / "worktrees").iterdir()):
             with suppress(OSError):
-                root = Path((child / "gitdir").read_text().strip()).resolve().parent
+                named = read_regular(child / "gitdir", 65536, follow=True).decode()
+                root = Path(named.strip()).resolve().parent
                 if path.is_relative_to(root) and (not best or len(str(root)) > len(best[1])):
                     best = (str(child), str(root))
     return best
@@ -212,7 +216,7 @@ def config_runs_code(common: str) -> list[str]:
     """Keys in a repository's own config that would run code or send git elsewhere."""
     found = []
     with suppress(OSError):
-        text = (Path(common) / "config").read_text(errors="replace")
+        text = read_regular(Path(common) / "config", follow=True).decode(errors="replace")
         section = ""
         for line in text.splitlines():
             line = line.strip()
@@ -320,8 +324,7 @@ def linked_worktree(path: Path) -> bool:
     pointer = path / ".git"
     with suppress(OSError):
         if pointer.is_file() and not pointer.is_symlink():
-            with pointer.open("rb") as handle:
-                return handle.read(8) == b"gitdir: "
+            return read_regular(pointer, 8, whole=False) == b"gitdir: "
     return False
 
 
@@ -470,7 +473,9 @@ def package_name(root: Path) -> str:
     ]
     for name, pattern in patterns:
         with suppress(OSError):
-            text = (root / name).read_text(errors="replace")[:20000]
+            text = read_regular(root / name, 20000, follow=True, whole=False).decode(
+                errors="replace"
+            )
             if match := re.search(pattern, text):
                 return match.group(1).rsplit("/", 1)[-1][:60]
     return ""
@@ -481,11 +486,14 @@ def readme_line(project: Path) -> str:
     for name in ("README.md", "README.rst", "README.txt", "README"):
         path = project / name
         if path.is_file():
-            with path.open(encoding="utf-8", errors="replace") as file:
-                for line in itertools.islice(file, 40):
-                    text = line.strip().lstrip("#").strip()
-                    if text and not text.startswith(("[!", "<", "![", "=", "-")):
-                        return text[:160]
+            try:
+                data = read_regular(path, 65536, follow=True, whole=False)
+            except OSError:
+                continue
+            for line in data.decode("utf-8", errors="replace").splitlines()[:40]:
+                text = line.strip().lstrip("#").strip()
+                if text and not text.startswith(("[!", "<", "![", "=", "-")):
+                    return text[:160]
     return ""
 
 
@@ -517,7 +525,7 @@ def git_dirs(checkouts: list[dict]) -> list[str]:
 def pointed(tree: Path) -> str:
     """Where a worktree's `.git` file points (its own folder in the repository), "" for none."""
     try:
-        named = (tree / ".git").read_text(errors="replace").strip()
+        named = read_regular(tree / ".git", 65536, follow=True).decode(errors="replace").strip()
     except OSError:
         return ""
     return (
@@ -554,7 +562,7 @@ def watched_git_paths(
 def worktree_config(root: Path) -> bool:
     """Whether a repository reads worktrees' own config (extensions.worktreeConfig)."""
     try:
-        text = (root / "config").read_text(errors="replace")
+        text = read_regular(root / "config", follow=True).decode(errors="replace")
     except OSError:
         return False
     section = ""
@@ -617,7 +625,12 @@ def identity_of(path: str) -> list:
             return ["l", info.st_dev, info.st_ino, str(Path(path).readlink())]
     if stat.S_ISREG(info.st_mode) and info.st_size <= 4096:
         with suppress(OSError):
-            return ["f", info.st_dev, info.st_ino, Path(path).read_text(errors="replace")]
+            return [
+                "f",
+                info.st_dev,
+                info.st_ino,
+                read_regular(path, 4096).decode(errors="replace"),
+            ]
     return ["o", info.st_dev, info.st_ino]
 
 
@@ -637,7 +650,8 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
     for checkout in checkouts:
         pointer = Path(checkout.get("path", "")) / ".git"
         with suppress(OSError, ValueError):
-            if pointer.is_file() and (text := pointer.read_text()).startswith("gitdir:"):
+            text = read_regular(pointer, 65536, follow=True).decode() if pointer.is_file() else ""
+            if text.startswith("gitdir:"):
                 own.add(Path(text.removeprefix("gitdir:").strip()).resolve())
     # Pointers that tell git where a repository is: a worker that rewrites them sends git (the
     # owner's, or Chief of Staff's) to a config it wrote. A repository's own .git has no
@@ -770,8 +784,9 @@ def file_digest(top: Path, names: list[str]) -> str:
         path = top / name
         if name.endswith("/") or not path.is_file():
             continue
-        with suppress(OSError), path.open("rb") as file:
-            found.update(name.encode() + b"\0" + file.read(MAX_NEW_FILE))
+        with suppress(OSError):
+            data = read_regular(path, MAX_NEW_FILE, follow=True, whole=False)
+            found.update(name.encode() + b"\0" + data)
     return found.hexdigest()
 
 
@@ -1572,7 +1587,7 @@ def count_lines(root: Path, names: list[str]) -> int:
             file = root / name
             if file.is_symlink() or not file.is_file() or file.stat().st_size > MAX_NEW_FILE:
                 continue
-            data = file.read_bytes()
+            data = read_regular(file, MAX_NEW_FILE)
             if b"\0" not in data[:8000]:
                 lines += data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
     return lines
@@ -1599,7 +1614,7 @@ def new_file_diff(top: Path, name: str) -> str:
         path = top / name
         if path.is_symlink() or not path.is_file():
             return ""
-        data = path.read_bytes()[: MAX_NEW_FILE + 1]
+        data = read_regular(path, MAX_NEW_FILE + 1, whole=False)
     except OSError:
         return ""
     if b"\0" in data[:8000]:
@@ -2066,7 +2081,8 @@ def only_carried(tree: Path, entry: str, carried: set[str], repo: Path) -> bool:
 
 def same_file(one: Path, other: Path) -> bool:
     try:
-        return one.read_bytes() == other.read_bytes()
+        limit = 1 << 40
+        return read_regular(one, limit, follow=True) == read_regular(other, limit, follow=True)
     except OSError:
         return False
 

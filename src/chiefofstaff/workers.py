@@ -478,7 +478,11 @@ class Workers:
             # change, say), it goes on (Runtime.settings_unsaid).
             row = self.store.find_session(held)
             if row and not row["closed_at"]:
-                await self.runtime.settings_refusal(row)
+                try:
+                    await self.runtime.settings_refusal(row)
+                except Exception:
+                    # (It stays waiting; the others start as they would.)
+                    logger.warning("Could not look at %s's folder.", held, exc_info=True)
             else:
                 self.runtime.settings_held.discard(held)
         starting = []

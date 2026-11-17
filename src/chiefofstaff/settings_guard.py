@@ -25,6 +25,7 @@ are never a project's settings.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -63,6 +64,45 @@ class SettingsChangedError(RuntimeError):
 
 class TooLargeError(Exception):
     """More, or larger, settings than a snapshot holds: they are never taken as unchanged."""
+
+
+class SpecialFileError(OSError):
+    """Where a file was to be read: a FIFO, a socket, a device (or, not following links, a
+    link), whose read could wait forever."""
+
+
+def read_regular(
+    path: Path | str, limit: int = MOST_BYTES, follow: bool = False, whole: bool = True
+) -> bytes:
+    """A regular file's bytes, for every file the checks read: opened without waiting (a FIFO
+    opened to read would wait for a writer) and, unless `follow`, without following a link;
+    what was opened is what is read (no look first and read after, which a swap could come
+    between). SpecialFileError for anything but a regular file; past `limit` bytes, an
+    OSError (EFBIG), or (not `whole`) its first `limit` bytes."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | (0 if follow else os.O_NOFOLLOW)
+    try:
+        handle = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP and not follow:
+            raise SpecialFileError(errno.ELOOP, "a link, not a file", str(path)) from exc
+        raise
+    try:
+        info = os.fstat(handle)
+        if not stat.S_ISREG(info.st_mode):
+            raise SpecialFileError(errno.EINVAL, "not a regular file", str(path))
+        if whole and info.st_size > limit:
+            raise OSError(errno.EFBIG, "too large", str(path))
+        chunks, total = [], 0
+        while chunk := os.read(handle, min(1024 * 1024, limit + 1 - total)):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                if whole:
+                    raise OSError(errno.EFBIG, "too large", str(path))
+                break
+        return b"".join(chunks)[:limit]
+    finally:
+        os.close(handle)
 
 
 def nfc(name: str) -> str:
@@ -131,7 +171,7 @@ def repository(dot_git: Path) -> bool:
         if dot_git.is_dir():
             return git_folder(dot_git)
         if dot_git.is_file():
-            named = dot_git.read_text(errors="replace").strip()
+            named = read_regular(dot_git, 4096, follow=True).decode(errors="replace").strip()
             if named.startswith("gitdir:"):
                 return git_folder(dot_git.parent / named.removeprefix("gitdir:").strip())
     except OSError:
@@ -192,7 +232,8 @@ def signature(top: Path, cwd: Path, names: tuple[str, ...], also: list[str]) -> 
     every tool a worker runs; a change means the full check (scan) runs. Each setting's own
     path wholly (up to the caps), and the folders on its way (a folder renamed over `.github`
     is another one): what fills a folder beside it (`.github/workflows`) neither costs the look
-    nor uses up its caps."""
+    nor uses up its caps. Never raises: what can't be looked at (a folder that can't be listed)
+    is noted as such, a change the full check then finds can't be checked."""
     seen: list = []
     noted: set[Path] = set()
 
@@ -202,7 +243,10 @@ def signature(top: Path, cwd: Path, names: tuple[str, ...], also: list[str]) -> 
         noted.add(path)
         try:
             info = os.lstat(path)
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        except OSError as exc:
+            seen.append((str(path), "unseen", exc.errno))
             return
         target: tuple = ()
         if stat.S_ISLNK(info.st_mode):
@@ -215,7 +259,13 @@ def signature(top: Path, cwd: Path, names: tuple[str, ...], also: list[str]) -> 
         seen.append((str(path), info.st_mode, info.st_ino, info.st_size, info.st_mtime_ns,
                      info.st_ctime_ns, target))  # fmt: skip
         if stat.S_ISDIR(info.st_mode) and depth < 4 and len(seen) < MOST_ENTRIES:
-            for entry in listed(path):
+            try:
+                entries = listed(path)
+            except TooLargeError as exc:
+                cause = exc.__cause__
+                seen.append((str(path), "unlisted", getattr(cause, "errno", None)))
+                return
+            for entry in entries:
                 note(path / entry.name, depth + 1)
 
     for folder in chain(top, cwd):
@@ -247,15 +297,19 @@ def glimpse(top: Path, cwd: Path, names: tuple[str, ...]) -> str:
         if stat.S_ISREG(info.st_mode) and info.st_size <= 4 * 1024 * 1024 and budget[1] > 0:
             budget[1] -= info.st_size
             with suppress(OSError):
-                found.append(hashlib.sha256(path.read_bytes()).hexdigest())
+                found.append(hashlib.sha256(read_regular(path, 4 * 1024 * 1024)).hexdigest())
         elif stat.S_ISLNK(info.st_mode):
             found.append(os.path.realpath(path))
         seen.append(found)
         budget[0] -= 1
         if stat.S_ISDIR(info.st_mode) and depth < 8 and budget[0] > 0:
-            with suppress(OSError):
-                for entry in listed(path):
-                    note(path / entry.name, f"{name}/{nfc(entry.name)}", depth + 1)
+            try:
+                entries = listed(path)
+            except TooLargeError:
+                found.append("unlisted")
+                return
+            for entry in entries:
+                note(path / entry.name, f"{name}/{nfc(entry.name)}", depth + 1)
 
     for folder in chain(top, cwd):
         for name in names:
@@ -348,8 +402,10 @@ def content(path: Path, size: int, budget: list) -> str:
     if budget[1] < 0:
         raise TooLargeError("too large")
     try:
-        data = path.read_bytes()
+        data = read_regular(path, budget[1] + size)
     except OSError as exc:
+        if exc.errno == errno.EFBIG:
+            raise TooLargeError("too large") from exc
         raise TooLargeError(f"{path.name} could not be read") from exc
     if len(budget) > 2 and path.name.lower().endswith(PARSED):
         budget[2][path] = data  # (Read once: what it runs is read from it next.)
@@ -450,9 +506,11 @@ def runs(
     real = path if value[0] == "f" else Path(os.path.realpath(path))
     try:
         data = budget[2].get(real) if len(budget) > 2 else None
-        text = (data if data is not None else real.read_bytes()).decode(errors="replace")
-    except OSError:
-        return {}
+        text = (data if data is not None else read_regular(real)).decode(errors="replace")
+    except FileNotFoundError:
+        return {}  # (A link to nothing: nothing runs.)
+    except OSError as exc:
+        raise TooLargeError(f"{name} could not be read") from exc
     held: dict[str, list] = {}
     extension = nfc(entry).casefold().startswith(".github/extensions/")
     place = real.parent if extension else folder
@@ -631,7 +689,8 @@ def entry_point(folder: Path, runner: str) -> Path | None:
         return folder / "__main__.py" if (folder / "__main__.py").is_file() else None
     if runner in NODE_LIKE:
         with suppress(OSError, ValueError, AttributeError):
-            main = json.loads((folder / "package.json").read_text()).get("main")
+            package = read_regular(folder / "package.json", 1024 * 1024, follow=True)
+            main = json.loads(package).get("main")
             if isinstance(main, str) and (folder / main).is_file():
                 return Path(os.path.normpath(folder / main))
         for name in ("index.js", "index.mjs", "index.cjs"):
@@ -657,7 +716,7 @@ def references(path: Path, text: str, say: Callable[[str], None]) -> Iterator[Re
             say("its front matter, which Chief of Staff can't read as YAML")
             data = loose_front_matter(text)
         else:
-            agent = str(data.get("name") or path.name.split(".")[0])
+            agent = agent_name(path.name, data)
     else:
         try:
             data = tomllib.loads(text) if suffix == ".toml" else json.loads(text)
@@ -668,6 +727,18 @@ def references(path: Path, text: str, say: Callable[[str], None]) -> Iterator[Re
             yield from (Ref(word, "folder", serves=command.serves) for word in command.arguments)
             continue
         yield from (ref._replace(serves=command.serves) for ref in command_refs(command, say))
+
+
+def agent_name(file: str, data: Any) -> str:
+    """The name a custom agent is called by (the task tool's agent_type, as Copilot matches it:
+    exactly): its front matter's `name`, else its file's name without `.agent.md` (`.md`)."""
+    named = data.get("name") if isinstance(data, dict) else None
+    if named not in (None, ""):
+        return str(named)
+    for suffix in (".agent.md", ".md"):
+        if file.lower().endswith(suffix):
+            return file[: -len(suffix)]
+    return file
 
 
 def command_refs(command: Command, say: Callable[[str], None]) -> Iterator[Ref]:

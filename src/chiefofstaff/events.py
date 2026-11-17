@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
@@ -117,6 +117,17 @@ TRANSIENT = re.compile(
     re.IGNORECASE,
 )
 RETRIES = 2
+# How long Copilot waits for Chief of Staff's answer before a tool at most (Events.pre_tool).
+PRE_TOOL_SECONDS = float(os.environ.get("CHIEFOFSTAFF_PRE_TOOL_SECONDS", "2"))
+PRE_TOOL_UNANSWERED = (
+    "Chief of Staff couldn't check this folder's agent settings in time, so this tool didn't run. "
+    "Try it again."
+)
+PRE_TOOL_UNCHECKED = (
+    "Chief of Staff couldn't check this folder's agent settings, so this tool didn't run."
+)
+# A pre-tool answer slower than this is logged (Copilot waits for it).
+PRE_TOOL_SLOW = 0.5
 # Seconds after its loop went idle (assistant.idle) or a turn ended (assistant.turn_end, for a
 # Copilot that does not say assistant.idle) with no session.idle: a command left running in the
 # background holds it (see Events.held_idle).
@@ -150,6 +161,13 @@ NOTHING_TO_SAY = re.compile(
 
 # Copilot's tools that write files, by the argument naming the file.
 EDIT_TOOLS = {"edit", "str_replace", "str_replace_editor", "create", "write", "write_file"}
+
+
+def unlooked(look: asyncio.Future):
+    """A look at a worker's settings Copilot stopped waiting for (Events.pre_tool), ended: its
+    failure logged, not lost."""
+    if not look.cancelled() and (failure := look.exception()):
+        logger.warning("A late look at agent settings failed.", exc_info=failure)
 
 
 def edited_paths(name: str, arguments: Any) -> list[str]:
@@ -881,35 +899,56 @@ class Events:
             return await asyncio.to_thread(permission_denial, row, request, writable)
         return permission_denial(row, request, writable)
 
-    def pre_tool(self, data: dict, invocation: dict) -> dict | Awaitable[dict | None] | None:
+    async def pre_tool(self, data: dict, invocation: dict) -> dict | None:
         """Before each tool a Copilot worker runs where Runtime.pre_tool_wanted, Copilot waiting
         for the answer (after its folder's own preToolUse hooks, whose scripts a folder moved
-        into place could have replaced: the sandbox holds paths): a server off for it not
-        started (Runtime.server_refusal), and its folder's settings looked at: a glance, here
-        at once while nothing changed (Copilot waits for the event loop), the full check only
-        when that changed (Runtime.settings_look). None lets it run as it would."""
-        row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
-        if not row or row["role"] != WORKER or row["closed_at"] or not row["cwd"]:
-            return None
-        tool = str(data.get("toolName") or "")
-        if why := self.runtime.server_refusal(row, tool, data.get("toolArgs")):
-            return {"permissionDecision": "deny", "permissionDecisionReason": why}
+        into place could have replaced: the sandbox holds paths): its folder's settings looked
+        at (a glance, the full check only when that changed: Runtime.settings_look), then a
+        server off for it not started (Runtime.server_refusal: what the look just found off
+        counts). None lets it run as it would. Answered within PRE_TOOL_SECONDS whatever
+        happens, never letting through what it could not look at: past that, or on an error, a
+        sandboxed worker's tool is denied with a line saying why (its turn goes on; a look past
+        its time goes on, and stops it if it finds a change; one that fails stops it at its
+        next model round: Runtime.settings_backstop)."""
+        started = time.monotonic()
+        row: dict | None = None
+        why = ""
         try:
-            if self.runtime.settings_unchanged(row):
+            row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
+            if not row or row["role"] != WORKER or row["closed_at"] or not row["cwd"]:
                 return None
+            sandboxed = bool(self.runtime.pre_tool_on.get(row["id"]))
+            looked = asyncio.ensure_future(self.runtime.settings_look(row))
+            try:
+                why = await asyncio.wait_for(asyncio.shield(looked), PRE_TOOL_SECONDS)
+            except Exception as exc:
+                if isinstance(exc, TimeoutError):
+                    looked.add_done_callback(unlooked)
+                    logger.warning("No look at %s's agent settings in time.", row["id"])
+                else:
+                    logger.warning(
+                        "Could not look at %s's agent settings.", row["id"], exc_info=exc
+                    )
+                if sandboxed:
+                    why = (
+                        PRE_TOOL_UNANSWERED if isinstance(exc, TimeoutError) else PRE_TOOL_UNCHECKED
+                    )
+            tool = str(data.get("toolName") or "")
+            why = why or self.runtime.server_refusal(row, tool, data.get("toolArgs"))
+            if not why and sandboxed:
+                # (A branch update: its tree as it begins, for one that stops halfway.)
+                left = PRE_TOOL_SECONDS - (time.monotonic() - started)
+                await self.runtime.half_mark(row, tool, data.get("toolArgs"), left)
         except Exception:
-            logger.warning("Could not look at %s's agent settings.", row["id"], exc_info=True)
-        return self.pre_tool_looked(row)
-
-    async def pre_tool_looked(self, row: dict) -> dict | None:
-        try:
-            why = await self.runtime.settings_look(row)
-        except Exception:
-            logger.warning("Could not look at %s's agent settings.", row["id"], exc_info=True)
-            return None
-        if why:
-            return {"permissionDecision": "deny", "permissionDecisionReason": why}
-        return None
+            # (Asked only of a sandboxed worker, or one with a server off: not let through.)
+            logger.warning("Could not answer before a tool of %s.", invocation, exc_info=True)
+            why = PRE_TOOL_UNCHECKED
+        finally:
+            if (waited := time.monotonic() - started) > PRE_TOOL_SLOW:
+                logger.warning(
+                    "Copilot waited %.2f s before a tool of %s.", waited, row and row["id"]
+                )
+        return {"permissionDecision": "deny", "permissionDecisionReason": why} if why else None
 
     async def on_permission(self, request: Any, invocation: dict):
         row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
