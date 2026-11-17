@@ -2,12 +2,119 @@
 
 ## Unreleased
 
-Pushes to the default branch that got past *Ask first* in 0.1.45 are refused, and a switch back
-to a branch of its own before a push is let through again; runs and documents are listed
-wherever they are served; an away notice that failed stays in sight; Artifacts words and times
-match what its rows say; a slow script's `copilot -p` calls are a batch again, and your own
-questions stay listed (QA round on 0.1.45).
+Sandboxed workers have package caches of their own, and can't change yours or Chief of Staff's
+own code. From the QA round on 0.1.45: pushes to the default branch that got past *Ask first*
+in 0.1.45 are refused, and a switch back to a branch of its own before a push is let through
+again; runs and documents are listed wherever they are served; an away notice that failed
+stays in sight; Artifacts words and times match what its rows say; a slow script's
+`copilot -p` calls are a batch again, and your own questions stay listed.
 
+- **Sandboxed workers have package caches of their own, and never download again what you or
+  another worker already have.** Copilot's sandbox let them write your caches, so a worker could
+  plant code your own builds then ran; and many tools failed in it: pnpm and Yarn through
+  corepack, uv (your uv-installed Pythons were unreadable), poetry and pre-commit installed with
+  `uv tool`, Maven's wrapper, Gradle (its native libraries; and Java never reached the sandbox's
+  proxy, so each worker downloaded Gradle again, 140 MB, when it could at all), and Playwright's
+  Chromium. Now every sandboxed worker shares a cache folder of workers' own, with yours
+  read-only beneath it: Gradle, Maven and Go read yours directly, Playwright's browsers are
+  linked, and the rest is copied from yours in the background as copy-on-write clones (a few
+  seconds the first time, about one after; never while a worker waits). Each worker's shell gets
+  its tools pointed there, and a temporary folder of its own, before each command (about 1 ms);
+  the Gradle instructions workers were given are gone, and npm's and pnpm's checks for newer
+  versions of themselves are off (pnpm fetched 0.7 MB at every install to make one). All of
+  those tools now install, build and test in the sandbox, as fast as before where they already
+  worked, and a second worker downloads nothing. Playwright's Chromium runs in a single process
+  there (the sandbox refuses the others it starts). uv before 0.9.29 still crashes in Copilot's
+  macOS sandbox (it reads the system's proxy settings from a service the sandbox closes):
+  workers say so instead of retrying. Workers that read Slack get caches of their own in their
+  workspace.
+- **Copilot's dev-tool access is off for sandboxed workers.** It opened your package caches
+  read-write in a project of their kind, and a folder of them deeper than one held read-only
+  stayed writable (`~/.gradle/wrapper/dists` under `~/.gradle/wrapper`: a worker could have
+  replaced the Gradle your `./gradlew` runs; also deno's and node's caches). Chief of Staff now
+  names everything a worker reads: its toolchains (every folder on your `PATH`, nvm's, pyenv's,
+  SDKMAN's, asdf's, mise's and Volta's toolchains, JDKs, uv's Pythons and tools, Copilot's own
+  ripgrep, the homes `JAVA_HOME`, `GOROOT` and the like name; rustup's for a Rust project, as
+  Copilot had it: elsewhere pip waited up to 0.5 s at each install for `rustc --version`, for
+  its user agent), and for workers on your own
+  tasks your package caches and the registry settings their builds read (`~/.npmrc`,
+  `~/.m2/settings.xml`, pip's, uv's and Go's configuration…), all read-only. Nothing in your home
+  is writable to a worker but workers' caches; the other caches Copilot opened (deno's,
+  node-gyp's, Electron's, virtualenv's, NuGet's, ccache's, sccache's, gh's…) are workers' own
+  too, and so is uv's tool folder, so `uvx` works in the sandbox (it could not write yours).
+  Every tool measured works as before, as fast. Your caches are found where your own
+  configuration in home keeps them (npm's `cache=` and pnpm's `store-dir` in `~/.npmrc`, Yarn's
+  `globalFolder`, pip's and uv's `cache-dir`, Maven's `localRepository`, Go's as `go env` has
+  them), never where a project's says; no configuration file makes anything writable.
+- **Chief of Staff never writes through a link a worker made.** Where sandboxed workers write
+  too (their shared caches, their temporary and own folders), it wrote by path: a worker that
+  put a link where the Playwright launcher was about to be written made it overwrite one of
+  your files (`~/.zshenv`) with a launcher of the worker's choosing. Every write there now opens
+  each folder without following links and writes by name in it (files made new, then renamed
+  into place); checkouts and clones for workers are made in a folder of Chief of Staff's own and
+  moved into place in one rename; a worktree it removes goes out of every worker's reach in one
+  rename, is checked again there and deleted from there (not by git in place). Workers'
+  temporary folders and the Java truststore moved beside workers' caches, out of the system's
+  temporary folder, which every sandboxed worker can write.
+- **Workers that read Slack read less of your toolchains.** They were granted whole tool homes
+  and the folder above each `bin` on `PATH`: another node version's `etc/npmrc`, Maven's
+  `conf/settings.xml`, your pnpm store (pnpm's home on `PATH`) and Go modules were readable to
+  them. They now read what runs (`bin`, `lib`, `share`…; of pnpm's home, pnpm and its shims),
+  every cache of yours is checked where your tools keep it (pnpm's store as pnpm finds it:
+  `store-dir`, `PNPM_HOME`, `XDG_DATA_HOME`; never a pnpm home's `store`, only the store
+  entries pnpm's global tools use), and those files, Homebrew's `var`,
+  the system's registry settings and mise's configuration are denied to them (git reads no
+  system configuration for them). Each worker's init script is its own (another worker could read it, and it
+  may name a GOPROXY with a token), deleted as the worker closes.
+- **Clearing workers' caches leaves running workers their links.** *Clear* made the folder
+  again only as another worker started: one running lost your browsers and its Gradle and Cargo
+  settings. It now waits for any seeding pass, makes them again at once, and is not offered
+  while a worker on your tasks is working. Your Go tools (`go install`) are linked into
+  workers' GOPATH, where a Makefile's `$(go env GOPATH)/bin/tool` looks.
+- **Native modules and Yarn PnP in the sandbox.** On macOS node-gyp builds in workers' own
+  folder, your headers linked in (a project on another Node version failed: node-gyp could not
+  write ~/Library/Caches/node-gyp); npm 11.5 and later warn "Unknown env config devdir". A
+  checkout's Yarn PnP and pnpm's global virtual store read your Yarn cache and pnpm store, as
+  they are. GOBIN is set for workers only where you set one (a cross build fails with it).
+- **Workers' caches, more robust.** Two workers starting together no longer race (the second
+  went without its caches); a worker's temporary folder and init script come first, and the
+  rest (browser links, settings) never stops it. What workers' caches need to know (an old uv,
+  your GOPROXY, node-gyp's headers) is found as Copilot connects, whatever the caches
+  settings, and uv is looked at again after an upgrade; the Java truststore is made in the
+  background (no worker waits for it). `go get` works (Go's
+  checksum database state was in your read-only GOPATH). A private registry works as in your
+  terminal (`~/.netrc`, Cargo's credentials, poetry's auth, Maven's `settings-security.xml`,
+  Gradle's `init.gradle`, read-only; never for workers that read Slack); asdf's and mise's global
+  versions are read. Seeding goes on past a cache it cannot clone, copies (within 8 GB) where
+  the disk cannot clone, fills NuGet's, Electron's, deno's, ccache's, sccache's, Yarn 1's and
+  Cargo's git caches too, and looks again only at folders that changed. Rust projects are found
+  four folders down (not in node_modules), once per worker. npm 11.5 and later no longer warn
+  about pnpm's store at every command (pnpm's own PNPM_HOME instead). The init script never
+  ends in an error (Copilot reported it before every command). Fewer read-only rules for each command (none inside another, none
+  for what Copilot's own profile reads already, only the few of your caches workers read where
+  they are, none for Chief of Staff's own code outside what they write): a sandboxed command
+  costs about 2 ms more than in 0.1.45 (it was 8–9 ms). Storage shows
+  workers' caches, with *Clear*.
+- **Sandboxed workers run quick read-only commands together.** Each command starts in about
+  0.3 s in Copilot's sandbox (its credential proxy starts anew for each); they are asked to join
+  quick checks in one call (`git status --short && git log -3 --oneline && ls`). Measured: a
+  turn of five such checks took 6.5 s instead of 8.2 s, with the same answers.
+- **No sandboxed worker can change Chief of Staff's own code.** Its environment, wherever `uvx`
+  or `uv tool install` put it (`uvx` keeps it in uv's cache, which Copilot's sandbox opened
+  read-write to commands in a Python project), the Python it runs on, every folder it imports
+  from, its `chiefofstaff` command, the `pyproject.toml` and `uv.lock` of a source checkout it
+  runs from, and the entries of uv's cache its packages come from are read-only to every
+  sandboxed worker. A worker could otherwise have changed what Chief of Staff runs at its next
+  start. They are looked up once, when Copilot connects, off the event loop. Other environments
+  uv makes (`uvx` of another tool, `uv run --with`) still work in a sandboxed worker. A worker
+  you asked to work in place in Chief of Staff's own checkout may still change what is in it.
+- **Workers that read Slack can't read your package caches or your registry credentials.**
+  Copilot's sandbox opened npm's, pip's, uv's, Go's, Cargo's, Gradle's, Maven's and other caches
+  read-write to them too, and let them read `~/.npmrc`, `~/.m2/settings.xml`,
+  `~/.gradle/gradle.properties` and the like. Now they have caches of their own, and those files,
+  `~/.pypirc`, Cargo's credentials, pip's and uv's configuration, `~/.netrc`, Docker's
+  `config.json`, `~/.git-credentials`, `gh`'s `hosts.yml`, Bundler's, RubyGems', Go's, AWS's,
+  Azure's, gcloud's and Kubernetes' configuration and npm's global `npmrc` are closed to them.
 - **A push to a branch a command makes up is refused**, saying it can't tell which branch (name
   the branch itself). Only `$(git branch --show-current)`, `$(git rev-parse --abbrev-ref HEAD)`
   and `$(git symbolic-ref --short HEAD)` (with `-q`, in backquotes, after `HEAD:`, or in a
@@ -157,112 +264,6 @@ questions stay listed (QA round on 0.1.45).
 - On Linux, processes are known by their whole command lines: `ps` there cut each line to the
   width `COLUMNS` gave, even into a pipe, so a process Chief of Staff started could be taken
   for another one when it was looked for again; `ps -ww` never cuts.
-- **Sandboxed workers have package caches of their own, and never download again what you or
-  another worker already have.** Copilot's sandbox let them write your caches, so a worker could
-  plant code your own builds then ran; and many tools failed in it: pnpm and Yarn through
-  corepack, uv (your uv-installed Pythons were unreadable), poetry and pre-commit installed with
-  `uv tool`, Maven's wrapper, Gradle (its native libraries; and Java never reached the sandbox's
-  proxy, so each worker downloaded Gradle again, 140 MB, when it could at all), and Playwright's
-  Chromium. Now every sandboxed worker shares a cache folder of workers' own, with yours
-  read-only beneath it: Gradle, Maven and Go read yours directly, Playwright's browsers are
-  linked, and the rest is copied from yours in the background as copy-on-write clones (a few
-  seconds the first time, about one after; never while a worker waits). Each worker's shell gets
-  its tools pointed there, and a temporary folder of its own, before each command (about 1 ms);
-  the Gradle instructions workers were given are gone, and npm's and pnpm's checks for newer
-  versions of themselves are off (pnpm fetched 0.7 MB at every install to make one). All of
-  those tools now install, build and test in the sandbox, as fast as before where they already
-  worked, and a second worker downloads nothing. Playwright's Chromium runs in a single process
-  there (the sandbox refuses the others it starts). uv before 0.9.29 still crashes in Copilot's
-  macOS sandbox (it reads the system's proxy settings from a service the sandbox closes):
-  workers say so instead of retrying. Workers that read Slack get caches of their own in their
-  workspace.
-- **Copilot's dev-tool access is off for sandboxed workers.** It opened your package caches
-  read-write in a project of their kind, and a folder of them deeper than one held read-only
-  stayed writable (`~/.gradle/wrapper/dists` under `~/.gradle/wrapper`: a worker could have
-  replaced the Gradle your `./gradlew` runs; also deno's and node's caches). Chief of Staff now
-  names everything a worker reads: its toolchains (every folder on your `PATH`, nvm's, pyenv's,
-  SDKMAN's, asdf's, mise's and Volta's toolchains, JDKs, uv's Pythons and tools, Copilot's own
-  ripgrep, the homes `JAVA_HOME`, `GOROOT` and the like name; rustup's for a Rust project, as
-  Copilot had it: elsewhere pip waited up to 0.5 s at each install for `rustc --version`, for
-  its user agent), and for workers on your own
-  tasks your package caches and the registry settings their builds read (`~/.npmrc`,
-  `~/.m2/settings.xml`, pip's, uv's and Go's configuration…), all read-only. Nothing in your home
-  is writable to a worker but workers' caches; the other caches Copilot opened (deno's,
-  node-gyp's, Electron's, virtualenv's, NuGet's, ccache's, sccache's, gh's…) are workers' own
-  too, and so is uv's tool folder, so `uvx` works in the sandbox (it could not write yours).
-  Every tool measured works as before, as fast. Your caches are found where your own
-  configuration in home keeps them (npm's `cache=` and pnpm's `store-dir` in `~/.npmrc`, Yarn's
-  `globalFolder`, pip's and uv's `cache-dir`, Maven's `localRepository`, Go's as `go env` has
-  them), never where a project's says; no configuration file makes anything writable.
-- **Chief of Staff never writes through a link a worker made.** Where sandboxed workers write
-  too (their shared caches, their temporary and own folders), it wrote by path: a worker that
-  put a link where the Playwright launcher was about to be written made it overwrite one of
-  your files (`~/.zshenv`) with a launcher of the worker's choosing. Every write there now opens
-  each folder without following links and writes by name in it (files made new, then renamed
-  into place); checkouts and clones for workers are made in a folder of Chief of Staff's own and
-  moved into place in one rename; a worktree it removes goes out of every worker's reach in one
-  rename, is checked again there and deleted from there (not by git in place). Workers'
-  temporary folders and the Java truststore moved beside workers' caches, out of the system's
-  temporary folder, which every sandboxed worker can write.
-- **Workers that read Slack read less of your toolchains.** They were granted whole tool homes
-  and the folder above each `bin` on `PATH`: another node version's `etc/npmrc`, Maven's
-  `conf/settings.xml`, your pnpm store (pnpm's home on `PATH`) and Go modules were readable to
-  them. They now read what runs (`bin`, `lib`, `share`…; of pnpm's home, pnpm and its shims),
-  every cache of yours is checked where your tools keep it (pnpm's store as pnpm finds it:
-  `store-dir`, `PNPM_HOME`, `XDG_DATA_HOME`; never a pnpm home's `store`, only the store
-  entries pnpm's global tools use), and those files, Homebrew's `var`,
-  the system's registry settings and mise's configuration are denied to them (git reads no
-  system configuration for them). Each worker's init script is its own (another worker could read it, and it
-  may name a GOPROXY with a token), deleted as the worker closes.
-- **Clearing workers' caches leaves running workers their links.** *Clear* made the folder
-  again only as another worker started: one running lost your browsers and its Gradle and Cargo
-  settings. It now waits for any seeding pass, makes them again at once, and is not offered
-  while a worker on your tasks is working. Your Go tools (`go install`) are linked into
-  workers' GOPATH, where a Makefile's `$(go env GOPATH)/bin/tool` looks.
-- **Native modules and Yarn PnP in the sandbox.** On macOS node-gyp builds in workers' own
-  folder, your headers linked in (a project on another Node version failed: node-gyp could not
-  write ~/Library/Caches/node-gyp); npm 11.5 and later warn "Unknown env config devdir". A
-  checkout's Yarn PnP and pnpm's global virtual store read your Yarn cache and pnpm store, as
-  they are. GOBIN is set for workers only where you set one (a cross build fails with it).
-- **Workers' caches, more robust.** Two workers starting together no longer race (the second
-  went without its caches); a worker's temporary folder and init script come first, and the
-  rest (browser links, settings) never stops it. What workers' caches need to know (an old uv,
-  your GOPROXY, node-gyp's headers) is found as Copilot connects, whatever the caches
-  settings, and uv is looked at again after an upgrade; the Java truststore is made in the
-  background (no worker waits for it). `go get` works (Go's
-  checksum database state was in your read-only GOPATH). A private registry works as in your
-  terminal (`~/.netrc`, Cargo's credentials, poetry's auth, Maven's `settings-security.xml`,
-  Gradle's `init.gradle`, read-only; never for workers that read Slack); asdf's and mise's global
-  versions are read. Seeding goes on past a cache it cannot clone, copies (within 8 GB) where
-  the disk cannot clone, fills NuGet's, Electron's, deno's, ccache's, sccache's, Yarn 1's and
-  Cargo's git caches too, and looks again only at folders that changed. Rust projects are found
-  four folders down (not in node_modules), once per worker. npm 11.5 and later no longer warn
-  about pnpm's store at every command (pnpm's own PNPM_HOME instead). The init script never
-  ends in an error (Copilot reported it before every command). Fewer read-only rules for each command (none inside another, none
-  for what Copilot's own profile reads already, only the few of your caches workers read where
-  they are, none for Chief of Staff's own code outside what they write): a sandboxed command
-  costs about 2 ms more than in 0.1.45 (it was 8–9 ms). Storage shows
-  workers' caches, with *Clear*.
-- **Sandboxed workers run quick read-only commands together.** Each command starts in about
-  0.3 s in Copilot's sandbox (its credential proxy starts anew for each); they are asked to join
-  quick checks in one call (`git status --short && git log -3 --oneline && ls`). Measured: a
-  turn of five such checks took 6.5 s instead of 8.2 s, with the same answers.
-- **No sandboxed worker can change Chief of Staff's own code.** Its environment, wherever `uvx`
-  or `uv tool install` put it (`uvx` keeps it in uv's cache, which Copilot's sandbox opened
-  read-write to commands in a Python project), the Python it runs on, every folder it imports
-  from, its `chiefofstaff` command, the `pyproject.toml` and `uv.lock` of a source checkout it
-  runs from, and the entries of uv's cache its packages come from are read-only to every
-  sandboxed worker. A worker could otherwise have changed what Chief of Staff runs at its next
-  start. They are looked up once, when Copilot connects, off the event loop. Other environments
-  uv makes (`uvx` of another tool, `uv run --with`) still work in a sandboxed worker. A worker
-  you asked to work in place in Chief of Staff's own checkout may still change what is in it.
-- **Workers that read Slack can't read your package caches or your registry credentials.**
-  Copilot's sandbox opened npm's, pip's, uv's, Go's, Cargo's, Gradle's, Maven's and other caches
-  read-write to them too, and let them read `~/.npmrc`, `~/.m2/settings.xml`,
-  `~/.gradle/gradle.properties` and the like. Now they have caches of their own, and those files,
-  `~/.pypirc`, Cargo's credentials, pip's and uv's configuration, `~/.netrc`, Docker's
-  `config.json`, `~/.git-credentials`, `gh`'s `hosts.yml`, Bundler's, RubyGems', Go's, AWS's,
-  Azure's, gcloud's and Kubernetes' configuration and npm's global `npmrc` are closed to them.
 
 ## 0.1.45 (2026-11-14)
 
