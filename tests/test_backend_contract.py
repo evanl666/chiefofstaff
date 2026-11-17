@@ -367,6 +367,246 @@ async def test_the_sandbox_keeps_what_runs_code_outside_it_read_only(backend, tm
         assert "marker" not in contents(target), target
 
 
+MANIFESTS = {
+    "node": "package.json", "python": "pyproject.toml", "gradle": "build.gradle",
+    "maven": "pom.xml", "go": "go.mod", "rust": "Cargo.toml",
+}  # fmt: skip
+
+
+@pytest.mark.copilot
+async def test_a_sandboxed_workers_commands_write_nothing_in_home_but_their_own(tmp_path):
+    """Copilot's own grants (its dev-tool access: the owner's package caches, read-write, in a
+    project of their kind) stay off: what Copilot enforces for each command, as its policy file
+    has it, lets a worker (one that reads Slack or not) write nothing in home but its workspace,
+    workers' caches, its temporary folder and Copilot's own folder for the session."""
+    if not (REAL and sandbox_supported()):
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 on a machine with Copilot's sandbox.")
+    from conftest import Harness
+    from copilot.generated.rpc import ShellExecuteUserRequestedRequest
+    from test_progress import spawn
+
+    from chiefofstaff.backend import copilot_home
+    from chiefofstaff.models import Settings
+
+    home = Path.home().resolve()
+    # Caches the owner's configuration moves (Copilot's dev-tool access followed those), and a
+    # project's pointing at the owner's caches: never writable either.
+    moved = home / "moved-caches"
+    configs = {
+        home / ".npmrc": f"cache={moved}/npm\nstore-dir={moved}/pnpm\n",
+        home / ".yarnrc.yml": f"globalFolder: {moved}/yarn\ncacheFolder: {moved}/yarn-cache\n",
+        home / ".config/pip/pip.conf": f"[global]\ncache-dir = {moved}/pip\n",
+        home / ".config/uv/uv.toml": f'cache-dir = "{moved}/uv"\n',
+        home / ".m2/settings.xml": f"<settings><localRepository>{moved}/m2</localRepository>"
+        "</settings>",
+        home / ".nuget/NuGet/NuGet.Config": "<configuration><config><add "
+        f'key="globalPackagesFolder" value="{moved}/nuget" /></config></configuration>',
+    }  # fmt: skip
+    pointing = {
+        ".npmrc": f"cache={home}/.npm\nstore-dir={home}/Library/pnpm/store\n",
+        ".yarnrc.yml": f"enableGlobalCache: false\ncacheFolder: {home}/.yarn/berry/cache\n",
+        "uv.toml": f'cache-dir = "{home}/.cache/uv"\n',
+        "NuGet.Config": "<configuration><config><add key=\"globalPackagesFolder\" "
+        f'value="{home}/.nuget/packages" /></config></configuration>',
+    }  # fmt: skip
+    kept = {path: path.read_bytes() for path in configs if path.exists()}
+    write_files(configs)
+    for name in ("npm", "pnpm", "yarn", "yarn-cache", "pip", "uv", "m2", "nuget"):
+        (moved / name).mkdir(parents=True, exist_ok=True)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    backend = copilot_backend("copilot")
+    await backend.start()
+    try:
+        for slack in (0, 1):
+            harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
+            row = harness.store.session(worker)
+            policy = runtime.sandbox_policy(row)
+            assert policy is not None
+            own = runtime.cache_plan(row)
+            workspace = runtime.workspaces.workspace(row)
+            for kind, marker in MANIFESTS.items():
+                project = workspace / kind
+                write_files({project / marker: "", **{project / k: v for k, v in pointing.items()}})
+                session = await backend.create_session(
+                    session_id=str(uuid4()), name="contract test", model=MODEL,
+                    working_directory=str(project), sandbox_config=backend.sandbox(policy),
+                    on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+                )  # fmt: skip
+                try:
+                    # Each tool named, as Copilot grants by the tools a command runs.
+                    tools = ("npm", "pnpm", "yarn", "pip", "uv", "mvn", "go", "cargo", "dotnet")
+                    command = "; ".join(f"{t} --version >/dev/null 2>&1" for t in tools) + "; true"
+                    await session.rpc.shell.execute_user_requested(
+                        ShellExecuteUserRequestedRequest(command=command, request_id=str(uuid4())),
+                        timeout=120,
+                    )
+                    folder = copilot_home() / "session-state" / session.session_id
+                    files = sorted((folder / "policies").glob("*.json"))
+                    assert files, f"{kind}: Copilot wrote no policy file"
+                    written = json.loads(files[-1].read_text())["filesystem"]["readwritePaths"]
+                finally:
+                    with contextlib.suppress(Exception):
+                        await backend.client.delete_session(session.session_id)
+                theirs = [own.tier, workspace, own.temporary, folder]
+                assert not outside(written, theirs, home), f"{kind}, slack={slack}: writable"
+    finally:
+        await backend.stop()
+        for path in configs:
+            path.unlink(missing_ok=True)
+        write_files(kept)
+
+
+async def test_copilots_base_profile_reads_what_chief_of_staff_leaves_out(tmp_path):
+    """Chief of Staff grants nothing in what Copilot's base profile already lets every
+    sandboxed command read (caches.BASE_READABLE: each rule costs every command): a file in
+    each of those folders is read by a sandboxed worker's command, one that reads Slack too."""
+    if not (REAL and sandbox_supported()):
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 on a machine with Copilot's sandbox.")
+    from conftest import Harness
+    from copilot.generated.rpc import ShellExecuteUserRequestedRequest
+    from test_progress import spawn
+
+    from chiefofstaff import caches
+    from chiefofstaff.models import Settings
+
+    files = {root: path for root in caches.BASE_READABLE if (path := first_file(root))}
+    if not files:
+        pytest.skip("Copilot's base profile is known on macOS only.")
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    backend = copilot_backend("copilot")
+    await backend.start()
+    try:
+        for slack in (0, 1):
+            harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
+            policy = runtime.sandbox_policy(harness.store.session(worker))
+            assert policy is not None
+            for root in files:
+                assert not any(Path(path).is_relative_to(root) for path in policy.readonly), root
+            session = await backend.create_session(
+                session_id=str(uuid4()), name="contract test", model=MODEL,
+                working_directory=str(tmp_path), sandbox_config=backend.sandbox(policy),
+                on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+            )  # fmt: skip
+            try:
+                command = "; ".join(
+                    f"head -c1 '{path}' >/dev/null 2>&1 && echo 'read {root}' || echo 'no {root}'"
+                    for root, path in files.items()
+                )
+                result = await session.rpc.shell.execute_user_requested(
+                    ShellExecuteUserRequestedRequest(command=command, request_id=str(uuid4())),
+                    timeout=120,
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    await backend.client.delete_session(session.session_id)
+            unread = [line for line in (result.output or "").splitlines() if line.startswith("no ")]
+            assert not unread and len(files) == (result.output or "").count("read "), (
+                slack,
+                result.output,
+            )
+    finally:
+        await runtime.stop()
+        await backend.stop()
+
+
+async def test_what_is_denied_in_copilots_own_places_is_refused_to_a_slack_reader(tmp_path):
+    """Copilot's base profile reads Homebrew's folders for every command: what Chief of Staff
+    denies a Slack reader there (Homebrew's var, its etc/npmrc and etc/gitconfig) is refused all
+    the same (the deny, deeper, wins); a worker on the owner's tasks reads it, as before."""
+    if not (REAL and sandbox_supported()):
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 on a machine with Copilot's sandbox.")
+    from conftest import Harness
+    from copilot.generated.rpc import ShellExecuteUserRequestedRequest
+    from test_progress import spawn
+
+    from chiefofstaff import caches
+    from chiefofstaff.models import Settings
+
+    names = ("var", "etc/npmrc", "etc/gitconfig")
+    closed = [
+        str(Path(prefix) / name)
+        for prefix in caches.SYSTEM_PREFIXES
+        if caches.base_readable(prefix)
+        for name in names
+        if (Path(prefix) / name).exists()
+    ]
+    if not closed:
+        pytest.skip("No Homebrew var or etc settings here.")
+    homebrew = await asyncio.to_thread(Path("/opt/homebrew/bin").is_dir)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Answer")
+    backend = copilot_backend("copilot")
+    await backend.start()
+    try:
+        for slack in (1, 0):
+            harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
+            policy = runtime.sandbox_policy(harness.store.session(worker))
+            assert policy is not None
+            assert all(path in policy.denied for path in closed) == bool(slack), policy.denied
+            session = await backend.create_session(
+                session_id=str(uuid4()), name="contract test", model=MODEL,
+                working_directory=str(tmp_path), sandbox_config=backend.sandbox(policy),
+                on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+            )  # fmt: skip
+            try:
+                command = "; ".join(
+                    f"if [ -d '{p}' ]; then ls '{p}' >/dev/null 2>&1; else head -c1 '{p}' "
+                    f">/dev/null 2>&1; fi && echo 'read {p}' || echo 'refused {p}'"
+                    for p in [*closed, "/opt/homebrew/bin"]
+                )
+                result = await session.rpc.shell.execute_user_requested(
+                    ShellExecuteUserRequestedRequest(command=command, request_id=str(uuid4())),
+                    timeout=120,
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    await backend.client.delete_session(session.session_id)
+            output = result.output or ""
+            for path in closed:
+                assert (f"refused {path}" in output) == bool(slack), (slack, output)
+            if homebrew:
+                assert "read /opt/homebrew/bin" in output, output
+    finally:
+        await runtime.stop()
+        await backend.stop()
+
+
+def first_file(root: str) -> str:
+    """A file (not a link) the owner can read in this folder or below; "" when none is."""
+    for folder, _, names in os.walk(root):
+        for name in names:
+            with contextlib.suppress(OSError):
+                path = Path(folder) / name
+                if path.is_file() and not path.is_symlink() and os.access(path, os.R_OK):
+                    return str(path)
+    return ""
+
+
+def write_files(files: dict) -> None:
+    for path, text in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text)
+
+
+def outside(written: list[str], theirs: list, home: Path) -> list[str]:
+    """What of `written` is in home and in none of `theirs`."""
+    mine = [Path(path).resolve() for path in theirs]
+    return [
+        path
+        for path in written
+        if Path(path).resolve().is_relative_to(home)
+        and not any(Path(path).resolve().is_relative_to(folder) for folder in mine)
+    ]
+
+
 def contents(path) -> str:
     return path.read_text() if path.exists() else ""
 

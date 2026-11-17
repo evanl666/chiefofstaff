@@ -148,7 +148,7 @@
               <textarea name="sandbox_writable" rows="2" placeholder="One folder per line, e.g. a Copilot plugin's own folder"></textarea>
               <small>For tools that must write outside a worker's folders, such as a Copilot plugin hook that keeps a journal.</small>
             </label>
-            <label class="check"><input name="shared_caches" type="checkbox" /> Share your npm and Yarn package stores, so installs are as fast as in your terminal</label>
+            <label class="check"><input name="shared_caches" type="checkbox" /> Start workers' caches from yours (read-only to them), so installs are as fast as in your terminal</label>
             <div class="check-row"><label class="check"><input name="watchdog_enabled" type="checkbox" /> Watchdog: check workers for stalls and drift</label><button id="watchdog-activity" type="button" class="link quiet" hidden>View activity</button></div>
             <label class="short"><span>Credit limit per worker</span><input name="worker_credit_limit" type="number" min="0" step="1" placeholder="0 = none, or 30 and up" /></label>
           </section>
@@ -422,6 +422,11 @@
           <h3>Package cache (uv)</h3>
           <p><code id="storage-uv-path"></code> · <span id="storage-uv-size"></span> <button type="button" class="link" id="storage-uv-measure">Measure</button></p>
           <p class="hint">Shared by everything uv installs; Chief of Staff never deletes it. To free space, run <code>uv cache prune</code> (removes only unused entries). Never run <code>uv cache clean</code> while Chief of Staff runs: it can delete the environment it runs from. Install it once with <code>uv tool install chiefofstaff</code> and update with <code>uv tool upgrade chiefofstaff</code>, instead of launching <code>uvx chiefofstaff@latest</code> again and again (each new version adds an environment to the cache).</p>
+        </section>
+        <section class="storage-caches">
+          <h3>Workers' caches</h3>
+          <p><code id="storage-caches-path"></code> · <span id="storage-caches-size"></span> <button type="button" class="link" id="storage-caches-measure">Measure</button> <button type="button" class="link" id="storage-caches-clear">Clear</button> <span class="hint" id="storage-caches-note"></span></p>
+          <p class="hint">Sandboxed workers' own package caches, started from yours as copy-on-write clones (where the disk cannot clone them, copies up to 8 GB). Clearing deletes them; the next worker makes them again, from yours, in the background. A worker installing at that moment may have to install again.</p>
         </section>
         <section>
           <h3>Cleanup history</h3>

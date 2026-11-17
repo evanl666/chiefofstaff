@@ -4782,6 +4782,39 @@ async def round_storage(runtime, browser, failures: list[str]):
         assert not tree.exists(), "deleted once confirmed"
         log("storage: Review files lists what is kept; delete only once 'delete' is typed")
 
+        # Workers' own caches: measured, then cleared (in a folder of this run's, not the
+        # machine's), once the owner confirms.
+        tier = runtime.cache_tier
+        runtime.cache_tier = store.directory.parent / "worker-caches" / "workers"
+        (runtime.cache_tier / "npm").mkdir(parents=True, exist_ok=True)
+        (runtime.cache_tier / "npm" / "blob").write_bytes(b"\1" * 3_000_000)
+        try:
+            runtime.storage.publish()
+            size = dialog.locator("#storage-caches-size")
+            await expect(dialog.locator("#storage-caches-path")).to_contain_text("worker-caches")
+            await dialog.locator("#storage-caches-measure").click()
+            # du runs at the lowest priority, after any other measuring.
+            await expect(size).to_contain_text(re.compile(r"^3 MB, measured"), timeout=60_000)
+            in_use = runtime.caches_in_use
+            runtime.caches_in_use = lambda: True
+            try:
+                runtime.storage.publish()
+                await expect(dialog.locator("#storage-caches-clear")).to_be_disabled()
+                await expect(dialog.locator("#storage-caches-note")).to_have_text(
+                    "Workers are using their caches; clear when they're idle."
+                )
+            finally:
+                runtime.caches_in_use = in_use
+            runtime.storage.publish()
+            await expect(dialog.locator("#storage-caches-note")).to_have_text("")
+            page.once("dialog", lambda asked: asyncio.ensure_future(asked.accept()))
+            await dialog.locator("#storage-caches-clear").click()
+            await expect(size).to_contain_text(re.compile(r"^0 KB, measured"), timeout=30_000)
+            assert not (runtime.cache_tier / "npm").exists(), "workers' caches deleted"
+        finally:
+            runtime.cache_tier = tier
+        log("storage: workers' caches measured, and cleared once confirmed")
+
         reading["free"] = 80 * 10**9
         machine._disk = (float("-inf"), None)
         await runtime.storage.check_disk()

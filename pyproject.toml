@@ -79,6 +79,7 @@ markers = [
     "copilot: runs against the real GitHub Copilot CLI (set CHIEFOFSTAFF_TEST_COPILOT=1)",
     "codex: runs against the owner's real Codex CLI (set CHIEFOFSTAFF_TEST_CODEX=1)",
     "titles: new tasks' titles are checked as in use (other tests name tasks tersely)",
+    "own_code: Chief of Staff's own code is looked up as in use (others skip the uv cache scan)",
 ]
 testpaths = ["tests"]
 
@@ -98,6 +99,8 @@ allowed-confusables = ["−"]
 ignore = ["SIM905", "PERF401"]
 
 [tool.ruff.lint.per-file-ignores]
+# os calls relative to an opened folder (dir_fd), which pathlib has no way to make.
+"src/chiefofstaff/safefs.py" = ["PTH"]
 "tests/*" = [
     "S101",  # Asserts are how pytest checks.
     "S105", "S107",  # Fake tokens and passwords.

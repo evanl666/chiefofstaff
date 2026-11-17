@@ -107,7 +107,15 @@ class FakeSession:
             await asyncio.sleep(0)
             return SimpleNamespace(removed=self.queued.pop(request.id, None) is not None)
 
+        # The shell init scripts Copilot was told to source (session.options.update), in turn.
+        self.shell_scripts: list[list[str]] = []
+
+        async def update_options(params):
+            if params.shell is not None:
+                self.shell_scripts.append([script.path for script in params.shell.init_scripts])
+
         self.rpc = SimpleNamespace(
+            options=SimpleNamespace(update=update_options),
             mcp=SimpleNamespace(oauth=SimpleNamespace(login=login)),
             tasks=SimpleNamespace(list=listed, cancel=cancel),
             queue=SimpleNamespace(pending_items=pending_items, remove_at=remove_at),
@@ -472,6 +480,31 @@ def plenty_of_memory(monkeypatch):
     """Tests do not depend on how much memory the machine running them has left."""
     monkeypatch.setattr(machine, "free_memory", lambda: None)
     monkeypatch.setattr(machine, "_cached", (0.0, None))
+
+
+@pytest.fixture(autouse=True)
+def own_code_unscanned(request, monkeypatch):
+    """Chief of Staff's own code is not looked up in this machine's uv cache at each connect
+    (tests of it pass `own_code` explicitly, or mark themselves `own_code`)."""
+    if request.node.get_closest_marker("own_code") is None:
+        from chiefofstaff import runtime
+
+        monkeypatch.setattr(runtime, "own_code", list)
+
+
+@pytest.fixture(autouse=True)
+def no_cache_seeding(monkeypatch, tmp_path):
+    """Workers' caches are never filled from the machine's own (caches.seed), nor its Go or
+    Java looked at, unless a test does it itself."""
+    from chiefofstaff import caches
+
+    monkeypatch.setattr(caches, "seed", lambda *args, **kwargs: {})
+    monkeypatch.setattr(caches, "default_tier", lambda: tmp_path / "worker-caches")
+    monkeypatch.setattr(caches, "go_env", dict)
+    monkeypatch.setattr(caches, "old_uv", lambda: "")
+    monkeypatch.setattr(caches, "truststore", lambda *args: None)
+    monkeypatch.setattr(caches, "uv_stamp", lambda: ("", 0))
+    monkeypatch.setattr(caches, "authority_stamp", lambda copilot_home: 0)
 
 
 @pytest.fixture

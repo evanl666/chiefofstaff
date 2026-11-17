@@ -893,8 +893,10 @@ async def test_a_folder_being_deleted_is_whole_or_gone_and_leftovers_are_counted
 
     def slow_rmtree(path, *args, **kwargs):
         path = Path(path)
-        # Deleted from trash only, never in place: the worktree has it whole, or not at all.
-        assert path.parent == trash, path
+        # Deleted from trash only, never in place: the worktree has it whole, or not at all;
+        # by name in trash opened (never following a link).
+        assert kwargs.get("dir_fd") is not None and len(path.parts) == 1, path
+        assert (trash / path.name).exists(), path
         # All of them out of the worktree before any is deleted.
         assert not any((tree / name).exists() for name in ("node_modules", ".pytest_cache"))
         assert not (tree / "build" / "out.o").exists()
@@ -1072,25 +1074,28 @@ async def test_new_files_hidden_by_git_config_are_never_deleted(tmp_path, monkey
     assert exists(Path(raced["cwd"]) / "src" / "feature.py"), "git refused to remove it"
 
 
-async def test_a_half_removed_worktree_with_a_new_file_is_not_forced(tmp_path, monkeypatch):
+async def test_a_worktree_a_file_appeared_in_while_it_was_removed_is_put_back(
+    tmp_path, monkeypatch
+):
+    """Found clean, it goes into trash in one rename (out of every worker's reach) and is
+    checked again there: a file written just before is never deleted with it."""
     app = project(tmp_path)
     harness = await harnessed(tmp_path)
     runtime = harness.runtime
     info = await spawn(runtime, harness.router_id, "Closing", project=str(app), isolate=True)
     await settle(runtime)
-    real_git = workspaces_module.checkout_git
+    real_trash = workspaces_module.to_trash
 
-    async def stopped(checkout, path, *arguments, **options):
-        if "remove" in arguments:
-            tree = Path(arguments[-1])
-            write(tree / "src" / "appeared.py", "written while git was removing")
-            raise TimedOutError("git timed out.")
-        return await real_git(checkout, path, *arguments, **options)
+    def late(path, trash):
+        moved = real_trash(path, trash)
+        if moved and moved.name.endswith("-app"):
+            write(moved / "src" / "appeared.py", "written as it was being removed")
+        return moved
 
-    monkeypatch.setattr(workspaces_module, "checkout_git", stopped)
+    monkeypatch.setattr(workspaces_module, "to_trash", late)
     await runtime.workers.close(info["session_id"])
     await settle(runtime)
-    assert exists(Path(info["cwd"]) / "src" / "appeared.py"), "not finished with --force"
+    assert exists(Path(info["cwd"]) / "src" / "appeared.py"), "put back, never deleted"
 
 
 async def test_a_submodules_own_commits_show_whatever_git_config_ignores(tmp_path):
@@ -1272,3 +1277,61 @@ def test_the_retry_handler_never_stops_a_whole_delete(tmp_path, monkeypatch):
 
     monkeypatch.setitem(writable.__globals__, "rmtree_writable", broken)
     writable(os.open, str(folder), None)  # Logged; the rest of the delete goes on.
+
+
+async def test_workers_caches_are_measured_and_cleared_from_storage(tmp_path):
+    from chiefofstaff import caches
+
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    tier = runtime.cache_tier
+    write(tier / "npm" / "_cacache" / "blob", "x" * 4096)
+    report = await runtime.storage.caches_measure()
+    assert report["caches"]["path"] == str(tier) and report["caches"]["busy"] == "measuring"
+    await settle(runtime)
+    assert runtime.storage.report()["caches"]["size"] >= 4096
+    await runtime.storage.caches_clear()
+    await settle(runtime)
+    assert not (tier / "npm").exists() and runtime.storage.report()["caches"]["size"] == 0
+    assert caches.copied_bytes(tier) == 0
+
+
+async def test_workers_caches_are_not_cleared_while_a_sandboxed_worker_works(tmp_path):
+    """Clearing while a worker builds took its files from under it: Clear waits until no
+    sandboxed worker on the owner's tasks is working, and says why."""
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    tier = runtime.cache_tier
+    write(tier / "npm" / "_cacache" / "blob", "x")
+    worker = (await spawn(runtime, harness.router_id, "Build"))["session_id"]
+    harness.store.execute("UPDATE sessions SET status='working' WHERE id=?", (worker,))
+    report = await runtime.storage.caches_clear()
+    assert report["caches"]["blocked"] == "Workers are using their caches; clear when they're idle."
+    assert report["caches"]["busy"] == "", "not started: the page says nothing was cleared"
+    await settle(runtime)
+    assert (tier / "npm" / "_cacache" / "blob").exists()
+    harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
+    assert not runtime.storage.report()["caches"]["blocked"], "one that reads Slack: its own"
+    harness.store.execute("UPDATE sessions SET slack=0, status='waiting' WHERE id=?", (worker,))
+    assert not runtime.storage.report()["caches"]["blocked"]
+    await runtime.storage.caches_clear()
+    await settle(runtime)
+    assert not (tier / "npm").exists()
+
+
+async def test_storage_says_at_once_when_workers_start_or_stop_using_their_caches(tmp_path):
+    """Clear's state was refreshed every minute only: it is published as a sandboxed worker on
+    the owner's tasks starts or stops working."""
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = (await spawn(runtime, harness.router_id, "Build"))["session_id"]
+    await settle(runtime)
+    for status, blocked in (("idle", False), ("working", True), ("idle", False)):
+        async with runtime.bus.subscribe() as events:
+            runtime.update_session(worker, status=status)
+            sent = []
+            while not events.empty():
+                sent.append(json.loads(events.get_nowait()))
+        storage_events = [e for e in sent if e["type"] == "storage"]
+        assert storage_events, status
+        assert bool(storage_events[-1]["data"]["caches"]["blocked"]) == blocked

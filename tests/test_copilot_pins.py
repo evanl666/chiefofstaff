@@ -28,9 +28,11 @@ from conftest import Harness, call_tool, settle
 from copilot.tools import Tool
 from test_runtime import at, logged
 
+from chiefofstaff import caches as caches_module
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff import tools as tools_module
 from chiefofstaff import watchdog as watchdog_module
+from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.backend import CopilotBackend
 from chiefofstaff.models import Settings
 from chiefofstaff.roles import WORKER
@@ -63,8 +65,25 @@ def machine(tmp_path, monkeypatch):
         "CHIEFOFSTAFF_WORKER_MCP",
         "CHIEFOFSTAFF_WORKER_HOOKS",
         "CHIEFOFSTAFF_ROUTER_CONTEXT",
+        *workspaces_module.MOVED_CACHES,
+        *workspaces_module.MOVED_SECRETS,
+        *caches_module.TOOL_HOMES,
+        *caches_module.MOVED_CONFIG,
     ):
         monkeypatch.delenv(name, raising=False)
+    # Chief of Staff's own code (where this Python runs from) and each system's own cache
+    # folders, made the same everywhere.
+    chief = tmp_path / "chief"
+    chief.mkdir()
+    monkeypatch.setattr(runtime_module, "own_code", lambda: [str(chief)])
+    monkeypatch.setattr(
+        caches_module, "worker_temp", lambda session, tier=None: tmp_path / f"t-{session[:8]}"
+    )
+    monkeypatch.setattr(caches_module, "path_folders", lambda home, slack=False: [])
+    monkeypatch.setattr(caches_module, "global_npmrc", list)
+    monkeypatch.setattr(caches_module, "SYSTEM_PREFIXES", ())  # Homebrew's, where it is.
+    caches = workspaces_module.PLATFORM_CACHES["darwin"]
+    monkeypatch.setattr(workspaces_module, "PLATFORM_CACHES", {"darwin": caches, "linux": caches})
     return SimpleNamespace(root=tmp_path, home=home, copilot=copilot)
 
 
@@ -93,10 +112,17 @@ MACOS = (
 )
 
 
+MACOS_SANDBOX = (
+    "\nPlaywright's Chromium runs in a single process in this sandbox (it refuses more); "
+    "Firefox, WebKit and full Chrome cannot start in it: if a test needs them, say so in your "
+    "report, with the command for the owner."
+)
+
+
 def neutral(value, machine: SimpleNamespace) -> str:
     """The value's canonical JSON, with this run's folders made the same in every run."""
     text = json.dumps(plain(value), sort_keys=True, ensure_ascii=False, indent=1)
-    text = text.replace(json.dumps(MACOS)[1:-1], "")
+    text = text.replace(json.dumps(MACOS)[1:-1], "").replace(json.dumps(MACOS_SANDBOX)[1:-1], "")
     return text.replace(str(machine.home), "<home>").replace(str(machine.root), "<tmp>")
 
 
@@ -292,18 +318,18 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "slack, created": (4501, "45e96f706f8f884c1ad15e268e2717480a4482bd75697b9db1a83afe2a21275f"),
     "slack, resumed": (4466, "90e994a20c3bcaadb98e628effd8a48499f866cc408d11fc19b63cbcb3fed734"),
     "the Copilot sandbox of a worker asking first": (
-        929,
-        "5ce9b8b8c0d7f9bc71f1f000de4aef801cac02083ac5d8e2dbba561e376fd05a",
+        1072,
+        "e8c9d8ec377183024901520ba042cdbf6108c5bc3a3fec1acf54769307e81fed",
     ),
     "watchdog, created": (3317, "74c2464eda92b08d7c0c2f0be7e9c18d5b80e0b4d7d7db7c5cbf22099bd3f111"),
     "watchdog, resumed": (3279, "3211b0fe48200b7a8b7e24baa9eca2c19608f7f40a7c4282665e9ca51f11ca54"),
     "worker asking first, sandboxed, created": (
-        19983,
-        "4da99cbf2ff979aaa12e4c111221ed80f0da29424ea4dd269f9c3226b5068513",
+        20186,
+        "381a66bf30b6f1a430879bde0800421133e8d839e9041e1c46c38d8310d6f671",
     ),
     "worker asking first, sandboxed, resumed": (
-        19938,
-        "54bdb9f8f7f935229fac1b54b49f4fec954d48e2dfa0bced339abba17b847f9c",
+        20141,
+        "766d6196610240918a77c54e1e63f7d936c031b385b2b0d7fedc71a62cd3229b",
     ),
     "worker in a trusted worktree, created": (
         18688,
@@ -314,12 +340,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "975d250bcb72472a04af36a9893065147566a7f2f0c36c4f60f2ce192f3b28d3",
     ),
     "worker that reads Slack, created": (
-        20598,
-        "3bc206ebdf57843533b538dcd00a045af2b903682cfe73ae6cb2783950506b25",
+        20451,
+        "3a4f32aba3fb578f6245ef227dc0ed67c8a5fbfb24e64b7cfe36df8d65babee9",
     ),
     "worker that reads Slack, resumed": (
-        20551,
-        "6cdcbf14bc8ed52686c9cac2f826f6d23345304ffad62befd0fd438bbca69dde",
+        20404,
+        "3e8f93a98d352fc0038703d3f577a88fd9a9ff68bfbe9731a5bcaf42c51cae22",
     ),
     "worker with its model, created": (
         18222,

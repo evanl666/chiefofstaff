@@ -325,8 +325,8 @@ class Settings(StrictModel):
     worker_sandbox: bool = False
     # Folders sandboxed workers may also write to (a Copilot plugin's own folder, say).
     sandbox_writable: list[str] = Field(default_factory=list, max_length=10)
-    # Sandboxed workers use the owner's dependency and build caches (Gradle, Maven, npm…), as
-    # sessions in a terminal do, instead of downloading and building everything again.
+    # Sandboxed workers' caches (their own, see caches.py) start from the owner's: read through
+    # where a tool can, copied in otherwise, instead of downloading everything again.
     shared_caches: bool = True
     # Copied task reports end with a short "Orchestrated with Chief of Staff" line.
     report_footer: bool = True

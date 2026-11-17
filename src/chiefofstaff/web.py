@@ -396,6 +396,14 @@ def create_app(
     async def storage_uv():
         return await runtime.storage.uv_measure()
 
+    @app.post("/api/storage/caches-measure")
+    async def storage_caches_measure():
+        return await runtime.storage.caches_measure()
+
+    @app.post("/api/storage/caches-clear")
+    async def storage_caches_clear():
+        return await runtime.storage.caches_clear()
+
     @app.post("/api/profile")
     async def save_profile(payload: ProfileText):
         await runtime.toolset.save_profile(payload.text)

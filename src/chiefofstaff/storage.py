@@ -33,13 +33,14 @@ from typing import TYPE_CHECKING
 
 from pydantic import Field
 
-from . import machine
+from . import caches, machine
 from .models import StrictModel
 from .roles import WORKER
 from .store import now
 from .tasks import FINISHED, OPEN
 from .workspaces import (
     OLD_TRASH,
+    STAGING,
     TRASH,
     clean_tree,
     delete_moved,
@@ -80,6 +81,8 @@ TITLES_AT_ONCE = 40
 SIZE, KEPT, KEEP = "storage:size:", "storage:kept:", "storage:keep:"
 HISTORY_KEY, LEVEL, NOTE = "storage:history", "storage:level", "storage:note"
 UV_KEY, OTHERS = "storage:uv", "storage:others"
+CACHES_KEY = "storage:worker-caches"
+CACHES_IN_USE = "Workers are using their caches; clear when they're idle."
 # What a cleanup could not delete from trash, by path: its size, since when, last tried.
 STUCK = "storage:stuck"
 STUCK_RETRY_SECONDS = 86400
@@ -142,10 +145,16 @@ class Storage:
         self.cleaned_at = float("-inf")
         self.cleaning: set[str] = set()
         self.uv_measuring = False
+        self.caches_busy = ""  # "measuring" or "clearing" workers' caches.
+        self.caches_blocked = False  # A sandboxed worker uses them (caches_in_use): no Clear.
         # What came of the owner's last action on a worker (a cleanup, why not): shown by it.
         self.notes: dict[str, str] = {}
         self.sizes: dict[str, dict] | None = None
         self.published = ""
+        # Each report's place in order (this run's): the page keeps the latest it got, whether
+        # an action's answer or an event came first.
+        self.run = time.time_ns() // 10**6  # A number: one in hex reads as a commit SHA.
+        self.reports = 0
         self.titles: dict[str, tuple[float, str]] = {}
         self.titles_left = TITLES_AT_ONCE
         # Workers still following a task whose caches were cleaned: when they last did anything.
@@ -386,7 +395,7 @@ class Storage:
                         entry.path
                         for entry in os.scandir(root)
                         if entry.is_dir(follow_symlinks=False)
-                        and entry.name != TRASH
+                        and entry.name not in {TRASH, STAGING}
                         and os.path.realpath(entry.path) not in known
                     ]
             return found[:MAX_LISTED]
@@ -941,6 +950,54 @@ class Storage:
             self.uv_measuring = False
             self.publish()
 
+    async def caches_measure(self) -> dict:
+        """How much sandboxed workers' own caches take (caches.py), measured when asked."""
+        if not self.caches_busy:
+            self.caches_busy = "measuring"
+            self.runtime.background(self.measure_caches())
+        return self.report()
+
+    async def measure_caches(self):
+        try:
+            path = str(self.runtime.cache_tier)
+            found: dict = {"at": now(), "size": 0}
+            if await asyncio.to_thread(os.path.isdir, path):
+                async with self.du_lock:
+                    sizes = await machine.disk_used([path], UV_SECONDS)
+                found["size"] = (sizes or {}).get(path)
+            self.store.set(CACHES_KEY, json.dumps(found))
+        finally:
+            self.caches_busy = ""
+            self.publish()
+
+    def workers_changed(self):
+        """A worker started or stopped: the page hears at once whether Clear is offered."""
+        blocked = self.runtime.caches_in_use()
+        if blocked != self.caches_blocked:
+            self.caches_blocked = blocked
+            self.publish()
+
+    async def caches_clear(self) -> dict:
+        """Delete sandboxed workers' own caches (caches.clear): made again at once, filled
+        again from the owner's by the next seeding. Not while a worker uses them."""
+        if not self.caches_busy and not self.runtime.caches_in_use():
+            self.caches_busy = "clearing"
+            self.runtime.background(self.clear_caches())
+        return self.report()
+
+    async def clear_caches(self):
+        try:
+            await asyncio.to_thread(
+                caches.clear, self.runtime.cache_tier, self.runtime.cache_owner()
+            )
+            self.store.set(CACHES_KEY, json.dumps({"at": now(), "size": 0}))
+            self.runtime.cache_seeded = 0.0  # Filled again at the next worker's start.
+        except OSError as exc:
+            logger.warning("Workers' caches could not all be deleted: %s", exc)
+        finally:
+            self.caches_busy = ""
+            self.publish()
+
     # The report
 
     def report(self) -> dict:
@@ -981,7 +1038,9 @@ class Storage:
             + sum(o["size"] for o in others.values())
             + sum(value["size"] for value in stuck.values())
         )
+        self.reports += 1
         return {
+            "order": [self.run, self.reports],
             "disk": {
                 key: disk.get(key)
                 for key in ("free", "total", "used_percent", "level", "warning", "critical", "path")
@@ -1002,6 +1061,15 @@ class Storage:
                 "at": "",
                 **json.loads(self.store.get(UV_KEY) or "{}"),
                 "measuring": self.uv_measuring,
+            },
+            "caches": {
+                "path": str(self.runtime.cache_tier),
+                "size": None,
+                "at": "",
+                **json.loads(self.store.get(CACHES_KEY) or "{}"),
+                "copied": caches.copied_bytes(self.runtime.cache_tier),
+                "busy": self.caches_busy,
+                "blocked": CACHES_IN_USE if self.runtime.caches_in_use() else "",
             },
             "working": self.working,
             "measuring_all": self.measure_all,
@@ -1087,6 +1155,7 @@ class Storage:
         shown = {
             **report,
             "disk": {**report["disk"], "free": free},
+            "order": None,
         }
         digest = hashlib.sha1(
             json.dumps(shown, sort_keys=True, default=str).encode(), usedforsecurity=False

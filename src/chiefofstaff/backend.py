@@ -33,6 +33,10 @@ from copilot.generated.rpc import (
     SandboxConfigUserPolicy,
     SandboxConfigUserPolicyFilesystem,
     SandboxConfigUserPolicyNetwork,
+    SessionUpdateOptionsParams,
+    ShellInitScript,
+    ShellInitScriptShell,
+    ShellOptions,
     TasksCancelRequest,
 )
 
@@ -340,7 +344,9 @@ class CopilotBackend:
             # added just because the session started there.
             add_current_working_directory=False,
             allow_bypass=False,
-            allow_dev_tool_access=True,
+            # Not Copilot's own grants to the owner's caches (read-write) and tools: the policy
+            # names what a worker reads and writes (caches.py).
+            allow_dev_tool_access=False,
             # MCP servers are what the owner or their company configured, not what an agent
             # wrote: they run as they do in Copilot, with their own sign-ins and network.
             sandbox_mcp_servers=False,
@@ -360,6 +366,18 @@ class CopilotBackend:
                 ),
             ),
         )
+
+
+async def shell_init(session: Any, scripts: list[str]) -> bool:
+    """Have Copilot source these scripts in the session's shell before each command it runs
+    (session init scripts, set again at every open: Copilot does not keep them). False when
+    the session cannot take them."""
+    options = getattr(getattr(session, "rpc", None), "options", None)
+    if options is None:
+        return False
+    sourced = [ShellInitScript(path, ShellInitScriptShell.BASH) for path in scripts]
+    await options.update(SessionUpdateOptionsParams(shell=ShellOptions(init_scripts=sourced)))
+    return True
 
 
 async def switch_model(session: Any, model: str, **tuning: Any) -> None:

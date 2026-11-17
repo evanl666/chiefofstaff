@@ -650,15 +650,18 @@ def worker_context(
     sandbox: str = "",
     caches: bool = False,
     local: bool = False,
-    gradle: bool = False,
+    old_uv: str = "",
     gh_accounts: list[dict] | None = None,
     gh_acting: dict[str, str] | None = None,
     slack: bool = False,
+    notes: list[str] | None = None,
 ) -> str:
     """`sandbox`: "" (no sandbox), "on", or "on-no-gh" (gh cannot reach GitHub inside it).
-    `caches`: the sandbox lets it use the owner's dependency and build caches; `local`: and
-    localhost. `gh_acting`: the account Chief of Staff acts as, by repository owner, where gh's
-    active one cannot reach them (GitHubSource.acting_login)."""
+    `caches`: its tools keep their caches in workers' own (caches.py), the owner's read-only
+    beneath; `local`: the sandbox lets it use localhost; `old_uv`: the owner's uv, when it is one
+    that crashes in the sandbox. `gh_acting`: the account Chief of Staff
+    acts as, by repository owner, where gh's active one cannot reach them
+    (GitHubSource.acting_login)."""
     lines = [
         f"Working directory: {cwd}",
         f"Your workspace: {workspace} (all yours: clone, build or download things there).",
@@ -728,30 +731,45 @@ def worker_context(
             if local
             else "Localhost is closed to you in the sandbox."
         )
+        # Measured: a sandboxed command starts in about 0.3 s (Copilot's credential proxy), and
+        # five quick checks in one call cut a turn by a fifth, as correct.
+        lines.append(
+            "Each shell command takes about 0.3 s to start in this sandbox: run quick read-only "
+            "commands together in one call (for example `git status --short && git log -3 "
+            "--oneline && ls`) rather than one call each."
+        )
         if caches:
             lines.append(
-                "npm's, Yarn's, pip's and uv's package caches are the owner's, as in their "
-                "terminal: install as usual, and do not point HOME or those caches elsewhere."
+                "Your tools keep their caches in a folder of workers' own, set in your shell's "
+                "environment (npm, pnpm, Yarn, Bun, pip, uv, poetry, pre-commit, Go, Cargo, "
+                "Gradle, Maven, Playwright), with the owner's caches read-only beneath it: what "
+                "the owner or another worker already has is not downloaded again. Install and "
+                "build as usual; do not point HOME or those caches elsewhere. Electron's native "
+                "rebuild (@electron/rebuild) keeps its headers in ~/.electron-gyp, read-only "
+                "here: if it fails there, report it as blocked, with the command for the owner."
+            )
+        if old_uv:
+            lines.append(
+                f"This machine's uv ({old_uv}) crashes in this sandbox (\"Attempted to create a "
+                'NULL object"; uv 0.9.29 and later do not): do not retry, report it as blocked '
+                "and tell the owner to update uv (`brew upgrade uv` or `uv self update`)."
+            )
+        if sys.platform == "darwin":
+            lines.append(
+                "Playwright's Chromium runs in a single process in this sandbox (it refuses "
+                "more); Firefox, WebKit and full Chrome cannot start in it: if a test needs "
+                "them, say so in your report, with the command for the owner."
             )
         if slack:
             lines.append(
                 "You read Slack, so your sandbox is stricter than the owner's setting (whatever "
-                "it is): its network reaches GitHub only and the owner's package caches are "
-                "closed, so installing packages or running tests that need them can fail here "
-                "(uv may even crash). Do not keep retrying: say in your report that this "
+                "it is): its network reaches GitHub only and your package caches are your own, "
+                "with nothing of the owner's, so installing packages or running tests that need "
+                "them can fail here. Do not keep retrying: say in your report that this "
                 "sandbox could not run them (not that the code failed), with the exact command "
                 "for the owner, so the Router can have a worker without Slack access run them."
             )
-        if gradle:
-            lines.append(
-                "Gradle: before your first build run `export GRADLE_USER_HOME="
-                f"{workspace}/.gradle GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches "
-                'GRADLE_OPTS="-Dorg.gradle.native=false $GRADLE_OPTS" && mkdir -p '
-                '"$GRADLE_USER_HOME" && cp -R $HOME/.gradle/gradle.properties $HOME/.gradle/init.d '
-                '"$GRADLE_USER_HOME"/ 2>/dev/null; true` (the sandbox loads no native library '
-                "from a writable folder). Its daemon and new downloads are yours; the owner's "
-                "dependencies are read from their cache, not downloaded again."
-            )
+        lines += notes or []  # What its sandbox cannot run (caches.Plan.notes).
         lines.append(
             "A tool whose cache is not writable here: give it a cache folder in your workspace "
             "(that is not working around the sandbox)."
