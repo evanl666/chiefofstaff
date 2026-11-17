@@ -2614,13 +2614,16 @@ class Workspaces:
 
     def touched(self, top: Path, besides: str = "") -> bool:
         """Whether a worker other than `besides` could have written in this folder, or above
-        it: one that ran (had a turn) with a folder it writes there, above or below."""
+        it: one whose folders to write are there, above or below (writes: not a checkout it was
+        given only to read), or the folders Settings lets sandboxed commands write; run or not
+        (one handed out before Chief of Staff kept track of turns may have)."""
+        extra = [os.path.realpath(path) for path in self.store.settings().sandbox_writable]
+        if any(within(place, str(top)) or within(str(top), place) for place in extra):
+            return True
         for other in self.store.all(
             "SELECT * FROM sessions WHERE role=? AND id!=?", (WORKER, besides)
         ):
-            if not self.store.get(f"sent:{other['id']}"):
-                continue  # (Handed out, never run.)
-            for place in map(os.path.realpath, self.writable(other)):
+            for place in map(os.path.realpath, self.writes(other)):
                 if within(place, str(top)) or within(str(top), place):
                     return True
         return False

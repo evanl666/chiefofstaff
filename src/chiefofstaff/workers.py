@@ -607,6 +607,7 @@ class Workers:
         if await self.runtime.settings_refusal(row):
             await self.settings_wait(session_id)
             return
+        await self.runtime.servers_turn(session_id, claimed=True)  # (As Delivery.deliver.)
         agent = self.runtime.agent(session_id)
         try:
             # Another agent's backend first (started on first use): one that cannot start (not

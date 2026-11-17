@@ -35,6 +35,7 @@ import tomllib
 import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import suppress
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -43,8 +44,11 @@ from .policy import AGENT_SETTINGS
 MOST_ENTRIES = 1000
 MOST_BYTES = 16 * 1024 * 1024
 KEY = "settingssnap:"
-# An entry for a file a setting runs: "<setting's entry>" + RUN + "<that file>".
+# An entry for a file a setting runs: "<setting's entry>" + RUN + "<that file>" for a hook's
+# (held: a change waits for the owner), + SERVES + "<server>\0<that file>" for a server's (a
+# change turns that server off for the worker: Runtime.servers_off).
 RUN = "\0run:"
+SERVES = "\0serves:"
 # A kind never taken as unchanged: a link where workers can write, a special file.
 REFUSED = "!"
 # A program a setting runs through a link out of the folder: [PROGRAM, where it leads, "w" when
@@ -193,8 +197,16 @@ def signature(top: Path, cwd: Path, names: tuple[str, ...], also: list[str]) -> 
             info = os.lstat(path)
         except OSError:
             return
+        target: tuple = ()
+        if stat.S_ISLNK(info.st_mode):
+            # Where it leads, and what is there (a link to nothing whose target is made later).
+            with suppress(OSError):
+                target = (str(path.readlink()),)
+            with suppress(OSError):
+                led = path.stat()
+                target += (led.st_mode, led.st_ino, led.st_size, led.st_mtime_ns, led.st_ctime_ns)
         seen.append((str(path), info.st_mode, info.st_ino, info.st_size, info.st_mtime_ns,
-                     info.st_ctime_ns))  # fmt: skip
+                     info.st_ctime_ns, target))  # fmt: skip
         if stat.S_ISDIR(info.st_mode) and depth < 4 and len(seen) < MOST_ENTRIES:
             for entry in listed(path):
                 note(path / entry.name, depth + 1)
@@ -361,15 +373,30 @@ def inside(top: Path, link: Path, budget: list) -> tuple[str, str]:
 
 # The files a setting runs, as far as its commands name them (best effort): a hook's script, an
 # MCP or language server's, a plugin marketplace's folder. Read from the JSON and TOML settings,
-# a custom agent's front matter (its mcp-servers), an extension's relative imports.
+# a custom agent's front matter (its mcp-servers and hooks), an extension's relative imports.
+# Two kinds (Ref.serves): what a hook runs (or a plugin, an extension: in the same turn, on
+# every tool) is held as the setting is (RUN entries: a change waits for the owner); what a
+# server runs (MCP, language, a custom agent's) is compared too, but a change only turns that
+# server off for the worker (SERVES entries, Runtime.servers_off), never a wait. A command the
+# parser does not follow (a substitution, a loop, a pipe into a shell, a variable it can't
+# expand) is said in `code`, never dropped.
 COMMAND_KEYS = {"command", "bash", "powershell", "pwsh", "sh", "cmd"}
-SHELLS = {"bash", "sh", "zsh", "dash", "pwsh", "powershell"}
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh", "powershell"}
+# Where a setting lists servers by name: {key, case-insensitive: the servers' kind}.
+SERVER_KEYS = {
+    "mcpservers": "mcp", "servers": "mcp", "mcp-servers": "mcp", "mcp_servers": "mcp",
+    "lspservers": "lsp", "lsp-servers": "lsp", "lsp_servers": "lsp",
+}  # fmt: skip
 SESSION_DIR = re.compile(r"\$\{COPILOT_SESSION_CWD\}|\$COPILOT_SESSION_CWD\b")
 PROJECT_DIR = re.compile(
     r"\$\{(?:CLAUDE_PROJECT_DIR|workspaceFolder|workspaceRoot|PWD)\}|\$(?:CLAUDE_PROJECT_DIR|PWD)\b"
 )
+# `${VAR:-default}`, `${VAR-default}`: the variable's value where it is one of those above.
+DEFAULTED = re.compile(r"\$\{(\w+):?-[^}]*\}")
+KNOWN_VARIABLES = {"CLAUDE_PROJECT_DIR", "workspaceFolder", "workspaceRoot", "PWD",
+                   "COPILOT_SESSION_CWD"}  # fmt: skip
 SCRIPTS = {".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".rb", ".pl",
-           ".ps1", ".php", ".lua", ".jar"}  # fmt: skip
+           ".ps1", ".php", ".lua", ".jar", ".awk", ".sed", ".jq", ".tcl", ".fish"}  # fmt: skip
 # Commands that run project code no file of theirs names (a package's scripts, a module, a
 # build file, a local package's bin): noted, not held.
 RUNNERS: dict[str, set[str] | None] = {
@@ -385,6 +412,9 @@ PARSED = (".json", ".toml", ".md", ".mjs", ".cjs", ".js")
 IMPORTS = re.compile(
     r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["'](\.{1,2}/[^"']+)["']"""
 )
+# A file a setting expects that is not there (yet): compared as such, so one made later (a
+# build's output, a planted script) is a change.
+ABSENT = ["-", ""]
 
 
 def runs(
@@ -397,11 +427,14 @@ def runs(
     held_already: dict | None = None,
     cwd: Path | None = None,
 ) -> dict[str, list]:
-    """The RUN entries of one setting's file: what its commands run, held as files are (but
-    for a file held as a setting itself, in `held_already`). A word naming what runs that is
-    found nowhere is said in `code` (project code no entry holds), never waited for."""
+    """The RUN and SERVES entries of one setting's file: what its commands run, held as files
+    are (but for a file held as a setting itself, in `held_already`). One it names by a path
+    that is not there is kept as absent; a word naming what runs that is found nowhere else
+    (a module, a program) is said in `code`, never waited for."""
     name = entry.split("\0")[0]
-    if value[0] not in {"f", "l"} or RUN in entry or not name.lower().endswith(PARSED):
+    if value[0] not in {"f", "l"} or RUN in entry or SERVES in entry:
+        return {}
+    if not name.lower().endswith(PARSED):
         return {}
     path = folder / name
     real = path if value[0] == "f" else Path(os.path.realpath(path))
@@ -414,12 +447,26 @@ def runs(
     extension = nfc(entry).casefold().startswith(".github/extensions/")
     place = real.parent if extension else folder
     setting = f"{folder_key(top, folder)}/{entry}".removeprefix("./")
-    for ref in references(real, text, code, setting):
+
+    def say(said: str):
+        note = f"{setting} runs `{shortened(said)}`"
+        if code is not None and note not in code:
+            code.append(note)
+
+    for ref in references(real, text, say):
         target = located(top, place, ref, cwd or top)
         if target is None:
-            note = f"{setting} runs `{ref.said}`"
-            if code is not None and ref.kind in {"script", "module"} and note not in code:
-                code.append(note)
+            if ref.kind in {"maybe", "program"}:
+                continue
+            if (missing := expected(top, place, ref, cwd or top)) is None:
+                if ref.kind in {"script", "module"} and not elsewhere(top, ref.word, cwd or top):
+                    say(ref.said or ref.word)
+                continue
+            key = run_key(name, ref.serves, nfc(missing.relative_to(top).as_posix()))
+            held.setdefault(key, list(ABSENT))
+            continue
+        if ref.kind == "maybe":
+            say(ref.said or ref.word)  # A program's file it doesn't follow: said.
             continue
         if target == Path(top) or Path(top).is_relative_to(target):
             continue
@@ -430,9 +477,10 @@ def runs(
         shown = (
             nfc(target.relative_to(top).as_posix()) if target.is_relative_to(top) else str(target)
         )
-        key = f"{name}{RUN}{shown}"
-        if key in held:
+        key = run_key(name, ref.serves, shown)
+        if key in held and held[key] != ABSENT:
             continue
+        held.pop(key, None)
         if target.is_dir() and not target.is_symlink():
             nested: dict[str, list] = {}
             for child in sorted(item.name for item in target.iterdir()):
@@ -454,30 +502,92 @@ def runs(
     return held
 
 
+def elsewhere(top: Path, word: str, cwd: Path) -> bool:
+    """Whether a word names a path out of the project (a system program, one in home)."""
+    token = expanded(word.split("=", 1)[-1] if word.startswith("-") else word, top, cwd)
+    path = Path(token)
+    return token.startswith("~") or (path.is_absolute() and not path.is_relative_to(top))
+
+
+def run_key(setting: str, serves: str, path: str) -> str:
+    """A RUN entry's key (a hook's file: held), or a SERVES one's (a server's: "mcp/name")."""
+    return f"{setting}{SERVES}{serves}\0{path}" if serves else f"{setting}{RUN}{path}"
+
+
+def ran_of(entry: str) -> tuple[str, str, str]:
+    """(setting, file it runs, server) of a RUN or SERVES entry; ("entry", "", "") otherwise."""
+    if SERVES in entry:
+        setting, _, rest = entry.partition(SERVES)
+        server, _, path = rest.partition("\0")
+        return setting, path, server
+    setting, _, path = entry.partition(RUN)
+    return setting, path, ""
+
+
+def shortened(said: str) -> str:
+    said = " ".join(said.split())
+    return said if len(said) <= 60 else said[:59] + "…"
+
+
 class Ref(NamedTuple):
     """A word of a setting's command that names what runs: `kind` "file" (the command, a
     script by its extension, a file a variable runs), "script" (an interpreter's: a folder is
     its entry point, `node server` is server.js), "module" (`python -m x`, `import x`),
-    "folder" (a plugin marketplace's); `base` where it is looked up from (a hook's `cwd`, a
-    `cd` before it); `said`: the command, for the owner, when it is found nowhere."""
+    "folder" (a plugin marketplace's), "maybe" (a path an unknown program is given: said when
+    it is there, as code the parser doesn't follow); `base` where it is looked up from (a
+    hook's `cwd`, a `cd` before it); `said`: the command, for the owner; `serves`: the server
+    it is part of ("mcp/name", "lsp/name", "mcp/name@agent"), "" for a hook's."""
 
     word: str
     kind: str
     base: str = ""
     said: str = ""
     runner: str = ""
+    serves: str = ""
 
 
 def located(top: Path, place: Path, ref: Ref, cwd: Path) -> Path | None:
     """The file or folder a reference names, if there: from its base (a hook's cwd, a `cd`),
     the setting's folder or the top; an absolute one only inside the top; a module as Python
     finds it there; an interpreter's folder, by its entry point."""
+    for candidate in candidates(top, place, ref, cwd):
+        if not os.path.lexists(candidate):
+            continue
+        found = Path(os.path.normpath(candidate))
+        if found.is_dir() and not found.is_symlink() and ref.kind != "folder":
+            entry = entry_point(found, ref.runner)
+            if entry is None:
+                continue  # A folder an argument names (a root, data): not what runs.
+            found = entry
+        return found
+    return None
+
+
+def expected(top: Path, place: Path, ref: Ref, cwd: Path) -> Path | None:
+    """Where a file a setting names by a path would be, inside the top, when it is nowhere
+    (a build's output, not built yet): kept as absent. None for a module or a program found
+    by name (on PATH)."""
+    if ref.kind not in {"file", "script"}:
+        return None
+    token = expanded(ref.word.split("=", 1)[-1] if ref.word.startswith("-") else ref.word, top, cwd)
+    if ref.kind == "file" and "/" not in token:
+        return None  # A program, found on PATH.
+    found = next(iter(candidates(top, place, ref, cwd)), None)
+    if found is None:
+        return None
+    found = Path(os.path.normpath(found))
+    return found if found.is_relative_to(top) and found != top else None
+
+
+def candidates(top: Path, place: Path, ref: Ref, cwd: Path) -> list[Path]:
     token = ref.word
     if token.startswith("-"):
         token = token.split("=", 1)[-1]
     token = expanded(token, top, cwd)
     if not token or token in {".", ".."} or "://" in token or token.startswith(("~", "-")):
-        return None
+        return []
+    if "$" in token or any(char in token for char in "*?["):
+        return []
     base = expanded(ref.base, top, cwd)
     if base and Path(base).is_absolute():
         bases = [Path(base)] if Path(base).is_relative_to(top) else []
@@ -491,25 +601,16 @@ def located(top: Path, place: Path, ref: Ref, cwd: Path) -> Path | None:
         if ref.kind == "script" and not Path(token).suffix and ref.runner in NODE_LIKE:
             names += [f"{token}{ext}" for ext in (".js", ".mjs", ".cjs", ".ts")]
     if Path(token).is_absolute():
-        candidates = [Path(token)] if Path(token).is_relative_to(top) else []
-    else:
-        candidates = [base / name for base in bases for name in names]
-    for candidate in candidates:
-        if not os.path.lexists(candidate):
-            continue
-        found = Path(os.path.normpath(candidate))
-        if found.is_dir() and not found.is_symlink() and ref.kind != "folder":
-            entry = entry_point(found, ref.runner)
-            if entry is None:
-                continue  # A folder an argument names (a root, data): not what runs.
-            found = entry
-        return found
-    return None
+        return [Path(token)] if Path(token).is_relative_to(top) else []
+    return [base / name for base in bases for name in names]
 
 
 def expanded(word: str, top: Path, cwd: Path) -> str:
     """A word with the project's and the session's folders put in (`$CLAUDE_PROJECT_DIR`,
-    `${COPILOT_SESSION_CWD}`, `$PWD`)."""
+    `${CLAUDE_PROJECT_DIR:-.}`, `${COPILOT_SESSION_CWD}`, `$PWD`)."""
+    word = DEFAULTED.sub(
+        lambda found: f"${{{found[1]}}}" if found[1] in KNOWN_VARIABLES else found[0], word
+    )
     return SESSION_DIR.sub(lambda _: str(cwd), PROJECT_DIR.sub(lambda _: str(top), word))
 
 
@@ -529,129 +630,396 @@ def entry_point(folder: Path, runner: str) -> Path | None:
     return None
 
 
-def references(path: Path, text: str, code: list | None, setting: str) -> Iterator[Ref]:
+def references(path: Path, text: str, say: Callable[[str], None]) -> Iterator[Ref]:
     """What a setting's commands run (held_words), from its JSON, TOML, a custom agent's front
     matter (block or flow style), an extension's relative imports; commands that run project
-    code by a name (`npm run`) go to `code`."""
+    code by a name (`npm run`), or that the parser does not follow, go to `say`."""
     suffix = path.suffix.lower()
     if suffix in {".mjs", ".cjs", ".js"}:
         for found in IMPORTS.finditer(text):
             yield Ref(found[1], "file")
         return
+    agent = ""
     if suffix == ".md":
         data: Any = front_matter(text)
+        if data is None:
+            # Read loosely (every command it names held as a hook's), and said.
+            say("its front matter, which Chief of Staff can't read as YAML")
+            data = loose_front_matter(text)
+        else:
+            agent = str(data.get("name") or path.name.split(".")[0])
     else:
         try:
             data = tomllib.loads(text) if suffix == ".toml" else json.loads(text)
         except (ValueError, tomllib.TOMLDecodeError):
             return
-    for command in walked(data):
+    for command in walked(data, "", agent):
         if command.folders:
-            yield from (Ref(word, "folder") for word in command.arguments)
+            yield from (Ref(word, "folder", serves=command.serves) for word in command.arguments)
             continue
-        base = command.cwd
-        for word in command.files:
-            yield Ref(word, "file", base)
-        for segment in segments(split(command.line) + command.arguments):
-            if segment[:1] == ["cd"] and len(segment) == 2:
-                base = str(Path(base) / segment[1]) if base else segment[1]
-                continue
-            note = f"{setting} runs `{said}`" if (said := project_code(segment)) else ""
-            if code is not None and note and note not in code:
-                code.append(note)
-            yield from (ref._replace(base=base) for ref in held_words(segment))
+        yield from (ref._replace(serves=command.serves) for ref in command_refs(command, say))
 
 
-INTERPRETERS = {"python", "python2", "python3", "node", "bash", "sh", "zsh", "dash", "ruby",
-                "perl", "php", "deno", "bun", "pwsh", "powershell", "tsx", "ts-node",
-                "lua"}  # fmt: skip
+def command_refs(command: Command, say: Callable[[str], None]) -> Iterator[Ref]:
+    """What one setting's command runs: the files its environment runs (`BASH_ENV`,
+    `NODE_OPTIONS=--require x`, `LD_PRELOAD`), a program its PATH finds in the project, and
+    each simple command of its line and arguments, from its `cwd`."""
+    environment = command.environment
+    for name, value in environment.items():
+        if name in RUN_VARIABLES:
+            yield Ref(value, "file", command.cwd)
+        elif name == "NODE_OPTIONS":
+            words = split(value) or []
+            for index, word in enumerate(words):
+                if word in NODE_CODE and index + 1 < len(words):
+                    yield Ref(words[index + 1], "file", command.cwd)
+                elif "=" in word and word.split("=", 1)[0] in NODE_CODE:
+                    yield Ref(word.split("=", 1)[1], "file", command.cwd)
+        elif name in {"LD_PRELOAD", "DYLD_INSERT_LIBRARIES"}:
+            yield from (Ref(part, "file", command.cwd) for part in value.split(":") if part)
+        elif name in {"PATH", "PYTHONPATH", "NODE_PATH", "RUBYLIB", "PERL5LIB"} and any(
+            not part.startswith("/") or "$" in part for part in value.split(":") if part
+        ):
+            # A folder of the project put where programs or modules are looked up first: said;
+            # a program it finds there (PATH=./bin, the command `tool`), held.
+            say(f"{command.line or ' '.join(command.arguments)} (with {name}={value})")
+            program = command.line.strip()
+            if name == "PATH" and program and "/" not in program and " " not in program:
+                for part in value.split(":"):
+                    if part and not part.startswith("/") and "$" not in part:
+                        yield Ref(f"{part.rstrip('/')}/{program}", "program", command.cwd)
+    line = command.line
+    if command.program:
+        # A server's program and its arguments (not a shell line): as the shell would be given
+        # them, quoted.
+        line = " ".join(map(shlex.quote, [line, *command.arguments]))
+    for words, base in simple_commands(line, command.cwd, say):
+        if said := project_code(words):
+            say(said)
+        yield from (ref._replace(base=base) for ref in held_words(words, say))
+
+
+INTERPRETERS = {"python", "python2", "python3", "node", "bash", "sh", "zsh", "dash", "ksh",
+                "fish", "ruby", "perl", "php", "deno", "bun", "pwsh", "powershell", "tsx",
+                "ts-node", "lua", "rscript", "julia", "tclsh", "osascript"}  # fmt: skip
 NODE_LIKE = {"node", "deno", "bun", "tsx", "ts-node"}
 # An interpreter's options whose value is not its script (python -W x, node --env-file .env).
-VALUED = {"-W", "-X", "-Q", "-o", "-O", "-I", "-r", "--require", "--import", "--loader",
-          "--env-file", "--inspect-port", "--title", "--config", "-C", "--cwd"}  # fmt: skip
-# Options after which no script follows (python -m module, sh -c line, node -e code).
-NO_SCRIPT = {"-m", "-c", "-e", "-p", "--eval", "--print", "-Command", "-EncodedCommand"}
-REDIRECT = re.compile(r"^(?:[0-9&]?>>?|<)")
+VALUED = {"-W", "-X", "-Q", "-o", "-O", "-I", "--env-file", "--inspect-port", "--title",
+          "--config", "-C", "--cwd"}  # fmt: skip
+# Node's options whose value is code it loads first (node -r ./pre.js server.js).
+NODE_CODE = {"-r", "--require", "--import", "--loader", "--experimental-loader"}
+# An interpreter's options whose value is code in the line itself (node -e, ruby -e, php -r).
+INLINE = {"-e", "-p", "--eval", "--print", "-Command", "-EncodedCommand", "-E"}
+# Programs that read a program from a file an option names (awk -f x.awk).
+FILE_OPTIONS = {"awk": {"-f"}, "gawk": {"-f"}, "mawk": {"-f"}, "nawk": {"-f"}, "sed": {"-f"},
+                "jq": {"-f", "--from-file"}}  # fmt: skip
+# Words that run what follows them (`exec timeout 5 ./x.sh`): left out, with their options
+# and as many arguments as given here.
+WRAPPERS = {"exec": 0, "command": 0, "builtin": 0, "nohup": 0, "time": 0, "nice": 0,
+            "timeout": 1, "stdbuf": 0, "caffeinate": 0, "chronic": 0}  # fmt: skip
+# Keywords before a command (`then ./x.sh`): left out.
+LEADING = {"then", "do", "else", "elif", "if", "while", "until", "!", "{", "(", "time"}
+# What the parser does not follow (a loop over files, code run later): said.
+UNFOLLOWED = {"for", "case", "select", "function", "eval", "trap", "alias", "xargs", "coproc",
+              "parallel", "watch", "find"}  # fmt: skip
+# Programs whose arguments are data, never code (nothing of theirs is held or said).
+DATA = {"true", "false", ":", "exit", "return", "echo", "printf", "test", "[", "[[", "set",
+        "shift", "read", "wait", "sleep", "unset", "export", "local", "declare", "readonly",
+        "fi", "done", "esac", "}", "]]", "]", ")", "cat", "ls", "mkdir", "rm", "rmdir", "touch",
+        "cp", "mv", "date", "pwd", "git", "gh", "grep", "egrep", "rg", "wc", "head", "tail",
+        "sort", "uniq", "cut", "tr", "diff", "cmp", "basename", "dirname", "realpath",
+        "readlink", "stat", "chmod", "chown", "ln", "which", "type", "file", "du", "df", "tar",
+        "zip", "unzip", "gzip", "open", "xdg-open", "curl", "wget", "notify-send",
+        "terminal-notifier", "say", "afplay", "logger", "yq", "sha256sum", "shasum", "md5",
+        "md5sum", "base64", "column", "tee", "jq"}  # fmt: skip
 # Variables whose value is a file the shell or interpreter runs first.
-RUN_VARIABLES = {"BASH_ENV", "ENV", "PYTHONSTARTUP"}
+RUN_VARIABLES = {"BASH_ENV", "ENV", "PYTHONSTARTUP", "ZDOTDIR"}
 IMPORTED = re.compile(r"(?:^|[;\n])\s*(?:import\s+([\w.]+)|from\s+([\w.]+)\s+import)")
+# A script a line of inline code names (ruby -e "load 'tools/s.rb'").
+NAMED_SCRIPT = re.compile(r"""["']([\w./-]+\.(?:py|rb|js|mjs|cjs|ts|pl|php|lua|sh))["']""")
+OPERATOR_CHARS = "();<>|&\n"
+# A word that names files by a pattern (`scripts/*.sh`, `*.py`), not data with a `*` in it.
+GLOB = re.compile(r"[*?](?=[^/]*$)(?:.*/|.*\.\w+$)|/.*[*?]|^\.?[*?]")
 
 
-def held_words(words: list[str]) -> list[Ref]:
-    """What one command runs: itself when it is a path, an interpreter's script (its first
-    word that is no option: `python tools/x.py`, `node tools/server`, `uv run --script x.py`),
-    the modules of `python -m x` or `python -c "import x"`, a file a variable runs
-    (`BASH_ENV=x.sh`), and any word naming a script by its extension. Never where its output
-    goes (`>> logs/x.log`, `tee`), nor an option's value that is no script (`--db ./dev.db`)."""
+def tokens(line: str) -> list[str] | None:
+    """A shell line's words and operators (`;`, `&&`, `|`, `>`, `(`, a newline), as a POSIX
+    shell reads them; None when it can't be read (an unclosed quote)."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=OPERATOR_CHARS)
+    lexer.whitespace_split = True
+    lexer.whitespace = " \t\r"
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def pieces(words: list[str]) -> tuple[list[tuple[list[str], bool]], bool, list[str]]:
+    """A line's simple commands (each with whether a pipe feeds it), redirections and their
+    targets left out; whether it holds what the parser does not follow (a here-document, a
+    command substitution whose output is more than data: `echo "$(date)"` is data, `sh -c
+    "$(cat x)"` is code); the lines of its command substitutions, read as commands too."""
+    found: list[tuple[list[str], bool]] = []
+    inner: list[str] = []
+    unfollowed = False
+    current: list[str] = []
+    piped = skip = False
+    for word in [*words, ";"]:
+        if skip:
+            skip = False
+            continue
+        if word and all(char in OPERATOR_CHARS for char in word):
+            op = word.replace("\n", "")
+            if "<" in op or ">" in op:
+                if current and current[-1].isdigit():
+                    current.pop()  # A file descriptor (2>).
+                unfollowed = unfollowed or op.startswith("<<")  # A here-document.
+                skip = True
+                continue
+            if current and current[-1] == "$" and "(" in op:
+                current.pop()  # $(…) unquoted: its commands are read as commands of the line.
+                unfollowed = unfollowed or not current or Path(current[0]).name not in DATA
+            if current:
+                found.append((current, piped))
+            piped = "|" in op and "||" not in op
+            current = []
+            continue
+        if "$(" in word or "`" in word:
+            unfollowed = unfollowed or not current or Path(current[0]).name not in DATA
+            inner += [a or b for a, b in re.findall(r"\$\(([^()]*)\)|`([^`]*)`", word)]
+        current.append(word)
+    return found, unfollowed, inner
+
+
+def simple_commands(
+    line: str, base: str, say: Callable[[str], None], depth: int = 0
+) -> Iterator[tuple[list[str], str]]:
+    """The simple commands of a shell line, each with the folder it runs in (a hook's `cwd`,
+    then `cd`, `pushd`, `popd`): split at its operators, subshells opened, redirections left
+    out, a shell's `-c` line and command substitutions read too. What the parser does not
+    follow is said (`say`, the whole line), never dropped; its commands are still read."""
+    words = tokens(line)
+    if words is None or depth > 4:
+        say(line)
+        return
+    commands, unfollowed, inner = pieces(words)
+    if "`" in line:
+        unfollowed = True  # Backquotes: what they give, the parser does not follow.
+        inner += [found for found in re.findall(r"`([^`]*)`", line) if found not in inner]
+    folders = [base]
+    for text in inner:
+        yield from simple_commands(text, folders[-1], say, depth + 1)
+    for found, piped in commands:
+        words = unwrapped(found)
+        if not words:
+            continue
+        name = Path(words[0]).name
+        if name in {"cd", "pushd", "popd"}:
+            unfollowed = not moved(words, folders) or unfollowed
+            continue
+        if name in SHELLS and (inline := shell_line(words)) is not None:
+            if inline:
+                yield from simple_commands(inline, folders[-1], say, depth + 1)
+            else:
+                unfollowed = True
+            continue
+        if not followed(words, piped):
+            unfollowed = True
+        yield words, folders[-1]
+    if unfollowed:
+        say(line)
+
+
+def unwrapped(words: list[str]) -> list[str]:
+    """A command without the words before it that only run it (`then`, `exec`, `timeout 5`)."""
+    while words:
+        if words[0] in LEADING:
+            words = words[1:]
+        elif words[0] in WRAPPERS:
+            count = WRAPPERS[words[0]]
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2:] if words[0] in {"-n", "-s", "-k", "--signal"} else words[1:]
+            words = words[count:]
+        else:
+            return words
+    return words
+
+
+def moved(words: list[str], folders: list[str]) -> bool:
+    """A `cd`, `pushd` or `popd`, followed (folders: the stack, the current last); False when
+    where it goes can't be said (a variable it doesn't know)."""
+    name = Path(words[0]).name
+    if name == "popd":
+        if len(folders) > 1:
+            folders.pop()
+        return True
+    target = next((word for word in words[1:] if not word.startswith("-")), "")
+    if not target or "$" in known_removed(target) or target.startswith("~"):
+        return False  # Home, the folder before, one a variable names: not followed.
+    here = folders[-1]
+    where = (
+        target
+        if Path(target).is_absolute() or target.startswith("$") or not here
+        else (str(Path(here) / target))
+    )
+    if name == "pushd":
+        folders.append(where)
+    else:
+        folders[-1] = where
+    return True
+
+
+def known_removed(word: str) -> str:
+    """A word without the variables the parser knows (the project's and the session's folder)."""
+    return PROJECT_DIR.sub("", SESSION_DIR.sub("", DEFAULTED.sub(
+        lambda found: "" if found[1] in KNOWN_VARIABLES else found[0], word
+    )))  # fmt: skip
+
+
+def shell_line(words: list[str]) -> str | None:
+    """A shell's own line (`bash -lc 'x'`, `sh -ec`, `bash --noprofile -c`): that line, ""
+    when it gives none; None when the shell runs a script (or reads its input) instead."""
+    options = []
+    rest = list(words[1:])
+    while rest and rest[0].startswith("-") and rest[0] != "-":
+        options.append(rest.pop(0))
+    if any(
+        (option.startswith("-") and not option.startswith("--") and "c" in option)
+        or option in {"-Command", "-command", "-EncodedCommand"}
+        for option in options
+    ):
+        return rest[0] if rest else ""
+    return None
+
+
+def followed(words: list[str], piped: bool) -> bool:
+    """Whether the parser can say what a command runs: not a loop or code run later, not a
+    command named by a variable it doesn't know, not a glob over files, not an interpreter fed
+    its program through a pipe."""
+    name = Path(words[0]).name.lower()
+    if name in UNFOLLOWED or "$" in known_removed(words[0]):
+        return False
+    if any(GLOB.search(word) for word in words[1:] if not word.startswith("-")):
+        return name in DATA  # A glob: which files, the parser can't say (but as data).
+    if piped and (name in SHELLS or name in INTERPRETERS or name.startswith("python")):
+        operands = [word for word in words[1:] if not word.startswith("-")]
+        return bool(operands) and operands[0] != "-"
+    return True
+
+
+def held_words(words: list[str], say: Callable[[str], None] | None = None) -> list[Ref]:
+    """What one simple command runs: itself when it is a path, an interpreter's script (its
+    first word that is no option: `python tools/x.py`, `node tools/server`, `uv run --script
+    x.py`), code an option loads (`node -r ./pre.js`, `awk -f x.awk`), the modules of `python
+    -m x` or `python -c "import x"`, a file a variable runs (`BASH_ENV=x.sh`), a file it
+    sources, any word naming a script by its extension; a path an unknown program is given
+    ("maybe": said if it is there). Never where its output goes (`tee`), nor an option's value
+    that is no code (`--db ./dev.db`)."""
+    say = say or (lambda said: None)
     refs: list[Ref] = []
-    while words and "=" in words[0] and not words[0].startswith("-"):
+    while words and "=" in words[0] and not words[0].startswith(("-", "=")):
         name, _, value = words[0].partition("=")
         if name in RUN_VARIABLES and value:
             refs.append(Ref(value, "file"))
         words = words[1:]  # Variables set for it.
-    if words[:1] == ["env"]:
-        return refs + held_words(words[1:])
-    kept: list[str] = []
-    skip = False
-    for word in words:
-        if skip:
-            skip = False
-        elif REDIRECT.match(word):
-            skip = word in {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>", "<"}
-        else:
-            kept.append(word)
-    if not kept or Path(kept[0]).name == "tee":
+    if not words:
         return refs
-    if "/" in kept[0] or kept[0].startswith("."):
-        refs.append(Ref(kept[0], "file"))
-    runner = Path(kept[0]).name.removesuffix(".exe").lower()
-    said = " ".join(kept)
-    said = said if len(said) <= 60 else said[:59] + "…"
-    refs += interpreted(runner, kept[1:], said)
+    command = Path(words[0]).name.removesuffix(".exe").lower()
+    if command == "env":
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in {"-u", "-C", "-S", "--unset", "--chdir"} else rest[1:]
+        return refs + held_words(rest, say)
+    if command in {"source", "."}:
+        return refs + ([Ref(words[1], "script", runner="sh")] if len(words) > 1 else [])
+    if "/" in words[0] or words[0].startswith("."):
+        refs.append(Ref(words[0], "file"))
+    said = shortened(" ".join(words))
+    refs += interpreted(command, words[1:], said, say)
+    if command in FILE_OPTIONS:
+        wanted = FILE_OPTIONS[command]
+        refs += [
+            Ref(words[i + 1], "file") for i, word in enumerate(words[1:-1], 1) if word in wanted
+        ]
     named = {ref.word for ref in refs}
-    refs += [
-        Ref(word, "file") for word in kept[1:]
-        if Path(word.split("=", 1)[-1]).suffix.lower() in SCRIPTS and word not in named
-    ]  # fmt: skip
+    for word in words[1:]:
+        value = word.split("=", 1)[-1] if word.startswith("-") else word
+        if word in named or value in named or command in DATA:
+            continue  # (What `cat`, `git`, `tee`… are given is data.)
+        if Path(value).suffix.lower() in SCRIPTS:
+            refs.append(Ref(value, "file"))
+            named.add(value)
+        elif (
+            command not in DATA
+            and command not in INTERPRETERS
+            and not command.startswith("python")
+            and command not in RUNNERS
+            and ("/" in value or value.startswith("."))
+            and not word.startswith("-")
+        ):
+            refs.append(Ref(value, "maybe", said=said))  # An unknown program's: said if there.
     return refs
 
 
-def interpreted(runner: str, rest: list[str], said: str) -> list[Ref]:
-    """What an interpreter runs: its script (`node --import x server.js`: server.js), the
-    module of `python -m x`, those `python -c "…"` imports."""
+def interpreted(runner: str, rest: list[str], said: str, say: Callable[[str], None]) -> list[Ref]:
+    """What an interpreter runs: its script (`node --import x server.js`: server.js, and x),
+    the module of `python -m x`, those `python -c "…"` imports; inline code (`ruby -e`), said,
+    with the scripts it names."""
     if runner == "uv":
         if rest[:1] != ["run"]:
             return []
         rest = rest[1:]
         found = first_operand(rest)
+        if found and (Path(found).name in INTERPRETERS or Path(found).name.startswith("python")):
+            index = rest.index(found)
+            return interpreted(Path(found).name, rest[index + 1 :], said, say)
         script = "--script" in rest or Path(found).suffix.lower() in SCRIPTS
         return [Ref(found, "script", said=said, runner="python")] if found and script else []
+    if runner == "uvx":
+        if any(
+            word in {"--from", "--with", "--with-editable"} and value.startswith((".", "/"))
+            for word, value in pairwise(rest)
+        ):
+            say(said)  # The project itself, installed and run.
+        return []
     if not (runner in INTERPRETERS or runner.startswith("python")):
         return []
     if runner in {"deno", "bun"} and rest[:1] == ["run"]:
         rest = rest[1:]
+    refs: list[Ref] = []
+    if runner in NODE_LIKE:
+        refs += [Ref(rest[i + 1], "file") for i, word in enumerate(rest[:-1]) if word in NODE_CODE]
+        refs += [
+            Ref(word.split("=", 1)[1], "file") for word in rest
+            if "=" in word and word.split("=", 1)[0] in NODE_CODE
+        ]  # fmt: skip
     if runner.startswith("python"):
         if "-m" in rest[:-1]:
             return [Ref(rest[rest.index("-m") + 1], "module", said=said, runner=runner)]
         if "-c" in rest[:-1]:
             line = rest[rest.index("-c") + 1]
-            return [
+            refs += [Ref(found, "file") for found in NAMED_SCRIPT.findall(line)]
+            return refs + [
                 Ref(found[1] or found[2], "module", said=said, runner=runner)
                 for found in IMPORTED.finditer(line)
             ]
-    if any(word in NO_SCRIPT for word in rest[:4]):
-        return []
-    found = first_operand(rest)
-    return [Ref(found, "script", said=said, runner=runner)] if found else []
+    inline = next((i for i, word in enumerate(rest[:-1]) if word in INLINE), None)
+    if inline is not None or (runner == "php" and "-r" in rest[:-1]):
+        line = rest[(inline if inline is not None else rest.index("-r")) + 1]
+        say(said)  # Code in the line itself: what it loads, the parser doesn't follow.
+        return refs + [Ref(found, "file") for found in NAMED_SCRIPT.findall(line)]
+    found = first_operand(rest, NODE_CODE if runner in NODE_LIKE else set())
+    return refs + ([Ref(found, "script", said=said, runner=runner)] if found else [])
 
 
-def first_operand(words: list[str]) -> str:
+def first_operand(words: list[str], valued: set[str] | frozenset = frozenset()) -> str:
     skip = False
     for word in words:
         if skip:
             skip = False
         elif word.startswith("-"):
-            skip = word in VALUED
+            skip = word in VALUED or word in valued
         else:
             return word
     return ""
@@ -662,62 +1030,160 @@ class Command(NamedTuple):
     arguments: list[str]
     folders: bool = False
     cwd: str = ""
-    files: tuple[str, ...] = ()
+    environment: dict = {}  # noqa: RUF012  (Never changed: read only.)
+    serves: str = ""
+    program: bool = False
 
 
-def walked(data: Any) -> Iterator[Command]:
+def walked(data: Any, serves: str = "", agent: str = "") -> Iterator[Command]:
     """The commands in a parsed setting: each command (a hook's `command`/`bash`, with its
-    `cwd` and the files its `env` runs; a server's `command` with its `args`), each `path` (a
-    plugin marketplace's own folder)."""
+    `cwd` and `env`; a server's `command` with its `args`), each `path` (a plugin
+    marketplace's own folder); `serves`, the server one is part of (under `mcpServers`,
+    `lspServers`, a custom agent's `mcp-servers`: "mcp/name", "lsp/name", "mcp/name@agent")."""
     if isinstance(data, dict):
-        arguments = [a for a in data.get("args") or [] if isinstance(a, str)]
+        arguments = [str(a) for a in data.get("args") or [] if isinstance(a, (str, int, float))]
         cwd = str(data["cwd"]) if isinstance(data.get("cwd"), str) else ""
-        environment: dict = data["env"] if isinstance(data.get("env"), dict) else {}
-        files = tuple(str(v) for k, v in environment.items() if k in RUN_VARIABLES and v)
+        environment = {
+            str(k): str(v) for k, v in (data.get("env") or {}).items()
+            if isinstance(data.get("env"), dict) and isinstance(v, (str, int, float))
+        }  # fmt: skip
+        program = isinstance(data.get("args"), list)
         for key in COMMAND_KEYS:
             if isinstance(data.get(key), str):
-                yield Command(data[key], arguments, cwd=cwd, files=files)
+                yield Command(data[key], arguments, cwd=cwd, environment=environment,
+                              serves=serves, program=program)  # fmt: skip
         if isinstance(data.get("path"), str):
-            yield Command("", [data["path"]], folders=True)
-        for value in data.values():
-            yield from walked(value)
+            yield Command("", [data["path"]], folders=True, serves=serves)
+        notify = data.get("notify")
+        if isinstance(notify, list) and notify and all(isinstance(w, str) for w in notify):
+            yield Command(notify[0], notify[1:], serves=serves, program=True)  # Codex's.
+        for key, value in data.items():
+            kind = SERVER_KEYS.get(str(key).casefold())
+            if kind and isinstance(value, dict) and not serves:
+                for name, server in value.items():
+                    yield from walked(server, f"{kind}/{name}" + (f"@{agent}" if agent else ""))
+            elif key not in COMMAND_KEYS:
+                yield from walked(value, serves, agent)
     elif isinstance(data, list):
         for value in data:
-            yield from walked(value)
+            yield from walked(value, serves, agent)
 
 
 def front_matter(text: str) -> Any:
-    """A custom agent's front matter, as far as its commands go: YAML's flow style (`{s:
-    {command: node, args: [x]}}`) read as such, block style line by line ({command, args})."""
+    """A custom agent's front matter, as values (its mcp-servers, hooks, name): YAML block
+    style as far as front matter goes (mappings, lists, scalars), flow style (`{s: {command:
+    node, args: [x]}}`) read as such. {} with none; None when it can't be read."""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
-        return []
+        return {}
+    body: list[str] = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if line.strip() and not line.lstrip().startswith("#"):
+            body.append(line.rstrip())
+    else:
+        return None
+    try:
+        value, rest = block(body, 0, 0)
+    except (ValueError, IndexError):
+        return None
+    return value if rest == len(body) else None
+
+
+def block(lines: list[str], start: int, indent: int) -> tuple[Any, int]:
+    """The YAML block at `start` (lines indented `indent`): a mapping, a list, or nothing."""
+    if start >= len(lines) or indentation(lines[start]) < indent:
+        return None, start
+    indent = indentation(lines[start])
+    if lines[start].strip().startswith("- ") or lines[start].strip() == "-":
+        items: list = []
+        index = start
+        while (
+            index < len(lines)
+            and indentation(lines[index]) == indent
+            and (lines[index].strip().startswith("-"))
+        ):
+            item = lines[index].strip()[1:].strip()
+            if ":" in item and not item.startswith(("'", '"', "{", "[")):
+                # A mapping in the list: its first key on the dash's line, the rest under it.
+                inner = [" " * (indent + 2) + item, *lines[index + 1 :]]
+                value, used = block(inner, 0, indent + 2)
+                items.append(value)
+                index += used
+            elif item:
+                items.append(scalar(item))
+                index += 1
+            else:
+                value, index = block(lines, index + 1, indent + 1)
+                items.append(value)
+        return items, index
+    found: dict = {}
+    index = start
+    while index < len(lines) and indentation(lines[index]) == indent:
+        key, colon, value = lines[index].strip().partition(":")
+        if not colon:
+            raise ValueError(lines[index])
+        key = key.strip().strip("\"'")
+        value = value.strip()
+        index += 1
+        if value and value[0] in "|>" and set(value[1:]) <= set("+-0123456789"):
+            text = []  # A block scalar (`description: |`): its lines, under it.
+            while index < len(lines) and indentation(lines[index]) > indent:
+                text.append(lines[index].strip())
+                index += 1
+            found[key] = "\n".join(text)
+        elif value:
+            found[key] = scalar(value)
+            while index < len(lines) and indentation(lines[index]) > indent:
+                index += 1  # A plain scalar's next lines (a long description).
+        elif (
+            index < len(lines)
+            and indentation(lines[index]) == indent
+            and (lines[index].strip().startswith("-"))
+        ):
+            found[key], index = block(lines, index, indent)  # A list at the key's indent.
+        else:
+            found[key], index = block(lines, index, indent + 1)
+    return found, index
+
+
+def loose_front_matter(text: str) -> list:
+    """Of a front matter the YAML reader can't read: each `command:` it says, with the `args`
+    under it, line by line."""
     found: list = []
     listing = False
-    for line in lines[1:]:
+    for line in text.splitlines()[1:]:
         if line.strip() == "---":
             break
         key, colon, value = line.strip().partition(":")
         value = value.strip()
-        if colon and value.startswith(("{", "[")):
-            with suppress(ValueError):
-                found.append(flow(value))
-                listing = False
-                continue
-        value = value.strip("\"'")
         if colon and key.strip("- ") in COMMAND_KEYS and value:
-            found.append({"command": value, "args": []})
+            found.append({"command": value.strip("\"'"), "args": []})
             listing = False
-        elif colon and key.strip("- ") == "args" and found and isinstance(found[-1], dict):
+        elif colon and key.strip("- ") == "args" and found:
             listing = not value
-            if value.startswith("["):
-                with suppress(ValueError):
-                    found[-1].setdefault("args", []).extend(map(str, flow(value)))
-        elif listing and line.strip().startswith("- ") and isinstance(found[-1], dict):
-            found[-1].setdefault("args", []).append(line.strip()[2:].strip().strip("\"'"))
+            with suppress(ValueError):
+                if value.startswith("["):
+                    found[-1]["args"].extend(map(str, flow(value)))
+        elif listing and line.strip().startswith("- "):
+            found[-1]["args"].append(line.strip()[2:].strip().strip("\"'"))
         else:
             listing = False
     return found
+
+
+def indentation(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def scalar(value: str) -> Any:
+    """A YAML value on one line: a flow collection, a quoted or plain scalar."""
+    if value.startswith(("{", "[")):
+        return flow(value)
+    if value[:1] in {"'", '"'} and value.endswith(value[0]) and len(value) > 1:
+        return value[1:-1]
+    return value.split(" #", 1)[0].strip()
 
 
 def flow(text: str) -> Any:
@@ -770,27 +1236,11 @@ def flow_value(text: str) -> tuple[Any, str]:
     return word.strip(), text[len(word) :]
 
 
-def split(line: str) -> list[str]:
+def split(line: str) -> list[str] | None:
     try:
         return shlex.split(line)
     except ValueError:
-        return line.split()
-
-
-def segments(words: list[str]) -> Iterator[list[str]]:
-    """The commands of a line, split at its shell operators; a shell's `-c` line read too."""
-    current: list[str] = []
-    for word in [*words, ";"]:
-        if word in {"&&", "||", ";", "|", "&"}:
-            if current:
-                name = Path(current[0]).name
-                if name in SHELLS and "-c" in current[:-1]:
-                    yield from segments(split(current[current.index("-c") + 1]))
-                else:
-                    yield current
-            current = []
-        else:
-            current.append(word)
+        return None
 
 
 def project_code(words: list[str]) -> str:
@@ -809,8 +1259,7 @@ def project_code(words: list[str]) -> str:
         (wanted := RUNNERS[name]) is not None and not (rest and rest[0] in wanted)
     ):
         return ""
-    line = " ".join(words)
-    return line if len(line) <= 60 else line[:59] + "…"
+    return shortened(" ".join(words))
 
 
 def restricted(snapshot: dict[str, dict], names: tuple[str, ...]) -> dict[str, dict]:
@@ -838,7 +1287,7 @@ def shown_entry(folder: str, entry: str) -> str:
     """An entry, as the owner reads it: its path from the top; a file a setting runs, with the
     setting ("tools/server.py (run by .mcp.json)")."""
     prefix = "" if folder == "." else f"{folder}/"
-    setting, _, ran = entry.partition(RUN)
+    setting, ran, _ = ran_of(entry)
     if ran:
         return f"{ran} (run by {prefix}{setting})"
     return prefix + setting.split("\0")[0]
@@ -848,17 +1297,22 @@ def named(folders: dict[str, dict]) -> list[str]:
     """The settings a snapshot holds, by path from the top (not the files they run)."""
     return sorted(
         {shown_entry(folder, entry) for folder, entries in folders.items() for entry in entries
-         if RUN not in entry}
+         if RUN not in entry and SERVES not in entry}
     )  # fmt: skip
 
 
-def changes(now: dict[str, dict], then: dict[str, dict]) -> list[tuple[str, str]]:
+def changes(
+    now: dict[str, dict], then: dict[str, dict], servers: bool = False
+) -> list[tuple[str, str]]:
     """(what, path) for each entry added, changed, removed, or never taken as unchanged
-    ("refused": a link out of the folder, a special file, said with why)."""
+    ("refused": a link out of the folder, a special file, said with why); what a server runs
+    only with `servers` (Codex's: a Copilot server's turns it off instead, servers_changed)."""
     found = []
     for folder in sorted(now.keys() | then.keys()):
         current, saved = now.get(folder, {}), then.get(folder, {})
         for entry in sorted(current.keys() | saved.keys()):
+            if SERVES in entry and not servers:
+                continue
             shown = shown_entry(folder, entry)
             value = current.get(entry) or saved[entry]
             if value[0] == PROGRAM and (entry not in current or not current[entry][2]):
@@ -872,6 +1326,38 @@ def changes(now: dict[str, dict], then: dict[str, dict]) -> list[tuple[str, str]
             elif current[entry] != saved[entry]:
                 found.append(("changed", shown))
     return found
+
+
+def servers_changed(now: dict[str, dict], then: dict[str, dict]) -> dict[str, list[str]]:
+    """{server ("mcp/name", "lsp/name", "mcp/name@agent"): the files it runs that differ from
+    `then`, shown}: a build's output made since, a server's source edited."""
+    found: dict[str, list[str]] = {}
+    for folder in sorted(now.keys() | then.keys()):
+        current, saved = now.get(folder, {}), then.get(folder, {})
+        for entry in sorted(current.keys() | saved.keys()):
+            if SERVES not in entry or current.get(entry) == saved.get(entry):
+                continue
+            value = current.get(entry) or saved[entry]
+            if value[0] == PROGRAM and (entry not in current or not current[entry][2]):
+                continue
+            server = ran_of(entry)[2]
+            found.setdefault(server, []).append(shown_entry(folder, entry))
+    return found
+
+
+def taken_servers(snapshot: dict, now: dict[str, dict], servers: set[str]):
+    """What these servers run, as `now` holds it, becomes the snapshot's (the owner said to
+    use them as they are)."""
+    for folder in now.keys() | snapshot["folders"].keys():
+        kept = snapshot["folders"].get(folder, {})
+        for entry in [e for e in kept if SERVES in e and ran_of(e)[2] in servers]:
+            del kept[entry]
+        kept |= {
+            entry: value for entry, value in now.get(folder, {}).items()
+            if SERVES in entry and ran_of(entry)[2] in servers
+        }  # fmt: skip
+        if kept:
+            snapshot["folders"][folder] = kept
 
 
 def described(found: list[tuple[str, str]]) -> str:
@@ -905,9 +1391,10 @@ def top_key(top: Path) -> str:
 
 # A snapshot, as kept: {"folders": {folder: {entry: [kind, digest]}}, "known": {folder:
 # [setting names it holds what was there of]}, "first": {folder: [setting names first seen
-# there, not looked at by the owner yet]}, "unchecked": {what of settings too many to check
-# the owner said to use as they were (unchecked_key: their names, those folders): glimpse},
-# "code": digest of the project code lines said (code_line)}.
+# there, not looked at by the owner yet]}, "carried": {folder: [setting names carried there
+# from the owner's checkout as it doesn't hold them]}, "unchecked": {what of settings too many
+# to check the owner said to use as they were (unchecked_key: their names, those folders):
+# glimpse}, "code": digest of the project code lines said (code_line)}.
 
 
 def unchecked_key(names: tuple[str, ...], folders: list[str]) -> str:
@@ -915,7 +1402,16 @@ def unchecked_key(names: tuple[str, ...], folders: list[str]) -> str:
 
 
 def fresh() -> dict:
-    return {"folders": {}, "known": {}, "first": {}, "unchecked": {}, "code": ""}
+    return {"folders": {}, "known": {}, "first": {}, "carried": {}, "unchecked": {}, "code": ""}
+
+
+def without_servers(snapshot: dict[str, dict]) -> dict[str, dict]:
+    """Of a snapshot's folders, all but what servers run (their own digest: a build between a
+    line and its click does not change what the owner is asked)."""
+    return {
+        folder: {entry: value for entry, value in entries.items() if SERVES not in entry}
+        for folder, entries in snapshot.items()
+    }
 
 
 def load(store: Any, top: Path) -> dict | None:
@@ -949,10 +1445,12 @@ def taken(snapshot: dict, now: dict[str, dict], folders: list[str], names: tuple
         kept |= restricted({folder: now.get(folder, {})}, names).get(folder, {})
         snapshot["folders"][folder] = kept
         snapshot["known"][folder] = sorted({*snapshot["known"].get(folder, []), *names})
-        if first := [n for n in snapshot["first"].get(folder, []) if n not in names]:
-            snapshot["first"][folder] = first
-        else:
-            snapshot["first"].pop(folder, None)
+        for marks in ("first", "carried"):
+            marked = snapshot.setdefault(marks, {})
+            if left := [n for n in marked.get(folder, []) if n not in names]:
+                marked[folder] = left
+            else:
+                marked.pop(folder, None)
 
 
 def unseen(snapshot: dict, now: dict[str, dict], missing: dict[str, tuple[str, ...]]):
@@ -967,13 +1465,23 @@ def unseen(snapshot: dict, now: dict[str, dict], missing: dict[str, tuple[str, .
             snapshot["first"][folder] = sorted({*snapshot["first"].get(folder, []), *found})
 
 
-def first_seen(snapshot: dict, now: dict[str, dict], then: dict[str, dict]) -> bool:
-    """Whether what differs is only what is in settings seen for the first time, there."""
+def first_seen(
+    snapshot: dict,
+    now: dict[str, dict],
+    then: dict[str, dict],
+    marks: str = "first",
+    servers: bool = False,
+) -> bool:
+    """Whether what differs is only what is in settings seen for the first time there
+    (`marks` "first"), or carried there from the owner's checkout as it doesn't hold them
+    ("carried")."""
     found = False
     for folder in now.keys() | then.keys():
         current, saved = now.get(folder, {}), then.get(folder, {})
-        first = snapshot["first"].get(folder, [])
+        first = snapshot.get(marks, {}).get(folder, [])
         for entry in current.keys() | saved.keys():
+            if SERVES in entry and not servers:
+                continue
             value = current.get(entry)
             if (value or saved[entry])[0] == PROGRAM and not (value and value[2]):
                 continue
@@ -1021,7 +1529,10 @@ def refresh(store: Any, top: Path, paths: list[str]):
         entry = path if folder == "." else path[len(folder) + 1 :]
         place = top if folder == "." else top / folder
         held = snapshot["folders"].setdefault(folder, {})
-        for key in [key for key in held if key == entry or key.startswith(entry + RUN)]:
+        for key in [
+            key for key in held
+            if key == entry or key.startswith((entry + RUN, entry + SERVES))
+        ]:  # fmt: skip
             del held[key]
         try:
             record(top, top / path, entry, held, budget)
@@ -1049,12 +1560,16 @@ def vet(store: Any, tree: Path, owner: Path, carried: list[str], untouched: bool
     for folder, entries in snapshot["folders"].items():
         prefix = "" if folder == "." else f"{folder}/"
         for entry in list(entries):
-            setting, _, ran = entry.partition(RUN)
+            setting, ran, _ = ran_of(entry)
             path = ran or prefix + setting.split("\0")[0]
             if path not in wanted and not any(path.startswith(f"{c}/") for c in wanted):
                 continue
-            owned = (theirs or {}).get("folders", {}).get(folder, {}).get(entry)
-            if owned is None and untouched:
+            # No worker could have written the owner's checkout: what is there now is theirs
+            # (their own tools change their local settings); else as its snapshot holds it.
+            owned = (
+                None if untouched else (theirs or {}).get("folders", {}).get(folder, {}).get(entry)
+            )
+            if untouched:
                 held: dict = {}
                 with suppress(TooLargeError):
                     record(
@@ -1064,9 +1579,12 @@ def vet(store: Any, tree: Path, owner: Path, carried: list[str], untouched: bool
             if owned == entries[entry]:
                 continue
             del entries[entry]
-            name = next((n for n in AGENT_SETTINGS if under(setting, n)), setting)
-            snapshot["first"][folder] = sorted({*snapshot["first"].get(folder, []), name})
             changed = True
+            if SERVES in entry:
+                continue  # A server's: that server is off for the worker until the owner says.
+            name = next((n for n in AGENT_SETTINGS if under(setting, n)), setting)
+            marked = snapshot.setdefault("carried", {})
+            marked[folder] = sorted({*marked.get(folder, []), name})
     if changed:
         save(store, tree, snapshot)
 

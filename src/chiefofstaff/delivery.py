@@ -125,6 +125,8 @@ class Delivery:
                 # there until the owner says to use them; this waits for it until then.
                 await self.runtime.settings_stop(session_id)
                 return message
+            # A server of its folder's changed or was let again: opened anew for this turn.
+            await self.runtime.servers_turn(session_id)
             self.rest_after(row)
         if batch and row["role"] in {ROUTER, SLACK}:
             if row["status"] == "working":

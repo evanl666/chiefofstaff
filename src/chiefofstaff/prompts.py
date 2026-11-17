@@ -654,11 +654,13 @@ def worker_context(
     gh_accounts: list[dict] | None = None,
     gh_acting: dict[str, str] | None = None,
     slack: bool = False,
+    held: list[str] | None = None,
 ) -> str:
     """`sandbox`: "" (no sandbox), "on", or "on-no-gh" (gh cannot reach GitHub inside it).
     `caches`: the sandbox lets it use the owner's dependency and build caches; `local`: and
     localhost. `gh_acting`: the account Chief of Staff acts as, by repository owner, where gh's
-    active one cannot reach them (GitHubSource.acting_login)."""
+    active one cannot reach them (GitHubSource.acting_login). `held`: the scripts its folder's
+    hooks run, read-only to it as the settings are (shown)."""
     lines = [
         f"Working directory: {cwd}",
         f"Your workspace: {workspace} (all yours: clone, build or download things there).",
@@ -720,13 +722,18 @@ def worker_context(
             'checkouts (and temporary folders); elsewhere they fail with "Operation not '
             "permitted\". The repositories' hooks and config are read-only: when your task "
             "asks you to push, use `git push origin HEAD`, without -u. So are their agent "
-            "settings (`.mcp.json`, `.github/hooks/`, `.github/agents/`, `.claude/settings*.json`, "
-            "`.codex/`…) and the scripts those run: if updating your branch (a merge, rebase or "
-            'pull) needs to change them, stop and tell the owner in one line, such as "main '
-            "changed .mcp.json; I can't update the branch's agent settings, so please update the "
-            'branch yourself or let me continue without it". git and gh use the '
-            "owner's GitHub sign-in through Copilot's proxy. When the task needs access the "
-            'sandbox denies, report(status="blocked") saying what; never work around it.'
+            "settings (`.mcp.json`, `.github/mcp.json`, `.github/lsp.json`, `.github/hooks/`, "
+            "`.github/copilot/`, `.github/extensions/`, `.github/agents/`, "
+            "`.claude/settings.json`, `.claude/settings.local.json`, `.claude/agents/`, and in "
+            "the owner's checkout `.codex/`) and the scripts their hooks run"
+            + (f" ({', '.join(held)})" if held else "")
+            + ". Before you update your branch (a merge, rebase or pull), list what it would "
+            "change (`git diff --name-only HEAD...<target>`): if that touches any of them, "
+            "don't start it; tell the owner in one line, such as \"main changed .mcp.json; I "
+            "can't update the branch's agent settings, so please update the branch yourself or "
+            "let me continue without it\". git and gh use the owner's GitHub sign-in through "
+            "Copilot's proxy. When the task needs access the sandbox denies, "
+            'report(status="blocked") saying what; never work around it.'
         )
         lines.append(
             "Servers on localhost work (a test's server, a build daemon)."

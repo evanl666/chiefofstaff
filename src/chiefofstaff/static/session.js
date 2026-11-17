@@ -793,8 +793,8 @@ function renderMessage(original) {
       // Agent settings in a worker's folder that changed: the owner's to use (theirs, say).
       const settings = meta.settings
         ? el("button", { type: "button", class: "link", text: "Open Settings", onclick: (event) => { event.stopPropagation(); openSettings(meta.settings); } })
-        : meta.agent_settings
-          ? useSettingsButton(message.session_id, meta.agent_settings)
+        : meta.agent_settings || meta.agent_servers
+          ? useSettingsButton(message.session_id, meta.agent_settings || meta.agent_servers)
           : meta.git_quarantine
             ? quarantineButtons(message.session_id, meta.git_quarantine.removable)
             : meta.git_replaced

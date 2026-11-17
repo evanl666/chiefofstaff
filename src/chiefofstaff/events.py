@@ -485,8 +485,6 @@ class Events:
             self.runtime.settings_glance(row["id"])  # (A custom agent's servers start now.)
 
     def tool_start(self, row: dict, event: Any):
-        if row["role"] == WORKER:
-            self.runtime.settings_glance(row["id"])  # (What it runs may load settings.)
         data = event.data
         name = getattr(data, "tool_name", "") or "tool"
         self.states[row["id"]].turn_tools += 1
@@ -667,6 +665,8 @@ class Events:
             self.runtime.background(self.runtime.git_watch_after(session_id))
         if row["role"] == WORKER:
             self.runtime.git_after_turn(session_id)  # (A .git it replaced.)
+            # (A branch update of its turn that stopped halfway: said, with how to undo it.)
+            self.runtime.background(self.runtime.half_updated(session_id))
         # Its session is free again: messages queue as usual. A turn that ended because it was
         # aborted (stopped, its task cancelled) owes no report.
         aborted, state.after_abort = state.after_abort, False
@@ -876,6 +876,27 @@ class Events:
         if getattr(request, "kind", "") == "shell":
             return await asyncio.to_thread(permission_denial, row, request, writable)
         return permission_denial(row, request, writable)
+
+    async def pre_tool(self, data: dict, invocation: dict) -> dict | None:
+        """Before each tool a Copilot worker runs, Copilot waiting for the answer (before its
+        folder's own preToolUse hooks, whose scripts a folder moved into place could have
+        replaced: the sandbox holds paths): its folder's settings looked at (a glance, the full
+        check only when that changed: Runtime.settings_look), and a server off for it not
+        started (Runtime.server_refusal). None lets it run as it would."""
+        row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
+        if not row or row["role"] != WORKER or row["closed_at"] or not row["cwd"]:
+            return None
+        tool = str(data.get("toolName") or "")
+        why = self.runtime.server_refusal(row, tool, data.get("toolArgs"))
+        if not why:
+            try:
+                why = await self.runtime.settings_look(row)
+            except Exception:
+                logger.warning("Could not look at %s's agent settings.", row["id"], exc_info=True)
+                return None
+        if why:
+            return {"permissionDecision": "deny", "permissionDecisionReason": why}
+        return None
 
     async def on_permission(self, request: Any, invocation: dict):
         row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))

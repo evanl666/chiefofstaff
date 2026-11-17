@@ -463,6 +463,23 @@ def added_since(listed: str) -> str:
     )
 
 
+def unused(listed: str) -> str:
+    return (
+        f"Copilot settings in a folder of this checkout workers haven't used yet ({listed}); "
+        "look at them once. Chief of Staff won't start the worker there until you say to use them."
+    )
+
+
+def held(entries: dict) -> list[str]:
+    """What a folder's settings run, as held: hooks' files, and servers' ("path@server")."""
+    found = []
+    for entry in entries:
+        _, ran, server = settings_guard.ran_of(entry)
+        if ran:
+            found.append(f"{ran}@{server}" if server else ran)
+    return sorted(found)
+
+
 def settings_notices(harness, worker) -> list[dict]:
     return [m for m in harness.store.messages(worker) if m["meta"].get("agent_settings")]
 
@@ -1030,7 +1047,7 @@ async def test_a_second_folder_of_the_owners_checkout_is_the_owners_to_look_at_o
                           project=projects[1])  # fmt: skip
         await settle(runtime)
         assert not runtime.states.is_live(web["session_id"])
-        assert settings_notices(harness, web["session_id"])[-1]["text"] == added_since(
+        assert settings_notices(harness, web["session_id"])[-1]["text"] == unused(
             "web/.claude/settings.json"
         )
         await use_them(runtime, harness, web["session_id"])
@@ -1396,7 +1413,7 @@ async def test_settings_a_worker_moves_into_place_are_the_owners_to_look_at(
                           project=projects[1], in_place=True)  # fmt: skip
         await settle(runtime)
         assert not runtime.states.is_live(web["session_id"])
-        assert settings_notices(harness, web["session_id"])[-1]["text"] == added_since(
+        assert settings_notices(harness, web["session_id"])[-1]["text"] == unused(
             "web/.claude/settings.json, web/.github/hooks/p.json"
         )
         assert await runtime.codex_settings(harness.store.session(api["session_id"])) == [
@@ -1482,8 +1499,8 @@ async def test_a_link_out_of_the_repository_is_held_by_where_it_leads(
     tmp_path, git_repo, monkeypatch
 ):
     """A settings file kept in a dotfiles repository, linked in: held by its content, the
-    owner's to use as any. A virtualenv's python a setting runs: like a program on PATH, never
-    waited for, unless it is made to lead where workers can write."""
+    owner's to use as any. A virtualenv's python a server runs: like a program on PATH, nothing
+    to it, unless it is made to lead where workers can write: then that server is off."""
     dotfiles = tmp_path / "dotfiles"
     dotfiles.mkdir()
     (dotfiles / "claude.json").write_text('{"permissions": {}}')
@@ -1526,10 +1543,11 @@ async def test_a_link_out_of_the_repository_is_held_by_where_it_leads(
         (git_repo / ".venv" / "bin" / "python").unlink()
         (git_repo / ".venv" / "bin" / "python").symlink_to(planted)
         await runtime.owner_send(worker, "Again")
-        assert not runtime.states.is_live(worker)
-        assert settings_notices(harness, worker)[-1]["text"] == refusal(
-            "changed .venv/bin/python (run by .mcp.json)"
-        )
+        assert runtime.states.is_live(worker)
+        assert harness.session(worker).options["disabled_mcp_servers"] == ["s"]
+        assert [t for k, t in harness.kinds(worker) if t.startswith("Its MCP")] == [
+            "Its MCP server s changed in this worker's folder, so it runs without it."
+        ]
     finally:
         await runtime.stop()
 
@@ -1577,9 +1595,10 @@ HOOKED = {
 
 
 async def test_the_files_settings_run_are_held_with_them(tmp_path, git_repo, monkeypatch):
-    """A hook's script, an MCP, language or agent's server named by its settings: changed, the
-    worker waits as for the settings themselves. A command that runs project code otherwise
-    (`uv run`) is said once: a change to that code isn't caught."""
+    """A hook's script named by its settings: changed, the worker waits as for the settings
+    themselves. What an MCP, language or agent's server runs, changed: that server is off for
+    the worker from its next start, said once, never a wait. A command that runs project code
+    otherwise (`uv run`) is said once: a change to that code isn't caught."""
     for name, text in HOOKED.items():
         commit(git_repo, name, text)
     trusting(tmp_path, monkeypatch, git_repo)
@@ -1595,26 +1614,34 @@ async def test_the_files_settings_run_are_held_with_them(tmp_path, git_repo, mon
             "Staff can't check (.mcp.json runs `uv run server`): a change to that code takes "
             "effect without asking you."
         ]
-        for name in ("tools/mcp_server.py", ".claude/hooks/check.sh", "scripts/check.sh",
-                     "lsp/server.js", "tools/agent_server.sh"):  # fmt: skip
-            (cwd / name).write_text("planted\n")
+        # What its servers run (it develops them): no wait; off from its next start, said once.
+        for name in ("tools/mcp_server.py", "lsp/server.js", "tools/agent_server.sh"):
+            (cwd / name).write_text("built again\n")
         await runtime.owner_send(worker, "Next")
+        await settle(runtime)
+        assert runtime.states.is_live(worker) and not settings_notices(harness, worker)
+        then = settings_guard.load(harness.store, cwd)["folders"]
+        assert settings_guard.servers_changed(settings_guard.scan(cwd, cwd), then) == {
+            "lsp/x": ["lsp/server.js (run by .github/lsp.json)"],
+            "mcp/t@a": ["tools/agent_server.sh (run by .github/agents/a.agent.md)"],
+            "mcp/tool": ["tools/mcp_server.py (run by .mcp.json)"],
+        }
+        line = [t for k, t in harness.kinds(worker) if t.startswith("Its ")]
+        assert line == [
+            "Its language server x, MCP server t (of the custom agent a) and MCP server tool "
+            "changed in this worker's folder, so it runs without them."
+        ]
+        assert harness.session(worker).options["disabled_mcp_servers"] == ["t", "tool"]
+        await at_rest(runtime, harness, worker)
+        # What its hooks run: as the settings themselves, it waits.
+        for name in (".claude/hooks/check.sh", "scripts/check.sh"):
+            (cwd / name).write_text("planted\n")
+        await runtime.owner_send(worker, "More")
         assert not runtime.states.is_live(worker)
         assert settings_notices(harness, worker)[-1]["text"] == refusal(
-            "changed .claude/hooks/check.sh (run by .claude/settings.json), tools/agent_server.sh "
-            "(run by .github/agents/a.agent.md), scripts/check.sh (run by .github/hooks/team.json) "
-            "and 2 more"
+            "changed .claude/hooks/check.sh (run by .claude/settings.json), scripts/check.sh "
+            "(run by .github/hooks/team.json)"
         )
-        changed = settings_guard.changes(
-            settings_guard.scan(cwd, cwd), settings_guard.load(harness.store, cwd)["folders"]
-        )
-        assert sorted(path for _, path in changed) == [
-            ".claude/hooks/check.sh (run by .claude/settings.json)",
-            "lsp/server.js (run by .github/lsp.json)",
-            "scripts/check.sh (run by .github/hooks/team.json)",
-            "tools/agent_server.sh (run by .github/agents/a.agent.md)",
-            "tools/mcp_server.py (run by .mcp.json)",
-        ]
         await use_them(runtime, harness, worker)
         assert runtime.states.is_live(worker)
     finally:
@@ -1647,10 +1674,7 @@ def test_what_settings_run_is_found_in_their_commands(tmp_path):
         plant(top, name, text)
     code: list[str] = []
     found = settings_guard.scan(top, top, code=code)["."]
-    ran = sorted(
-        entry.split(settings_guard.RUN)[1] for entry in found if settings_guard.RUN in entry
-    )
-    assert ran == ["bin/server", "plugins", "src/helper.mjs"]
+    assert held(found) == ["bin/server@mcp/s", "plugins", "src/helper.mjs"]
     assert sorted(code) == [
         ".claude/settings.json runs `npx -y srv`",
         ".claude/settings.json runs `python3 -m tools.check`",
@@ -1698,14 +1722,80 @@ def test_the_file_a_setting_runs_is_found(tmp_path, case):
     plant(tmp_path, ran, "print('ok')\n")
     code: list[str] = []
     entries = settings_guard.scan(tmp_path, tmp_path, code=code)["."]
-    held = [entry.split(settings_guard.RUN)[1] for entry in entries if settings_guard.RUN in entry]
-    assert held == [ran] and code == []
+    assert [path.split("@")[0] for path in held(entries)] == [ran]
+    assert code == []
+
+
+def hooked(bash: str, **more) -> tuple[str, dict]:
+    return ".github/hooks/h.json", {"version": 1, "hooks": {"preToolUse": [
+        {"type": "command", "bash": bash, **more}]}}  # fmt: skip
+
+
+def served(command: str, args: list, **more) -> tuple[str, dict]:
+    return ".mcp.json", {"mcpServers": {"s": {"command": command, "args": args, **more}}}
+
+
+SHELL = {  # A setting, the file it runs, whether that is held, whether the command is said.
+    "bash -lc": (*hooked("bash -lc 'python3 tools/guard.py'"), "tools/guard.py", True, False),
+    "sh -ec": (*hooked("sh -ec 'node tools/guard.js'"), "tools/guard.js", True, False),
+    "bash --noprofile -c": (*hooked("bash --noprofile -c 'python3 tools/guard.py'"),
+                            "tools/guard.py", True, False),
+    "env with a variable": (*hooked("env FOO=1 python3 tools/guard.py"), "tools/guard.py",
+                            True, False),
+    ". file": (*hooked(". scripts/env.sh; echo ok"), "scripts/env.sh", True, False),
+    "pushd": (*hooked("pushd scripts >/dev/null && ./guard.sh"), "scripts/guard.sh", True, False),
+    "cd ${VAR:-.}": (*hooked('cd "${CLAUDE_PROJECT_DIR:-.}/scripts" && ./guard.sh'),
+                     "scripts/guard.sh", True, False),
+    "sh -c $(cat …)": (*hooked('sh -c "$(cat scripts/guard.sh)"'), "scripts/guard.sh", False, True),
+    "git add x.ts": (*hooked("git add src/x.ts"), "src/x.ts", False, False),
+    "a pipe into sh": (*hooked("cat scripts/guard.txt | sh"), "scripts/guard.txt", False, True),
+    "a loop over a glob": (*hooked("for f in scripts/*.sh; do sh $f; done"), "scripts/a.sh",
+                           False, True),
+    "PATH in its env": (*served("guardtool", [], env={"PATH": "./bin:/usr/bin:/bin"}),
+                        "bin/guardtool", True, True),
+    "node -r": (*served("node", ["-r", "./tools/pre.js", "/usr/lib/x.js"]), "tools/pre.js",
+                True, False),
+    "NODE_OPTIONS": (*served("node", ["/usr/lib/x.js"], env={"NODE_OPTIONS": "--require "
+                     "./tools/pre.js"}), "tools/pre.js", True, False),
+    "uvx --from .": (*served("uvx", ["--from", ".", "mytool"]), "pyproject.toml", False, True),
+    "sh file": (*hooked("sh guard"), "guard", True, False),
+    "python file": (*served("python3", ["server"]), "server", True, False),
+    "ruby -e": (*served("ruby", ["-e", "load 'tools/s.rb'"]), "tools/s.rb", True, True),
+    "awk -f": (*hooked("awk -f tools/x.awk /dev/null"), "tools/x.awk", True, False),
+    "exec timeout": (*hooked("exec timeout 5 ./scripts/guard.sh"), "scripts/guard.sh", True, False),
+    "x;": (*hooked("./scripts/guard.sh; exit 0"), "scripts/guard.sh", True, False),
+    "x>file": (*hooked("./scripts/guard.sh>/dev/null"), "scripts/guard.sh", True, False),
+    "(x)": (*hooked("(./scripts/guard.sh)"), "scripts/guard.sh", True, False),
+    "x&&y": (*hooked("./scripts/guard.sh&&true"), "scripts/guard.sh", True, False),
+    '"$CLAUDE_PROJECT_DIR"/x;': (*hooked('"$CLAUDE_PROJECT_DIR"/.claude/hooks/check.sh;'),
+                                ".claude/hooks/check.sh", True, False),
+    "lines": (*hooked("set -e\n./scripts/guard.sh\n"), "scripts/guard.sh", True, False),
+    "sh -c with ;": (*served("sh", ["-c", "cd tools; exec node server.js"]), "tools/server.js",
+                     True, False),
+    "bash -c with &&": (*served("bash", ["-c", "cd tools&&node server.js"]), "tools/server.js",
+                        True, False),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("case", SHELL)
+def test_what_a_settings_shell_line_runs_is_held_or_said(tmp_path, case):
+    """Read as a POSIX shell reads it (operators glued to words, subshells, newlines, `cd`,
+    `pushd`, `.`, wrappers, a shell's `-c` line, a program's code options and environment);
+    what the parser doesn't follow (a loop, a pipe into a shell, a substitution, inline code, a
+    PATH into the project, the project installed by uvx) is said, never dropped."""
+    setting, said, ran, is_held, is_said = SHELL[case]
+    plant(tmp_path, setting, json.dumps(said))
+    plant(tmp_path, ran, "#!/bin/sh\necho ok\n")
+    code: list[str] = []
+    entries = settings_guard.scan(tmp_path, tmp_path, code=code)["."]
+    assert (ran in [path.split("@")[0] for path in held(entries)]) == is_held
+    assert bool(code) == is_said, code
 
 
 def test_what_a_setting_merely_writes_or_reads_is_not_held(tmp_path):
     """Where its output goes (GitHub's own hook example logs to a file), an option's value that
-    is no script, data: never held, so the worker never waits for its log. A script that is
-    nowhere: said as project code it can't check, not waited for."""
+    is no script, data: never held, so the worker never waits for its log. A server's script
+    that is not there yet (built later): kept as absent, so the build turns it off."""
     plant(tmp_path, ".github/hooks/log.json", json.dumps({"version": 1, "hooks": {"sessionStart": [
         {"type": "command", "bash": 'echo "$(date) start" >> logs/session.log'},
         {"type": "command", "bash": "./run.sh 2> logs/err.log | tee logs/tee.log"}]}}))  # fmt: skip
@@ -1716,9 +1806,9 @@ def test_what_a_setting_merely_writes_or_reads_is_not_held(tmp_path):
     plant(tmp_path, "run.sh", "#!/bin/sh\n")
     code: list[str] = []
     entries = settings_guard.scan(tmp_path, tmp_path, code=code)["."]
-    held = sorted(e.split(settings_guard.RUN)[1] for e in entries if settings_guard.RUN in e)
-    assert held == ["run.sh"]
-    assert code == [".mcp.json runs `node missing/server.js --db-path ./dev.db data/seed.json`"]
+    assert held(entries) == ["missing/server.js@mcp/db", "run.sh"]
+    assert entries[".mcp.json\0serves:mcp/db\0missing/server.js"] == settings_guard.ABSENT
+    assert code == []
 
 
 async def test_settings_carried_from_the_owners_checkout_are_what_it_holds(
@@ -1771,7 +1861,7 @@ async def test_settings_a_worker_put_in_a_folder_are_never_shown_as_the_owners(
         other = await spawn(runtime, harness.router_id, title="Two", instructions="f",
                             project=str(git_repo / "sub"), in_place=True)  # fmt: skip
         await settle(runtime)
-        assert settings_notices(harness, other["session_id"])[-1]["text"] == added_since(
+        assert settings_notices(harness, other["session_id"])[-1]["text"] == unused(
             "sub/.github/hooks/p.json"
         )
     finally:
@@ -1779,9 +1869,15 @@ async def test_settings_a_worker_put_in_a_folder_are_never_shown_as_the_owners(
 
 
 async def test_settings_changed_mid_turn_stop_it_at_its_next_tool(tmp_path, git_repo, monkeypatch):
-    """Copilot loads a custom agent added mid-session when the worker calls it, and can start a
-    turn by itself: as it starts a tool or a sub-agent, a glance at its settings (no file read)
-    runs the full check when something changed, which stops it."""
+    """Copilot loads a custom agent added mid-session when the worker calls it, and runs its
+    folder's preToolUse hooks before each tool: Copilot asks Chief of Staff first (its own
+    pre-tool hook, waited for), which glances at the settings (no file read) and, when
+    something changed, runs the full check: a change denies the tool and stops the worker; a
+    script made executable alone (as Copilot does a hook's) changes nothing. As a sub-agent
+    starts, the same glance."""
+    hook = {"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": "./guard.sh"}]}}
+    commit(git_repo, ".github/hooks/guard.json", json.dumps(hook))
+    commit(git_repo, "guard.sh", "#!/bin/sh\necho '{}'\n")
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
     runtime = await harness.connect()
@@ -1789,10 +1885,27 @@ async def test_settings_changed_mid_turn_stop_it_at_its_next_tool(tmp_path, git_
         worker, cwd = await isolated(runtime, harness, git_repo)
         await settle(runtime)
         session = harness.session(worker)
-        session.emit("tool.execution_start", tool_name="bash", tool_call_id="c1",
-                     arguments={"command": "ls"})  # fmt: skip
+        hooks = session.options["hooks"]
+        call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
+        assert await hooks["on_pre_tool_use"](call, {"session_id": worker}) is None
+        (cwd / "guard.sh").chmod(0o755)
+        assert await hooks["on_pre_tool_use"](call, {"session_id": worker}) is None
+        assert runtime.states.is_live(worker), "nothing changed but its mode: no stop"
+        # A folder moved into place, past the sandbox's paths: another guard script.
+        (tmp_path / "swap").mkdir()
+        (tmp_path / "swap" / "guard.sh").write_text("#!/bin/sh\necho allow\n")
+        (cwd / "guard.sh").unlink()
+        (tmp_path / "swap" / "guard.sh").rename(cwd / "guard.sh")
+        denied = await hooks["on_pre_tool_use"](call, {"session_id": worker})
+        assert denied["permissionDecision"] == "deny"
+        assert denied["permissionDecisionReason"] == refusal(
+            "changed guard.sh (run by .github/hooks/guard.json)"
+        )
         await settle(runtime)
-        assert runtime.states.is_live(worker), "nothing changed: no full check, no stop"
+        assert session.aborted and not runtime.states.is_live(worker)
+        await use_them(runtime, harness, worker)
+        assert runtime.states.is_live(worker)
+        session = harness.session(worker)
         plant(cwd, ".github/agents/x.agent.md", "---\nmcp-servers: {p: {command: sh}}\n---\n")
         session.emit("subagent.started", agent_name="x")
         await settle(runtime)
@@ -1928,6 +2041,306 @@ def test_a_git_folder_that_is_no_repository_is_no_top(tmp_path):
     assert settings_guard.outermost_top(app) == tmp_path
 
 
+def turn_over(runtime, harness, worker):
+    """Its turn over (it reported), its session still open."""
+    return call_tool(runtime, "report", worker, status="done", summary="Done.")
+
+
+async def test_a_server_the_worker_develops_is_off_for_it_after_a_build_never_a_wait(
+    tmp_path, git_repo, monkeypatch
+):
+    """A repository that develops its own MCP server and dogfoods its build (`node
+    dist/index.js`, dist/ gitignored): the worker builds and edits it freely. What the build
+    made turns that server off for the worker from its next turn (Copilot opens MCP servers as
+    a session opens; nothing stops mid-turn), said once; never a wait. "Use these settings" on
+    that line turns it on again from its next turn."""
+    commit(git_repo, ".gitignore", "dist/\n")
+    commit(git_repo, "src/index.ts", "export {}\n")
+    commit(git_repo, ".mcp.json", json.dumps(
+        {"mcpServers": {"self": {"command": "node", "args": ["dist/index.js"]}}}))  # fmt: skip
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        session = harness.session(worker)
+        assert "disabled_mcp_servers" not in session.options
+        # Its build, mid-turn: a model round's check says nothing, stops nothing.
+        (cwd / "dist").mkdir()
+        (cwd / "dist" / "index.js").write_text("// built 1\n")
+        session.emit("assistant.turn_start")
+        await settle(runtime)
+        assert runtime.states.is_live(worker) and not session.aborted
+        assert not [t for k, t in harness.kinds(worker) if t.startswith("Its MCP server")]
+        await turn_over(runtime, harness, worker)
+        session.emit("session.idle")
+        await settle(runtime)
+        # Its next turn: opened again without that server, said once.
+        await runtime.owner_send(worker, "Next")
+        await settle(runtime)
+        assert runtime.states.is_live(worker) and not settings_notices(harness, worker)
+        assert harness.session(worker) is not session
+        assert harness.session(worker).options["disabled_mcp_servers"] == ["self"]
+        said = [t for k, t in harness.kinds(worker) if t.startswith("Its MCP server")]
+        assert said == [
+            "Its MCP server self changed in this worker's folder, so it runs without it."
+        ]
+        # Built again, its source edited: still off, nothing more said, no wait.
+        await turn_over(runtime, harness, worker)
+        harness.session(worker).emit("session.idle")
+        await settle(runtime)
+        (cwd / "dist" / "index.js").write_text("// built 2\n")
+        (cwd / "src" / "index.ts").write_text("export const x = 1\n")
+        session = harness.session(worker)
+        await runtime.owner_send(worker, "More")
+        await settle(runtime)
+        assert harness.session(worker) is session, "the same servers off: not opened again"
+        assert len([t for k, t in harness.kinds(worker) if t.startswith("Its MCP server")]) == 1
+        # The owner turns it on: from its next turn.
+        line = [m for m in harness.store.messages(worker) if m["meta"].get("agent_servers")][-1]
+        said = await runtime.accept_settings(worker, line["meta"]["agent_servers"]["digest"])
+        assert said == "You let this worker use its MCP server self again."
+        await turn_over(runtime, harness, worker)
+        harness.session(worker).emit("session.idle")
+        await settle(runtime)
+        await runtime.owner_send(worker, "Again")
+        await settle(runtime)
+        assert "disabled_mcp_servers" not in harness.session(worker).options
+    finally:
+        await runtime.stop()
+
+
+async def test_a_language_or_agent_server_off_for_a_worker_is_never_started(
+    tmp_path, git_repo, monkeypatch
+):
+    """Copilot starts a language server as its lsp tool first needs it, a custom agent's MCP
+    servers as the agent runs: off for the worker (what they run changed), the tool that
+    would start them is denied before it runs (Chief of Staff's pre-tool hook)."""
+    lsp = {"command": "node", "args": ["lsp/server.js"], "fileExtensions": {".x": "x"}}
+    commit(git_repo, ".github/lsp.json", json.dumps({"lspServers": {"x": lsp}}))
+    commit(git_repo, "lsp/server.js", "// a server\n")
+    commit(git_repo, ".github/agents/a.agent.md", "---\nname: a\nmcp-servers:\n  t:\n"
+           "    command: node\n    args: [tools/agent.js]\n---\nAn agent.\n")  # fmt: skip
+    commit(git_repo, "tools/agent.js", "// a server\n")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        lsp = {"toolName": "lsp", "toolArgs": {"file": "a.x"}}
+        task = {"toolName": "task", "toolArgs": {"agent_type": "a", "prompt": "hi"}}
+        other = {"toolName": "task", "toolArgs": {"agent_type": "explore", "prompt": "hi"}}
+        for call in (lsp, task, other):
+            assert await hook(call, {"session_id": worker}) is None
+        await at_rest(runtime, harness, worker)
+        (cwd / "lsp" / "server.js").write_text("// edited\n")
+        (cwd / "tools" / "agent.js").write_text("// edited\n")
+        await runtime.owner_send(worker, "Next")
+        await settle(runtime)
+        assert runtime.states.is_live(worker)
+        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        denied = await hook(lsp, {"session_id": worker})
+        assert denied["permissionDecision"] == "deny"
+        assert denied["permissionDecisionReason"].startswith(
+            "The language server x changed in this folder since the owner last let you use it"
+        )
+        denied = await hook(task, {"session_id": worker})
+        assert denied["permissionDecisionReason"].startswith(
+            "The MCP server t (of the custom agent a) changed"
+        )
+        assert await hook(other, {"session_id": worker}) is None
+        assert harness.session(worker).options["disabled_mcp_servers"] == ["t"]
+    finally:
+        await runtime.stop()
+
+
+async def test_a_hooks_script_not_there_yet_is_held_as_missing(tmp_path, git_repo, monkeypatch):
+    """A hook names a script the checkout doesn't have (yet): one a worker makes there runs at
+    its next tool, so it is a change, as an edit is; the sandbox denies making it (macOS)."""
+    hook = {"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": "./scripts/g.sh"}]}}
+    commit(git_repo, ".github/hooks/guard.json", json.dumps(hook))
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, worker)
+        policy = runtime.sandbox_policy(harness.store.session(worker))
+        assert str(cwd / "scripts" / "g.sh") in policy.denied
+        plant(cwd, "scripts/g.sh", "#!/bin/sh\necho allow\n")
+        await runtime.owner_send(worker, "Next")
+        assert not runtime.states.is_live(worker)
+        assert settings_notices(harness, worker)[-1]["text"] == refusal(
+            "changed scripts/g.sh (run by .github/hooks/guard.json)"
+        )
+    finally:
+        await runtime.stop()
+
+
+async def test_a_branch_update_left_halfway_is_said_with_how_to_undo_it(
+    tmp_path, git_repo, monkeypatch
+):
+    """A merge that stopped on a file it couldn't change (the sandbox holds agent settings)
+    leaves the branch's new files untracked and no merge to abort: after its turn, its
+    timeline says so, and the worker is told how to put its tree back (those files only),
+    once. A merge under way (it can be aborted) is the worker's own to finish."""
+    commit(git_repo, "base.txt", "b\n")
+    run("git", "checkout", "-q", "-b", "team", cwd=git_repo)
+    commit(git_repo, "team.txt", "t\n")
+    run("git", "checkout", "-q", "main", cwd=git_repo)
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        session = harness.session(worker)
+        (cwd / "team.txt").write_text("t\n")  # What the merge wrote before it stopped.
+        (cwd / "mine.txt").write_text("mine\n")  # The worker's own, untouched.
+        session.emit("tool.execution_start", tool_name="bash", tool_call_id="m1",
+                     arguments={"command": "git merge team"})  # fmt: skip
+        await call_tool(runtime, "report", worker, status="done", summary="Merge failed.")
+        session.emit("session.idle")
+        await settle(runtime)
+        notes = [t for k, t in harness.kinds(worker) if "stopped halfway" in t]
+        assert notes == [
+            "Its branch update stopped halfway (`team.txt` left untracked): asked it to put its "
+            "worktree back."
+        ]
+        told = harness.session(worker).sent[-1]
+        assert "remove `team.txt`" in told and "mine.txt" not in told
+        # Again after another turn, the same left: said once.
+        session = harness.session(worker)
+        session.emit("tool.execution_start", tool_name="bash", tool_call_id="m2",
+                     arguments={"command": "git -c a=b merge team"})  # fmt: skip
+        session.emit("session.idle")
+        await settle(runtime)
+        assert len([t for k, t in harness.kinds(worker) if "stopped halfway" in t]) == 1
+    finally:
+        await runtime.stop()
+
+
+async def test_a_read_only_worker_never_makes_the_owners_local_settings_ask(
+    tmp_path, git_repo, monkeypatch
+):
+    """A worker that only reads the owner's checkout (a question about it) could not have
+    written their gitignored local settings: worktrees made after it carry them as the
+    owner's, however the owner's own tools change them. Once the owner said to use carried
+    ones in a checkout workers did write, the next worktree carrying the same isn't asked."""
+    commit(git_repo, ".gitignore", ".claude/settings.local.json\n")
+    commit(git_repo, ".worktreeinclude", ".claude/settings.local.json\n")
+    plant(git_repo, ".claude/settings.local.json", '{"permissions": {"allow": []}}')
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Explain", instructions="e",
+                           project=str(git_repo))  # fmt: skip
+        await at_rest(runtime, harness, info["session_id"])
+        for n in range(2):
+            (git_repo / ".claude" / "settings.local.json").write_text(
+                json.dumps({"permissions": {"allow": [f"Bash(npm test {n})"]}})
+            )
+            worker, _ = await isolated(runtime, harness, git_repo)
+            await settle(runtime)
+            assert runtime.states.is_live(worker) and not settings_notices(harness, worker)
+        # A worker that wrote the checkout (in place): carried ones are asked about once.
+        writer = await spawn(runtime, harness.router_id, title="Edit", instructions="e",
+                             project=str(git_repo), in_place=True)  # fmt: skip
+        await settle(runtime)
+        # (The owner's tools changed their local settings since the first worker read them.)
+        await use_them(runtime, harness, writer["session_id"])
+        await at_rest(runtime, harness, writer["session_id"])
+        (git_repo / ".claude" / "settings.local.json").write_text('{"permissions": {"x": 1}}')
+        first, _ = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        assert settings_notices(harness, first)[-1]["text"] == added_since(
+            ".claude/settings.local.json"
+        )
+        await use_them(runtime, harness, first)
+        again, _ = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        assert runtime.states.is_live(again) and not settings_notices(harness, again)
+    finally:
+        await runtime.stop()
+
+
+async def test_the_owner_making_their_worktree_again_is_no_replaced_git(
+    tmp_path, git_repo, monkeypatch
+):
+    """The owner removes a worktree of theirs and makes one again under that name (`git
+    worktree remove`, `add`): its private folder in the .git is another, made with a new
+    worktree out of every worker's reach: theirs, nothing waits."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    # (The test's folders are in the temporary folder, which workers can write.)
+    workspaces = str((tmp_path / "data").resolve())
+    monkeypatch.setattr(runtime, "writable_roots", lambda: (workspaces,))
+    try:
+        run("git", "worktree", "add", "-q", str(tmp_path / "hotfix"), "-b", "hotfix", cwd=git_repo)
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, worker)
+        await runtime.owner_send(worker, "Go on")
+        await settle(runtime)
+        assert runtime.states.is_live(worker)
+        await at_rest(runtime, harness, worker)
+        run("git", "worktree", "remove", str(tmp_path / "hotfix"), cwd=git_repo)
+        run("git", "worktree", "add", "-q", str(tmp_path / "hotfix"), "-b", "hotfix2", cwd=git_repo)
+        await runtime.owner_send(worker, "Next")
+        await settle(runtime)
+        assert runtime.states.is_live(worker)
+        await workspaces_module.git("-C", str(cwd), "status", "--porcelain")
+    finally:
+        await runtime.stop()
+
+
+async def test_a_worker_stopped_for_its_settings_is_never_left_working(
+    tmp_path, git_repo, monkeypatch
+):
+    """Copilot goes on with a turn whose tool was denied (its next model round starts) as Chief
+    of Staff stops it and lets go of it: no end of that turn comes, and it is at rest."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        interrupt = runtime.workers.interrupt
+
+        async def interrupted(session_id, **more):
+            await interrupt(session_id, **more)
+            harness.session(session_id).emit("assistant.turn_start")  # (Its next round.)
+            await asyncio.sleep(0.05)  # (Handled on the event loop meanwhile.)
+
+        monkeypatch.setattr(runtime.workers, "interrupt", interrupted)
+        plant(cwd, ".mcp.json")
+        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
+        assert (await hook(call, {"session_id": worker}))["permissionDecision"] == "deny"
+        await settle(runtime)
+        assert not runtime.states.is_live(worker)
+        assert harness.store.session(worker)["status"] == "idle"
+    finally:
+        await runtime.stop()
+
+
+def test_a_glance_sees_what_a_link_leads_to(tmp_path):
+    """A setting linked to nothing (yet): what it leads to, made later, is a change the glance
+    sees, as the full check would."""
+    top = tmp_path / "top"
+    (top / ".github").mkdir(parents=True)
+    (tmp_path / "dotfiles").mkdir()
+    (top / ".github" / "lsp.json").symlink_to(tmp_path / "dotfiles" / "lsp.json")
+    before = settings_guard.signature(top, top, (".github/lsp.json",), [])
+    (tmp_path / "dotfiles" / "lsp.json").write_text('{"lspServers": {}}')
+    assert settings_guard.signature(top, top, (".github/lsp.json",), []) != before
+
+
 def test_workers_never_write_copilots_repository_settings(tmp_path):
     from chiefofstaff.policy import SETTINGS_WRITE, settings_write
 
@@ -1951,15 +2364,21 @@ def test_workers_never_write_copilots_repository_settings(tmp_path):
 async def test_a_sandboxed_workers_commands_cannot_write_copilots_repository_settings(
     tmp_path, git_repo, monkeypatch
 ):
-    """In its own worktree as in the owner's checkout: those there, and the files they run,
-    are read-only to its commands, and one not there yet is denied (macOS; a missing `.claude`
-    whole, one rule). Codex's only in the owner's (no Codex works in a Copilot worker's own; each
-    rule costs every command a little). Its edits to the files they run are refused too."""
+    """In its own worktree as in the owner's checkout: those there, and the files their hooks
+    run, are read-only to its commands, and one not there yet is denied (macOS; `.claude`'s
+    settings one by one: its commands, skills and rules stay the worker's to write). Codex's
+    only in the owner's (no Codex works in a Copilot worker's own; each rule costs every command
+    a little). Its edits to the files the hooks run are refused too. What a server runs is the
+    worker's to build and edit (a change turns that server off)."""
     trusting(tmp_path, monkeypatch, git_repo)
     monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
-    server = {"mcpServers": {"s": {"command": "python3", "args": ["tools/server.py"]}}}
+    server = {"mcpServers": {"s": {"command": "node", "args": ["dist/index.js"]}}}
+    commit(git_repo, ".gitignore", "dist/\n")
     commit(git_repo, ".mcp.json", json.dumps(server))
-    commit(git_repo, "tools/server.py", "print('serve')\n")
+    commit(git_repo, "src/index.ts", "export {}\n")
+    hook = {"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": "tools/guard.sh"}]}}
+    commit(git_repo, ".github/hooks/guard.json", json.dumps(hook))
+    commit(git_repo, "tools/guard.sh", "#!/bin/sh\n")
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
     runtime = await harness.connect()
     try:
@@ -1972,16 +2391,23 @@ async def test_a_sandboxed_workers_commands_cannot_write_copilots_repository_set
             policy = runtime.sandbox_policy(row)
             assert policy is not None
             cwd = Path(row["cwd"])
-            for name in (".mcp.json", "tools/server.py"):
+            for name in (".mcp.json", ".github/hooks", "tools/guard.sh"):
                 assert str(cwd / name) in policy.readonly, name
-            for name in (".github/hooks", ".github/lsp.json", ".github/agents", ".claude"):
+            for name in (".github/lsp.json", ".github/agents", ".claude/settings.json",
+                         ".claude/settings.local.json", ".claude/agents"):  # fmt: skip
                 assert str(cwd / name) in policy.denied, name
-            assert str(cwd / ".claude" / "settings.json") not in policy.denied, "one rule"
+            assert str(cwd / ".claude") not in (*policy.denied, *policy.readonly)
             assert (str(cwd / ".codex") in policy.denied) == (info is theirs)
-            request = SimpleNamespace(kind="write", resolved_path=str(cwd / "tools/server.py"))
+            listed = (*policy.denied, *policy.readonly)
+            for name in ("dist", "dist/index.js", "src/index.ts"):
+                assert not any(
+                    p == str(cwd / name) or p.startswith(f"{cwd}/{name}/") for p in listed
+                )
+            request = SimpleNamespace(kind="write", resolved_path=str(cwd / "tools/guard.sh"))
             assert settings_write(row, request, runtime.held_run_files(row)) == RUN_WRITE
-            request = SimpleNamespace(kind="write", resolved_path=str(cwd / "tools/other.py"))
-            assert settings_write(row, request, runtime.held_run_files(row)) is None
+            for name in ("tools/other.py", "dist/index.js", "src/index.ts"):
+                request = SimpleNamespace(kind="write", resolved_path=str(cwd / name))
+                assert settings_write(row, request, runtime.held_run_files(row)) is None, name
     finally:
         await runtime.stop()
 
