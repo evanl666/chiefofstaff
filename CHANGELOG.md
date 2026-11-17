@@ -12,31 +12,32 @@
   looked at it once), and the worker's timeline says when it isn't, with **Use these settings**
   for you. Workers' edits to
   `.codex/` folders and to Codex's own settings folder are refused.
-- **Security: a Copilot worker could plant hooks and MCP servers for itself.** In a repository
-  you trust in Copilot (a worktree of it is trusted too), a worker could write the repository's
-  own Copilot settings in its folder: hooks (`.github/hooks/`, `.github/copilot/settings.json`,
-  and `.claude/settings.json`, whose hooks Copilot runs too), custom agents with their own hooks
-  and MCP servers (`.github/agents/`, `.claude/agents/`), MCP servers (`.mcp.json`,
+- **Security: a Copilot worker could plant hooks and MCP servers for itself.** In a repository you
+  trust in Copilot (a worktree of it is trusted too), a worker could write the repository's own
+  Copilot settings in its folder: hooks (`.github/hooks/`, `.github/copilot/settings.json`, and
+  `.claude/settings.json`, whose hooks Copilot runs too), custom agents with their own hooks and
+  MCP servers (`.github/agents/`, `.claude/agents/`), MCP servers (`.mcp.json`,
   `.github/mcp.json`) and language servers (`.github/lsp.json`), loaded from its next turn or
-  resume. A hook could approve commands Chief of Staff would refuse, and a server ran outside
-  the worker sandbox. Now Chief of Staff keeps what those files hold, with the scripts their
-  hooks and servers run, when it makes a worker's folder or first hands a worker your checkout,
-  in its own data, and reads them again before each start and each turn, and as each of the
-  worker's tools starts when a quick look sees a change (before the tool runs where the folder
-  has hooks or the worker works without the sandbox), without running git there. A folder of a checkout workers already had, one workers used before this version, or a
-  file a worktree carries from your checkout that isn't as your checkout holds it, waits for you
-  to look once. A worker whose settings or hooks' scripts changed starts no turn until you click
-  **Use these settings** on the line its timeline shows (news for it waits too), or until they
-  are as they were again; it shows *waiting for you*, and the Router hears it once. One stopped
-  mid-task goes on with it after the click. What a server runs (a repository developing its own
-  MCP server) stays the worker's to build and edit: when it changed, that server is off for the
-  worker from its next turn, said once, with the same button to turn it on. With the sandbox on,
-  workers' commands can't change those settings or their hooks' scripts, in your checkout or
-  their own worktree; a worker checks before a branch update that would, and tells you, and one
-  that stopped halfway anyway is said with how to undo it. A setting linked into a folder
-  workers can write, or a special file, is never used. Workers' edits to those files are
-  refused, whatever their case. Agent homes (`~/.codex`, `~/.claude`) are never read as your
-  home folder's settings.
+  resume. A hook could approve commands Chief of Staff would refuse, and a server ran outside the
+  worker sandbox. Now Chief of Staff keeps what those files hold, with the scripts their hooks and
+  servers run, when it makes a worker's folder or first hands a worker your checkout, in its own
+  data, and reads them again before each start and each turn, and as each of the worker's tools
+  starts when a quick look sees a change (with the sandbox on, before the tool runs), without
+  running git there. A folder of a checkout workers already had, one workers used before this
+  version, or a file a worktree carries from your checkout that isn't as your checkout holds it,
+  waits for you to look once. A worker whose settings or hooks' scripts changed starts no turn
+  until you click **Use these settings** on the line its timeline shows (news for it waits too),
+  or until they are as they were again; it shows *waiting for you*, and the Router hears it once.
+  One stopped mid-task goes on with it after the click. What a server runs (a repository
+  developing its own MCP server) stays the worker's to build and edit: when it changed, that
+  server is off for the worker from its next turn, said once, with the same button to turn it on.
+  With the sandbox on, workers' commands can't change those settings or their hooks' scripts in
+  your checkout, nor in their own worktree the MCP server files Copilot loads by itself
+  (`.mcp.json`, `.github/mcp.json`) and their hooks' scripts; a worker checks before a branch
+  update that would, and tells you, and one that stopped halfway anyway is said with how to undo
+  it. A setting linked into a folder workers can write, or a special file, is never used. Workers'
+  edits to those files are refused, whatever their case. Agent homes (`~/.codex`, `~/.claude`) are
+  never read as your home folder's settings.
 
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create

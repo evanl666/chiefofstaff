@@ -660,7 +660,7 @@ def worker_context(
     `caches`: the sandbox lets it use the owner's dependency and build caches; `local`: and
     localhost. `gh_acting`: the account Chief of Staff acts as, by repository owner, where gh's
     active one cannot reach them (GitHubSource.acting_login). `held`: the scripts its folder's
-    hooks run, read-only to it as the settings are (shown)."""
+    hooks run, read-only to it as the held settings are (shown)."""
     lines = [
         f"Working directory: {cwd}",
         f"Your workspace: {workspace} (all yours: clone, build or download things there).",
@@ -721,11 +721,12 @@ def worker_context(
             "Your shell commands run in an OS sandbox: they can write only in your workspace and "
             'checkouts (and temporary folders); elsewhere they fail with "Operation not '
             "permitted\". The repositories' hooks and config are read-only: when your task "
-            "asks you to push, use `git push origin HEAD`, without -u. So are their agent "
-            "settings (`.mcp.json`, `.github/mcp.json`, `.github/lsp.json`, `.github/hooks/`, "
-            "`.github/copilot/`, `.github/extensions/`, `.github/agents/`, "
-            "`.claude/settings.json`, `.claude/settings.local.json`, `.claude/agents/`, and in "
-            "the owner's checkout `.codex/`) and the scripts their hooks run"
+            "asks you to push, use `git push origin HEAD`, without -u. So are their MCP "
+            "server files (`.mcp.json`, `.github/mcp.json`; in the owner's checkout every "
+            "agent's settings: also `.github/lsp.json`, `.github/hooks/`, `.github/copilot/`, "
+            "`.github/extensions/`, `.github/agents/`, `.claude/settings.json`, "
+            "`.claude/settings.local.json`, `.claude/agents/` and `.codex/`) and the scripts "
+            "their hooks run"
             + (f" ({', '.join(held)})" if held else "")
             + ". Before you update your branch (a merge, rebase or pull), list what it would "
             "change (`git diff --name-only HEAD...<target>`): if that touches any of them, "

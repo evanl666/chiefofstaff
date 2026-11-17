@@ -2734,6 +2734,13 @@ REPOSITORY_SETTINGS = (
     ".claude/settings.local.json",
     ".claude/agents",
 )
+# Of those, what Copilot loads by itself mid-session, with no tool call and no session start or
+# resume: it watches its MCP servers' files and starts a server added there within seconds,
+# outside the worker's sandbox (checked on the Copilot CLI 1.0.100 and 1.0.112). A sandboxed
+# worker's commands may never write these in its own folder; the others load only as a session
+# starts or resumes, which Chief of Staff's check precedes, or through a tool (hooks, plugins,
+# extensions, language servers, custom agents), which its pre-tool check sees first.
+SANDBOX_HELD = (".mcp.json", ".github/mcp.json")
 # Codex's own (a trusted folder's rules, MCP servers, environment, model, hooks).
 CODEX_SETTINGS = (".codex",)
 # Every agent's: what a folder's snapshot holds (settings_guard).

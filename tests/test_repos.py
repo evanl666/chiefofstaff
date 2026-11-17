@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import FakeSession, Harness, call_tool, env, said, settle, task_of
 
+from chiefofstaff import policy as policy_module
 from chiefofstaff import settings_guard
 from chiefofstaff import workers as workers_module
 from chiefofstaff import workspaces as workspaces_module
@@ -1877,16 +1878,17 @@ async def test_settings_a_worker_put_in_a_folder_are_never_shown_as_the_owners(
 
 async def test_settings_changed_mid_turn_stop_it_at_its_next_tool(tmp_path, git_repo, monkeypatch):
     """Copilot loads a custom agent added mid-session when the worker calls it, and runs its
-    folder's preToolUse hooks before each tool: Copilot asks Chief of Staff first (its own
-    pre-tool hook, waited for), which glances at the settings (no file read) and, when
-    something changed, runs the full check: a change denies the tool and stops the worker; a
-    script made executable alone (as Copilot does a hook's) changes nothing. As a sub-agent
-    starts, the same glance."""
+    folder's preToolUse hooks before each tool: for a sandboxed worker, Copilot asks Chief of
+    Staff first (its pre-tool hook, waited for), which glances at the settings (no file read)
+    and, when something changed, runs the full check: a change denies the tool and stops the
+    worker; a script made executable alone (as Copilot does a hook's) changes nothing. As a
+    sub-agent starts, the same glance."""
     hook = {"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": "./guard.sh"}]}}
     commit(git_repo, ".github/hooks/guard.json", json.dumps(hook))
     commit(git_repo, "guard.sh", "#!/bin/sh\necho '{}'\n")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -2123,7 +2125,8 @@ async def test_a_language_or_agent_server_off_for_a_worker_is_never_started(
 ):
     """Copilot starts a language server as its lsp tool first needs it, a custom agent's MCP
     servers as the agent runs: off for the worker (what they run changed), the tool that
-    would start them is denied before it runs (Chief of Staff's pre-tool hook)."""
+    would start them is denied before it runs (Chief of Staff's pre-tool hook: for a worker
+    without the sandbox, only while one of those is off)."""
     lsp = {"command": "node", "args": ["lsp/server.js"], "fileExtensions": {".x": "x"}}
     commit(git_repo, ".github/lsp.json", json.dumps({"lspServers": {"x": lsp}}))
     commit(git_repo, "lsp/server.js", "// a server\n")
@@ -2136,12 +2139,10 @@ async def test_a_language_or_agent_server_off_for_a_worker_is_never_started(
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
         await settle(runtime)
-        hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        assert "hooks" not in harness.session(worker).options
         lsp = {"toolName": "lsp", "toolArgs": {"file": "a.x"}}
         task = {"toolName": "task", "toolArgs": {"agent_type": "a", "prompt": "hi"}}
         other = {"toolName": "task", "toolArgs": {"agent_type": "explore", "prompt": "hi"}}
-        for call in (lsp, task, other):
-            assert await asked(hook, call, worker) is None
         await at_rest(runtime, harness, worker)
         (cwd / "lsp" / "server.js").write_text("// edited\n")
         (cwd / "tools" / "agent.js").write_text("// edited\n")
@@ -2306,42 +2307,15 @@ async def test_the_owner_making_their_worktree_again_is_no_replaced_git(
         await runtime.stop()
 
 
-HOOK = {"preToolUse": [{"type": "command", "bash": "echo hi"}]}
-HOOK_SOURCES = {
-    ".github/hooks/h.json": json.dumps({"version": 1, "hooks": HOOK}),
-    ".github/copilot/settings.json": json.dumps({"hooks": HOOK}),
-    ".github/copilot/settings.local.json": json.dumps({"enabledPlugins": {"p@m": True}}),
-    ".claude/settings.json": json.dumps(
-        {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"command": "echo hi"}]}]}}
-    ),
-    ".claude/settings.local.json": json.dumps({"hooks": HOOK}),
-    ".github/agents/a.agent.md": "---\nname: a\nhooks:\n  preToolUse:\n    - bash: echo hi\n---\n",
-    ".claude/agents/b.md": "---\nname: b\nhooks: {PreToolUse: [{command: echo hi}]}\n---\n",
-    ".github/extensions/x/extension.mjs": "// an extension\n",
-}
-NO_HOOKS = {
-    ".github/copilot/settings.json": json.dumps({"model": "x"}),
-    ".claude/settings.json": json.dumps({"permissions": {}}),
-    ".github/agents/a.agent.md": "---\nname: a\nmcp-servers: {}\n---\nAn agent.\n",
-    ".claude/agents/b.md": "An agent with no front matter.\n",
-    ".mcp.json": json.dumps({"mcpServers": {}}),
-}
-
-
-@pytest.mark.parametrize("name", ["", *HOOK_SOURCES])
-async def test_copilot_asks_first_only_where_the_folder_has_hooks_or_a_worker_could_add_one(
-    tmp_path, git_repo, monkeypatch, name
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+async def test_copilot_asks_first_before_every_tool_of_a_sandboxed_worker_only(
+    tmp_path, git_repo, monkeypatch, platform
 ):
-    """Copilot asks Chief of Staff before each tool (and waits) only where that matters: where
-    the folder runs hooks of its own as the session opens (a script of theirs swapped mid-turn
-    runs first), and where the worker could add a custom agent mid-session (Copilot loads one
-    as it is called, with its hooks): without the sandbox, or on Linux. Settings with no hooks
-    don't make it ask. Hooks added mid-session load only as it opens again (asking then)."""
-    for setting, text in NO_HOOKS.items():
-        commit(git_repo, setting, text)
-    if name:
-        commit(git_repo, name, HOOK_SOURCES[name])
-    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    """Every sandboxed worker's tools wait for Chief of Staff's pre-tool hook (a setting moved
+    in past the sandbox's paths is found before the tool that would load it). One without the
+    sandbox is not asked first (its commands run as the owner; a few ms a tool): unless a
+    language server or a custom agent's is off for it (an MCP server off needs no tool's)."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", platform)
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
     runtime = await harness.connect()
@@ -2349,29 +2323,25 @@ async def test_copilot_asks_first_only_where_the_folder_has_hooks_or_a_worker_co
         worker, _ = await isolated(runtime, harness, git_repo)
         await settle(runtime)
         row = harness.store.session(worker)
-        assert ("hooks" in harness.session(worker).options) == bool(name)
-        assert (worker in runtime.pre_tool_on) == bool(name)
-        if not name:
-            monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "linux")
-            assert "hooks" in runtime.options(row)
-            monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
-            harness.store.save_settings(Settings(projects=[str(git_repo)], worker_sandbox=False))
-            assert "hooks" in runtime.options(row)
-            harness.store.save_settings(Settings(projects=[str(git_repo)], worker_sandbox=True))
-            assert "hooks" not in runtime.options(row)
-            runtime.servers_off[worker] = {"lsp/x": ["lsp/server.js"]}
-            assert "hooks" in runtime.options(row)
+        assert "hooks" in harness.session(worker).options and worker in runtime.pre_tool_on
+        harness.store.save_settings(Settings(projects=[str(git_repo)], worker_sandbox=False))
+        assert "hooks" not in runtime.options(row)
+        runtime.servers_off[worker] = {"mcp/s": [".mcp.json"]}
+        assert "hooks" not in runtime.options(row)
+        for server in ("lsp/x", "mcp/t@a"):
+            runtime.servers_off[worker] = {server: ["server.js"]}
+            assert "hooks" in runtime.options(row), server
     finally:
         await runtime.stop()
 
 
-async def test_hooks_a_worker_adds_ask_first_once_the_owner_says_to_use_them(
+async def test_an_agent_moved_in_past_the_sandbox_is_denied_before_it_runs(
     tmp_path, git_repo, monkeypatch
 ):
-    """A sandboxed worker whose folder had no hooks: Copilot doesn't ask before its tools, which
-    Chief of Staff glances at as they start (a change stops it). Hooks that came meanwhile
-    stop it before its next turn; once the owner says to use them, its session opens again,
-    Copilot asking before each tool."""
+    """A sandboxed worker renames a folder over `.github` (the sandbox's lists are paths) with a
+    custom agent in it, and calls it: Copilot asks Chief of Staff before that `task`, which
+    finds the change and denies it (the agent's MCP servers never start), and stops it."""
+    commit(git_repo, ".github/workflows/ci.yml", "on: push\n")
     monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
@@ -2380,20 +2350,45 @@ async def test_hooks_a_worker_adds_ask_first_once_the_owner_says_to_use_them(
         worker, cwd = await isolated(runtime, harness, git_repo)
         await settle(runtime)
         session = harness.session(worker)
-        assert "hooks" not in session.options
-        plant(cwd, ".github/hooks/h.json", json.dumps({"version": 1, "hooks": HOOK}))
+        hook = session.options["hooks"]["on_pre_tool_use"]
+        task = {"toolName": "task", "toolArgs": {"agent_type": "evil", "prompt": "hi"}}
+        assert hook(task, {"session_id": worker}) is None, "at once"
+        shutil.copytree(cwd / ".github", cwd / "stage")
+        plant(cwd / "stage", "agents/evil.agent.md", "---\nname: evil\nmcp-servers:\n  e:\n"
+              "    command: sh\n---\nEvil.\n")  # fmt: skip
+        (cwd / ".github").rename(cwd / ".github-old")
+        (cwd / "stage").rename(cwd / ".github")
+        denied = await asked(hook, task, worker)
+        assert denied["permissionDecision"] == "deny"
+        assert denied["permissionDecisionReason"] == refusal("added .github/agents/evil.agent.md")
+        await settle(runtime)
+        assert session.aborted and not runtime.states.is_live(worker)
+    finally:
+        await runtime.stop()
+
+
+async def test_a_worker_without_the_sandbox_is_glanced_at_as_each_tool_starts(
+    tmp_path, git_repo, monkeypatch
+):
+    """Copilot doesn't wait for Chief of Staff before an unsandboxed worker's tools: each one's
+    start is a glance at its settings, off Copilot's path; a change stops it there."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        session = harness.session(worker)
+        assert "hooks" not in session.options and worker not in runtime.pre_tool_on
+        session.emit("tool.execution_start", tool_name="bash", tool_call_id="c0",
+                     arguments={"command": "ls"})  # fmt: skip
+        await settle(runtime)
+        assert runtime.states.is_live(worker)
+        plant(cwd, ".github/hooks/h.json")
         session.emit("tool.execution_start", tool_name="bash", tool_call_id="c1",
                      arguments={"command": "ls"})  # fmt: skip
         await settle(runtime)
         assert session.aborted and not runtime.states.is_live(worker)
-        await use_them(runtime, harness, worker)
-        await runtime.owner_send(worker, "Next")
-        await settle(runtime)
-        assert runtime.states.is_live(worker)
-        hooks = harness.session(worker).options["hooks"]
-        call = {"toolName": "bash", "toolArgs": {"command": "ls"}}
-        assert await asked(hooks["on_pre_tool_use"], call, worker) is None
-        assert worker in runtime.pre_tool_on
     finally:
         await runtime.stop()
 
@@ -2436,7 +2431,8 @@ async def test_a_worker_stopped_for_its_settings_is_never_left_working(
     """Copilot goes on with a turn whose tool was denied (its next model round starts) as Chief
     of Staff stops it and lets go of it: no end of that turn comes, and it is at rest."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -2472,6 +2468,28 @@ def test_a_glance_sees_what_a_link_leads_to(tmp_path):
     assert settings_guard.signature(top, top, (".github/lsp.json",), []) != before
 
 
+def test_a_glance_sees_a_setting_however_full_the_folders_beside_it_are(tmp_path):
+    """A sandboxed worker may write a folder's other files (`.github/workflows`, a thousand of
+    them): the glance still sees a custom agent added to `.github/agents/` (its tools wait for
+    that glance), and a `.github` renamed over the old one."""
+    top = tmp_path / "top"
+    for name in (".github/agents/base.agent.md", ".github/workflows/ci.yml"):
+        plant(top, name, "x")
+    for index in range(settings_guard.MOST_ENTRIES + 5):
+        plant(top, f".github/aaa/{index}.yml", "x")
+    names = policy_module.REPOSITORY_SETTINGS
+    before = settings_guard.signature(top, top, names, [])
+    plant(top, ".github/workflows/more.yml", "x")
+    assert settings_guard.signature(top, top, names, []) == before, "not a setting"
+    plant(top, ".github/agents/evil.agent.md", "x")
+    after = settings_guard.signature(top, top, names, [])
+    assert after != before
+    shutil.copytree(top / ".github", tmp_path / "stage")
+    (top / ".github").rename(tmp_path / "old")
+    (tmp_path / "stage").rename(top / ".github")
+    assert settings_guard.signature(top, top, names, []) != after
+
+
 def test_workers_never_write_copilots_repository_settings(tmp_path):
     from chiefofstaff.policy import SETTINGS_WRITE, settings_write
 
@@ -2495,12 +2513,15 @@ def test_workers_never_write_copilots_repository_settings(tmp_path):
 async def test_a_sandboxed_workers_commands_cannot_write_copilots_repository_settings(
     tmp_path, git_repo, monkeypatch
 ):
-    """In its own worktree as in the owner's checkout: those there, and the files their hooks
-    run, are read-only to its commands, and one not there yet is denied (macOS; `.claude`'s
-    settings one by one: its commands, skills and rules stay the worker's to write). Codex's
-    only in the owner's (no Codex works in a Copilot worker's own; each rule costs every command
-    a little). Its edits to the files the hooks run are refused too. What a server runs is the
-    worker's to build and edit (a change turns that server off)."""
+    """In the owner's checkout, every agent's settings, and the files their hooks run, are
+    read-only to its commands, and one not there yet is denied (macOS; `.claude`'s settings one
+    by one: its commands, skills and rules stay the worker's to write): the owner's own
+    sessions load them. In its own worktree, only what Copilot loads by itself mid-session (its
+    MCP server files) and the files hooks run (each rule costs every command a little): the
+    others load as its session starts (after the full check) or through a tool (after the
+    pre-tool check). Its edits to them, and to the files the hooks run, are refused all the
+    same. What a server runs is the worker's to build and edit (a change turns that server
+    off)."""
     trusting(tmp_path, monkeypatch, git_repo)
     monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
     server = {"mcpServers": {"s": {"command": "node", "args": ["dist/index.js"]}}}
@@ -2522,14 +2543,16 @@ async def test_a_sandboxed_workers_commands_cannot_write_copilots_repository_set
             policy = runtime.sandbox_policy(row)
             assert policy is not None
             cwd = Path(row["cwd"])
-            for name in (".mcp.json", ".github/hooks", "tools/guard.sh"):
-                assert str(cwd / name) in policy.readonly, name
-            for name in (".github/lsp.json", ".github/agents", ".claude/settings.json",
-                         ".claude/settings.local.json", ".claude/agents"):  # fmt: skip
-                assert str(cwd / name) in policy.denied, name
-            assert str(cwd / ".claude") not in (*policy.denied, *policy.readonly)
-            assert (str(cwd / ".codex") in policy.denied) == (info is theirs)
             listed = (*policy.denied, *policy.readonly)
+            for name in (".mcp.json", "tools/guard.sh"):
+                assert str(cwd / name) in policy.readonly, name
+            assert str(cwd / ".github/mcp.json") in policy.denied
+            assert (str(cwd / ".github/hooks") in policy.readonly) == (info is theirs)
+            for name in (".github/lsp.json", ".github/agents", ".github/copilot",
+                         ".github/extensions", ".claude/settings.json",
+                         ".claude/settings.local.json", ".claude/agents", ".codex"):  # fmt: skip
+                assert (str(cwd / name) in policy.denied) == (info is theirs), name
+            assert str(cwd / ".claude") not in listed
             for name in ("dist", "dist/index.js", "src/index.ts"):
                 assert not any(
                     p == str(cwd / name) or p.startswith(f"{cwd}/{name}/") for p in listed

@@ -189,10 +189,17 @@ def scan(
 def signature(top: Path, cwd: Path, names: tuple[str, ...], also: list[str]) -> str:
     """What the file system says of these settings (each entry's kind, inode, size and change
     times, no content read) and of `also` (the files they run): cheap enough to look at before
-    every tool a worker runs; a change means the full check (scan) runs."""
+    every tool a worker runs; a change means the full check (scan) runs. Each setting's own
+    path wholly (up to the caps), and the folders on its way (a folder renamed over `.github`
+    is another one): what fills a folder beside it (`.github/workflows`) neither costs the look
+    nor uses up its caps."""
     seen: list = []
+    noted: set[Path] = set()
 
     def note(path: Path, depth: int):
+        if path in noted:
+            return
+        noted.add(path)
         try:
             info = os.lstat(path)
         except OSError:
@@ -213,68 +220,14 @@ def signature(top: Path, cwd: Path, names: tuple[str, ...], also: list[str]) -> 
 
     for folder in chain(top, cwd):
         note(folder, 4)
-        for name in {name.split("/")[0] for name in names}:
+        for name in names:
+            parts = name.split("/")
+            for end in range(1, len(parts)):
+                note(folder.joinpath(*parts[:end]), 4)
             note(folder / name, 0)
     for path in also:
         note(Path(path), 4)
     return hashlib.sha256(repr(seen).encode()).hexdigest()[:16]
-
-
-# Where a folder's Copilot settings give it hooks (Copilot runs those before a tool, and one can
-# approve what Chief of Staff would refuse): each file of these folders (an extension adds its
-# own), these settings' `hooks` (or the plugins they turn on, which bring theirs), a custom
-# agent's front matter's.
-HOOK_FOLDERS = (".github/hooks", ".github/extensions")
-HOOK_SETTINGS = (
-    ".github/copilot/settings.json",
-    ".github/copilot/settings.local.json",
-    ".claude/settings.json",
-    ".claude/settings.local.json",
-)
-HOOK_KEYS = ("hooks", "enabledPlugins", "extraKnownMarketplaces")
-AGENT_FOLDERS = (".github/agents", ".claude/agents")
-MOST_AGENTS = 200
-
-
-def hooked(top: Path, cwd: Path) -> bool:
-    """Whether a Copilot session opened in `cwd` runs hooks of its folders' own (from `cwd` up
-    to the top): Copilot loads them as a session starts or resumes (hooks added mid-session it
-    does not run before then). True when one can't be read."""
-    try:
-        for folder in chain(top, cwd):
-            for name in HOOK_FOLDERS:
-                if listed(folder / name):
-                    return True
-            for name in HOOK_SETTINGS:
-                path = folder / name
-                if not path.exists():
-                    if path.is_symlink():
-                        return True  # (A link to nowhere: what it leads to may come.)
-                    continue
-                if path.stat().st_size > MOST_BYTES:
-                    return True
-                data = json.loads(path.read_bytes())
-                if not isinstance(data, dict) or any(data.get(key) for key in HOOK_KEYS):
-                    return True
-            agents = [
-                path
-                for name in AGENT_FOLDERS
-                for path in sorted((folder / name).rglob("*"))
-                if path.suffix.lower() == ".md"
-            ]
-            if len(agents) > MOST_AGENTS:
-                return True
-            for path in agents:
-                if path.stat().st_size > MOST_BYTES:
-                    return True
-                found = front_matter(path.read_bytes().decode(errors="replace"))
-                if not isinstance(found, dict) or any(
-                    str(key).casefold() == "hooks" and value for key, value in found.items()
-                ):
-                    return True
-    except (OSError, ValueError, TooLargeError):
-        return True
-    return False
 
 
 def glimpse(top: Path, cwd: Path, names: tuple[str, ...]) -> str:

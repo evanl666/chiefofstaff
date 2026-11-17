@@ -86,7 +86,14 @@ from .models import AS_SAVED, Attachment, SentItem, Settings
 from .notify import mac_notification
 from .others import Others
 from .peers import Peers
-from .policy import AGENT_SETTINGS, CODEX_SETTINGS, GITHUB_MCP, REPOSITORY_SETTINGS, within
+from .policy import (
+    AGENT_SETTINGS,
+    CODEX_SETTINGS,
+    GITHUB_MCP,
+    REPOSITORY_SETTINGS,
+    SANDBOX_HELD,
+    within,
+)
 from .provenance import ALIVE_EVERY, RUNS_KEPT, Provenance, log_of, runs_of
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sendsocket import LimitedError, SendSocket
@@ -1835,14 +1842,17 @@ class Runtime:
         if sandbox_platform() == "linux":
             self.git_watch(row["id"], [p for p in watched if not os.path.lexists(p)])
         readonly = list(protected)
-        # Repository settings an agent would load (hooks, MCP and language servers) and the
-        # files their hooks run, in each folder it may write and those above it up to its top
-        # (its own worktree or workspace too): its commands never change them, nor (macOS) make
-        # one. A branch update that needs to is not started: its prompt says to tell the owner.
-        # (What a server runs stays writable: a change turns that server off, servers_off.) Not
-        # its own workspace when it works in a checkout there: nothing loads them from that
-        # folder of Chief of Staff's. In a folder of its own, only its agent's (Copilot's: no
-        # other agent works there); in the owner's, every agent's.
+        # Repository settings an agent would load and the files their hooks run, in each folder
+        # it may write and those above it up to its top: its commands never change them, nor
+        # (macOS) make one. In the owner's checkout, every agent's (the owner's own sessions
+        # load them, with no check of Chief of Staff's). In a folder of its own, only what
+        # Copilot loads by itself mid-session (SANDBOX_HELD: each path held costs every command
+        # a little): the others load as its session starts or resumes, after the full check,
+        # or through a tool, after its pre-tool check (pre_tool_wanted). A branch update that
+        # needs to change a held one is not started: its prompt says to tell the owner. (What a
+        # server runs stays writable: a change turns that server off, servers_off.) Not its own
+        # workspace when it works in a checkout there: nothing loads them from that folder of
+        # Chief of Staff's.
         gated: dict[str, None] = {}
         workspace = os.path.realpath(self.workspaces.workspace(row))
         cwd = os.path.realpath(row["cwd"])
@@ -1859,7 +1869,7 @@ class Runtime:
             owners = not within(folder, workspace) or bool(checkout and checkout.get("shared"))
             places = [real, *[p for p in real.parents if p.is_relative_to(top)]]
             for place in places:
-                for name in AGENT_SETTINGS if owners else REPOSITORY_SETTINGS:
+                for name in AGENT_SETTINGS if owners else SANDBOX_HELD:
                     gated[str(place / name)] = None
             gated |= dict.fromkeys(self.run_files(top))
         readonly += list(gated)
@@ -1916,21 +1926,21 @@ class Runtime:
         return found
 
     def pre_tool_wanted(self, row: dict, sandboxed: bool) -> bool:
-        """Whether Copilot asks Chief of Staff before each of a worker's tools (Events.pre_tool,
-        about 2 to 4 ms a tool): where its folder has hooks of its own as its session opens
-        (a script of theirs swapped mid-turn, past the sandbox's paths, would run first and
-        could approve what a check refuses); where a server is off for it (the tool that
-        would start it, denied); and where it could add a custom agent mid-session, which
-        Copilot (1.0.109 and later) loads as it is called, with its hooks and MCP servers:
-        without the sandbox, or on Linux, whose sandbox does not hold a folder not there.
-        Hooks added mid-session load only from its next start, which the full check precedes;
-        otherwise each tool is glanced at as it starts (Events.tool_start), not waited for."""
+        """Whether Copilot asks Chief of Staff before each of a worker's tools (Events.pre_tool):
+        for every sandboxed worker, which keeps the sandbox's word: a setting it puts in place
+        past the sandbox's paths (a folder renamed over `.github`) is found before the tool
+        that would load it (a custom agent's `task`, the lsp tool, an extensions reload) and
+        before its folder's own hook scripts' answers stand. Not for a worker without the
+        sandbox (its commands run as the owner, and it would pay a few ms a tool): its tools
+        are glanced at as they start (Events.tool_start), its turns checked before they start;
+        unless a language server or a custom agent's is off for it (the tool that would start
+        it, denied)."""
         if row["role"] != WORKER or not row["cwd"]:
             return False
-        if self.servers_off.get(row["id"]) or not sandboxed or sandbox_platform() != "darwin":
-            return True
-        top, cwd, _ = self.settings_place(row)
-        return settings_guard.hooked(top, cwd)
+        return sandboxed or any(
+            server.startswith("lsp/") or "@" in server
+            for server in self.servers_off.get(row["id"], {})
+        )
 
     def yolo(self, row: dict) -> bool:
         """Whether this worker acts without permission checks (a session choice, else Settings)."""
