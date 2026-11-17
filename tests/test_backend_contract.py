@@ -513,6 +513,69 @@ async def test_copilots_base_profile_reads_what_chief_of_staff_leaves_out(tmp_pa
         await backend.stop()
 
 
+async def test_what_is_denied_in_copilots_own_places_is_refused_to_a_slack_reader(tmp_path):
+    """Copilot's base profile reads Homebrew's folders for every command: what Chief of Staff
+    denies a Slack reader there (Homebrew's var, its etc/npmrc and etc/gitconfig) is refused all
+    the same (the deny, deeper, wins); a worker on the owner's tasks reads it, as before."""
+    if not (REAL and sandbox_supported()):
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 on a machine with Copilot's sandbox.")
+    from conftest import Harness
+    from copilot.generated.rpc import ShellExecuteUserRequestedRequest
+    from test_progress import spawn
+
+    from chiefofstaff import caches
+    from chiefofstaff.models import Settings
+
+    names = ("var", "etc/npmrc", "etc/gitconfig")
+    closed = [
+        str(Path(prefix) / name)
+        for prefix in caches.SYSTEM_PREFIXES
+        if caches.base_readable(prefix)
+        for name in names
+        if (Path(prefix) / name).exists()
+    ]
+    if not closed:
+        pytest.skip("No Homebrew var or etc settings here.")
+    homebrew = await asyncio.to_thread(Path("/opt/homebrew/bin").is_dir)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Answer")
+    backend = copilot_backend("copilot")
+    await backend.start()
+    try:
+        for slack in (1, 0):
+            harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
+            policy = runtime.sandbox_policy(harness.store.session(worker))
+            assert policy is not None
+            assert all(path in policy.denied for path in closed) == bool(slack), policy.denied
+            session = await backend.create_session(
+                session_id=str(uuid4()), name="contract test", model=MODEL,
+                working_directory=str(tmp_path), sandbox_config=backend.sandbox(policy),
+                on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+            )  # fmt: skip
+            try:
+                command = "; ".join(
+                    f"if [ -d '{p}' ]; then ls '{p}' >/dev/null 2>&1; else head -c1 '{p}' "
+                    f">/dev/null 2>&1; fi && echo 'read {p}' || echo 'refused {p}'"
+                    for p in [*closed, "/opt/homebrew/bin"]
+                )
+                result = await session.rpc.shell.execute_user_requested(
+                    ShellExecuteUserRequestedRequest(command=command, request_id=str(uuid4())),
+                    timeout=120,
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    await backend.client.delete_session(session.session_id)
+            output = result.output or ""
+            for path in closed:
+                assert (f"refused {path}" in output) == bool(slack), (slack, output)
+            if homebrew:
+                assert "read /opt/homebrew/bin" in output, output
+    finally:
+        await runtime.stop()
+        await backend.stop()
+
+
 def first_file(root: str) -> str:
     """A file (not a link) the owner can read in this folder or below; "" when none is."""
     for folder, _, names in os.walk(root):

@@ -123,19 +123,18 @@ def test_a_workers_init_script_starts_no_process_and_points_java_at_the_proxy(tm
     tier = tmp_path / "tier"
     assert f"GOPATH={tier / 'go'}" in found, "Go's checksum database state, written at go get"
     assert f"GOMODCACHE={tier / 'go' / 'mod'}" in found
-    assert f"GOBIN={tier / 'go' / 'bin'}" in found, "the owner's GOBIN (go env -w) is read-only"
+    assert "GOBIN" not in found, "go install's default, GOPATH's bin (a GOBIN set fails cross)"
+    owned = caches.script(tier, owner, tmp_path / "ws", tmp_path / "t", True, "", None,
+                          gobin=True)  # fmt: skip
+    assert f"GOBIN={tier / 'go' / 'bin'}" in owned, "the owner's GOBIN (go env -w) is read-only"
     assert f"PNPM_HOME={tier / 'pnpm'}" in found
-    assert "npm_config_store_dir" not in found and "npm_config_devdir" not in found, (
-        "npm 11.5 and later warn about either at every command"
-    )
+    assert "npm_config_store_dir" not in found, "npm 11.5 and later warn about it at every command"
     stale = caches.script(tier, owner, tmp_path / "ws", tmp_path / "t", True, "", tmp_path / "no")
     status = subprocess.run(
         ["bash", "--norc", "--noprofile", "-c", f". /dev/stdin <<'EOF'\n{stale}EOF\necho $?"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()  # fmt: skip
     assert status == "0", "a stale truststore never makes the script fail (Copilot reports it)"
-    named = caches.script(tier, owner, tmp_path / "ws", tmp_path / "t", True, "", None, True)
-    assert f"npm_config_devdir={tier / 'node-gyp'}" in named, "asked: the owner's lack headers"
     (tmp_path / "home" / ".npmrc").parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / "home" / ".npmrc").write_text("store-dir=/elsewhere/pnpm-store\n")
     named = caches.script(tier, owner, tmp_path / "ws", tmp_path / "t", True, "", None)
@@ -510,7 +509,7 @@ def test_read_only_paths_another_one_holds_are_left_out(tmp_path, monkeypatch):
     """Every read-only path is a rule Copilot writes and the sandbox reads at each command: one
     inside another read-only folder adds nothing (a worker's commands took ~8 ms longer each),
     unless it is in a writable folder (it carves that out) or leads elsewhere (a link)."""
-    monkeypatch.setattr(caches, "temp_root", lambda: str(tmp_path / "temp" / "T"))
+    monkeypatch.setattr(caches, "temp_roots", lambda: [str(tmp_path / "temp" / "T")])
     tools, work, elsewhere = tmp_path / "tools", tmp_path / "work", tmp_path / "elsewhere"
     for folder in (tools / "go" / "bin", work / ".git" / "hooks", elsewhere):
         folder.mkdir(parents=True)
@@ -581,19 +580,37 @@ def test_each_workers_init_script_is_its_own_and_goes_when_it_closes(tmp_path):
     assert not path.parent.exists() and theirs.exists()
 
 
-@pytest.mark.parametrize("temp", ["/tmp", "/", "/private/var/folders/ab/cd/T"])
-def test_the_temporary_folder_never_makes_every_path_writable(temp, monkeypatch):
-    """The system's temporary folder's parent is / on Linux (and with TMPDIR=/tmp): every path
-    then counted as writable, and nothing was left out. Only macOS' per-user folder (its T
-    and C, which Copilot's sandbox writes) goes up one."""
-    monkeypatch.setattr(caches.tempfile, "gettempdir", lambda: temp)
-    root = "/nonexistent-chief-root"
-    kept = caches.fewest([root, f"{root}/go/bin", f"{temp.rstrip('/')}/cd-x"], [])
-    assert f"{root}/go/bin" not in kept and root in kept
-    if temp.startswith("/private/var/folders"):
-        assert caches.temp_root() == "/private/var/folders/ab/cd"
+@pytest.mark.parametrize(
+    ("platform", "tmpdir", "roots"),
+    [
+        ("linux", None, ["/tmp", "/var/tmp", "/dev/shm"]),
+        ("linux", "/srv/scratch/t", ["/srv/scratch/t", "/tmp", "/var/tmp", "/dev/shm"]),
+        ("linux", "/", ["/tmp", "/var/tmp", "/dev/shm"]),
+        ("darwin", "/private/var/folders/ab/cd/T", ["/private/var/folders/ab/cd"]),
+        ("darwin", "/tmp", ["/private/tmp"]),
+    ],
+)
+def test_every_temporary_folder_copilot_lets_commands_write_holds_its_carve_outs(
+    platform, tmpdir, roots, monkeypatch
+):
+    """Copilot's sandbox lets commands write the temporary folder its own environment names
+    (TMPDIR: the whole per-user folder on macOS), and on Linux /tmp as well where bubblewrap
+    mounts it: Chief of Staff's code in any of them keeps its read-only rules. Never / (it
+    would hold every path, and nothing would be left out)."""
+    monkeypatch.setattr(caches, "system", lambda: platform)
+    monkeypatch.setattr(caches.tempfile, "gettempdir", lambda: tmpdir or "/tmp")
+    if tmpdir:
+        monkeypatch.setenv("TMPDIR", tmpdir)
     else:
-        assert caches.temp_root() in {None, os.path.realpath(temp)} and caches.temp_root() != "/"
+        monkeypatch.delenv("TMPDIR", raising=False)
+    found = caches.temp_roots()
+    assert all(os.path.realpath(root) in found for root in roots), found
+    assert "/" not in found
+    pinned = ["/tmp/chief/site-packages/chiefofstaff", "/nonexistent-chief-root/lib"]
+    in_temp = platform == "linux" or tmpdir == "/tmp"
+    assert caches.carve_outs(pinned, []) == (pinned[:1] if in_temp else [])
+    kept = caches.fewest(["/nonexistent-chief-root", "/nonexistent-chief-root/go/bin"], [])
+    assert kept == ["/nonexistent-chief-root"]
 
 
 def test_workers_read_in_place_only_the_owners_caches_they_read_through(tmp_path, monkeypatch):
@@ -604,11 +621,13 @@ def test_workers_read_in_place_only_the_owners_caches_they_read_through(tmp_path
     node-gyp's headers."""
     monkeypatch.setattr(caches, "system", lambda: "darwin")
     home = tmp_path / "home"
+    # Yarn 4's global cache and pnpm's store: a checkout's .pnp.cjs, or node_modules in
+    # pnpm's global virtual store, loads packages from them where they are.
     read = (".gradle/caches", ".m2/repository", "go/pkg/mod", "Library/Caches/ms-playwright",
-            ".cache/pre-commit", "Library/Caches/node-gyp", ".electron-gyp")  # fmt: skip
+            ".cache/pre-commit", "Library/Caches/node-gyp", ".electron-gyp", ".yarn/berry/cache",
+            "Library/pnpm/store")  # fmt: skip
     copied = (".npm", ".cache/uv", "Library/Caches/pip", ".gradle/wrapper", ".m2/wrapper",
-              ".cargo/registry", "Library/Caches/go-build", ".yarn/berry",
-              "Library/pnpm")  # fmt: skip
+              ".cargo/registry", "Library/Caches/go-build")  # fmt: skip
     for name in (*read, *copied):
         (home / name).mkdir(parents=True)
     found = caches.plan(tmp_path / "tier", tmp_path / "ws" / "w", "11111111-a", tmp_path / "s",
@@ -617,6 +636,9 @@ def test_workers_read_in_place_only_the_owners_caches_they_read_through(tmp_path
         assert str(home / name) in found.readonly, name
     for name in copied:
         assert str(home / name) not in found.readonly, name
+    reader = caches.plan(tmp_path / "tier", tmp_path / "ws" / "r", "22222222-b", tmp_path / "s",
+                         slack=True, read_through=False, home=home)  # fmt: skip
+    assert not [path for path in reader.readonly if path.startswith(str(home))], "none for Slack"
 
 
 def test_what_copilots_base_profile_reads_already_takes_no_rule(tmp_path, monkeypatch):
@@ -624,9 +646,31 @@ def test_what_copilots_base_profile_reads_already_takes_no_rule(tmp_path, monkey
     /Library and /System: a rule for one of them, or a folder in them, adds nothing."""
     base = tmp_path / "opt" / "homebrew"
     monkeypatch.setattr(caches, "BASE_READABLE", (str(base),))
-    monkeypatch.setattr(caches, "temp_root", lambda: None)
+    monkeypatch.setattr(caches, "temp_roots", list)
     kept = caches.fewest([str(base), str(base / "bin"), str(base / "opt" / "node")], [])
     assert kept == []
     monkeypatch.setenv("PATH", f"{base / 'bin'}{os.pathsep}{tmp_path / 'tools' / 'bin'}")
     folders = caches.path_folders(tmp_path / "home")
     assert base not in folders and tmp_path / "tools" in folders
+
+
+def test_node_gyp_builds_in_workers_own_folder_with_the_owners_headers(tmp_path, monkeypatch):
+    """On macOS node-gyp keeps headers in ~/Library/Caches/node-gyp (env-paths, not
+    XDG_CACHE_HOME), read-only to workers: a project on another Node version made node-gyp
+    mkdir there, EPERM (it falls back on EACCES only), and native modules failed. Workers'
+    own folder always, the owner's header versions linked into it (no download)."""
+    monkeypatch.setattr(caches, "system", lambda: "darwin")
+    home = tmp_path / "home"
+    headers = home / "Library" / "Caches" / "node-gyp" / "22.11.0"
+    (headers / "include" / "node").mkdir(parents=True)
+    (headers / "installVersion").write_text("11\n")
+    tier, scripts = tmp_path / "chief" / "workers", tmp_path / "data" / "worker-shell"
+    found = caches.plan(tier, tmp_path / "ws" / "w", "11111111-a", scripts, slack=False,
+                        read_through=True, home=home)  # fmt: skip
+    assert f"export npm_config_devdir={tier / 'node-gyp'}" in found.text
+    assert caches.prepare(found, "11111111-a", scripts)
+    assert (tier / "node-gyp" / "22.11.0").resolve() == headers
+    monkeypatch.setattr(caches, "system", lambda: "linux")
+    linux = caches.plan(tier, tmp_path / "ws" / "w", "11111111-a", scripts, slack=False,
+                        read_through=True, home=home)  # fmt: skip
+    assert "npm_config_devdir" not in linux.text, "XDG_CACHE_HOME moves it there"

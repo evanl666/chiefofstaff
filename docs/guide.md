@@ -354,7 +354,11 @@ and with the worker's own daemon). Your caches are found where
 your own configuration in home keeps them (`cache=` in `~/.npmrc`, pip's `cache-dir`, Maven's
 `localRepository`…), never where a project's says. *Start workers' caches from yours* off
 (Settings) keeps your caches out of theirs. **Storage** shows the folder's size, and *Clear*
-deletes it (made again at once, and filled again from yours), when no worker is using it.
+deletes it (made again at once, and filled again from yours), when no worker is using it; a
+worker's Yarn PnP worktree then needs `yarn install` again. On macOS node-gyp builds native
+modules in workers' folder too, with your headers linked in: npm 11.5 and later warn
+"Unknown env config devdir" at each command (node-gyp reads no other setting for it).
+Electron's `@electron/rebuild` keeps its headers in `~/.electron-gyp`, read-only to workers.
 
 Copilot's own *dev-tool access* (which opened your caches read-write) is off for sandboxed
 workers: nothing in your home is writable to them but that folder and their own temporary
@@ -362,16 +366,16 @@ folders beside it, and they read only what Chief of Staff names: their toolchain
 your `PATH`, so tools installed under `~/.local/bin` too; nvm's, pyenv's, asdf's, mise's,
 SDKMAN's toolchains, JDKs, uv's Pythons, rustup's for a Rust project…) and, for workers on your
 own tasks, the few of your caches they read where they are (Gradle's and Maven's, Go's
-modules, Playwright's browsers, pre-commit's hooks; they have copies of the rest) and what a
-private registry needs (`~/.npmrc`,
+modules, Playwright's browsers, pre-commit's hooks, Yarn's global cache and pnpm's store; they
+have copies of the rest) and what a private registry needs (`~/.npmrc`,
 `~/.m2/settings.xml` and `settings-security.xml`, pip's, uv's, poetry's and Go's configuration,
 `~/.netrc`, Cargo's credentials, mise's configuration…), as in your terminal. Workers that read
 Slack have caches of their own in their workspace, can't read yours, can't read the registry and
 credential files build tools use (`~/.npmrc`, `~/.m2/settings.xml`,
 `~/.gradle/gradle.properties`, `~/.pypirc`, `~/.netrc`, `~/.git-credentials`,
 `~/.aws/credentials`…), and read of a toolchain only what runs: its `bin`, `lib`, `share`…, never
-a node's `etc/npmrc`, Maven's `conf/settings.xml`, Homebrew's `var` or a tool home's caches
-(GOPATH's modules, pnpm's store). Each worker's shell setup is its own: no other worker reads
+a node's `etc/npmrc`, Maven's `conf/settings.xml`, Homebrew's `var`, the system's registry
+settings or a tool home's caches (GOPATH's modules, pnpm's store). Each worker's shell setup is its own: no other worker reads
 it, and it goes when the worker closes. Chief of Staff itself never writes
 through a link a worker made in those folders. No worker can change Chief of Staff's own code
 or the Python it runs on, unless you asked it to work in place in Chief of Staff's own checkout.

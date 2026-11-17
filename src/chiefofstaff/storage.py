@@ -146,6 +146,7 @@ class Storage:
         self.cleaning: set[str] = set()
         self.uv_measuring = False
         self.caches_busy = ""  # "measuring" or "clearing" workers' caches.
+        self.caches_blocked = False  # A sandboxed worker uses them (caches_in_use): no Clear.
         # What came of the owner's last action on a worker (a cleanup, why not): shown by it.
         self.notes: dict[str, str] = {}
         self.sizes: dict[str, dict] | None = None
@@ -967,6 +968,13 @@ class Storage:
             self.store.set(CACHES_KEY, json.dumps(found))
         finally:
             self.caches_busy = ""
+            self.publish()
+
+    def workers_changed(self):
+        """A worker started or stopped: the page hears at once whether Clear is offered."""
+        blocked = self.runtime.caches_in_use()
+        if blocked != self.caches_blocked:
+            self.caches_blocked = blocked
             self.publish()
 
     async def caches_clear(self) -> dict:

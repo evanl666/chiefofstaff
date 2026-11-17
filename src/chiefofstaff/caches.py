@@ -359,8 +359,8 @@ MOVED_CONFIG = {
 def fewest(readonly: list[str], writable: list[str]) -> list[str]:
     """The read-only paths but those another one already holds (inside it, by their real
     paths): each is a rule Copilot writes and the sandbox reads at every command. One in a
-    writable folder stays (it carves that out), the system's temporary folder included
-    (temp_root), and so does a link (its rule holds the link itself)."""
+    writable folder stays (it carves that out), the system's temporary folders included
+    (temp_roots), and so does a link (its rule holds the link itself)."""
 
     def within(path: str, folders: list[str]) -> bool:
         return any(
@@ -375,7 +375,7 @@ def fewest(readonly: list[str], writable: list[str]) -> list[str]:
         if path
         for form in (os.path.normpath(path), os.path.realpath(path))
     ]
-    open_ += [temp] if (temp := temp_root()) else []
+    open_ += temp_roots()
     return [
         path
         for path, resolved in real.items()
@@ -389,14 +389,14 @@ def fewest(readonly: list[str], writable: list[str]) -> list[str]:
     ]
 
 
-# What Copilot's base macOS profile lets every sandboxed command read (CLI 1.0.111; checked by
-# tests/test_backend_contract.py): a rule for one of them, or a folder in one, adds nothing but
-# its cost at every command. Elsewhere not known: none.
+# What Copilot's base macOS profile lets every sandboxed command read (CLI 1.0.100 to 1.0.111;
+# checked by tests/test_backend_contract.py): a rule for one of them, or a folder in one, adds
+# nothing but its cost at every command. Not /Applications/Xcode.app (from 1.0.111 only).
+# Elsewhere not known: none.
 BASE_READABLE: tuple[str, ...] = (
     (
         "/bin", "/sbin", "/usr/bin", "/usr/lib", "/usr/libexec", "/usr/local", "/usr/sbin",
         "/usr/share", "/opt/homebrew", "/Library", "/System", "/private/etc",
-        "/Applications/Xcode.app",
     )
     if sys.platform == "darwin"
     else ()
@@ -408,14 +408,23 @@ def base_readable(path: Path | str) -> bool:
     return any(resolved == root or resolved.startswith(root + "/") for root in BASE_READABLE)
 
 
-def temp_root() -> str | None:
-    """The system's temporary folder, which Copilot's sandbox lets every command write: on
-    macOS the whole per-user folder (/var/folders/xx/yy: its T and C), elsewhere the folder
-    itself; never / (it would hold every path)."""
-    temp = os.path.realpath(tempfile.gettempdir())
-    if found := re.match(r"^(/(?:private/)?var/folders/[^/]+/[^/]+)(?:/|$)", temp):
-        temp = found.group(1)
-    return None if temp in {"", "/"} else temp
+def temp_roots() -> list[str]:
+    """The temporary folders Copilot's sandbox lets every command write: the one its own
+    environment names (TMPDIR, else /tmp; on macOS the whole per-user folder /var/folders/xx/yy
+    in its place, its T and C: as CLI 1.0.111's policy files have it), and Python's own pick;
+    on Linux /tmp, /var/tmp and /dev/shm as well (bubblewrap's mounts are not known here: held
+    all the same). Never / (it would hold every path)."""
+    found = []
+    # Not files made there: the places the sandbox lets commands write, to hold rules in.
+    shared = ("/tmp", "/var/tmp", "/dev/shm")  # noqa: S108
+    for temp in (os.environ.get("TMPDIR") or shared[0], tempfile.gettempdir()):
+        temp = os.path.realpath(temp)
+        if user := re.match(r"^(/(?:private/)?var/folders/[^/]+/[^/]+)(?:/|$)", temp):
+            temp = user.group(1)
+        found.append(temp)
+    if system() != "darwin":
+        found += [os.path.realpath(path) for path in shared]
+    return [path for path in dict.fromkeys(found) if path not in {"", "/"}]
 
 
 def tool_paths(owner: Owner, rust: bool = False, slack: bool = False) -> list[str]:
@@ -466,11 +475,75 @@ MAVEN_INSTALLS = (
 SYSTEM_PREFIXES = ("/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew")
 
 
+# System-wide registry settings, which may hold a token: denied to a Slack reader.
+SYSTEM_CONFIGS = (
+    "/Library/Application Support/pip/pip.conf", "/etc/pip.conf", "/etc/xdg/pip/pip.conf",
+    "/etc/uv/uv.toml", "/etc/xdg/uv/uv.toml", "/etc/npmrc", "/etc/gitconfig",
+)  # fmt: skip
+# pnpm's home: its binaries (and shims) beside its store, often on PATH.
+PNPM_HOMES = ("Library/pnpm", ".local/share/pnpm")
+
+
+def owner_caches(owner: Owner) -> list[Path]:
+    """Every cache of the owner's: where their tools keep it (their environment and
+    configuration), and where such caches usually are (held_caches)."""
+    gradle, maven, cargo = owner.gradle(), owner.maven(), owner.cargo()
+    return [
+        owner.npm(), owner.pnpm_store(), owner.yarn(), owner.bun(), owner.pip(), owner.uv(),
+        owner.poetry(), owner.pre_commit(), owner.corepack(), gradle / "caches",
+        gradle / "wrapper", owner.maven_repository(), maven / "wrapper", cargo / "registry",
+        cargo / "git", owner.go_modules(), owner.go_build(), owner.playwright(),
+        owner.yarn_classic(), owner.node_gyp(), owner.electron(), owner.deno(), owner.ccache(),
+        owner.sccache(), owner.nuget(), owner.virtualenv(), owner.bundle(),
+        *map(Path, held_caches(owner.home)[0]),
+    ]  # fmt: skip
+
+
+def slack_view(owner: Owner, readonly: list[str]) -> tuple[list[str], list[str]]:
+    """What a worker that reads Slack reads of these, and which of the owner's caches within
+    it is denied (S2). Every cache is checked by where it really is: a folder that is a cache
+    or in one is not read; of pnpm's home (on PATH, its store beside its binaries) only what
+    is not a cache, each on its own (a store made later is not read either); a cache inside a
+    folder read is denied (one that exists: the sandbox would leave an empty folder in place
+    of the rest)."""
+
+    def within(path: str, folder: str) -> bool:
+        return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+    homes = {os.path.realpath(owner.home / name) for name in PNPM_HOMES}
+    if pnpm := os.environ.get("PNPM_HOME"):
+        homes.add(os.path.realpath(pnpm))
+    found = [path for path in owner_caches(owner) if not too_broad(str(path))]
+    caches = {os.path.realpath(path) for path in found} - homes
+    granted = []
+    for path in readonly:
+        real = os.path.realpath(path)
+        if any(within(real, cache) for cache in caches):
+            continue
+        if real in homes and Path(path).is_dir():
+            for child in sorted(Path(path).iterdir()):
+                inside = os.path.realpath(child)
+                if not any(within(inside, cache) or within(cache, inside) for cache in caches):
+                    granted.append(str(child))
+            continue
+        granted.append(path)
+    held = [os.path.realpath(path) for path in granted]
+    denied = [
+        str(path)
+        for path in dict.fromkeys(found)
+        if os.path.lexists(path)
+        and any(os.path.realpath(path).startswith(folder.rstrip("/") + "/") for folder in held)
+    ]
+    return granted, denied
+
+
 def slack_denied(owner: Owner, readonly: list[str]) -> list[str]:
-    """What a worker that reads Slack must not read where a folder it reads holds it (S2):
-    every node install's etc/npmrc, Maven's conf/settings.xml, Homebrew's var, the owner's
-    caches. Only what exists (the sandbox would leave an empty folder in place of the rest),
-    and in home only what a folder it reads holds (nothing else of home is readable)."""
+    """What a worker that reads Slack must not read where a folder it reads, or Copilot's own
+    profile, holds it (S2): every node install's etc/npmrc, Maven's conf/settings.xml,
+    Homebrew's var, etc/npmrc and etc/gitconfig, the system's registry settings, a
+    virtualenv's or conda environment's pip.conf and condarc. Only what exists (the sandbox
+    would leave an empty folder in place of the rest), and in home only what a folder it
+    reads holds (nothing else of home is readable). Caches: slack_view."""
     home = owner.home
     nodes = [path for pattern in NODE_INSTALLS for path in home.glob(pattern)]
     mavens = [path for pattern in MAVEN_INSTALLS for path in home.glob(pattern)]
@@ -481,11 +554,15 @@ def slack_denied(owner: Owner, readonly: list[str]) -> list[str]:
     found = [path / "etc" / "npmrc" for path in nodes]
     found += [path / "conf" / "settings.xml" for path in mavens]
     for prefix in map(Path, SYSTEM_PREFIXES):
-        found += [prefix / "etc" / "npmrc", prefix / "var"]
+        found += [prefix / "etc" / "npmrc", prefix / "etc" / "gitconfig", prefix / "var"]
         found += [
             path / "libexec" / "conf" / "settings.xml" for path in prefix.glob("Cellar/maven/*")
         ]
-    found += [Path(path) for path in held_caches(home)[0]]
+    found += [Path(os.path.realpath(path)) for path in SYSTEM_CONFIGS]
+    for variable, names in (("VIRTUAL_ENV", ("pip.conf",)),
+                            ("CONDA_PREFIX", ("pip.conf", ".condarc", "condarc"))):  # fmt: skip
+        if (value := os.environ.get(variable, "")) and Path(value).is_absolute():
+            found += [Path(value) / name for name in names]
     held = [os.path.realpath(path) for path in readonly]
     return [
         str(path)
@@ -539,18 +616,22 @@ def read_caches(owner: Owner) -> list[str]:
     """The owner's caches a worker on their tasks reads where they are, read-only: Gradle's
     dependency cache, Maven's repository and Go's module downloads (read through: script),
     Playwright's browsers (linked), pre-commit's hook environments (the tier's copies run them
-    by their paths) and node-gyp's headers (read where they are). Not the others, which the tier
-    has copies of: each read-only path is a rule at every command."""
+    by their paths), node-gyp's headers (linked), Yarn's global cache and pnpm's store (a
+    checkout's packages load from them). Not the others, which the tier has copies of: each
+    read-only path is a rule at every command."""
     found = [
         owner.gradle() / "caches", owner.maven_repository(), owner.go_modules(),
         owner.playwright(), owner.pre_commit(), owner.home / ".node-gyp",
         owner.home / ".electron-gyp", *([owner.node_gyp()] if owner.mac else []),
+        # Yarn 4's global cache (a checkout's .pnp.cjs loads its zips from there) and pnpm's
+        # store (node_modules in its global virtual store link into it).
+        owner.yarn(), owner.pnpm_store(),
     ]  # fmt: skip
     return unsecret(found, owner.home)
 
 
 def carve_outs(paths: list[str], writable: list[str]) -> list[str]:
-    """Those of these paths that something writable holds (the system's temporary folder
+    """Those of these paths that something writable holds (the system's temporary folders
     included): only there does a read-only rule for them hold anything."""
     folders = [
         form
@@ -558,7 +639,7 @@ def carve_outs(paths: list[str], writable: list[str]) -> list[str]:
         if path
         for form in {os.path.normpath(path), os.path.realpath(path)}
     ]
-    folders += [temp] if (temp := temp_root()) else []
+    folders += temp_roots()
     return [
         path
         for path in paths
@@ -964,11 +1045,30 @@ def link_owner(tier: Folder, owner: Owner, slack: bool) -> None:
     """What the tier links of the owner's: their browsers (every worker's), their settings and
     Go tools (not for a worker that reads Slack), each on its own: one that fails is logged
     and stops nothing."""
-    for link in (link_browsers, *(() if slack else (link_settings, link_go_tools))):
+    owners = (link_settings, link_go_tools, link_node_headers)
+    for link in (link_browsers, *(() if slack else owners)):
         try:
             link(tier, owner)
         except OSError as exc:
             logger.warning("Workers' caches: %s: %s", link.__name__, exc)
+
+
+def link_node_headers(tier: Folder, owner: Owner) -> None:
+    """On macOS, each version of node-gyp's headers the owner has, as a link in workers' own
+    node-gyp folder (npm_config_devdir): found at once, never downloaded again; another
+    version downloads into the tier."""
+    source = owner.node_gyp()
+    if not owner.mac or not source.is_dir():
+        return
+    with tier.child("node-gyp", create=True) as target:
+        for entry in sorted(source.iterdir()):
+            if (
+                entry.is_dir()
+                and not entry.name.startswith(".")
+                and target.lstat(entry.name) is None
+            ):
+                with suppress(FileExistsError):
+                    target.symlink(entry.name, entry)
 
 
 def link_go_tools(tier: Folder, owner: Owner) -> None:
@@ -1013,22 +1113,6 @@ def uv_stamp() -> tuple[str, int]:
     with suppress(OSError):
         return path, Path(path).stat().st_mtime_ns if path else 0
     return path, 0
-
-
-def node_headers() -> bool | None:
-    """Whether node-gyp's headers for the node on PATH are already in the owner's cache (read
-    from there, they need no folder of workers' own); None without node."""
-    if not (node := shutil.which("node")):
-        return None
-    try:
-        found = subprocess.run(  # noqa: S603  (the owner's node, as their shell finds it)
-            [node, "-p", "process.versions.node"], capture_output=True, text=True, timeout=20,
-            check=False,
-        )  # fmt: skip
-    except (OSError, subprocess.SubprocessError):
-        return None
-    version = found.stdout.strip()
-    return bool(version) and (Owner(Path.home()).node_gyp() / version / "installVersion").is_file()
 
 
 def authority_stamp(copilot_home: Path) -> int:
@@ -1106,7 +1190,9 @@ def script(
     read_through: bool,
     goproxy: str,
     truststore: Path | None,
-    devdir: bool = False,
+    *,
+    gobin: bool = False,
+    slack: bool = False,
 ) -> str:
     """A worker's shell init script: every tool pointed at the tier, read through to the
     owner's caches where the tool can (`read_through`), a temporary folder of its own, the JVM
@@ -1134,7 +1220,7 @@ def script(
         # GOPATH too: Go writes its checksum database's state there (pkg/sumdb) at `go get`;
         # `go install` writes in its bin, where the owner's tools are linked (link_go_tools).
         f"export GOPATH={q(str(t / 'go'))} GOMODCACHE={q(str(t / 'go' / 'mod'))}"
-        f" GOCACHE={q(str(t / 'go' / 'build'))} GOBIN={q(str(t / 'go' / 'bin'))}",
+        f" GOCACHE={q(str(t / 'go' / 'build'))}",
         f"export GRADLE_USER_HOME={q(str(t / 'gradle'))}",
         # Gradle's native libraries would load from that writable folder, which the sandbox
         # refuses; its daemons are this worker's own (a daemon keeps the sandbox it started in).
@@ -1157,10 +1243,21 @@ def script(
     ]
     if owner.pnpm_store_named():
         lines.append(f"export npm_config_store_dir={q(str(t / 'pnpm' / 'store'))}")
-    if devdir:
-        # node-gyp's headers: on macOS only this moves them (on Linux XDG_CACHE_HOME does),
-        # wanted only when the owner's own lack the node on PATH's (npm 11.5 warns about it).
+    if gobin:
+        # The owner's own GOBIN (their environment, or `go env -w`) is read-only: go install
+        # writes where GOPATH's bin would be. Not otherwise (a GOBIN set fails a cross build).
+        lines.append(f"export GOBIN={q(str(t / 'go' / 'bin'))}")
+    if system() == "darwin":
+        # node-gyp's headers (on Linux XDG_CACHE_HOME moves them): ~/Library/Caches/node-gyp
+        # is read-only, and node-gyp falls back only on EACCES, not the sandbox's EPERM. The
+        # owner's are linked in (link_node_headers). node-gyp reads no other variable for it
+        # (only npm_config_*, --devdir, or HOME), so npm 11.5 and later warn "Unknown env config
+        # devdir" at each command: a warning, against native modules failing.
         lines.append(f"export npm_config_devdir={q(str(t / 'node-gyp'))}")
+    if slack:
+        # Git's system configuration (Homebrew's etc/gitconfig) is denied to a Slack reader:
+        # read none (git warns at each command about one it cannot read).
+        lines.append("export GIT_CONFIG_NOSYSTEM=1")
     maven = f"-Dmaven.repo.local={t / 'maven' / 'repository'}"
     if read_through:
         lines.append(f"export GRADLE_RO_DEP_CACHE={q(str(owner.gradle() / 'caches'))}")
@@ -1311,7 +1408,6 @@ def plan(
     truststore_path: Path | None = None,
     home: Path | None = None,
     rust: bool = False,
-    devdir: bool = False,
 ) -> Plan:
     """A worker's caches: the shared tier (a tier of its own in its workspace when it reads
     Slack, nothing of the owner's copied there), its toolchains read-only, the owner's caches
@@ -1337,11 +1433,14 @@ def plan(
     # Nothing of the owner's is read through for a worker that reads Slack: it can't read it.
     text = script(
         own, owner, workspace, temporary, read_through and not slack, go.get("GOPROXY", ""),
-        None if slack else truststore_path, devdir and not slack,
+        None if slack else truststore_path, gobin=bool(go.get("GOBIN")), slack=slack,
     )  # fmt: skip
     readonly = [path for path in dict.fromkeys(readonly) if not too_broad(path)]
     trusted = workspace.parent if slack else tier.parent
-    denied = slack_denied(owner, readonly) if slack else []
+    denied: list[str] = []
+    if slack:
+        readonly, closed = slack_view(owner, readonly)
+        denied = [*slack_denied(owner, readonly), *closed]
     return Plan(own, trusted, temporary, readwrite, readonly, text, slack, owner, denied)
 
 

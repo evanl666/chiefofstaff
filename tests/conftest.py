@@ -504,7 +504,6 @@ def no_cache_seeding(monkeypatch, tmp_path):
     monkeypatch.setattr(caches, "old_uv", lambda: "")
     monkeypatch.setattr(caches, "truststore", lambda *args: None)
     monkeypatch.setattr(caches, "uv_stamp", lambda: ("", 0))
-    monkeypatch.setattr(caches, "node_headers", lambda: None)
     monkeypatch.setattr(caches, "authority_stamp", lambda copilot_home: 0)
 
 

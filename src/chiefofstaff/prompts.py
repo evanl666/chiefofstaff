@@ -743,7 +743,9 @@ def worker_context(
                 "environment (npm, pnpm, Yarn, Bun, pip, uv, poetry, pre-commit, Go, Cargo, "
                 "Gradle, Maven, Playwright), with the owner's caches read-only beneath it: what "
                 "the owner or another worker already has is not downloaded again. Install and "
-                "build as usual; do not point HOME or those caches elsewhere."
+                "build as usual; do not point HOME or those caches elsewhere. Electron's native "
+                "rebuild (@electron/rebuild) keeps its headers in ~/.electron-gyp, read-only "
+                "here: if it fails there, report it as blocked, with the command for the owner."
             )
         if old_uv:
             lines.append(

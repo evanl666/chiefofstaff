@@ -33,7 +33,10 @@ export function bindStorage() {
   $("#storage-uv-measure").addEventListener("click", () => act("/api/storage/uv-measure"));
   $("#storage-caches-measure").addEventListener("click", () => act("/api/storage/caches-measure"));
   $("#storage-caches-clear").addEventListener("click", () => {
-    if (confirm("Delete sandboxed workers' own caches? They are made again from yours; a worker installing right now may have to install again.")) act("/api/storage/caches-clear", undefined, "Clearing workers' caches…");
+    if (!confirm("Delete sandboxed workers' own caches? They are made again from yours. A worker's Yarn PnP worktree needs `yarn install` again afterwards.")) return;
+    act("/api/storage/caches-clear").then((data) => {
+      if (data && data.caches && data.caches.busy === "clearing") toast("Clearing workers' caches…");
+    });
   });
   $("#storage-settings").addEventListener("submit", saveSettings);
   refreshStorageLink();

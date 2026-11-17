@@ -1791,7 +1791,6 @@ class Runtime:
             go=facts.get("go"),
             truststore_path=facts.get("truststore"),
             rust=rust,
-            devdir=sys.platform == "darwin" and facts.get("node_headers") is False,
         )
 
     def project_folders(self, row: dict) -> list[Path]:
@@ -1812,7 +1811,6 @@ class Runtime:
             "go": await asyncio.to_thread(caches.go_env),
             "uv": await asyncio.to_thread(caches.uv_stamp),
             "old_uv": await asyncio.to_thread(caches.old_uv),
-            "node_headers": await asyncio.to_thread(caches.node_headers),
             "ca": await asyncio.to_thread(caches.authority_stamp, copilot_home()),
         }
         self.cache_facts.update(found)
@@ -3570,6 +3568,8 @@ class Runtime:
     def update_session(self, session_id: str, **values) -> dict:
         row = self.store.update_session(session_id, **values)
         self.publish_session(row)
+        if row["role"] == WORKER and ("status" in values or "closed_at" in values):
+            self.storage.workers_changed()  # Clear is offered while no worker uses caches.
         return row
 
     def task_changed(self, task: dict):

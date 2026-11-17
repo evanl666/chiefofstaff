@@ -1307,6 +1307,7 @@ async def test_workers_caches_are_not_cleared_while_a_sandboxed_worker_works(tmp
     harness.store.execute("UPDATE sessions SET status='working' WHERE id=?", (worker,))
     report = await runtime.storage.caches_clear()
     assert report["caches"]["blocked"] == "Workers are using their caches; clear when they're idle."
+    assert report["caches"]["busy"] == "", "not started: the page says nothing was cleared"
     await settle(runtime)
     assert (tier / "npm" / "_cacache" / "blob").exists()
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
@@ -1316,3 +1317,21 @@ async def test_workers_caches_are_not_cleared_while_a_sandboxed_worker_works(tmp
     await runtime.storage.caches_clear()
     await settle(runtime)
     assert not (tier / "npm").exists()
+
+
+async def test_storage_says_at_once_when_workers_start_or_stop_using_their_caches(tmp_path):
+    """Clear's state was refreshed every minute only: it is published as a sandboxed worker on
+    the owner's tasks starts or stops working."""
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = (await spawn(runtime, harness.router_id, "Build"))["session_id"]
+    await settle(runtime)
+    for status, blocked in (("idle", False), ("working", True), ("idle", False)):
+        async with runtime.bus.subscribe() as events:
+            runtime.update_session(worker, status=status)
+            sent = []
+            while not events.empty():
+                sent.append(json.loads(events.get_nowait()))
+        storage_events = [e for e in sent if e["type"] == "storage"]
+        assert storage_events, status
+        assert bool(storage_events[-1]["data"]["caches"]["blocked"]) == blocked

@@ -850,6 +850,7 @@ async def test_workers_write_a_cache_of_their_own_and_read_the_owners(tmp_path, 
     prompt = harness.session(worker).options["system_message"]["content"]
     assert "GRADLE_RO_DEP_CACHE" not in prompt, "set in its shell, not asked of the model"
     assert "a folder of workers' own" in prompt
+    assert "~/.electron-gyp" in prompt, "@electron/rebuild's headers: read-only, said so"
     # Its shell gets the tools pointed there, at every open.
     scripts = harness.session(worker).shell_scripts
     assert len(scripts) == 1 and scripts[0][0].startswith(str(tmp_path / "data")), scripts
@@ -1015,9 +1016,12 @@ async def test_no_configuration_file_makes_a_folder_of_the_owners_writable(tmp_p
         for path in policy.readwrite:
             if Path(path).is_relative_to(home):
                 assert any(Path(path).is_relative_to(mine) for mine in theirs), (slack, path)
-        for name in ("npm", "pnpm", "yarn", "pip", "uv", "nuget"):
+        for name in ("npm", "yarn", "pip", "uv", "nuget"):
             assert str(moved / name) not in policy.readonly, (slack, name, "not followed")
         assert (str(moved / "m2") in policy.readonly) == (not slack), "Maven's: read through"
+        assert (str(moved / "pnpm") in policy.readonly) == (not slack), (
+            "pnpm's store, where the owner's own configuration keeps it: read in place"
+        )
         assert (f"maven.repo.local.tail={moved / 'm2'}" in own.text) == (not slack)
         for read_through in ("GRADLE_RO_DEP_CACHE", "GOPROXY=file://"):
             assert (read_through in own.text) == (not slack), "none of the owner's, for Slack's"
@@ -1146,6 +1150,65 @@ async def test_workers_that_read_slack_read_only_what_their_tools_run(tmp_path, 
     assert policy is not None
     for whole in ("gopath", "maven", "tools/acme", ".nvm/versions"):
         assert str(home / whole) in policy.readonly, f"{whole}: an owner-task worker's, as before"
+
+
+async def test_a_slack_reader_reads_no_cache_where_a_tool_folder_on_path_holds_one(
+    tmp_path, monkeypatch
+):
+    """pnpm's home is on PATH and holds its store (~/Library/pnpm/store): the PATH folder was
+    granted whole, and a cache was denied only strictly inside a folder read, so the store
+    stayed readable to a Slack reader. Every cache of the owner's (where their tools say) is
+    checked against what it reads: of a PATH folder that is a cache's home, only what is not
+    a cache (pnpm itself, its shims); a cache it reads into is denied. System-wide registry
+    settings are denied too, and git reads no system configuration."""
+    from chiefofstaff import caches
+
+    for name in (*MOVED, "NVM_DIR", "MAVEN_HOME", "PNPM_HOME", "VIRTUAL_ENV", "CONDA_PREFIX"):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    files = (
+        "Library/pnpm/pnpm", "Library/pnpm/eslint", "Library/pnpm/store/v10/files/00/private.js",
+        "Library/pnpm/global/5/node_modules/eslint/package.json", "tools/npmcache/_cacache/x",
+        "tools/bin/tool", "venv/bin/python", "venv/pip.conf", "conda/.condarc", "conda/pip.conf",
+        "conda/bin/python", "../system/pip.conf", "../brew/etc/gitconfig", "../brew/etc/npmrc",
+    )  # fmt: skip
+    for name in files:
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
+        (home / name).write_text("token")
+    system = tmp_path / "system" / "pip.conf"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(caches, "system", lambda: "darwin")
+    monkeypatch.setattr(caches, "SYSTEM_PREFIXES", (str(tmp_path / "brew"),))
+    monkeypatch.setattr(caches, "SYSTEM_CONFIGS", (str(system),))
+    monkeypatch.setenv("PNPM_HOME", str(home / "Library/pnpm"))
+    monkeypatch.setenv("npm_config_cache", str(home / "tools/npmcache"))
+    monkeypatch.setenv("VIRTUAL_ENV", str(home / "venv"))
+    monkeypatch.setenv("CONDA_PREFIX", str(home / "conda"))
+    on_path = [home / "Library/pnpm", home / "tools/bin", home / "venv/bin"]
+    monkeypatch.setenv("PATH", os.pathsep.join([*map(str, on_path), os.environ["PATH"]]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Answer in the thread")
+    harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
+    row = harness.store.session(worker)
+    policy = runtime.sandbox_policy(row)
+    assert policy is not None
+
+    def reads(path: Path) -> bool:
+        held = any(path.is_relative_to(folder) for folder in map(Path, policy.readonly))
+        return held and not any(path.is_relative_to(denied) for denied in policy.denied)
+
+    assert reads(home / "Library/pnpm/pnpm") and reads(home / "Library/pnpm/eslint")
+    assert str(home / "Library/pnpm") not in policy.readonly, "not the folder: its store"
+    assert not reads(home / "Library/pnpm/store/v10/files/00/private.js")
+    assert not reads(home / "tools/npmcache/_cacache/x"), "npm's cache, where npm says"
+    assert reads(home / "tools/bin/tool") and reads(home / "venv/bin/python")
+    for secret in ("venv/pip.conf", "conda/.condarc", "conda/pip.conf"):
+        assert str(home / secret) in policy.denied, secret
+    for secret in (system, tmp_path / "brew/etc/gitconfig", tmp_path / "brew/etc/npmrc"):
+        assert str(secret) in policy.denied, secret
+    assert "export GIT_CONFIG_NOSYSTEM=1" in runtime.cache_plan(row).text
 
 
 MOVED = (
