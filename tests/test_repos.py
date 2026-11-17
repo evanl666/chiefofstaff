@@ -2299,6 +2299,38 @@ async def test_the_owner_making_their_worktree_again_is_no_replaced_git(
         await runtime.stop()
 
 
+async def test_a_model_round_reads_no_settings_unless_the_glance_changed(
+    tmp_path, git_repo, monkeypatch
+):
+    """Each model round of a turn (assistant.turn_start) glances at the folder's settings; the
+    full check (every file read) runs only when that glance found a change."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        session = harness.session(worker)
+        await settle(runtime)
+        verdicts = []
+        verdict = runtime.settings_verdict
+
+        async def counted(*args, **kwargs):
+            verdicts.append(args)
+            return await verdict(*args, **kwargs)
+
+        monkeypatch.setattr(runtime, "settings_verdict", counted)
+        for _ in range(5):
+            session.emit("assistant.turn_start")
+            await settle(runtime)
+        assert verdicts == [] and runtime.states.is_live(worker)
+        plant(cwd, ".mcp.json")
+        session.emit("assistant.turn_start")
+        await settle(runtime)
+        assert verdicts and not runtime.states.is_live(worker)
+    finally:
+        await runtime.stop()
+
+
 async def test_a_worker_stopped_for_its_settings_is_never_left_working(
     tmp_path, git_repo, monkeypatch
 ):

@@ -3662,10 +3662,11 @@ class Runtime:
         self.background(self.settings_glanced(session_id))
 
     async def settings_look(self, row: dict) -> str:
-        """Before each tool a Copilot worker runs (Events.pre_tool, which Copilot waits for):
-        what the file system says of its folder's settings (some lstat calls, off the event
-        loop), against its last full check's; when that changed, the full check, whose line
-        says why the tool may not run ("" when it may: a script Copilot made executable)."""
+        """Before each tool a Copilot worker runs (Events.pre_tool, which Copilot waits for), and
+        as each of its model rounds starts (settings_backstop): what the file system says of its
+        folder's settings (some lstat calls, off the event loop), against its last full check's;
+        when that changed, the full check, whose line says why the tool may not run ("" when it
+        may: a script Copilot made executable)."""
         if paths := self.settings_paths.get(row["id"]):
             # (Where its last full check found them: the files' places alone, no snapshot read.)
             now = await asyncio.to_thread(settings_guard.signature, paths[0], paths[1],
@@ -3805,19 +3806,15 @@ class Runtime:
         return said
 
     async def settings_glanced(self, session_id: str):
-        row = self.store.find_session(session_id)
-        if not row or row["closed_at"]:
-            return
-        now = await asyncio.to_thread(self.settings_signature, row)
-        if now != self.settings_sigs.get(session_id):
-            await self.settings_backstop(session_id)
+        await self.settings_backstop(session_id)
 
     async def settings_backstop(self, session_id: str):
-        """A turn a Copilot worker started (from Copilot's own queue, say): stopped at once if
-        its folder's settings changed meanwhile."""
+        """A turn a Copilot worker started (from Copilot's own queue, say), each of its model
+        rounds: stopped at once if its folder's settings changed meanwhile (a glance, the full
+        check only when that changed: settings_look)."""
         row = self.store.find_session(session_id)
-        if row and not row["closed_at"] and await self.settings_refusal(row):
-            await self.settings_stop(session_id)
+        if row and not row["closed_at"] and row["cwd"]:
+            await self.settings_look(row)
 
     async def codex_settings(self, row: dict) -> list[str]:
         """The folders whose Codex settings differ from what Chief of Staff last saw (a Codex
