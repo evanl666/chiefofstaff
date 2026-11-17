@@ -1752,7 +1752,10 @@ class Runtime:
         readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
         if agent := os.environ.get("SSH_AUTH_SOCK"):
             writable.append(agent)  # Signing through the agent; key files stay unreadable.
-        readonly += self.own_code(writes)
+        # Chief of Staff's own code: held only where something writable holds it (nothing else
+        # of it is writable to them, and workers never run it: no rule to pay for at each
+        # command).
+        readonly += caches.carve_outs(self.own_code(writes), writable)
         readonly += cached.readonly
         # Workers that read Slack must not read the owner's registry credentials. Nothing
         # else of the owner's needs closing: Copilot grants nothing of its own (dev-tool

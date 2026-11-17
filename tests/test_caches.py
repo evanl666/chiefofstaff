@@ -594,3 +594,39 @@ def test_the_temporary_folder_never_makes_every_path_writable(temp, monkeypatch)
         assert caches.temp_root() == "/private/var/folders/ab/cd"
     else:
         assert caches.temp_root() in {None, os.path.realpath(temp)} and caches.temp_root() != "/"
+
+
+def test_workers_read_in_place_only_the_owners_caches_they_read_through(tmp_path, monkeypatch):
+    """Each read-only path is a rule at every command, and the tier has its own copies of most
+    of the owner's caches: a worker on the owner's tasks reads in place only Gradle's dependency
+    cache, Maven's repository and Go's module downloads (read through), Playwright's browsers
+    (linked), pre-commit's hook environments (the tier's copies run them by their paths) and
+    node-gyp's headers."""
+    monkeypatch.setattr(caches, "system", lambda: "darwin")
+    home = tmp_path / "home"
+    read = (".gradle/caches", ".m2/repository", "go/pkg/mod", "Library/Caches/ms-playwright",
+            ".cache/pre-commit", "Library/Caches/node-gyp", ".electron-gyp")  # fmt: skip
+    copied = (".npm", ".cache/uv", "Library/Caches/pip", ".gradle/wrapper", ".m2/wrapper",
+              ".cargo/registry", "Library/Caches/go-build", ".yarn/berry",
+              "Library/pnpm")  # fmt: skip
+    for name in (*read, *copied):
+        (home / name).mkdir(parents=True)
+    found = caches.plan(tmp_path / "tier", tmp_path / "ws" / "w", "11111111-a", tmp_path / "s",
+                        slack=False, read_through=True, home=home)  # fmt: skip
+    for name in read:
+        assert str(home / name) in found.readonly, name
+    for name in copied:
+        assert str(home / name) not in found.readonly, name
+
+
+def test_what_copilots_base_profile_reads_already_takes_no_rule(tmp_path, monkeypatch):
+    """Copilot's macOS profile lets every command read /usr's folders, /bin, /sbin, Homebrew's,
+    /Library and /System: a rule for one of them, or a folder in them, adds nothing."""
+    base = tmp_path / "opt" / "homebrew"
+    monkeypatch.setattr(caches, "BASE_READABLE", (str(base),))
+    monkeypatch.setattr(caches, "temp_root", lambda: None)
+    kept = caches.fewest([str(base), str(base / "bin"), str(base / "opt" / "node")], [])
+    assert kept == []
+    monkeypatch.setenv("PATH", f"{base / 'bin'}{os.pathsep}{tmp_path / 'tools' / 'bin'}")
+    folders = caches.path_folders(tmp_path / "home")
+    assert base not in folders and tmp_path / "tools" in folders

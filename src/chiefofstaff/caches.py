@@ -368,7 +368,7 @@ def fewest(readonly: list[str], writable: list[str]) -> list[str]:
         )
 
     real = {path: os.path.realpath(path) for path in readonly}
-    holders = list(dict.fromkeys(real.values()))
+    holders = list(dict.fromkeys([*real.values(), *BASE_READABLE]))
     open_ = [
         form
         for path in writable
@@ -382,8 +382,30 @@ def fewest(readonly: list[str], writable: list[str]) -> list[str]:
         if Path(path).is_symlink()
         or within(resolved, open_)
         or within(os.path.normpath(path), open_)
-        or not any(resolved != holder and within(resolved, [holder]) for holder in holders)
+        or not any(
+            (resolved != holder or holder in BASE_READABLE) and within(resolved, [holder])
+            for holder in holders
+        )
     ]
+
+
+# What Copilot's base macOS profile lets every sandboxed command read (CLI 1.0.111; checked by
+# tests/test_backend_contract.py): a rule for one of them, or a folder in one, adds nothing but
+# its cost at every command. Elsewhere not known: none.
+BASE_READABLE: tuple[str, ...] = (
+    (
+        "/bin", "/sbin", "/usr/bin", "/usr/lib", "/usr/libexec", "/usr/local", "/usr/sbin",
+        "/usr/share", "/opt/homebrew", "/Library", "/System", "/private/etc",
+        "/Applications/Xcode.app",
+    )
+    if sys.platform == "darwin"
+    else ()
+)  # fmt: skip
+
+
+def base_readable(path: Path | str) -> bool:
+    resolved = os.path.realpath(path)
+    return any(resolved == root or resolved.startswith(root + "/") for root in BASE_READABLE)
 
 
 def temp_root() -> str | None:
@@ -513,6 +535,41 @@ def rust_project(folders: list[Path], depth: int = 4) -> bool:
     return False
 
 
+def read_caches(owner: Owner) -> list[str]:
+    """The owner's caches a worker on their tasks reads where they are, read-only: Gradle's
+    dependency cache, Maven's repository and Go's module downloads (read through: script),
+    Playwright's browsers (linked), pre-commit's hook environments (the tier's copies run them
+    by their paths) and node-gyp's headers (read where they are). Not the others, which the tier
+    has copies of: each read-only path is a rule at every command."""
+    found = [
+        owner.gradle() / "caches", owner.maven_repository(), owner.go_modules(),
+        owner.playwright(), owner.pre_commit(), owner.home / ".node-gyp",
+        owner.home / ".electron-gyp", *([owner.node_gyp()] if owner.mac else []),
+    ]  # fmt: skip
+    return unsecret(found, owner.home)
+
+
+def carve_outs(paths: list[str], writable: list[str]) -> list[str]:
+    """Those of these paths that something writable holds (the system's temporary folder
+    included): only there does a read-only rule for them hold anything."""
+    folders = [
+        form
+        for path in writable
+        if path
+        for form in {os.path.normpath(path), os.path.realpath(path)}
+    ]
+    folders += [temp] if (temp := temp_root()) else []
+    return [
+        path
+        for path in paths
+        if any(
+            form == folder or form.startswith(folder.rstrip("/") + "/")
+            for form in {os.path.normpath(path), os.path.realpath(path)}
+            for folder in folders
+        )
+    ]
+
+
 def path_folders(home: Path, slack: bool = False) -> list[Path]:
     """Each folder on PATH and, for a bin folder deep enough not to be one of home's own
     (~/.cargo), the tool's folder above it (for a worker that reads Slack, only its lib,
@@ -523,7 +580,11 @@ def path_folders(home: Path, slack: bool = False) -> list[Path]:
         if folder.is_absolute():
             found.append(folder)
             above = folder.parent
-            if folder.name in {"bin", "shims"} and home not in {above, above.parent}:
+            if (
+                folder.name in {"bin", "shims"}
+                and home not in {above, above.parent}
+                and not base_readable(folder)  # /usr/bin: /usr's own folders are read already.
+            ):
                 found += [above / name for name in RUNS] if slack else [above]
     return found
 
@@ -1267,8 +1328,7 @@ def plan(
         # that does not exist yet stays closed (Copilot grants nothing of its own here). Of
         # those a configuration file moves (the owner's own, in home), only the two read
         # through: Maven's repository and Go's modules.
-        readonly += held_caches(owner.home)[0]
-        readonly += unsecret([owner.maven_repository(), owner.go_modules()], owner.home)
+        readonly += read_caches(owner)
         readonly += registry_config(owner)
         readonly += [str(source) for source, _ in owner_settings(own, owner)]
         readonly += [str(truststore_path.parent)] if truststore_path else []

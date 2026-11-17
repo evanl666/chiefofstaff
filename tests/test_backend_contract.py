@@ -458,6 +458,72 @@ async def test_a_sandboxed_workers_commands_write_nothing_in_home_but_their_own(
         write_files(kept)
 
 
+async def test_copilots_base_profile_reads_what_chief_of_staff_leaves_out(tmp_path):
+    """Chief of Staff grants nothing in what Copilot's base profile already lets every
+    sandboxed command read (caches.BASE_READABLE: each rule costs every command): a file in
+    each of those folders is read by a sandboxed worker's command, one that reads Slack too."""
+    if not (REAL and sandbox_supported()):
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 on a machine with Copilot's sandbox.")
+    from conftest import Harness
+    from copilot.generated.rpc import ShellExecuteUserRequestedRequest
+    from test_progress import spawn
+
+    from chiefofstaff import caches
+    from chiefofstaff.models import Settings
+
+    files = {root: path for root in caches.BASE_READABLE if (path := first_file(root))}
+    if not files:
+        pytest.skip("Copilot's base profile is known on macOS only.")
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Build")
+    backend = copilot_backend("copilot")
+    await backend.start()
+    try:
+        for slack in (0, 1):
+            harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
+            policy = runtime.sandbox_policy(harness.store.session(worker))
+            assert policy is not None
+            for root in files:
+                assert not any(Path(path).is_relative_to(root) for path in policy.readonly), root
+            session = await backend.create_session(
+                session_id=str(uuid4()), name="contract test", model=MODEL,
+                working_directory=str(tmp_path), sandbox_config=backend.sandbox(policy),
+                on_permission_request=lambda request, inv: PermissionDecisionApproveOnce(),
+            )  # fmt: skip
+            try:
+                command = "; ".join(
+                    f"head -c1 '{path}' >/dev/null 2>&1 && echo 'read {root}' || echo 'no {root}'"
+                    for root, path in files.items()
+                )
+                result = await session.rpc.shell.execute_user_requested(
+                    ShellExecuteUserRequestedRequest(command=command, request_id=str(uuid4())),
+                    timeout=120,
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    await backend.client.delete_session(session.session_id)
+            unread = [line for line in (result.output or "").splitlines() if line.startswith("no ")]
+            assert not unread and len(files) == (result.output or "").count("read "), (
+                slack,
+                result.output,
+            )
+    finally:
+        await runtime.stop()
+        await backend.stop()
+
+
+def first_file(root: str) -> str:
+    """A file (not a link) the owner can read in this folder or below; "" when none is."""
+    for folder, _, names in os.walk(root):
+        for name in names:
+            with contextlib.suppress(OSError):
+                path = Path(folder) / name
+                if path.is_file() and not path.is_symlink() and os.access(path, os.R_OK):
+                    return str(path)
+    return ""
+
+
 def write_files(files: dict) -> None:
     for path, text in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)

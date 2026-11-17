@@ -836,14 +836,11 @@ async def test_workers_write_a_cache_of_their_own_and_read_the_owners(tmp_path, 
     policy = runtime.sandbox_policy(harness.store.session(worker))
     tier = str(tmp_path / "worker-caches")
     assert tier in policy.readwrite, "workers' own caches"
-    for owner in (
-        ".npm",
-        ".gradle/caches",
-        ".gradle/wrapper",
-        ".m2/repository",
-        ".cache/pre-commit",
-    ):
+    for owner in (".gradle/caches", ".m2/repository", ".cache/pre-commit"):
         assert str(home / owner) in policy.readonly, f"{owner}: read, never written"
+    for copied in (".npm", ".gradle/wrapper"):
+        assert str(home / copied) not in policy.readonly, f"{copied}: the tier's copy is read"
+    for owner in (".gradle/caches", ".m2/repository", ".cache/pre-commit", ".npm", ".gradle"):
         assert not any(str(home / owner).startswith(path) for path in policy.readwrite), owner
     assert str(home / ".local/share/uv/python") in policy.readonly, "uv's Pythons run"
     assert not any(str(home / ".cargo") in path for path in policy.denied), (
@@ -870,7 +867,7 @@ async def test_workers_write_a_cache_of_their_own_and_read_the_owners(tmp_path, 
     )
     harness.store.save_settings(Settings(shared_caches=False, worker_sandbox=True))
     policy = runtime.sandbox_policy(harness.store.session(worker))
-    assert tier in policy.readwrite and str(home / ".npm") in policy.readonly
+    assert tier in policy.readwrite and str(home / ".gradle/caches") in policy.readonly
     assert "GRADLE_RO_DEP_CACHE" not in runtime.cache_plan(harness.store.session(worker)).text
     assert str(home / "Library/Jupyter/runtime") in policy.denied, "denied before it exists"
 
@@ -929,7 +926,7 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
         config = (".npmrc", ".m2/settings.xml", ".config/go/env", ".config/mise/config.toml")
         for name in config:
             assert (str(home / name) in policy.readonly) == (not slack), (slack, name)
-        assert (str(home / ".npm") in policy.readonly) == (not slack), "the owner's caches"
+        assert str(home / ".npm") not in policy.readonly, "copied in the tier: not read in place"
         for secret in (".cargo", ".aws/credentials", ".pypirc"):
             assert str(home / secret) not in policy.readonly, (slack, secret)
         for credentials in (".netrc", ".cargo/credentials.toml"):
@@ -1304,17 +1301,30 @@ async def test_chiefs_own_code_is_read_only_for_every_sandboxed_worker(tmp_path,
     for name in MOVED:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")  # Not Chief of Staff's own bin: a tool's.
     harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Build")
     package = str(Path(workspaces.__file__).parent)
+
+    def writable(path: str, policy) -> bool:
+        if any(Path(path).is_relative_to(folder) for folder in policy.readonly):
+            return False  # Held, in what is writable (caches.fewest keeps it there).
+        return any(Path(path).is_relative_to(folder) for folder in policy.readwrite)
+
     for slack in (0, 1):
         harness.store.execute("UPDATE sessions SET slack=? WHERE id=?", (slack, worker))
         policy = runtime.sandbox_policy(harness.store.session(worker))
         for path in (sys.prefix, package):
-            held = [folder for folder in policy.readonly if Path(path).is_relative_to(folder)]
-            assert held, (slack, path)  # It, or a folder it is in (caches.fewest).
-            assert path not in policy.readwrite
+            assert not writable(path, policy), (slack, path)
+            # Nothing writable holds it (dev-tool access is off): no rule for it, which each
+            # command would pay for; workers never run Chief of Staff's code.
+            assert not any(folder in policy.readonly for folder in (sys.prefix, package)), slack
+    # A folder the owner made writable to workers that holds it: held there.
+    above = str(Path(sys.prefix).parent)
+    harness.store.save_settings(Settings(worker_sandbox=True, sandbox_writable=[above]))
+    policy = runtime.sandbox_policy(harness.store.session(worker))
+    assert above in policy.readwrite and not writable(sys.prefix, policy)
 
 
 async def test_workers_that_read_slack_get_none_of_the_owners_caches(tmp_path, monkeypatch):
@@ -1345,13 +1355,8 @@ async def test_workers_that_read_slack_get_none_of_the_owners_caches(tmp_path, m
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Build")
     policy = runtime.sandbox_policy(harness.store.session(worker))
-    assert str(home / ".npm") in policy.readonly, "the owner's own tasks: read-only too"
+    assert str(home / ".m2/repository") in policy.readonly, "the owner's own tasks: read through"
     assert str(home / ".npmrc") not in policy.denied, "their registry, as in a terminal"
-
-    monkeypatch.setattr(sys, "platform", "linux")
-    policy = runtime.sandbox_policy(harness.store.session(worker))
-    assert str(home / "Library/Caches/pip") in policy.readonly, "another system's place: held too"
-    monkeypatch.setattr(sys, "platform", "darwin")
 
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (worker,))
     policy = runtime.sandbox_policy(harness.store.session(worker))

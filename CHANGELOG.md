@@ -229,8 +229,10 @@ questions stay listed (QA round on 0.1.45).
   Cargo's git caches too, and looks again only at folders that changed. Rust projects are found
   four folders down (not in node_modules), once per worker. npm 11.5 and later no longer warn
   about pnpm's store at every command (pnpm's own PNPM_HOME instead). The init script never
-  ends in an error (Copilot reported it before every command). A read-only path inside another
-  is no longer passed to the sandbox (half of them; about 8 ms less per command). Storage shows
+  ends in an error (Copilot reported it before every command). Fewer read-only rules for each command (none inside another, none
+  for what Copilot's own profile reads already, only the few of your caches workers read where
+  they are, none for Chief of Staff's own code outside what they write): a sandboxed command
+  costs about 2 ms more than in 0.1.45 (it was 8–9 ms). Storage shows
   workers' caches, with *Clear*.
 - **Sandboxed workers run quick read-only commands together.** Each command starts in about
   0.3 s in Copilot's sandbox (its credential proxy starts anew for each); they are asked to join

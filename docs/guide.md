@@ -361,7 +361,9 @@ workers: nothing in your home is writable to them but that folder and their own 
 folders beside it, and they read only what Chief of Staff names: their toolchains (what is on
 your `PATH`, so tools installed under `~/.local/bin` too; nvm's, pyenv's, asdf's, mise's,
 SDKMAN's toolchains, JDKs, uv's Pythons, rustup's for a Rust project…) and, for workers on your
-own tasks, your package caches and what a private registry needs (`~/.npmrc`,
+own tasks, the few of your caches they read where they are (Gradle's and Maven's, Go's
+modules, Playwright's browsers, pre-commit's hooks; they have copies of the rest) and what a
+private registry needs (`~/.npmrc`,
 `~/.m2/settings.xml` and `settings-security.xml`, pip's, uv's, poetry's and Go's configuration,
 `~/.netrc`, Cargo's credentials, mise's configuration…), as in your terminal. Workers that read
 Slack have caches of their own in their workspace, can't read yours, can't read the registry and
