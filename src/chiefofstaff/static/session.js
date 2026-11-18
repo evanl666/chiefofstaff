@@ -966,6 +966,8 @@ export function showDeliveries() {
 function waitWhy(node) {
   const session = byId(node.dataset.worker);
   if (!session || session.role !== "worker" || session.closed_at) return null;
+  // Waiting for your word (its folder's settings changed): its timeline says what to do.
+  if (WAITING.has(node.dataset.delivery) && /^waiting for you\b/i.test(session.activity || "")) return { text: session.activity, help: session.activity };
   if (node.dataset.delivery === "held") return { text: "you stopped this worker", help: "It gets this with your next message, or now with Send now", now: true };
   if (node.dataset.delivery !== "queued" || session.status !== "queued") return null;
   const activity = session.activity || "";

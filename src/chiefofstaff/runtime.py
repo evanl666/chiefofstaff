@@ -5127,6 +5127,9 @@ class Runtime:
         row = self.store.session(session_id)
         if row["role"] != WORKER or row["closed_at"]:
             raise ValueError("Only an open worker's messages wait to be sent.")
+        if session_id in self.settings_held:
+            # Its folder changed (settings_stop): it goes on once the owner says to use them.
+            raise ValueError(f"It waits: {SETTINGS_WAIT}.")
         if row["status"] == "queued":
             if row["activity"]:
                 raise ValueError(f"It waits: {row['activity']}.")

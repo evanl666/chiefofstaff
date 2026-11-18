@@ -10,6 +10,7 @@ import threading
 import time
 import unicodedata
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -710,6 +711,49 @@ async def test_a_queued_worker_whose_folder_changed_waits_for_the_owner(
         assert runtime.states.is_live(worker)
         assert "One more thing" in harness.session(worker).sent[-1]
         assert harness.store.session(worker)["activity"] != workers_module.SETTINGS_WAIT
+    finally:
+        await runtime.stop()
+
+
+async def test_send_now_waits_for_the_owners_word_on_a_changed_folder(
+    tmp_path, git_repo, monkeypatch
+):
+    """Stopped at work because its folder's settings changed, what it was sent and never saw
+    is held for its next message, as a stopped worker's is: Send now does not start its turn
+    (Use these settings does, and the held message goes with it), and says why."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    harness.client.capabilities = replace(harness.client.capabilities, echoes=True)
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        session = harness.session(worker)
+
+        async def nothing():
+            return []
+
+        session.get_events = nothing  # (Its conversation never shows what it is sent next.)
+        await runtime.owner_send(worker, "Use the staging config")
+        plant(cwd, ".mcp.json")
+        assert await runtime.settings_refusal(harness.store.session(worker))
+        await runtime.settings_stop(worker)
+        await settle(runtime)
+        assert harness.store.session(worker)["activity"] == workers_module.SETTINGS_WAIT
+        rows = harness.store.messages(worker)
+        mine = next(
+            delivery
+            for row, delivery in zip(rows, runtime.delivery.delivery_for(worker, rows), strict=True)
+            if row["text"] == "Use the staging config"
+        )
+        assert mine == "held"
+        sent = len(session.sent)
+        with pytest.raises(ValueError, match="its folder's settings changed"):
+            await runtime.send_now(worker)
+        await settle(runtime)
+        assert len(session.sent) == sent and not runtime.states.is_live(worker), "no turn"
+        assert worker in runtime.settings_held
+        await use_them(runtime, harness, worker)
+        assert "Use the staging config" in harness.session(worker).sent[-1]
     finally:
         await runtime.stop()
 
