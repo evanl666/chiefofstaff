@@ -1,9 +1,10 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
 import { $, api, blobLive, blobUrl, el, foldable, toast, whenNearScreen } from "./dom.js";
-import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, slackText, threadLabel } from "./text.js";
+import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, shorten, slackText, threadLabel } from "./text.js";
 import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
 import { MARKERS } from "./board.js";
+import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
@@ -159,8 +160,58 @@ export function renderHeader() {
   setComposer(
     session.elsewhere
       ? { locked: IN_TERMINAL }
-      : { placeholder: session.closed_at ? "Message to reopen this worker…" : placeholders[session.role] || "Message this worker directly…" },
+      : { placeholder: session.closed_at ? "Message to reopen this worker…" : placeholders[session.role] || chatPlaceholder(session) },
   );
+}
+// A worker with several tasks: the one the owner chose in its chat, which what they write is
+// about (bug QA6-3: it was filed under the one given last, whatever they looked at): the task
+// the chat was opened at, else, scrolled up from its end, the latest of its messages in view
+// that is about one. "" at the chat's end (the server decides: a question it asks, the task it
+// is on, the one their own last message was about, else a task of its own: Runtime.chat_task),
+// and with one task or none to choose from.
+export function chatAnchor() {
+  const session = current();
+  if (state.selected === HOME || session?.role !== "worker" || !session.chat_task) return "";
+  if (openedAt.session === session.id && openedAt.task in session.chat_task.titles) return openedAt.task;
+  const scroller = $("#scroller");
+  if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160) return "";
+  const bottom = scroller.getBoundingClientRect().bottom;
+  let found = "";
+  for (const node of $("#timeline").querySelectorAll(":scope > [data-task]")) {
+    if (node.getBoundingClientRect().top >= bottom) break;
+    if (node.dataset.task in session.chat_task.titles) found = node.dataset.task;
+  }
+  return found;
+}
+// What the composer of a worker's chat says: where what is written there goes, when it has
+// several tasks (the one in view, else the server's choice: maybe a task of its own).
+function chatPlaceholder(session) {
+  const known = session.chat_task;
+  if (!known) return "Message this worker directly…";
+  const anchor = chatAnchor();
+  const title = anchor ? known.titles[anchor] : known.title;
+  return title ? `Message about “${shorten(title, 60)}”…` : "A new task for this worker…";
+}
+// The task a worker's chat was opened at (a task row's Worker link): what is written there is
+// about it until the owner scrolls elsewhere themself.
+let openedAt = { session: "", task: "" };
+export function scrolledByOwner() {
+  if (!openedAt.task) return;
+  openedAt = { session: "", task: "" };
+  followAnchor();
+}
+// The placeholder follows what the owner scrolls to (once a frame at most).
+let anchoring = 0;
+export function followAnchor() {
+  if (anchoring) return;
+  anchoring = requestAnimationFrame(() => {
+    anchoring = 0;
+    const session = current();
+    if (state.selected === HOME || session?.role !== "worker" || session.closed_at || session.elsewhere) return;
+    const input = $("#composer-input");
+    const placeholder = chatPlaceholder(session);
+    if (input.placeholder !== placeholder) input.placeholder = placeholder;
+  });
 }
 // Two programs must not write to one Copilot session: one open in a terminal is used there.
 export const IN_TERMINAL = "Open in a terminal right now. Continue there, or exit it there (/exit) to message it here.";
@@ -287,6 +338,7 @@ export function setLayout(home) {
 // its end: the worker may have gone on to other work since.
 export async function select(sessionId, { task = "" } = {}) {
   if (!sessionId) return;
+  openedAt = { session: task ? sessionId : "", task };
   // The Router's chat and the inbox of earlier versions are Home.
   if (sessionId === "inbox" || sessionId === routerId()) sessionId = HOME;
   closeMentions();
@@ -334,11 +386,16 @@ export async function select(sessionId, { task = "" } = {}) {
   state.lastId = 0;
   Object.assign(earlier, { session: viewed, first: messages[0] || null, more: false, count: null, busy: false });
   appendMessages(messages);
-  appendMessages(loading.held);
+  appendMessages(loading.held.filter((message) => !message.amended));
+  // What changed meanwhile in messages it shows (where one stands): as they are now. Applied only
+  // once they are on the page (bug QA6-1: a message sent while Home's chat loaded showed no
+  // word of where it stood).
+  for (const message of loading.held.filter((message) => message.amended)) replaceMessage(message);
   scrollToBottom(true);
   if (messages.length >= PAGE) await countEarlier(viewed);
   if (state.selected !== sessionId) return;
   if (task) await showTaskInTimeline(task);
+  followAnchor();
   if (viewed && byId(viewed)?.unread) markRead(viewed);
   if (!$("#composer").hidden) $("#composer-input").focus();
 }
@@ -863,6 +920,9 @@ function quarantineButtons(sessionId, removable) {
 // it reached its session (`delivery`), in a word.
 function ownerMessage(text, meta = {}, time = "", delivery = "") {
   const node = el("div", { class: "msg owner", title: time ? clock(time) : undefined });
+  // The worker it went to (Home's copy says which): why it waits, if it does, is that worker's.
+  const worker = meta.to || (state.selected !== HOME ? viewedId() : "");
+  if (worker) node.dataset.worker = worker;
   // Sent from Home straight to one worker.
   if (meta.to) node.append(el("button", { type: "button", class: "to", text: `→ ${meta.to_title}`, title: "Open this worker", onclick: () => select(meta.to) }));
   const files = meta.attachments || [];
@@ -884,12 +944,62 @@ function ownerMessage(text, meta = {}, time = "", delivery = "") {
   return node;
 }
 // Where the owner's messages stand, under each: what is not there yet (or never got there)
-// under every one; that one got there or was handled, only under the latest.
+// under every one; that one got there or was handled, only under the latest. The latest one that
+// waits says why, and what to do about it, where there is something (bug QA6-1: it said
+// "Waiting to be sent" and nothing more).
 const SETTLED = new Set(["received", "processed"]);
-function showDeliveries() {
+const WAITING = new Set(["queued", "held"]);
+export function showDeliveries() {
   const nodes = [...$("#timeline").querySelectorAll(".msg.owner[data-delivery]")];
   const latest = [...$("#timeline").querySelectorAll(".msg.owner")].pop();
-  for (const node of nodes) node.querySelector(":scope > .delivery").hidden = SETTLED.has(node.dataset.delivery) && node !== latest;
+  const waits = new Map();
+  for (const node of nodes) {
+    node.querySelector(":scope > .delivery").hidden = SETTLED.has(node.dataset.delivery) && node !== latest;
+    if (WAITING.has(node.dataset.delivery) && node.dataset.worker) waits.set(node.dataset.worker, node);
+  }
+  for (const node of nodes) waitNote(node, waits.get(node.dataset.worker) === node);
+}
+// Why a message to a worker waits, in a few words, and Send now when it can go at once: its
+// worker was stopped (it holds it for its next message), or every worker slot is taken. Not
+// what keeps it waiting for a reason (memory, disk space, a task it waits for): that is said
+// (its details on hover).
+function waitWhy(node) {
+  const session = byId(node.dataset.worker);
+  if (!session || session.role !== "worker" || session.closed_at) return null;
+  if (node.dataset.delivery === "held") return { text: "you stopped this worker", help: "It gets this with your next message, or now with Send now", now: true };
+  if (node.dataset.delivery !== "queued" || session.status !== "queued") return null;
+  const activity = session.activity || "";
+  // "waiting for memory: 12% free on this computer": the reason, its numbers on hover.
+  if (/^waiting for (memory|disk space):/i.test(activity)) return { text: activity.split(":")[0], help: activity };
+  if (/^waiting for /i.test(activity)) return { text: activity, help: activity };
+  const reason = slotReason(session);
+  return { text: "waiting for a free worker slot", help: `${reason.text.split(" · ").pop()}. ${reason.help}`, now: true };
+}
+function waitNote(node, latest) {
+  const line = node.querySelector(":scope > .delivery");
+  const why = latest ? waitWhy(node) : null;
+  const key = why ? `${why.text}:${why.now}` : "";
+  if ((line.dataset.why || "") === key) return;
+  line.dataset.why = key;
+  if (!why) {
+    line.textContent = DELIVERY_WORDS[node.dataset.delivery]?.[0] || "";
+    return;
+  }
+  const sendNow = async (event) => {
+    event.stopPropagation();
+    event.target.disabled = true;
+    try {
+      upsertSession(await api(`/api/sessions/${node.dataset.worker}/send-now`, { method: "POST" }));
+    } catch (error) {
+      event.target.disabled = false;
+      toast(error.message, "error");
+    }
+  };
+  // One short line: "Not sent yet: you stopped this worker · Send now".
+  line.replaceChildren(
+    el("span", { class: "why", text: `Not sent yet: ${why.text}`, title: why.help || undefined }),
+    ...(why.now ? [el("span", { class: "sep", text: " · " }), el("button", { type: "button", class: "link", text: "Send now", title: "Send it to the worker now", onclick: sendNow })] : []),
+  );
 }
 // The work between messages, folded into one line: its steps, and what the session said on the
 // way to them ("Now the tests:"), which is narration, not an answer. The line shows the latest.
@@ -973,6 +1083,7 @@ export function appendMessages(messages) {
   updateDraftRecords();
   showDeliveries();
   scrollToBottom();
+  followAnchor();
 }
 // One message at the end of `container`: a step (or narration) joins the fold before it.
 function place(container, message, next, shown) {

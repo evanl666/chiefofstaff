@@ -590,6 +590,8 @@ class OwnerMessage(StrictModel):
     # From the Router chat, addressed to one worker: it goes to that worker directly.
     to: str = Field(default="", max_length=64)
     attachments: list[Attachment] = Field(default_factory=list, max_length=5)
+    # In a worker's chat: the task of its the owner looks at there (Runtime.chat_task).
+    task_id: str = Field(default="", max_length=64)
 
     @model_validator(mode="after")
     def something(self) -> "OwnerMessage":
@@ -716,6 +718,9 @@ class DraftDecision(StrictModel):
     choice: str = Field(default="", max_length=1000)
     text: str = Field(default="", max_length=MAX_DRAFT)
     reason: str = Field(default="", max_length=2000)
+    # Sent from a card that held its task's result (to accept, or news on it): that task, settled
+    # with it (accepted, its news seen), one decision for both.
+    accept: str = Field(default="", max_length=64)
 
 
 class WithdrawDraft(BaseModel):

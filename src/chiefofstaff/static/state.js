@@ -3,7 +3,7 @@
 import { $, api, el, toast, withKey } from "./dom.js";
 import { firstLine, shorten } from "./text.js";
 import { renderOthers, renderSidebar } from "./sidebar.js";
-import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, select, updateDraftRecords, updateWorkingLine } from "./session.js";
+import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, select, showDeliveries, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { scheduleHome } from "./inbox.js";
 import { upsertTask } from "./tasks.js";
 import { refreshUsageLink, renderConnections, renderLearning } from "./settings.js";
@@ -80,11 +80,12 @@ export function workerTitle(session) {
   return session?.display_title || session?.title || "";
 }
 // Where a message sent to a session stands (`delivery`: the owner's, the Router's, a notice),
-// in words for the chat and for the row the owner sent it from: queued, sent, its conversation
-// shows it (received), the turn it was in ended (handled), sent again for want of a sign it got
-// there, or given up on.
+// in words for the chat and for the row the owner sent it from: queued, held for its next
+// message (it was stopped), sent, its conversation shows it (received), the turn it was in
+// ended (handled), sent again for want of a sign it got there, or given up on.
 export const DELIVERY_WORDS = {
   queued: ["Waiting to be sent", "wait"],
+  held: ["Not sent yet", "wait"],
   sent: ["Sent", ""],
   received: ["Received", "good"],
   processed: ["Handled", "good"],
@@ -189,7 +190,9 @@ function handleEvent({ type, data }) {
     // Where a message sent to a worker stands: the row it was sent from says it too.
     if (noteDelivery(data) && data.session_id !== viewedId()) scheduleHome();
     if (data.amended) {
-      if (data.session_id === viewedId()) replaceMessage(data);
+      // While its chat loads, kept for after it: a message held meanwhile is not on the page yet.
+      if (state.loading?.id === data.session_id) state.loading.held.push(data);
+      else if (data.session_id === viewedId()) replaceMessage(data);
       return;
     }
     if (state.loading?.id === data.session_id) state.loading.held.push(data);
@@ -277,6 +280,8 @@ export function upsertSession(session) {
   scheduleHome();
   // Settings shows whether Chief of Staff's learning worker is at it.
   if (session.helper && $("#settings-dialog").open) renderLearning();
+  // Why what the owner sent it waits (a slot, a stop) changes with it: here or on Home.
+  showDeliveries();
   if (session.id !== viewedId()) return;
   if (session.closed_at) state.viewing = session;
   renderHeader();

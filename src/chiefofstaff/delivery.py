@@ -291,11 +291,15 @@ class Delivery:
 
     def defer_pending(self, session_id: str):
         """Whatever it has not received yet rides along with its next message (it was stopped
-        or its task cancelled): a restart must not start a turn for it."""
+        or its task cancelled): a restart must not start a turn for it. The chats say so (held)."""
         mark = int(self.store.get(f"sent:{session_id}") or 0)
+        held = []
         for message in self.store.prompts(session_id, after=mark):
             if not message["meta"].get("deferred"):
-                self.store.update_message_meta(message["id"], {**message["meta"], "deferred": True})
+                message["meta"] = {**message["meta"], "deferred": True}
+                self.store.update_message_meta(message["id"], message["meta"])
+                held.append(message)
+        self.publish_delivery(session_id, held)
 
     def undefer(self, session_id: str) -> bool:
         """What was held back for its next message (it was stopped) is due now; whether any."""
@@ -321,6 +325,8 @@ class Delivery:
         mark = int(self.store.get(f"sent:{session_id}") or 0)
         if min(firsts) - 1 < mark:
             self.store.set(f"sent:{session_id}", str(min(firsts) - 1))
+            # Not sent after all, as the chats say (until it goes with its next message).
+            self.publish_delivery(session_id, self.store.prompts(session_id, after=min(firsts) - 1))
         return True
 
     def drop_pending(self, session_id: str, task_id: str = "") -> bool:
@@ -329,6 +335,7 @@ class Delivery:
         about that task before."""
         mark = int(self.store.get(f"sent:{session_id}") or 0)
         received = False
+        dropped = []
         for message in self.store.prompts(session_id):
             if task_id and message["meta"].get("task_id") != task_id:
                 continue
@@ -336,7 +343,10 @@ class Delivery:
                 received = True
                 continue
             kept = {k: v for k, v in message["meta"].items() if k != "prompt"}
-            self.store.update_message_meta(message["id"], {**kept, "dropped": True})
+            message["meta"] = {**kept, "dropped": True}
+            self.store.update_message_meta(message["id"], message["meta"])
+            dropped.append(message)
+        self.publish_delivery(session_id, dropped)  # Not sent, nor waiting to be: nothing said.
         return received
 
     def has_unsent(self, session_id: str) -> bool:
@@ -428,11 +438,18 @@ class Delivery:
         # What it is given now, not what rides along with it (instructions held back
         # while it was stopped are taken up when their turn comes).
         fresh = "\n\n".join(m["meta"]["prompt"] for m in pending if not m["meta"].get("deferred"))
+        # The owner's chat about one of its tasks names none in its words: its turn is on the
+        # task it is filed under all the same (Home names the worker by it: bug QA6-3).
+        chats = [
+            m["meta"]["task_id"]
+            for m in pending
+            if m["kind"] == "owner" and m["meta"].get("task_id") and not m["meta"].get("deferred")
+        ]
         if (
             row["role"] == WORKER
             and not mid_turn
             and not busy
-            and (named := tasks_named(fresh or text))
+            and (named := tasks_named(fresh or text) or chats[-1:])
         ):
             # A turn on it starts now; sent while it works, once its conversation shows it
             # (a connection that shows none: when its turn on it comes, see working_on).
@@ -535,7 +552,8 @@ class Delivery:
         return messages[: last + 1]
 
     # Delivery, as the chats show it: queued (not sent yet) -> sent -> received (its
-    # conversation shows it) -> processed (the turn it was in ended); or resending, undelivered.
+    # conversation shows it) -> processed (the turn it was in ended); or resending, undelivered;
+    # or held (for its next message: it was stopped).
 
     def delivery_marks(self, session_id: str) -> dict:
         seen = self.store.get(f"seen:{session_id}")
@@ -558,7 +576,8 @@ class Delivery:
         if meta.get("undelivered"):
             return "undelivered"
         if message["id"] > marks["sent"]:
-            return "queued"
+            # Held back for its next message (it was stopped, or failed): no turn of its own.
+            return "held" if meta.get("deferred") else "queued"
         for first, last, resent in marks["waiting"]:
             if first <= message["id"] <= last:
                 return "resending" if resent else "sent"
@@ -568,18 +587,60 @@ class Delivery:
             return "received"
         return "sent" if marks["seen"] is not None else ""
 
+    def delivery_for(self, session_id: str, messages: list[dict]) -> list[str]:
+        """Where each of a session's messages stands, as its chat shows it. The Router's copy of
+        what the owner wrote a worker (Home shows it, "→ worker") stands where that worker has
+        it: the Router hears of it only with its next message, which is not the owner's message
+        getting there (bug QA6-1: it said "Waiting to be sent" hours after the worker answered)."""
+        marks = self.delivery_marks(session_id)
+        others: dict[str, dict] = {}
+        return [
+            self.copy_delivery(meta, others)
+            if isinstance(meta := message.get("meta"), dict) and meta.get("to")
+            else self.delivery_of(message, marks)
+            for message in messages
+        ]
+
+    def copy_delivery(self, meta: dict, marks: dict[str, dict]) -> str:
+        """Where the worker's own message stands (`sent_as`); "" for a copy of none (an answer
+        to its question card, not sent as a message; a copy from before copies said which)."""
+        worker, sent_as = meta.get("to"), meta.get("sent_as")
+        if not sent_as or not isinstance(worker, str):
+            return ""
+        try:
+            original = self.store.message(int(sent_as))
+        except (LookupError, TypeError, ValueError):
+            return ""
+        if original["session_id"] != worker:
+            return ""
+        if worker not in marks:
+            marks[worker] = self.delivery_marks(worker)
+        return self.delivery_of(original, marks[worker])
+
     def publish_delivery(self, session_id: str, messages: list[dict]):
-        """The chats show where these messages stand now."""
+        """The chats show where these messages stand now: Home's copies of the owner's too."""
         tracked = [m for m in messages if m["kind"] in TRACKED]
         if not tracked:
             return
-        marks = self.delivery_marks(session_id)
-        for message in tracked:
+        for message, delivery in zip(tracked, self.delivery_for(session_id, tracked), strict=True):
             meta = {k: v for k, v in (message.get("meta") or {}).items() if k != "prompt"}
-            delivery = self.delivery_of(message, marks)
             self.runtime.bus.publish(
                 "message", {**message, "meta": meta, "delivery": delivery, "amended": True}
             )
+        owners = [m["id"] for m in tracked if m["kind"] == "owner"]
+        try:
+            router = self.runtime.router_id()
+        except RuntimeError:
+            return
+        if not owners or router == session_id:
+            return
+        copies = self.store.all(
+            "SELECT id FROM messages WHERE session_id=? AND kind='owner' "
+            "AND json_extract(meta, '$.to')=? AND json_extract(meta, '$.sent_as') BETWEEN ? AND ?",
+            (router, session_id, min(owners), max(owners)),
+        )
+        if copies:
+            self.publish_delivery(router, [self.store.message(row["id"]) for row in copies])
 
     def publish_range(self, session_id: str, first: int, last: int):
         found = self.store.all(
@@ -788,10 +849,12 @@ class Delivery:
         elif row["status"] in {"done", "waiting"}:
             state.resting = row["status"]
 
-    async def resume(self, session_id: str):
-        """Send what an idle session was given but never received (after a restart)."""
+    async def resume(self, session_id: str, now: bool = False):
+        """Send what an idle session was given but never received (after a restart). `now`:
+        the owner asked for it (Runtime.send_now), a failed worker too."""
         row = self.store.session(session_id)
-        if row["closed_at"] or row["status"] in {"queued", "starting", "working", "failed"}:
+        busy = {"queued", "starting", "working"} | (set() if now else {"failed"})
+        if row["closed_at"] or row["status"] in busy:
             return  # A failed one gets what it missed with the owner's next message.
         if not self.has_unsent(session_id):
             return  # Only deferred notes: they wait for its next message.
@@ -799,8 +862,10 @@ class Delivery:
             self.schedule_flush(session_id, 0)
         elif await self.runtime.workers.claim_slot(session_id):
             self.rest_after(row)  # As deliver does.
+            # Stopped, Copilot may hold its session busy a while: steered, it takes it at once.
+            mode: SendMode = "immediate" if self.states[session_id].after_abort else "enqueue"
             try:
-                if await self.flush(session_id, await self.runtime.session_for(session_id)):
+                if await self.flush(session_id, await self.runtime.session_for(session_id), mode):
                     self.runtime.update_session(session_id, status="working")
                 else:
                     self.states[session_id].busy = False

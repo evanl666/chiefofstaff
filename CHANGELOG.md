@@ -9,7 +9,10 @@ Chief of Staff's own code. From the QA round on 0.1.45: pushes to the default br
 past *Ask first* in 0.1.45 are refused, and a switch back to a branch of its own before a push
 is let through again; runs and documents are listed wherever they are served; an away notice
 that failed stays in sight; Artifacts words and times match what its rows say; a slow
-script's `copilot -p` calls are a batch again, and your own questions stay listed.
+script's `copilot -p` calls are a batch again, and your own questions stay listed. From an
+owner's report: what you write a worker says where it is (on Home too) and is about the task
+you look at; a result and the reply drafted for it are one decision; a check-back that finds
+nothing new is no *Update*; one piece of work is one row.
 
 - **Security: a Codex worker could switch off Chief of Staff's checks for itself.** In a
   repository you trust in Codex, a worker could write Codex settings into its own folder
@@ -339,6 +342,44 @@ script's `copilot -p` calls are a batch again, and your own questions stay liste
   session a batch, left out for good. It now takes two sessions of that name, or a worker's
   command where the session ran (as workers name their calls); one so named is still left out
   while it runs (QA on 0.1.45, E81).
+- **What you write a worker says where it is, on Home too.** Home's copy of a message you wrote
+  a worker (*→ worker*) is the Router's note of it, which goes with the Router's next message:
+  it said *Waiting to be sent* until then, hours after the worker had it and answered. It now
+  says where the worker has it (*Sent*, *Received*, *Handled*). A message that does wait says
+  why, in one line: *Not sent yet: you stopped this worker* or *Not sent yet: waiting for a
+  free worker slot*, each with *Send now* (over the parallel-worker limit if need be); waiting
+  for memory, disk space or another task, it says that (*Not sent yet: waiting for memory*)
+  (QA6-1).
+- **A result and the reply drafted for it are one decision.** Their card had two: *Accept* on
+  the result and *Copy & mark sent* on the reply. Either click left the other half on the card,
+  and copying the reply accepted the result only when it changed no code and no other reply of
+  it waited. The card's one action is now *Copy & accept* (*Send & accept* for a Slack reply):
+  the reply goes and the result is accepted (news on accepted work is seen with it); *Follow
+  up* and *Request changes* stay on the result. A result accepted elsewhere first leaves its
+  reply's card as it was; the Router hears of the reply once (QA6-2).
+- **What you write in a worker's chat is about the task you look at there.** It was filed under
+  the task the worker was given last: more for an earlier task, written after the Router gave
+  the worker another, went to that other one, and Home showed a row named for it doing the
+  earlier task's work, beside the earlier task's own row. It now goes to the task you chose in
+  the chat: the one you opened it at (a task row's *Worker* link), or one you scrolled up to.
+  Otherwise (at the chat's end, or from Home with @) it goes to the task that asked you
+  something, the one the worker is on, its only one, or the one it was last given word of (your
+  message, or the Router's on a task it had: a check-back, a note, a changed decision); when
+  that word started a task of the Router's, with several finished, it is a task of its own,
+  named from your message. The chat's box says which (*Message about “…”*, *A new task for
+  this worker…*), and so does Home's *To* line (*as a new task*). The worker is named for that
+  task, and its row is that task's own, under *Running* while it works (QA6-3, QA6-4).
+- **A check-back that finds its runs still going is no *Update*.** On accepted work, each
+  check-back has its worker report where its runs stand, and each report came under *Needs you*
+  as an *Update* (*still in progress…*), timed as its task (*1h ago*) though it had just come.
+  A check-back's report that says each of its runs again as it stood, still going, is what the
+  *Monitoring* row says (*reported running just now · next in 59 min*); anything else is an
+  *Update* (a run ended, failed or new, a failure said in words only), timed as itself (QA6-5).
+- **One piece of work is one row.** Accepted work its worker went on with as a new task (the
+  Router makes more of accepted work a new task, often under the same name) showed twice, with
+  the same runs: the new task under *Running*, the accepted one under *Monitoring*. When an
+  open task of the same worker watches all the accepted one waits on, the accepted one is with
+  the finished ones (*Still following*) (QA6-6).
 - On Linux, processes are known by their whole command lines: `ps` there cut each line to the
   width `COLUMNS` gave, even into a pipe, so a process Chief of Staff started could be taken
   for another one when it was looked for again; `ps -ww` never cuts.

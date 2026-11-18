@@ -634,7 +634,8 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
   font-size: var(--body);
   color: var(--muted);
 }
-#composer-to strong { color: var(--text); font-weight: 600; }
+#composer-to strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 600; }
+#composer-to .apart { flex: none; }
 /* How long the message is, near the limit; over it, in red (it is not sent). */
 #composer-count { flex-basis: 100%; font-size: var(--small); color: var(--muted); font-variant-numeric: tabular-nums; }
 #composer-count.over { color: var(--red); }
@@ -1556,6 +1557,12 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .delivery.bad { color: var(--red); font-weight: 600; }
 .delivery.good { color: var(--green); }
 .msg.owner > .delivery { margin-top: 2px; text-align: right; opacity: 0.85; }
+/* Why it waits, and Send now when it can go at once: one short line, cut with "…" if need be. */
+.msg.owner > .delivery:has(.why) { display: flex; justify-content: flex-end; align-items: baseline; }
+.delivery > .why { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.delivery > .sep { flex: none; white-space: pre; }
+.delivery > button.link { flex: none; min-height: 0; padding: 0; font-size: inherit; line-height: inherit; color: var(--accent); }
+.delivery > button.link:hover { text-decoration: underline; }
 /* Its question: what it asks, why, the answers it offers, what it does then. */
 .card .asked { display: grid; gap: 4px; margin: 4px 0 0 16px; min-width: 0; font-size: var(--small); color: var(--soft); }
 .card.question-card .asked { margin-left: 0; }

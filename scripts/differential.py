@@ -210,6 +210,12 @@ FIXES: list[Allow] = [
     # first seen (a folder moved into its place is another), and (Linux) the git files that
     # appeared in one a worker writes. Nothing is shown.
     Allow(".git identities", data=r"\.db\.kv\.git(id|appeared):"),
+    # 0.1.46 (QA6-1): a message held for its session's next message (it was stopped, it failed,
+    # a note that rides along) says so: held, not "Waiting to be sent".
+    Allow("a held message's delivery", data=r"/messages\[\d+\]\.delivery$", value="held"),
+    # 0.1.46 (QA6-3): where the owner's next message in a worker's chat goes (null with one task
+    # or none: nothing to choose from).
+    Allow("a session's chat_task", data=r"\.chat_task$"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

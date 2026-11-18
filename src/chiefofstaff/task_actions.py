@@ -3787,7 +3787,7 @@ class TaskActions:
                 "answer, and report.",
             )
         try:
-            await self.delivery.deliver(
+            message = await self.delivery.deliver(
                 row["id"],
                 prompt,
                 kind="owner",
@@ -3800,7 +3800,7 @@ class TaskActions:
                 self.store.delete(f"reopened:{task_id}")
                 self.tasks.move(task_id, before)  # The follow-up never reached its worker.
             raise
-        self.runtime.owner_told(row, shown)
+        self.runtime.owner_told(row, shown, message)
         return task
 
     def drop_cancelled_note(self, session_id: str, task_id: str):
@@ -3851,7 +3851,7 @@ class TaskActions:
             prompt += "\n\n" + wrap("system", "context", switched)
         shown = text.strip() or "Try again."
         try:
-            await self.delivery.deliver(
+            message = await self.delivery.deliver(
                 row["id"],
                 prompt,
                 kind="owner",
@@ -3863,7 +3863,7 @@ class TaskActions:
             self.tasks.move(task_id, before["status"], progress=before["progress"])
             raise
         # What the owner did, as their chat shows it: the task's id is for its worker only.
-        self.runtime.owner_told(row, shown)
+        self.runtime.owner_told(row, shown, message)
         return task
 
     def followed_for(self, task: dict, follows: list[str]) -> list[str]:

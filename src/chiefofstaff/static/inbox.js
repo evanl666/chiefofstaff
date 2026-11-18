@@ -6,7 +6,7 @@ import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, ownerUp
 import { boardOf, followingUp, workerSection } from "./board.js";
 import { renderSidebar, renderStatusLine } from "./sidebar.js";
 import { renderHeader, scrollToBottom, select } from "./session.js";
-import { draftCard, draftKey, uncertainCard } from "./drafts.js";
+import { draftCard, draftKey, relabel, uncertainCard } from "./drafts.js";
 import { expandTask, followUpItem, inTerminal, ownTasks, questionParts, taskItem, terminalItem, unfoldTask } from "./tasks.js";
 import { artifactItems } from "./artifacts.js";
 import { duck } from "./mascot.js";
@@ -301,12 +301,16 @@ function draftTask(draft) {
   // The task it is on now, else one still open.
   return mine.find((task) => task.id === worker?.task?.task_id && ["running", "waiting", "review", "queued"].includes(task.status)) || mine.find((task) => ["running", "waiting", "review", "queued"].includes(task.status));
 }
+// Cards whose own action sends what a worker drafted for its result, and accepts it with it.
+const SETTLING = new Set(["reply", "slack", "github"]);
 function draftItem(draft, phases, embedded = new Set()) {
   const task = draftTask(draft);
   // A result shown on this card only (board.js: on its card): its own card goes in it, with its
   // receipts, its news and its actions (Accept, Create PR…); once, on the first card about it.
   const phase = task && !embedded.has(task.id) && phases.get(task.id);
-  const inner = phase && !phase.section && phase.marker ? taskItem(task, { ...phase, section: "" }) : null;
+  // One decision: the card's own action (Send, Copy & mark sent) settles the result it holds,
+  // where that action sends what its worker drafted for it (a question's card keeps Accept).
+  const inner = phase && !phase.section && phase.marker ? taskItem(task, { ...phase, section: "", inDraft: SETTLING.has(draft.kind) }) : null;
   if (inner) embedded.add(task.id);
   return {
     key: draftKey(draft),
@@ -318,6 +322,12 @@ function draftItem(draft, phases, embedded = new Set()) {
 // Which task the card is about, with what it found folded under its title; a result it is the
 // only card of, as that task's card (`inner`), redrawn in place (a form open on it stays).
 function withTask(node, task, draft, inner = null) {
+  placeTask(node, task, draft, inner);
+  // Its own action says whether it accepts the result it holds now.
+  relabel(node);
+  return node;
+}
+function placeTask(node, task, draft, inner) {
   const old = node.querySelector(":scope > .context, :scope > .card.task");
   if (task && inner) {
     if (old?.dataset.key === inner.key) {

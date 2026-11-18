@@ -132,7 +132,8 @@ async def test_a_stop_takes_over_what_was_never_shown(harness):
     await runtime.workers.interrupt(worker)
     await wait(runtime)
     assert session.raw_sent.count(sent) == 1
-    assert states(runtime, harness, worker)["Also fix the README"] == "queued"
+    # Held for its next message (QA6: said as such, with Send now).
+    assert states(runtime, harness, worker)["Also fix the README"] == "held"
 
 
 async def test_a_cancelled_tasks_message_is_not_sent_again_after_the_cancel(harness):

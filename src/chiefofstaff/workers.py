@@ -154,7 +154,8 @@ class Workers:
             if self.states[session_id].busy:
                 return True
             limit = self.store.settings().max_workers
-            if self.running() >= limit and not self.runtime.special(row):
+            over = self.runtime.special(row) or self.states[session_id].now
+            if self.running() >= limit and not over:
                 self.runtime.update_session(session_id, status="queued", activity="")
                 return False
             if not self.runtime.special(row) and (free := machine.short_of_memory()) is not None:
@@ -166,6 +167,7 @@ class Workers:
                 self.runtime.update_session(session_id, status="queued", activity=note)
                 return False
             self.states[session_id].busy = True
+            self.states[session_id].now = False
             return True
 
     def complete_report(self, session_id: str):
@@ -507,8 +509,11 @@ class Workers:
                     if row["activity"] != machine.disk_note(room):
                         self.runtime.update_session(row["id"], activity=machine.disk_note(room))
                     continue
-                if self.running() < limit or self.runtime.special(row):
+                # The owner asked to send what waits for it now (Runtime.send_now): over the limit.
+                over = self.runtime.special(row) or self.states[row["id"]].now
+                if self.running() < limit or over:
                     self.states[row["id"]].busy = True
+                    self.states[row["id"]].now = False
                     starting.append(self.runtime.update_session(row["id"], status="starting"))
         for row in starting:
             await self.start(row)

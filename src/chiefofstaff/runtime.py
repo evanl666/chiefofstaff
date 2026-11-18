@@ -4902,15 +4902,18 @@ class Runtime:
         attachments: Sequence[Attachment] = (),
         clear_questions: bool = True,
         from_home: bool = False,
+        task_id: str = "",
     ) -> dict:
         """`learn`: the owner typed it (not a message the app sends for them). A message to a
         worker is also noted for the Router (`tell_router`), which must know what the owner
-        asked for. `from_home`: written on Home (@ a worker), where its answer is shown too."""
+        asked for. `from_home`: written on Home (@ a worker), where its answer is shown too.
+        `task_id`: the task of the worker's they look at in its chat (see chat_task)."""
         row = self.store.session(session_id)
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id, restore=True)
-        # The task this is about: the one whose question it answers, else the one it is on.
-        about = self.chat_task(session_id) if row["role"] == WORKER else None
+        # The task this is about: the one whose question it answers, the one the owner looks
+        # at, the one it is on… (see chat_task).
+        about = self.chat_task(session_id, task_id) if row["role"] == WORKER else None
         if row["role"] == WORKER and not attachments and text.strip():
             # Waiting on its question card: this is the answer (sent as a message, it would only
             # be read once the card times out).
@@ -4945,6 +4948,17 @@ class Runtime:
         meta: dict[str, Any] = {}
         switched = self.switched_language(session_id, spoken)
         notes = [switched]
+        made = None
+        # About none of its tasks in particular (several finished, the latest given by the
+        # Router): a task of its own, named from it, so what Home shows it doing is this.
+        apart = (
+            row["role"] == WORKER
+            and not about
+            and bool(text.strip())
+            and not decided
+            and not asked_back
+            and not self.special(row)
+        )
         if row["role"] == WORKER and about and about["status"] != "cancelled":
             notes.append(self.apart_note(about))
         notes += [f"This answers your decision card: {c['target']['question']}" for c in decided]
@@ -4971,10 +4985,21 @@ class Runtime:
             meta["ref"] = "o" + uuid4().hex[:6]
             prompt = wrap("owner", "message", text, ref=meta["ref"], reply_in=spoken)
             notes += [self.projects_note(), self.toolset.related_hint(text)]
+        was = self.store.value("SELECT task_id FROM sessions WHERE id=?", (session_id,))
+        if apart:
+            about = made = self.new_chat_task(session_id, text)
+            notes.append(
+                f"This message starts task {made['id']} \u201c{made['title']}\u201d: the owner "
+                "wrote it in your chat, about none of your earlier tasks in particular. Do it "
+                f"and report it with report(task_id='{made['id']}'); if it only asks a "
+                "question, report your answer (status done)."
+            )
         context = [wrap("system", "context", note) for note in notes if note]
         prompt = "\n\n".join([prompt, *context])
         task = about
-        if task:
+        if made:
+            meta |= {"task_id": made["id"]}  # Its instruction, as a task's first one is.
+        elif task:
             # What its turn is about now; a chat with it, not a task card's follow-up.
             meta |= {"task_id": task["id"], "chat": True}
         if from_home:
@@ -4984,21 +5009,31 @@ class Runtime:
             self.store.set(f"followup:{task['id']}", "chat")
             # Its checkouts now: what this task changes from here is a new result.
             await self.task_actions.record_chat_base(task)
-        elif task and task["status"] in OPEN_WORK and not task["result"]:
+        elif task and task["status"] in OPEN_WORK and not task["result"] and not made:
             # Its checkouts now: separate work this asks for starts here (see split_off).
             await self.task_actions.record_asked_base(task)
-        message = await self.delivery.deliver(
-            session_id,
-            prompt,
-            kind="owner",
-            display=text,
-            meta=meta,
-            # Steered into a Router turn written in the other language, the answer stays in it;
-            # its own turn (Router turns are short) starts in the owner's.
-            steer=not (switched and row["role"] == ROUTER),
-        )
+        try:
+            message = await self.delivery.deliver(
+                session_id,
+                prompt,
+                kind="owner",
+                display=text,
+                meta=meta,
+                # Steered into a Router turn written in the other language, the answer stays in
+                # it; its own turn (Router turns are short) starts in the owner's.
+                steer=not (switched and row["role"] == ROUTER),
+            )
+        except Exception:
+            # Not sent (a cancellation is not this: what it was given may yet go out).
+            if made:
+                self.drop_chat_task(made, was)
+            raise
+        if task and (made or self.store.get(f"followup:{task['id']}")):
+            # Home shows it at work on that task (bug QA6-4: its row stayed under Monitoring,
+            # and a row of its worker's beside it under Running said the same work).
+            self.task_actions.publish(self.tasks.get(task["id"]))
         if row["role"] == WORKER and tell_router:
-            self.owner_told(row, text)
+            self.owner_told(row, text, message)
         if about and about["status"] == "waiting" and clear_questions and not asked_back:
             # It has the owner's answer now: it goes on (not "waits for your answer" until its
             # next report).
@@ -5084,17 +5119,46 @@ class Runtime:
             self.add_message(router_id, "notice", note, {"session_id": row["id"]})
         return {**message, "note": note}
 
-    def owner_told(self, row: dict, text: str):
+    async def send_now(self, session_id: str) -> dict:
+        """What waits to be sent to a worker goes now, as the owner asks where it says it waits:
+        its worker waits for a free slot (it takes one over the parallel-worker limit), or was
+        stopped and holds it for its next message. Not while memory or the disk is short, nor
+        before the task it is given waits for another: that is said, and it waits on."""
+        row = self.store.session(session_id)
+        if row["role"] != WORKER or row["closed_at"]:
+            raise ValueError("Only an open worker's messages wait to be sent.")
+        if row["status"] == "queued":
+            if row["activity"]:
+                raise ValueError(f"It waits: {row['activity']}.")
+            self.states[session_id].now = True
+            await self.workers.pump()
+        elif row["status"] not in {"starting", "working"} and (
+            self.delivery.undefer(session_id) or self.delivery.has_unsent(session_id)
+        ):
+            # Over the limit for what is due now, not for whatever comes next (review L1).
+            self.states[session_id].now = True
+            try:
+                await self.delivery.resume(session_id, now=True)
+            finally:
+                if self.store.session(session_id)["status"] != "queued":
+                    self.states[session_id].now = False
+        return self.view(self.store.session(session_id))
+
+    def owner_told(self, row: dict, text: str, sent: dict | None = None):
         """What the owner told a worker directly (in its timeline, @ in Chat, on a task card):
-        the Router hears of it with its next message, so it never takes the result for drift."""
+        the Router hears of it with its next message, so it never takes the result for drift.
+        `sent`: the worker's own message, as it was given it: Home's copy stands where that one
+        does (Delivery.delivery_for)."""
+        given = sent and "prompt" in (sent.get("meta") or {})
         with suppress(RuntimeError):
-            self.add_message(
+            copy = self.add_message(
                 self.router_id(),
                 "owner",
                 text,
                 {
                     "to": row["id"],
                     "to_title": self.display_title(row),
+                    **({"sent_as": sent["id"]} if sent and given else {}),
                     # Not a turn of its own: it goes with the Router's next message.
                     "prompt": wrap(
                         "system",
@@ -5106,6 +5170,9 @@ class Runtime:
                     "deferred": True,
                 },
             )
+            if given:
+                # Where the worker has it, at once (it was sent before this copy was made).
+                self.delivery.publish_delivery(copy["session_id"], [copy])
 
     def usage(self, since: float, until: float) -> dict:
         """What was spent in a range; each worker by the name it has everywhere (its work's,
@@ -5761,6 +5828,8 @@ class Runtime:
             "task": self.toolset.task_brief(self.tasks.current(row["id"])),
             # The task its current (or last) turn is about: what its steps are for.
             "turn_task": self.working_on(row["id"]) if row["role"] == WORKER else "",
+            # Where the owner's next message in its chat goes, unless they look at a task there.
+            "chat_task": self.chat_view(row),
             "display_title": self.display_title(row),
             "elsewhere": self.copilot_id(row["id"]) in self.elsewhere and not row["closed_at"],
             "terminal": self.terminal.get(row["id"]),
@@ -5830,20 +5899,97 @@ class Runtime:
         self.publish_state()
         return found
 
-    def chat_task(self, session_id: str) -> dict | None:
-        """The task the owner's chat with a worker is about: the one with its question to the
-        owner (the newest asked), else the one it is on, else the one given last."""
+    def chat_task(self, session_id: str, viewing: str = "") -> dict | None:
+        """The task the owner's chat with a worker is about: the one they look at in its chat
+        (`viewing`: opened at it, or scrolled to it), else the one with its question to the
+        owner (the newest asked), else one waiting for them, else the one it is on, else its
+        only one, else the one it was given word of last: the owner's message about it, or the
+        Router's on a task it had (a check-back, a note, more of it, a decision changed). Not
+        blindly the one given last (bug QA6-3: a request that went on with an earlier task was
+        filed under the one the Router gave it since): when the Router's latest word started a
+        task (that task's first instruction), it cannot be told, None, and the message is a task
+        of its own (see owner_send)."""
+        mine = self.tasks.for_session(session_id)
+        looked = next((t for t in mine if viewing and t["id"] == viewing), None)
+        if looked and looked["status"] != "cancelled":
+            return looked
         asking = [q for q in self.asks.session_questions(session_id) if q.get("task_id")]
         for question in reversed(asking):
             task = self.tasks.find(question["task_id"])
             if task and task["session_id"] == session_id and task["status"] in OPEN:
                 return task
-        waiting = [t for t in self.tasks.for_session(session_id) if t["status"] == "waiting"]
+        waiting = [t for t in mine if t["status"] == "waiting"]
         if waiting:
             return waiting[-1]
         if on := self.working_on(session_id):
             return self.tasks.find(on)
-        return self.tasks.current(session_id)
+        kept = [t for t in mine if t["status"] != "cancelled"]
+        if len(kept) <= 1 or self.special(self.store.session(session_id)):
+            return kept[-1] if kept else self.tasks.current(session_id)
+        given = self.store.one(
+            "SELECT id, kind, json_extract(meta, '$.task_id') AS task_id FROM messages "
+            "WHERE session_id=? AND kind IN ('owner', 'router') "
+            "AND json_extract(meta, '$.prompt') IS NOT NULL "
+            "AND json_extract(meta, '$.task_id') IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        )
+        if not given:
+            return None
+        if given["kind"] == "router":
+            # Review M1: a check-back, a note or a changed decision on a task it had is about
+            # that task; only the instruction that started one leaves it open.
+            started = self.store.value(
+                "SELECT min(id) FROM messages WHERE session_id=? AND kind IN ('owner', 'router') "
+                "AND json_extract(meta, '$.prompt') IS NOT NULL "
+                "AND json_extract(meta, '$.task_id')=?",
+                (session_id, given["task_id"]),
+            )
+            if started == given["id"]:
+                return None
+        return next((t for t in kept if t["id"] == given["task_id"]), None)
+
+    def chat_view(self, row: dict) -> dict | None:
+        """Where the owner's next message in a worker's chat goes, unless they look at one of
+        its tasks there: {"id", "title"} of that task, or "" for a task of its own (see
+        chat_task), with the titles of its tasks (the one they look at is named by it); None
+        when it has one task or none (nothing to choose from)."""
+        if row["role"] != WORKER or row["closed_at"] or self.special(row):
+            return None
+        kept = [t for t in self.tasks.for_session(row["id"]) if t["status"] != "cancelled"]
+        if len(kept) <= 1:
+            return None
+        task = self.chat_task(row["id"])
+        return {
+            "id": task["id"] if task else "",
+            "title": task["title"] if task else "",
+            "titles": {t["id"]: t["title"] for t in kept},
+        }
+
+    def drop_chat_task(self, task: dict, was: str | None):
+        """A task made of the owner's message that never reached its worker (its delivery
+        failed): gone again, and its worker is named as before (review L2)."""
+        self.store.execute("DELETE FROM runs WHERE task_id=?", (task["id"],))
+        self.store.execute("DELETE FROM tasks WHERE id=?", (task["id"],))
+        self.store.execute(
+            "UPDATE messages SET meta=json_remove(meta, '$.task_id') WHERE session_id=? "
+            "AND json_extract(meta, '$.task_id')=?",
+            (task["session_id"], task["id"]),
+        )
+        self.store.execute("UPDATE sessions SET task_id=? WHERE id=?", (was, task["session_id"]))
+        self.publish_state()  # Gone from every list.
+        self.publish_session(self.store.session(task["session_id"]))
+
+    def new_chat_task(self, session_id: str, text: str) -> dict:
+        """The owner's message to a worker that is about none of its tasks in particular: a task
+        of its own, named from what they wrote, its worker on it now (the row on Home says so)."""
+        lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+        return self.tasks.create(
+            session_id,
+            clean_title(lines[0] if lines else text),
+            text.strip()[:4000],
+            status="running",
+            why_new="You wrote it in its chat, about none of its tasks in particular.",
+        )
 
     def took_up(self, session_id: str, tasks: list[str], switch: bool = True, news: bool = False):
         """Its conversation shows instructions on these tasks: its turn is on the last; each has

@@ -25,13 +25,18 @@ export const ownTasks = () => tasks().filter((task) => !isHelperTask(task));
 const busy = (session) => session.role === "worker" && !session.closed_at && (session.slot ?? (["working", "starting"].includes(session.status) || session.activity?.startsWith("Waiting for you")));
 // Why a queued task has not started: a task it waits for, or every worker slot is taken.
 export function queuedReason(task) {
-  const activity = byId(task.session_id)?.activity || "";
+  return slotReason(byId(task.session_id));
+}
+// Why a queued worker has not started: what it waits for (another task, memory, disk space), or
+// every worker slot is taken (`slot`: then it can start at once, over the limit, if asked).
+export function slotReason(worker) {
+  const activity = worker?.activity || "";
   if (/^waiting for /i.test(activity)) return { text: `W${activity.slice(1)}` };
   const limit = state.snapshot.settings.max_workers;
   // Chief of Staff's own helpers take no slot.
   const own = sessions().filter((session) => busy(session) && !session.helper).length;
   const help = `At most ${limit} worker${limit === 1 ? "" : "s"} run at once: Settings → General → Parallel workers.`;
-  return { text: `Waiting for a worker slot · ${Math.min(own, limit)} of ${limit} busy`, help };
+  return { text: `Waiting for a worker slot · ${Math.min(own, limit)} of ${limit} busy`, help, slot: true };
 }
 // Workers the owner is using in a terminal right now: working, though no task says so.
 export const inTerminal = () => sessions().filter((session) => session.role === "worker" && !session.helper && session.elsewhere && session.terminal?.working);
@@ -195,6 +200,8 @@ function taskMeta(task, phase = {}) {
   const earlier = (task.earlier_titles || []).map((item) => `“${item.title}”`).join(", ");
   // Short: a few lines, each a fact.
   const help = [
+    // On the card of what its worker drafted for it: that card's own action accepts it.
+    phase.inDraft && phase.marker === "review" ? "Sending what is drafted for it accepts this result: one decision for both" : "",
     phase.marker === "review" && phase.why ? phase.why : "",
     [`Task ${task.id}`, ended ? `finished ${since(task.ended_at || task.updated_at)}` : `started ${since(task.created_at)}`].join(" · "),
     task.worker && task.worker !== task.title ? `Worker: ${shorten(task.worker, 60)}` : "",
@@ -210,6 +217,9 @@ function taskMeta(task, phase = {}) {
   else if (phase.marker === "check-back" && task.check_back?.at) when = clockTime(task.check_back.at);
   else if (phase.section === "monitoring") when = since(task.active_at || task.updated_at);
   else if (phase.marker === "queued" || phase.marker === "turn") when = "";
+  // An update's time is its news's own, not when the task ended (bug QA6-5: news that came
+  // just now said "1h ago").
+  else if (phase.marker === "update" && task.news?.at) when = since(task.news.at);
   return [[statusWord(phase), when], help.filter(Boolean).join("\n")];
 }
 // The meta's parts: the status, and when (left out on a narrow row: it is in the tooltip).
@@ -604,8 +614,10 @@ function taskCard(task, phase = phaseOf(task)) {
       shown = [quiet(untracked.text, untracked.onclick, untracked.tip)];
       more = [followUp, copy, pr, named, splitOff, worker];
     } else if (task.status === "review") {
-      // Every result waits for the owner's Accept, a report that only informs too.
-      main = el("button", { type: "button", text: "Accept", onclick: accept });
+      // Every result waits for the owner's Accept, a report that only informs too. On the card
+      // of what its worker drafted for it, that card's own action accepts it (bug QA6-2: two
+      // decisions on one card, and either click left the other behind).
+      main = phase.inDraft ? null : el("button", { type: "button", text: "Accept", onclick: accept });
       shown = [viewing, following, changes];
       more = [copy, pr, named, splitOff, worker];
     } else if (task.status === "waiting" && task.stopped && task.spend_stop && !task.go_on) {
@@ -628,8 +640,9 @@ function taskCard(task, phase = phaseOf(task)) {
     } else if (task.status === "running" || task.status === "queued") {
       more = [note, task.status === "running" ? { text: "Nudge", onclick: () => nudge.click() } : null, named, worker, cancel];
     } else if (task.status === "done" && task.news) {
-      // News about finished work: seen, it goes back where it was.
-      main = el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
+      // News about finished work: seen, it goes back where it was (on a draft's card, with
+      // that draft: its own action).
+      main = phase.inDraft ? null : el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
       more = [{ text: "Follow up…", onclick: () => reply("What should it do about it?", "Sent to the worker.") }, copy, pr, named, worker];
     } else if (task.status === "done") {
       more = [followUp, copy, pr, named, splitOff, worker];

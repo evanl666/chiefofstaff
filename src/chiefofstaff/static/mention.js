@@ -1,7 +1,7 @@
 // Addressing one worker from Home: "@" picks a worker, and the message goes straight to it. The
 // Router hears of it with its next message.
 import { $, el } from "./dom.js";
-import { HOME, sessions, state, workerTitle } from "./state.js";
+import { byId, HOME, sessions, state, workerTitle } from "./state.js";
 
 export const mention = { to: null, options: [], active: 0, dismissed: -1 };
 
@@ -93,11 +93,15 @@ export function setRecipient(worker) {
   mention.to = worker ? { id: worker.id, title: workerTitle(worker) } : null;
   const chip = $("#composer-to");
   chip.hidden = !mention.to;
+  // Several finished tasks, the latest one the Router gave it: what is written goes as a task of
+  // its own (Runtime.chat_task), said here before it is sent (review M1).
+  const apart = mention.to && byId(mention.to.id)?.chat_task?.id === "";
   chip.replaceChildren(
     ...(mention.to
       ? [
           el("span", { text: "To " }),
-          el("strong", { text: mention.to.title }),
+          el("strong", { text: mention.to.title, title: mention.to.title }),
+          apart ? el("span", { class: "apart", text: "· as a new task", title: "It is about none of its tasks in particular: it becomes a task of its own, named from your message" }) : "",
           el("button", { type: "button", class: "clear", "aria-label": "Send to your chief of staff instead", title: "Send to your chief of staff instead", text: "×", onclick: () => setRecipient(null) }),
         ]
       : []),
