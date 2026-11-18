@@ -272,6 +272,13 @@ stays in sight; Artifacts words and times match what its rows say; a slow script
   stopped*), or waiting for a free worker slot (*3 of 3 busy*), each with *Send now*, which
   sends it (over the parallel-worker limit if need be); waiting for memory, disk space or
   another task, it says that (QA6-1).
+- **A result and the reply drafted for it are one decision.** Their card had two: *Accept* on
+  the result and *Copy & mark sent* on the reply. Either click left the other half on the card,
+  and copying the reply accepted the result only when it changed no code and no other reply of
+  it waited. The card's one action is now *Copy & accept* (*Send & accept* for a Slack reply):
+  the reply goes and the result is accepted (news on accepted work is seen with it); *Follow
+  up* and *Request changes* stay on the result. A result accepted elsewhere first leaves its
+  reply's card as it was; the Router hears of the reply once (QA6-2).
 
 ## 0.1.45 (2026-11-14)
 

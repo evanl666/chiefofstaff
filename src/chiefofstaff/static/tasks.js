@@ -200,6 +200,8 @@ function taskMeta(task, phase = {}) {
   const earlier = (task.earlier_titles || []).map((item) => `“${item.title}”`).join(", ");
   // Short: a few lines, each a fact.
   const help = [
+    // On the card of what its worker drafted for it: that card's own action accepts it.
+    phase.inDraft && phase.marker === "review" ? "Sending what is drafted for it accepts this result: one decision for both" : "",
     phase.marker === "review" && phase.why ? phase.why : "",
     [`Task ${task.id}`, ended ? `finished ${since(task.ended_at || task.updated_at)}` : `started ${since(task.created_at)}`].join(" · "),
     task.worker && task.worker !== task.title ? `Worker: ${shorten(task.worker, 60)}` : "",
@@ -607,8 +609,10 @@ function taskCard(task, phase = phaseOf(task)) {
       shown = [quiet(untracked.text, untracked.onclick, untracked.tip)];
       more = [followUp, copy, pr, named, splitOff, worker];
     } else if (task.status === "review") {
-      // Every result waits for the owner's Accept, a report that only informs too.
-      main = el("button", { type: "button", text: "Accept", onclick: accept });
+      // Every result waits for the owner's Accept, a report that only informs too. On the card
+      // of what its worker drafted for it, that card's own action accepts it (bug QA6-2: two
+      // decisions on one card, and either click left the other behind).
+      main = phase.inDraft ? null : el("button", { type: "button", text: "Accept", onclick: accept });
       shown = [viewing, following, changes];
       more = [copy, pr, named, splitOff, worker];
     } else if (task.status === "waiting" && task.stopped && task.spend_stop && !task.go_on) {
@@ -631,8 +635,9 @@ function taskCard(task, phase = phaseOf(task)) {
     } else if (task.status === "running" || task.status === "queued") {
       more = [note, task.status === "running" ? { text: "Nudge", onclick: () => nudge.click() } : null, named, worker, cancel];
     } else if (task.status === "done" && task.news) {
-      // News about finished work: seen, it goes back where it was.
-      main = el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
+      // News about finished work: seen, it goes back where it was (on a draft's card, with
+      // that draft: its own action).
+      main = phase.inDraft ? null : el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
       more = [{ text: "Follow up…", onclick: () => reply("What should it do about it?", "Sent to the worker.") }, copy, pr, named, worker];
     } else if (task.status === "done") {
       more = [followUp, copy, pr, named, splitOff, worker];

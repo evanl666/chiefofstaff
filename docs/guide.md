@@ -45,8 +45,9 @@ opens its chat at that task), what it made, and the one action that matters now.
 
 When a finished task's worker drafted something for you (a Slack reply, a PR review, a reply on
 your own PR), the draft is the one card: the task's own card is in it (*Result of …*: what it
-came to, its receipts and news, *Accept* or *Got it*, and **⋯** with *Create PR*), and sending
-it accepts the task.
+came to, its receipts and news, *Follow up*, *Request changes*, and **⋯** with *Create PR*),
+and the card has one action, which sends the draft and accepts the task (*Copy & accept*, *Send
+& accept*; news on accepted work is seen with it): one decision for both.
 
 Click a task's title (or *Open worker*) to see its worker's full timeline at that task's report
 (the worker may have gone on to other work since), every step, report and message, and to talk

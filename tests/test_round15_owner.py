@@ -128,3 +128,67 @@ async def test_a_message_waiting_for_a_slot_goes_now_when_asked(harness):
         "sent"
     )
     assert not runtime.states[other].now, "once"
+
+
+async def reported_with_reply(runtime, harness, title="Answer Ann about the release date"):
+    """A worker's result to accept, and the reply it drafted for the owner to send themself."""
+    worker = await spawn(runtime, harness.router_id, title)
+    task = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="Ann gets Friday.")
+    await settle(runtime)
+    draft = harness.store.create_draft(
+        worker, "reply", {"to": "Ann", "where": "email", "task_id": task["id"]}, "Friday works."
+    )
+    return worker, runtime.tasks.get(task["id"]), draft
+
+
+def draft_notes(harness) -> list[str]:
+    """What the Router hears of the owner's drafts (with its next message)."""
+    return [m["text"] for m in harness.store.messages(harness.router_id)
+            if m["meta"].get("draft_id")]  # fmt: skip
+
+
+async def test_copying_a_reply_from_its_results_card_accepts_that_result(harness):
+    """#2: a card holding a result (Awaiting acceptance, Accept) and a reply drafted for it
+    (Copy & mark sent) was two decisions: one click left the other half of the card behind
+    (another reply of it still waiting kept the result unaccepted, say). Sent from that card,
+    the reply settles the result too; the Router hears of it once."""
+    from chiefofstaff.models import DraftDecision
+
+    runtime = await harness.connect()
+    worker, task, draft = await reported_with_reply(runtime, harness)
+    other = harness.store.create_draft(
+        worker, "reply", {"to": "Bo", "where": "email", "task_id": task["id"]}, "Friday."
+    )
+    assert task["status"] == "review"
+    await runtime.drafts.resolve(
+        draft["id"], DraftDecision(action="send", text="Friday works.", accept=task["id"])
+    )
+    await settle(runtime)
+    assert harness.store.draft(draft["id"])["status"] == "sent"
+    assert runtime.tasks.get(task["id"])["status"] == "done", "one decision: accepted with it"
+    assert harness.store.draft(other["id"])["status"] == "pending", "its own card, still to send"
+    assert len(draft_notes(harness)) == 1, draft_notes(harness)
+    # Accepted first (elsewhere), its reply still goes: nothing half-done, nothing refused.
+    await runtime.drafts.resolve(
+        other["id"], DraftDecision(action="send", text="Friday.", accept=task["id"])
+    )
+    assert harness.store.draft(other["id"])["status"] == "sent"
+    assert runtime.tasks.get(task["id"])["status"] == "done"
+    assert len(draft_notes(harness)) == 2, "one note per reply, none for the accept"
+
+
+async def test_a_reply_sent_from_a_card_with_news_on_its_result_settles_the_news(harness):
+    """#2: news on an accepted result shows on the card of the reply drafted for it (Got it);
+    the reply sent from there has seen it."""
+    from chiefofstaff.models import DraftDecision
+
+    runtime = await harness.connect()
+    _, task, draft = await reported_with_reply(runtime, harness)
+    runtime.task_actions.accept(task["id"])
+    runtime.task_actions.news(task["id"], "Ann asked for Thursday instead.")
+    await runtime.drafts.resolve(
+        draft["id"], DraftDecision(action="send", text="Thursday works.", accept=task["id"])
+    )
+    assert not harness.store.get(f"news:{task['id']}")
+    assert runtime.tasks.get(task["id"])["status"] == "done"

@@ -2881,17 +2881,24 @@ async def round_nine(runtime, browser, failures: list[str]):
     await expect(inner.locator(".head .of")).to_have_text("Result of")
     await expect(inner.locator(".head .title")).to_have_text("Commit notes on r9-cpr")
     await expect(inner.locator(".receipt.changes")).to_have_text("+2 −0 in 1 file")
-    await expect(inner.get_by_role("button", name="Accept")).to_be_visible()
-    await expect(card.get_by_role("button", name="Copy & mark sent")).to_be_visible()
+    # One decision (QA6-2): the card's own action accepts the result it holds, and says so.
+    await expect(inner.get_by_role("button", name="Accept")).to_have_count(0)
+    await expect(inner.get_by_role("button", name="Request changes")).to_be_visible()
+    await expect(card.get_by_role("button", name="Copy & accept")).to_be_visible()
     await expect(needs.locator(".card.task", has_text="Commit notes on r9-cpr")).to_have_count(1)
     # W3: news on a result a draft is for shows on that card, once.
     news = needs.locator(f'.card.draft[data-id="{to_bob["id"]}"] .card.task.in-draft')
     await expect(news.locator(".news")).to_contain_text("Bob says the flag is on now.")
-    # Still a result to accept (QA round 10): Accept takes its news with it.
-    await expect(news.get_by_role("button", name="Accept")).to_be_visible()
+    # Still a result to accept (QA round 10): its card's own action accepts it, news and all.
+    await expect(news.get_by_role("button", name="Accept")).to_have_count(0)
+    await expect(
+        needs.locator(f'.card.draft[data-id="{to_bob["id"]}"]').get_by_role(
+            "button", name="Copy & accept"
+        )
+    ).to_be_visible()
     await expect(needs.locator(".news", has_text="Bob says the flag")).to_have_count(1)
     await card.screenshot(path=SHOTS / "ui-edges-r9-draft-result.png")
-    log("S6/W3: a draft's card holds its result's card: changes, Accept, its news, once")
+    log("S6/W3: a draft's card holds its result's card: changes, its news, once; one action")
 
     # A12: its ⋯ from the keyboard: Enter opens it on its first item; arrows, Home and End
     # move (round); Escape closes it, back on ⋯.
@@ -2922,7 +2929,7 @@ async def round_nine(runtime, browser, failures: list[str]):
     await expect(title).to_be_focused()
     await page.keyboard.press("Escape")
     await expect(title).to_have_count(0)
-    await expect(inner.get_by_role("button", name="Accept")).to_be_visible()
+    await expect(inner.get_by_role("button", name="Request changes")).to_be_visible()
     await expect(card).to_be_visible()
     log("A12: ⋯ menus by arrow keys, Home, End and Escape; Escape closes a card's form; A9")
 

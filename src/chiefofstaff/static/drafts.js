@@ -49,6 +49,15 @@ function later(text, build) {
 function actionRow(error, main, more = [], ...extra) {
   return el("div", { class: "actions" }, error, ...extra, moreMenu(more), main);
 }
+// A card holding its task's result to accept (inbox.js withTask): its own action accepts that
+// too, and says so ("Copy & accept"): one decision for both (bug QA6-2).
+export function relabel(node) {
+  const accepts = Boolean(node.querySelector(":scope > .card.task.in-draft.review"));
+  for (const button of node.querySelectorAll(":scope > .actions > button[data-alone]")) {
+    const text = accepts ? button.dataset.withResult : button.dataset.alone;
+    if (button.textContent !== text) button.textContent = text;
+  }
+}
 // The owner's decision on a card: it leaves at once, the toast says what was done; if the
 // server says no, the card comes back with why (`failed` shows it elsewhere, in a view).
 function decider(draft, node, error, failed = null) {
@@ -56,6 +65,12 @@ function decider(draft, node, error, failed = null) {
   return (body, done = "") => once(`draft:${draft.id}`, node, () => decide(body, done));
   async function decide(body, done) {
     const key = `draft:${draft.id}`;
+    // Sent from a card that holds its task's result (to accept, or news on it): that is
+    // settled with it, one decision (bug QA6-2).
+    const settles = body.action === "send" && ["reply", "slack", "github"].includes(draft.kind);
+    const result = settles ? node.querySelector(":scope > .card.task.in-draft") : null;
+    if (result?.dataset.task) body = { ...body, accept: result.dataset.task };
+    if (done && result?.classList.contains("review")) done = `${done} Result accepted.`;
     error.textContent = "";
     state.leaving.add(key);
     node.classList.add("leaving");
@@ -433,17 +448,19 @@ function replyCard(draft) {
     decide({ action: "send", text: text.value }, "Copied. Paste it there and send it.");
   };
   const actions = el("div", { class: "actions" });
-  const show = () =>
+  const show = () => {
     actions.replaceChildren(
       error,
       moreMenu([
         { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
         { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
       ]),
-      el("button", { type: "button", text: "Copy & mark sent", onclick: copy }),
+      el("button", { type: "button", text: "Copy & mark sent", "data-alone": "Copy & mark sent", "data-with-result": "Copy & accept", onclick: copy }),
     );
-  show();
+    relabel(node);
+  };
   node.append(actions);
+  show();
   return node;
 }
 export function draftCard(draft) {
@@ -537,15 +554,17 @@ function messageCard(draft) {
   // now that the owner sees what they wrote. It is checked again on the way (the server knows
   // that message now): held again only if someone wrote after it.
   const held = draft.kind === "slack" && Boolean(target.moved_on);
-  const show = () =>
+  const show = () => {
     actions.replaceChildren(
       error,
       moreMenu([
         { text: "Ask to redo…", onclick: () => redoForm(actions, decide, show) },
         { text: "Reject…", onclick: () => rejectForm(actions, decide, show) },
       ]),
-      el("button", { type: "button", class: review ? "secondary" : "", text: held ? "Send anyway" : "Send", title: held ? "Send it as it is, now that you have seen what they wrote" : review ? "It waits for the review to be posted first" : undefined, onclick: () => send() }),
+      el("button", { type: "button", class: review ? "secondary" : "", text: held ? "Send anyway" : "Send", title: held ? "Send it as it is, now that you have seen what they wrote" : review ? "It waits for the review to be posted first" : undefined, ...(held || review ? {} : { "data-alone": "Send", "data-with-result": "Send & accept" }), onclick: () => send() }),
     );
+    relabel(node);
+  };
   show();
   return node;
 }

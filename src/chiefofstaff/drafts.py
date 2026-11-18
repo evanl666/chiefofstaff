@@ -197,7 +197,7 @@ class Drafts:
         else:
             verdict = None
         if draft["kind"] == "reply":
-            return await self.copied(draft, final)
+            return await self.copied(draft, final, decision.accept)
         if draft["kind"] == "github" and not final:
             # Checked before anything about the draft changes; with the verdict the owner chose.
             kept = [
@@ -286,7 +286,7 @@ class Drafts:
         if comments_edited and (task := self.task_of(draft)):
             # Its line comments or verdict changed: not accepted as it was.
             self.store.set(f"draft_edited:{task['id']}", "1")
-        await self.settle_task(draft)
+        await self.settle_task(draft, decision.accept)
         edited = final != draft["text"] or bool(comments_edited)
         self.runtime.learning.record(
             "draft-edited" if edited else "draft-sent",
@@ -1036,8 +1036,9 @@ class Drafts:
         )
         return draft
 
-    async def copied(self, draft: dict, final: str) -> dict:
-        """A reply the owner sends themself: approved (and copied for them) is as good as sent."""
+    async def copied(self, draft: dict, final: str, accept: str = "") -> dict:
+        """A reply the owner sends themself: approved (and copied for them) is as good as sent.
+        `accept`: the task whose result its card held (see settle_task)."""
         draft = self.store.update_draft(
             draft["id"],
             status="sent",
@@ -1047,7 +1048,7 @@ class Drafts:
         )
         self.bus.publish("draft", draft)
         self.settle_question(draft)
-        await self.settle_task(draft)
+        await self.settle_task(draft, accept)
         edited = final != draft["text"]
         self.runtime.learning.record(
             "draft-edited" if edited else "draft-sent",
@@ -1169,17 +1170,33 @@ class Drafts:
         ids = {row["id"] for row in self.store.all("SELECT id FROM drafts")}
         return owner_words(text, ids)
 
-    async def settle_task(self, draft: dict):
+    async def settle_task(self, draft: dict, accept: str = ""):
         """A task whose result was this text (a reply, a review) is done once the owner sent
         it: one approval, not a second one for the task. Not one that also changed code: that
         is still for the owner to review. Sent before the worker reported: settled when it
-        reports (settle_reported)."""
+        reports (settle_reported). `accept`: sent from the card that held that task's result
+        (its receipts, its changes, its news): the owner decided both there, in one click
+        (bug QA6-2: Accept and Copy & mark sent were two decisions on one card, and either
+        one left the other behind). Accepted, or its news seen."""
         task = self.task_of(draft)
+        shown = self.runtime.tasks.find(accept) if accept else None
+        if shown and shown["session_id"] == draft["session_id"]:
+            task = shown
         sent = (draft.get("final_text") or draft["text"]).strip()
         if task and sent != (draft["text"] or "").strip():
             self.store.set(f"draft_edited:{task['id']}", "1")  # Not accepted as it was.
         if task and task["status"] in {"running", "queued"}:
             self.store.set(f"draft_sent:{task['id']}", "1")
+            return
+        if task and shown is task and task["status"] == "review":
+            self.store.delete(f"draft_sent:{task['id']}")
+            edited = bool(self.store.get(f"draft_edited:{task['id']}"))
+            self.store.delete(f"draft_edited:{task['id']}")
+            self.runtime.task_actions.accept(task["id"], as_is=not edited)
+            return
+        if task and shown is task and task["status"] == "done":
+            if self.store.get(f"news:{task['id']}"):
+                self.runtime.task_actions.news_seen(task["id"])
             return
         if not task or task["status"] != "review":
             return
