@@ -26,6 +26,7 @@ from .models import (
     GitQuarantine,
     NewLesson,
     OpenFolder,
+    OpenPr,
     OwnerMessage,
     ProfileText,
     ProjectPath,
@@ -228,7 +229,9 @@ def create_app(
 
     @app.exception_handler(ValueError)
     async def invalid(request, exc):
-        return JSONResponse({"detail": str(exc)}, status_code=400)
+        # One the owner may do anyway (MayHoldWorkError): the words of that action, for its button.
+        anyway = {"anyway": exc.anyway} if getattr(exc, "anyway", "") else {}
+        return JSONResponse({"detail": str(exc), **anyway}, status_code=400)
 
     @app.exception_handler(LookupError)
     async def missing(request, exc):
@@ -507,8 +510,9 @@ def create_app(
         return await runtime.task_actions.diff(task_id)
 
     @app.post("/api/tasks/{task_id}/pr")
-    async def task_pr(task_id: str):
-        return runtime.task_actions.view(await runtime.task_actions.create_pr(task_id))
+    async def task_pr(task_id: str, payload: OpenPr | None = None):
+        anyway = bool(payload and payload.anyway)
+        return runtime.task_actions.view(await runtime.task_actions.create_pr(task_id, anyway))
 
     @app.post("/api/tasks/{task_id}/accept")
     async def accept_task(task_id: str):

@@ -998,6 +998,105 @@ async def test_git_stopped_halfway_through_removing_a_worktree_is_finished(tmp_p
     assert (Path(closing["cwd"]) / "src" / "main.py").read_text() == "print(1)\n", "whole"
 
 
+def files_in(folder: Path) -> int:
+    return sum(len(names) for _, _, names in os.walk(folder))
+
+
+def deleting(tree: Path) -> bool:
+    """Whether git is deleting a worktree made of `big/` folders (its `.git`, or some, gone)."""
+    big = tree / "big"
+    return not (tree / ".git").exists() or not big.exists() or len(list(big.iterdir())) < 100
+
+
+async def test_chief_of_staff_stopping_while_a_worktree_is_removed_leaves_no_half_tree(tmp_path):
+    """A closed worker's worktree on a big repository is being removed (in the background) when
+    Chief of Staff stops (quit, restart, upgrade): git finishes it. Never half a tree (files
+    and its `.git` gone, git's record of it left) for the reopened worker to resume in."""
+    app = project(tmp_path)
+    for folder in range(100):
+        for name in range(100):
+            write(app / "big" / f"m{folder}" / f"f{name}.txt", str(name))
+    run("git", "add", ".", cwd=app)
+    run(*GIT, "commit", "-qm", "big", cwd=app)
+    harness = await harnessed(tmp_path)
+    runtime = harness.runtime
+    worker = await spawn(runtime, harness.router_id, "Big", project=str(app), isolate=True)
+    await settle(runtime)
+    tree = Path(worker["cwd"])
+    whole = files_in(tree)
+    await runtime.workers.close(worker["session_id"])
+    for _ in range(5000):  # Until git is deleting it.
+        if deleting(tree):
+            break
+        await asyncio.sleep(0.002)
+    await runtime.stop()
+    assert not exists(tree) or files_in(tree) == whole, "never half a tree"
+    assert "prunable" not in run("git", "worktree", "list", "--porcelain", cwd=app)
+    restarted = Harness(tmp_path / "data", client=harness.client)
+    again = await restarted.connect()
+    try:
+        await again.workers.reopen(worker["session_id"])
+        await settle(again)
+        assert files_in(tree) == whole and run("git", "status", "--porcelain", cwd=tree) == ""
+    finally:
+        await again.stop()
+
+
+async def test_git_making_or_removing_a_worktree_finishes_when_its_waiter_stops(
+    tmp_path, monkeypatch
+):
+    """Stopped halfway, it would leave half a tree: it goes on (within its limit) when whoever
+    waits for it stops waiting. Other git ends with its waiter."""
+    fake = tmp_path / "bin"
+    write(fake / "git", '#!/bin/sh\nsleep 1\necho "$@" > "$DONE"\n')
+    (fake / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    for words, finishes in ((("worktree", "remove", "t"), True), (("status",), False)):
+        done = tmp_path / f"{words[0]}.done"
+        waiting = asyncio.ensure_future(
+            workspaces_module.command("git", *words, env={"DONE": str(done)}, limit=30)
+        )
+        await asyncio.sleep(0.3)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        await asyncio.sleep(1.5)
+        assert done.exists() == finishes, words
+
+
+async def test_a_worktree_whose_removal_stopped_halfway_comes_back_whole(tmp_path):
+    """Chief of Staff ended at once (a crash, a kill) while git removed a worktree: what is left
+    goes, and the worktree is made again from its branch, before its worker resumes there. Not
+    a worktree whose `.git` its own worker removed: that is its doing."""
+    app = project(tmp_path)
+    harness = await harnessed(tmp_path)
+    runtime = harness.runtime
+    left = await spawn(runtime, harness.router_id, "Left", project=str(app), isolate=True)
+    kept = await spawn(runtime, harness.router_id, "Kept", project=str(app), isolate=True)
+    own = await spawn(runtime, harness.router_id, "Own", project=str(app), isolate=True)
+    await settle(runtime)
+    for info, pointer in ((left, False), (kept, True), (own, False)):
+        tree = Path(info["cwd"])
+        (tree / "src" / "main.py").unlink()
+        if not pointer:
+            (tree / ".git").unlink()
+        if info is not own:
+            [checkout] = runtime.workspaces.checkouts(harness.store.session(info["session_id"]))
+            harness.store.set(workspaces_module.REMOVING + checkout["worktree"], "1")
+    for info in (left, kept, own):
+        await runtime.workspaces.restore(harness.store.session(info["session_id"]))
+    for info in (left, kept):
+        tree = Path(info["cwd"])
+        assert (tree / "src" / "main.py").read_text() == "print(1)\n", "whole again"
+        assert run("git", "status", "--porcelain", cwd=tree) == ""
+        assert run("git", "branch", "--show-current", cwd=tree).strip() == info["branch"]
+    assert "prunable" not in run("git", "worktree", "list", "--porcelain", cwd=app)
+    assert not (Path(own["cwd"]) / ".git").exists(), "its own doing, as it left it"
+    assert (Path(own["cwd"]) / "build" / "tracked.txt").exists()
+    assert not harness.store.all("SELECT key FROM kv WHERE key LIKE 'removing:%'")
+    await runtime.stop()
+
+
 async def test_a_worker_still_following_its_task_loses_only_tools_caches(tmp_path, monkeypatch):
     app = project(tmp_path)
     harness = await harnessed(tmp_path)

@@ -2576,14 +2576,22 @@ def current_branches(folder: str) -> set[str]:
     """The branch a folder's checkout is on and the remote branch a bare push there updates
     (`@{push}`), asked of git; none when it cannot say."""
     found = set()
+    # As all of Chief of Staff's git (workspaces.command): the folder may be a worker's
+    # repository, whose config it wrote. No transport, nothing fetched, no file-system monitor
+    # (rev-parse runs no hook).
+    own = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
+    quiet = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_CONFIG_NOSYSTEM": "1"}
+    asked = ["git", "-c", "core.fsmonitor=false", "-C", folder, "rev-parse", "--abbrev-ref"]
     for ref in ("HEAD", "@{push}"):
         try:
             done = subprocess.run(  # noqa: S603  (git, with its folder and a ref of its own)
-                ["git", "-C", folder, "rev-parse", "--abbrev-ref", ref],  # noqa: S607
+                [*asked, ref],
                 capture_output=True,
                 text=True,
                 timeout=10,
                 check=False,
+                stdin=subprocess.DEVNULL,
+                env=own | quiet | {"GIT_TERMINAL_PROMPT": "0"},
             )
         except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
             continue

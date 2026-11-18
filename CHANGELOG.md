@@ -45,9 +45,16 @@
   write: a filter configured there ran, as you, whenever Chief of Staff read the worker's changes
   (`git status`, `git diff`, a snapshot). And learning checks from a worker's test runs ran git in
   a repository the worker had made itself, whatever its config said. Now Chief of Staff's git
-  never looks into a submodule's files (it reads their commits, and a submodule checked out
-  counts as holding work, so its worktree is kept), and runs git only in a worker's checkouts,
-  a repository it made itself only once its config runs nothing.
+  reads a submodule's commits, not its files (a submodule checked out counts as holding work, so
+  its worktree is kept), but before a PR opens, as it reads a worker's clone: where its config
+  would run code, the PR opens only on your word (**Open it anyway**). It runs git only in a
+  worker's checkouts, a repository it made itself only once its config runs nothing. A clone in
+  a worker's folder (a repository it cloned or made, taken at its task's end) could also run its
+  code through a partial clone's fetch or a `.git` swapped for a pointer elsewhere: now it is
+  read only through the `.git` it had when taken, with no filter at all (not even your own, such
+  as git-lfs's, whatever its attributes name) and no fetch; and Chief of Staff's git reaches
+  other repositories only over http(s), ssh, git or a local path, not a remote helper such as
+  `codecommit::`.
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create
   `.git/commondir` in your repository, sending your git to a configuration of its own whose
@@ -60,6 +67,11 @@
   folder moved into place gets past the sandbox's paths) waits the same way, until **Use this
   .git**; a worktree removed and made again under its name (yours, or a worker's scratch one) is
   no replaced one.
+- **A worktree half removed comes back whole.** Chief of Staff stopping (or ending at once) while
+  it removed a closed worker's worktree could leave half of it, without its `.git`; the reopened
+  worker went on there, in a folder that was no repository. Now git finishes a removal it started
+  as Chief of Staff stops, and what one stopped halfway left goes before the worker resumes,
+  its worktree made again from its branch.
 
 ## 0.1.45 (2026-11-14)
 

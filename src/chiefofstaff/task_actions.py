@@ -41,6 +41,7 @@ from .workspaces import (
     same_version,
     share_files,
     snapshot,
+    submodule_work,
     tree_names,
     untracked_work,
     version,
@@ -51,6 +52,15 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 logger = logging.getLogger(__name__)
+
+
+class MayHoldWorkError(ValueError):
+    """A PR not opened because a repository may hold work not committed yet, where it couldn't
+    be read safely: the owner may open it anyway (`anyway`, the words of that action)."""
+
+    anyway = "Open it anyway"
+
+
 CHECK_BACK_RETRY_MINUTES = 5
 # Reads of a followed thread failed in a row before it shows as failing.
 FAILING_READS = 3
@@ -2488,8 +2498,10 @@ class TaskActions:
                     logger.info("No diff for %s: %s", checkout["path"], exc)
         return found
 
-    async def create_pr(self, task_id: str) -> dict:
-        """Push the task's branches and open a PR from each, or find the one already open."""
+    async def create_pr(self, task_id: str, anyway: bool = False) -> dict:
+        """Push the task's branches and open a PR from each, or find the one already open.
+        `anyway`: the owner's word, though a submodule's files could not be read
+        (MayHoldWorkError)."""
         task = self.tasks.get(task_id)
         if task["status"] not in {"review", "done"}:
             raise ValueError(f"The task is {task['status']}: open a PR once it is finished.")
@@ -2501,7 +2513,7 @@ class TaskActions:
             for checkout in self.workspaces.checkouts(row):
                 if not (checkout.get("repo") and checkout.get("branch")):
                     continue  # A shared project folder has no branch of its own.
-                if plan := await self.pr_plan(checkout):
+                if plan := await self.pr_plan(checkout, anyway):
                     plans.append((checkout, *plan))
             if not plans:
                 raise ValueError("Nothing to open a PR from: the worker committed nothing.")
@@ -2593,19 +2605,26 @@ class TaskActions:
                 found += [line.strip() for line in listed.splitlines() if line.strip()]
         return found
 
-    async def pr_plan(self, checkout: dict) -> tuple[str, str, str] | None:
-        """(repository, GitHub owner/name, branch) to open a PR from, or None: no commits."""
+    async def pr_plan(self, checkout: dict, anyway: bool = False) -> tuple[str, str, str] | None:
+        """(repository, GitHub owner/name, branch) to open a PR from, or None: no commits. Not
+        while its worktree, or a submodule checked out in it, holds work not committed yet."""
         repo, branch = checkout["repo"], checkout["branch"]
         # As the owner knows it: its package's name ("textkit"), else its folder's.
         name = await asyncio.to_thread(package_name, Path(repo)) or Path(repo).name
         tree = checkout.get("worktree") or checkout["path"]
         live = await asyncio.to_thread(os.path.isdir, tree)
         status = await checkout_git(checkout, tree, "status", "--porcelain") if live else ""
-        if worth_committing(status):
+        changed, unread = await submodule_work(checkout, tree) if live else ([], [])
+        if worth_committing(status) or changed:
+            where = f" in {', '.join(changed)}" if changed and not worth_committing(status) else ""
             raise ValueError(
-                f"The {name} repository has uncommitted changes. Follow up and ask the worker to "
-                "commit "
-                "them, then create the PR."
+                f"The {name} repository has uncommitted changes{where}. Follow up and ask the "
+                "worker to commit them, then create the PR."
+            )
+        if unread and not anyway:
+            raise MayHoldWorkError(
+                f"The {name} repository may have uncommitted changes in {', '.join(unread)}, "
+                "whose files Chief of Staff can't read safely (its git config runs code)."
             )
         if live:
             # The branch it is on now (one the owner named, say), not the one it was given.

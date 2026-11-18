@@ -292,7 +292,7 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   worker may change it.
 - Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
   are removed if they hold nothing uncommitted (the branches stay); reopening it brings them
-  back. A worktree with ignored files you may want (an edited `.env`, a report) is kept, with
+  back (whole, also one whose removal Chief of Staff stopping cut short). A worktree with ignored files you may want (an edited `.env`, a report) is kept, with
   its dependencies and build output deleted; those alone do not keep it (see
   [Disk space](#disk-space)).
 
@@ -507,7 +507,9 @@ signed-in `gh`: titled with what its commits say (their subjects; the task's tit
 none to read), and its report as the description, without what the report said about pushing or
 a PR (moot once the PR is open), and what was checked. If a PR from that branch
 is open already, that one is used. Uncommitted work is not pushed: follow up and ask the worker
-to commit first. An open worker then follows the PR (reviews, comments and CI go to it); its
+to commit first (also work left in a submodule checked out in its worktree; one whose git config
+would run code can't be read safely, so the PR opens only once you click *Open it anyway*). An
+open worker then follows the PR (reviews, comments and CI go to it); its
 task stays under *Monitoring* until the PR is merged or closed, and waits for your *Accept* until
 you give it (merging does not accept it).
 

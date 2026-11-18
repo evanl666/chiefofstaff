@@ -37,8 +37,8 @@ from .receipts import NO_TESTS_RAN, test_runs, words
 from .roles import WORKER
 from .store import now
 from .workspaces import (
-    NO_HOOKS,
     PLAIN_DIFF,
+    SAFE_GIT,
     base_of,
     checkout_git,
     command,
@@ -47,6 +47,7 @@ from .workspaces import (
     git_unlooked,
     gitlinks,
     locate,
+    unfiltered,
 )
 
 if TYPE_CHECKING:
@@ -483,12 +484,15 @@ class Checks:
     async def checked_out(self, git_dir: str, *commits: str):
         """Commits checked out in scratch worktrees: what checks run on, as a clean checkout
         (new files included, nothing ignored or built), whatever the worker's folder holds."""
-        if await asyncio.to_thread(own_repository, git_dir, self.runtime.workspaces.roots()) and (
-            found := await asyncio.to_thread(config_runs_code, git_dir)
-        ):
+        own = await asyncio.to_thread(own_repository, git_dir, self.runtime.workspaces.roots())
+        unfiltering: tuple[str, ...] = ()
+        if own:
             # A clone in a worker's folder, whose config it can write: checking it out would run
-            # what that config says (a filter), as the owner.
-            raise ValueError(f"Its git config was changed ({', '.join(found)}).")
+            # what that config says (a filter), as the owner; its files are written with no
+            # filter at all, and nothing is fetched for it.
+            if found := await asyncio.to_thread(config_runs_code, git_dir):
+                raise ValueError(f"Its git config was changed ({', '.join(found)}).")
+            unfiltering = await unfiltered({"GIT_DIR": git_dir})
         root = self.scratch() / f"versions-{uuid4().hex[:8]}"
         made = []
         try:
@@ -497,9 +501,9 @@ class Checks:
                 # Without the repository's hooks (a post-checkout hook would run outside the
                 # sandbox) and without fetching large files.
                 await command(
-                    "git", "-c", f"core.hooksPath={NO_HOOKS}", "--git-dir", git_dir, "worktree",
+                    "git", *SAFE_GIT, *unfiltering, "--git-dir", git_dir, "worktree",
                     "add", "--detach", "--quiet", str(path), commit,
-                    limit=120, env={"GIT_LFS_SKIP_SMUDGE": "1"},
+                    limit=120, env={"GIT_LFS_SKIP_SMUDGE": "1"}, lazy=not own,
                 )  # fmt: skip
                 made.append(path)
             yield made

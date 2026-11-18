@@ -422,10 +422,19 @@ BRANCH_UPDATE = re.compile(
     r"\bgit\b(?:\s+(?:-[cC]\s+\S+|--[\w-]+(?:=\S+)?))*"
     r"\s+(merge|rebase|pull|cherry-pick|am|revert)(?![\w-])([^;&|\n]*)"
 )
-# What a failed one's output says when git could not change a file (the sandbox holds it, or
-# its permissions): not an ordinary conflict, which the worker resolves (or aborts) itself.
+# What a failed one's output says when git could not change a file of the work tree (one the
+# sandbox holds): git's own words for each file, as checkout and merge say them. Not an ordinary
+# conflict, which the worker resolves (or aborts) itself; not a file of a `.git` (FETCH_HEAD);
+# nor any update whose fetch was refused (an SSH key the sandbox keeps unreadable): nothing
+# changed then.
 UNCHANGEABLE = re.compile(
-    r"operation not permitted|permission denied|read-only file system", re.IGNORECASE
+    r"(?:unable to (?:unlink(?: old)?|create (?:file|symlink)|rmdir)|cannot create directory at)"
+    r" '?(?P<path>[^'\n]*?)'?: (?:operation not permitted|permission denied|read-only file system)",
+    re.IGNORECASE,
+)
+IN_GIT_FOLDER = re.compile(r"(?:^|/)\.git(?:/|$)")
+NOT_FETCHED = re.compile(
+    r"permission denied \(publickey|could not read from remote repository", re.IGNORECASE
 )
 UPDATE_FAILED = (
     "That branch update failed partway; put your tree back as it was (e.g. `git merge --abort` / "
@@ -3588,17 +3597,22 @@ class Runtime:
             self.background(self.settings_stop(session_id))
 
     def update_failed(self, row: dict, ran: dict, code: int | None, output: str):
-        """A worker's command that updates its branch (a merge, a rebase, a pull) failed where
-        git could not change a file (one the sandbox holds): the worker is told at once, within
-        its turn, to put its tree back before going on. Words only: Chief of Staff runs no git
-        in a worker's repository for this (a filter or a promisor there would run as it).
-        Ordinary conflicts are the worker's own to resolve."""
+        """A sandboxed worker's command that updates its branch (a merge, a rebase, a pull)
+        failed where git could not change a file of its work tree (one the sandbox holds): the
+        worker is told at once, within its turn, to put its tree back before going on. Words
+        only: Chief of Staff runs no git in a worker's repository for this (a filter or a
+        promisor there would run as it). Ordinary conflicts are the worker's own to resolve."""
         if (
             row["role"] != WORKER
             or code in (0, None)
             or ran["id"] in self.updates_said
             or not BRANCH_UPDATE.search(ran["command"])
-            or not UNCHANGEABLE.search(output or "")
+            or not self.pre_tool_on.get(row["id"])  # (Its session runs sandboxed.)
+            or NOT_FETCHED.search(output or "")
+            or not any(
+                not IN_GIT_FOLDER.search(found["path"])
+                for found in UNCHANGEABLE.finditer(output or "")
+            )
         ):
             return
         self.updates_said.add(ran["id"])

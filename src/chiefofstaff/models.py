@@ -783,5 +783,10 @@ class OpenFolder(StrictModel):
     app: Literal["finder", "vscode"]
 
 
+class OpenPr(StrictModel):
+    # The owner's word that it opens though a submodule's files couldn't be read (MayHoldWorkError).
+    anyway: bool = False
+
+
 class ProfileText(StrictModel):
     text: str = Field(default="", max_length=20000)

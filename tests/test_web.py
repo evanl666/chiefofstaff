@@ -291,6 +291,33 @@ def test_the_owner_reviews_and_follows_up_on_tasks(app_client):
     assert refused.status_code == 400
 
 
+def test_a_pr_that_may_miss_work_says_so_and_opens_on_the_owners_word(app_client, monkeypatch):
+    """Why it didn't open, with what the owner may do anyway; done anyway, on their word."""
+    from chiefofstaff.task_actions import MayHoldWorkError
+
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    asked = []
+
+    async def create_pr(task_id: str, anyway: bool = False):
+        asked.append(anyway)
+        if not anyway:
+            raise MayHoldWorkError("The app repository may have uncommitted changes in lib.")
+        raise LookupError("opened")  # (What comes after is another test's.)
+
+    monkeypatch.setattr(runtime.task_actions, "create_pr", create_pr)
+    refused = app_client.post("/api/tasks/t1/pr", json={}, headers=ORIGIN)
+    assert refused.status_code == 400
+    assert refused.json() == {
+        "detail": "The app repository may have uncommitted changes in lib.",
+        "anyway": "Open it anyway",
+    }
+    plain = app_client.post("/api/tasks/t1/follow-up", json={"text": ""}, headers=ORIGIN)
+    assert "anyway" not in plain.json()
+    app_client.post("/api/tasks/t1/pr", json={"anyway": True}, headers=ORIGIN)
+    assert asked == [False, True]
+
+
 def test_the_owner_requests_changes_and_sees_where_a_message_stands(app_client):
     sign_in(app_client)
     runtime = app_client.app.state.runtime

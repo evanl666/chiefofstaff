@@ -423,6 +423,8 @@ function taskCard(task, phase = phaseOf(task)) {
       state.leaving.delete(key);
       node.classList.remove("leaving");
       error.textContent = failure.message;
+      // What the owner may do all the same, having read why not: one button after it.
+      if (failure.anyway) error.append(" ", el("button", { type: "button", class: "link", text: failure.anyway, onclick: () => act(path, { ...payload, anyway: true }, done, moves, sends) }));
       // Redrawn meanwhile (it finished as the owner cancelled it, say): why, where it is seen.
       if (!error.isConnected) toast(failure.message, "error");
       for (const button of actions.querySelectorAll("button")) button.disabled = false;
