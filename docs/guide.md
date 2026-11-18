@@ -282,6 +282,10 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   when it is not sure.
 - A repository a task needs that is not there yet (a GitHub owner/name or a git URL) is cloned
   into the code folder once and stays for later tasks.
+- A repository a worker clones or makes in its own folder counts as one of its checkouts at its
+  task's end. Chief of Staff reads it with no filter (a git-lfs file is read as it is on disk),
+  and not at all when its git config would run or fetch something (a filter, a hook, a partial
+  clone's fetches, a remote helper).
 - Each worker works in its own task folder, with a **git worktree** of each repository it
   changes, on branch `chief/<task>`, started from the latest default branch of `origin`. Your
   checkouts are never touched, and parallel workers never share one: two agents in one folder
@@ -502,8 +506,9 @@ uncommitted edits and new files, from where its branch started (also after the w
 Click a line (or Tab to it and press Enter) to comment on it; *Send to the worker* sends all comments as one follow-up, each
 with its file and line, and the task comes back for review when the worker is done.
 
-*Create PR* pushes the worker's branch to `origin` and opens a pull request on GitHub with your
-signed-in `gh`: titled with what its commits say (their subjects; the task's title when it has
+*Create PR* pushes the worker's branch to `origin` (over http(s), ssh, git or a local path, as all
+of Chief of Staff's own fetches and pushes: not through a remote helper such as `codecommit::`)
+and opens a pull request on GitHub with your signed-in `gh`: titled with what its commits say (their subjects; the task's title when it has
 none to read), and its report as the description, without what the report said about pushing or
 a PR (moot once the PR is open), and what was checked. If a PR from that branch
 is open already, that one is used. Uncommitted work is not pushed: follow up and ask the worker
