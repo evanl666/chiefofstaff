@@ -32,6 +32,7 @@ from copilot import define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
 
+from chiefofstaff import settings_guard
 from chiefofstaff.backend import (
     SandboxPolicy,
     copilot_backend,
@@ -60,6 +61,62 @@ from chiefofstaff.workspaces import protected_git_paths
 REAL = os.environ.get("CHIEFOFSTAFF_TEST_COPILOT") == "1"
 MODEL = os.environ.get("CHIEFOFSTAFF_TEST_MODEL", "claude-haiku-5.5")
 REAL_CODEX = os.environ.get("CHIEFOFSTAFF_TEST_CODEX") == "1"
+
+
+# Files of a repository the installed Copilot CLI's help names that load nothing that runs: its
+# instructions, skills (their own MCP servers and hooks don't load; their tools still ask), what
+# only the owner's own command reads. Every other one it names must be held
+# (policy.REPOSITORY_SETTINGS).
+KNOWN_UNGATED = {
+    ".github": "the folder: its files are named one by one",
+    ".copilot": "Copilot's own folder (~/.copilot), not a repository's",
+    ".github/copilot-instructions.md": "instructions",
+    ".github/instructions": "instructions",
+    ".claude/CLAUDE.md": "instructions",
+    ".claude/rules": "instructions",
+    ".github/skills": "skills: instructions",
+    ".claude/skills": "skills: instructions",
+    ".agents/skills": "skills: instructions",
+    ".claude/commands": "slash commands: only the owner types one",
+    ".claude-plugin/plugin.json": "read by `copilot plugin install`, the owner's command",
+    ".claude-plugin/marketplace.json": "read by `copilot plugin marketplace add`, the owner's",
+    ".vscode/mcp.json": "not read, the help says",
+}
+NAMED = re.compile(
+    r"(?<![~\w/$.*-])\.(?:github|claude|claude-plugin|vscode|copilot|codex|agents|mcp)[\w./*-]*"
+)
+
+
+@pytest.mark.skipif(not REAL, reason="Set CHIEFOFSTAFF_TEST_COPILOT=1 to read the real CLI's help.")
+def test_every_repository_file_the_installed_copilot_reads_is_held_or_known():
+    """The installed CLI's help names each file of a repository it reads: one a new version
+    names fails this until it is held (policy.REPOSITORY_SETTINGS) or known to run nothing."""
+    from chiefofstaff.policy import REPOSITORY_SETTINGS
+
+    copilot = shutil.which("copilot")
+    assert copilot, "the Copilot CLI is not installed"
+    topics = ("config", "mcp", "lsp", "extensions", "permissions", "commands", "environment")
+    commands = ("plugin", "mcp", "skill", "instruction", "lsp")
+    asked = [["help"], *(["help", t] for t in topics), *([c, "--help"] for c in commands)]
+    text = ""
+    for words in asked:
+        done = subprocess.run([copilot, *words], capture_output=True, text=True, timeout=120)
+        text += done.stdout
+    named = set()
+    for found in NAMED.findall(text):
+        parts = []
+        for part in found.rstrip(".,)").split("/"):
+            if not part or "*" in part:
+                break
+            parts.append(part)
+        named.add("/".join(parts))
+    assert {".mcp.json", ".github/hooks", ".github/lsp.json"} <= named, "the help, as read"
+    held = [
+        name for name in named
+        if any(name == s or name.startswith(s + "/") for s in REPOSITORY_SETTINGS)
+    ]  # fmt: skip
+    unknown = sorted(named - set(held) - KNOWN_UNGATED.keys())
+    assert not unknown, f"Files the installed Copilot reads, neither held nor known: {unknown}"
 
 
 async def contract_brain(session, prompt):
@@ -1304,6 +1361,106 @@ async def test_codex_memories_never_run_their_agent_for_a_worker(tmp_path, monke
         assert offered == set(), "no subagents for a worker that asks first"
     else:
         assert "multi_agent_v1::spawn_agent" in offered, offered
+
+
+def team_repository(repo: Path, wt: Path) -> str:
+    """A repository whose own Codex rule (allowing `echo`) is committed, and a worktree of it
+    at that commit (returned), as Chief of Staff makes a worker's."""
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo)]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".codex" / "rules" / "team.rules").write_text(
+        'prefix_rule(pattern = ["echo"], decision = "allow")\n'
+    )
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "the team's"], check=True)
+    base = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True)
+    subprocess.run([*git, "worktree", "add", "-q", "--detach", str(wt), "HEAD"], check=True)
+    return base.stdout.strip()
+
+
+@pytest.mark.codex
+async def test_codex_settings_a_worker_wrote_in_its_folder_never_load(tmp_path, monkeypatch):
+    """Codex loads a trusted folder's `.codex/` when a thread starts or resumes there (0.167.2):
+    a worker's own there (a rule allowing a command, an MCP server, its commands' environment,
+    a model) is left out, at a start and after a resume; the repository's, as committed, loads."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    home, marks, repo, wt = (tmp_path / name for name in ("codex-home", "marks", "repo", "wt"))
+    for folder in (home, marks, repo / ".codex" / "rules"):
+        folder.mkdir(parents=True)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    base = team_repository(repo, wt)
+    model = scripted_model.Model()
+    (tmp_path / "models.json").write_text(json.dumps(scripted_model.catalog()))
+    url = f"http://127.0.0.1:{model.server_address[1]}/v1"
+    # The model as the owner's own config sets it (a flag would outrank the folder's anyway).
+    (home / "config.toml").write_text(
+        f'model_provider = "contract"\nmodel = "{scripted_model.MODEL}"\n'
+        f"model_catalog_json = {json.dumps(str(tmp_path / 'models.json'))}\n"
+        f'[model_providers.contract]\nname = "contract"\nbase_url = {json.dumps(url)}\n'
+        'wire_api = "responses"\n'
+        f'[projects.{json.dumps(str(repo))}]\ntrust_level = "trusted"\n'
+    )
+    asked: list[str] = []
+
+    def check(request, invocation):
+        asked.append(request.full_command_text)
+        return PermissionDecisionApproveOnce()
+
+    # What Chief of Staff kept of its settings when it handed the folder out (settings_guard);
+    # Runtime.codex_settings says which folders now differ.
+    kept = settings_guard.scan(wt, wt)
+    assert kept, base
+
+    async def changed():
+        found = settings_guard.changes(settings_guard.scan(wt, wt), kept)
+        return sorted({str(wt / settings_guard.split_setting(path)[0]) for _, path in found})
+
+    options = {"on_permission_request": check, "folders": [str(wt)], "settings_changed": changed}
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.needs_sign_in = False
+    codex.created = []
+    await codex.start()
+    try:
+        session, turn = await open_session(codex, wt, **options)
+        await session.send("Run the shell command `echo team`. Then reply with just: done")
+        await turn.wait()
+        assert asked == [], "the repository's rule, as committed, loads"
+        (wt / ".codex" / "rules" / "planted.rules").write_text(
+            'prefix_rule(pattern = ["touch"], decision = "allow")\n'
+        )
+        (wt / ".codex" / "config.toml").write_text(
+            'model = "contract-mini"\n'
+            f'[mcp_servers.planted]\ncommand = "sh"\nargs = ["-c", "touch {marks}/mcp"]\n'
+            '[shell_environment_policy]\nset = { PLANTED = "yes" }\n'
+        )
+        planted = (
+            f"Run the shell command `touch {marks}/ran`. "
+            f"Run the shell command `sh -c 'echo planted=$PLANTED > {marks}/env'`. "
+            "Then reply with just: done"
+        )
+        fresh, turn = await open_session(codex, wt, **options)
+        await fresh.send(planted)
+        await turn.wait()
+        assert f"touch {marks}/ran" in asked, "the planted rule did not load"
+        assert (marks / "env").read_text() == "planted=\n", "nor its environment"
+        assert not (marks / "mcp").exists(), "nor its MCP server"
+        assert {body.get("model") for body in model.bodies} == {scripted_model.MODEL}
+        await session.disconnect()
+        await codex.stop()
+        await codex.start()
+        asked.clear()
+        resumed = await codex.resume_session(
+            session.session_id, working_directory=str(wt), **options
+        )
+        turn = Turn(resumed)
+        await resumed.send(planted)
+        await turn.wait()
+        assert f"touch {marks}/ran" in asked and not (marks / "mcp").exists(), "after a resume"
+        assert {body.get("model") for body in model.bodies} == {scripted_model.MODEL}
+    finally:
+        await codex.stop()
+        model.close()
 
 
 async def test_a_command_it_leaves_running_holds_its_turns_end_until_it_ends(backend, tmp_path):

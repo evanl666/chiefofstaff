@@ -777,6 +777,10 @@ async def gh_trusts_sandbox(command: str = "copilot") -> bool | None:
     except TimeoutError:
         process.kill()
         return None
+    except asyncio.CancelledError:
+        with suppress(ProcessLookupError):
+            process.kill()
+        raise
 
 
 def older(version: str, than: str) -> bool:

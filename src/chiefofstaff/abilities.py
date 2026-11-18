@@ -247,6 +247,9 @@ class Abilities:
             raise RuntimeError(
                 "Installing took too long (it may wait for a confirmation)."
             ) from None
+        except asyncio.CancelledError:
+            process.kill()
+            raise
         text = output.decode(errors="replace").strip()
         if process.returncode:
             raise RuntimeError(text or f"copilot plugin install exited with {process.returncode}")

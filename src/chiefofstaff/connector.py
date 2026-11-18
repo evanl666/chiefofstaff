@@ -1473,8 +1473,15 @@ class Connector:
                 "ioreg", "-c", "IOHIDSystem", "-d", "4",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )  # fmt: skip
-            output, _ = await asyncio.wait_for(process.communicate(), 10)
         except Exception:
+            return app
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), 10)
+        except BaseException as exc:
+            with suppress(ProcessLookupError):
+                process.kill()
+            if not isinstance(exc, Exception):
+                raise
             return app
         found = HID_IDLE.search(output.decode(errors="replace"))
         return int(found.group(1)) / 1e9 if found else app

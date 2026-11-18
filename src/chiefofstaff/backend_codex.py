@@ -45,12 +45,13 @@ import shlex
 import shutil
 import sys
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from stat import S_ISDIR, S_ISREG
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
@@ -425,6 +426,108 @@ def trust_levels(
             for key in trust_keys(place):
                 projects[key] = {"trust_level": level}
     return projects
+
+
+# A trusted folder's `.codex/` a worker changed (0.167.2, checked): from the next thread started
+# or resumed there, Codex loads its rules (`prefix_rule(..., decision="allow")`: commands that
+# then run without asking Chief of Staff), its MCP servers (their commands, run at the thread's
+# start), its shell_environment_policy (every command's environment) and its model. Such a
+# folder (Runtime.codex_settings: what Chief of Staff last saw of it, settings_guard) is
+# untrusted for the worker's threads until the owner says to use them; its AGENTS.md is then
+# given as text.
+SETTINGS = ".codex"
+
+
+def cased(path: str) -> str:
+    """A path as its folders are spelled on the disk (a case-insensitive file system finds
+    `/x/casedir` for `/x/CaseDir`): "" when it is not there. Codex 0.167.2 keys a folder as its
+    path was given (checked); one that keys it as the disk spells it finds the same."""
+    found = Path(path).anchor
+    for part in Path(path).parts[1:]:
+        try:
+            with os.scandir(found) as entries:
+                names = [entry.name for entry in entries]
+        except OSError:
+            return ""
+        if part in names:
+            found = str(Path(found) / part)
+            continue
+        same = [
+            name
+            for name in names
+            if unicodedata.normalize("NFC", name).casefold()
+            == unicodedata.normalize("NFC", part).casefold()
+        ]
+        if len(same) != 1:
+            return ""
+        found = str(Path(found) / same[0])
+    return found
+
+
+def every_key(place: str) -> list[str]:
+    """Each spelling Codex may key a folder's trust by: as given, its real path, and both as
+    the disk spells them."""
+    keys = trust_keys(place)
+    for key in list(keys):
+        if (spelled := cased(key)) and spelled not in keys:
+            keys.append(spelled)
+    return keys
+
+
+def without_layers(read: dict, skipped: set[str]) -> dict:
+    """config/read's answer without the project layers of these `.codex/` folders: its config
+    merged again from its other loaded layers (listed highest first), each table key by key."""
+    layers = [
+        layer
+        for layer in read.get("layers") or []
+        if not (
+            isinstance(layer, dict)
+            and mapping(layer.get("name")).get("type") == "project"
+            and canonical(str(mapping(layer.get("name")).get("dotCodexFolder") or "")) in skipped
+        )
+    ]
+    config: dict = {}
+    for layer in reversed(layers):
+        if isinstance(layer, dict) and not layer.get("disabledReason"):
+            merged_into(config, mapping(layer.get("config")))
+    return {**read, "config": config, "layers": layers}
+
+
+def merged_into(config: dict, layer: dict):
+    for key, value in layer.items():
+        if isinstance(value, dict) and isinstance(config.get(key), dict):
+            merged_into(config[key], value)
+        else:
+            config[key] = json.loads(json.dumps(value)) if isinstance(value, dict | list) else value
+
+
+def codex_home() -> str:
+    given = os.environ.get("CODEX_HOME")
+    return os.path.realpath(Path(given).expanduser() if given else Path.home() / SETTINGS)
+
+
+def codex_settings_path(path: str) -> bool:
+    """Whether an edit would write Codex's own settings: in a `.codex` folder (a repository's,
+    the owner's), or in CODEX_HOME, by its path or where its links lead; names compared as a
+    case-insensitive file system compares them, NFC or NFD."""
+
+    def folded(text: str) -> str:
+        return unicodedata.normalize("NFC", text).casefold()
+
+    home = folded(codex_home())
+    for spelled in {path, os.path.realpath(path)}:
+        if SETTINGS in map(folded, Path(spelled).parts):
+            return True
+        lowered = folded(spelled)
+        if home and (lowered == home or lowered.startswith(home.rstrip(os.sep) + os.sep)):
+            return True
+    return False
+
+
+SETTINGS_EDIT = (
+    "workers don't edit Codex's own settings (a .codex folder): Codex would load them for this "
+    "worker without Chief of Staff's checks. Leave that change to the owner."
+)
 
 
 # The repository's instructions, as Codex 0.167.2 reads them where it trusts a folder
@@ -1237,6 +1340,10 @@ class CodexBackend:
                 process.kill()
             await process.wait()
             return []
+        except asyncio.CancelledError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            raise
         try:
             return await asyncio.to_thread(protocol_missing, folder)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -1328,6 +1435,27 @@ class CodexBackend:
         apps are off."""
         read = await self.request("config/read", {"cwd": cwd, "includeLayers": True})
         owner = mapping(read.get("config"))
+        folders = [cwd, *(f for f in options.get("folders") or [] if f != cwd)]
+        projects = await asyncio.to_thread(
+            trust_levels,
+            owner.get("projects"),
+            folders,
+            owner.get("project_root_markers"),
+            trust_answered(read.get("layers")),
+        )
+        # A folder whose Codex settings changed since Chief of Staff last saw them is not
+        # trusted for its threads (under each spelling Codex may key it by), and what Chief of
+        # Staff reads of the owner's configuration leaves them out too.
+        check = cast("Callable[[], Awaitable[list[str]]] | None", options.get("settings_changed"))
+        changed = list(await check()) if check else []
+        if changed:
+            for place in changed:
+                for key in every_key(place):
+                    projects[key] = {"trust_level": "untrusted"}
+            skipped = {canonical(Path(place) / SETTINGS) for place in changed}
+            skipped |= {cased(canonical(Path(place) / SETTINGS)) for place in changed} - {""}
+            read = without_layers(read, skipped)
+            owner = mapping(read.get("config"))
         # The MCP servers the owner added in Chief of Staff's Settings, as Codex has one.
         provided = {
             str(name): found
@@ -1337,14 +1465,6 @@ class CodexBackend:
         # Which of its MCP servers is GitHub's is told from their configuration (elicitation).
         options["mcp_configs"] = {**mapping(owner.get("mcp_servers")), **provided}
         await self.skill_roots(options.get("skill_directories") or [])
-        folders = [cwd, *(f for f in options.get("folders") or [] if f != cwd)]
-        projects = await asyncio.to_thread(
-            trust_levels,
-            owner.get("projects"),
-            folders,
-            owner.get("project_root_markers"),
-            trust_answered(read.get("layers")),
-        )
         # Untrusted, Codex reads none of the repository's AGENTS.md: its text is given to the
         # thread (give_docs), as a Copilot worker's repository instructions are (nothing of the
         # repository is run).
@@ -2769,6 +2889,10 @@ class CodexSession:
             # A move (apply_patch's `*** Move to:`) writes its destination too.
             moved = mapping(change.get("kind")).get("move_path")
             for path in [str(change.get("path") or ""), *([moved] if moved else [])]:
+                if path and codex_settings_path(path):
+                    self.emit("agent.notice", text=f"Refused an edit to Codex's settings: {path}")
+                    await self.tell(SETTINGS_EDIT)
+                    return {"decision": "decline"}
                 request = SimpleNamespace(
                     kind="write",
                     file_name=str(path),

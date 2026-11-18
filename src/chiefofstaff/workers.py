@@ -21,6 +21,7 @@ from .envelope import clean_title, owner_text, sendable, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
 from .provenance import LEFT_OUT, managed, whose
 from .roles import ROUTER, WORKER
+from .settings_guard import SettingsChangedError
 from .sources.slack import describe
 from .store import now
 from .tasks import ADOPTED, HELPERS, OPEN
@@ -30,6 +31,11 @@ from .watchdog import instruction, recent_messages, since_last_instruction, time
 RELEASE_IDLE = float(os.environ.get("CHIEFOFSTAFF_RELEASE_IDLE_MINUTES", "10")) * 60
 # What a queued worker's card says while the computer is low on memory.
 MEMORY_WAIT = "waiting for memory"
+# A worker whose folder's agent settings changed: it starts once the owner says to use them.
+SETTINGS_WAIT = "waiting for you: its folder's settings changed"
+# Who stopped a task its worker was at when they changed ("Stopped by …"): the owner's "Use
+# these settings" goes on with it.
+SETTINGS_STOP = "Chief of Staff, for its folder's settings"
 # A final answer at least this long, left in a worker's chat without report(), is its report.
 FILED_ANSWER_CHARS = 80
 # An answer in its chat this long, and twice its "done" report or more, completes that report.
@@ -467,6 +473,18 @@ class Workers:
         """Start queued workers while fewer than max_workers are running a turn."""
         if not self.runtime.ready():
             return
+        for held in list(self.runtime.settings_held):
+            # One waiting for its folder's settings: as they were again (the owner removed a
+            # change, say), it goes on (Runtime.settings_unsaid).
+            row = self.store.find_session(held)
+            if row and not row["closed_at"]:
+                try:
+                    await self.runtime.settings_refusal(row)
+                except Exception:
+                    # (It stays waiting; the others start as they would.)
+                    logger.warning("Could not look at %s's folder.", held, exc_info=True)
+            else:
+                self.runtime.settings_held.discard(held)
         starting = []
         async with self.pump_lock:
             limit = self.store.settings().max_workers
@@ -475,6 +493,8 @@ class Workers:
             for row in self.store.open_sessions(WORKER):
                 if row["status"] != "queued":
                     continue
+                if row["id"] in self.runtime.settings_held:
+                    continue  # Until the owner says to use its folder's settings (settings_wait).
                 if not self.runtime.made(row["id"]) and self.waiting_for(row):
                     continue
                 if short is not None and not self.runtime.special(row):
@@ -588,6 +608,10 @@ class Workers:
                 {"prompt": wrap("router", "results", text, task=task["id"]), "task_id": task["id"]},
             )
             self.store.set(f"handed:{task['id']}", "1")
+        if await self.runtime.settings_refusal(row):
+            await self.settings_wait(session_id)
+            return
+        await self.runtime.servers_turn(session_id, claimed=True)  # (As Delivery.deliver.)
         agent = self.runtime.agent(session_id)
         try:
             # Another agent's backend first (started on first use): one that cannot start (not
@@ -654,6 +678,8 @@ class Workers:
             # Stopped, reconnected or shut down meanwhile: it waits in the queue again.
             self.requeue(session_id)
             raise
+        except SettingsChangedError:
+            await self.settings_wait(session_id)  # Changed as it opened.
         except Exception as exc:
             backend, connections = self.runtime.connection(agent)
             if not backend or connections != connection:
@@ -665,6 +691,17 @@ class Workers:
                 self.requeue(session_id)  # It starts again, on Copilot's default model.
                 return
             self.runtime.fail(row, f"Could not start: {describe(exc)}")
+
+    async def settings_wait(self, session_id: str):
+        """A start refused for its folder's changed agent settings (Runtime.settings_refusal
+        said why in its timeline): it waits in the queue, not started again until the owner
+        says to use them (or they are as they were)."""
+        await self.runtime.settings_stop(session_id)
+        self.states[session_id].busy = False
+        current = self.store.find_session(session_id)
+        if current and not current["closed_at"] and current["status"] in {"starting", "queued"}:
+            self.runtime.update_session(session_id, status="queued", activity=SETTINGS_WAIT)
+        self.runtime.background(self.pump())  # Its slot is free for another.
 
     def requeue(self, session_id: str):
         """A start that did not happen: the worker waits in the queue again."""
@@ -708,6 +745,9 @@ class Workers:
                     await session.disconnect()
         self.states[session_id].busy = False
         self.states[session_id].steps.clear()
+        if self.store.get(f"gitwatch:{session_id}"):
+            # (Linux: what it made in a .git, looked for once more; then not again.)
+            self.runtime.background(self.runtime.git_watch_after(session_id, closing=True))
         self.store.unfollow_session(session_id)
         self.runtime.decisions.drop_asker(session_id)
         self.states[session_id].last_output = ""
@@ -1011,6 +1051,9 @@ class Workers:
             await stop_background(session)
         self.states[session_id].busy = False
         self.states[session_id].steps.clear()
+        if self.store.get(f"gitwatch:{session_id}"):
+            # (Linux: what it made in a .git.)
+            self.runtime.background(self.runtime.git_watch_after(session_id))
         if row["role"] == WORKER:
             # What it was sent during the turn and never saw (Copilot drops it with the turn),
             # and its task given and not received: for its next message, not a turn now. Events
@@ -1089,8 +1132,13 @@ class Workers:
             "idle",
             cwd=cwd or str(self.runtime.role_dir("scratch")),
         )
+        waits = False
         try:
             await self.runtime.open_live(row)
+        except SettingsChangedError:
+            # Its folder's agent settings changed since workers last had it: adopted, at rest,
+            # its line there with Use these settings; it opens once the owner says so.
+            waits = True
         except Exception as exc:
             self.store.execute("DELETE FROM sessions WHERE id=?", (session_id,))
             self.bus.publish("state")
@@ -1103,7 +1151,8 @@ class Workers:
         self.runtime.add_message(
             self.runtime.router_id(),
             "notice",
-            f"Adopted “{row['title']}”",
+            f"Adopted “{row['title']}”"
+            + (": it waits for you to look at its folder's settings" if waits else ""),
             {"session_id": session_id},
         )
         return self.store.session(session_id)
@@ -1114,8 +1163,10 @@ class Workers:
         Imported messages carry no prompt: they are never sent again, and the Watchdog does not
         take them for instructions.
         """
-        if self.store.one("SELECT id FROM messages WHERE session_id=? LIMIT 1", (row["id"],)):
-            return
+        if self.store.one(
+            "SELECT id FROM messages WHERE session_id=? AND kind!='notice' LIMIT 1", (row["id"],)
+        ):
+            return  # (A notice may come first: why it waited to open.)
         try:
             events = await session.get_events()
         except Exception:

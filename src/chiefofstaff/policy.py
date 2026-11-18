@@ -19,7 +19,8 @@ import shlex
 import subprocess
 import tempfile
 import threading
-from collections.abc import Callable
+import unicodedata
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -3428,14 +3429,22 @@ def current_branches(folder: str) -> set[str]:
     """The branch a folder's checkout is on and the remote branch a bare push there updates
     (`@{push}`), asked of git; none when it cannot say."""
     found = set()
+    # As all of Chief of Staff's git (workspaces.command): the folder may be a worker's
+    # repository, whose config it wrote. No transport, nothing fetched, no file-system monitor
+    # (rev-parse runs no hook).
+    own = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
+    quiet = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_CONFIG_NOSYSTEM": "1"}
+    asked = ["git", "-c", "core.fsmonitor=false", "-C", folder, "rev-parse", "--abbrev-ref"]
     for ref in ("HEAD", "@{push}"):
         try:
             done = subprocess.run(  # noqa: S603  (git, with its folder and a ref of its own)
-                ["git", "-C", folder, "rev-parse", "--abbrev-ref", ref],  # noqa: S607
+                [*asked, ref],
                 capture_output=True,
                 text=True,
                 timeout=10,
                 check=False,
+                stdin=subprocess.DEVNULL,
+                env=own | quiet | {"GIT_TERMINAL_PROMPT": "0"},
             )
         except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
             continue
@@ -4064,6 +4073,80 @@ def written_file(cwd: str, request: Any) -> str:
     if cwd and target and within(target, cwd):
         return os.path.relpath(target, cwd)
     return target
+
+
+# A repository's own Copilot configuration, which Copilot loads only in a folder it trusts (a
+# worktree of a trusted repository is trusted too), from the working directory up to the
+# repository's top: hooks (one can approve what Chief of Staff would refuse), MCP and language
+# servers (their commands run outside the worker's sandbox), plugins and extensions. Copilot also
+# runs the hooks of Claude's settings. Checked on the Copilot CLI (scripts in its security
+# review); the contract test reads the installed CLI's help for others (KNOWN_UNGATED there).
+REPOSITORY_SETTINGS = (
+    ".mcp.json",
+    ".github/mcp.json",
+    ".github/lsp.json",
+    ".github/hooks",
+    ".github/copilot",
+    ".github/extensions",
+    ".github/agents",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/agents",
+)
+# Of those, what Copilot loads by itself mid-session, with no tool call and no session start or
+# resume: it watches its MCP servers' files and starts a server added there within seconds,
+# outside the worker's sandbox (checked on the Copilot CLI 1.0.100 and 1.0.112). A sandboxed
+# worker's commands may never write these in its own folder; the others load only as a session
+# starts or resumes, which Chief of Staff's check precedes, or through a tool (hooks, plugins,
+# extensions, language servers, custom agents), which its pre-tool check sees first.
+SANDBOX_HELD = (".mcp.json", ".github/mcp.json")
+# Codex's own (a trusted folder's rules, MCP servers, environment, model, hooks).
+CODEX_SETTINGS = (".codex",)
+# Every agent's: what a folder's snapshot holds (settings_guard).
+AGENT_SETTINGS = REPOSITORY_SETTINGS + CODEX_SETTINGS
+RUN_WRITE = (
+    "The repository's agent settings run this file (a hook's script, a server's): a change to it "
+    "would run outside Chief of Staff's checks, so workers don't write it. Leave that change to "
+    "the owner."
+)
+SETTINGS_WRITE = (
+    "A coding agent loads this file as the repository's own settings (hooks, MCP servers, "
+    "agents), outside Chief of Staff's checks: workers don't write it. Leave that change to "
+    "the owner."
+)
+
+
+def repository_settings(path: str) -> bool:
+    """Whether a path is (or is in) one of the repository settings an agent loads in a trusted
+    folder, by its path or where its links lead; names compared as a case-insensitive file
+    system compares them (macOS's, Windows'), NFC or NFD."""
+    for spelled in {path, os.path.realpath(path)}:
+        parts = tuple(unicodedata.normalize("NFC", part).casefold() for part in Path(spelled).parts)
+        for name in AGENT_SETTINGS:
+            gated = tuple(name.casefold().split("/"))
+            if any(parts[i : i + len(gated)] == gated for i in range(len(parts))):
+                return True
+    return False
+
+
+def settings_write(row: dict, request: Any, ran: Iterable[str] = ()) -> str | None:
+    """Why a worker may not write this file: it is a repository setting Copilot would load from
+    its next turn or start, or a file such a setting runs (`ran`: a hook's script, held with
+    them), which a hook would run at once (any worker, also one acting without permission
+    checks)."""
+    if row["role"] != WORKER or getattr(request, "kind", "") != "write":
+        return None
+    target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "") or ""
+    if target and not Path(target).is_absolute():
+        target = str(Path(row["cwd"] or ".") / target)
+    if not target:
+        return None
+    if repository_settings(target):
+        return SETTINGS_WRITE
+    real = os.path.realpath(target)
+    if any(real == os.path.realpath(path) for path in ran):
+        return RUN_WRITE
+    return None
 
 
 def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | None:

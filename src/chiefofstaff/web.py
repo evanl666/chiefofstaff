@@ -17,12 +17,16 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import agents
 from .bus import Bus
 from .models import (
+    AgentSettings,
     ArtifactHide,
     DraftDecision,
     FocusRequest,
     FollowRetry,
+    GitIdentity,
+    GitQuarantine,
     NewLesson,
     OpenFolder,
+    OpenPr,
     OwnerMessage,
     ProfileText,
     ProjectPath,
@@ -225,7 +229,9 @@ def create_app(
 
     @app.exception_handler(ValueError)
     async def invalid(request, exc):
-        return JSONResponse({"detail": str(exc)}, status_code=400)
+        # One the owner may do anyway (MayHoldWorkError): the words of that action, for its button.
+        anyway = {"anyway": exc.anyway} if getattr(exc, "anyway", "") else {}
+        return JSONResponse({"detail": str(exc), **anyway}, status_code=400)
 
     @app.exception_handler(LookupError)
     async def missing(request, exc):
@@ -512,8 +518,9 @@ def create_app(
         return await runtime.task_actions.diff(task_id)
 
     @app.post("/api/tasks/{task_id}/pr")
-    async def task_pr(task_id: str):
-        return runtime.task_actions.view(await runtime.task_actions.create_pr(task_id))
+    async def task_pr(task_id: str, payload: OpenPr | None = None):
+        anyway = bool(payload and payload.anyway)
+        return runtime.task_actions.view(await runtime.task_actions.create_pr(task_id, anyway))
 
     @app.post("/api/tasks/{task_id}/accept")
     async def accept_task(task_id: str):
@@ -625,6 +632,21 @@ def create_app(
     @app.post("/api/sessions/{session_id}/yolo")
     async def session_yolo(session_id: str, payload: SessionYolo):
         return await runtime.set_session_yolo(session_id, payload.mode)
+
+    @app.post("/api/sessions/{session_id}/agent-settings")
+    async def use_agent_settings(session_id: str, payload: AgentSettings):
+        """The owner's word only: no tool, Slack or Send to Chief reaches this."""
+        return {"ok": True, "said": await runtime.accept_settings(session_id, payload.digest)}
+
+    @app.post("/api/sessions/{session_id}/git-identity")
+    async def use_git_identity(session_id: str, payload: GitIdentity):
+        """The owner's word only, as for agent-settings."""
+        return {"ok": True, "said": await runtime.accept_git(session_id, payload.digest)}
+
+    @app.post("/api/sessions/{session_id}/git-quarantine")
+    async def answer_git_quarantine(session_id: str, payload: GitQuarantine):
+        """The owner's word only, as for agent-settings."""
+        return {"ok": True, "said": await runtime.answer_git_quarantine(session_id, payload.use)}
 
     @app.post("/api/sessions/{session_id}/open")
     async def open_folder(session_id: str, payload: OpenFolder):

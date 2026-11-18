@@ -18,11 +18,11 @@ from typing import TYPE_CHECKING, Any
 
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
-from . import prompts, receipts, threads
-from .backend import running_background, stop_background
+from . import prompts, receipts, settings_guard, threads
+from .backend import COPILOT_AGENT, running_background, stop_background
 from .delivery import digest
 from .envelope import from_owner, news_tasks, tasks_named, wrap
-from .policy import owners_checkout, permission_denial, written_file
+from .policy import owners_checkout, permission_denial, settings_write, written_file
 from .roles import ROUTER, SLACK, WORKER
 from .store import now
 
@@ -117,6 +117,21 @@ TRANSIENT = re.compile(
     re.IGNORECASE,
 )
 RETRIES = 2
+# How long Copilot waits for Chief of Staff's answer before a tool at most (Events.pre_tool).
+PRE_TOOL_SECONDS = float(os.environ.get("CHIEFOFSTAFF_PRE_TOOL_SECONDS", "2"))
+PRE_TOOL_UNANSWERED = (
+    "Chief of Staff couldn't check this folder's agent settings in time, so this tool didn't run. "
+    "Try it again."
+)
+PRE_TOOL_UNCHECKED = (
+    "Chief of Staff couldn't check this folder's agent settings, so this tool didn't run."
+)
+PRE_TOOL_BUSY = (
+    "Chief of Staff can't check this folder's agent settings right now, so this tool didn't run. "
+    "Try it again."
+)
+# A pre-tool answer slower than this is logged (Copilot waits for it).
+PRE_TOOL_SLOW = 0.5
 # Seconds after its loop went idle (assistant.idle) or a turn ended (assistant.turn_end, for a
 # Copilot that does not say assistant.idle) with no session.idle: a command left running in the
 # background holds it (see Events.held_idle).
@@ -152,6 +167,13 @@ NOTHING_TO_SAY = re.compile(
 EDIT_TOOLS = {"edit", "str_replace", "str_replace_editor", "create", "write", "write_file"}
 
 
+def unlooked(look: asyncio.Future):
+    """A look at a worker's settings Copilot stopped waiting for (Events.pre_tool), ended: its
+    failure logged, not lost."""
+    if not look.cancelled() and (failure := look.exception()):
+        logger.warning("A late look at agent settings failed.", exc_info=failure)
+
+
 def edited_paths(name: str, arguments: Any) -> list[str]:
     """The files a tool call writes (an edit, a new file, a patch)."""
     if not isinstance(arguments, dict):
@@ -180,6 +202,7 @@ class Events:
             "assistant.message": self.assistant_message,
             "assistant.turn_start": self.turn_start,
             "tool.execution_start": self.tool_start,
+            "subagent.started": self.subagent_started,
             "tool.execution_complete": self.tool_complete,
             "assistant.usage": self.usage,
             # Another agent's usage, in its own ledger (never Copilot's), and its turns' end.
@@ -275,6 +298,9 @@ class Events:
             (kind, code, output[-600:], ran["ended_at"] or now(), ran["id"]),
         )
         self.runtime.checks.on_command(session_id, ran["call_id"])
+        if row := self.store.find_session(session_id):
+            # (A branch update that failed partway: the worker is told to put its tree back.)
+            self.runtime.update_failed(row, ran, code, output)
         if code == 0 and ran["run_id"] and OPENS_PR.search(ran["command"]):
             # The PR it opened is its task's own work (not one its report only mentions).
             run = self.store.one("SELECT task_id FROM runs WHERE id=?", (ran["run_id"],))
@@ -474,8 +500,20 @@ class Events:
             # Another agent's worker that may not run now (a change came as its turn began);
             # not one stopped already (its turn's start said late).
             self.runtime.background(self.runtime.stop_blocked(row["id"], why))
+        if row["role"] == WORKER and not stopped and self.runtime.agent(row["id"]) == COPILOT_AGENT:
+            # A turn Copilot started from its own queue (or any other): stopped at once if its
+            # folder's agent settings changed meanwhile (Runtime.settings_refusal).
+            self.runtime.background(self.runtime.settings_backstop(row["id"]))
+
+    def subagent_started(self, row: dict, event: Any):
+        if row["role"] == WORKER:
+            self.runtime.settings_glance(row["id"])  # (A custom agent's servers start now.)
 
     def tool_start(self, row: dict, event: Any):
+        if row["role"] == WORKER and row["id"] not in self.runtime.pre_tool_on:
+            # One whose tools Copilot runs without asking first (Runtime.pre_tool_wanted): what
+            # it runs may load settings (a custom agent).
+            self.runtime.settings_glance(row["id"])
         data = event.data
         name = getattr(data, "tool_name", "") or "tool"
         self.states[row["id"]].turn_tools += 1
@@ -651,6 +689,11 @@ class Events:
         state.held = held
         state.busy = False
         self.delivery.handled(session_id)
+        if row["role"] == WORKER and self.store.get(f"gitwatch:{session_id}"):
+            # (Linux: what its turn made in a .git.)
+            self.runtime.background(self.runtime.git_watch_after(session_id))
+        if row["role"] == WORKER:
+            self.runtime.git_after_turn(session_id)  # (A .git it replaced.)
         # Its session is free again: messages queue as usual. A turn that ended because it was
         # aborted (stopped, its task cancelled) owes no report.
         aborted, state.after_abort = state.after_abort, False
@@ -861,12 +904,65 @@ class Events:
             return await asyncio.to_thread(permission_denial, row, request, writable)
         return permission_denial(row, request, writable)
 
+    async def pre_tool(self, data: dict, invocation: dict) -> dict | None:
+        """Before each tool a Copilot worker runs where Runtime.pre_tool_wanted, Copilot waiting
+        for the answer (after its folder's own preToolUse hooks, whose scripts a folder moved
+        into place could have replaced: the sandbox holds paths): its folder's settings looked
+        at (a glance, the full check only when that changed: Runtime.settings_look), then a
+        server off for it not started (Runtime.server_refusal: what the look just found off
+        counts). None lets it run as it would. Answered within PRE_TOOL_SECONDS whatever
+        happens, never letting through what it could not look at: past that, or on an error, a
+        sandboxed worker's tool is denied with a line saying why (its turn goes on; a look past
+        its time goes on, and stops it if it finds a change; one that fails stops it at its
+        next model round: Runtime.settings_backstop)."""
+        started = time.monotonic()
+        row: dict | None = None
+        why = ""
+        try:
+            row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
+            if not row or row["role"] != WORKER or row["closed_at"] or not row["cwd"]:
+                return None
+            sandboxed = bool(self.runtime.pre_tool_on.get(row["id"]))
+            looked = asyncio.ensure_future(self.runtime.settings_look(row))
+            try:
+                why = await asyncio.wait_for(asyncio.shield(looked), PRE_TOOL_SECONDS)
+            except Exception as exc:
+                if isinstance(exc, TimeoutError):
+                    looked.add_done_callback(unlooked)
+                    logger.warning("No look at %s's agent settings in time.", row["id"])
+                else:
+                    logger.warning(
+                        "Could not look at %s's agent settings.", row["id"], exc_info=exc
+                    )
+                if sandboxed:
+                    why = (
+                        PRE_TOOL_UNANSWERED
+                        if isinstance(exc, TimeoutError)
+                        else PRE_TOOL_BUSY
+                        if isinstance(exc, settings_guard.SettingsBusyError)
+                        else PRE_TOOL_UNCHECKED
+                    )
+            tool = str(data.get("toolName") or "")
+            why = why or self.runtime.server_refusal(row, tool, data.get("toolArgs"))
+        except Exception:
+            # (Asked only of a sandboxed worker, or one with a server off: not let through.)
+            logger.warning("Could not answer before a tool of %s.", invocation, exc_info=True)
+            why = PRE_TOOL_UNCHECKED
+        finally:
+            if (waited := time.monotonic() - started) > PRE_TOOL_SLOW:
+                logger.warning(
+                    "Copilot waited %.2f s before a tool of %s.", waited, row and row["id"]
+                )
+        return {"permissionDecision": "deny", "permissionDecisionReason": why} if why else None
+
     async def on_permission(self, request: Any, invocation: dict):
         row = self.store.find_session(self.runtime.row_id(invocation.get("session_id", "")))
         if not row:
             return PermissionDecisionReject(feedback="Unknown session.")
-        if (reason := owners_checkout(row, request, self.workspaces.checkouts(row))) or (
-            not self.runtime.yolo(row) and (reason := await self.denial(row, request))
+        if (
+            (reason := owners_checkout(row, request, self.workspaces.checkouts(row)))
+            or (reason := settings_write(row, request, self.runtime.held_run_files(row)))
+            or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
         ):
             self.runtime.add_message(row["id"], "notice", reason)
             return PermissionDecisionReject(feedback=reason)

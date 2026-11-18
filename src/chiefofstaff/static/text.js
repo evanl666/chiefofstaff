@@ -592,6 +592,9 @@ export function changesText(changed) {
 // In a folder of the owner's, files changed during the task by others (the owner, a pull,
 // another task): not its own, so not counted ("not counted: 2 files"; may be missing).
 export const notCountedText = (changed) => (Number(changed.not_counted) > 0 ? `not counted: ${plural(Number(changed.not_counted), "file")}` : "");
+// In a clone in its folder, files git-lfs keeps that may have changed: not read, so not counted
+// ("2 LFS files not checked"; may be missing).
+export const uncheckedText = (changed) => (Number(changed.unchecked) > 0 ? `${plural(Number(changed.unchecked), "LFS file")} not checked` : "");
 export function lines(value) {
   return value.split("\n").map((line) => line.trim()).filter(Boolean);
 }

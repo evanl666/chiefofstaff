@@ -59,6 +59,8 @@ def machine(tmp_path, monkeypatch):
 
     for module in (runtime_module, tools_module, watchdog_module):
         monkeypatch.setattr(module, "uuid4", numbered)
+    # How the sandbox holds paths that do not exist yet: as on macOS (Linux does not hold them).
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
     for name in (
         "SSH_AUTH_SOCK",
         "GRADLE_USER_HOME",
@@ -318,18 +320,18 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "slack, created": (4501, "45e96f706f8f884c1ad15e268e2717480a4482bd75697b9db1a83afe2a21275f"),
     "slack, resumed": (4466, "90e994a20c3bcaadb98e628effd8a48499f866cc408d11fc19b63cbcb3fed734"),
     "the Copilot sandbox of a worker asking first": (
-        1072,
-        "e8c9d8ec377183024901520ba042cdbf6108c5bc3a3fec1acf54769307e81fed",
+        1219,
+        "1928982b927cd745e5c879b7667a90a7a3a04b6c868dddb549e03a6ee407edbe",
     ),
     "watchdog, created": (3317, "74c2464eda92b08d7c0c2f0be7e9c18d5b80e0b4d7d7db7c5cbf22099bd3f111"),
     "watchdog, resumed": (3279, "3211b0fe48200b7a8b7e24baa9eca2c19608f7f40a7c4282665e9ca51f11ca54"),
     "worker asking first, sandboxed, created": (
-        20186,
-        "381a66bf30b6f1a430879bde0800421133e8d839e9041e1c46c38d8310d6f671",
+        21073,
+        "040b8d51b1c5af4a3b433e0430574f6bcdb6f989d8446d529362940b3353b1e0",
     ),
     "worker asking first, sandboxed, resumed": (
-        20141,
-        "766d6196610240918a77c54e1e63f7d936c031b385b2b0d7fedc71a62cd3229b",
+        21028,
+        "378bfb856351c14b7b935daa07881b671803d63df7d3dbf62bcbe577b9b1bc55",
     ),
     "worker in a trusted worktree, created": (
         18688,
@@ -340,12 +342,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "975d250bcb72472a04af36a9893065147566a7f2f0c36c4f60f2ce192f3b28d3",
     ),
     "worker that reads Slack, created": (
-        20451,
-        "3a4f32aba3fb578f6245ef227dc0ed67c8a5fbfb24e64b7cfe36df8d65babee9",
+        21338,
+        "c81b77b6ab254dba5c8a36e5a41d13675df78784ce29abf61359f786d1032e6d",
     ),
     "worker that reads Slack, resumed": (
-        20404,
-        "3e8f93a98d352fc0038703d3f577a88fd9a9ff68bfbe9731a5bcaf42c51cae22",
+        21291,
+        "40630447673b224b07740714861526a1850a1d7cb1eafc44efb7873f22643b1f",
     ),
     "worker with its model, created": (
         18222,

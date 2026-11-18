@@ -779,6 +779,9 @@ def summarize(
         # In a folder of the owner's: files others changed there meanwhile (not its own).
         "not_counted": sum(c.get("not_counted", 0) for c in checkouts),
     }
+    if unchecked := sum(c.get("unchecked", 0) for c in checkouts):
+        # In a clone in a worker's folder: files git-lfs keeps that may have changed, not read.
+        changed["unchecked"] = unchecked
     flags = []
     tests = last("test")
     prs = evidence.get("prs", [])
@@ -813,7 +816,9 @@ def summarize(
             flags.append(f"Says tests pass, but the last test run failed (exit {code}).")
     elif tests and tests["passed"] is False:
         flags.append(f"The last test run failed (exit {tests['exit_code']}).")
-    if checkouts and said_changed and not any(changed.values()):
+    # A checkout Chief of Staff could not read: "Not reading <path>: why."
+    flags += evidence.get("unread", [])
+    if checkouts and said_changed and not any(changed.values()) and not evidence.get("unread"):
         flags.append("Says it made changes, but its checkouts have none.")
     # Counted all the same (a PR would carry them), and said: not what to commit.
     if generated := [name for c in checkouts for name in c.get("generated") or []]:

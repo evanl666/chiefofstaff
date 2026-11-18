@@ -133,7 +133,8 @@ export async function api(path, { method = "GET", body } = {}) {
   if (!response.ok) {
     // With the fields it is about, for a form to show them.
     const fields = Array.isArray(data.detail) ? data.detail.map(fieldName).filter(Boolean) : [];
-    throw Object.assign(new Error(errorText(data, response.status)), { fields });
+    // `anyway`: the words of what the owner may do anyway (open the PR all the same).
+    throw Object.assign(new Error(errorText(data, response.status)), { fields, anyway: data.anyway || "" });
   }
   return data;
 }

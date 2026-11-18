@@ -24,6 +24,7 @@ from . import agents
 from .backend import COPILOT_AGENT, running_background, stop_background, take_queued
 from .envelope import news_tasks, tasks_named
 from .roles import ROUTER, SLACK, WORKER
+from .settings_guard import SettingsChangedError
 from .sources.slack import describe
 
 if TYPE_CHECKING:
@@ -119,6 +120,13 @@ class Delivery:
             # A worktree removed under it (by hand, a cleanup) is back before it reads this.
             with suppress(Exception):
                 await self.runtime.workspaces.restore(row)
+            if await self.runtime.settings_refusal(row):
+                # Its folder's agent settings changed (Runtime.settings_refusal): no turn starts
+                # there until the owner says to use them; this waits for it until then.
+                await self.runtime.settings_stop(session_id)
+                return message
+            # A server of its folder's changed or was let again: opened anew for this turn.
+            await self.runtime.servers_turn(session_id)
             self.rest_after(row)
         if batch and row["role"] in {ROUTER, SLACK}:
             if row["status"] == "working":
@@ -154,6 +162,13 @@ class Delivery:
                 self.states[session_id].busy = False
                 self.runtime.background(self.runtime.workers.pump())
             raise
+        except SettingsChangedError:
+            # Its folder's settings changed as it opened: this waits, as above.
+            if claimed:
+                self.states[session_id].busy = False
+                self.runtime.background(self.runtime.workers.pump())
+            self.runtime.background(self.runtime.settings_stop(session_id))
+            return message
         except Exception as exc:
             if claimed or row["role"] != WORKER:
                 self.states[session_id].busy = False
@@ -355,6 +370,11 @@ class Delivery:
         pending = self.store.prompts(session_id, after=mark)
         if not pending:
             return False
+        worker = self.store.session(session_id)
+        if worker["role"] == WORKER and await self.runtime.settings_refusal(worker):
+            # No turn starts while its folder's agent settings are changed (see deliver).
+            self.runtime.background(self.runtime.settings_stop(session_id))
+            return False
         prompts = [self.runtime.told_prompt(message) for message in pending]
         if preamble := self.store.get(f"preamble:{session_id}"):
             prompts.insert(0, preamble)  # A new Router's handover, before what is new.
@@ -478,6 +498,8 @@ class Delivery:
                     and digest(getattr(event.data, "content", "") or "") == marker["digest"]
                     for event in await session.get_events()
                 )
+        except SettingsChangedError:
+            pass  # Not opened (its timeline says why): unknown, sent again once it may.
         except Exception:
             logger.warning("Could not check what %s received.", session_id, exc_info=True)
         if arrived:
@@ -500,6 +522,8 @@ class Delivery:
                 for event in await session.get_events()
                 if getattr(event.type, "value", "") == "user.message"
             )
+        except SettingsChangedError:
+            return messages  # Not opened (its timeline says why).
         except Exception:
             logger.warning("Could not check what %s received.", session_id, exc_info=True)
             return messages
@@ -643,6 +667,10 @@ class Delivery:
             state.echo_wait.pop(sent, None)
             self.undelivered_after_resends(session_id, first, last)
             return
+        if row["role"] == WORKER and await self.runtime.settings_refusal(row):
+            # Sent again, it would start a turn: it waits with what else it was sent.
+            self.runtime.background(self.runtime.settings_stop(session_id))
+            return
         async with state.sending:
             if (
                 sent not in state.echo_wait
@@ -777,6 +805,11 @@ class Delivery:
                 else:
                     self.states[session_id].busy = False
                     self.runtime.background(self.runtime.workers.pump())
+            except SettingsChangedError:
+                # Its timeline says why; it waits for the owner (Runtime.settings_stop).
+                self.states[session_id].busy = False
+                self.runtime.background(self.runtime.workers.pump())
+                await self.runtime.settings_stop(session_id)
             except Exception:
                 self.states[session_id].busy = False
                 self.runtime.background(self.runtime.workers.pump())

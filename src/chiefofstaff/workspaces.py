@@ -16,15 +16,18 @@ import sys
 import tempfile
 import time
 import unicodedata
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
-from . import machine, receipts, safefs
+from . import machine, privategit, receipts, safefs, settings_guard
 from .models import Settings
-from .policy import within
+from .policy import CODEX_SETTINGS, REPOSITORY_SETTINGS, within
+from .privategit import config_entries
 from .roles import WORKER
+from .settings_guard import read_regular
 from .store import Store
 
 # Workers' branches: chief/<task-slug>-<id>.
@@ -35,14 +38,120 @@ class TimedOutError(ValueError):
     """A command stopped for taking too long (not one that failed by itself)."""
 
 
+# What Chief of Staff's own git never does in a worker's tree: look into its submodules' work
+# trees. A submodule's git folder in a worktree of Chief of Staff's is in that worktree's own
+# folder (.git/worktrees/<it>/modules/), which its worker can write: a filter or a file-system
+# monitor configured there would run as the owner. Their commits still count (`dirty`).
+INTO_SUBMODULES = {"status": "--ignore-submodules=dirty", "diff": "--ignore-submodules=dirty",
+                   "fetch": "--no-recurse-submodules"}  # fmt: skip
+# What every diff, show and log Chief of Staff runs is told, whatever the owner's or a
+# repository's config says: no external diff program and no textconv one (as configured, they run
+# on what a worker wrote), a submodule shown as the commit it is at (never its log or its diff,
+# which open its repository: its config, which its worker can write).
+PLAIN_DIFFS = {"diff", "show", "log"}
+PLAIN_DIFF_OPTIONS = ("--no-ext-diff", "--no-textconv", "--submodule=short")
+
+
+# git's own options before its command that take the next word as their value.
+VALUED_GIT_OPTIONS = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+
+
+# git commands that reach another repository (over a transport): the only ones that may.
+NETWORK_GIT = {"fetch", "push", "clone", "ls-remote", "pull"}
+# The transports those may use (GIT_ALLOW_PROTOCOL: whatever a repository's config says). Not
+# `ext::` (a command line), nor a remote helper (`<name>::`, a program by its name).
+TRANSPORTS = "http:https:ssh:git:file"
+# Those from a repository a worker can write (private_git): not a repository on this machine
+# either, which a worker may have made (its hooks run as whoever pushes there).
+REMOTE_TRANSPORTS = "http:https:ssh:git"
+
+
+def git_command_at(words: list[str] | tuple[str, ...]) -> int:
+    """Where a git command line's command is (after git's own options), len(words) for none."""
+    at = 1
+    while at < len(words) and words[at].startswith("-"):
+        at += 2 if words[at] in VALUED_GIT_OPTIONS else 1
+    return at
+
+
+def git_command_of(arguments: tuple[str, ...]) -> str:
+    at = git_command_at(arguments)
+    return arguments[at] if at < len(arguments) else ""
+
+
+def git_environment(
+    arguments: tuple[str, ...], lazy: bool, local_remotes: bool = True
+) -> dict[str, str]:
+    """What every git Chief of Staff runs has in its environment, whatever the repository's
+    config says: no transport but the plain ones (not `file`, a repository on this machine,
+    unless `local_remotes`), and only for a command that reaches another repository or (`lazy`:
+    one of the owner's, a partial clone's missing objects fetched as they are read) where that
+    may happen. Elsewhere (a repository a worker can write): no transport at all and no object
+    fetched as it is read."""
+    environment = {} if lazy else {"GIT_NO_LAZY_FETCH": "1"}
+    if lazy or git_command_of(arguments) in NETWORK_GIT:
+        transports = TRANSPORTS if local_remotes else REMOTE_TRANSPORTS
+        return environment | {"GIT_ALLOW_PROTOCOL": transports}
+    return environment | {"GIT_ALLOW_PROTOCOL": ""}
+
+
+# What git reaching another repository never does for Chief of Staff, whatever the owner's or a
+# repository's config says (`submodule.recurse`, `push.recurseSubmodules`): go into submodules,
+# whose own git folders (and so their config: a receivepack, an sshCommand) a worker can write.
+NOT_INTO_SUBMODULES = ("-c", "submodule.recurse=false", "-c", "push.recurseSubmodules=no",
+                       "-c", "fetch.recurseSubmodules=no")  # fmt: skip
+
+
+def without_submodules(arguments: tuple[str, ...]) -> tuple[str, ...]:
+    """A git command line as Chief of Staff runs it: `diff`, `show` and `log` with
+    PLAIN_DIFF_OPTIONS, `status` and `diff` not looking into submodules' work trees (whatever
+    else it asked for), `fetch` not into submodules."""
+    words = list(arguments)
+    at = git_command_at(words)
+    if at < len(words) and words[at] in PLAIN_DIFFS:
+        words[at + 1 : at + 1] = [o for o in PLAIN_DIFF_OPTIONS if o not in words[at + 1 :]]
+        arguments = tuple(words)
+    if at >= len(words) or not (flag := INTO_SUBMODULES.get(words[at])):
+        return arguments
+    name, rest = flag.split("=")[0], words[at + 1 :]
+    paths = rest.index("--") if "--" in rest else len(rest)
+    options = [w for w in rest[:paths] if w.split("=")[0] not in {name, "--recurse-submodules"}]
+    return (*words[: at + 1], flag, *options, *rest[paths:])
+
+
 async def command(
-    *arguments: str, limit: float = 60, stdin_data: bytes | None = None, env: dict | None = None
+    *arguments: str,
+    limit: float = 60,
+    stdin_data: bytes | None = None,
+    env: dict | None = None,
+    lazy: bool = False,
+    local_remotes: bool = True,
 ) -> str:
     """Run a command without a terminal (it can never wait for a password prompt), and without
     Chief of Staff's own CHIEFOFSTAFF_* variables (a token one may hold): what it runs can run code
-    a repository or a worker configured (a git filter)."""
+    a repository or a worker configured (a git filter). git never runs what a repository's
+    config names (SAFE_GIT), never looks into submodules' work trees (without_submodules), and
+    reaches other repositories only as git_environment lets it (`lazy`: one of the owner's
+    repositories, which may fetch objects as they are read; `local_remotes`: not one a worker
+    can write, which may reach a repository on this machine). Stopped, with what it started,
+    when it takes longer than `limit` or whoever waits for it stops waiting."""
+    fixed: dict[str, str] = {}
+    finish = False
+    if arguments and arguments[0] == "git":
+        if "core.fsmonitor=false" not in arguments:
+            arguments = ("git", *SAFE_GIT, *arguments[1:])
+        arguments = without_submodules(arguments)
+        if git_command_of(arguments) in NETWORK_GIT:
+            arguments = ("git", *NOT_INTO_SUBMODULES, *arguments[1:])
+        fixed = git_environment(arguments, lazy, local_remotes)
+        # Stopped halfway, git making or removing a worktree leaves half a tree (files gone, its
+        # `.git` gone, git's record of it left): it finishes, within its limit, even when
+        # whoever waits for it stops waiting (Chief of Staff stopping).
+        finish = git_command_of(arguments) == "worktree"
+    elif arguments and arguments[0] == "gh":
+        fixed = {"GIT_ALLOW_PROTOCOL": TRANSPORTS}  # (The git it runs: a clone.)
     own = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
-    env = {**own, **(env or {}), "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
+    env = {**own, **(env or {}), **fixed, "GIT_TERMINAL_PROMPT": "0", "GH_PROMPT_DISABLED": "1"}
     # ssh asks for passphrases and host keys on the terminal, not stdin: make it fail instead.
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     process = await asyncio.create_subprocess_exec(
@@ -53,13 +162,24 @@ async def command(
         env=env,
         start_new_session=True,  # No controlling terminal to prompt on.
     )
+    deadline = asyncio.get_running_loop().time() + limit
     try:
-        async with asyncio.timeout(limit):
+        async with asyncio.timeout_at(deadline):
             stdout, stderr = await process.communicate(stdin_data)
     except TimeoutError as exc:
         machine.kill_process_tree(process.pid)
         await process.wait()
         raise TimedOutError(f"{arguments[0]} timed out.") from exc
+    except asyncio.CancelledError:
+        # Whoever waited stopped (Chief of Staff stopping, a look past its time): it ends too,
+        # but for one that finishes (by its deadline, unless whoever waits insists).
+        if finish:
+            with suppress(TimeoutError, asyncio.CancelledError):
+                async with asyncio.timeout_at(deadline):
+                    await asyncio.shield(process.communicate())
+        if process.returncode is None:
+            machine.kill_process_tree(process.pid)
+        raise
     if process.returncode:
         error = stderr.decode(errors="replace").strip()[:500]
         raise ValueError(f"{arguments[0]} failed: {error}")
@@ -67,15 +187,40 @@ async def command(
 
 
 async def git(*arguments: str, limit: float = 60, stdin_data: bytes | None = None) -> str:
-    return await command("git", *SAFE_GIT, *arguments, limit=limit, stdin_data=stdin_data)
+    """Chief of Staff's git in the owner's repositories (making and removing its worktrees,
+    fetching their branch) and in a clone it makes before any worker has it; in a worker's
+    checkouts, checkout_git."""
+    where = arguments[arguments.index("-C") + 1] if "-C" in arguments[:-1] else ""
+    await guarded(where)
+    return await command(
+        "git", *SAFE_GIT, *arguments, limit=limit, stdin_data=stdin_data, lazy=True
+    )
+
+
+# What the runtime looks at before Chief of Staff runs git (Runtime.git_guard): on Linux, the
+# files a worker must not make in a .git (a commondir would send that git elsewhere); anywhere,
+# a .git (or a folder of one) a worker replaced. It refuses (ValueError) git there until the
+# owner says so.
+GIT_GUARD: weakref.WeakMethod | None = None
+
+
+async def guarded(where: str = "", roots: tuple[str, ...] = ()):
+    """Off the event loop (some lstat calls), in the runtime's own threads for it
+    (Runtime.guard_thread: never behind its looks at workers' settings); ValueError where it
+    may not run."""
+    if GIT_GUARD and (guard := GIT_GUARD()):
+        await guard.__self__.guard_thread(guard, where, roots)
 
 
 # Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
 # code for it (a file-system monitor, hooks). Git for Windows can read /dev/null as a folder at
 # the drive's root, which any user may make (as in CVE-2022-24765): there hooks are looked for
-# in this file instead, which nothing can be put in.
+# in this file instead, which nothing can be put in. A submodule is shown as the commit it is
+# at, whatever the owner's config says (`diff.submodule=log` or `diff`, a status summary): its
+# own repository, whose config its worker can write, is never opened for its log or diff.
 NO_HOOKS = Path(__file__).as_posix() if sys.platform == "win32" else "/dev/null"
-SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", f"core.hooksPath={NO_HOOKS}")
+SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", f"core.hooksPath={NO_HOOKS}",
+            "-c", "diff.submodule=short", "-c", "status.submoduleSummary=false")  # fmt: skip
 if sys.platform == "win32":
     SAFE_GIT += ("-c", "core.longpaths=true")
 # What running code leaves behind in a project without a .gitignore for it: not work to commit,
@@ -120,15 +265,18 @@ def worth_committing(status: str) -> list[str]:
     ]
 
 
-# Config that runs a program or sends git elsewhere: not allowed in a repository a worker can
-# write the config of (a clone in its own folder), when Chief of Staff runs git there.
-RUNS_CODE = re.compile(
-    r"^(core\.(fsmonitor|hookspath|sshcommand|pager|editor|askpass|gitproxy|worktree|"
-    r"alternaterefscommand)|credential\..*|filter\..*|diff\..*\.(command|textconv)|"
-    r"merge\..*\.driver|include\..*|includeif\..*|url\..*|gpg\..*|sequence\.editor|"
-    r"uploadpack\..*|receive\..*|remote\..*\.(uploadpack|receivepack|proxy|vcs))$",
+# A remote's address git reaches with a plain transport (TRANSPORTS): a URL of one, a path, or
+# scp-like `host:path`. Anything else (`ext::…`, `<helper>::…`, an unknown scheme) runs a program.
+PLAIN_ADDRESS = re.compile(
+    r"^((https?|ssh|git|file|git\+ssh|ssh\+git)://|[^:]*$|[^:/]+:(?!:)|[A-Za-z]:[\\/])",
     re.IGNORECASE,
 )
+
+
+def plain_address(url: str) -> bool:
+    """Whether git reaches a remote's address with a plain transport, running no program."""
+    url = url.strip()
+    return bool(url) and "::" not in url and bool(PLAIN_ADDRESS.match(url))
 
 
 def admin_dir(common: str, tree: str) -> str:
@@ -139,7 +287,8 @@ def admin_dir(common: str, tree: str) -> str:
     with suppress(OSError):
         for child in sorted(root.iterdir()):
             with suppress(OSError):
-                if Path((child / "gitdir").read_text().strip()).resolve() == target:
+                named = read_regular(child / "gitdir", 65536, follow=True).decode()
+                if Path(named.strip()).resolve() == target:
                     return str(child)
     return ""
 
@@ -152,7 +301,8 @@ def linked_tree(common: str, path: Path) -> tuple[str, str] | None:
     with suppress(OSError):
         for child in sorted((Path(common) / "worktrees").iterdir()):
             with suppress(OSError):
-                root = Path((child / "gitdir").read_text().strip()).resolve().parent
+                named = read_regular(child / "gitdir", 65536, follow=True).decode()
+                root = Path(named.strip()).resolve().parent
                 if path.is_relative_to(root) and (not best or len(str(root)) > len(best[1])):
                     best = (str(child), str(root))
     return best
@@ -194,39 +344,325 @@ def git_pins(checkout: dict, path: str) -> dict[str, str] | None:
     return {}
 
 
-def config_runs_code(common: str) -> list[str]:
-    """Keys in a repository's own config that would run code or send git elsewhere."""
-    found = []
-    with suppress(OSError):
-        text = (Path(common) / "config").read_text(errors="replace")
-        section = ""
-        for line in text.splitlines():
-            line = line.strip()
-            if match := re.match(r'^\[\s*([\w.-]+)(?:\s+"([^"]*)")?\s*\]', line):
-                section = match.group(1) + (f".{match.group(2)}" if match.group(2) else "")
-            elif section and (key := re.match(r"^([\w-]+)\s*(=|$)", line)):
-                name = f"{section}.{key.group(1)}"
-                if RUNS_CODE.match(name):
-                    found.append(name)
+# git's commands that read a work tree's files: there, Chief of Staff's git leaves out each
+# submodule's path (whose own git folder, config included, a worker can write: git would read
+# it to tell the submodule's commit) and, in a repository a worker can write, each file a
+# filter would have to read (git-lfs's: no filter runs there, see unfiltered).
+READS_TREE = {"status", "add", "diff", "diff-files", "diff-index"}
+# Of those, the ones that may also compare only commits or the index (then nothing is left out).
+COMPARES = {"diff", "diff-index"}
+# The git commands that read a checkout's files (where gitattributes could name a filter), a
+# racily clean one's to tell it from its index entry too (write-tree), or write them.
+READS_FILES = {"status", "add", "diff", "show", "log", "stash", "commit", "checkout", "restore",
+               "reset", "merge", "rebase", "cherry-pick", "grep", "blame", "archive",
+               "write-tree", "ls-files", "update-index", "worktree", "switch", "read-tree",
+               "checkout-index", "apply", "hash-object", "diff-files", "diff-index"}  # fmt: skip
+# Told when a clone in a worker's folder was made again where it was (the worker cloned it
+# anew): Runtime.clone_remade, which records it and says so once on the worker's timeline.
+CLONE_REMADE: weakref.WeakMethod | None = None
+
+
+def reads_tree(arguments: tuple[str, ...]) -> bool:
+    """Whether a git command line reads the work tree's files (not `diff A B`, `diff --cached`)."""
+    at = git_command_at(arguments)
+    if at >= len(arguments) or arguments[at] not in READS_TREE:
+        return False
+    if arguments[at] not in COMPARES:
+        return True
+    rest = list(arguments[at + 1 :])
+    rest = rest[: rest.index("--")] if "--" in rest else rest
+    if any(word in {"--cached", "--staged", "--no-index"} for word in rest):
+        return False
+    revisions = [word for word in rest if not word.startswith("-")]
+    return len(revisions) <= 1 and not any(".." in word for word in revisions)
+
+
+def left_out(arguments: tuple[str, ...], paths: list[str], filters: list[str]) -> tuple[str, ...]:
+    """A git command line that reads the work tree with these paths (from the top) and the
+    files these filters keep left out of it; as it was for any other."""
+    specs = [f":(top,exclude,literal){path}" for path in paths]
+    specs += [f":(top,exclude,attr:filter={name})" for name in filters]
+    if not specs or not reads_tree(arguments):
+        return arguments
+    return (*arguments, *specs) if "--" in arguments else (*arguments, "--", *specs)
+
+
+# Each index's submodules (by its file: (inode, size, mtime)): {path from the top: commit}.
+GITLINKS: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
+
+
+async def index_gitlinks(path: str, env: dict[str, str], index: Path, lazy: bool) -> dict:
+    """The submodules (and repositories added in it) an index holds: {path from the top: the
+    commit it records}; read again only when the index changed."""
+    try:
+        info = await asyncio.to_thread(os.stat, index)
+        key = (info.st_ino, info.st_size, info.st_mtime_ns)
+    except OSError:
+        return {}
+    if (known := GITLINKS.get(str(index))) and known[0] == key:
+        return known[1]
+    listed = await command(
+        "git", *SAFE_GIT, "-C", path, "ls-files", "--stage", "-z", "--full-name", "--", ":/",
+        env=env, lazy=lazy,
+    )  # fmt: skip
+    found = {}
+    for entry in listed.split("\0"):
+        mode, _, name = entry.partition("\t")
+        if mode.startswith("160000 ") and name:
+            found[name] = mode.split()[1]
+    if len(GITLINKS) > 256:
+        GITLINKS.clear()
+    GITLINKS[str(index)] = (key, found)
     return found
 
 
 async def checkout_git(
-    checkout: dict, path: str, *arguments: str, limit: float = 60, env: dict | None = None
+    checkout: dict,
+    path: str,
+    *arguments: str,
+    limit: float = 60,
+    env: dict | None = None,
+    every: bool = False,
+    filtered: bool = False,
 ) -> str:
     """git in one of a worker's checkouts, as Chief of Staff: the repository pinned (git_pins),
-    nothing in its config run, and a clone in the worker's own folder (whose config it can
-    write) refused if its config would run code."""
+    nothing in its config run, each submodule's path left out where git would read the work
+    tree (unless `every`: what is left out, unread). A clone in a worker's folder (one Chief of
+    Staff made there, or one of its own) is read through a git folder of Chief of Staff's own
+    (clone_git): never through its own .git, whose config the worker can write. `filtered`:
+    only about the files a filter keeps there (which are not read: private_git); "" for none,
+    and anywhere else."""
+    await guarded(path, (checkout.get("git_dir") or "", checkout.get("admin") or ""))
+    if checkout.get("remote"):
+        return await clone_git(checkout, path, arguments, limit, env, every, filtered)
+    if filtered:
+        return ""
     pins = await asyncio.to_thread(git_pins, checkout, path)
     if pins is None:
         raise ValueError(f"Not reading {path}: its worktree cannot be found in its repository.")
-    if checkout.get("remote") and (found := await asyncio.to_thread(
-        config_runs_code, pins.get("GIT_COMMON_DIR") or str(Path(path) / ".git")
-    )):  # fmt: skip
-        raise ValueError(f"Not reading {path}: its git config was changed ({', '.join(found)}).")
+    pins = {**pins, **(env or {})}
+    if not every and reads_tree(("git", *arguments)) and (own := pins.get("GIT_DIR")):
+        index = Path(pins.get("GIT_INDEX_FILE") or Path(own) / "index")
+        links = await index_gitlinks(path, pins, index, lazy=True)
+        arguments = left_out(("git", *arguments), list(links), [])[1:]
     return await command(
-        "git", *SAFE_GIT, "-C", path, *arguments, limit=limit, env={**pins, **(env or {})}
+        "git", *SAFE_GIT, "-C", path, *arguments, limit=limit, env=pins, lazy=True
+    )  # fmt: skip
+
+
+async def clone_git(
+    checkout: dict, path: str, arguments: tuple[str, ...], limit: float, env: dict | None,
+    every: bool, filtered: bool,
+) -> str:  # fmt: skip
+    """git in a clone in a worker's folder (or a worktree made of one): through its .git as
+    found (clone_place), with a git folder of Chief of Staff's own (privategit)."""
+    common, admin, tree, remade = await asyncio.to_thread(clone_place, checkout, path)
+    if remade:
+        checkout.update(remade)
+        if CLONE_REMADE and (told := CLONE_REMADE()):
+            told(checkout)
+    return await private_git(common, admin, tree, origin_of(checkout), path, arguments,
+                             limit=limit, env=env, every=every, filtered=filtered)  # fmt: skip
+
+
+class UnreadableError(ValueError):
+    """Chief of Staff's own git folder for a repository a worker can write could not be made
+    (privategit.prepare): "Not reading <path>: <why>." (`why` alone too)."""
+
+    def __init__(self, path: str, why: str):
+        super().__init__(f"Not reading {path}: {why}.")
+        self.why = why
+
+
+async def private_git(
+    common: str,
+    admin: str,
+    tree: str,
+    origin: str,
+    path: str,
+    arguments: tuple[str, ...],
+    limit: float = 60,
+    env: dict | None = None,
+    every: bool = False,
+    filtered: bool = False,
+) -> str:
+    """git in a repository a worker can write (its git folder `common`, `admin` for one of its
+    linked worktrees; its work tree `tree`), run at `path` with Chief of Staff's own git folder
+    for it (privategit.prepare): never the repository's config, hooks or info/attributes. Its
+    files are read with no filter (unfiltered) and those a filter keeps left out (unless
+    `every`; `filtered`: only those, "" for none), and no submodule is looked into; nothing is
+    fetched as it is read. UnreadableError when that git folder can't be made."""
+    folder = privategit.place(common, admin)
+    async with privategit.lock(folder):
+        try:
+            pins = await asyncio.to_thread(privategit.prepare, common, admin, tree, origin)
+        except ValueError as exc:
+            raise UnreadableError(path, str(exc)) from exc
+        except OSError as exc:
+            raise UnreadableError(path, f"Chief of Staff's copy of its git folder can't be made "
+                                        f"({exc.strerror or exc})") from exc  # fmt: skip
+        pins |= env or {}
+        line = ("git", *arguments)
+        options: tuple[str, ...] = ("-c", "submodule.recurse=false")
+        filters: list[str] = []
+        if git_command_of(line) in READS_FILES or filtered:
+            blanked, filters = await unfiltered(pins, path, common, admin)
+            options += blanked
+        if filtered:
+            if not filters:
+                return ""
+            specs = [f":(top,attr:filter={name})" for name in filters]
+            line = (*line, *specs) if "--" in line else (*line, "--", *specs)
+        elif not every and reads_tree(line):
+            # (Known by the repository's own index: its copy here is made again when it changes.)
+            index = Path(pins.get("GIT_INDEX_FILE") or Path(admin or common) / "index")
+            links = await index_gitlinks(path, pins, index, lazy=False)
+            line = left_out(line, list(links), filters)
+        return await command(
+            "git", *SAFE_GIT, *options, "-C", path, *line[1:], limit=limit, env=pins, lazy=False,
+            local_remotes=False,
+        )  # fmt: skip
+
+
+# The filters the owner's and the system's git config define, as `git config` last said them:
+# with the environment it was read in and each file it came from (identity, size, time).
+OUTSIDE_FILTERS: dict[tuple, tuple[float, tuple, set[str]]] = {}
+CONFIG_ENVIRONMENT = ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                      "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_PARAMETERS")  # fmt: skip
+
+
+def owner_config_files(environment: dict[str, str]) -> list[str]:
+    """Where the owner's own git config is, there or not yet."""
+    home = environment.get("HOME") or str(Path.home())
+    xdg = environment.get("XDG_CONFIG_HOME") or str(Path(home) / ".config")
+    return [environment.get("GIT_CONFIG_GLOBAL") or str(Path(home) / ".gitconfig"),
+            str(Path(xdg) / "git" / "config")]  # fmt: skip
+
+
+async def outside_filters(pins: dict[str, str], path: str) -> set[str]:
+    """The filters git (with Chief of Staff's own git folder) knows of: the owner's and the
+    system's config's, with their includes; read again when one of their files changed (or
+    appeared), and at least every minute."""
+    environment = {**os.environ, **pins}
+    variables = sorted(item for item in environment.items() if item[0].startswith("GIT_CONFIG"))
+    key = (pins.get("GIT_DIR", ""), *(environment.get(name, "") for name in CONFIG_ENVIRONMENT),
+           *variables)  # fmt: skip
+    if (known := OUTSIDE_FILTERS.get(key)) and time.monotonic() - known[0] < 60:
+        _, files, names = known
+        now = await asyncio.to_thread(lambda: tuple(privategit.looked(Path(f)) for f, _ in files))
+        if now == tuple(look for _, look in files):
+            return names
+    listed = await command(
+        "git", *SAFE_GIT, "-C", path, "config", "--list", "--show-origin", "-z", env=pins,
+        limit=20,
+    )  # fmt: skip
+    names, origins = set(), set()
+    items = listed.split("\0")
+    for origin, entry in zip(items[::2], items[1::2], strict=False):
+        names |= filter_names([entry.split("\n", 1)[0]])
+        if origin.startswith("file:"):
+            origins.add(origin.removeprefix("file:"))
+    origins |= set(owner_config_files(environment))
+    files = await asyncio.to_thread(
+        lambda: tuple((f, privategit.looked(Path(f))) for f in sorted(origins))
     )
+    if len(OUTSIDE_FILTERS) > 64:
+        OUTSIDE_FILTERS.clear()
+    OUTSIDE_FILTERS[key] = (time.monotonic(), files, names)
+    return names
+
+
+async def unfiltered(
+    pins: dict[str, str], path: str, common: str, admin: str = ""
+) -> tuple[tuple[str, ...], list[str]]:
+    """git's options that turn off every filter a repository a worker can write would otherwise
+    run (git-lfs's: defined in the owner's or the system's config, which Chief of Staff's git
+    keeps for how files are kept, autocrlf included), and the names of those and of the ones
+    its own config defines (never read by git): the files they keep are left out of what is
+    read (left_out), their content not being what git would store. Gitattributes in its tree
+    are read for git's own conversions (eol, text, encoding), which run no program."""
+    names = await outside_filters(pins, path)
+    options: list[str] = []
+    for name in sorted(names):
+        for setting in ("clean=", "smudge=", "process=", "required=false"):
+            options += ["-c", f"filter.{name}.{setting}"]
+    return tuple(options), sorted(names | set(privategit.filters_of(common, admin)))
+
+
+def filter_names(keys) -> set[str]:
+    """The filters some config keys define (`filter.<name>.<setting>`)."""
+    found = set()
+    for key in keys:
+        section, _, rest = key.partition(".")
+        if section.lower() == "filter" and "." in rest:
+            found.add(rest.rpartition(".")[0])
+    return found
+
+
+def clone_identity(dot_git: Path) -> dict:
+    """What a clone's .git is as Chief of Staff takes it (it made the clone, or a worker's own
+    is taken as a checkout): its folder, device and inode (clone_place)."""
+    real = os.path.realpath(dot_git)
+    info = Path(real).stat()
+    return {"clone_git": real, "clone_id": [info.st_dev, info.st_ino]}
+
+
+def clone_place(checkout: dict, path: str) -> tuple[str, str, str, dict]:
+    """Where a clone in a worker's folder is: (its git folder, the admin folder of the linked
+    worktree of it `path` is in or "", the work tree, and its identity when it is a new one).
+    Its .git must be a folder there (not a `gitdir:` file, nor a link): one the worker made
+    again where it was is read as the clone now (its new identity returned, to record); its
+    config is never read (private_git). ValueError when it can't be found so."""
+    repo = checkout["repo"]
+    if checkout.get("git_dir") and os.path.realpath(checkout["git_dir"]) == os.path.realpath(repo):
+        common, own = repo, False  # A bare repository (its own worktree's).
+    else:
+        common, own = str(Path(repo) / ".git"), True
+    try:
+        if Path(repo).is_symlink():
+            raise ValueError(f"Not reading {path}: its folder is a link now.")
+        info = os.lstat(common)
+    except OSError:
+        raise ValueError(f"Not reading {path}: its .git is gone.") from None
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"Not reading {path}: its .git is no longer a folder.")
+    common = os.path.realpath(common)
+    identity = [info.st_dev, info.st_ino]
+    remade = {}
+    if (checkout.get("clone_git") and common != checkout["clone_git"]) or (
+        checkout.get("clone_id") and identity != checkout["clone_id"]
+    ):
+        remade = {"clone_git": common, "clone_id": identity}
+    resolved = Path(path).resolve()
+    if own and resolved.is_relative_to(Path(repo).resolve()):
+        return common, "", str(Path(repo)), remade
+    if found := linked_tree(common, resolved):
+        admin, root = found
+        return common, admin, root, remade
+    raise ValueError(f"Not reading {path}: its worktree cannot be found in its repository.")
+
+
+def origin_of(checkout: dict) -> str:
+    """Where a clone in a worker's folder is pushed to, as Chief of Staff recorded it (never as
+    its config says now): the remote it cloned it from, or the one a worker's own clone had
+    when it was taken; "" for none."""
+    if found := checkout.get("origin"):
+        return found if plain_address(found) else ""
+    remote = checkout.get("remote") or ""
+    if not remote or remote == checkout.get("repo"):
+        return ""
+    if GITHUB_NAME.fullmatch(remote):
+        return clone_source(remote)[0]  # (Recorded before `origin` was.)
+    return remote if plain_address(remote) else ""
+
+
+def recorded_origin(git_folder: Path) -> str:
+    """A clone's `origin` as its config says it when Chief of Staff takes it (read here as data,
+    never by git): the address it is pushed to from then on; "" for none, or one that would run
+    a program."""
+    entries = dict(privategit.config_entries(git_folder / "config") or [])
+    url = entries.get("remote.origin.url", "")
+    return url if plain_address(url) else ""
 
 
 # Repository -> when its default branch was last fetched; parallel workers fetch once.
@@ -305,8 +741,7 @@ def linked_worktree(path: Path) -> bool:
     pointer = path / ".git"
     with suppress(OSError):
         if pointer.is_file() and not pointer.is_symlink():
-            with pointer.open("rb") as handle:
-                return handle.read(8) == b"gitdir: "
+            return read_regular(pointer, 8, whole=False) == b"gitdir: "
     return False
 
 
@@ -500,7 +935,9 @@ def package_name(root: Path) -> str:
     ]
     for name, pattern in patterns:
         with suppress(OSError):
-            text = (root / name).read_text(errors="replace")[:20000]
+            text = read_regular(root / name, 20000, follow=True, whole=False).decode(
+                errors="replace"
+            )
             if match := re.search(pattern, text):
                 return match.group(1).rsplit("/", 1)[-1][:60]
     return ""
@@ -511,11 +948,14 @@ def readme_line(project: Path) -> str:
     for name in ("README.md", "README.rst", "README.txt", "README"):
         path = project / name
         if path.is_file():
-            with path.open(encoding="utf-8", errors="replace") as file:
-                for line in itertools.islice(file, 40):
-                    text = line.strip().lstrip("#").strip()
-                    if text and not text.startswith(("[!", "<", "![", "=", "-")):
-                        return text[:160]
+            try:
+                data = read_regular(path, 65536, follow=True, whole=False)
+            except OSError:
+                continue
+            for line in data.decode("utf-8", errors="replace").splitlines()[:40]:
+                text = line.strip().lstrip("#").strip()
+                if text and not text.startswith(("[!", "<", "![", "=", "-")):
+                    return text[:160]
     return ""
 
 
@@ -544,6 +984,118 @@ def git_dirs(checkouts: list[dict]) -> list[str]:
     return found
 
 
+def pointed(tree: Path) -> str:
+    """Where a worktree's `.git` file points (its own folder in the repository), "" for none."""
+    try:
+        named = read_regular(tree / ".git", 65536, follow=True).decode(errors="replace").strip()
+    except OSError:
+        return ""
+    return (
+        os.path.realpath(named.removeprefix("gitdir:").strip())
+        if named.startswith("gitdir:")
+        else ""
+    )
+
+
+def watched_git_paths(
+    repositories: list[str], checkouts: list[dict], modules: bool = True
+) -> list[str]:
+    """The files of a repository's .git that, made by a worker, would change what git runs or
+    which repository it uses: a `commondir` (git then reads another .git), a `config.worktree`
+    where the repository reads one (extensions.worktreeConfig), a `hooks` folder where it had
+    none, and (`modules`: where the sandbox holds them, so no owner's own git is mistaken for a
+    worker's) a submodules' folder, which the owner's `git submodule update` would reuse, in a
+    repository with submodules. Not a `shallow`, alternates, `info/`: what objects git has, each
+    checked by its hash."""
+    found: list[str] = []
+    admins = [c.get("admin") or "" for c in checkouts if c.get("worktree")]
+    trees = [Path(c["path"]) for c in checkouts if c.get("path")]
+    for common in repositories:
+        root = Path(common)
+        found += [str(root / "commondir"), str(root / "hooks")]
+        if modules and any((tree / ".gitmodules").exists() for tree in [root.parent, *trees]):
+            found.append(str(root / "modules"))
+        if worktree_config(root):
+            found.append(str(root / "config.worktree"))
+            found += [str(Path(a) / "config.worktree") for a in admins if a.startswith(common)]
+    return found
+
+
+def worktree_config(root: Path) -> bool:
+    """Whether a repository reads worktrees' own config (extensions.worktreeConfig)."""
+    try:
+        text = read_regular(root / "config", follow=True).decode(errors="replace")
+    except OSError:
+        return False
+    section = ""
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].split(";", 1)[0].strip()
+        if line.startswith("["):
+            section = line.strip("[]").strip().lower()
+        elif section == "extensions" and "=" in line:
+            key, _, value = line.partition("=")
+            if key.strip().lower() == "worktreeconfig":
+                return value.strip().lower() in {"true", "yes", "on", "1"}
+    return False
+
+
+def replaceable_git_paths(checkouts: list[dict], writable: list[str]) -> list[str]:
+    """The folders of a repository's .git a worker's commands may write whose replacing would
+    put what it wrote where git reads it. Copilot's sandbox holds paths, not folders: a folder
+    moved into place brings what is in it past those paths (a `.git` of its own with a config
+    that runs code, an `objects/info` with alternates, a worktree's private folder with its
+    own commondir). Each is told by its identity (identity_of), looked at before each turn,
+    after each, and before Chief of Staff runs git: the `.git` of an owner's checkout it works
+    in itself, and in each repository it commits to, `objects`, `objects/info` and the private
+    folders of the worktrees there."""
+    found: dict[str, None] = {}
+    reals = [os.path.realpath(path) for path in writable]
+    for checkout in checkouts:
+        common = checkout.get("git_dir") or ""
+        if not common or checkout.get("remote"):
+            continue
+        if checkout.get("shared"):
+            top = Path(checkout.get("top") or Path(common).parent)
+            if any(os.path.realpath(top) == real for real in reals):
+                found[str(top / ".git")] = None
+        found[str(Path(common) / "objects")] = None
+        found[str(Path(common) / "objects" / "info")] = None
+        with suppress(OSError):
+            found |= dict.fromkeys(
+                str(entry) for entry in sorted((Path(common) / "worktrees").iterdir())
+                if entry.is_dir()
+            )  # fmt: skip
+    return list(dict.fromkeys(os.path.realpath(path) for path in found))
+
+
+def holds_alternates(path: str) -> bool:
+    """Whether an `objects/info` holds what makes git take objects from elsewhere."""
+    return any(os.path.lexists(Path(path) / n) for n in ("alternates", "http-alternates"))
+
+
+def identity_of(path: str) -> list:
+    """What is at a path now: [kind, device, inode] (a .git file's pointer, a link's target
+    too); [] when nothing is. A folder moved into its place is another."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return []
+    if stat.S_ISDIR(info.st_mode):
+        return ["d", info.st_dev, info.st_ino]
+    if stat.S_ISLNK(info.st_mode):
+        with suppress(OSError):
+            return ["l", info.st_dev, info.st_ino, str(Path(path).readlink())]
+    if stat.S_ISREG(info.st_mode) and info.st_size <= 4096:
+        with suppress(OSError):
+            return [
+                "f",
+                info.st_dev,
+                info.st_ino,
+                read_regular(path, 4096).decode(errors="replace"),
+            ]
+    return ["o", info.st_dev, info.st_ino]
+
+
 def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
     """Parts of a repository's .git that a worker must not change, though it commits there.
 
@@ -560,14 +1112,27 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
     for checkout in checkouts:
         pointer = Path(checkout.get("path", "")) / ".git"
         with suppress(OSError, ValueError):
-            if pointer.is_file() and (text := pointer.read_text()).startswith("gitdir:"):
+            text = read_regular(pointer, 65536, follow=True).decode() if pointer.is_file() else ""
+            if text.startswith("gitdir:"):
                 own.add(Path(text.removeprefix("gitdir:").strip()).resolve())
     # Pointers that tell git where a repository is: a worker that rewrites them sends git (the
     # owner's, or Chief of Staff's) to a config it wrote. A repository's own .git has no
-    # commondir; a worker must not make one.
-    paths = [root / "hooks", root / "config", root / "commondir"]
+    # commondir; a worker must not make one. Nor the other files git reads for configuration
+    # (config.worktree, with extensions.worktreeConfig), attributes (info/), which commits are
+    # whole (shallow) or where else objects come from (alternates): absent ones are held too
+    # (sandbox_paths).
+    paths = [
+        root / "hooks",
+        root / "config",
+        root / "commondir",
+        root / "config.worktree",
+        root / "info",
+        root / "shallow",
+        root / "objects" / "info" / "alternates",
+        root / "objects" / "info" / "http-alternates",
+    ]
     for admin in sorted(own):
-        paths += [admin / "commondir", admin / "gitdir"]
+        paths += [admin / "commondir", admin / "gitdir", admin / "config.worktree"]
     for checkout in checkouts:
         pointer = Path(checkout.get("worktree") or "") / ".git"
         if checkout.get("worktree") and pointer.is_file():
@@ -576,8 +1141,7 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
         # The owner's own checkout: its branch and staged changes are theirs. (A worker that
         # works in the owner's checkout itself needs them.)
         paths += [root / name for name in ("HEAD", "index") if (root / name).exists()]
-    if (root / "modules").is_dir():
-        paths.append(root / "modules")
+    paths.append(root / "modules")  # Its submodules' git folders (a worktree's are its own).
     if (root / "worktrees").is_dir():
         paths += sorted(
             path
@@ -585,6 +1149,34 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
             if path.is_dir() and path.resolve() not in own
         )
     return [str(path) for path in paths]
+
+
+# Copilot's sandbox holds a listed path only if it exists when the session starts (CLI 1.0.112,
+# checked on macOS: a command creates one that does not, in a read-only folder's place or not).
+# Denied, an absent path is held on macOS, and nothing is left behind. On Linux the sandbox
+# mounts an empty folder in its place and leaves it on the disk (which breaks git where it reads
+# a file, .git/commondir): an absent path is not listed there; Chief of Staff looks for those it
+# must not find after each turn (Runtime.git_watch_check, SECURITY.md).
+SANDBOX_PLATFORM = sys.platform
+
+
+def sandbox_platform() -> str:
+    return SANDBOX_PLATFORM
+
+
+def sandbox_paths(paths: Sequence[str]) -> tuple[list[str], list[str]]:
+    """(read-only, denied): the paths a worker's commands must not change, as Copilot's sandbox
+    holds them here: those that exist read-only, absent ones denied on macOS (not held on
+    Linux: absent_paths)."""
+    readonly: list[str] = []
+    denied: list[str] = []
+    for path in dict.fromkeys(paths):
+        if os.path.lexists(path):
+            readonly.append(path)
+        elif SANDBOX_PLATFORM == "darwin":
+            # (A link to nowhere: where it leads too.)
+            denied += dict.fromkeys([path, os.path.realpath(path)])
+    return readonly, denied
 
 
 def locate(checkout: dict) -> tuple[str, str, bool]:
@@ -654,8 +1246,9 @@ def file_digest(top: Path, names: list[str]) -> str:
         path = top / name
         if name.endswith("/") or not path.is_file():
             continue
-        with suppress(OSError), path.open("rb") as file:
-            found.update(name.encode() + b"\0" + file.read(MAX_NEW_FILE))
+        with suppress(OSError):
+            data = read_regular(path, MAX_NEW_FILE, follow=True, whole=False)
+            found.update(name.encode() + b"\0" + data)
     return found.hexdigest()
 
 
@@ -870,6 +1463,24 @@ def private_temp() -> str | None:
     return str(PRIVATE_TEMP[0])
 
 
+async def gitlinks(checkout: dict, top: str) -> list[str]:
+    """The submodules (and repositories added in it) a checkout's index holds, by path. `git
+    add` looks into the work tree of each (its config there runs: the worker's to write, see
+    INTO_SUBMODULES), so Chief of Staff's own adds leave them out (git_unlooked)."""
+    staged = await checkout_git(checkout, top, "ls-files", "--stage", "-z")
+    found = []
+    for entry in staged.split("\0"):
+        mode, _, path = entry.partition("\t")
+        if mode.startswith("160000 ") and path:
+            found.append(path)
+    return found
+
+
+def git_unlooked(paths: list[str]) -> list[str]:
+    """Pathspecs that leave these paths out of a git command."""
+    return [f":(exclude,literal){path}" for path in paths]
+
+
 async def snapshot(checkout: dict) -> dict | None:
     """What a checkout holds now, all of it: its commit, and a tree of its files as they are
     (edited, new; not ignored ones). Written to the repository's objects only, through an index
@@ -897,8 +1508,9 @@ async def snapshot(checkout: dict) -> dict | None:
             with suppress(FileNotFoundError):
                 await asyncio.to_thread(shutil.copyfile, index, own)
             env = {"GIT_INDEX_FILE": own}
-            # New files too large to copy are left out (and listed: a task's large new file).
-            left_out = [f":(exclude,literal){name}" for name in large]
+            # New files too large to copy are left out (and listed: a task's large new file);
+            # submodules too, as the index holds them (git_unlooked).
+            left_out = git_unlooked([*large, *await gitlinks(checkout, top)])
             await checkout_git(checkout, top, "add", "-A", "--", ".", *left_out, limit=120, env=env)
             tree = (await checkout_git(checkout, top, "write-tree", env=env)).strip()
         return {"commit": commit, "tree": tree, "large": large}
@@ -949,6 +1561,8 @@ async def changes(checkout: dict, scope: Scope | None = None) -> dict | None:
     path, head, live = await asyncio.to_thread(locate, checkout)
     try:
         await checkout_git(checkout, path, "rev-parse", "--git-dir")
+    except UnreadableError:
+        raise  # (Said in its receipts: see TaskActions.collected.)
     except ValueError:
         return None
     result = {"path": checkout["path"], "branch": checkout.get("branch", ""), "commits": 0}
@@ -964,6 +1578,8 @@ async def changes(checkout: dict, scope: Scope | None = None) -> dict | None:
     shared = bool(checkout.get("shared"))
     if shared:
         result["shared"] = True  # A folder of the owner's: no branch of its own to open a PR from.
+    if live and checkout.get("remote") and (unchecked := await unchecked_files(checkout, path)):
+        result["unchecked"] = unchecked
     if scope is not None:
         result.update(await scoped_changes(checkout, path, head, live, shared, scope))
         result.update(await version(checkout) or {})
@@ -1000,6 +1616,19 @@ async def changes(checkout: dict, scope: Scope | None = None) -> dict | None:
     result.update(total)
     result.update(await version(checkout) or {})
     return result
+
+
+async def unchecked_files(checkout: dict, path: str) -> int:
+    """In a clone in a worker's folder: the files a filter keeps (git-lfs's) that may have
+    changed (their time or size no longer as its index says; read no further) or are new. Their
+    content is not read there (private_git), so not counted either; 0 elsewhere."""
+    found: set[str] = set()
+    with suppress(ValueError):
+        for arguments in (("diff-files", "--name-only", "-z"),
+                          ("ls-files", "--others", "--exclude-standard", "-z")):  # fmt: skip
+            listed = await checkout_git(checkout, path, *arguments, filtered=True)
+            found.update(name for name in listed.split("\0") if name)
+    return len(found)
 
 
 async def scope_base(checkout: dict, path: str, head: str, scope: Scope) -> tuple[str, str]:
@@ -1468,7 +2097,7 @@ def count_lines(root: Path, names: list[str]) -> int:
             file = root / name
             if file.is_symlink() or not file.is_file() or file.stat().st_size > MAX_NEW_FILE:
                 continue
-            data = file.read_bytes()
+            data = read_regular(file, MAX_NEW_FILE)
             if b"\0" not in data[:8000]:
                 lines += data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
     return lines
@@ -1495,7 +2124,7 @@ def new_file_diff(top: Path, name: str) -> str:
         path = top / name
         if path.is_symlink() or not path.is_file():
             return ""
-        data = path.read_bytes()[: MAX_NEW_FILE + 1]
+        data = read_regular(path, MAX_NEW_FILE + 1, whole=False)
     except OSError:
         return ""
     if b"\0" in data[:8000]:
@@ -1640,6 +2269,9 @@ OLD_TRASH = ".trash"
 TRASHED = re.compile(r"^[0-9a-f]{12}-")
 # How long git may take to remove a worktree (a huge one, a slow disk).
 REMOVE_SECONDS = 900
+# A worktree whose removal started (kv, by its path) and has not ended: if Chief of Staff stopped
+# meanwhile, what is left is no tree to resume in (restore() clears it, then makes it again).
+REMOVING = "removing:"
 
 
 def ignored_kind(entry: str, extra: Sequence[str] = (), never: Sequence[str] = ()) -> str:
@@ -1759,20 +2391,113 @@ async def sort_ignored(
 
 
 # git status of a worktree whatever its config hides: new files (status.showUntrackedFiles=no)
-# and changed submodules (diff.ignoreSubmodules, submodule.*.ignore).
-ALL_STATUS = ("status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
+# and submodules moved to other commits (diff.ignoreSubmodules, submodule.*.ignore). Never what
+# is in a submodule's work tree (without_submodules): status_lines says each one there is.
+ALL_STATUS = ("status", "--porcelain", "--untracked-files=normal")
 # For git's own check before it removes a worktree (a `git status` it runs without -u).
 SHOW_UNTRACKED = ("-c", "status.showUntrackedFiles=normal")
 
 
 async def status_lines(checkout: dict, tree: str) -> list[str] | None:
-    """A worktree's `git status --porcelain` lines, all of them (see ALL_STATUS); None when git
-    cannot tell."""
+    """A worktree's `git status --porcelain` lines, all of them (see ALL_STATUS), and each
+    submodule checked out in it as changed (" M lib": what is in it is never read, and it may
+    hold work); None when git cannot tell."""
     try:
         status = await checkout_git(checkout, tree, *ALL_STATUS, limit=REMOVE_SECONDS)
+        lines = [line for line in status.splitlines() if line.strip()]
+        named = {status_name(line) for line in lines}
+        for path in await gitlinks(checkout, tree):
+            if path not in named and await asyncio.to_thread(
+                os.path.lexists, Path(tree) / path / ".git"
+            ):
+                lines.append(f" M {path}")
     except ValueError:
         return None
-    return [line for line in status.splitlines() if line.strip()]
+    return lines
+
+
+async def submodule_work(checkout: dict, tree: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """The submodules checked out in a worktree that hold work not committed in it: a commit of
+    their own its index doesn't record, or edited files, new ones that are work (what `git
+    status` there shows); and those that can't be read so, with why: each by its path. As the
+    owner's repository says to leave one out (`submodule.<name>.ignore` in its config; not in
+    `.gitmodules`, which the worker can write). A submodule's git folder is in its worktree's
+    own, which the worker can write: it is read through a git folder of Chief of Staff's own
+    (private_git), never through its config."""
+    changed: list[str] = []
+    unread: list[tuple[str, str]] = []
+    ignored = await submodules_ignored(checkout, tree)
+    staged = await checkout_git(checkout, tree, "ls-files", "--stage", "-z")
+    for entry in staged.split("\0"):
+        mode, _, path = entry.partition("\t")
+        if not mode.startswith("160000 ") or not path:
+            continue
+        place, ignore = Path(tree) / path, ignored.get(path, "")
+        if ignore == "all" or not await asyncio.to_thread(os.path.lexists, place / ".git"):
+            continue
+        shown = "no" if ignore == "untracked" else "normal"
+        try:
+            common = await asyncio.to_thread(submodule_git_dir, place, tree)
+            head = await private_git(common, "", str(place), "", str(place), ("rev-parse", "HEAD"))
+            status = "" if ignore == "dirty" else await private_git(
+                common, "", str(place), "", str(place),
+                ("status", "--porcelain", f"--untracked-files={shown}"), limit=REMOVE_SECONDS,
+            )  # fmt: skip
+        except TimedOutError:
+            unread.append((path, "reading it took too long"))
+            continue
+        except (ValueError, OSError) as exc:
+            logger.info("Could not read the submodule %s of %s: %s", path, tree, exc)
+            why = exc.why if isinstance(exc, UnreadableError) else str(exc)
+            why = why.removeprefix("git failed: ")
+            unread.append((path, why[:120] or "git could not read it"))
+            continue
+        if head.strip() != mode.split()[1] or worth_committing(status):
+            changed.append(path)
+    return changed, unread
+
+
+def submodule_git_dir(place: Path, tree: str) -> str:
+    """The git folder of a submodule checked out at `place` in the worktree `tree`: the one its
+    `.git` names (or is), read here. ValueError when that is no plain repository of its own (or
+    is reached through a link)."""
+    if Path(os.path.realpath(place)) != Path(os.path.realpath(tree)) / place.relative_to(tree):
+        raise ValueError("its folder is reached through a link")
+    dot = place / ".git"
+    info = dot.lstat()
+    if stat.S_ISDIR(info.st_mode):
+        git_dir = os.path.realpath(dot)
+    elif stat.S_ISREG(info.st_mode):
+        named = read_regular(dot, 65536).decode(errors="replace").strip()
+        if not named.startswith("gitdir:"):
+            raise ValueError("its .git names no git folder")
+        git_dir = os.path.realpath(place / named.removeprefix("gitdir:").strip())
+    else:
+        raise ValueError("its .git is no file or folder")
+    if not Path(git_dir).is_dir() or os.path.lexists(Path(git_dir) / "commondir"):
+        raise ValueError("its git folder is no repository of its own")
+    return git_dir
+
+
+async def submodules_ignored(checkout: dict, tree: str) -> dict[str, str]:
+    """What a worktree's repository says `git status` leaves out of each submodule (by path):
+    `submodule.<name>.ignore` in its config only (the owner's: a worker's clone's own is never
+    read), each named by its path in `.gitmodules`."""
+    names: dict[str, str] = {}
+    ignore: dict[str, str] = {}
+    entries = await asyncio.to_thread(config_entries, Path(tree) / ".gitmodules") or []
+    for key, value in entries:
+        section, _, rest = key.partition(".")
+        name, _, setting = rest.rpartition(".")
+        if section.lower() == "submodule" and name and setting.lower() == "path":
+            names[name] = value
+    with suppress(ValueError):
+        listed = await checkout_git(
+            checkout, tree, "config", "-z", "--get-regexp", r"^submodule\..*\.ignore$"
+        )
+        for key, _, value in (e.partition("\n") for e in listed.split("\0") if e):
+            ignore[key.partition(".")[2].rpartition(".")[0]] = value.strip().lower()
+    return {path: ignore[name] for name, path in names.items() if name in ignore}
 
 
 async def uncommitted(checkout: dict, tree: str) -> list[str] | None:
@@ -2015,7 +2740,8 @@ def only_carried(tree: Path, entry: str, carried: set[str], repo: Path) -> bool:
 
 def same_file(one: Path, other: Path) -> bool:
     try:
-        return one.read_bytes() == other.read_bytes()
+        limit = 1 << 40
+        return read_regular(one, limit, follow=True) == read_regular(other, limit, follow=True)
     except OSError:
         return False
 
@@ -2341,6 +3067,9 @@ class Workspaces:
         self.store = store
         self.work_root = work_root
         PRIVATE_TEMP[:] = [work_root / "tmp"]
+        # Chief of Staff's own git folders for repositories workers can write (privategit): in
+        # its data folder, out of every worker's reach.
+        privategit.ROOT = work_root / "git"
         self.project_cache: dict[str, tuple[float, dict]] = {}
         self.known: tuple[float, tuple, list[str]] = (0.0, (), [])
         self.clone_lock = asyncio.Lock()
@@ -2482,12 +3211,15 @@ class Workspaces:
                 changes = await uncommitted(checkout, tree)
             elif found is not None and not unknown and changes == []:
                 # Not in Chief of Staff's folders: git removes it, or it stays.
+                self.store.set(REMOVING + tree, "1")
                 with suppress(ValueError):
                     await checkout_git(
                         checkout, checkout["repo"], "worktree", "remove", tree,
                         limit=REMOVE_SECONDS,
                     )  # fmt: skip
                     removed.append(tree)
+                self.store.delete(REMOVING + tree)
+                if tree in removed:
                     continue
             stays |= {
                 "items": unknown[:MAX_KEPT_LISTED],
@@ -2527,7 +3259,14 @@ class Workspaces:
         from there, never following a link; git then forgets it, so a reopened worker gets it
         back whole from its branch. Not git's own removal, which deletes in place by paths a
         worker's leftover program could redirect. False, and put back, when a file changed or
-        appeared meanwhile."""
+        appeared meanwhile. Noted as under way (REMOVING) until done: restore() finishes one
+        stopped halfway."""
+        self.store.set(REMOVING + tree, "1")
+        removed = await self.removed_tree(checkout, tree, trash)
+        self.store.delete(REMOVING + tree)
+        return removed
+
+    async def removed_tree(self, checkout: dict, tree: str, trash: Path) -> bool:
         moved = await asyncio.to_thread(to_trash, Path(tree), trash)
         if not moved:
             return False
@@ -2541,16 +3280,19 @@ class Workspaces:
             await checkout_git(checkout, checkout["repo"], "worktree", "prune")
         return not await asyncio.to_thread(os.path.lexists, tree)
 
-    @staticmethod
-    async def force_remove(checkout: dict, tree: str, trash: Path) -> bool:
+    async def force_remove(self, checkout: dict, tree: str, trash: Path) -> bool:
         """Remove a worktree with whatever is in it: out of its place into trash in one rename,
         deleted from there (never following a link), and forgotten by git: never a half tree
-        for a reopened worker to resume in (restore() makes it again from its branch)."""
+        for a reopened worker to resume in (restore() makes it again from its branch, as it
+        does when this itself was stopped halfway: noted as under way, REMOVING)."""
+        self.store.set(REMOVING + tree, "1")
         if moved := await asyncio.to_thread(to_trash, Path(tree), trash):
             await asyncio.to_thread(delete_moved, moved)
         with suppress(ValueError):
             await checkout_git(checkout, checkout["repo"], "worktree", "prune")
-        return not await asyncio.to_thread(os.path.lexists, tree)
+        gone = not await asyncio.to_thread(os.path.lexists, tree)
+        self.store.delete(REMOVING + tree)
+        return gone
 
     def others(self, row: dict) -> list[tuple[str, list[str]]]:
         """The other open workers, each with the folders it works in (its own, its checkouts)."""
@@ -2564,15 +3306,20 @@ class Workspaces:
         return found
 
     async def restore(self, row: dict):
-        """The task folder and worktrees release() removed, back on their branches."""
+        """The task folder and worktrees release() removed, back on their branches; one whose
+        removal stopped halfway (Chief of Staff stopped past its time, or ended at once) goes
+        first, then comes back whole."""
         workspace = self.workspace(row)
         if row["cwd"] == str(workspace):  # A worker without a repository works in it directly.
             await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
         for checkout in self.checkouts(row):
             tree = checkout.get("worktree")
-            if not tree or await asyncio.to_thread(os.path.exists, tree):
+            half = bool(tree and self.store.get(REMOVING + tree))
+            if not tree or (await asyncio.to_thread(os.path.exists, tree) and not half):
                 continue
             repo = checkout["repo"]
+            if half and not await self.clear_half(row, tree):
+                continue
             await git("-C", repo, "worktree", "prune")
             async with self.staging() as staging:
                 staged = staging / Path(tree).name
@@ -2585,8 +3332,11 @@ class Workspaces:
                         checkout.get("base_ref") or "HEAD",
                     )  # fmt: skip
                 admin = (await git("-C", str(staged), "rev-parse", "--absolute-git-dir")).strip()
-                if not row["slack"]:
-                    await carry_ignored_files(Path(repo), staged, staging)
+                # (Made now, by Chief of Staff.)
+                self.store.delete(f"gitid:{await asyncio.to_thread(os.path.realpath, admin)}")
+                carried = (
+                    [] if row["slack"] else await carry_ignored_files(Path(repo), staged, staging)
+                )
                 try:
                     placed = await asyncio.to_thread(
                         place_tree, staged, Path(tree).parent, workspace.parent, Path(tree).name,
@@ -2601,6 +3351,30 @@ class Workspaces:
                         await git("-C", repo, "worktree", "remove", "--force", str(staged))
                     raise
                 checkout["admin"] = admin
+            self.store.delete(REMOVING + tree)
+            if not row["slack"]:
+                # What it carries is the owner's, as at its first making: kept as now, as far
+                # as the owner's checkout holds it so (vet_carried).
+                await asyncio.to_thread(settings_guard.refresh, self.store, Path(tree), carried)
+                await asyncio.to_thread(self.vet_carried, Path(tree), Path(repo), carried)
+
+    async def clear_half(self, row: dict, tree: str) -> bool:
+        """What is left of a worktree whose removal stopped halfway (one found with nothing
+        uncommitted, or one the owner said to delete): out of its place in one step and deleted
+        from trash in Chief of Staff's own folders, deleted where it is elsewhere (git was
+        deleting it there). Whether it is gone."""
+        roots = self.roots()
+        folder = await asyncio.to_thread(folder_of, self.workspace(row), roots)
+        real = Path(await asyncio.to_thread(os.path.realpath, tree))
+        trash = trash_of(folder, roots) if folder and real.is_relative_to(folder) else None
+        logger.warning("Removing what is left of %s: its removal stopped halfway.", tree)
+        if trash and (moved := await asyncio.to_thread(to_trash, Path(tree), trash)):
+            await asyncio.to_thread(delete_moved, moved)
+        elif await asyncio.to_thread(os.path.isdir, tree):
+            await asyncio.to_thread(rmtree_writable, Path(tree))
+        if gone := not await asyncio.to_thread(os.path.lexists, tree):
+            self.store.delete(REMOVING + tree)
+        return gone
 
     def roots(self) -> list[Path]:
         """The folders Chief of Staff makes workers' own folders in: the configured one, and
@@ -2631,7 +3405,8 @@ class Workspaces:
         """Repositories a worker cloned itself into its folder (`git clone` in its shell), and
         worktrees it made there (`git worktree add`, see own_worktree), not yet among its
         checkouts: what it does there is counted and shown like a checkout's, not lost as a
-        report's. Not one whose git config would run code."""
+        report's. Read through Chief of Staff's own git folder for each (private_git): its
+        config, as it says where it was cloned from, is read once, here, as data."""
         workspace = self.workspace(row)
         keys = ("path", "repo", "worktree")
         paths = [c[key] for c in self.checkouts(row) for key in keys if c.get(key)]
@@ -2644,7 +3419,6 @@ class Workspaces:
                 repo
                 for repo in find_repositories(workspace, set(), worktrees=True)
                 if os.path.realpath(repo) not in known
-                and not config_runs_code(str(Path(repo) / ".git"))
             ]
 
         made = []
@@ -2657,10 +3431,14 @@ class Workspaces:
                 checkout = {"project": "", "repo": repo, "path": repo, "branch": "",
                             "base_ref": "", "base": "a clone it made itself",
                             "remote": repo}  # fmt: skip
+                try:  # Its .git as taken now: the one Chief of Staff's git reads (clone_place).
+                    checkout |= await asyncio.to_thread(clone_identity, Path(repo) / ".git")
+                except OSError:
+                    continue
             if checkout.get("remote"):
-                with suppress(ValueError):
-                    url = await checkout_git(checkout, repo, "remote", "get-url", "origin")
-                    checkout["remote"] = url.strip() or repo
+                # Where it is pushed to from now on: as its config says now, recorded.
+                origin = await asyncio.to_thread(recorded_origin, Path(checkout["clone_git"]))
+                checkout |= {"origin": origin, "remote": origin or checkout["remote"]}
             with suppress(ValueError):
                 branch = await checkout_git(checkout, repo, "rev-parse", "--abbrev-ref", "HEAD")
                 checkout["branch"] = branch.strip().removesuffix("HEAD")
@@ -2677,9 +3455,9 @@ class Workspaces:
 
     async def own_worktree(self, row: dict, tree: str, found: list[str]) -> dict | None:
         """A linked worktree a worker made itself in its folder, as a checkout: only of a
-        repository it works in or a clone it made in its folder (whose config it can write:
-        checked like a clone's). Which one is read from the repository's side (admin_dir), not
-        from the `.git` file the worker wrote."""
+        repository it works in or a clone it made in its folder (read like a clone: through
+        Chief of Staff's own git folder). Which one is read from the repository's side
+        (admin_dir), not from the `.git` file the worker wrote."""
         workspace = str(self.workspace(row))
         commons = [
             checkout.get("git_dir") or str(Path(checkout["repo"]) / ".git")
@@ -2701,8 +3479,6 @@ class Workspaces:
         if not common:
             return None
         own = within(common, workspace)
-        if own and await asyncio.to_thread(config_runs_code, common):
-            return None
         checkout = {"project": "", "path": tree, "branch": "", "base_ref": "",
                     "base": "a worktree it made itself"}  # fmt: skip
         if Path(common).name == ".git":
@@ -2711,6 +3487,10 @@ class Workspaces:
             checkout |= {"repo": common, "git_dir": common}
         if own:
             checkout["remote"] = checkout["repo"]
+            try:  # The clone's .git (or the repository) as taken now (clone_place).
+                checkout |= await asyncio.to_thread(clone_identity, Path(common))
+            except OSError:
+                return None
         return checkout
 
     def writes(self, row: dict) -> list[str]:
@@ -2751,6 +3531,12 @@ class Workspaces:
             checkout = {"project": str(path), "path": str(path), "branch": "", "shared": True}
             if git_dir := await common_git_dir(path):
                 checkout["git_dir"] = git_dir
+                # Where its agent settings are read up to (settings_guard.checkout_top), as
+                # git says now, before any worker had it.
+                with suppress(ValueError):
+                    checkout["top"] = (
+                        await git("-C", str(path), "rev-parse", "--show-toplevel")
+                    ).strip()
             return checkout
         toplevel = await git("-C", str(path), "rev-parse", "--show-toplevel")
         top = await asyncio.to_thread(Path(toplevel.strip()).resolve)
@@ -2770,6 +3556,7 @@ class Workspaces:
                 # Its own folder in the repository, read now, before a worker could change
                 # where its .git points.
                 admin = (await git("-C", str(staged), "rev-parse", "--absolute-git-dir")).strip()
+                self.store.delete(f"gitid:{await asyncio.to_thread(os.path.realpath, admin)}")
                 carried = await carry_ignored_files(top, staged, staging) if carry else []
                 tree = await asyncio.to_thread(
                     place_tree, staged, workspace, workspace.parent, top.name
@@ -2782,7 +3569,7 @@ class Workspaces:
                     await git("-C", str(top), "branch", "-D", branch)
                 raise
         repos.add(str(top))
-        return {
+        checkout = {
             "project": str(path),
             "repo": str(top),
             "worktree": str(tree),
@@ -2794,6 +3581,11 @@ class Workspaces:
             "admin": admin,
             "carried": carried,
         }
+        # The agent settings it is given, as Chief of Staff made it (settings_guard), what it
+        # carried from the owner's checkout only as the owner's checkout holds it.
+        await asyncio.to_thread(self.keep_settings, tree, Path(checkout["path"]))
+        await asyncio.to_thread(self.vet_carried, tree, top, checkout["carried"])
+        return checkout
 
     def staging(self) -> contextlib.AbstractAsyncContextManager[Path]:
         """A folder of Chief of Staff's own, beside workers' folders (the same disk, so one
@@ -2823,6 +3615,30 @@ class Workspaces:
         with suppress(ValueError):
             await git("-C", checkout["repo"], "branch", "-D", checkout["branch"])
 
+    def vet_carried(self, tree: Path, owner: Path, carried: list[str]):
+        settings_guard.vet(self.store, tree, owner, carried, not self.touched(owner))
+
+    def touched(self, top: Path, besides: str = "") -> bool:
+        """Whether a worker other than `besides` could have written in this folder, or above
+        it: one whose folders to write are there, above or below (writes: not a checkout it was
+        given only to read), or the folders Settings lets sandboxed commands write; run or not
+        (one handed out before Chief of Staff kept track of turns may have)."""
+        extra = [os.path.realpath(path) for path in self.store.settings().sandbox_writable]
+        if any(within(place, str(top)) or within(str(top), place) for place in extra):
+            return True
+        for other in self.store.all(
+            "SELECT * FROM sessions WHERE role=? AND id!=?", (WORKER, besides)
+        ):
+            for place in map(os.path.realpath, self.writes(other)):
+                if within(place, str(top)) or within(str(top), place):
+                    return True
+        return False
+
+    def keep_settings(self, top: Path, cwd: Path):
+        """A folder Chief of Staff just made for a worker: the agent settings in it are its own
+        (settings_guard.keep), as they are now: each agent's."""
+        settings_guard.keep(self.store, top, cwd, (REPOSITORY_SETTINGS, CODEX_SETTINGS))
+
     async def clone_checkout(self, workspace: Path, slug: str, repo: str) -> dict:
         """Clone a repository that is not on this machine into a worker's workspace."""
         url, name = clone_source(repo)
@@ -2837,9 +3653,16 @@ class Workspaces:
             default = (await git("-C", str(staged), "rev-parse", "--abbrev-ref", "HEAD")).strip()
             start = (await git("-C", str(staged), "rev-parse", "HEAD")).strip()
             await git("-C", str(staged), "checkout", "--quiet", "-b", branch)
+            # Where it came from, as Chief of Staff's own clone says before any worker has it:
+            # where it is pushed to (privategit; the clone's config is never read again).
+            url = ""
+            with suppress(ValueError):
+                url = await git("-C", str(staged), "config", "--get", "remote.origin.url")
             destination = await asyncio.to_thread(
                 place_tree, staged, workspace, workspace.parent, name
             )
+        await asyncio.to_thread(self.keep_settings, destination, destination)
+        made = await asyncio.to_thread(clone_identity, destination / ".git")
         return {
             "project": "",
             "repo": str(destination),
@@ -2848,6 +3671,8 @@ class Workspaces:
             "base": f"origin/{default} of a fresh clone of {repo}",
             "base_ref": start,
             "remote": repo,
+            "origin": url.strip() if plain_address(url) else "",
+            **made,
         }
 
     async def prepare_directory(

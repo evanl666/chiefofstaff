@@ -188,9 +188,9 @@ EXAMPLE = Feature(
 )
 
 # Deliberate fixes of how the baseline looks, not any feature's: allowed in every run (the plain
-# one, and each feature's off and on), each with why. None against v0.1.44: those of 0.1.41 to
-# 0.1.44 (the one-line heading, workers' batch CLI line, learning from talked sessions, the runs
-# kept, role rules, the Router's title rule, a check-back's runs) are its own behaviour.
+# one, and each feature's off and on), each with why. Those of 0.1.41 to 0.1.44 (the one-line
+# heading, workers' batch CLI line, learning from talked sessions, the runs kept, role rules, the
+# Router's title rule, a check-back's runs) are the baseline's own behaviour.
 FIXES: list[Allow] = [
     # 0.1.46: sandboxed workers' package caches are their own, started from the owner's, which
     # are read-only to them (caches.py); the switch says so instead of "share your stores".
@@ -203,6 +203,13 @@ FIXES: list[Allow] = [
     Allow("Storage's report of workers' caches", data=r"/api/storage\.caches"),
     # 0.1.46: and its place in order (an action's answer that comes late no longer wins).
     Allow("Storage's report's order", data=r"/api/storage\.order"),
+    # 0.1.46 (security): what the agent settings in each folder handed to a worker held then,
+    # kept in Chief of Staff's own data (settings_guard), empty ones too. Nothing is shown.
+    Allow("agent settings snapshots", data=r"\.db\.kv\.settingssnap:"),
+    # 0.1.46 (security): the identity of each .git folder a worker's commands could replace, as
+    # first seen (a folder moved into its place is another), and (Linux) the git files that
+    # appeared in one a worker writes. Nothing is shown.
+    Allow(".git identities", data=r"\.db\.kv\.git(id|appeared):"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

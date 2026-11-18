@@ -655,13 +655,15 @@ def worker_context(
     gh_acting: dict[str, str] | None = None,
     slack: bool = False,
     notes: list[str] | None = None,
+    held: list[str] | None = None,
 ) -> str:
     """`sandbox`: "" (no sandbox), "on", or "on-no-gh" (gh cannot reach GitHub inside it).
     `caches`: its tools keep their caches in workers' own (caches.py), the owner's read-only
     beneath; `local`: the sandbox lets it use localhost; `old_uv`: the owner's uv, when it is one
     that crashes in the sandbox. `gh_acting`: the account Chief of Staff
     acts as, by repository owner, where gh's active one cannot reach them
-    (GitHubSource.acting_login)."""
+    (GitHubSource.acting_login). `held`: the scripts its folder's hooks run, read-only to it as
+    the held settings are (shown)."""
     lines = [
         f"Working directory: {cwd}",
         f"Your workspace: {workspace} (all yours: clone, build or download things there).",
@@ -722,9 +724,20 @@ def worker_context(
             "Your shell commands run in an OS sandbox: they can write only in your workspace and "
             'checkouts (and temporary folders); elsewhere they fail with "Operation not '
             "permitted\". The repositories' hooks and config are read-only: when your task "
-            "asks you to push, use `git push origin HEAD`, without -u. git and gh use the "
-            "owner's GitHub sign-in through Copilot's proxy. When the task needs access the "
-            'sandbox denies, report(status="blocked") saying what; never work around it.'
+            "asks you to push, use `git push origin HEAD`, without -u. So are their MCP "
+            "server files (`.mcp.json`, `.github/mcp.json`; in the owner's checkout every "
+            "agent's settings: also `.github/lsp.json`, `.github/hooks/`, `.github/copilot/`, "
+            "`.github/extensions/`, `.github/agents/`, `.claude/settings.json`, "
+            "`.claude/settings.local.json`, `.claude/agents/` and `.codex/`) and the scripts "
+            "their hooks run"
+            + (f" ({', '.join(held)})" if held else "")
+            + ". Before you update your branch (a merge, rebase or pull), list what it would "
+            "change (`git diff --name-only HEAD...<target>`): if that touches any of them, "
+            "don't start it; tell the owner in one line, such as \"main changed .mcp.json; I "
+            "can't update the branch's agent settings, so please update the branch yourself or "
+            "let me continue without it\". git and gh use the owner's GitHub sign-in through "
+            "Copilot's proxy. When the task needs access the sandbox denies, "
+            'report(status="blocked") saying what; never work around it.'
         )
         lines.append(
             "Servers on localhost work (a test's server, a build daemon)."

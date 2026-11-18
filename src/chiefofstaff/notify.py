@@ -2,6 +2,7 @@ import asyncio
 import logging
 import shutil
 import sys
+from contextlib import suppress
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,14 @@ async def mac_notification(title: str, text: str):
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
+    except OSError:
+        logger.warning("macOS notification failed", exc_info=True)
+        return
+    try:
         await asyncio.wait_for(process.wait(), timeout=5)
-    except (OSError, TimeoutError):
+    except BaseException as exc:
+        with suppress(ProcessLookupError):
+            process.kill()
+        if not isinstance(exc, (OSError, TimeoutError)):
+            raise  # (Cancelled: it ends with its waiter.)
         logger.warning("macOS notification failed", exc_info=True)

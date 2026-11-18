@@ -758,8 +758,34 @@ class SessionYolo(StrictModel):
     mode: Literal["", "on", "off"] = ""  # "" follows Settings.
 
 
+class AgentSettings(StrictModel):
+    """The owner's "Use these settings" on a worker's line about its folder's agent settings:
+    those it was shown (their digest)."""
+
+    digest: str = Field(min_length=1, max_length=64)
+
+
+class GitIdentity(StrictModel):
+    """The owner's word on a .git (or a folder of one) a worker's folder had replaced: what
+    they were shown (its digest)."""
+
+    digest: str = Field(min_length=1, max_length=64)
+
+
+class GitQuarantine(StrictModel):
+    """The owner's word on a git file that appeared in a .git a worker can write: use it, or
+    (in Chief of Staff's own worktree folders) keep it removed."""
+
+    use: bool
+
+
 class OpenFolder(StrictModel):
     app: Literal["finder", "vscode"]
+
+
+class OpenPr(StrictModel):
+    # The owner's word that it opens though a submodule's files couldn't be read (MayHoldWorkError).
+    anyway: bool = False
 
 
 class ProfileText(StrictModel):

@@ -2,13 +2,91 @@
 
 ## Unreleased
 
-Sandboxed workers have package caches of their own, and can't change yours or Chief of Staff's
-own code. From the QA round on 0.1.45: pushes to the default branch that got past *Ask first*
-in 0.1.45 are refused, and a switch back to a branch of its own before a push is let through
-again; runs and documents are listed wherever they are served; an away notice that failed
-stays in sight; Artifacts words and times match what its rows say; a slow script's
-`copilot -p` calls are a batch again, and your own questions stay listed.
+Workers can no longer plant agent settings that load for them (Codex's `.codex/`, Copilot's
+hooks and MCP servers) or git files and configuration that run code for you or for Chief of
+Staff's own git. Sandboxed workers have package caches of their own, and can't change yours or
+Chief of Staff's own code. From the QA round on 0.1.45: pushes to the default branch that got
+past *Ask first* in 0.1.45 are refused, and a switch back to a branch of its own before a push
+is let through again; runs and documents are listed wherever they are served; an away notice
+that failed stays in sight; Artifacts words and times match what its rows say; a slow
+script's `copilot -p` calls are a batch again, and your own questions stay listed.
 
+- **Security: a Codex worker could switch off Chief of Staff's checks for itself.** In a
+  repository you trust in Codex, a worker could write Codex settings into its own folder
+  (`.codex/`): from its next start or resume, Codex loaded them. A rule there let commands run
+  without asking Chief of Staff (under *Ask first* too, and past its refusals, such as pushes to
+  the default branch), an MCP server there ran its command at every start, and settings there
+  could change its commands' environment and its model. Now Codex loads a folder's `.codex/` for
+  a worker only while it is as you last let it (as Chief of Staff made the folder, or as you
+  looked at it once), and the worker's timeline says when it isn't, with **Use these settings**
+  for you. Workers' edits to
+  `.codex/` folders and to Codex's own settings folder are refused.
+- **Security: a Copilot worker could plant hooks and MCP servers for itself.** In a repository you
+  trust in Copilot (a worktree of it is trusted too), a worker could write the repository's own
+  Copilot settings in its folder: hooks (`.github/hooks/`, `.github/copilot/settings.json`, and
+  `.claude/settings.json`, whose hooks Copilot runs too), custom agents with their own hooks and
+  MCP servers (`.github/agents/`, `.claude/agents/`), MCP servers (`.mcp.json`,
+  `.github/mcp.json`) and language servers (`.github/lsp.json`), loaded from its next turn or
+  resume. A hook could approve commands Chief of Staff would refuse, and a server ran outside the
+  worker sandbox. Now Chief of Staff keeps what those files hold, with the scripts their hooks and
+  servers run, when it makes a worker's folder or first hands a worker your checkout, in its own
+  data, and reads them again before each start and each turn, and as each of the worker's tools
+  starts when a quick look sees a change (with the sandbox on, before the tool runs: Copilot has
+  that answer within 2 seconds, and a tool Chief of Staff couldn't look before is denied),
+  without running git there. A folder of a checkout workers already had, one workers used before this
+  version, or a file a worktree carries from your checkout that isn't as your checkout holds it,
+  waits for you to look once. A worker whose settings or hooks' scripts changed starts no turn
+  until you click **Use these settings** on the line its timeline shows (news for it waits too),
+  or until they are as they were again; it shows *waiting for you*, and the Router hears it once.
+  One stopped mid-task goes on with it after the click. What a server runs (a repository
+  developing its own MCP server) stays the worker's to build and edit: when it changed, that
+  server is off for the worker from its next turn, said once, with the same button to turn it on.
+  With the sandbox on, workers' commands can't change those settings or their hooks' scripts in
+  your checkout, nor in their own worktree the MCP server files Copilot loads by itself
+  (`.mcp.json`, `.github/mcp.json`) and their hooks' scripts; a worker checks before a branch
+  update that would, and tells you, and one that fails partway anyway is told to put its tree
+  back first. A setting linked into a folder workers can write, or a special file, is never used. Workers'
+  edits to those files are refused, whatever their case. Agent homes (`~/.codex`, `~/.claude`) are
+  never read as your home folder's settings.
+- **Security: a sandboxed worker could make Chief of Staff's own git run its code.** A worktree
+  keeps its submodules' git folders in its own folder in your repository, which its worker can
+  write: a filter configured there ran, as you, whenever Chief of Staff read the worker's changes
+  (`git status`, `git diff`, a snapshot). Learning checks from a worker's test runs ran git in a
+  repository the worker had made itself, whatever its config said; a clone in a worker's folder
+  (one it cloned or made, taken at its task's end) could run its code through a partial clone's
+  fetch, a filter swapped into its config between Chief of Staff's look and git's use, or a
+  submodule's program a PR's push ran. Now Chief of Staff's git never reads a git config a worker
+  can write: such a clone, and a submodule of a worktree, are read through a git folder of its
+  own (their objects, refs and index as data, a config it writes, the remote it recorded when it
+  took the clone), with no filter at all (files git-lfs keeps there are said as not checked);
+  elsewhere it leaves submodules out where it reads files, and its pushes and fetches never go
+  into one, whatever your config says. A submodule a PR would leave work behind in keeps it
+  until that is committed, or, when it can't be read, until you click **Open it anyway**. Its
+  git reaches other repositories only over http(s), ssh, git or a local path, not a remote
+  helper such as `codecommit::`; from such a clone, not a local path either, and **Create PR**
+  pushes its branch only to GitHub's own address for the repository (a local repository whose
+  path read as GitHub's, with hooks of the worker's, was pushed to as you). A submodule in a
+  diff is shown as the commit it is at, whatever your `diff.submodule` says, so its own
+  repository (its config a worker could write) is never opened for a log or a diff. A clone
+  Chief of Staff can't read so is said in the task's receipts and the PR's error ("Not reading
+  …"), not left out.
+- **Security: a sandboxed worker could create git files that run code for you.** Copilot's
+  sandbox holds a read-only path only once it exists. A sandboxed worker could create
+  `.git/commondir` in your repository, sending your git to a configuration of its own whose
+  hooks or file-system monitor then ran as you, outside any sandbox; or a `.git/hooks` folder
+  where your repository had none, a `config.worktree` or a submodule's folder. Chief of Staff
+  now denies such paths while they don't exist (macOS). Linux's sandbox can't hold them, so
+  there Chief of Staff looks for them after each of the worker's turns, as it stops or closes,
+  and before it runs git itself: if one appeared, the worker waits for you and Chief of Staff
+  runs no git there until you click **Use it**. A worker that replaced a whole `.git` folder (a
+  folder moved into place gets past the sandbox's paths) waits the same way, until **Use this
+  .git**; a worktree removed and made again under its name (yours, or a worker's scratch one) is
+  no replaced one.
+- **A worktree half removed comes back whole.** Chief of Staff stopping (or ending at once) while
+  it removed a closed worker's worktree could leave half of it, without its `.git`; the reopened
+  worker went on there, in a folder that was no repository. Now a worktree leaves its place in one
+  rename before anything in it is deleted, and one whose removal was under way when Chief of
+  Staff stopped is cleared before the worker resumes, its worktree made again from its branch.
 - **Sandboxed workers have package caches of their own, and never download again what you or
   another worker already have.** Copilot's sandbox let them write your caches, so a worker could
   plant code your own builds then ran; and many tools failed in it: pnpm and Yarn through

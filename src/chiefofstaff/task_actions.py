@@ -32,16 +32,19 @@ from .tasks import ADOPTED, ENDED, OPEN
 from .workspaces import (
     CommandRun,
     Scope,
+    UnreadableError,
     base_of,
     changes,
     checkout_git,
     checkout_top,
     diff,
     file_times,
+    origin_of,
     package_name,
     same_version,
     share_files,
     snapshot,
+    submodule_work,
     tree_names,
     untracked_work,
     version,
@@ -52,12 +55,36 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 logger = logging.getLogger(__name__)
+
+
+class MayHoldWorkError(ValueError):
+    """A PR not opened because a repository may hold work not committed yet, where it couldn't
+    be read safely: the owner may open it anyway (`anyway`, the words of that action)."""
+
+    anyway = "Open it anyway"
+
+
 CHECK_BACK_RETRY_MINUTES = 5
 # Reads of a followed thread failed in a row before it shows as failing.
 FAILING_READS = 3
 
 PROJECT_URL = "https://github.com/evanl666/chiefofstaff"
-GITHUB_REMOTE = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
+# A GitHub repository's address (http(s), ssh, or scp-like `[git@]github.com:`), its owner/name
+# in group 1: on GitHub's host itself, not a path on this machine or another host that only has
+# github.com in it.
+GITHUB_REMOTE = re.compile(
+    r"^(?:(?:https?|ssh)://(?:[^@/\s]+@)?github\.com/|(?:[\w.-]+@)?github\.com:)"
+    r"([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
+)
+
+
+def github_address(remote: str, slug: str) -> str:
+    """Where a clone in a worker's folder is pushed for a PR: GitHub's address for the repository,
+    made here from its owner/name (never one its config, nor Chief of Staff's record of it,
+    names), over ssh when the remote it was taken with is an ssh one, else https."""
+    if remote.startswith(("https://", "http://")):
+        return f"https://github.com/{slug}.git"
+    return f"git@github.com:{slug}.git"
 
 
 STATUS_WORDS = {
@@ -1139,15 +1166,19 @@ class TaskActions:
         if ended:
             await self.record_end(task)  # Its result: its share ends here.
             row = self.store.find_session(task["session_id"]) or row  # Its own clones too.
-        checkouts = []
+        checkouts, unread = [], []
         # Not while its worktrees are removed (a worker closed as it reported).
         async with self.states[row["id"]].checkouts:
             for checkout in self.workspaces.checkouts(row):
                 if self.not_its(task, checkout):
                     continue
-                with suppress(Exception):
+                try:
                     if found := await changes(checkout, self.scope(task, checkout)):
                         checkouts.append(found)
+                except UnreadableError as exc:
+                    unread.append(str(exc))  # "Not reading <path>: …", in its receipts.
+                except Exception:  # noqa: S112
+                    continue
         # Offered to merge only as read now: a PR GitHub could not answer for keeps its last
         # read (see read_prs), which may be of a head pushed over since.
         read = now()
@@ -1169,6 +1200,8 @@ class TaskActions:
                 "prs_at": time.time(),
                 "role_rules": ROLE_RULES,
             }
+            if unread:
+                evidence["unread"] = unread
             before = json.loads(run["evidence"]) if keep_stale and run["evidence"] else {}
             if reason := before.get("stale") or moved(before.get("checkouts", []), checkouts):
                 # The checks were about the code as it was then, not as it is now.
@@ -2534,8 +2567,10 @@ class TaskActions:
                     logger.info("No diff for %s: %s", checkout["path"], exc)
         return found
 
-    async def create_pr(self, task_id: str) -> dict:
-        """Push the task's branches and open a PR from each, or find the one already open."""
+    async def create_pr(self, task_id: str, anyway: bool = False) -> dict:
+        """Push the task's branches and open a PR from each, or find the one already open.
+        `anyway`: the owner's word, though a submodule's files could not be read
+        (MayHoldWorkError)."""
         task = self.tasks.get(task_id)
         if task["status"] not in {"review", "done"}:
             raise ValueError(f"The task is {task['status']}: open a PR once it is finished.")
@@ -2547,14 +2582,18 @@ class TaskActions:
             for checkout in self.workspaces.checkouts(row):
                 if not (checkout.get("repo") and checkout.get("branch")):
                     continue  # A shared project folder has no branch of its own.
-                if plan := await self.pr_plan(checkout):
+                if plan := await self.pr_plan(checkout, anyway):
                     plans.append((checkout, *plan))
             if not plans:
                 raise ValueError("Nothing to open a PR from: the worker committed nothing.")
             title, body = self.pr_text(task, await self.commit_subjects(plans))
             for checkout, repo, slug, branch in plans:
+                # A clone in a worker's folder: to GitHub's address for it, made here.
+                to = "origin"
+                if checkout.get("remote"):
+                    to = github_address(origin_of(checkout), slug)
                 await checkout_git(
-                    checkout, repo, "push", "--quiet", "origin",
+                    checkout, repo, "push", "--quiet", to,
                     f"refs/heads/{branch}:refs/heads/{branch}", limit=180,
                 )  # fmt: skip
                 listed = await gh(
@@ -2639,19 +2678,27 @@ class TaskActions:
                 found += [line.strip() for line in listed.splitlines() if line.strip()]
         return found
 
-    async def pr_plan(self, checkout: dict) -> tuple[str, str, str] | None:
-        """(repository, GitHub owner/name, branch) to open a PR from, or None: no commits."""
+    async def pr_plan(self, checkout: dict, anyway: bool = False) -> tuple[str, str, str] | None:
+        """(repository, GitHub owner/name, branch) to open a PR from, or None: no commits. Not
+        while its worktree, or a submodule checked out in it, holds work not committed yet."""
         repo, branch = checkout["repo"], checkout["branch"]
         # As the owner knows it: its package's name ("textkit"), else its folder's.
         name = await asyncio.to_thread(package_name, Path(repo)) or Path(repo).name
         tree = checkout.get("worktree") or checkout["path"]
         live = await asyncio.to_thread(os.path.isdir, tree)
         status = await checkout_git(checkout, tree, "status", "--porcelain") if live else ""
-        if worth_committing(status):
+        changed, unread = await submodule_work(checkout, tree) if live else ([], [])
+        if worth_committing(status) or changed:
+            where = f" in {', '.join(changed)}" if changed and not worth_committing(status) else ""
             raise ValueError(
-                f"The {name} repository has uncommitted changes. Follow up and ask the worker to "
-                "commit "
-                "them, then create the PR."
+                f"The {name} repository has uncommitted changes{where}. Follow up and ask the "
+                "worker to commit them, then create the PR."
+            )
+        if unread and not anyway:
+            where = "; ".join(f"{path}, which Chief of Staff couldn't read ({why})"
+                              for path, why in unread)  # fmt: skip
+            raise MayHoldWorkError(
+                f"The {name} repository may have uncommitted changes in {where}."
             )
         if live:
             # The branch it is on now (one the owner named, say), not the one it was given.
