@@ -94,13 +94,17 @@ def ref_name(name: str) -> bool:
                for part in name.split("/"))  # fmt: skip
 
 
+def root() -> Path:
+    """Where Chief of Staff's git folders are (ROOT)."""
+    if ROOT is None:  # (Only outside Chief of Staff: a script, a test of this alone.)
+        return Path(tempfile.gettempdir()) / f"chiefofstaff-git-{getattr(os, 'getuid', int)()}"
+    return ROOT
+
+
 def place(common: str, admin: str = "") -> Path:
     """The git folder Chief of Staff's git uses for a repository (and one of its worktrees)."""
-    root = ROOT
-    if root is None:  # (Only outside Chief of Staff: a script, a test of this alone.)
-        root = Path(tempfile.gettempdir()) / f"chiefofstaff-git-{getattr(os, 'getuid', int)()}"
     named = f"{os.path.realpath(common)}\0{admin and os.path.realpath(admin)}"
-    return root / hashlib.sha256(named.encode()).hexdigest()[:24]
+    return root() / hashlib.sha256(named.encode()).hexdigest()[:24]
 
 
 def lock(folder: Path) -> asyncio.Lock:
