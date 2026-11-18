@@ -707,38 +707,6 @@ def test_a_folder_git_cannot_be_asked_of_is_a_reason_not_an_error(command, featu
     assert found and found.startswith("Denied: ") and policy.NOT_CHECKED not in found
 
 
-def test_where_a_bare_push_goes_is_read_without_git_reading_the_repository(tmp_path):
-    """A bare push's branches are read from the repository's files as data (its HEAD, the push
-    settings of its config), git asked only through a folder of Chief of Staff's own: as git
-    would push (push.default=upstream to main, a push refspec), whatever a fetch setting
-    renamed its tracking branches to; and not known (so asked) where its config includes other
-    files, or where none is checked out."""
-    repo = checkout(tmp_path / "repo", "feature")
-    git = ["git", "-C", str(repo)]
-
-    def config(*words):
-        subprocess.run([*git, "config", *words], check=True)
-
-    assert policy.current_branches(str(repo / "src")) == {"feature"}
-    config("branch.feature.remote", "origin")
-    config("branch.feature.merge", "refs/heads/main")
-    config("push.default", "upstream")
-    assert policy.current_branches(str(repo)) == {"feature", "main"}
-    config("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/feature-*")
-    assert policy.current_branches(str(repo)) == {"feature", "main"}, "not feature-main"
-    config("push.default", "current")
-    config("remote.origin.push", "refs/heads/feature:refs/heads/main")
-    assert policy.current_branches(str(repo)) == {"feature", "main"}
-    config("--unset-all", "remote.origin.push")
-    assert policy.current_branches(str(repo)) == {"feature"}
-    config("include.path", str(tmp_path / "more.gitconfig"))
-    assert policy.current_branches(str(repo)) == set(), "where it pushes: not known"
-    config("--unset", "include.path")
-    subprocess.run([*git, "checkout", "-q", "--detach"], check=True)
-    assert policy.current_branches(str(repo)) == set()
-    assert policy.current_branches(str(tmp_path)) == set()
-
-
 def test_any_failure_to_check_refuses_saying_so(monkeypatch, feature):
     def broken(folder):
         raise RuntimeError(folder)

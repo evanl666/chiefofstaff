@@ -55,10 +55,7 @@
   into one, whatever your config says. A submodule a PR would leave work behind in keeps it
   until that is committed, or, when it can't be read, until you click **Open it anyway**. Its
   git reaches other repositories only over http(s), ssh, git or a local path, not a remote
-  helper such as `codecommit::`. Where a bare `git push` goes (for *Ask first*'s check of
-  pushes to the default branch) is read from the repository's files as data too: a fetch
-  setting that renamed its tracking branches no longer hides a push to `main`, and a config
-  that includes other files makes it not known, so asked.
+  helper such as `codecommit::`.
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create
   `.git/commondir` in your repository, sending your git to a configuration of its own whose
