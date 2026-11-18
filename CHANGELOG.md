@@ -296,6 +296,11 @@ stays in sight; Artifacts words and times match what its rows say; a slow script
   Its runs all still going as before, the *Monitoring* row says so (*reported running just
   now · next in 59 min*); a run that ended, or a new one, is an *Update*, timed as itself
   (QA6-5).
+- **One piece of work is one row.** Accepted work its worker went on with as a new task (the
+  Router makes more of accepted work a new task, often under the same name) showed twice, with
+  the same runs: the new task under *Running*, the accepted one under *Monitoring*. When an
+  open task of the same worker watches all the accepted one waits on, the accepted one is with
+  the finished ones (*Still following*) (QA6-6).
 
 ## 0.1.45 (2026-11-14)
 

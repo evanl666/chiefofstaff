@@ -330,3 +330,35 @@ async def test_a_check_back_that_finds_its_runs_still_going_is_no_update(harness
                     artifacts=[NIGHTLY])  # fmt: skip
     news = harness.store.get(f"news:{a['id']}")
     assert news and "Bob approved" in news
+
+
+def test_one_piece_of_work_is_one_row_on_the_board():
+    """#6: accepted work its worker goes on with as a task of its own (the Router gives more of
+    an accepted task as a new one, under the same name), the same runs on both: a row under
+    Running for the new task, waiting for its background process, and one under Monitoring for
+    the accepted one, with the same two runs. Watched by the open task, the accepted one is
+    that task's: one row, where the open one stands."""
+    from test_ui_text import board, task
+
+    def run(name):
+        return {"key": f"https://flyte.acme.dev/console/executions/{name}", "kind": "flow",
+                "label": name, "url": f"https://flyte.acme.dev/console/executions/{name}",
+                "waiting_for": "the run", "status": "running", "unknown": False}  # fmt: skip
+
+    runs = [run("nightly-a"), run("nightly-b")]
+    title = "Tune the retry policy, option 1"
+    workers = [{"id": "w1", "status": "idle", "background": True, "turn_task": "x"},
+               {"id": "w2", "status": "idle", "turn_task": "z"}]  # fmt: skip
+    tasks = [
+        task("y", "w1", "done", title=title, monitoring=runs, result="Both runs started."),
+        task("x", "w1", "running", title=title, monitoring=runs, started=True),
+        # Another worker's accepted task on the same runs is its own work: still monitored.
+        task("z", "w2", "done", title="Report on the retry runs", monitoring=runs[:1]),
+        # Its own accepted task with a run the open one does not watch: still monitored.
+        task("v", "w1", "done", title="Export the shards", monitoring=[run("q1")]),
+    ]
+    found = board(tasks, workers)
+    assert found["phases"]["x"] == "running/background"
+    assert found["phases"]["y"] == "finished/still-following", found["phases"]
+    assert found["whys"]["y"] == "Still following, in a newer task of the same name"
+    assert sorted(found["sections"]["monitoring"]) == ["v", "z"]

@@ -335,6 +335,27 @@ export function boardOf(tasks, workers, { now = Date.now(), stallHours = 4, onCa
     if (first) phases.set(task.id, { section: "finished", marker: "still-following", why: `Still following, for “${first.title}”` });
     else followed.set(key, task);
   }
+  // One piece of work, one row (bug QA6-6): an accepted task whose worker goes on with it as a
+  // task of its own (more of accepted work is a new task), that task watching all it waits on
+  // (its runs, its PR), is that task's: with the finished ones, still followed, not a row of
+  // its own under Monitoring beside the open one.
+  const openKeys = new Map();
+  for (const task of tasks) {
+    if (!["running", "waiting", "queued"].includes(task.status)) continue;
+    const keys = openKeys.get(task.session_id) || new Map();
+    for (const item of obligationsOf(task)) if (item.kind !== "check_back") keys.set(String(item.key).toLowerCase(), task);
+    openKeys.set(task.session_id, keys);
+  }
+  for (const task of tasks) {
+    const open = openKeys.get(task.session_id);
+    if (!open?.size || task.status !== "done" || phases.get(task.id).section !== "monitoring") continue;
+    const keys = obligationsOf(task).filter((item) => item.kind !== "check_back").map((item) => String(item.key).toLowerCase());
+    const watchers = keys.map((key) => open.get(key));
+    if (!keys.length || !watchers.every(Boolean)) continue;
+    // Gone on with under the same name (as the Router names more of it): said so, not "for" itself.
+    const why = watchers[0].title === task.title ? "Still following, in a newer task of the same name" : `Still following, for “${watchers[0].title}”`;
+    phases.set(task.id, { section: "finished", marker: "still-following", why });
+  }
   const sections = Object.fromEntries(SECTIONS.map(([key]) => [key, tasks.filter((task) => phases.get(task.id)?.section === key)]));
   const newest = (a, b) => b.updated_at.localeCompare(a.updated_at);
   sections.needs.sort(newest);
