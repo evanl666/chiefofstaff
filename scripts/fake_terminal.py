@@ -6,17 +6,17 @@ process holds it open until this process is killed. It names itself to Copilot a
 """
 
 import asyncio
-import subprocess
 import sys
 import uuid
 
-from copilot import CopilotClient, RuntimeConnection
+from chiefofstaff.backend import copilot_backend
 
 
 async def main(cwd: str, text: str, client_name: str):
-    path = subprocess.run(["which", "copilot"], capture_output=True, text=True).stdout.strip()
-    client = CopilotClient(connection=RuntimeConnection.for_stdio(path=path))
-    await client.start()
+    # As Chief of Staff runs Copilot (its own runtime when the CLI is newer than the SDK).
+    backend = copilot_backend("copilot")
+    await backend.start()
+    client = backend.client
     session = await client.create_session(
         session_id=str(uuid.uuid4()),
         working_directory=cwd,

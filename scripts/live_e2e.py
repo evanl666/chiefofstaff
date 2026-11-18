@@ -32,7 +32,8 @@ from contextlib import suppress
 from pathlib import Path
 
 import httpx
-from copilot import CopilotClient, RuntimeConnection
+
+from chiefofstaff.backend import copilot_backend
 
 sys.path.insert(0, str(Path(__file__).parent))
 from fake_oauth_mcp import forget_sign_ins, keychain_accounts
@@ -1471,9 +1472,10 @@ async def cleanup(data: Path):
     ids: list[str] = []
     if database.exists():
         ids = sessions_in(database)
-    path = subprocess.run(["which", "copilot"], capture_output=True, text=True).stdout.strip()
-    client = CopilotClient(connection=RuntimeConnection.for_stdio(path=path))
-    await client.start()
+    # As Chief of Staff runs Copilot (its own runtime when the CLI is newer than the SDK).
+    backend = copilot_backend("copilot")
+    await backend.start()
+    client = backend.client
     # Also whatever the database does not list (a crash, a delete that failed): every session
     # that worked in this run's temporary folders.
     root = str(data.resolve().parent) + "/"
@@ -1486,7 +1488,7 @@ async def cleanup(data: Path):
             await client.delete_session(session_id)
         except Exception as exc:
             log(f"could not delete {session_id}: {exc}")
-    await client.stop()
+    await backend.stop()
     log(f"deleted {len(ids)} test sessions")
 
 

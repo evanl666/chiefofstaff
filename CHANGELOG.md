@@ -14,6 +14,12 @@ owner's report: what you write a worker says where it is (on Home too) and is ab
 you look at; a result and the reply drafted for it are one decision; a check-back that finds
 nothing new is no *Update*; one piece of work is one row.
 
+- **Fixed: Chief of Staff could not start once your Copilot CLI updated itself to 1.0.114.** That
+  version speaks a protocol the Copilot SDK Chief of Staff uses doesn't yet ("SDK protocol
+  version mismatch"). Now, when your CLI is newer than Chief of Staff supports, it runs the
+  Copilot version its SDK was made with instead (downloaded once, about 100 MB, into the SDK's
+  own cache), with the same sign-in, settings and sessions, and says so: "Your Copilot CLI
+  (1.0.114) is newer than Chief of Staff supports; using Copilot 1.0.105 for now."
 - **Security: a Codex worker could switch off Chief of Staff's checks for itself.** In a
   repository you trust in Codex, a worker could write Codex settings into its own folder
   (`.codex/`): from its next start or resume, Codex loaded them. A rule there let commands run

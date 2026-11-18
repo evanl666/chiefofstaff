@@ -1231,6 +1231,67 @@ async def test_copilot_runs_without_chiefofstaff_secrets(monkeypatch):
     assert captured["env"]["KEEP_ME"] == "1"
 
 
+async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_the_sdks_own(tmp_path, monkeypatch):
+    """The owner's Copilot CLI updated itself to a protocol this SDK doesn't speak: the SDK's own
+    Copilot runs instead (as the SDK finds or downloads it, not one COPILOT_CLI_PATH names),
+    the owner told as it starts and once it runs; a CLI refused for anything else is not."""
+    made = []
+    newer = (
+        "SDK protocol version mismatch: SDK supports versions 3-3, but server reports version 4."
+        " Please update your SDK or server to ensure compatibility."
+    )
+
+    class Client:
+        refusal = newer
+
+        def __init__(self, connection, env):
+            self.path, self.env = connection.path, env
+            made.append(self)
+
+        async def start(self):
+            if self.path:  # The owner's.
+                raise RuntimeError(self.refusal)
+
+        async def get_status(self):
+            return SimpleNamespace(version="1.0.105")
+
+        async def stop(self):
+            return []
+
+    async def cli_version(command):
+        return "1.0.114"
+
+    monkeypatch.setattr(backend_module, "CopilotClient", Client)
+    monkeypatch.setattr(backend_module, "cli_version", cli_version)
+    monkeypatch.setenv("COPILOT_CLI_PATH", "/elsewhere/copilot")
+    backend = backend_module.copilot_backend("git")
+    notes = []
+    backend.note = notes.append
+    await backend.start()
+    assert backend.fallback == ("1.0.114", "1.0.105") and backend.client is made[1]
+    assert made[1].path is None and "COPILOT_CLI_PATH" not in made[1].env
+    assert made[0].env["COPILOT_CLI_PATH"] == "/elsewhere/copilot", "the owner's as before"
+    assert notes == [
+        "Your Copilot CLI (1.0.114) is newer than Chief of Staff supports: setting up the "
+        "Copilot version it works with (a download of about 100 MB, the first time)…"
+    ]
+    harness = Harness(tmp_path / "data", Settings())
+    runtime = await harness.connect()
+    try:
+        runtime.backend.fallback = backend.fallback  # type: ignore[attr-defined]
+        assert await runtime.version_warning() == (
+            "Your Copilot CLI (1.0.114) is newer than Chief of Staff supports; using Copilot "
+            "1.0.105 for now."
+        )
+    finally:
+        await runtime.stop()
+    Client.refusal = newer.replace("version 4", "version 2").replace("3-3", "3-4")
+    made.clear()
+    with pytest.raises(RuntimeError, match="server reports version 2"):
+        await backend_module.copilot_backend("git").start()
+    assert len(made) == 1, "an older one is not replaced"
+
+
 async def test_slack_session_only_has_its_own_tools(tmp_path):
     harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
     await harness.connect()

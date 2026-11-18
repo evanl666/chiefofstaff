@@ -51,6 +51,7 @@ from .backend import (
     COPILOT_AGENT,
     OLDEST_CLI,
     AgentBackend,
+    CopilotBackend,
     SandboxPolicy,
     copilot_backend,
     copilot_home,
@@ -737,6 +738,8 @@ class Runtime:
                 if started := await asyncio.to_thread(copilot_orphans, records, directory):
                     await asyncio.to_thread(lambda: end_processes(copilot_tree(started)))
                 self.backend = self.backend_factory(self.store.settings())
+                if isinstance(self.backend, CopilotBackend):
+                    self.backend.note = self.backend_note
                 await self.backend.start()
                 auth = await self.backend.get_auth_status()
                 # It answered: its processes run now. Remembered, so they never count as the
@@ -790,9 +793,21 @@ class Runtime:
             self.background(self.workers.refresh_elsewhere())
             self.background(self.github.signed_in())  # Which GitHub accounts workers can use.
 
+    def backend_note(self, text: str) -> None:
+        """What Copilot's start is doing when it takes a while: said as it connects."""
+        self.status = {"state": "starting", "error": "", "warning": text}
+        self.publish_state()
+
     async def version_warning(self) -> str:
-        """A note for the owner when the agent CLI is older than the versions we tested."""
+        """A note for the owner when the agent CLI is older than the versions we tested, or
+        newer than this release supports (another Copilot runs instead: backend.fallback)."""
         backend = self.connected()
+        if fallback := getattr(backend, "fallback", None):
+            theirs, ours = fallback
+            return (
+                f"Your Copilot CLI{f' ({theirs})' if theirs else ''} is newer than Chief of Staff "
+                f"supports; using Copilot {ours} for now."
+            )
         try:
             version = await backend.version()
         except Exception:
