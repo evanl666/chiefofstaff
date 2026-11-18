@@ -7,7 +7,10 @@ own code. From the QA round on 0.1.45: pushes to the default branch that got pas
 in 0.1.45 are refused, and a switch back to a branch of its own before a push is let through
 again; runs and documents are listed wherever they are served; an away notice that failed
 stays in sight; Artifacts words and times match what its rows say; a slow script's
-`copilot -p` calls are a batch again, and your own questions stay listed.
+`copilot -p` calls are a batch again, and your own questions stay listed. From an owner's
+report: what you write a worker says where it is (on Home too) and is about the task you look
+at; a result and the reply drafted for it are one decision; a check-back that finds nothing new
+is no *Update*; one piece of work is one row.
 
 - **Sandboxed workers have package caches of their own, and never download again what you or
   another worker already have.** Copilot's sandbox let them write your caches, so a worker could

@@ -4325,6 +4325,213 @@ async def round_fourteen(runtime, browser, failures: list[str]):
     await context.close()
 
 
+async def qa6_seeded(runtime) -> dict:
+    """QA round 6 (the owner's report): a worker stopped with the owner's message unseen (1); a
+    result and the reply drafted for it (2); a worker whose earlier task A is watched while B,
+    given since, waits for acceptance (3, 4); accepted work with news just now (5); accepted
+    work with two runs gone on with as a new task of the same name, its command running (6)."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(store.settings().model_copy(update={"max_workers": 90}))
+    ago = lambda **delta: (datetime.now(UTC) - timedelta(**delta)).isoformat()  # noqa: E731
+    found: dict = {}
+
+    async def spawn(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        worker = json.loads(result.text_result_for_llm)["session_id"]
+        await settle(runtime)
+        session = runtime.states.handle(worker)
+        session.emit("user.message", content=session.raw_sent[-1])
+        session.emit("assistant.turn_start")
+        await settle(runtime)
+        return worker, runtime.tasks.current(worker)
+
+    async def idle(worker):
+        runtime.states.handle(worker).emit("session.idle")
+        await settle(runtime)
+
+    async def nothing():
+        return []
+
+    held, _task = await spawn("QA6 update the deploy guide")
+    runtime.update_session(held, status="working")
+    runtime.states.handle(held).get_events = nothing
+    await runtime.owner_send(held, "QA6 use the staging config")
+    await runtime.workers.interrupt(held)
+    found["held"] = held
+
+    ann, task = await spawn("QA6 answer Ann about the release")
+    await call_tool(runtime, "report", ann, status="done", summary="The release is Friday.")
+    await idle(ann)
+    found["draft"] = store.create_draft(
+        ann, "reply", {"to": "Ann", "where": "email", "task_id": task["id"]}, "It is Friday."
+    )
+    found["ann"] = task
+
+    # A question its worker asks about its result: answering it accepts nothing.
+    asker, task = await spawn("QA6 size the cache")
+    await call_tool(runtime, "report", asker, status="done", summary="96 MB fits.")
+    await idle(asker)
+    found["ask"] = store.create_draft(
+        asker, "question", {"task_id": task["id"], "choices": ["Yes", "No"]}, "Keep 96 MB?"
+    )
+
+    chat, a = await spawn("QA6 benchmark the cache backends")
+    await call_tool(runtime, "report", chat, status="done", summary="Backend B is 20% faster.",
+                    artifacts=[{"url": FLYTE + "qa6c", "name": "QA6 load test",
+                                "status": "running"}])  # fmt: skip
+    runtime.task_actions.accept(a["id"])
+    await idle(chat)
+    await call_tool(runtime, "message_session", router, session_id=chat, task="new",
+                    why_new="another question",
+                    title="QA6 answer whether the API docs cover paging",
+                    text="Do the API docs cover paging?")  # fmt: skip
+    await settle(runtime)
+    await call_tool(
+        runtime, "report", chat, status="done", summary="Yes, under the list endpoints."
+    )
+    await idle(chat)
+    found["chat"], found["a"] = chat, a
+
+    news, task = await spawn("QA6 migrate the exporter to the new schema")
+    await call_tool(runtime, "report", news, status="done", summary="Switched.")
+    runtime.task_actions.accept(task["id"])
+    await idle(news)
+    runtime.tasks.update(task["id"], ended_at=ago(hours=1, minutes=5))
+    runtime.task_actions.news(task["id"], "QA6 the schema migration finished.")
+    found["news"] = task
+
+    went, y = await spawn("QA6 tune the retry policy, option 1")
+    runs = [{"url": FLYTE + "qa6a", "name": "QA6 run a", "status": "running"},
+            {"url": FLYTE + "qa6b", "name": "QA6 run b", "status": "running"}]  # fmt: skip
+    await call_tool(runtime, "report", went, status="done", summary="Both runs started.",
+                    artifacts=runs)  # fmt: skip
+    runtime.task_actions.accept(y["id"])
+    await idle(went)
+    await call_tool(runtime, "message_session", router, session_id=went, task="new",
+                    why_new="more of it", title="QA6 tune the retry policy, option 1",
+                    text="Wait for both runs and compare them.")  # fmt: skip
+    await settle(runtime)
+    await call_tool(runtime, "report", went, status="progress", summary="Waiting for both runs.",
+                    artifacts=runs)  # fmt: skip
+    await idle(went)
+    runtime.states[went].held = True  # Its turn over, a command it left running goes on.
+    runtime.update_session(went, status="idle", activity="")
+    found["y"] = y
+    for task in runtime.tasks.listed():
+        runtime.task_actions.publish(runtime.tasks.get(task["id"]))
+    for draft in (found["draft"], found["ask"]):
+        runtime.bus.publish("draft", store.draft(draft["id"]))
+    runtime.publish_state()
+    return found
+
+
+async def round_qa6(runtime, browser, failures: list[str]):
+    """The owner's QA round 6. 1: Home's copy of what they wrote a worker stands where the
+    worker has it; held by a stop, it says so, with Send now. 2: a result and the reply drafted
+    for it, one decision: Copy & accept, and the card is gone with both done. 3/4: written in a
+    worker's chat opened at an earlier task, a message is about that task: its row comes under
+    Running, named for it, once. 5: an update's time is its own. 6: accepted work gone on with
+    as a new task of the same name is one row."""
+    found = await qa6_seeded(runtime)
+    store = runtime.store
+    context = await browser.new_context(viewport={"width": 1500, "height": 1100})
+    await context.grant_permissions(["clipboard-read", "clipboard-write"])
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+
+    copy = page.locator("#timeline .msg.owner", has_text="QA6 use the staging config")
+    await expect(copy.locator(".to")).to_have_text("→ QA6 update the deploy guide")
+    line = copy.locator(".delivery")
+    await expect(line).to_contain_text("Held for its next message: it was stopped")
+    await line.get_by_role("button", name="Send now").click()
+    await expect(line).to_have_text("Sent", timeout=10000)
+    sent = runtime.states.handle(found["held"]).raw_sent[-1]
+    assert "QA6 use the staging config" in sent, sent
+    assert not any(
+        m["delivery"] == "queued"
+        for m in await page.evaluate(
+            "id => import('/static/dom.js').then((d) => d.api(`/api/sessions/${id}/messages`))",
+            store.get("router_id"),
+        )
+        if m["kind"] == "owner" and (m["meta"] or {}).get("to")
+    ), "no copy of a message a worker has says it waits"
+    log("QA6-1: Home's copy stands where the worker has it; held, it says why, Send now sends")
+
+    needs = page.locator("#needs")
+    card = needs.locator(f'.card.draft[data-id="{found["draft"]["id"]}"]')
+    inner = card.locator(".card.task.in-draft")
+    await expect(inner.locator(".head .title")).to_have_text("QA6 answer Ann about the release")
+    await expect(inner.get_by_role("button", name="Accept")).to_have_count(0)
+    await expect(inner.get_by_role("button", name="Request changes")).to_be_visible()
+    main = card.get_by_role("button", name="Copy & accept")
+    await expect(main).to_be_visible()
+    await card.screenshot(path=SHOTS / "ui-edges-qa6-one-decision.png")
+    await main.click()
+    await expect(page.locator(".toast", has_text="Result accepted.")).to_be_visible()
+    await expect(card).to_have_count(0, timeout=10000)
+    await expect(needs.locator(".card", has_text="QA6 answer Ann")).to_have_count(0)
+    assert store.draft(found["draft"]["id"])["status"] == "sent"
+    assert runtime.tasks.get(found["ann"]["id"])["status"] == "done"
+    assert await page.evaluate("navigator.clipboard.readText()") == "It is Friday."
+    log("QA6-2: a result and its reply, one action: copied, sent, accepted; the card gone")
+    asked = needs.locator(f'.card.draft[data-id="{found["ask"]["id"]}"]')
+    await expect(asked.locator(".card.task.in-draft .head .title")).to_have_text(
+        "QA6 size the cache"
+    )
+    await expect(
+        asked.locator(".card.task.in-draft").get_by_role("button", name="Accept")
+    ).to_be_visible()
+    log("QA6-2: a question about a result keeps Accept on it: answering it accepts nothing")
+
+    title = "QA6 benchmark the cache backends"
+    watched = page.locator("#tasks-monitoring .card.task", has_text=title)
+    await expect(watched).to_have_count(1)
+    # Opened at its end (the sidebar), with two finished tasks, the latest given by the Router:
+    # nothing says which one is meant, so what is written there is a task of its own.
+    await page.locator("#session-list .item", has_text="QA6 answer whether the API").click()
+    composer = page.locator("#composer-input")
+    await expect(composer).to_have_attribute("placeholder", "A new task for this worker…")
+    await page.locator("#back-home").click()
+    await watched.locator(".worker-ref").first.click()
+    await expect(page.locator("#back-home")).to_be_visible()
+    await expect(composer).to_have_attribute("placeholder", f"Message about “{title}”…")
+    async with page.expect_request(f"**/api/sessions/{found['chat']}/messages") as request:
+        await composer.fill("QA6 also time the cold start")
+        await composer.press("Enter")
+    assert (await request.value).post_data_json["task_id"] == found["a"]["id"]
+    asked = [m for m in store.messages(found["chat"]) if m["kind"] == "owner"][-1]
+    assert asked["meta"]["task_id"] == found["a"]["id"], asked
+    await page.locator("#back-home").click()
+    running = page.locator("#tasks-running .card", has_text=title)
+    await expect(running).to_have_count(1, timeout=10000)
+    await expect(running.locator(".head .meta")).to_contain_text("Following up")
+    await expect(watched).to_have_count(0)
+    await expect(
+        page.locator("#tasks-running .card", has_text="QA6 answer whether the API docs")
+    ).to_have_count(0)
+    log("QA6-3/4: written at task A in its chat, it is A's: one row, under Running, named A")
+
+    update = needs.locator(".card.task", has_text="QA6 migrate the exporter")
+    await expect(update.locator(".head .meta .marker")).to_have_text("Update")
+    await expect(update.locator(".head .meta .when")).to_have_text(" · just now")
+    log("QA6-5: an update's time is the news's own, not when its task ended")
+
+    again = "QA6 tune the retry policy, option 1"
+    await expect(page.locator("#tasks-running .card.task", has_text=again)).to_have_count(1)
+    await expect(page.locator("#tasks-monitoring .card.task", has_text=again)).to_have_count(0)
+    earlier = page.locator("#tasks-recent .card.task", has_text=again)
+    await expect(earlier.locator(".head .meta")).to_contain_text("Still following")
+    await expect(earlier).to_contain_text("Still following, in a newer task of the same name")
+    log("QA6-6: accepted work gone on with as a new task of the same name: one row")
+    assert not errors, errors
+    await context.close()
+
+
 async def main():
     from chiefofstaff import machine
 
@@ -4666,7 +4873,7 @@ async def main():
                           round_ten, round_scale, round_qa, round_eleven, round_twelve,
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
-                          round_send, round_agents):  # fmt: skip
+                          round_send, round_agents, round_qa6):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
