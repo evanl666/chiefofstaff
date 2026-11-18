@@ -511,14 +511,34 @@ async def private_git(
                 return ""
             specs = [f":(top,attr:filter={name})" for name in filters]
             line = (*line, *specs) if "--" in line else (*line, "--", *specs)
-        elif not every and reads_tree(line):
+        stdin = None
+        if not filtered and not every and reads_tree(line):
             # (Known by the repository's own index: its copy here is made again when it changes.)
             index = Path(pins.get("GIT_INDEX_FILE") or Path(admin or common) / "index")
-            links = await index_gitlinks(path, pins, index, lazy=False)
-            line = left_out(line, list(links), filters)
+            links = list(await index_gitlinks(path, pins, index, lazy=False))
+            if filters and git_command_of(line) == "add":
+                # git before 2.43 (Debian 12's 2.39) takes no `attr:` pathspec in `add`: the
+                # files those filters keep are listed (ls-files takes it) and left out by name,
+                # all its paths given on its stdin (there may be many).
+                kept: set[str] = set()
+                specs = [f":(top,attr:filter={name})" for name in filters]
+                for listing in ((), ("--others", "--exclude-standard")):
+                    listed = await command(
+                        "git", *SAFE_GIT, *options, "-C", path, "ls-files", "-z", "--full-name",
+                        *listing, "--", *specs, limit=limit, env=pins, lazy=False,
+                        local_remotes=False,
+                    )  # fmt: skip
+                    kept.update(name for name in listed.split("\0") if name)
+                line = left_out(line, [*links, *sorted(kept)], [])
+                if "--" in line:
+                    at = line.index("--")
+                    stdin = "\0".join(line[at + 1 :]).encode()
+                    line = (*line[:at], "--pathspec-from-file=-", "--pathspec-file-nul")
+            else:
+                line = left_out(line, links, filters)
         return await command(
             "git", *SAFE_GIT, *options, "-C", path, *line[1:], limit=limit, env=pins, lazy=False,
-            local_remotes=False,
+            local_remotes=False, stdin_data=stdin,
         )  # fmt: skip
 
 
