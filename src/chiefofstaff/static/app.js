@@ -3,7 +3,7 @@
 import { $, api, closeMenus, closeOnBackdrop, rememberKey, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, othersOn, routerId, state, viewedId } from "./state.js";
 import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
-import { appendMessages, renderHeader, scrollToBottom, select } from "./session.js";
+import { appendMessages, chatAnchor, followAnchor, renderHeader, scrolledByOwner, scrollToBottom, select } from "./session.js";
 import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
@@ -76,7 +76,9 @@ function bindUi() {
         await select(sessionId);
         return;
       }
-      appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body() })]);
+      // About the task of the worker's the owner looks at in its chat (several to choose from).
+      const task = chatAnchor();
+      appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body(task ? { task_id: task } : {}) })]);
     } catch (error) {
       if (other) input.disabled = false;
       input.value = text;
@@ -86,6 +88,9 @@ function bindUi() {
     }
   });
   bindAttachments();
+  // In a worker's chat, what is written goes with the task in view: its placeholder says which.
+  $("#scroller").addEventListener("scroll", followAnchor, { passive: true });
+  for (const type of ["wheel", "touchmove"]) $("#scroller").addEventListener(type, scrolledByOwner, { passive: true });
   // The owner is here: what needs them is not sent elsewhere meanwhile (When you're away).
   let seen = 0;
   const present = () => {

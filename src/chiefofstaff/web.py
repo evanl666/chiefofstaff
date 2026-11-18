@@ -319,7 +319,9 @@ def create_app(
                 )
             )
         return shown(
-            await runtime.owner_send(session_id, payload.text, attachments=payload.attachments)
+            await runtime.owner_send(
+                session_id, payload.text, attachments=payload.attachments, task_id=payload.task_id
+            )
         )
 
     @app.get("/api/attachments/{name}")

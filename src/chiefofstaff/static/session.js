@@ -1,7 +1,7 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
 import { $, api, blobLive, blobUrl, el, foldable, toast, whenNearScreen } from "./dom.js";
-import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, slackText, threadLabel } from "./text.js";
+import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, shorten, slackText, threadLabel } from "./text.js";
 import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
 import { MARKERS } from "./board.js";
 import { slotReason } from "./tasks.js";
@@ -160,8 +160,58 @@ export function renderHeader() {
   setComposer(
     session.elsewhere
       ? { locked: IN_TERMINAL }
-      : { placeholder: session.closed_at ? "Message to reopen this worker…" : placeholders[session.role] || "Message this worker directly…" },
+      : { placeholder: session.closed_at ? "Message to reopen this worker…" : placeholders[session.role] || chatPlaceholder(session) },
   );
+}
+// A worker with several tasks: the one the owner chose in its chat, which what they write is
+// about (bug QA6-3: it was filed under the one given last, whatever they looked at): the task
+// the chat was opened at, else, scrolled up from its end, the latest of its messages in view
+// that is about one. "" at the chat's end (the server decides: a question it asks, the task it
+// is on, the one their own last message was about, else a task of its own: Runtime.chat_task),
+// and with one task or none to choose from.
+export function chatAnchor() {
+  const session = current();
+  if (state.selected === HOME || session?.role !== "worker" || !session.chat_task) return "";
+  if (openedAt.session === session.id && openedAt.task in session.chat_task.titles) return openedAt.task;
+  const scroller = $("#scroller");
+  if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160) return "";
+  const bottom = scroller.getBoundingClientRect().bottom;
+  let found = "";
+  for (const node of $("#timeline").querySelectorAll(":scope > [data-task]")) {
+    if (node.getBoundingClientRect().top >= bottom) break;
+    if (node.dataset.task in session.chat_task.titles) found = node.dataset.task;
+  }
+  return found;
+}
+// What the composer of a worker's chat says: where what is written there goes, when it has
+// several tasks (the one in view, else the server's choice: maybe a task of its own).
+function chatPlaceholder(session) {
+  const known = session.chat_task;
+  if (!known) return "Message this worker directly…";
+  const anchor = chatAnchor();
+  const title = anchor ? known.titles[anchor] : known.title;
+  return title ? `Message about “${shorten(title, 60)}”…` : "A new task for this worker…";
+}
+// The task a worker's chat was opened at (a task row's Worker link): what is written there is
+// about it until the owner scrolls elsewhere themself.
+let openedAt = { session: "", task: "" };
+export function scrolledByOwner() {
+  if (!openedAt.task) return;
+  openedAt = { session: "", task: "" };
+  followAnchor();
+}
+// The placeholder follows what the owner scrolls to (once a frame at most).
+let anchoring = 0;
+export function followAnchor() {
+  if (anchoring) return;
+  anchoring = requestAnimationFrame(() => {
+    anchoring = 0;
+    const session = current();
+    if (state.selected === HOME || session?.role !== "worker" || session.closed_at || session.elsewhere) return;
+    const input = $("#composer-input");
+    const placeholder = chatPlaceholder(session);
+    if (input.placeholder !== placeholder) input.placeholder = placeholder;
+  });
 }
 // Two programs must not write to one Copilot session: one open in a terminal is used there.
 export const IN_TERMINAL = "Open in a terminal right now. Continue there, or exit it there (/exit) to message it here.";
@@ -288,6 +338,7 @@ export function setLayout(home) {
 // its end: the worker may have gone on to other work since.
 export async function select(sessionId, { task = "" } = {}) {
   if (!sessionId) return;
+  openedAt = { session: task ? sessionId : "", task };
   // The Router's chat and the inbox of earlier versions are Home.
   if (sessionId === "inbox" || sessionId === routerId()) sessionId = HOME;
   closeMentions();
@@ -340,6 +391,7 @@ export async function select(sessionId, { task = "" } = {}) {
   if (messages.length >= PAGE) await countEarlier(viewed);
   if (state.selected !== sessionId) return;
   if (task) await showTaskInTimeline(task);
+  followAnchor();
   if (viewed && byId(viewed)?.unread) markRead(viewed);
   if (!$("#composer").hidden) $("#composer-input").focus();
 }
@@ -968,6 +1020,7 @@ export function appendMessages(messages) {
   updateDraftRecords();
   showDeliveries();
   scrollToBottom();
+  followAnchor();
 }
 // One message at the end of `container`: a step (or narration) joins the fold before it.
 function place(container, message, next, shown) {

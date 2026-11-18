@@ -279,6 +279,17 @@ stays in sight; Artifacts words and times match what its rows say; a slow script
   the reply goes and the result is accepted (news on accepted work is seen with it); *Follow
   up* and *Request changes* stay on the result. A result accepted elsewhere first leaves its
   reply's card as it was; the Router hears of the reply once (QA6-2).
+- **What you write in a worker's chat is about the task you look at there.** It was filed under
+  the task the worker was given last: more for an earlier task, written after the Router gave
+  the worker another, went to that other one, and Home showed a row named for it doing the
+  earlier task's work, beside the earlier task's own row. It now goes to the task you chose in
+  the chat: the one you opened it at (a task row's *Worker* link), or one you scrolled up to.
+  Otherwise (at the chat's end, or from Home with @) it goes to the task that asked you
+  something, the one the worker is on, its only one, or the one you were writing it about;
+  with several finished and none of those, it is a task of its own, named from your message.
+  The chat's box says which (*Message about “…”*, *A new task for this worker…*). The worker is
+  named for that task, and its row is that task's own, under *Running* while it works
+  (QA6-3, QA6-4).
 
 ## 0.1.45 (2026-11-14)
 

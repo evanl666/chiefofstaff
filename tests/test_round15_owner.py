@@ -192,3 +192,106 @@ async def test_a_reply_sent_from_a_card_with_news_on_its_result_settles_the_news
     )
     assert not harness.store.get(f"news:{task['id']}")
     assert runtime.tasks.get(task["id"])["status"] == "done"
+
+
+async def worker_with_two_tasks(runtime, harness):
+    """A worker that did task A (accepted), then task B the Router gave it, since reported."""
+    router = harness.router_id
+    worker = await spawn(runtime, router, "Benchmark the two cache backends")
+    first = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", summary="Backend B is 20% faster.")
+    runtime.task_actions.accept(first["id"])
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    await call_tool(runtime, "message_session", router, session_id=worker, task="new",
+                    why_new="another question", title="Answer whether the API docs cover paging",
+                    text="Do the API docs cover paging?")  # fmt: skip
+    await settle(runtime)
+    second = runtime.tasks.current(worker)
+    await call_tool(
+        runtime, "report", worker, status="done", summary="Yes, under the list endpoints."
+    )
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    assert harness.store.session(worker)["status"] != "working"
+    return worker, first, runtime.tasks.get(second["id"])
+
+
+def last_owner_message(harness, worker) -> dict:
+    return [m for m in harness.store.messages(worker) if m["kind"] == "owner"][-1]
+
+
+async def test_a_message_written_at_a_task_in_its_chat_is_filed_under_that_task(harness):
+    """#3/#4: the owner opened the worker's chat at task A (its row's Worker link) and wrote
+    more for A; it was filed under B, the task the Router gave it last: Home showed a row
+    named B doing A's work, beside A's own row. Filed under A, the worker is named for A."""
+    runtime = await harness.connect()
+    worker, first, second = await worker_with_two_tasks(runtime, harness)
+    published = []
+    publish = runtime.bus.publish
+    runtime.bus.publish = lambda kind, data: (published.append((kind, data)), publish(kind, data))
+    await runtime.owner_send(worker, "Also time the cold start", task_id=first["id"])
+    await settle(runtime)
+    assert last_owner_message(harness, worker)["meta"]["task_id"] == first["id"]
+    # Home hears A is followed up now (its row under Running), not only the worker's state.
+    told = [d for kind, d in published if kind == "task" and d["id"] == first["id"]]
+    assert told and told[-1]["follow_up"], "A's row moves to Running at once"
+    view = runtime.view(harness.store.session(worker))
+    assert view["display_title"] == first["title"], "named for what it does now"
+    assert view["turn_task"] == first["id"]
+    assert len(runtime.tasks.for_session(worker)) == 2, "no other task"
+    assert runtime.tasks.get(second["id"])["status"] == "review", "B is left as it was"
+
+
+async def test_a_message_about_none_of_its_tasks_in_particular_is_a_task_of_its_own(harness):
+    """#3: several finished tasks, the latest given by the Router, and nothing says which one
+    the owner means: not the latest blindly, a task of its own named from the message."""
+    runtime = await harness.connect()
+    worker, first, second = await worker_with_two_tasks(runtime, harness)
+    view = runtime.view(harness.store.session(worker))
+    assert view["chat_task"]["id"] == "", "the chat says it starts a task of its own"
+    assert view["chat_task"]["titles"] == {first["id"]: first["title"],
+                                           second["id"]: second["title"]}  # fmt: skip
+    await runtime.owner_send(worker, "Also time the cold start\nRun it five times.")
+    await settle(runtime)
+    made = runtime.tasks.for_session(worker)[-1]
+    assert made["id"] not in {first["id"], second["id"]}
+    assert made["title"] == "Also time the cold start"
+    assert made["status"] == "running"
+    assert last_owner_message(harness, worker)["meta"]["task_id"] == made["id"]
+    assert f"starts task {made['id']}" in harness.session(worker).sent[-1]
+    view = runtime.view(harness.store.session(worker))
+    assert view["display_title"] == made["title"] and view["turn_task"] == made["id"]
+
+
+async def test_the_task_the_owner_looks_at_wins_over_one_that_waits(harness):
+    """#3 (review): with another task stopped (waiting for Go on), a message written at task A
+    in its chat went to the stopped one, and set it going again."""
+    runtime = await harness.connect()
+    worker, first, _second = await worker_with_two_tasks(runtime, harness)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task="new",
+                    why_new="third", title="Export the weekly numbers",
+                    text="Export them.")  # fmt: skip
+    third = runtime.tasks.current(worker)
+    await runtime.workers.interrupt(worker)
+    assert runtime.tasks.get(third["id"])["status"] == "waiting"
+    await runtime.owner_send(worker, "Also time the cold start", task_id=first["id"])
+    assert last_owner_message(harness, worker)["meta"]["task_id"] == first["id"]
+    assert not harness.store.get(f"goingon:{third['id']}"), "the stopped task stays stopped"
+    assert runtime.tasks.get(third["id"])["status"] == "waiting"
+
+
+async def test_the_owners_own_conversation_with_a_worker_goes_on_about_its_task(harness):
+    """#3: what the owner wrote about A last, the next message goes on with (not a new task),
+    unless they look at another task in its chat."""
+    runtime = await harness.connect()
+    worker, first, second = await worker_with_two_tasks(runtime, harness)
+    await runtime.owner_send(worker, "Also time the cold start", task_id=first["id"])
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    assert runtime.view(harness.store.session(worker))["chat_task"]["id"] == first["id"]
+    await runtime.owner_send(worker, "And keep the older snapshots too")
+    assert last_owner_message(harness, worker)["meta"]["task_id"] == first["id"]
+    await runtime.owner_send(worker, "Cite the doc's section", task_id=second["id"])
+    assert last_owner_message(harness, worker)["meta"]["task_id"] == second["id"]
+    assert len(runtime.tasks.for_session(worker)) == 2

@@ -73,7 +73,12 @@ they allow. Home's copy of what you wrote a worker (*→ worker*) says where tha
 *Go on* and replies show the same on the task's row. When you cancel a task, the Router hears of it with its next message, and it
 does not start that work again (nor a new Router after a handover) unless you ask. What you
 write in a worker's chat answers the task that asked you (or the question or decision card it
-waits on), and that task goes on at once; about finished work, its answer is an
+waits on), and that task goes on at once; otherwise it is about the task you chose there: the
+one you opened its chat at (a task row's *Worker* link), or one you scrolled up to. At the
+chat's end, or written to it from Home (@), it is about the task it is on, its only one, or the
+one you were writing it about; with several finished and none of those, it is a task of its
+own, named from your message (the box says which: *Message about “…”*, *A new task for this
+worker…*). Its worker is named for that task while it works on it; about finished work, its answer is an
 *Update* on the task, which keeps its result, unless it changed code for you, or redid or
 corrected the work: then that is its new result (to review again when you had not accepted it),
 and the one before is under *Earlier reports* on its card. A message there that asks for something else ("New, separate task: add mod()

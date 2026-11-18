@@ -2247,8 +2247,10 @@ async def test_a_new_task_answered_without_a_report_is_filed_not_left_running(ha
     assert task["title"] == "Monthly growth"
     assert task["status"] == "review" and "| Feb | +4% |" in task["result"], task["status"]
 
-    # Asked about finished work (no new task), it goes back to done after answering.
-    await runtime.owner_send(worker, "Which month was best?")
+    # Asked about finished work (no new task), it goes back to done after answering. Asked in
+    # its chat opened at that result, as the chat sends it (QA6: with two finished tasks, the
+    # latest given by the Router, and none chosen, the message would be a task of its own).
+    await runtime.owner_send(worker, "Which month was best?", task_id=task["id"])
     session.emit("assistant.message", content="February.")
     session.emit("session.idle")
     await settle(runtime)

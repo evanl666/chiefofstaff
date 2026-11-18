@@ -418,11 +418,18 @@ class Delivery:
         # What it is given now, not what rides along with it (instructions held back
         # while it was stopped are taken up when their turn comes).
         fresh = "\n\n".join(m["meta"]["prompt"] for m in pending if not m["meta"].get("deferred"))
+        # The owner's chat about one of its tasks names none in its words: its turn is on the
+        # task it is filed under all the same (Home names the worker by it: bug QA6-3).
+        chats = [
+            m["meta"]["task_id"]
+            for m in pending
+            if m["kind"] == "owner" and m["meta"].get("task_id") and not m["meta"].get("deferred")
+        ]
         if (
             row["role"] == WORKER
             and not mid_turn
             and not busy
-            and (named := tasks_named(fresh or text))
+            and (named := tasks_named(fresh or text) or chats[-1:])
         ):
             # A turn on it starts now; sent while it works, once its conversation shows it
             # (a connection that shows none: when its turn on it comes, see working_on).
