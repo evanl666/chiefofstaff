@@ -68,10 +68,11 @@ CHECK_BACK_RETRY_MINUTES = 5
 FAILING_READS = 3
 
 PROJECT_URL = "https://github.com/evanl666/chiefofstaff"
-# A GitHub repository's address (https, ssh or scp-like), its owner/name in group 1: on GitHub's
-# host itself, not a path on this machine or another host that only has github.com in it.
+# A GitHub repository's address (http(s), ssh, or scp-like `[git@]github.com:`), its owner/name
+# in group 1: on GitHub's host itself, not a path on this machine or another host that only has
+# github.com in it.
 GITHUB_REMOTE = re.compile(
-    r"^(?:https://(?:[^@/\s]+@)?|ssh://(?:[^@/\s]+@)?|[\w.-]+@)github\.com[:/]"
+    r"^(?:(?:https?|ssh)://(?:[^@/\s]+@)?github\.com/|(?:[\w.-]+@)?github\.com:)"
     r"([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
 )
 
@@ -80,7 +81,7 @@ def github_address(remote: str, slug: str) -> str:
     """Where a clone in a worker's folder is pushed for a PR: GitHub's address for the repository,
     made here from its owner/name (never one its config, nor Chief of Staff's record of it,
     names), over ssh when the remote it was taken with is an ssh one, else https."""
-    if remote.startswith("https://"):
+    if remote.startswith(("https://", "http://")):
         return f"https://github.com/{slug}.git"
     return f"git@github.com:{slug}.git"
 

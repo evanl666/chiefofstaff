@@ -2866,8 +2866,8 @@ def armed_clone(tmp_path: Path, workspace: Path, marker: Path) -> Path:
 async def test_a_push_from_a_workers_clone_never_goes_into_its_submodules(tmp_path, monkeypatch):
     """A clone in a worker's folder whose submodule's own config runs a program as it is pushed
     to, with the owner's git set to push submodules too (`submodule.recurse`) and `.gitmodules`
-    saying to ignore it: Chief of Staff's push (a PR's) goes to the remote it recorded, never
-    into a submodule."""
+    saying to ignore it: Chief of Staff's push (a PR's) never goes to a repository on this
+    machine; and where one may (as here, to see it go), never into a submodule."""
     owner = tmp_path / "owner.gitconfig"
     owner.write_text('[submodule]\n\trecurse = true\n[protocol "file"]\n\tallow = always\n'
                      "[user]\n\temail = o@o\n\tname = o\n")  # fmt: skip
@@ -2888,9 +2888,12 @@ async def test_a_push_from_a_workers_clone_never_goes_into_its_submodules(tmp_pa
         row = await runtime.task_actions.adopt_clones(harness.store.session(worker))
         [taken] = [c for c in json.loads(row["repos"]) if c.get("path") == str(clone)]
         assert taken["origin"] == str(tmp_path / "up.git")
-        await workspaces_module.checkout_git(
-            taken, str(clone), "push", "--quiet", "origin", "refs/heads/work:refs/heads/work"
-        )
+        pushing = ("push", "--quiet", "origin", "refs/heads/work:refs/heads/work")
+        with pytest.raises(ValueError, match="transport 'file' not allowed"):
+            await workspaces_module.checkout_git(taken, str(clone), *pushing)
+        assert not marker.exists(), "the worker's program never ran as the owner"
+        monkeypatch.setattr(workspaces_module, "REMOTE_TRANSPORTS", workspaces_module.TRANSPORTS)
+        await workspaces_module.checkout_git(taken, str(clone), *pushing)
         assert not marker.exists(), "the worker's program never ran as the owner"
         assert run("git", "--git-dir", str(tmp_path / "up.git"), "branch", "--list", "work")
     finally:
