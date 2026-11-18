@@ -1231,10 +1231,10 @@ async def test_copilot_runs_without_chiefofstaff_secrets(monkeypatch):
     assert captured["env"]["KEEP_ME"] == "1"
 
 
-async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_the_sdks_own(tmp_path, monkeypatch):
-    """The owner's Copilot CLI updated itself to a protocol this SDK doesn't speak: the SDK's own
-    Copilot runs instead (as the SDK finds or downloads it, not one COPILOT_CLI_PATH names),
-    the owner told as it starts and once it runs; a CLI refused for anything else is not."""
+async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_one_it_speaks(tmp_path, monkeypatch):
+    """The owner's Copilot CLI updated itself to a protocol this SDK doesn't speak: Copilot
+    FALLBACK_CLI runs instead (as the SDK provisions its own runtime), the owner told as it
+    starts and once it runs; a CLI refused for anything else is not."""
     made = []
     newer = (
         "SDK protocol version mismatch: SDK supports versions 3-3, but server reports version 4."
@@ -1249,11 +1249,11 @@ async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_the_sdks_own(tmp_p
             made.append(self)
 
         async def start(self):
-            if self.path:  # The owner's.
+            if self.path != "/sdk/cli/1.0.112/copilot-runtime":  # The owner's.
                 raise RuntimeError(self.refusal)
 
         async def get_status(self):
-            return SimpleNamespace(version="1.0.105")
+            return SimpleNamespace(version="1.0.112")
 
         async def stop(self):
             return []
@@ -1263,13 +1263,16 @@ async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_the_sdks_own(tmp_p
 
     monkeypatch.setattr(backend_module, "CopilotClient", Client)
     monkeypatch.setattr(backend_module, "cli_version", cli_version)
+    monkeypatch.setattr(
+        backend_module, "fallback_runtime", lambda: "/sdk/cli/1.0.112/copilot-runtime"
+    )
     monkeypatch.setenv("COPILOT_CLI_PATH", "/elsewhere/copilot")
     backend = backend_module.copilot_backend("git")
     notes = []
     backend.note = notes.append
     await backend.start()
-    assert backend.fallback == ("1.0.114", "1.0.105") and backend.client is made[1]
-    assert made[1].path is None and "COPILOT_CLI_PATH" not in made[1].env
+    assert backend.fallback == ("1.0.114", "1.0.112") and backend.client is made[1]
+    assert "COPILOT_CLI_PATH" not in made[1].env
     assert made[0].env["COPILOT_CLI_PATH"] == "/elsewhere/copilot", "the owner's as before"
     assert notes == [
         "Your Copilot CLI (1.0.114) is newer than Chief of Staff supports: setting up the "
@@ -1281,7 +1284,7 @@ async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_the_sdks_own(tmp_p
         runtime.backend.fallback = backend.fallback  # type: ignore[attr-defined]
         assert await runtime.version_warning() == (
             "Your Copilot CLI (1.0.114) is newer than Chief of Staff supports; using Copilot "
-            "1.0.105 for now."
+            "1.0.112 for now."
         )
     finally:
         await runtime.stop()

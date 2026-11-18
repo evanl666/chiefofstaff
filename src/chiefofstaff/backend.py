@@ -207,6 +207,21 @@ OLDEST_CLI = "1.0.100"
 # version 4".
 NEWER_PROTOCOL = re.compile(r"SDK supports versions (\d+)-(\d+), but server reports version (\d+)")
 CLI_VERSION = re.compile(r"\b(\d+\.\d+\.\d+(?:-\d+)?)\b")
+# The Copilot that runs instead then: the newest that speaks this SDK's protocol, the one this
+# release was tested with (the SDK's own pinned runtime, 1.0.105, lacks what Chief of Staff
+# reads of later ones, such as which client last ran a session).
+FALLBACK_CLI = "1.0.112"
+
+
+def fallback_runtime() -> str:
+    """The Copilot runtime FALLBACK_CLI, as the SDK provisions its own (from the CLI's GitHub
+    release, its checksum checked, into the SDK's cache: downloaded once); "" when this SDK
+    can't provision another version (then its own pinned one runs)."""
+    try:
+        from copilot._cli_download import ensure_runtime_wrapper
+    except ImportError:
+        return ""
+    return ensure_runtime_wrapper(FALLBACK_CLI)
 
 
 def newer_protocol(error: BaseException) -> bool:
@@ -318,9 +333,9 @@ class CopilotBackend:
         self.client._verify_protocol_version = verifying  # type: ignore[method-assign]
 
     async def start_fallback(self, refused: RuntimeError) -> None:
-        """The owner's Copilot CLI updated itself past what this SDK speaks: the Copilot runtime
-        the SDK was made with runs instead (downloaded once, into the SDK's own cache; the same
-        sign-in, settings and sessions, in ~/.copilot), until a release supports the new one."""
+        """The owner's Copilot CLI updated itself past what this SDK speaks: Copilot
+        FALLBACK_CLI runs instead (downloaded once, into the SDK's own cache; the same sign-in,
+        settings and sessions, in ~/.copilot), until a release supports the new one."""
         with suppress(Exception):
             await self.stop()  # (What the refused CLI left running.)
         self.started = {}
@@ -336,9 +351,10 @@ class CopilotBackend:
         env = {key: value for key, value in (self.env or os.environ).items()
                if key != "COPILOT_CLI_PATH"}  # fmt: skip
         try:
-            # (The SDK finds or downloads its runtime as the client is made: not on this loop.)
+            # (Downloaded once, as the SDK finds or downloads its runtime: not on this loop.)
+            path = await asyncio.to_thread(fallback_runtime) or None
             self.client = await asyncio.to_thread(
-                CopilotClient, connection=RuntimeConnection.for_stdio(), env=env
+                CopilotClient, connection=RuntimeConnection.for_stdio(path=path), env=env
             )
             await self.client.start()
             ours = (await self.client.get_status()).version
