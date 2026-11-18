@@ -350,7 +350,7 @@ def config_entries(file: Path) -> list[tuple[str, str]] | None:
     [] for none, None when it can't be read as one."""
     try:
         data = read_regular(file, 1024 * 1024, follow=True)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):  # (None there: a worktree's .git file.)
         return []
     except OSError:
         return None
