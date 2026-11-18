@@ -2,7 +2,7 @@
 
 import { api, el, foldable, moreMenu, once, submits, toast } from "./dom.js";
 import { monitorParts, obligationsOf, PR_TO_FIX, SECTION_DOT, statusWord, taskPhase, workerContext } from "./board.js";
-import { ago, changesText, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel } from "./text.js";
+import { ago, changesText, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel, uncheckedText } from "./text.js";
 import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
 import { byId, closedWorkers, DELIVERY_WORDS, latestDelivery, loadState, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
@@ -1204,6 +1204,7 @@ function report(task) {
   const changed = receipts.changed || {};
   if (changed.commits) more.push(el("span", { class: "receipt", text: plural(changed.commits, "commit") }));
   if (changed.uncommitted) more.push(el("span", { class: "receipt warn", text: `${changed.uncommitted} uncommitted` }));
+  if (uncheckedText(changed)) more.push(el("span", { class: "receipt none", title: "In a clone in the worker's folder, Chief of Staff runs no filter (git-lfs's): it can't tell whether these changed", text: uncheckedText(changed) }));
   // No changes of its own, but others changed its folder meanwhile: said, not counted.
   if (!changed.files && notCountedText(changed)) more.push(el("span", { class: "receipt none", title: "Changed in your folder meanwhile by you or other work: not this task's", text: notCountedText(changed) }));
   if (receipts.tests && !receipts.tests.own) more.push(testsElsewhere(receipts.tests));

@@ -19,7 +19,7 @@ from conftest import FakeSession, Harness, call_tool, env, said, settle, task_of
 
 from chiefofstaff import events as events_module
 from chiefofstaff import policy as policy_module
-from chiefofstaff import settings_guard
+from chiefofstaff import privategit, settings_guard
 from chiefofstaff import workers as workers_module
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
@@ -2286,7 +2286,8 @@ async def test_no_chief_of_staff_git_runs_in_a_workers_repository_around_its_bra
 ):
     """A repository the worker made itself (its workspace, `git init`) can hold a filter that
     git runs as it compares files: Chief of Staff runs no git there before a worker's branch
-    update (Copilot asks first), nor as one fails, nor after its turn."""
+    update (Copilot asks first), nor as one fails; after its turn, only through a git folder of
+    its own (its task's work read at its end), never the repository's."""
     monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
@@ -2308,7 +2309,7 @@ async def test_no_chief_of_staff_git_runs_in_a_workers_repository_around_its_bra
         command = workspaces_module.command
 
         async def watched(*arguments, **kwargs):
-            seen.append(arguments)
+            seen.append((arguments, (kwargs.get("env") or {}).get("GIT_DIR", "")))
             return await command(*arguments, **kwargs)
 
         monkeypatch.setattr(workspaces_module, "command", watched)
@@ -2320,11 +2321,18 @@ async def test_no_chief_of_staff_git_runs_in_a_workers_repository_around_its_bra
         failed = "error: unable to unlink old 'f.txt': Operation not permitted"
         done = SimpleNamespace(content=f"{failed}\n<exited with exit code 1>")
         session.emit("tool.execution_complete", tool_call_id="m1", success=False, result=done)
+        await settle(runtime)
+        there = [a for a, _ in seen if a[0] == "git" and any(str(cwd) in str(w) for w in a)]
+        assert not there, "none around its branch update"
         await call_tool(runtime, "report", worker, status="done", summary="Merge failed.")
         session.emit("session.idle")
         await settle(runtime)
         assert not marker.exists(), "the worker's filter never ran"
-        assert not [a for a in seen if a[0] == "git" and any(str(cwd) in str(w) for w in a)]
+        own = str(privategit.ROOT)
+        assert all(
+            folder.startswith(own) for a, folder in seen
+            if a[0] == "git" and any(str(cwd) in str(w) for w in a)
+        ), "at its end, through Chief of Staff's own git folder only"  # fmt: skip
     finally:
         await runtime.stop()
 
@@ -2378,6 +2386,13 @@ async def test_a_submodule_filter_a_worker_configured_never_runs_in_chief_of_sta
         lines = await workspaces_module.status_lines(checkout, str(cwd))
         assert " M lib" in lines, "a submodule checked out may hold work: never taken for clean"
         assert not marker.exists()
+        # Nor is its config read at all (git would, to tell the submodule's commit): one git
+        # can't read does it no harm.
+        with (Path(subgit) / "config").open("a") as config:
+            config.write("[core\n\tbroken\n")
+        assert await workspaces_module.version(checkout)
+        assert (await workspaces_module.changes(checkout))["files"] >= 1
+        assert " M lib" in await workspaces_module.status_lines(checkout, str(cwd))
         await runtime.workers.close(worker, by="you")
         await settle(runtime)
         assert not marker.exists(), "the worker's filter never ran as the owner"
@@ -2386,12 +2401,14 @@ async def test_a_submodule_filter_a_worker_configured_never_runs_in_chief_of_sta
         await runtime.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell filter, a file made unreadable")
 async def test_a_pr_waits_for_work_left_uncommitted_in_a_submodule(tmp_path, monkeypatch):
     """The task's change is in a submodule checked out in its worktree, not committed there
     yet: no PR opens without it. Read as `git status` there says (a file written again as it
-    was is no change, nor what running code left; as the repository's `ignore` says), with no
-    filter run; where its git config would run code, it may hold work: the owner can open the
-    PR anyway."""
+    was is no change, nor what running code left; as the owner's repository says to ignore it,
+    not as a `.gitmodules` the worker wrote), never through its config (a filter there never
+    runs); one that can't be read may hold work: why is said, and the owner can open the PR
+    anyway."""
     gc = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always"]
     sub, repo = tmp_path / "sub", tmp_path / "repo"
     run("git", "init", "-q", "-b", "main", str(sub))
@@ -2421,12 +2438,51 @@ async def test_a_pr_waits_for_work_left_uncommitted_in_a_submodule(tmp_path, mon
         run("git", "config", "submodule.lib.ignore", "dirty", cwd=repo)
         assert await plan(checkout) is None, "as its repository says git status counts it"
         run("git", "config", "--unset", "submodule.lib.ignore", cwd=repo)
-        subgit = run("git", "rev-parse", "--absolute-git-dir", cwd=cwd / "lib").strip()
-        run("git", "--git-dir", subgit, "config", "filter.x.clean", f"sh -c 'touch {marker}; cat'")
-        (cwd / "lib" / ".gitattributes").write_text("*.txt filter=x\n")
-        with pytest.raises(MayHoldWorkError, match="may have uncommitted changes in lib"):
+        run("git", "config", "-f", ".gitmodules", "submodule.lib.ignore", "all", cwd=cwd)
+        run("git", *gc, "commit", "-qam", "ignore it", cwd=cwd)  # The worker's.
+        with pytest.raises(ValueError, match=r"has uncommitted changes in lib\. Follow up"):
             await plan(checkout)
-        assert await plan(checkout, anyway=True) is None, "the owner's word"
+        subgit = Path(run("git", "rev-parse", "--absolute-git-dir", cwd=cwd / "lib").strip())
+        run("git", "--git-dir", str(subgit), "config", "filter.x.clean",
+            f"sh -c 'touch {marker}; cat'")  # fmt: skip
+        (cwd / "lib" / ".gitattributes").write_text("*.txt filter=x\n")
+        later = (cwd / "lib" / "s.txt").stat().st_mtime + 5
+        os.utime(cwd / "lib" / "s.txt", (later, later))
+        with pytest.raises(ValueError, match=r"has uncommitted changes in lib\. Follow up"):
+            await plan(checkout)
+        assert not marker.exists(), "the worker's filter never ran as the owner"
+        (subgit / "HEAD").chmod(0)
+        try:
+            with pytest.raises(MayHoldWorkError, match=r"lib, which Chief of Staff couldn't "
+                               r"read \(its HEAD can't be read"):  # fmt: skip
+                await plan(checkout)
+            with pytest.raises(ValueError, match="no GitHub remote"):  # (Past it, on its word.)
+                await plan(checkout, anyway=True)
+        finally:
+            (subgit / "HEAD").chmod(0o644)
+        # Its config swapped from a command it left running, between Chief of Staff's looks.
+        config = subgit / "config"
+        evil, clean = config.read_bytes(), config.read_bytes().split(b'[filter "x"]')[0]
+        stop = threading.Event()
+
+        def flipping():
+            turn = 0
+            while not stop.is_set():
+                swap = config.with_name("config.swap")
+                swap.write_bytes(evil if turn % 2 else clean)
+                swap.replace(config)
+                turn += 1
+                time.sleep(0.003)
+
+        flipper = threading.Thread(target=flipping, daemon=True)
+        flipper.start()
+        try:
+            for _ in range(20):
+                with pytest.raises(ValueError, match="has uncommitted changes in lib"):
+                    await plan(checkout)
+        finally:
+            stop.set()
+            flipper.join()
         assert not marker.exists(), "the worker's filter never ran as the owner"
     finally:
         await runtime.stop()
@@ -2552,8 +2608,8 @@ async def test_a_git_whose_waiter_stops_waiting_is_stopped_too(tmp_path):
 async def test_a_workers_own_clone_never_fetches_through_its_config(tmp_path, git_repo):
     """A clone a worker made in its folder (its config its own) becomes a checkout at its task's
     end. A partial clone whose promisor remote is an `ext::` command would run it, as the owner,
-    when Chief of Staff's git reads an object it lacks: its git fetches nothing for such a
-    clone, through no transport, and a config that fetches by itself is never taken."""
+    when Chief of Staff's git reads an object it lacks: its git never reads that config, and
+    fetches nothing for such a clone, through no transport."""
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
     runtime = await harness.connect()
     try:
@@ -2583,17 +2639,9 @@ async def test_a_workers_own_clone_never_fetches_through_its_config(tmp_path, gi
             ("remote.origin.url", f"ext::sh -c touch% {marker}% 1>&2"),
         ):  # fmt: skip
             run("git", "config", key, value, cwd=clone)
-        assert await workspaces_module.snapshot(taken) is None
-        assert await workspaces_module.version(taken) is None
-        assert await workspaces_module.status_lines(taken, str(clone)) is None
-        # Even with a config the denylist would miss: no transport, no fetch as it reads.
-        monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setattr(workspaces_module, "config_runs_code", lambda *a: [])
-        try:
-            await workspaces_module.snapshot(taken)
-            await workspaces_module.version(taken)
-        finally:
-            monkeypatch.undo()
+        await workspaces_module.snapshot(taken)
+        await workspaces_module.version(taken)
+        await workspaces_module.status_lines(taken, str(clone))
         assert not marker.exists(), "the worker's command never ran as the owner"
     finally:
         await runtime.stop()
@@ -2603,12 +2651,11 @@ async def test_a_workers_own_clone_never_fetches_through_its_config(tmp_path, gi
 async def test_a_workers_own_clone_is_read_only_through_the_git_it_was_taken_with(
     tmp_path, git_repo
 ):
-    """Its clone taken as a checkout (its config clean then), the worker swaps its .git for a
-    `gitdir:` file naming a folder it configured (a filter), or for another folder: Chief of
-    Staff's git reads the clone only through the .git it took, and refuses it once that changed.
-    Its files are read with no filter at all: none its attributes name runs, the owner's own
-    included, whether they are in its tree or in `.git/info/attributes` (which git reads
-    whatever tree it is given), with any git."""
+    """Its clone taken as a checkout, the worker swaps its .git for a `gitdir:` file naming a
+    folder it configured (a filter): Chief of Staff's git refuses it. Another folder moved into
+    place (the clone made again) is read as the clone now, never through its config. Its files
+    are read with no filter at all: none its attributes name runs, the owner's own included,
+    whether they are in its tree or in `.git/info/attributes`."""
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
     runtime = await harness.connect()
     try:
@@ -2629,16 +2676,12 @@ async def test_a_workers_own_clone_is_read_only_through_the_git_it_was_taken_wit
         assert await workspaces_module.snapshot(taken) is None
         with pytest.raises(ValueError, match="no longer a folder"):
             await workspaces_module.checkout_git(taken, str(clone), "status")
-        # Another folder moved into place: refused too.
+        # Another folder moved into place: the clone as it is now, its config never read.
         (clone / ".git").unlink()
         shutil.copytree(clone / ".g2", clone / ".git")
-        with pytest.raises(ValueError, match="was replaced"):
-            await workspaces_module.checkout_git(taken, str(clone), "status")
+        assert await workspaces_module.snapshot(taken)
         assert not marker.exists(), "the worker's filter never ran as the owner"
-        # Its own .git back: read again, its gitattributes (one naming the owner's own filter,
-        # say) left out.
-        shutil.rmtree(clone / ".git")
-        (clone / ".g2").rename(clone / ".git")
+        # The owner's own filter, named by its attributes (in its tree, in its .git): off.
         run("git", "config", "--unset", "filter.x.clean", cwd=clone)
         run("git", "config", "--global", "filter.x.clean", f"sh -c 'touch {marker}; cat'",
             env={**os.environ, "HOME": str(tmp_path)})  # fmt: skip
@@ -2646,18 +2689,239 @@ async def test_a_workers_own_clone_is_read_only_through_the_git_it_was_taken_wit
         monkeypatch.setenv("HOME", str(tmp_path))
         try:
             assert await workspaces_module.snapshot(taken)
-            assert not marker.exists(), "no gitattributes of the clone's own are read"
+            assert not marker.exists(), "no filter its tree's attributes name runs"
             (clone / ".git" / "info").mkdir(exist_ok=True)
             (clone / ".git" / "info" / "attributes").write_text("* filter=x\n")
             (clone / "f.txt").write_text("c\n")
             assert await workspaces_module.snapshot(taken)
             assert not marker.exists(), "nor its .git/info/attributes"
-            monkeypatch.setattr(workspaces_module, "GIT_VERSION", [(2, 39, 5)])
-            (clone / "f.txt").write_text("d\n")
-            assert await workspaces_module.snapshot(taken), "read with an older git too"
-            assert not marker.exists(), "and no filter runs there either"
         finally:
             monkeypatch.undo()
+    finally:
+        await runtime.stop()
+
+
+def armed_clone(tmp_path: Path, workspace: Path, marker: Path) -> Path:
+    """A clone in a worker's folder (of a remote, up.git, on branch work) with a submodule of
+    its own (sub, a commit not pushed yet) whose config runs a program as it is pushed to, and
+    a `.gitmodules` saying to ignore it."""
+    evil = tmp_path / "evil.sh"
+    evil.write_text(f"#!/bin/sh\necho ran >> {marker}\nexit 1\n")
+    evil.chmod(0o755)
+    up, subup = tmp_path / "up.git", tmp_path / "subup.git"
+    for bare in (up, subup):
+        run("git", "init", "-q", "--bare", "-b", "main", str(bare))
+    run("git", "clone", "-q", str(subup), str(tmp_path / "subsrc"))
+    commit(tmp_path / "subsrc", "s.txt", "s\n")
+    run("git", "push", "-q", "origin", "main", cwd=tmp_path / "subsrc")
+    clone = workspace / "app"
+    run("git", "clone", "-q", str(up), str(clone))
+    commit(clone, "a.txt", "a\n")
+    run("git", "push", "-q", "origin", "main", cwd=clone)
+    run("git", "checkout", "-q", "-b", "work", cwd=clone)
+    run("git", "clone", "-q", str(subup), "sub", cwd=clone)
+    run("git", "checkout", "-q", "-b", "work", cwd=clone / "sub")
+    commit(clone / "sub", "s.txt", "s2\n")
+    run("git", "config", "remote.origin.receivepack", str(evil), cwd=clone / "sub")
+    (clone / ".gitmodules").write_text(
+        f'[submodule "sub"]\n\tpath = sub\n\turl = {subup}\n\tignore = all\n'
+    )
+    run("git", "-c", "user.email=w@w", "-c", "user.name=w", "add", ".gitmodules", "sub",
+        cwd=clone)  # fmt: skip
+    run("git", "-c", "user.email=w@w", "-c", "user.name=w", "commit", "-qm", "sub", cwd=clone)
+    return clone
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell program")
+async def test_a_push_from_a_workers_clone_never_goes_into_its_submodules(tmp_path, monkeypatch):
+    """A clone in a worker's folder whose submodule's own config runs a program as it is pushed
+    to, with the owner's git set to push submodules too (`submodule.recurse`) and `.gitmodules`
+    saying to ignore it: Chief of Staff's push (a PR's) goes to the remote it recorded, never
+    into a submodule."""
+    owner = tmp_path / "owner.gitconfig"
+    owner.write_text('[submodule]\n\trecurse = true\n[protocol "file"]\n\tallow = always\n'
+                     "[user]\n\temail = o@o\n\tname = o\n")  # fmt: skip
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(owner))
+    harness = Harness(tmp_path / "data", Settings())
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Look", instructions="l")
+        worker, workspace = info["session_id"], Path(info["cwd"])
+        marker = tmp_path / "MARK"
+        clone = armed_clone(tmp_path, workspace, marker)
+        armed = tmp_path / "copy"
+        shutil.copytree(clone, armed, symlinks=True)
+        with pytest.raises(AssertionError, match="failed to push all needed submodules"):
+            run("git", "push", "origin", "refs/heads/work:refs/heads/work", cwd=armed)
+        assert marker.exists()
+        marker.unlink()
+        row = await runtime.task_actions.adopt_clones(harness.store.session(worker))
+        [taken] = [c for c in json.loads(row["repos"]) if c.get("path") == str(clone)]
+        assert taken["origin"] == str(tmp_path / "up.git")
+        await workspaces_module.checkout_git(
+            taken, str(clone), "push", "--quiet", "origin", "refs/heads/work:refs/heads/work"
+        )
+        assert not marker.exists(), "the worker's program never ran as the owner"
+        assert run("git", "--git-dir", str(tmp_path / "up.git"), "branch", "--list", "work")
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell filter, a file made unreadable")
+async def test_chief_of_staffs_git_never_reads_a_workers_clone_config(tmp_path, git_repo):
+    """Chief of Staff's git in a clone in a worker's folder never opens its config: with that
+    file unreadable, its work is read all the same; and with the worker swapping in a filter
+    there between Chief of Staff's looks (from a command it left running), none ever runs, in
+    the clone nor in a submodule of a worktree."""
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Look", instructions="l")
+        worker, workspace = info["session_id"], Path(info["cwd"])
+        marker = tmp_path / "MARK"
+        commit(git_repo, "f.txt", "a\n")
+        clone = workspace / "lib"
+        run("git", "clone", "-q", str(git_repo), "lib", cwd=workspace)
+        row = await runtime.task_actions.adopt_clones(harness.store.session(worker))
+        [taken] = [c for c in json.loads(row["repos"]) if c.get("path") == str(clone)]
+        config = clone / ".git" / "config"
+        (clone / "f.txt").write_text("b\n")
+        (clone / "new.txt").write_text("new\n")
+        config.chmod(0)
+        try:
+            with pytest.raises(AssertionError, match="unable to access"):
+                run("git", "status", cwd=clone)  # (git itself can't do without it.)
+            assert await workspaces_module.snapshot(taken)
+            found = await workspaces_module.changes(taken)
+            assert found and found["uncommitted"] == 2, found
+        finally:
+            config.chmod(0o644)
+        clean = config.read_bytes()
+        filtering = f'[filter "x"]\n\tclean = "sh -c \'echo ran >> {marker}; cat\'"\n'
+        evil = clean + filtering.encode()
+        (clone / ".gitattributes").write_text("* filter=x\n")
+        stop = threading.Event()
+
+        def flipping(target: Path, one: bytes, other: bytes):
+            turn = 0
+            while not stop.is_set():
+                swap = target.with_name("config.swap")
+                swap.write_bytes(other if turn % 2 else one)
+                swap.replace(target)
+                turn += 1
+                time.sleep(0.003)
+
+        flipper = threading.Thread(target=flipping, args=(config, clean, evil), daemon=True)
+        flipper.start()
+        try:
+            for _ in range(20):
+                (clone / "f.txt").write_text(f"{time.monotonic()}\n")
+                await workspaces_module.checkout_git(taken, str(clone), "status", "--porcelain")
+                await workspaces_module.snapshot(taken)
+        finally:
+            stop.set()
+            flipper.join()
+        assert not marker.exists(), "the worker's filter never ran as the owner"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell filter")
+async def test_a_workers_clone_with_lfs_and_crlf_files_reads_as_its_own_git_status(
+    tmp_path, monkeypatch
+):
+    """A clone in a worker's folder of a repository with git-lfs files (the owner's filter) and
+    files kept with CRLF (`eol=crlf`), some rewritten as they were: what Chief of Staff reads
+    there is what the worker's own git says (nothing changed: no PR refused for it, a snapshot
+    of HEAD), its gitattributes' own conversions applied; the owner's filter never runs on the
+    worker's files, so the LFS files that may have changed are said, not counted."""
+    marker = tmp_path / "RAN"
+    owner = tmp_path / "owner.gitconfig"
+    owner.write_text(
+        f'[filter "lfs"]\n\tclean = "sh -c \'echo ran >> {marker}; sed s/REAL/PTR/\'"\n'
+        "\tsmudge = sed s/PTR/REAL/\n\trequired = true\n[user]\n\temail = o@o\n\tname = o\n"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(owner))
+    source = tmp_path / "source"
+    run("git", "init", "-q", "-b", "main", str(source))
+    (source / ".gitattributes").write_text(
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n*.cmd text eol=crlf\n"
+    )
+    (source / "model.bin").write_text("REAL payload\n")
+    (source / "run.cmd").write_text("echo hi\n")
+    (source / "a.py").write_text("x = 1\n")
+    run("git", "add", "-A", cwd=source)
+    run("git", "commit", "-qm", "a", cwd=source)
+    harness = Harness(tmp_path / "data", Settings())
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Look", instructions="l")
+        worker, workspace = info["session_id"], Path(info["cwd"])
+        clone = workspace / "source"
+        run("git", "clone", "-q", str(source), str(clone))
+        assert (clone / "run.cmd").read_bytes() == b"echo hi\r\n"
+        row = await runtime.task_actions.adopt_clones(harness.store.session(worker))
+        [taken] = [c for c in json.loads(row["repos"]) if c.get("path") == str(clone)]
+        head_tree = run("git", "rev-parse", "HEAD^{tree}", cwd=clone).strip()
+        later = time.time() + 5
+        for name in ("model.bin", "run.cmd"):
+            os.utime(clone / name, (later, later))  # Written again as they were.
+        marker.unlink(missing_ok=True)
+        assert (
+            await workspaces_module.checkout_git(taken, str(clone), "status", "--porcelain") == ""
+        )
+        assert (await workspaces_module.snapshot(taken))["tree"] == head_tree
+        found = await workspaces_module.changes(taken)
+        assert (found["uncommitted"], found["unchecked"]) == (0, 1), found
+        assert await runtime.task_actions.pr_plan(taken) is None, "nothing of its own to commit"
+        (clone / "a.py").write_text("x = 2\n")
+        (clone / "model.bin").write_text("REAL other\n")
+        found = await workspaces_module.changes(taken)
+        assert (found["uncommitted"], found["unchecked"]) == (1, 1), found
+        assert not marker.exists(), "the owner's filter never ran on the worker's files"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_clone_its_worker_made_again_where_it_was_is_read_and_said_once(
+    tmp_path, monkeypatch
+):
+    """A worker deletes the clone Chief of Staff made for it and clones it again at the same
+    place (a fresh start), then commits its fix there: its work is read from the new clone,
+    pushed where Chief of Staff recorded, and its timeline says once that it was made again."""
+    source = tmp_path / "source"
+    run("git", "init", "-q", "-b", "main", str(source))
+    commit(source, "a.py", "x = 1\n")
+    harness = Harness(tmp_path / "data", Settings())
+    runtime = await harness.connect()
+    try:
+        worker = (await spawn(runtime, harness.router_id, title="Fix", instructions="f"))[
+            "session_id"
+        ]
+        await settle(runtime)
+        added = json.loads(
+            (
+                await call_tool(runtime, "add_repo", worker, repo=f"file://{source}")
+            ).text_result_for_llm
+        )
+        clone, branch = Path(added["path"]), added["branch"]
+        shutil.rmtree(clone)
+        run("git", "clone", "-q", f"file://{source}", str(clone))
+        run("git", "checkout", "-q", "-b", branch, cwd=clone)
+        commit(clone, "a.py", "x = 2\n")
+        await call_tool(runtime, "report", worker, status="done", summary="Fixed a.py.",
+                        changed_code=True)  # fmt: skip
+        await settle(runtime)
+        found = runtime.task_actions.receipts(runtime.tasks.current(worker))
+        assert found["changed"]["commits"] == 1 and found["changed"]["files"] == 1, found
+        [checkout] = [c for c in runtime.workspaces.checkouts(harness.store.session(worker))
+                      if c.get("remote")]  # fmt: skip
+        origin = await workspaces_module.checkout_git(
+            checkout, str(clone), "config", "--get", "remote.origin.url"
+        )
+        assert origin.strip() == f"file://{source}"
+        said = [t for k, t in harness.kinds(worker) if "was made again" in t]
+        assert len(said) == 1, said
     finally:
         await runtime.stop()
 

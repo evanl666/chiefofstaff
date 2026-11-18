@@ -564,6 +564,7 @@ class Runtime:
         self.work_root = store.directory / "work"
         self.workspaces = Workspaces(store, self.work_root)
         workspaces_module.GIT_GUARD = weakref.WeakMethod(self.git_guard)
+        workspaces_module.CLONE_REMADE = weakref.WeakMethod(self.clone_remade)
         self.workspaces.github_token = lambda repo: self.github.token_for(repo)
         self.tasks = TaskBook(store, on_change=lambda task: self.task_changed(task))
         migrate_tasks(store)
@@ -662,6 +663,9 @@ class Runtime:
         self.send.close()
         if workspaces_module.GIT_GUARD and workspaces_module.GIT_GUARD() == self.git_guard:
             workspaces_module.GIT_GUARD = None
+        remade = workspaces_module.CLONE_REMADE
+        if remade and remade() == self.clone_remade:
+            workspaces_module.CLONE_REMADE = None
         for job in (
             self.recovery,
             self.process_job,
@@ -3567,6 +3571,31 @@ class Runtime:
                     if checkout.get(key) and os.path.realpath(checkout[key]) == place:
                         return True
         return False
+
+    def clone_remade(self, checkout: dict):
+        """A clone in a worker's folder that its worker made again where it was (deleted, cloned
+        anew): read as it is now (its config never is: workspaces.private_git), its new .git
+        recorded in that worker's checkouts and said once on its timeline."""
+        for row in self.store.all(
+            "SELECT id, repos FROM sessions WHERE role=? AND repos LIKE '[{%'", (WORKER,)
+        ):
+            repos = json.loads(row["repos"])
+            found = [
+                item for item in repos
+                if item.get("remote") and item.get("repo") == checkout["repo"]
+                and item.get("clone_id") != checkout["clone_id"]
+            ]  # fmt: skip
+            if not found:
+                continue
+            for item in found:
+                item |= {"clone_git": checkout["clone_git"], "clone_id": checkout["clone_id"]}
+            self.update_session(row["id"], repos=json.dumps(repos))
+            self.add_message(
+                row["id"],
+                "notice",
+                f"Its clone {home_shown(checkout['repo'])} was made again where it was: Chief "
+                "of Staff reads the new one.",
+            )
 
     def git_replaced_said(self, row: dict, replaced: list[str]) -> str:
         outermost = [

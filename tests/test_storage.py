@@ -1048,7 +1048,7 @@ async def test_git_making_or_removing_a_worktree_finishes_when_its_waiter_stops(
     """Stopped halfway, it would leave half a tree: it goes on (within its limit) when whoever
     waits for it stops waiting. Other git ends with its waiter."""
     fake = tmp_path / "bin"
-    write(fake / "git", '#!/bin/sh\nsleep 1\necho "$@" > "$DONE"\n')
+    write(fake / "git", '#!/bin/sh\ntouch "$DONE.started"\nsleep 1\necho "$@" > "$DONE"\n')
     (fake / "git").chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
     for words, finishes in ((("worktree", "remove", "t"), True), (("status",), False)):
@@ -1056,7 +1056,10 @@ async def test_git_making_or_removing_a_worktree_finishes_when_its_waiter_stops(
         waiting = asyncio.ensure_future(
             workspaces_module.command("git", *words, env={"DONE": str(done)}, limit=30)
         )
-        await asyncio.sleep(0.3)
+        for _ in range(400):  # Until it runs (however loaded the machine is).
+            if exists(f"{done}.started"):
+                break
+            await asyncio.sleep(0.025)
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiting

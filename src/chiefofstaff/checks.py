@@ -31,7 +31,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from . import machine, prompts
+from . import machine, privategit, prompts
 from .models import NestedArguments
 from .receipts import NO_TESTS_RAN, test_runs, words
 from .roles import WORKER
@@ -42,7 +42,6 @@ from .workspaces import (
     base_of,
     checkout_git,
     command,
-    config_runs_code,
     git,
     git_unlooked,
     gitlinks,
@@ -485,14 +484,17 @@ class Checks:
         """Commits checked out in scratch worktrees: what checks run on, as a clean checkout
         (new files included, nothing ignored or built), whatever the worker's folder holds."""
         own = await asyncio.to_thread(own_repository, git_dir, self.runtime.workspaces.roots())
-        unfiltering: tuple[str, ...] = ()
+        options: tuple[str, ...] = ()
+        pins = {"GIT_DIR": git_dir}
         if own:
-            # A clone in a worker's folder, whose config it can write: checking it out would run
-            # what that config says (a filter), as the owner; its files are written with no
-            # filter at all, and nothing is fetched for it.
-            if found := await asyncio.to_thread(config_runs_code, git_dir):
-                raise ValueError(f"Its git config was changed ({', '.join(found)}).")
-            unfiltering = await unfiltered({"GIT_DIR": git_dir})
+            # A clone in a worker's folder, whose config it can write: checked out through Chief
+            # of Staff's own git folder for it (never that config), with no filter at all and
+            # nothing fetched for it.
+            folder = privategit.place(git_dir)
+            async with privategit.lock(folder):
+                pins = await asyncio.to_thread(privategit.prepare, git_dir, "", "")
+            pins.pop("GIT_WORK_TREE")
+            options, _ = await unfiltered(pins, os.sep, git_dir)
         root = self.scratch() / f"versions-{uuid4().hex[:8]}"
         made = []
         try:
@@ -501,24 +503,35 @@ class Checks:
                 # Without the repository's hooks (a post-checkout hook would run outside the
                 # sandbox) and without fetching large files.
                 await command(
-                    "git", *SAFE_GIT, *unfiltering, "--git-dir", git_dir, "worktree",
-                    "add", "--detach", "--quiet", str(path), commit,
-                    limit=120, env={"GIT_LFS_SKIP_SMUDGE": "1"}, lazy=not own,
+                    "git", *SAFE_GIT, *options, "worktree", "add", "--detach", "--quiet",
+                    str(path), commit, limit=120, env={**pins, "GIT_LFS_SKIP_SMUDGE": "1"},
+                    lazy=not own,
                 )  # fmt: skip
                 made.append(path)
             yield made
         finally:
             for path in made:
                 with suppress(ValueError):
-                    await git("--git-dir", git_dir, "worktree", "remove", "--force", str(path))
+                    if own:
+                        await command(
+                            "git", *SAFE_GIT, "worktree", "remove", "--force", str(path),
+                            env=pins,
+                        )  # fmt: skip
+                    else:
+                        await git("--git-dir", git_dir, "worktree", "remove", "--force", str(path))
             shutil.rmtree(root, ignore_errors=True)
 
     async def validate(self, case: dict, text: str) -> tuple[str, dict]:
         """Run a proposed check on both versions: "" and the evidence when it catches the
         mistake (fails on the failing code, passes on the fixed code), else what is wrong."""
         versions = self.checked_out(case["git_dir"], case["failing"], case["fixed"])
+        own = await asyncio.to_thread(
+            own_repository, case["git_dir"], self.runtime.workspaces.roots()
+        )
         async with versions as (failing_dir, fixed_dir):
             readable = [Path(case["git_dir"])]
+            if own:  # (The git folder its versions' git reads: Chief of Staff's own for it.)
+                readable.append(privategit.place(case["git_dir"]))
             failing = await run_sandboxed(
                 text, failing_dir, [failing_dir, *readable], self.scratch()
             )

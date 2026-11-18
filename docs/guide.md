@@ -283,9 +283,10 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
 - A repository a task needs that is not there yet (a GitHub owner/name or a git URL) is cloned
   into the code folder once and stays for later tasks.
 - A repository a worker clones or makes in its own folder counts as one of its checkouts at its
-  task's end. Chief of Staff reads it with no filter (a git-lfs file is read as it is on disk),
-  and not at all when its git config would run or fetch something (a filter, a hook, a partial
-  clone's fetches, a remote helper).
+  task's end. Chief of Staff reads it without its git config (through a git folder of its own),
+  with no filter: files git-lfs keeps there are not compared (a task's report says how many may
+  have changed: *2 LFS files not checked*). A clone the worker deleted and cloned again where it
+  was is read as it is now (its timeline says so once).
 - Each worker works in its own task folder, with a **git worktree** of each repository it
   changes, on branch `chief/<task>`, started from the latest default branch of `origin`. Your
   checkouts are never touched, and parallel workers never share one: two agents in one folder
@@ -512,9 +513,8 @@ and opens a pull request on GitHub with your signed-in `gh`: titled with what it
 none to read), and its report as the description, without what the report said about pushing or
 a PR (moot once the PR is open), and what was checked. If a PR from that branch
 is open already, that one is used. Uncommitted work is not pushed: follow up and ask the worker
-to commit first (also work left in a submodule checked out in its worktree; one whose git config
-would run code can't be read safely, so the PR opens only once you click *Open it anyway*). An
-open worker then follows the PR (reviews, comments and CI go to it); its
+to commit first (also work left in a submodule checked out in its worktree; one Chief of Staff
+can't read says why, and the PR opens once you click *Open it anyway*). An open worker then follows the PR (reviews, comments and CI go to it); its
 task stays under *Monitoring* until the PR is merged or closed, and waits for your *Accept* until
 you give it (merging does not accept it).
 

@@ -43,18 +43,19 @@
 - **Security: a sandboxed worker could make Chief of Staff's own git run its code.** A worktree
   keeps its submodules' git folders in its own folder in your repository, which its worker can
   write: a filter configured there ran, as you, whenever Chief of Staff read the worker's changes
-  (`git status`, `git diff`, a snapshot). And learning checks from a worker's test runs ran git in
-  a repository the worker had made itself, whatever its config said. Now Chief of Staff's git
-  reads a submodule's commits, not its files (a submodule checked out counts as holding work, so
-  its worktree is kept), but before a PR opens, as it reads a worker's clone: where its config
-  would run code, the PR opens only on your word (**Open it anyway**). It runs git only in a
-  worker's checkouts, a repository it made itself only once its config runs nothing. A clone in
-  a worker's folder (a repository it cloned or made, taken at its task's end) could also run its
-  code through a partial clone's fetch or a `.git` swapped for a pointer elsewhere: now it is
-  read only through the `.git` it had when taken, with no filter at all (not even your own, such
-  as git-lfs's, whatever its attributes name) and no fetch; and Chief of Staff's git reaches
-  other repositories only over http(s), ssh, git or a local path, not a remote helper such as
-  `codecommit::`.
+  (`git status`, `git diff`, a snapshot). Learning checks from a worker's test runs ran git in a
+  repository the worker had made itself, whatever its config said; a clone in a worker's folder
+  (one it cloned or made, taken at its task's end) could run its code through a partial clone's
+  fetch, a filter swapped into its config between Chief of Staff's look and git's use, or a
+  submodule's program a PR's push ran. Now Chief of Staff's git never reads a git config a worker
+  can write: such a clone, and a submodule of a worktree, are read through a git folder of its
+  own (their objects, refs and index as data, a config it writes, the remote it recorded when it
+  took the clone), with no filter at all (files git-lfs keeps there are said as not checked);
+  elsewhere it leaves submodules out where it reads files, and its pushes and fetches never go
+  into one, whatever your config says. A submodule a PR would leave work behind in keeps it
+  until that is committed, or, when it can't be read, until you click **Open it anyway**. Its
+  git reaches other repositories only over http(s), ssh, git or a local path, not a remote
+  helper such as `codecommit::`.
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create
   `.git/commondir` in your repository, sending your git to a configuration of its own whose

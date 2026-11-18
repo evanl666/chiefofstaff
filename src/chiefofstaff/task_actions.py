@@ -2622,9 +2622,10 @@ class TaskActions:
                 "worker to commit them, then create the PR."
             )
         if unread and not anyway:
+            where = "; ".join(f"{path}, which Chief of Staff couldn't read ({why})"
+                              for path, why in unread)  # fmt: skip
             raise MayHoldWorkError(
-                f"The {name} repository may have uncommitted changes in {', '.join(unread)}, "
-                "whose files Chief of Staff can't read safely (its git config runs code)."
+                f"The {name} repository may have uncommitted changes in {where}."
             )
         if live:
             # The branch it is on now (one the owner named, say), not the one it was given.

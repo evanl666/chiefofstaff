@@ -778,6 +778,8 @@ def summarize(
         "large": sum(c.get("large", 0) for c in checkouts),
         # In a folder of the owner's: files others changed there meanwhile (not its own).
         "not_counted": sum(c.get("not_counted", 0) for c in checkouts),
+        # In a clone in a worker's folder: files git-lfs keeps that may have changed, not read.
+        "unchecked": sum(c.get("unchecked", 0) for c in checkouts),
     }
     flags = []
     tests = last("test")
