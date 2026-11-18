@@ -271,10 +271,10 @@ is no *Update*; one piece of work is one row.
   a worker (*→ worker*) is the Router's note of it, which goes with the Router's next message:
   it said *Waiting to be sent* until then, hours after the worker had it and answered. It now
   says where the worker has it (*Sent*, *Received*, *Handled*). A message that does wait says
-  why: held for its next message once you stopped it (*Held for its next message: it was
-  stopped*), or waiting for a free worker slot (*3 of 3 busy*), each with *Send now*, which
-  sends it (over the parallel-worker limit if need be); waiting for memory, disk space or
-  another task, it says that (QA6-1).
+  why, in one line: *Not sent yet: you stopped this worker* or *Not sent yet: waiting for a
+  free worker slot*, each with *Send now* (over the parallel-worker limit if need be); waiting
+  for memory, disk space or another task, it says that (*Not sent yet: waiting for memory*)
+  (QA6-1).
 - **A result and the reply drafted for it are one decision.** Their card had two: *Accept* on
   the result and *Copy & mark sent* on the reply. Either click left the other half on the card,
   and copying the reply accepted the result only when it changed no code and no other reply of

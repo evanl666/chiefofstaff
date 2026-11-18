@@ -85,7 +85,7 @@ export function workerTitle(session) {
 // ended (handled), sent again for want of a sign it got there, or given up on.
 export const DELIVERY_WORDS = {
   queued: ["Waiting to be sent", "wait"],
-  held: ["Held for its next message", "wait"],
+  held: ["Not sent yet", "wait"],
   sent: ["Sent", ""],
   received: ["Received", "good"],
   processed: ["Handled", "good"],

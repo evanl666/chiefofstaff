@@ -4447,7 +4447,9 @@ async def round_qa6(runtime, browser, failures: list[str]):
     copy = page.locator("#timeline .msg.owner", has_text="QA6 use the staging config")
     await expect(copy.locator(".to")).to_have_text("→ QA6 update the deploy guide")
     line = copy.locator(".delivery")
-    await expect(line).to_contain_text("Held for its next message: it was stopped")
+    await expect(line).to_have_text("Not sent yet: you stopped this worker · Send now")
+    box = await line.bounding_box()
+    assert box and box["height"] < 24, ("one short line", box)
     await line.get_by_role("button", name="Send now").click()
     await expect(line).to_have_text("Sent", timeout=10000)
     sent = runtime.states.handle(found["held"]).raw_sent[-1]

@@ -900,16 +900,21 @@ export function showDeliveries() {
   }
   for (const node of nodes) waitNote(node, waits.get(node.dataset.worker) === node);
 }
-// Why a message to a worker waits, in words, and Send now when it can go at once: its worker
-// was stopped (it holds it for its next message), or every worker slot is taken. Not what keeps
-// it waiting for a reason (memory, disk space, a task it waits for): that is said.
+// Why a message to a worker waits, in a few words, and Send now when it can go at once: its
+// worker was stopped (it holds it for its next message), or every worker slot is taken. Not
+// what keeps it waiting for a reason (memory, disk space, a task it waits for): that is said
+// (its details on hover).
 function waitWhy(node) {
   const session = byId(node.dataset.worker);
   if (!session || session.role !== "worker" || session.closed_at) return null;
-  if (node.dataset.delivery === "held") return { text: "it was stopped", now: true };
+  if (node.dataset.delivery === "held") return { text: "you stopped this worker", help: "It gets this with your next message, or now with Send now", now: true };
   if (node.dataset.delivery !== "queued" || session.status !== "queued") return null;
+  const activity = session.activity || "";
+  // "waiting for memory: 12% free on this computer": the reason, its numbers on hover.
+  if (/^waiting for (memory|disk space):/i.test(activity)) return { text: activity.split(":")[0], help: activity };
+  if (/^waiting for /i.test(activity)) return { text: activity, help: activity };
   const reason = slotReason(session);
-  return { text: reason.text.charAt(0).toLowerCase() + reason.text.slice(1), help: reason.help, now: reason.slot };
+  return { text: "waiting for a free worker slot", help: `${reason.text.split(" · ").pop()}. ${reason.help}`, now: true };
 }
 function waitNote(node, latest) {
   const line = node.querySelector(":scope > .delivery");
@@ -917,8 +922,10 @@ function waitNote(node, latest) {
   const key = why ? `${why.text}:${why.now}` : "";
   if ((line.dataset.why || "") === key) return;
   line.dataset.why = key;
-  line.querySelector(".why")?.remove();
-  if (!why) return;
+  if (!why) {
+    line.textContent = DELIVERY_WORDS[node.dataset.delivery]?.[0] || "";
+    return;
+  }
   const sendNow = async (event) => {
     event.stopPropagation();
     event.target.disabled = true;
@@ -929,13 +936,10 @@ function waitNote(node, latest) {
       toast(error.message, "error");
     }
   };
-  line.append(
-    el(
-      "span",
-      { class: "why" },
-      el("span", { text: `: ${why.text}`, title: why.help || undefined }),
-      why.now ? el("button", { type: "button", class: "link", text: "Send now", title: "Send it to the worker now", onclick: sendNow }) : "",
-    ),
+  // One short line: "Not sent yet: you stopped this worker · Send now".
+  line.replaceChildren(
+    el("span", { class: "why", text: `Not sent yet: ${why.text}`, title: why.help || undefined }),
+    ...(why.now ? [el("span", { class: "sep", text: " · " }), el("button", { type: "button", class: "link", text: "Send now", title: "Send it to the worker now", onclick: sendNow })] : []),
   );
 }
 // The work between messages, folded into one line: its steps, and what the session said on the
