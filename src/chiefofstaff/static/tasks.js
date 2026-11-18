@@ -25,13 +25,18 @@ export const ownTasks = () => tasks().filter((task) => !isHelperTask(task));
 const busy = (session) => session.role === "worker" && !session.closed_at && (session.slot ?? (["working", "starting"].includes(session.status) || session.activity?.startsWith("Waiting for you")));
 // Why a queued task has not started: a task it waits for, or every worker slot is taken.
 export function queuedReason(task) {
-  const activity = byId(task.session_id)?.activity || "";
+  return slotReason(byId(task.session_id));
+}
+// Why a queued worker has not started: what it waits for (another task, memory, disk space), or
+// every worker slot is taken (`slot`: then it can start at once, over the limit, if asked).
+export function slotReason(worker) {
+  const activity = worker?.activity || "";
   if (/^waiting for /i.test(activity)) return { text: `W${activity.slice(1)}` };
   const limit = state.snapshot.settings.max_workers;
   // Chief of Staff's own helpers take no slot.
   const own = sessions().filter((session) => busy(session) && !session.helper).length;
   const help = `At most ${limit} worker${limit === 1 ? "" : "s"} run at once: Settings → General → Parallel workers.`;
-  return { text: `Waiting for a worker slot · ${Math.min(own, limit)} of ${limit} busy`, help };
+  return { text: `Waiting for a worker slot · ${Math.min(own, limit)} of ${limit} busy`, help, slot: true };
 }
 // Workers the owner is using in a terminal right now: working, though no task says so.
 export const inTerminal = () => sessions().filter((session) => session.role === "worker" && !session.helper && session.elsewhere && session.terminal?.working);

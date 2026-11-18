@@ -64,8 +64,12 @@ the Router says it had finished. Under your latest messages to a session its cha
 they stand: *Waiting to be sent*, *Sent*, *Received* (its conversation shows it), *Handled* (the
 turn it was in ended); one its conversation does not show within 20 seconds, and that Copilot
 does not hold for it either, is sent again (*Not received yet — sending again*), and after two
-tries it says *Not delivered* and tells you, so a message is never lost without a word. *Go on*
-and replies show the same on the task's row. When you cancel a task, the Router hears of it with its next message, and it
+tries it says *Not delivered* and tells you, so a message is never lost without a word. One
+that waits says why: *Held for its next message: it was stopped* (it went in during a turn you
+stopped), or a free worker slot (*3 of 3 busy*), each with *Send now* (over the parallel-worker
+limit if need be); memory, disk space or another task it waits for are said, and it goes once
+they allow. Home's copy of what you wrote a worker (*→ worker*) says where that worker has it.
+*Go on* and replies show the same on the task's row. When you cancel a task, the Router hears of it with its next message, and it
 does not start that work again (nor a new Router after a handover) unless you ask. What you
 write in a worker's chat answers the task that asked you (or the question or decision card it
 waits on), and that task goes on at once; about finished work, its answer is an

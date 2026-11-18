@@ -264,6 +264,14 @@ stays in sight; Artifacts words and times match what its rows say; a slow script
 - On Linux, processes are known by their whole command lines: `ps` there cut each line to the
   width `COLUMNS` gave, even into a pipe, so a process Chief of Staff started could be taken
   for another one when it was looked for again; `ps -ww` never cuts.
+- **What you write a worker says where it is, on Home too.** Home's copy of a message you wrote
+  a worker (*→ worker*) is the Router's note of it, which goes with the Router's next message:
+  it said *Waiting to be sent* until then, hours after the worker had it and answered. It now
+  says where the worker has it (*Sent*, *Received*, *Handled*). A message that does wait says
+  why: held for its next message once you stopped it (*Held for its next message: it was
+  stopped*), or waiting for a free worker slot (*3 of 3 busy*), each with *Send now*, which
+  sends it (over the parallel-worker limit if need be); waiting for memory, disk space or
+  another task, it says that (QA6-1).
 
 ## 0.1.45 (2026-11-14)
 

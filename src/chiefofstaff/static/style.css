@@ -1556,6 +1556,10 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .delivery.bad { color: var(--red); font-weight: 600; }
 .delivery.good { color: var(--green); }
 .msg.owner > .delivery { margin-top: 2px; text-align: right; opacity: 0.85; }
+/* Why it waits, and Send now when it can go at once: on the line that says it waits. */
+.msg.owner > .delivery:has(.why) { white-space: normal; }
+.delivery .why button.link { margin-left: 8px; padding: 0; font-size: inherit; color: var(--accent); }
+.delivery .why button.link:hover { text-decoration: underline; }
 /* Its question: what it asks, why, the answers it offers, what it does then. */
 .card .asked { display: grid; gap: 4px; margin: 4px 0 0 16px; min-width: 0; font-size: var(--small); color: var(--soft); }
 .card.question-card .asked { margin-left: 0; }

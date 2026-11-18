@@ -4,6 +4,7 @@ import { $, api, blobLive, blobUrl, el, foldable, toast, whenNearScreen } from "
 import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, slackText, threadLabel } from "./text.js";
 import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
 import { MARKERS } from "./board.js";
+import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
@@ -808,6 +809,9 @@ function renderMessage(original) {
 // it reached its session (`delivery`), in a word.
 function ownerMessage(text, meta = {}, time = "", delivery = "") {
   const node = el("div", { class: "msg owner", title: time ? clock(time) : undefined });
+  // The worker it went to (Home's copy says which): why it waits, if it does, is that worker's.
+  const worker = meta.to || (state.selected !== HOME ? viewedId() : "");
+  if (worker) node.dataset.worker = worker;
   // Sent from Home straight to one worker.
   if (meta.to) node.append(el("button", { type: "button", class: "to", text: `→ ${meta.to_title}`, title: "Open this worker", onclick: () => select(meta.to) }));
   const files = meta.attachments || [];
@@ -829,12 +833,58 @@ function ownerMessage(text, meta = {}, time = "", delivery = "") {
   return node;
 }
 // Where the owner's messages stand, under each: what is not there yet (or never got there)
-// under every one; that one got there or was handled, only under the latest.
+// under every one; that one got there or was handled, only under the latest. The latest one that
+// waits says why, and what to do about it, where there is something (bug QA6-1: it said
+// "Waiting to be sent" and nothing more).
 const SETTLED = new Set(["received", "processed"]);
-function showDeliveries() {
+const WAITING = new Set(["queued", "held"]);
+export function showDeliveries() {
   const nodes = [...$("#timeline").querySelectorAll(".msg.owner[data-delivery]")];
   const latest = [...$("#timeline").querySelectorAll(".msg.owner")].pop();
-  for (const node of nodes) node.querySelector(":scope > .delivery").hidden = SETTLED.has(node.dataset.delivery) && node !== latest;
+  const waits = new Map();
+  for (const node of nodes) {
+    node.querySelector(":scope > .delivery").hidden = SETTLED.has(node.dataset.delivery) && node !== latest;
+    if (WAITING.has(node.dataset.delivery) && node.dataset.worker) waits.set(node.dataset.worker, node);
+  }
+  for (const node of nodes) waitNote(node, waits.get(node.dataset.worker) === node);
+}
+// Why a message to a worker waits, in words, and Send now when it can go at once: its worker
+// was stopped (it holds it for its next message), or every worker slot is taken. Not what keeps
+// it waiting for a reason (memory, disk space, a task it waits for): that is said.
+function waitWhy(node) {
+  const session = byId(node.dataset.worker);
+  if (!session || session.role !== "worker" || session.closed_at) return null;
+  if (node.dataset.delivery === "held") return { text: "it was stopped", now: true };
+  if (node.dataset.delivery !== "queued" || session.status !== "queued") return null;
+  const reason = slotReason(session);
+  return { text: reason.text.charAt(0).toLowerCase() + reason.text.slice(1), help: reason.help, now: reason.slot };
+}
+function waitNote(node, latest) {
+  const line = node.querySelector(":scope > .delivery");
+  const why = latest ? waitWhy(node) : null;
+  const key = why ? `${why.text}:${why.now}` : "";
+  if ((line.dataset.why || "") === key) return;
+  line.dataset.why = key;
+  line.querySelector(".why")?.remove();
+  if (!why) return;
+  const sendNow = async (event) => {
+    event.stopPropagation();
+    event.target.disabled = true;
+    try {
+      upsertSession(await api(`/api/sessions/${node.dataset.worker}/send-now`, { method: "POST" }));
+    } catch (error) {
+      event.target.disabled = false;
+      toast(error.message, "error");
+    }
+  };
+  line.append(
+    el(
+      "span",
+      { class: "why" },
+      el("span", { text: `: ${why.text}`, title: why.help || undefined }),
+      why.now ? el("button", { type: "button", class: "link", text: "Send now", title: "Send it to the worker now", onclick: sendNow }) : "",
+    ),
+  );
 }
 // The work between messages, folded into one line: its steps, and what the session said on the
 // way to them ("Now the tests:"), which is narration, not an answer. The line shows the latest.

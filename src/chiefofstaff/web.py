@@ -293,8 +293,8 @@ def create_app(
         session_id = store.session(session_id)["id"]
         rows = store.messages(session_id, after or 0, limit, before=before, first=after is not None)
         # Where each message it was sent stands: queued, sent, received, processed...
-        marks = runtime.delivery.delivery_marks(session_id)
-        rows = [{**row, "delivery": runtime.delivery.delivery_of(row, marks)} for row in rows]
+        found = runtime.delivery.delivery_for(session_id, rows)
+        rows = [{**row, "delivery": delivery} for row, delivery in zip(rows, found, strict=True)]
         return rows if prompts else [shown(row) for row in rows]
 
     @app.get("/api/sessions/{session_id}/messages/count")
@@ -612,6 +612,11 @@ def create_app(
         return runtime.task_actions.view(
             await runtime.task_actions.request_changes(task_id, payload.text)
         )
+
+    @app.post("/api/sessions/{session_id}/send-now")
+    async def send_now(session_id: str):
+        """What waits to be sent to a worker (a free slot, its next message) goes now."""
+        return await runtime.send_now(session_id)
 
     @app.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str):

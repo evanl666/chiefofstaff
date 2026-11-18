@@ -203,6 +203,9 @@ FIXES: list[Allow] = [
     Allow("Storage's report of workers' caches", data=r"/api/storage\.caches"),
     # 0.1.46: and its place in order (an action's answer that comes late no longer wins).
     Allow("Storage's report's order", data=r"/api/storage\.order"),
+    # 0.1.46 (QA6-1): a message held for its session's next message (it was stopped, it failed,
+    # a note that rides along) says so: held, not "Waiting to be sent".
+    Allow("a held message's delivery", data=r"/messages\[\d+\]\.delivery$", value="held"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

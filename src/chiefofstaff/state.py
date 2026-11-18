@@ -94,6 +94,9 @@ class SessionState:
     turn_tools: int = 0
     # Its failed turn is sent again shortly (not a turn that ended without a report).
     retrying: bool = False
+    # The owner asked to send what waits for it now (Runtime.send_now): it takes a slot over
+    # the parallel-worker limit, once.
+    now: bool = False
     # Its current turn brings news from a thread or PR it follows: the owner hears of it.
     thread_turn: bool = False
     thread_nudged: bool = False

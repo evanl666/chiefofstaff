@@ -3775,7 +3775,7 @@ class Runtime:
             steer=not (switched and row["role"] == ROUTER),
         )
         if row["role"] == WORKER and tell_router:
-            self.owner_told(row, text)
+            self.owner_told(row, text, message)
         if about and about["status"] == "waiting" and clear_questions and not asked_back:
             # It has the owner's answer now: it goes on (not "waits for your answer" until its
             # next report).
@@ -3861,17 +3861,40 @@ class Runtime:
             self.add_message(router_id, "notice", note, {"session_id": row["id"]})
         return {**message, "note": note}
 
-    def owner_told(self, row: dict, text: str):
+    async def send_now(self, session_id: str) -> dict:
+        """What waits to be sent to a worker goes now, as the owner asks where it says it waits:
+        its worker waits for a free slot (it takes one over the parallel-worker limit), or was
+        stopped and holds it for its next message. Not while memory or the disk is short, nor
+        before the task it is given waits for another: that is said, and it waits on."""
+        row = self.store.session(session_id)
+        if row["role"] != WORKER or row["closed_at"]:
+            raise ValueError("Only an open worker's messages wait to be sent.")
+        if row["status"] == "queued":
+            if row["activity"]:
+                raise ValueError(f"It waits: {row['activity']}.")
+            self.states[session_id].now = True
+            await self.workers.pump()
+        elif row["status"] not in {"starting", "working"}:
+            self.delivery.undefer(session_id)
+            self.states[session_id].now = True
+            await self.delivery.resume(session_id, now=True)
+        return self.view(self.store.session(session_id))
+
+    def owner_told(self, row: dict, text: str, sent: dict | None = None):
         """What the owner told a worker directly (in its timeline, @ in Chat, on a task card):
-        the Router hears of it with its next message, so it never takes the result for drift."""
+        the Router hears of it with its next message, so it never takes the result for drift.
+        `sent`: the worker's own message, as it was given it: Home's copy stands where that one
+        does (Delivery.delivery_for)."""
+        given = sent and "prompt" in (sent.get("meta") or {})
         with suppress(RuntimeError):
-            self.add_message(
+            copy = self.add_message(
                 self.router_id(),
                 "owner",
                 text,
                 {
                     "to": row["id"],
                     "to_title": self.display_title(row),
+                    **({"sent_as": sent["id"]} if sent and given else {}),
                     # Not a turn of its own: it goes with the Router's next message.
                     "prompt": wrap(
                         "system",
@@ -3883,6 +3906,9 @@ class Runtime:
                     "deferred": True,
                 },
             )
+            if given:
+                # Where the worker has it, at once (it was sent before this copy was made).
+                self.delivery.publish_delivery(copy["session_id"], [copy])
 
     def usage(self, since: float, until: float) -> dict:
         """What was spent in a range; each worker by the name it has everywhere (its work's,
