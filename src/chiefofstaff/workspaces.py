@@ -42,6 +42,12 @@ class TimedOutError(ValueError):
 # monitor configured there would run as the owner. Their commits still count (`dirty`).
 INTO_SUBMODULES = {"status": "--ignore-submodules=dirty", "diff": "--ignore-submodules=dirty",
                    "fetch": "--no-recurse-submodules"}  # fmt: skip
+# What every diff, show and log Chief of Staff runs is told, whatever the owner's or a
+# repository's config says: no external diff program and no textconv one (as configured, they run
+# on what a worker wrote), a submodule shown as the commit it is at (never its log or its diff,
+# which open its repository: its config, which its worker can write).
+PLAIN_DIFFS = {"diff", "show", "log"}
+PLAIN_DIFF_OPTIONS = ("--no-ext-diff", "--no-textconv", "--submodule=short")
 
 
 # git's own options before its command that take the next word as their value.
@@ -95,10 +101,14 @@ NOT_INTO_SUBMODULES = ("-c", "submodule.recurse=false", "-c", "push.recurseSubmo
 
 
 def without_submodules(arguments: tuple[str, ...]) -> tuple[str, ...]:
-    """A git command line as Chief of Staff runs it: `status` and `diff` not looking into
-    submodules' work trees (whatever else it asked for), `fetch` not into submodules."""
+    """A git command line as Chief of Staff runs it: `diff`, `show` and `log` with
+    PLAIN_DIFF_OPTIONS, `status` and `diff` not looking into submodules' work trees (whatever
+    else it asked for), `fetch` not into submodules."""
     words = list(arguments)
     at = git_command_at(words)
+    if at < len(words) and words[at] in PLAIN_DIFFS:
+        words[at + 1 : at + 1] = [o for o in PLAIN_DIFF_OPTIONS if o not in words[at + 1 :]]
+        arguments = tuple(words)
     if at >= len(words) or not (flag := INTO_SUBMODULES.get(words[at])):
         return arguments
     name, rest = flag.split("=")[0], words[at + 1 :]
@@ -203,9 +213,12 @@ async def guarded(where: str = "", roots: tuple[str, ...] = ()):
 # Chief of Staff's own git runs outside any sandbox: nothing in a repository's config may run
 # code for it (a file-system monitor, hooks). Git for Windows can read /dev/null as a folder at
 # the drive's root, which any user may make (as in CVE-2022-24765): there hooks are looked for
-# in this file instead, which nothing can be put in.
+# in this file instead, which nothing can be put in. A submodule is shown as the commit it is
+# at, whatever the owner's config says (`diff.submodule=log` or `diff`, a status summary): its
+# own repository, whose config its worker can write, is never opened for its log or diff.
 NO_HOOKS = Path(__file__).as_posix() if sys.platform == "win32" else "/dev/null"
-SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", f"core.hooksPath={NO_HOOKS}")
+SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", f"core.hooksPath={NO_HOOKS}",
+            "-c", "diff.submodule=short", "-c", "status.submoduleSummary=false")  # fmt: skip
 if sys.platform == "win32":
     SAFE_GIT += ("-c", "core.longpaths=true")
 # What running code leaves behind in a project without a .gitignore for it: not work to commit,

@@ -2562,6 +2562,62 @@ async def test_a_clone_is_pushed_for_a_pr_only_to_github_at_an_address_made_for_
         await runtime.stop()
 
 
+@pytest.mark.parametrize("shown", ["log", "diff"])
+async def test_a_submodule_in_a_diff_is_the_commit_it_is_at_whatever_the_owner_config_says(
+    tmp_path, git_repo, monkeypatch, shown
+):
+    """The owner's git config shows submodules' logs or diffs (`diff.submodule`): a task's diff
+    shows a submodule its worker moved as the commit it is at, its repository (whose config the
+    worker wrote: an external diff program, a missing commit fetched by a program of its own)
+    never opened."""
+    owner = tmp_path / "owner.gitconfig"
+    owner.write_text(f"[user]\n\temail = o@o\n\tname = o\n[diff]\n\tsubmodule = {shown}\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(owner))
+    commit(git_repo, "f.txt", "a\n")
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    marker = tmp_path / "RAN"
+    try:
+        worker, tree = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        # Its commands, in its worktree: a repository of its own, committed there as a
+        # submodule and moved on once; then its config names programs, its new commit gone.
+        sub = tree / "vendor"
+        run("git", "init", "-q", "-b", "main", str(sub))
+        commit(sub, "s.txt", "1\n")
+        first = run("git", "rev-parse", "HEAD", cwd=sub).strip()
+        run("git", "update-index", "--add", "--cacheinfo", f"160000,{first},vendor", cwd=tree)
+        (tree / ".gitmodules").write_text(
+            '[submodule "vendor"]\n\tpath = vendor\n\turl = ./vendor\n'
+        )
+        run("git", "add", ".gitmodules", cwd=tree)
+        run("git", "commit", "-qm", "vendor", cwd=tree)
+        commit(sub, "s.txt", "2\n")
+        second = run("git", "rev-parse", "HEAD", cwd=sub).strip()
+        run("git", "update-index", "--cacheinfo", f"160000,{second},vendor", cwd=tree)
+        run("git", "commit", "-qm", "bump vendor", cwd=tree)
+        script = tree / "tools" / "run.sh"
+        script.parent.mkdir()
+        script.write_text(f"#!/bin/sh\necho ran >> {marker}\n")
+        script.chmod(0o755)
+        run("git", "reset", "-q", "--hard", "HEAD~1", cwd=sub)
+        (sub / ".git" / "objects" / second[:2] / second[2:]).unlink()
+        for key, value in (("core.repositoryformatversion", "1"),
+                           ("extensions.partialClone", "origin"), ("remote.origin.url", str(tree)),
+                           ("remote.origin.promisor", "true"),
+                           ("remote.origin.uploadpack", str(script)),
+                           ("diff.external", str(script))):  # fmt: skip
+            run("git", "config", key, value, cwd=sub)
+        await call_tool(runtime, "report", worker, status="done", summary="Done.")
+        await settle(runtime)
+        found = await runtime.task_actions.diff(task_of(harness, worker))
+        assert f"+Subproject commit {second}" in "".join(d.get("diff") or "" for d in found)
+        assert not marker.exists(), "nothing its config names ran as the owner"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_look_past_the_settings_threads_room_is_denied_at_once(
     tmp_path, git_repo, monkeypatch
 ):
