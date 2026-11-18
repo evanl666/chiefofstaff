@@ -2887,6 +2887,25 @@ class Tools:
         await self.runtime.workers.close(row["id"], by="the Router")
         return "Closed."
 
+    def checking_back(self, session_id: str, task: dict) -> bool:
+        """Whether its turn is its check-back on this task: what it was given last is that
+        (not the owner's chat, a thread's news or the Router since)."""
+        given = self.store.one(
+            "SELECT meta FROM messages WHERE session_id=? "
+            "AND json_extract(meta, '$.prompt') IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        )
+        meta = json.loads(given["meta"]) if given else {}
+        return bool(meta.get("check_back")) and meta.get("task_id") == task["id"]
+
+    def going_runs(self, task: dict | None) -> set[str]:
+        """The links of a task's runs still going (TaskActions.runs_going)."""
+        return (
+            {item["url"] for item in self.runtime.task_actions.runs_going(task["id"])}
+            if task
+            else set()
+        )
+
     async def t_report(self, params: Report, caller: str):
         row = self.caller(caller, WORKER, SLACK)
         task = (
@@ -2929,6 +2948,8 @@ class Tools:
                     f"own; {task['id']} {kept}."
                 )
                 task = made
+        # Its runs still going before this report: one that says they all still go is no news.
+        going_before = self.going_runs(task)
         if task and params.artifacts:
             # What they are and where they stand is a fact, whatever becomes of the report.
             declared = self.runtime.task_actions.declare_artifacts(
@@ -3167,8 +3188,12 @@ class Tools:
             elif task["status"] in {"review", "done"} and params.status == "progress":
                 # News about finished work (PR feedback handled, a question answered): it stays
                 # where it is, and stays in sight until the owner has seen it. A blocker or a
-                # question needs the owner, and shows as such.
-                self.runtime.task_actions.news(task["id"], params.summary)
+                # question needs the owner, and shows as such. Not, woken by its check-back,
+                # where its runs stand when they all still go as before: Monitoring says that
+                # (bug QA6-5: an Update under Needs you each hour, saying nothing new).
+                unchanged = bool(going_before) and self.going_runs(task) == going_before
+                if not (unchanged and self.checking_back(caller, task)):
+                    self.runtime.task_actions.news(task["id"], params.summary)
                 task = self.tasks.update(task["id"], progress=params.summary[:6000])
             elif (
                 params.status == "done"

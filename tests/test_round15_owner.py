@@ -295,3 +295,38 @@ async def test_the_owners_own_conversation_with_a_worker_goes_on_about_its_task(
     await runtime.owner_send(worker, "Cite the doc's section", task_id=second["id"])
     assert last_owner_message(harness, worker)["meta"]["task_id"] == second["id"]
     assert len(runtime.tasks.for_session(worker)) == 2
+
+
+async def test_a_check_back_that_finds_its_runs_still_going_is_no_update(harness):
+    """#5: an Update card came under Needs you an hour after the last one, saying the run was
+    still going: each check-back on finished work asks its worker to report where its runs
+    stand (status progress), and each such report was news. Its runs all still going, as
+    before, Monitoring says so; one ended is news."""
+    from test_round12_checkbacks import checking, woken
+    from test_round12_runs import FLYTE, NIGHTLY
+
+    runtime, worker, a, _b, session = await checking(harness, with_b=False)
+    await woken(runtime, session)
+    await call_tool(runtime, "report", worker, status="progress", task_id=a["id"],
+                    summary="Still running; 2 of 5 shards written.",
+                    artifacts=[NIGHTLY])  # fmt: skip
+    assert not harness.store.get(f"news:{a['id']}"), "no Update for no change"
+    shown = runtime.task_actions.view(runtime.tasks.get(a["id"]))
+    assert shown["progress"].startswith("Still running") and shown["monitoring"]
+    await call_tool(runtime, "check_back", worker, task_id=a["id"], minutes=60,
+                    what="whether the nightly export finished", url=FLYTE)  # fmt: skip
+    await woken(runtime, session)
+    await call_tool(runtime, "report", worker, status="progress", task_id=a["id"],
+                    summary="The export finished: 5 shards, 12M rows.",
+                    artifacts=[{**NIGHTLY, "status": "succeeded"}])  # fmt: skip
+    news = harness.store.get(f"news:{a['id']}")
+    assert news and "12M rows" in news, "a run that ended is news"
+    # Not woken by its check-back (the owner's chat, a PR's news): what it says is news, runs
+    # or no runs.
+    runtime.task_actions.news_seen(a["id"])
+    await runtime.owner_send(worker, "Did Bob answer on the PR?")
+    await call_tool(runtime, "report", worker, status="progress", task_id=a["id"],
+                    summary="Bob approved the PR; the export runs again.",
+                    artifacts=[NIGHTLY])  # fmt: skip
+    news = harness.store.get(f"news:{a['id']}")
+    assert news and "Bob approved" in news

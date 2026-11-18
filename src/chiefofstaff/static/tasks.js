@@ -217,6 +217,9 @@ function taskMeta(task, phase = {}) {
   else if (phase.marker === "check-back" && task.check_back?.at) when = clockTime(task.check_back.at);
   else if (phase.section === "monitoring") when = since(task.active_at || task.updated_at);
   else if (phase.marker === "queued" || phase.marker === "turn") when = "";
+  // An update's time is its news's own, not when the task ended (bug QA6-5: news that came
+  // just now said "1h ago").
+  else if (phase.marker === "update" && task.news?.at) when = since(task.news.at);
   return [[statusWord(phase), when], help.filter(Boolean).join("\n")];
 }
 // The meta's parts: the status, and when (left out on a narrow row: it is in the tooltip).

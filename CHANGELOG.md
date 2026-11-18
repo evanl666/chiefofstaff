@@ -290,6 +290,12 @@ stays in sight; Artifacts words and times match what its rows say; a slow script
   The chat's box says which (*Message about “…”*, *A new task for this worker…*). The worker is
   named for that task, and its row is that task's own, under *Running* while it works
   (QA6-3, QA6-4).
+- **A check-back that finds its runs still going is no *Update*.** On accepted work, each
+  check-back has its worker report where its runs stand, and each report came under *Needs you*
+  as an *Update* (*still in progress…*), timed as its task (*1h ago*) though it had just come.
+  Its runs all still going as before, the *Monitoring* row says so (*reported running just
+  now · next in 59 min*); a run that ended, or a new one, is an *Update*, timed as itself
+  (QA6-5).
 
 ## 0.1.45 (2026-11-14)
 
