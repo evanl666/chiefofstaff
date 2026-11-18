@@ -288,17 +288,18 @@ is no *Update*; one piece of work is one row.
   earlier task's work, beside the earlier task's own row. It now goes to the task you chose in
   the chat: the one you opened it at (a task row's *Worker* link), or one you scrolled up to.
   Otherwise (at the chat's end, or from Home with @) it goes to the task that asked you
-  something, the one the worker is on, its only one, or the one you were writing it about;
-  with several finished and none of those, it is a task of its own, named from your message.
-  The chat's box says which (*Message about “…”*, *A new task for this worker…*). The worker is
-  named for that task, and its row is that task's own, under *Running* while it works
-  (QA6-3, QA6-4).
+  something, the one the worker is on, its only one, or the one it was last given word of (your
+  message, or the Router's on a task it had: a check-back, a note, a changed decision); when
+  that word started a task of the Router's, with several finished, it is a task of its own,
+  named from your message. The chat's box says which (*Message about “…”*, *A new task for
+  this worker…*), and so does Home's *To* line (*as a new task*). The worker is named for that
+  task, and its row is that task's own, under *Running* while it works (QA6-3, QA6-4).
 - **A check-back that finds its runs still going is no *Update*.** On accepted work, each
   check-back has its worker report where its runs stand, and each report came under *Needs you*
   as an *Update* (*still in progress…*), timed as its task (*1h ago*) though it had just come.
-  Its runs all still going as before, the *Monitoring* row says so (*reported running just
-  now · next in 59 min*); a run that ended, or a new one, is an *Update*, timed as itself
-  (QA6-5).
+  A check-back's report that says each of its runs again as it stood, still going, is what the
+  *Monitoring* row says (*reported running just now · next in 59 min*); anything else is an
+  *Update* (a run ended, failed or new, a failure said in words only), timed as itself (QA6-5).
 - **One piece of work is one row.** Accepted work its worker went on with as a new task (the
   Router makes more of accepted work a new task, often under the same name) showed twice, with
   the same runs: the new task under *Running*, the accepted one under *Monitoring*. When an

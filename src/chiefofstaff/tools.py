@@ -42,6 +42,7 @@ from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
 from .store import ago_minutes, now
 from .task_actions import (
+    RUN_GOING,
     covers,
     deliverable_kind,
     deliverable_title,
@@ -2898,12 +2899,31 @@ class Tools:
         meta = json.loads(given["meta"]) if given else {}
         return bool(meta.get("check_back")) and meta.get("task_id") == task["id"]
 
-    def going_runs(self, task: dict | None) -> set[str]:
-        """The links of a task's runs still going (TaskActions.runs_going)."""
+    def runs_said(self, task: dict | None) -> dict[str, str]:
+        """Where a task's runs stand as last said (still tracked): link -> status."""
+        known = json.loads(self.store.get(f"artifacts:{task['id']}") or "[]") if task else []
+        return {
+            item["url"]: item.get("status") or ""
+            for item in known
+            if deliverable_kind(item["url"], declared=True)[0] == "flow"
+            and not item.get("untracked")
+        }
+
+    @staticmethod
+    def said_again(before: dict[str, str], declared: list[dict]) -> bool:
+        """Whether a report's artifacts say again of its runs what was said before, all still
+        going: every run going before is declared again, and each declared one stood so, its
+        status the same and a going one (none new, ended, failed or changed). Not a report
+        that declares none: its words may say anything (review M2)."""
+        going = {url for url, status in before.items() if RUN_GOING.search(status)}
+        said = {item["url"]: item["status"] for item in declared}
         return (
-            {item["url"] for item in self.runtime.task_actions.runs_going(task["id"])}
-            if task
-            else set()
+            bool(going)
+            and going <= said.keys()
+            and all(
+                RUN_GOING.search(status) and before.get(url) == status
+                for url, status in said.items()
+            )
         )
 
     async def t_report(self, params: Report, caller: str):
@@ -2948,8 +2968,10 @@ class Tools:
                     f"own; {task['id']} {kept}."
                 )
                 task = made
-        # Its runs still going before this report: one that says they all still go is no news.
-        going_before = self.going_runs(task)
+        # Where its runs stood before this report: one that says them all again, still going,
+        # is no news.
+        runs_before = self.runs_said(task)
+        declared: list[dict] = []
         if task and params.artifacts:
             # What they are and where they stand is a fact, whatever becomes of the report.
             declared = self.runtime.task_actions.declare_artifacts(
@@ -3189,9 +3211,9 @@ class Tools:
                 # News about finished work (PR feedback handled, a question answered): it stays
                 # where it is, and stays in sight until the owner has seen it. A blocker or a
                 # question needs the owner, and shows as such. Not, woken by its check-back,
-                # where its runs stand when they all still go as before: Monitoring says that
-                # (bug QA6-5: an Update under Needs you each hour, saying nothing new).
-                unchanged = bool(going_before) and self.going_runs(task) == going_before
+                # its runs said again as they stood, all still going: Monitoring says that (bug
+                # QA6-5: an Update under Needs you each hour, saying nothing new).
+                unchanged = self.said_again(runs_before, declared)
                 if not (unchanged and self.checking_back(caller, task)):
                     self.runtime.task_actions.news(task["id"], params.summary)
                 task = self.tasks.update(task["id"], progress=params.summary[:6000])

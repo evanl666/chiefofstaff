@@ -362,3 +362,102 @@ def test_one_piece_of_work_is_one_row_on_the_board():
     assert found["phases"]["y"] == "finished/still-following", found["phases"]
     assert found["whys"]["y"] == "Still following, in a newer task of the same name"
     assert sorted(found["sections"]["monitoring"]) == ["v", "z"]
+
+
+async def test_the_routers_word_on_an_earlier_task_is_about_that_task(harness):
+    """Review M1: after a check-back on A (or the Router's note on it, a changed decision), the
+    owner's next message became a task of its own: a second row for A's work. Only a task the
+    Router started (its first instruction) leaves it open."""
+    from chiefofstaff.envelope import wrap
+
+    runtime = await harness.connect()
+    worker, first, _second = await worker_with_two_tasks(runtime, harness)
+    await runtime.delivery.deliver(
+        worker,
+        wrap("system", "check-back", "Time to check the load test.", task=first["id"]),
+        kind="router",
+        display="Check back: the load test",
+        meta={"task_id": first["id"], "check_back": True},
+    )
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    assert runtime.view(harness.store.session(worker))["chat_task"]["id"] == first["id"]
+    await runtime.owner_send(worker, "Also time the cold start")
+    assert last_owner_message(harness, worker)["meta"]["task_id"] == first["id"]
+    assert len(runtime.tasks.for_session(worker)) == 2, "no task of its own"
+
+
+async def test_a_routers_note_on_an_earlier_task_is_about_that_task(harness):
+    runtime = await harness.connect()
+    worker, first, _second = await worker_with_two_tasks(runtime, harness)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    task="note", task_id=first["id"],
+                    text="Backend B is the one we keep.")  # fmt: skip
+    await runtime.owner_send(worker, "Also time the cold start")
+    assert last_owner_message(harness, worker)["meta"]["task_id"] == first["id"]
+    assert len(runtime.tasks.for_session(worker)) == 2
+
+
+async def test_a_failure_said_on_a_check_back_is_an_update(harness):
+    """Review M2: on a check-back, a report whose runs all still went was no Update, also one
+    that said a failure in words only (no runs declared), or declared a new failed run beside
+    the one still going. Only a report that says every run again as it stood, still going, is
+    left to Monitoring."""
+    from test_round12_checkbacks import checking, woken
+    from test_round12_runs import FLYTE, NIGHTLY
+
+    runtime, worker, a, _b, session = await checking(harness, with_b=False)
+    await woken(runtime, session)
+    await call_tool(runtime, "report", worker, status="progress", task_id=a["id"],
+                    summary="The export failed: out of disk on shard 3.")  # fmt: skip
+    news = harness.store.get(f"news:{a['id']}")
+    assert news and "out of disk" in news, "said in words only: an Update"
+    runtime.task_actions.news_seen(a["id"])
+    await call_tool(runtime, "check_back", worker, task_id=a["id"], minutes=60,
+                    what="whether the nightly export finished", url=FLYTE)  # fmt: skip
+    await woken(runtime, session)
+    await call_tool(runtime, "report", worker, status="progress", task_id=a["id"],
+                    summary="Still running; the backfill run failed.",
+                    artifacts=[NIGHTLY, {"url": FLYTE + "b2", "name": "Backfill",
+                                         "status": "failed"}])  # fmt: skip
+    news = harness.store.get(f"news:{a['id']}")
+    assert news and "backfill" in news.lower(), "a new failed run: an Update"
+
+
+async def test_send_now_with_nothing_due_takes_no_slot_later(harness):
+    """Review L1: Send now with nothing waiting (or on a busy worker) left its "now" set, and the
+    Router's next message to it went over the parallel-worker limit."""
+    harness.store.save_settings(harness.store.settings().model_copy(update={"max_workers": 1}))
+    runtime = await echoing(harness)
+    other = await spawn(runtime, harness.router_id, "Update the docs")
+    await call_tool(runtime, "report", other, status="done", summary="Updated the docs.")
+    harness.session(other).emit("session.idle")
+    await settle(runtime)
+    await busy_worker(runtime, harness, "Fix the login timeout")
+    await runtime.send_now(other)
+    assert not runtime.states[other].now, "nothing was due"
+    await call_tool(runtime, "message_session", harness.router_id, session_id=other,
+                    task="note", text="FYI: the docs site moved.")  # fmt: skip
+    await settle(runtime)
+    assert harness.store.session(other)["status"] == "queued", "it waits for a slot"
+
+
+async def test_a_new_task_whose_message_never_went_is_rolled_back(harness, monkeypatch):
+    """Review L2: the task made of the owner's message (about none of its tasks) stayed running,
+    and named the worker, when the message could not be delivered."""
+    runtime = await harness.connect()
+    worker, _first, second = await worker_with_two_tasks(runtime, harness)
+
+    async def refused(*args, **kwargs):
+        raise RuntimeError("Could not deliver the message: connection lost.")
+
+    monkeypatch.setattr(runtime.delivery, "deliver", refused)
+    try:
+        await runtime.owner_send(worker, "Also time the cold start")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("the delivery error is the caller's")
+    assert [t["id"] for t in runtime.tasks.for_session(worker)] == [_first["id"], second["id"]]
+    assert runtime.tasks.current(worker)["id"] == second["id"]
+    assert runtime.view(harness.store.session(worker))["display_title"] == second["title"]
