@@ -24,8 +24,10 @@ O4 a closed session continued here works and leaves the list (a); an open one is
 O6 whose a `copilot -p` session is (provenance.py): ten alike that a script runs one after
    the other are a batch, left out of the sidebar's rows and the Router's list (/api/external)
    once they ended (listed as the owner's while they run, and the first five, a few alike, the
-   owner's still), and kept so in the store; a single
-   one named `batch: …` is never listed, also while it runs (a); a single one is the owner's,
+   owner's still), and kept so in the store; one named `batch: …` is not listed while it
+   runs, and alone (a name alone is no batch) is the owner's once it ended; a second of that
+   name makes both a batch's: it is never listed, also while it runs, and the first is left
+   out from then on (a); a single one is the owner's,
    listed and finished (b); `chiefofstaff tidy-sessions` shows the batch, what would be dropped
    and what was learned from it, changing nothing, and leaves them while they are new (c); made
    two hours old, --apply moves them with a manifest, drops what was not learned yet and keeps
@@ -1721,8 +1723,21 @@ async def o6_batch(ctx: Ctx):
     log(f"O6a passed: {len(batch)} `copilot -p` alike: left out of the rows and the Router's "
         f"list, kept as a batch ({made[batch[0]]['why']})")  # fmt: skip
 
-    # One named as a batch's, as workers name theirs: never listed, also while it runs (the
-    # sidebar's rows, and the Router's list asked again and again meanwhile).
+    # One named as a batch's, as workers name theirs: not listed while it runs; alone, the
+    # owner's once it ended (a name alone is no batch: provenance.py, since 0.1.46).
+    alone = await prompt_mode(ctx, folder, OK, "--name", "batch: Label the acme tickets")
+    ctx.labels[alone] = "named alone"
+    await watch.until(
+        "named alone, ended: listed as the owner's", alone, lambda r: r and not r["open"], LISTING
+    )
+    assert not any(entry[1] for entry in watch.timeline.get(alone, [])), "listed while it ran"
+    assert alone not in app.made(), app.made().get(alone)
+    log("O6a: one `copilot -p --name \"batch: …\"` alone: not listed while it ran, the owner's "
+        "once it ended")  # fmt: skip
+
+    # A second of that name: both a batch's. It is never listed, also while it runs (the
+    # sidebar's rows, and the Router's list asked again and again meanwhile); the first is left
+    # out from then on.
     routers: set[str] = set()
 
     async def ask_routers_list():
@@ -1744,9 +1759,15 @@ async def o6_batch(ctx: Ctx):
     assert named not in watch.seen, f"named a batch's, yet listed: {watch.timeline.get(named)}"
     assert routers and named not in routers, "named a batch's, yet in the Router's list"
     assert (await app.http.get(f"/api/others/{named}")).status_code == 404
-    assert app.made()[named]["why"] == "named", app.made()[named]
-    log(f"O6a passed: one `copilot -p --name \"batch: …\"` alone: never listed, also while "
-        f"it ran (the Router's list read {len(routers)} ids meanwhile); kept as named")  # fmt: skip
+    await watch.until("named alone: left out, another of its name came", alone,
+                      lambda r: r is None, LISTING)  # fmt: skip
+    ctx.banned.add(alone)
+    made = app.made()
+    assert made[named]["why"] == made[alone]["why"] == "named", (made[named], made[alone])
+    log(
+        f'O6a passed: a second `copilot -p --name "batch: …"`: never listed, also while '
+        f"it ran (the Router's list read {len(routers)} ids meanwhile); both kept as named"
+    )
 
     # b. A single one of the owner's: theirs.
     one_off = await prompt_mode(ctx, ctx.folder("one-off"), YES)
@@ -1784,8 +1805,8 @@ async def o6_batch(ctx: Ctx):
     assert shown.returncode == 0, shown.stderr
     for said in (
         "10 sessions of a script's batch (one-shot, alike)",
-        "1 session named as a batch's",
-        "Left where they are: 11 sessions changed in the last hour.",
+        "2 sessions named as a batch's",
+        "Left where they are: 12 sessions changed in the last hour.",
         "1 prompt of theirs, read as yours and not learned from yet, would be dropped.",
         f"How you write, Answers and reports to you (version {version}): 1 of its 1 example",
     ):
