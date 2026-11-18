@@ -202,6 +202,40 @@ COPILOT = Capabilities(
 # The Copilot CLI versions this release was tested with (live end-to-end and contract tests).
 TESTED_CLI = "1.0.107"
 OLDEST_CLI = "1.0.100"
+# The SDK refusing a Copilot CLI that speaks a newer protocol than it does (the CLI updates
+# itself; the SDK supporting it comes later): "SDK supports versions 3-3, but server reports
+# version 4".
+NEWER_PROTOCOL = re.compile(r"SDK supports versions (\d+)-(\d+), but server reports version (\d+)")
+CLI_VERSION = re.compile(r"\b(\d+\.\d+\.\d+(?:-\d+)?)\b")
+
+
+def newer_protocol(error: BaseException) -> bool:
+    """Whether the SDK refused the CLI for speaking a newer protocol than it supports."""
+    found = NEWER_PROTOCOL.search(str(error))
+    return bool(found) and int(found.group(3)) > int(found.group(2))
+
+
+async def cli_version(command: str) -> str:
+    """The version a Copilot CLI says it is (`copilot --version`), "" when it doesn't say."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            command, "--version", stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )  # fmt: skip
+    except OSError:
+        return ""
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), 15)
+    except TimeoutError:
+        with suppress(ProcessLookupError):
+            process.kill()
+        return ""
+    except asyncio.CancelledError:
+        with suppress(ProcessLookupError):
+            process.kill()
+        raise
+    found = CLI_VERSION.search(output.decode(errors="replace"))
+    return found.group(1) if found else ""
 
 
 # What Chief of Staff calls itself to Copilot (work-buddy: its earlier name), which the CLI keeps
@@ -231,15 +265,73 @@ class CopilotBackend:
 
     capabilities = COPILOT
 
-    def __init__(self, client: CopilotClient, command: str = "copilot"):
+    def __init__(
+        self, client: CopilotClient, command: str = "copilot", env: dict[str, str] | None = None
+    ):
         self.client = client
         self.command = command
+        self.env = env
         # The CLI's process and those it started (the npm loader runs Copilot's own program,
         # which outlives the loader when only that is killed), as last seen: pid -> command.
         self.started: dict[int, str] = {}
+        # Told what the start is doing when it takes a while (Runtime.backend_note).
+        self.note: Callable[[str], None] | None = None
+        # When the owner's CLI speaks a newer protocol than this SDK: (its version, the version
+        # of the SDK's own Copilot runtime used instead).
+        self.fallback: tuple[str, str] | None = None
 
     async def start(self) -> None:
-        await self.client.start()
+        watching = asyncio.create_task(self.watch_start())
+        try:
+            await self.client.start()
+        except RuntimeError as exc:
+            if not newer_protocol(exc):
+                raise
+            watching.cancel()
+            await self.start_fallback(exc)
+        finally:
+            watching.cancel()
+
+    async def watch_start(self) -> None:
+        """The CLI's processes as it starts (processes): when the SDK refuses it, it stops the
+        npm loader only, and Copilot's own program would run on."""
+        with suppress(Exception):
+            while True:
+                await asyncio.to_thread(self.processes)
+                await asyncio.sleep(0.25)
+
+    async def start_fallback(self, refused: RuntimeError) -> None:
+        """The owner's Copilot CLI updated itself past what this SDK speaks: the Copilot runtime
+        the SDK was made with runs instead (downloaded once, into the SDK's own cache; the same
+        sign-in, settings and sessions, in ~/.copilot), until a release supports the new one."""
+        with suppress(Exception):
+            await self.stop()  # (What the refused CLI left running.)
+        self.started = {}
+        theirs = await cli_version(self.command)
+        if self.note:
+            self.note(
+                f"Your Copilot CLI{f' ({theirs})' if theirs else ''} is newer than Chief of "
+                "Staff supports: setting up the Copilot version it works with (a download of "
+                "about 100 MB, the first time)…"
+            )
+        # The SDK's own: not one COPILOT_CLI_PATH names (a Copilot CLI sets it for what it
+        # runs, as when Chief of Staff was started from one).
+        env = {key: value for key, value in (self.env or os.environ).items()
+               if key != "COPILOT_CLI_PATH"}  # fmt: skip
+        try:
+            # (The SDK finds or downloads its runtime as the client is made: not on this loop.)
+            self.client = await asyncio.to_thread(
+                CopilotClient, connection=RuntimeConnection.for_stdio(), env=env
+            )
+            await self.client.start()
+            ours = (await self.client.get_status()).version
+        except Exception as exc:
+            raise RuntimeError(
+                f"Your Copilot CLI{f' ({theirs})' if theirs else ''} is newer than Chief of Staff "
+                f"supports ({refused}), and the Copilot version it works with could not be set "
+                f"up: {exc}"
+            ) from exc
+        self.fallback = (theirs, ours)
 
     def cli_process(self) -> subprocess.Popen | None:
         return getattr(self.client, "_cli_process", None)
@@ -479,7 +571,7 @@ def copilot_backend(command: str) -> CopilotBackend:
     # The CLI and every worker shell inherit this environment; keep our own settings out.
     env = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
     client = CopilotClient(connection=RuntimeConnection.for_stdio(path=path), env=env)
-    return CopilotBackend(client, path)
+    return CopilotBackend(client, path, env)
 
 
 def copilot_home() -> Path:

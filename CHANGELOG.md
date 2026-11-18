@@ -11,6 +11,12 @@ is let through again; runs and documents are listed wherever they are served; an
 that failed stays in sight; Artifacts words and times match what its rows say; a slow
 script's `copilot -p` calls are a batch again, and your own questions stay listed.
 
+- **Fixed: Chief of Staff could not start once your Copilot CLI updated itself to 1.0.114.** That
+  version speaks a protocol the Copilot SDK Chief of Staff uses doesn't yet ("SDK protocol
+  version mismatch"). Now, when your CLI is newer than Chief of Staff supports, it runs the
+  Copilot version its SDK was made with instead (downloaded once, about 100 MB, into the SDK's
+  own cache), with the same sign-in, settings and sessions, and says so: "Your Copilot CLI
+  (1.0.114) is newer than Chief of Staff supports; using Copilot 1.0.105 for now."
 - **Security: a Codex worker could switch off Chief of Staff's checks for itself.** In a
   repository you trust in Codex, a worker could write Codex settings into its own folder
   (`.codex/`): from its next start or resume, Codex loaded them. A rule there let commands run
