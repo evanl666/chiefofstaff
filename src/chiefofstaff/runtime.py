@@ -129,6 +129,7 @@ from .tools import Tools
 from .watchdog import WatchConfig, Watchdog
 from .workers import SETTINGS_STOP, SETTINGS_WAIT, Workers
 from .workspaces import (
+    ABSENT_HELD_CLI,
     BRANCH_PREFIX,
     Workspaces,
     common_git_dir,
@@ -751,6 +752,9 @@ class Runtime:
                 if not auth.isAuthenticated:
                     raise RuntimeError("Copilot is not signed in. Run `copilot login`.")
                 warning = await self.version_warning()
+                with suppress(Exception):
+                    version = await self.backend.version()
+                    workspaces_module.ABSENT_HELD = not older(version, ABSENT_HELD_CLI)
                 self.sandbox_gh = await self.backend.gh_works_in_sandbox()
                 await self.ensure_router()
                 self.toolset.ensure_profile_card()

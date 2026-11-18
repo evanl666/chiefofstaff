@@ -1440,6 +1440,33 @@ async def test_settings_a_worker_moves_into_place_are_the_owners_to_look_at(
         await runtime.stop()
 
 
+@pytest.mark.parametrize(("version", "held"), [("1.0.105", False), ("1.0.112", True)])
+async def test_an_absent_git_file_is_denied_only_where_copilot_leaves_nothing_there(
+    tmp_path, git_repo, monkeypatch, version, held
+):
+    """On macOS, a git file that isn't there (.git/commondir) is denied in the sandbox only
+    with a Copilot that leaves nothing at such a path: 1.0.105 leaves an empty folder there,
+    which breaks every git in the owner's repository. With that one, it is looked for after
+    each turn instead, as on Linux."""
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    monkeypatch.setattr(workspaces_module, "ABSENT_HELD", True)
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    harness.client.cli_version = version
+    runtime = await harness.connect()
+    try:
+        worker, _ = await isolated(runtime, harness, git_repo)
+        await settle(runtime)
+        policy = runtime.sandbox_policy(harness.store.session(worker))
+        assert policy is not None
+        commondir = str(git_repo.resolve() / ".git" / "commondir")
+        assert (commondir in policy.denied) is held
+        watched = json.loads(harness.store.get(f"gitwatch:{worker}") or "[]")
+        assert (commondir in watched) is not held
+    finally:
+        await runtime.stop()
+
+
 async def test_a_git_folder_a_worker_makes_does_not_shorten_what_is_checked(
     tmp_path, git_repo, monkeypatch
 ):

@@ -1178,9 +1178,19 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
 # a file, .git/commondir): an absent path is not listed there; Chief of Staff looks for those it
 # must not find after each turn (Runtime.git_watch_check, SECURITY.md).
 SANDBOX_PLATFORM = sys.platform
+# Copilot before this leaves an empty folder at a denied path that did not exist (1.0.105,
+# checked on macOS; 1.0.107 and later do not), as Linux's sandbox does: one that breaks git,
+# where it reads a file (.git/commondir). With such a Copilot (ABSENT_HELD, as the runtime found
+# it connected), absent paths are looked for after each turn, as on Linux.
+ABSENT_HELD_CLI = "1.0.107"
+ABSENT_HELD = True
 
 
 def sandbox_platform() -> str:
+    """The platform whose sandbox the worker's paths are held as: macOS's holds a denied path
+    that does not exist (with a Copilot that leaves nothing there), Linux's does not."""
+    if SANDBOX_PLATFORM == "darwin" and not ABSENT_HELD:
+        return "linux"
     return SANDBOX_PLATFORM
 
 
@@ -1193,7 +1203,7 @@ def sandbox_paths(paths: Sequence[str]) -> tuple[list[str], list[str]]:
     for path in dict.fromkeys(paths):
         if os.path.lexists(path):
             readonly.append(path)
-        elif SANDBOX_PLATFORM == "darwin":
+        elif sandbox_platform() == "darwin":
             # (A link to nowhere: where it leads too.)
             denied += dict.fromkeys([path, os.path.realpath(path)])
     return readonly, denied
