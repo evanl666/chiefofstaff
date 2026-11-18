@@ -28,6 +28,9 @@ from chiefofstaff.runtime import GITHUB_HOSTS, home_shown
 from chiefofstaff.store import Store
 from chiefofstaff.task_actions import MayHoldWorkError, moved
 
+# Root reads any file and lists any folder, whatever its mode (Linux CI's containers).
+AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
 
 def run(*command, cwd=None, env=None):
     done = subprocess.run(command, cwd=cwd, capture_output=True, text=True, env=env)
@@ -2451,15 +2454,16 @@ async def test_a_pr_waits_for_work_left_uncommitted_in_a_submodule(tmp_path, mon
         with pytest.raises(ValueError, match=r"has uncommitted changes in lib\. Follow up"):
             await plan(checkout)
         assert not marker.exists(), "the worker's filter never ran as the owner"
-        (subgit / "HEAD").chmod(0)
-        try:
-            with pytest.raises(MayHoldWorkError, match=r"lib, which Chief of Staff couldn't "
-                               r"read \(its HEAD can't be read"):  # fmt: skip
-                await plan(checkout)
-            with pytest.raises(ValueError, match="no GitHub remote"):  # (Past it, on its word.)
-                await plan(checkout, anyway=True)
-        finally:
-            (subgit / "HEAD").chmod(0o644)
+        if not AS_ROOT:
+            (subgit / "HEAD").chmod(0)
+            try:
+                with pytest.raises(MayHoldWorkError, match=r"lib, which Chief of Staff couldn't "
+                                   r"read \(its HEAD can't be read"):  # fmt: skip
+                    await plan(checkout)
+                with pytest.raises(ValueError, match="no GitHub remote"):  # (Past it, on its word.)
+                    await plan(checkout, anyway=True)
+            finally:
+                (subgit / "HEAD").chmod(0o644)
         # Its config swapped from a command it left running, between Chief of Staff's looks.
         config = subgit / "config"
         evil, clean = config.read_bytes(), config.read_bytes().split(b'[filter "x"]')[0]
@@ -2922,8 +2926,9 @@ async def test_chief_of_staffs_git_never_reads_a_workers_clone_config(tmp_path, 
         (clone / "new.txt").write_text("new\n")
         config.chmod(0)
         try:
-            with pytest.raises(AssertionError, match="unable to access"):
-                run("git", "status", cwd=clone)  # (git itself can't do without it.)
+            if not AS_ROOT:
+                with pytest.raises(AssertionError, match="unable to access"):
+                    run("git", "status", cwd=clone)  # (git itself can't do without it.)
             assert await workspaces_module.snapshot(taken)
             found = await workspaces_module.changes(taken)
             assert found and found["uncommitted"] == 2, found
@@ -3019,7 +3024,7 @@ async def test_a_workers_clone_with_lfs_and_crlf_files_reads_as_its_own_git_stat
 async def test_a_clone_its_worker_made_again_where_it_was_is_read_and_said_once(
     tmp_path, monkeypatch
 ):
-    """A worker deletes the clone Chief of Staff made for it and clones it again at the same
+    """A worker moves away the clone Chief of Staff made for it and clones it again at the same
     place (a fresh start), then commits its fix there: its work is read from the new clone,
     pushed where Chief of Staff recorded, and its timeline says once that it was made again."""
     source = tmp_path / "source"
@@ -3038,7 +3043,9 @@ async def test_a_clone_its_worker_made_again_where_it_was_is_read_and_said_once(
             ).text_result_for_llm
         )
         clone, branch = Path(added["path"]), added["branch"]
-        shutil.rmtree(clone)
+        # (Moved aside, not deleted: Linux may give a new folder a deleted one's inode, which
+        # Chief of Staff then can't tell from the one it took.)
+        shutil.move(clone, tmp_path / "old-clone")
         run("git", "clone", "-q", f"file://{source}", str(clone))
         run("git", "checkout", "-q", "-b", branch, cwd=clone)
         commit(clone, "a.py", "x = 2\n")
@@ -3260,6 +3267,7 @@ def drained(fifo: Path, seconds: float = 20):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows has no FIFOs nor unreadable folders")
+@pytest.mark.skipif(AS_ROOT, reason="root lists any folder")
 async def test_a_folder_that_cant_be_listed_never_lets_a_tool_through(
     tmp_path, git_repo, monkeypatch
 ):
