@@ -37,6 +37,7 @@ from .workspaces import (
     checkout_top,
     diff,
     file_times,
+    origin_of,
     package_name,
     same_version,
     share_files,
@@ -66,7 +67,21 @@ CHECK_BACK_RETRY_MINUTES = 5
 FAILING_READS = 3
 
 PROJECT_URL = "https://github.com/evanl666/chiefofstaff"
-GITHUB_REMOTE = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
+# A GitHub repository's address (https, ssh or scp-like), its owner/name in group 1: on GitHub's
+# host itself, not a path on this machine or another host that only has github.com in it.
+GITHUB_REMOTE = re.compile(
+    r"^(?:https://(?:[^@/\s]+@)?|ssh://(?:[^@/\s]+@)?|[\w.-]+@)github\.com[:/]"
+    r"([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
+)
+
+
+def github_address(remote: str, slug: str) -> str:
+    """Where a clone in a worker's folder is pushed for a PR: GitHub's address for the repository,
+    made here from its owner/name (never one its config, nor Chief of Staff's record of it,
+    names), over ssh when the remote it was taken with is an ssh one, else https."""
+    if remote.startswith("https://"):
+        return f"https://github.com/{slug}.git"
+    return f"git@github.com:{slug}.git"
 
 
 STATUS_WORDS = {
@@ -2519,8 +2534,12 @@ class TaskActions:
                 raise ValueError("Nothing to open a PR from: the worker committed nothing.")
             title, body = self.pr_text(task, await self.commit_subjects(plans))
             for checkout, repo, slug, branch in plans:
+                # A clone in a worker's folder: to GitHub's address for it, made here.
+                to = "origin"
+                if checkout.get("remote"):
+                    to = github_address(origin_of(checkout), slug)
                 await checkout_git(
-                    checkout, repo, "push", "--quiet", "origin",
+                    checkout, repo, "push", "--quiet", to,
                     f"refs/heads/{branch}:refs/heads/{branch}", limit=180,
                 )  # fmt: skip
                 listed = await gh(

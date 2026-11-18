@@ -508,7 +508,8 @@ Click a line (or Tab to it and press Enter) to comment on it; *Send to the worke
 with its file and line, and the task comes back for review when the worker is done.
 
 *Create PR* pushes the worker's branch to `origin` (over http(s), ssh, git or a local path, as all
-of Chief of Staff's own fetches and pushes: not through a remote helper such as `codecommit::`)
+of Chief of Staff's own fetches and pushes: not through a remote helper such as `codecommit::`;
+from a clone in the worker's folder, only to GitHub's own address for the repository)
 and opens a pull request on GitHub with your signed-in `gh`: titled with what its commits say (their subjects; the task's title when it has
 none to read), and its report as the description, without what the report said about pushing or
 a PR (moot once the PR is open), and what was checked. If a PR from that branch

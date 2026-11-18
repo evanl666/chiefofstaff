@@ -2488,6 +2488,80 @@ async def test_a_pr_waits_for_work_left_uncommitted_in_a_submodule(tmp_path, mon
         await runtime.stop()
 
 
+async def test_a_clone_is_pushed_for_a_pr_only_to_github_at_an_address_made_for_it(
+    tmp_path, monkeypatch
+):
+    """A clone in a worker's folder is pushed for a PR only to GitHub, at the address Chief of
+    Staff makes from its owner/name: never where its config said (a repository on this machine
+    whose path reads as GitHub's: its hooks would run as the owner), and never to a repository
+    on this machine at all."""
+    owner = tmp_path / "owner.gitconfig"
+    owner.write_text("[user]\n\temail = o@o\n\tname = o\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(owner))
+    harness = Harness(tmp_path / "data", Settings())
+    runtime = await harness.connect()
+
+    async def gh(*arguments, payload=None):
+        if arguments[:2] == ("pr", "list"):
+            return "[]"
+        return "https://github.com/acme/app/pull/1\n"
+
+    runtime.github.gh = gh
+    marker = tmp_path / "RAN"
+    try:
+        info = await spawn(runtime, harness.router_id, title="Fix", instructions="f")
+        worker, workspace = info["session_id"], Path(info["cwd"])
+        # Its commands: a bare repository with a hook, at a path that reads as GitHub's; a
+        # clone of it, with a commit on a branch.
+        bare = workspace / "mirror" / "github.com" / "acme" / "app.git"
+        run("git", "init", "-q", "--bare", "-b", "main", str(bare))
+        hook = bare / "hooks" / "pre-receive"
+        hook.write_text(f"#!/bin/sh\necho ran >> {marker}\n")
+        hook.chmod(0o755)
+        clone = workspace / "app"
+        run("git", "clone", "-q", str(bare), str(clone))
+        commit(clone, "a.txt", "a\n")
+        run("git", "push", "-q", "origin", "main", cwd=clone)
+        marker.unlink()
+        run("git", "checkout", "-q", "-b", "fix", cwd=clone)
+        commit(clone, "a.txt", "b\n")
+        await call_tool(runtime, "report", worker, status="done", summary="Fixed it.")
+        await settle(runtime)
+        [taken] = [c for c in runtime.workspaces.checkouts(harness.store.session(worker))
+                   if c.get("path") == str(clone)]  # fmt: skip
+        assert taken["origin"] == str(bare)
+        task_id = task_of(harness, worker)
+        with pytest.raises(ValueError, match="no GitHub remote"):
+            await runtime.task_actions.create_pr(task_id)
+        with pytest.raises(ValueError, match="transport 'file' not allowed"):
+            await workspaces_module.checkout_git(taken, str(clone), "push", "origin", "fix")
+        assert not marker.exists(), "its hook never ran as the owner"
+        # Taken with GitHub's address: pushed there, as made from its owner/name.
+        pushed = []
+        real = workspaces_module.command
+
+        async def command(*arguments, **options):
+            if "push" in arguments:
+                pushed.append((arguments, options))
+                return ""
+            return await real(*arguments, **options)
+
+        monkeypatch.setattr(workspaces_module, "command", command)
+        made = {"git@github.com:acme/app": "git@github.com:acme/app.git",
+                "https://me@github.com/acme/app/": "https://github.com/acme/app.git"}  # fmt: skip
+        for origin, address in made.items():
+            pushed.clear()
+            taken["origin"] = taken["remote"] = origin
+            runtime.update_session(worker, repos=json.dumps([taken]))
+            runtime.tasks.update(task_id, status="done")
+            await runtime.task_actions.create_pr(task_id)
+            [(arguments, options)] = pushed
+            assert arguments[arguments.index("push") + 2] == address
+            assert options["local_remotes"] is False
+    finally:
+        await runtime.stop()
+
+
 async def test_a_look_past_the_settings_threads_room_is_denied_at_once(
     tmp_path, git_repo, monkeypatch
 ):

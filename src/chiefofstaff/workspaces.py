@@ -53,6 +53,9 @@ NETWORK_GIT = {"fetch", "push", "clone", "ls-remote", "pull"}
 # The transports those may use (GIT_ALLOW_PROTOCOL: whatever a repository's config says). Not
 # `ext::` (a command line), nor a remote helper (`<name>::`, a program by its name).
 TRANSPORTS = "http:https:ssh:git:file"
+# Those from a repository a worker can write (private_git): not a repository on this machine
+# either, which a worker may have made (its hooks run as whoever pushes there).
+REMOTE_TRANSPORTS = "http:https:ssh:git"
 
 
 def git_command_at(words: list[str] | tuple[str, ...]) -> int:
@@ -68,15 +71,19 @@ def git_command_of(arguments: tuple[str, ...]) -> str:
     return arguments[at] if at < len(arguments) else ""
 
 
-def git_environment(arguments: tuple[str, ...], lazy: bool) -> dict[str, str]:
+def git_environment(
+    arguments: tuple[str, ...], lazy: bool, local_remotes: bool = True
+) -> dict[str, str]:
     """What every git Chief of Staff runs has in its environment, whatever the repository's
-    config says: no transport but the plain ones, and only for a command that reaches another
-    repository or (`lazy`: one of the owner's, a partial clone's missing objects fetched as
-    they are read) where that may happen. Elsewhere (a repository a worker can write): no
-    transport at all and no object fetched as it is read."""
+    config says: no transport but the plain ones (not `file`, a repository on this machine,
+    unless `local_remotes`), and only for a command that reaches another repository or (`lazy`:
+    one of the owner's, a partial clone's missing objects fetched as they are read) where that
+    may happen. Elsewhere (a repository a worker can write): no transport at all and no object
+    fetched as it is read."""
     environment = {} if lazy else {"GIT_NO_LAZY_FETCH": "1"}
     if lazy or git_command_of(arguments) in NETWORK_GIT:
-        return environment | {"GIT_ALLOW_PROTOCOL": TRANSPORTS}
+        transports = TRANSPORTS if local_remotes else REMOTE_TRANSPORTS
+        return environment | {"GIT_ALLOW_PROTOCOL": transports}
     return environment | {"GIT_ALLOW_PROTOCOL": ""}
 
 
@@ -106,13 +113,15 @@ async def command(
     stdin_data: bytes | None = None,
     env: dict | None = None,
     lazy: bool = False,
+    local_remotes: bool = True,
 ) -> str:
     """Run a command without a terminal (it can never wait for a password prompt), and without
     Chief of Staff's own CHIEFOFSTAFF_* variables (a token one may hold): what it runs can run code
     a repository or a worker configured (a git filter). git never runs what a repository's
     config names (SAFE_GIT), never looks into submodules' work trees (without_submodules), and
     reaches other repositories only as git_environment lets it (`lazy`: one of the owner's
-    repositories, which may fetch objects as they are read). Stopped, with what it started,
+    repositories, which may fetch objects as they are read; `local_remotes`: not one a worker
+    can write, which may reach a repository on this machine). Stopped, with what it started,
     when it takes longer than `limit` or whoever waits for it stops waiting."""
     fixed: dict[str, str] = {}
     finish = False
@@ -122,7 +131,7 @@ async def command(
         arguments = without_submodules(arguments)
         if git_command_of(arguments) in NETWORK_GIT:
             arguments = ("git", *NOT_INTO_SUBMODULES, *arguments[1:])
-        fixed = git_environment(arguments, lazy)
+        fixed = git_environment(arguments, lazy, local_remotes)
         # Stopped halfway, git making or removing a worktree leaves half a tree (files gone, its
         # `.git` gone, git's record of it left): it finishes, within its limit, even when
         # whoever waits for it stops waiting (Chief of Staff stopping).
@@ -480,7 +489,8 @@ async def private_git(
             links = await index_gitlinks(path, pins, index, lazy=False)
             line = left_out(line, list(links), filters)
         return await command(
-            "git", *SAFE_GIT, *options, "-C", path, *line[1:], limit=limit, env=pins, lazy=False
+            "git", *SAFE_GIT, *options, "-C", path, *line[1:], limit=limit, env=pins, lazy=False,
+            local_remotes=False,
         )  # fmt: skip
 
 
