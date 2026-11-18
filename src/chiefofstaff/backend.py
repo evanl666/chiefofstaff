@@ -281,24 +281,41 @@ class CopilotBackend:
         self.fallback: tuple[str, str] | None = None
 
     async def start(self) -> None:
-        watching = asyncio.create_task(self.watch_start())
+        self.watch_start()
         try:
             await self.client.start()
         except RuntimeError as exc:
             if not newer_protocol(exc):
                 raise
-            watching.cancel()
             await self.start_fallback(exc)
-        finally:
-            watching.cancel()
 
-    async def watch_start(self) -> None:
-        """The CLI's processes as it starts (processes): when the SDK refuses it, it stops the
-        npm loader only, and Copilot's own program would run on."""
-        with suppress(Exception):
-            while True:
-                await asyncio.to_thread(self.processes)
-                await asyncio.sleep(0.25)
+    def watch_start(self) -> None:
+        """The CLI's processes, taken (processes) when the SDK refuses the protocol it speaks:
+        the SDK then stops the npm loader only, and Copilot's own program would run on."""
+        verify = getattr(self.client, "_verify_protocol_version", None)
+        if verify is None:
+            return
+
+        def taken() -> None:
+            # (The SDK keeps its stdio process as `_process`.)
+            client = self.client
+            process = getattr(client, "_cli_process", None) or getattr(client, "_process", None)
+            if pid := getattr(process, "pid", None):
+                table = process_table()
+                self.started |= {
+                    child: table[child][1] for child in descendants(table, pid) if child in table
+                }
+
+        async def verifying() -> Any:
+            try:
+                return await verify()
+            except Exception:
+                # (It answered: its program runs now, the loader not stopped yet.)
+                with suppress(Exception):
+                    await asyncio.to_thread(taken)
+                raise
+
+        self.client._verify_protocol_version = verifying  # type: ignore[method-assign]
 
     async def start_fallback(self, refused: RuntimeError) -> None:
         """The owner's Copilot CLI updated itself past what this SDK speaks: the Copilot runtime
