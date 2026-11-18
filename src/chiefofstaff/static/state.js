@@ -190,7 +190,9 @@ function handleEvent({ type, data }) {
     // Where a message sent to a worker stands: the row it was sent from says it too.
     if (noteDelivery(data) && data.session_id !== viewedId()) scheduleHome();
     if (data.amended) {
-      if (data.session_id === viewedId()) replaceMessage(data);
+      // While its chat loads, kept for after it: a message held meanwhile is not on the page yet.
+      if (state.loading?.id === data.session_id) state.loading.held.push(data);
+      else if (data.session_id === viewedId()) replaceMessage(data);
       return;
     }
     if (state.loading?.id === data.session_id) state.loading.held.push(data);

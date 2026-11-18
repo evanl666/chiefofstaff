@@ -386,7 +386,11 @@ export async function select(sessionId, { task = "" } = {}) {
   state.lastId = 0;
   Object.assign(earlier, { session: viewed, first: messages[0] || null, more: false, count: null, busy: false });
   appendMessages(messages);
-  appendMessages(loading.held);
+  appendMessages(loading.held.filter((message) => !message.amended));
+  // What changed meanwhile in messages it shows (where one stands): as they are now. Applied only
+  // once they are on the page (bug QA6-1: a message sent while Home's chat loaded showed no
+  // word of where it stood).
+  for (const message of loading.held.filter((message) => message.amended)) replaceMessage(message);
   scrollToBottom(true);
   if (messages.length >= PAGE) await countEarlier(viewed);
   if (state.selected !== sessionId) return;

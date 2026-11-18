@@ -4518,6 +4518,25 @@ async def round_qa6(runtime, browser, failures: list[str]):
     ).to_have_count(0)
     log("QA6-3/4: written at task A in its chat, it is A's: one row, under Running, named A")
 
+    # Every worker slot taken (the one at work above has one): a message waits for a slot,
+    # says so in a line, and Send now sends it all the same.
+    from chiefofstaff import machine
+
+    roomy, machine.short_of_memory = machine.short_of_memory, lambda: None
+    busy = runtime.workers.running()
+    assert busy >= 1, busy
+    store.save_settings(store.settings().model_copy(update={"max_workers": busy}))
+    await runtime.owner_send(found["news"]["session_id"], "QA6 add the row counts")
+    waits = page.locator("#timeline .msg.owner", has_text="QA6 add the row counts")
+    await expect(waits.locator(".delivery")).to_have_text(
+        "Not sent yet: waiting for a free worker slot · Send now", timeout=10000
+    )
+    await waits.get_by_role("button", name="Send now").click()
+    await expect(waits.locator(".delivery")).to_have_text("Sent", timeout=10000)
+    store.save_settings(store.settings().model_copy(update={"max_workers": 90}))
+    machine.short_of_memory = roomy
+    log("QA6-1: every slot taken, a message says so in a line; Send now sends it")
+
     update = needs.locator(".card.task", has_text="QA6 migrate the exporter")
     await expect(update.locator(".head .meta .marker")).to_have_text("Update")
     await expect(update.locator(".head .meta .when")).to_have_text(" · just now")
