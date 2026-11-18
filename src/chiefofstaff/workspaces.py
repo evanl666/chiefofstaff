@@ -463,6 +463,15 @@ async def clone_git(
                              limit=limit, env=env, every=every, filtered=filtered)  # fmt: skip
 
 
+class UnreadableError(ValueError):
+    """Chief of Staff's own git folder for a repository a worker can write could not be made
+    (privategit.prepare): "Not reading <path>: <why>." (`why` alone too)."""
+
+    def __init__(self, path: str, why: str):
+        super().__init__(f"Not reading {path}: {why}.")
+        self.why = why
+
+
 async def private_git(
     common: str,
     admin: str,
@@ -480,10 +489,16 @@ async def private_git(
     for it (privategit.prepare): never the repository's config, hooks or info/attributes. Its
     files are read with no filter (unfiltered) and those a filter keeps left out (unless
     `every`; `filtered`: only those, "" for none), and no submodule is looked into; nothing is
-    fetched as it is read."""
+    fetched as it is read. UnreadableError when that git folder can't be made."""
     folder = privategit.place(common, admin)
     async with privategit.lock(folder):
-        pins = await asyncio.to_thread(privategit.prepare, common, admin, tree, origin)
+        try:
+            pins = await asyncio.to_thread(privategit.prepare, common, admin, tree, origin)
+        except ValueError as exc:
+            raise UnreadableError(path, str(exc)) from exc
+        except OSError as exc:
+            raise UnreadableError(path, f"Chief of Staff's copy of its git folder can't be made "
+                                        f"({exc.strerror or exc})") from exc  # fmt: skip
         pins |= env or {}
         line = ("git", *arguments)
         options: tuple[str, ...] = ("-c", "submodule.recurse=false")
@@ -1487,6 +1502,8 @@ async def changes(checkout: dict, scope: Scope | None = None) -> dict | None:
     path, head, live = await asyncio.to_thread(locate, checkout)
     try:
         await checkout_git(checkout, path, "rev-parse", "--git-dir")
+    except UnreadableError:
+        raise  # (Said in its receipts: see TaskActions.collected.)
     except ValueError:
         return None
     result = {"path": checkout["path"], "branch": checkout.get("branch", ""), "commits": 0}
@@ -2371,7 +2388,8 @@ async def submodule_work(checkout: dict, tree: str) -> tuple[list[str], list[tup
             continue
         except (ValueError, OSError) as exc:
             logger.info("Could not read the submodule %s of %s: %s", path, tree, exc)
-            why = str(exc).removeprefix("git failed: ")
+            why = exc.why if isinstance(exc, UnreadableError) else str(exc)
+            why = why.removeprefix("git failed: ")
             unread.append((path, why[:120] or "git could not read it"))
             continue
         if head.strip() != mode.split()[1] or worth_committing(status):

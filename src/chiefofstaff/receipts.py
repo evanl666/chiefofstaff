@@ -816,7 +816,9 @@ def summarize(
             flags.append(f"Says tests pass, but the last test run failed (exit {code}).")
     elif tests and tests["passed"] is False:
         flags.append(f"The last test run failed (exit {tests['exit_code']}).")
-    if checkouts and said_changed and not any(changed.values()):
+    # A checkout Chief of Staff could not read: "Not reading <path>: why."
+    flags += evidence.get("unread", [])
+    if checkouts and said_changed and not any(changed.values()) and not evidence.get("unread"):
         flags.append("Says it made changes, but its checkouts have none.")
     # Counted all the same (a PR would carry them), and said: not what to commit.
     if generated := [name for c in checkouts for name in c.get("generated") or []]:

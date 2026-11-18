@@ -31,6 +31,7 @@ from .tasks import ADOPTED, ENDED, OPEN
 from .workspaces import (
     CommandRun,
     Scope,
+    UnreadableError,
     base_of,
     changes,
     checkout_git,
@@ -1118,15 +1119,19 @@ class TaskActions:
         if ended:
             await self.record_end(task)  # Its result: its share ends here.
             row = self.store.find_session(task["session_id"]) or row  # Its own clones too.
-        checkouts = []
+        checkouts, unread = [], []
         # Not while its worktrees are removed (a worker closed as it reported).
         async with self.states[row["id"]].checkouts:
             for checkout in self.workspaces.checkouts(row):
                 if self.not_its(task, checkout):
                     continue
-                with suppress(Exception):
+                try:
                     if found := await changes(checkout, self.scope(task, checkout)):
                         checkouts.append(found)
+                except UnreadableError as exc:
+                    unread.append(str(exc))  # "Not reading <path>: …", in its receipts.
+                except Exception:  # noqa: S112
+                    continue
         # Offered to merge only as read now: a PR GitHub could not answer for keeps its last
         # read (see read_prs), which may be of a head pushed over since.
         read = now()
@@ -1148,6 +1153,8 @@ class TaskActions:
                 "prs_at": time.time(),
                 "role_rules": ROLE_RULES,
             }
+            if unread:
+                evidence["unread"] = unread
             before = json.loads(run["evidence"]) if keep_stale and run["evidence"] else {}
             if reason := before.get("stale") or moved(before.get("checkouts", []), checkouts):
                 # The checks were about the code as it was then, not as it is now.

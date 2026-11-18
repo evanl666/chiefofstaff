@@ -55,7 +55,13 @@
   into one, whatever your config says. A submodule a PR would leave work behind in keeps it
   until that is committed, or, when it can't be read, until you click **Open it anyway**. Its
   git reaches other repositories only over http(s), ssh, git or a local path, not a remote
-  helper such as `codecommit::`.
+  helper such as `codecommit::`; from such a clone, not a local path either, and **Create PR**
+  pushes its branch only to GitHub's own address for the repository (a local repository whose
+  path read as GitHub's, with hooks of the worker's, was pushed to as you). A submodule in a
+  diff is shown as the commit it is at, whatever your `diff.submodule` says, so its own
+  repository (its config a worker could write) is never opened for a log or a diff. A clone
+  Chief of Staff can't read so is said in the task's receipts and the PR's error ("Not reading
+  …"), not left out.
 - **Security: a sandboxed worker could create git files that run code for you.** Copilot's
   sandbox holds a read-only path only once it exists. A sandboxed worker could create
   `.git/commondir` in your repository, sending your git to a configuration of its own whose
