@@ -14,7 +14,13 @@ from conftest import Harness, call_tool, settle
 
 from chiefofstaff.backend import process_table
 from chiefofstaff.models import DraftDecision, Settings
-from chiefofstaff.workspaces import changes, checkout_git, command, protected_git_paths
+from chiefofstaff.workspaces import (
+    changes,
+    checkout_git,
+    command,
+    protected_git_paths,
+    unchecked_files,
+)
 
 
 async def spawn(runtime, router, title, **extra):
@@ -233,17 +239,33 @@ async def test_commands_chief_of_staff_runs_never_see_its_own_variables(monkeypa
     assert "GIT_TERMINAL_PROMPT=0" in (await command("sh", "-c", "env", env={"A": "b"}))
 
 
-async def test_a_clone_whose_config_would_run_code_is_not_read(tmp_path):
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell filter")
+async def test_a_clone_whose_config_would_run_code_is_read_without_it(tmp_path):
+    """A clone in a worker's folder whose config names a filter some of its files use: read
+    through a git folder of Chief of Staff's own, so the filter never runs (and the files it
+    keeps are not compared: said as not checked)."""
     clone = tmp_path / "clone"
+    marker = tmp_path / "pwned"
 
     def made():
-        subprocess.run(["git", "init", "-q", str(clone)], check=True)
-        subprocess.run(["git", "config", "filter.x.clean", "touch pwned"], cwd=clone, check=True)
+        git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*git, "init", "-q", str(clone)], check=True)
+        (clone / ".gitattributes").write_text("*.bin filter=x\n")
+        (clone / "f.bin").write_text("a\n")
+        (clone / "g.txt").write_text("a\n")
+        subprocess.run([*git, "add", "-A"], cwd=clone, check=True)
+        subprocess.run([*git, "commit", "-qm", "a"], cwd=clone, check=True)
+        subprocess.run([*git, "config", "filter.x.clean", f"sh -c 'touch {marker}; cat'"],
+                       cwd=clone, check=True)  # fmt: skip
+        for name in ("f.bin", "g.txt"):
+            (clone / name).write_text("b\n")  # (Its content must be read to tell.)
 
     await asyncio.to_thread(made)
     checkout = {"repo": str(clone), "path": str(clone), "remote": "acme/x", "branch": "b"}
-    with pytest.raises(ValueError, match=r"filter\.x\.clean"):
-        await checkout_git(checkout, str(clone), "status", "--porcelain")
+    status = await checkout_git(checkout, str(clone), "status", "--porcelain")
+    assert status.splitlines() == [" M g.txt"]
+    assert await unchecked_files(checkout, str(clone)) == 1
+    assert not marker.exists()
 
 
 async def test_closing_keeps_a_worktree_with_ignored_work(tmp_path):
