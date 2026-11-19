@@ -1932,20 +1932,33 @@ async def sy7_interrupted_count(ctx: Ctx):
     view = await ctx.kept(
         target, lambda v: (v.get("action") or {}).get("kind") == "fix", "Fix it", 900
     )
-    for _ in range(3):
-        await ctx.act(target, "fix")
+    # Fix it, then stopped mid-attempt, until it is refused: by the third attempt of the day
+    # at the latest (one Suggest made by itself counts too).
+    for _ in range(4):
+        try:
+            await ctx.act(target, "fix")
+        except RuntimeError as exc:
+            assert "tried" in str(exc) or "today" in str(exc), exc
+            break
         await ctx.kept(
             target, lambda v: v.get("line", "").startswith("Preparing"), "an attempt", 900
         )
         await ctx.app.post(f"/api/sessions/{view['task']['session_id']}/stop")
-        await asyncio.sleep(10)
-    try:
-        await ctx.act(target, "fix")
-    except RuntimeError as exc:
-        assert "tried" in str(exc) or "today" in str(exc), exc
+        await ctx.kept(
+            target,
+            lambda v: not v.get("line", "").startswith("Preparing"),
+            "the attempt stopped",
+            300,
+        )
     else:
-        later = await ctx.task(target)
-        assert len(later["shepherd"]["journal"]) <= 3, later["shepherd"]["journal"]
+        raise AssertionError("a fourth attempt started")
+    later = await ctx.task(target)
+    started = [
+        e
+        for e in later["shepherd"]["journal"]
+        if e["kind"] == "fix-ci" and e["state"] not in {"stale", "withdrawn"}  # Some never ran.
+    ]
+    assert len(started) <= 3, started
 
 
 async def sy11_signed_out(ctx: Ctx):
