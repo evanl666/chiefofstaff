@@ -1542,6 +1542,7 @@ class Tools:
                 params_type=leak_proof(params),
                 handler=self.handler(self.t_message_kept),
                 skip_permission=True,
+                defer="never",
             )
         return self.spawn_tools[("message", "+shepherd")]
 
@@ -1555,6 +1556,7 @@ class Tools:
                 params_type=leak_proof(ShepherdResult),
                 handler=self.handler(self.t_shepherd_result),
                 skip_permission=True,
+                defer="never",
             )
         return [self.step_made["shepherd_result"], self.runtime.tools["draft_github_review"]]
 
