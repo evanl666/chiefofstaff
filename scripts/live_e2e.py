@@ -1040,12 +1040,14 @@ async def router_mark(app: App, router: str) -> int:
     return max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
 
 
-async def started_since(app: App, router: str, mark: int) -> list[dict]:
+async def started_since(app: App, router: str, mark: int, queued: bool = False) -> list[dict]:
+    """The workers the Router started since `mark` (`queued`: and those it queued for a slot)."""
     messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+    kinds = ("Started", "Queued") if queued else ("Started",)
     return [
         await app.get(f"/api/sessions/{m['meta']['session_id']}")
         for m in messages
-        if m["kind"] == "notice" and m["text"].startswith("Started")
+        if m["kind"] == "notice" and m["text"].startswith(kinds) and m["meta"].get("session_id")
     ]
 
 
@@ -1165,7 +1167,9 @@ async def scenario_owner_flow(app: App, root: Path):
     )
 
     async def both():
-        workers = await started_since(app, router, mark)
+        # With two worker slots, one may still be ending the turn of the step before: then
+        # "Notes" is queued for its slot (a notice of its own), which is as good here.
+        workers = await started_since(app, router, mark, queued=True)
         slow = next((w for w in workers if "slow" in w["title"].lower()), None)
         notes = next((w for w in workers if "note" in w["title"].lower()), None)
         if slow and notes and "sleep" in (slow.get("step_command") or ""):
