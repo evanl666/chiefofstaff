@@ -305,16 +305,17 @@ Off by default (Settings → General, *Keep my PRs moving*). On, Chief of Staff 
 replies for your PRs in their worker, and publishes only what you approve:
 
 - **The worker's turn is restricted.** While it prepares, its session runs with a profile of its
-  own: the sandbox on whatever Settings say, no credential proxy for `git` or `gh`, GitHub's
-  hosts blocked, the network only for the registries its project installs from and the hosts
-  you list, this computer's own servers only for a repository you allow, your credentials and
-  keys unreadable (your git configuration readable, as git needs it to run), no MCP servers or
-  Slack, and only file, shell and its own result tools. Its instructions, CI logs and review
-  comments are data, in a folder it reads; nothing it writes is published by it. Before the
-  first fix on a Copilot version, Chief of Staff runs a check through that profile (a push,
-  `gh`, `curl` and raw sockets to GitHub by name and by address, reading gh's credentials, a
-  cross-session tool, all expected to fail; an install from PyPI and a commit in its worktree
-  expected to work) and prepares nothing on a version that did not pass.
+  own: the sandbox on whatever Settings say (with workers' own package caches and your toolchains
+  read-only, as for any sandboxed worker), no credential proxy for `git` or `gh`, GitHub's hosts
+  blocked, the network only for the registries its project installs from and the hosts you list,
+  this computer's own servers only for a repository you allow, your credentials and keys
+  unreadable (your git configuration readable, as git needs it to run), no MCP servers or Slack,
+  and only file, shell and its own result tools. Its instructions, CI logs and review comments are
+  data, in a folder it reads; nothing it writes is published by it. Before the first fix on a
+  Copilot version, Chief of Staff runs a check through that profile (a push, `gh`, `curl` and raw
+  sockets to GitHub by name and by address, reading gh's credentials, a cross-session tool, all
+  expected to fail; an install from PyPI and a commit in its worktree expected to work) and
+  prepares nothing on a version that did not pass.
 - **What goes out is the plan you approved.** The plan's operations are journaled before any is
   sent, in order, one writer per account, within GitHub's limits. A push is exactly the commit
   that was checked, to the PR's own branch, leased on the commit the plan was made on, with hooks

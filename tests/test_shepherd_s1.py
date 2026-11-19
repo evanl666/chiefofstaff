@@ -4,6 +4,7 @@ what a crash leaves, the Router's handing over, and the owner's other PRs found 
 
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1043,6 +1044,9 @@ async def test_unpushed_work_in_the_worker_is_left_as_it_is(world):
     step, sha = await fixed(world, runtime)
     assert step["tree"] != str(checkout) and step["plan"]["fresh"] is True
     assert run("git", "rev-parse", "HEAD", cwd=checkout) == mine
+    # Its own worktree's .git file is the step's to read, never to rewrite (as a worker's).
+    policy = world.session().options["sandbox_config"]
+    assert str(Path(step["tree"]) / ".git") in policy.readonly
     await approve(runtime.shepherd, step["id"], {})
     await settle(runtime)
     await settle(runtime)

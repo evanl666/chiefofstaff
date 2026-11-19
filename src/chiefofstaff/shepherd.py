@@ -68,12 +68,7 @@ from .receipts import APPROVAL
 from .roles import WORKER
 from .steps import Steps
 from .store import now
-from .workspaces import (
-    git_dirs,
-    protected_git_paths,
-    service_secrets,
-    shared_caches,
-)
+from .workspaces import service_secrets
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -304,33 +299,33 @@ class Shepherd(Keeping, Steps):
 
     def step_policy(self, row: dict, step: dict) -> StepSandboxPolicy:
         """What a step's commands may touch: its worktree (and its git folder, but what runs code
-        for the owner), the frozen worktrees, its folder and temp; no credentials, no GitHub,
-        only the hosts its project's install needs and the owner allowed; this computer's own
-        servers only where the owner allowed them for the repository; none at all for a worker
-        that reads Slack."""
+        for the owner), the frozen worktrees, its folder, and its worker's caches and temporary
+        folder (the owner's caches and its toolchains read-only beneath, as for a sandboxed
+        worker, Runtime.sandbox_policy); no credentials, no GitHub, only the hosts its project's
+        install needs and the owner allowed; this computer's own servers only where the owner
+        allowed them for the repository; none at all for a worker that reads Slack."""
         settings = self.store.settings()
         evidence = step.get("evidence") or {}
-        trees = [path for path in [step["tree"], *evidence.get("frozen", {}).values()] if path]
-        checkouts = [*self.runtime.workspaces.checkouts(row), *({"path": tree} for tree in trees)]
-        repositories = git_dirs(self.runtime.workspaces.checkouts(row))
-        writable = [*trees, step["folder"], *repositories]
-        if settings.shared_caches and not row["slack"]:
-            writable += shared_caches()
-        readonly = [
-            path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
-        ]
+        own = [evidence["checkout"]] if evidence.get("checkout") else []
+        trees = [c for c in [*own, *(evidence.get("frozen_checkouts") or {}).values()]
+                 if c.get("worktree")]  # fmt: skip
+        frozen = list((evidence.get("frozen") or {}).values())
+        writes = [path for path in [step["tree"], *frozen, step["folder"]] if path]
+        base = self.runtime.sandbox_policy(row, writes=writes, trees=trees)
+        if base is None:  # (Never: a step's is made whatever its worker's.)
+            raise ValueError("no sandbox for it")
         # The owner's git configuration, to read: without the credential proxy Copilot keeps it
         # out of reach, and git then refuses to run at all (a commit too).
-        readonly += evidence.get("git_config") or []
+        readonly = [*base.readonly, *(evidence.get("git_config") or [])]
         repo, _ = repo_number(step["target"])
         choice = settings.proactive_repos.get(repo)
         hosts = () if row["slack"] else self.step_hosts(step)
         return StepSandboxPolicy(
-            readwrite=tuple(dict.fromkeys(path for path in writable if path)),
-            readonly=tuple(readonly),
+            readwrite=base.readwrite,
+            readonly=tuple(dict.fromkeys(readonly)),
             allowed_hosts=hosts,
             local_network=bool(choice and choice.localhost) and not row["slack"],
-            denied=step_denied(),
+            denied=tuple(dict.fromkeys([*base.denied, *step_denied()])),
             credentials=False,
             outbound=bool(hosts),
             blocked_hosts=BLOCKED_HOSTS,
@@ -367,6 +362,10 @@ class Shepherd(Keeping, Steps):
         options["enable_config_discovery"] = False
         options["enable_session_store"] = False
         options["disabled_mcp_servers"] = list(dict.fromkeys([GITHUB_MCP, *configured, "slack"]))
+        if self.runtime.pre_tool_wanted(row, True):
+            # Sandboxed, whatever its worker's mode: asked before each of its tools, as every
+            # sandboxed worker is (its folder's settings looked at; a change stops the step).
+            options["hooks"] = {"on_pre_tool_use": self.runtime.events.pre_tool}
         return options
 
     @staticmethod

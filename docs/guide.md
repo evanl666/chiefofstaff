@@ -1023,7 +1023,8 @@ marked, and its parts come first.
 **While it prepares, the worker runs restricted.** For that turn only: no GitHub (no `git push`,
 no `gh`, no GitHub hosts at all), no credentials, no MCP servers, no Slack, and the network only
 for the package registries its project installs from (PyPI, npm, crates.io, Go, and the hosts you
-list under *Other hosts fixes may download from*). This computer's own servers are reachable only
+list under *Other hosts fixes may download from*). Its tools use workers' own package caches, as
+a sandboxed worker's do; yours stay read-only. This computer's own servers are reachable only
 for a repository where you tick *Its tests may use this computer's servers*. Chief of Staff
 publishes what you approve itself, as your account, with git hooks off and a push that only goes
 out if the branch is still where the plan found it. Before the first fix on a new version of
