@@ -2252,7 +2252,7 @@ async def test_codex_settings_a_worker_wrote_in_its_folder_never_load(tmp_path, 
         return sorted({str(wt / settings_guard.split_setting(path)[0]) for _, path in found})
 
     options = {"on_permission_request": check, "folders": [str(wt)], "settings_changed": changed}
-    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex = CodexBackend(CODEX_COMMAND)  # (Found before the tests hid the owner's agents.)
     codex.needs_sign_in = False
     codex.created = []
     await codex.start()
