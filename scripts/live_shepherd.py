@@ -588,9 +588,10 @@ class Repo:
 
 def cleanup(owner: GitHub, name: str, stamp: str, keep: set[str] | None = None) -> list[str]:
     """What run `stamp` left in repository `name`, removed: its workflow runs (cancelled first),
-    its open PRs closed, its branches deleted (and a PR's branch outside shepherd-live/<stamp>/
-    that its worker made, when `keep` says which branches were there before), its ruleset and
-    its hold label. Returns what is left (nothing, when it all went)."""
+    its open PRs closed, their comments deleted, its branches deleted (and a PR's branch
+    outside shepherd-live/<stamp>/ that its worker made, when `keep` says which branches were
+    there before), its ruleset and its hold label. Returns what is left (nothing, when it all
+    went)."""
     prefix = f"{RUNS}/{stamp}/"
 
     def ours(pr: dict) -> bool:
@@ -627,6 +628,15 @@ def cleanup(owner: GitHub, name: str, stamp: str, keep: set[str] | None = None) 
                 "api", f"repos/{name}/pulls/{pr['number']}", "-X", "PATCH",
                 payload={"state": "closed"},
             )  # fmt: skip
+    # Every comment on them, whoever wrote it (the owner, an admin, may delete any): its review
+    # comments and replies, and its conversation's. (A submitted review itself stays: GitHub
+    # deletes none; its PR is closed.)
+    comments = 0
+    for pr in prs:
+        for kind in ("pulls", "issues"):
+            for comment in owner.pages(f"repos/{name}/{kind}/{pr['number']}/comments?per_page=100"):
+                owner.ok("api", f"repos/{name}/{kind}/comments/{comment['id']}", "-X", "DELETE")
+                comments += 1
     refs = {
         item["ref"].removeprefix("refs/heads/")
         for item in owner.json("api", f"repos/{name}/git/matching-refs/heads/{prefix}") or []
@@ -669,14 +679,20 @@ def cleanup(owner: GitHub, name: str, stamp: str, keep: set[str] | None = None) 
         if ours(pr)
     ]
     left += [
+        f"comment {comment['id']} on PR #{pr['number']}"
+        for pr in prs
+        for kind in ("pulls", "issues")
+        for comment in owner.pages(f"repos/{name}/{kind}/{pr['number']}/comments?per_page=100")
+    ]
+    left += [
         f"ruleset {ruleset['name']}"
         for ruleset in owner.json("api", f"repos/{name}/rulesets") or []
         if ruleset["name"] == f"{RUNS}-{stamp}"
     ]
     log(
         f"cleaned up run {stamp}: {len(runs)} workflow runs, {len(prs)} PRs "
-        f"({sum(pr['state'] == 'open' for pr in prs)} closed now), {len(refs)} branches"
-        + (f"; left: {', '.join(left)}" if left else "")
+        f"({sum(pr['state'] == 'open' for pr in prs)} closed now), {comments} comments, "
+        f"{len(refs)} branches" + (f"; left: {', '.join(left)}" if left else "")
     )
     return left
 
@@ -2262,6 +2278,15 @@ class World:
             return 201, comment
         if key[:4] == ("GET", "pulls", "N", "comments"):
             return 200, self.comments.get(number, [])
+        if key[:4] == ("GET", "issues", "N", "comments"):
+            return 200, []  # (No conversation comment is made here.)
+        if key == ("DELETE", "pulls", "comments", "N"):
+            made = int(tail[2])
+            for found in self.comments.values():
+                if any(comment["id"] == made for comment in found):
+                    found[:] = [comment for comment in found if comment["id"] != made]
+                    return 204, None
+            return 404, None
         if key == ("GET", "issues", "N", "timeline"):
             return 200, []
         if key == ("GET", "labels"):
@@ -2399,6 +2424,7 @@ async def dry_run():
         # Gone: everything the run made. Unchanged: everything else.
         assert not world.refs(f"{RUNS}/{repo.stamp}/") and not world.sha("worker-own-name")
         assert all(pr["state"] == "closed" for pr in world.prs.values() if repo.ours(pr))
+        assert not any(world.comments.values()), "the run's comments, deleted"
         assert world.prs[1]["state"] == "open", "someone else's PR, untouched"
         assert {ref: world.sha(ref) for ref in before} == before
         assert [r["name"] for r in world.rulesets.values()] == [f"{RUNS}-{now_running}"]
