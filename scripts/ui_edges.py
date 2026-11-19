@@ -7433,6 +7433,7 @@ PLAN_NOTE = (
     "On a Claude plan, Claude workers count against your plan's usage limits, under Anthropic's "
     "terms."
 )
+HOOKS_NOTE = "Sandboxed Claude workers don't run hooks."
 NO_EXTRA = "Needs Chief of Staff's Claude extra: `uv tool install 'chiefofstaff[claude]'`"
 LIMIT_LINE = "Your Claude plan's 5-hour limit is reached; it resets at 3:40 pm."
 
@@ -7773,7 +7774,14 @@ async def agents_states(browser, scheme: str):
         # Sandboxed, and the owner's own Claude settings would widen its sandbox.
         "claude-widened": {
             "agents": [claude | {"state": "2.1.322 · signed in with your Claude plan",
-                                 "sandbox": WIDENED_CLAUDE}],
+                                 "sandbox": WIDENED_CLAUDE, "sandbox_note": HOOKS_NOTE}],
+            "new_workers": "copilot", "sandboxed": True,
+        },
+        # Sandboxed, its workers can start: they run no hooks, one quiet line says.
+        "claude-sandboxed": {
+            "agents": [claude | {"enabled": True, "note": PLAN_NOTE,
+                                 "state": "2.1.322 · signed in with your Claude plan",
+                                 "sandbox": "", "sandbox_note": HOOKS_NOTE}],
             "new_workers": "copilot", "sandboxed": True,
         },
         "offline": {
@@ -7834,7 +7842,8 @@ async def agents_states(browser, scheme: str):
             problem = shown["problem"] or (answer["sandboxed"] and shown.get("sandbox")) or ""
             # A command in it shows as code, its marks not as they are.
             await expect(line).to_have_text((problem or shown["state"]).replace("`", ""))
-            notes = [shown.get("limit_line"), "" if problem else shown.get("note")]
+            notes = [shown.get("limit_line")]
+            notes += [] if problem else [shown.get("note"), shown.get("sandbox_note")]
             await expect(rows.locator(".agent-note")).to_have_text([n for n in notes if n])
             assert "`" not in await rows.inner_text(), "no code marks shown as they are"
             label = rows.locator("label.check")
@@ -7877,8 +7886,8 @@ async def agents_states(browser, scheme: str):
         await context.close()
     log(
         f"agents ({scheme}): checking, error, none found, signed out, too old, sandboxed, "
-        "Claude's settings widening its sandbox, offline, Claude's plan limit, Claude without "
-        "its extra"
+        "Claude's settings widening its sandbox, Claude sandboxed (no hooks), offline, Claude's "
+        "plan limit, Claude without its extra"
     )
 
 

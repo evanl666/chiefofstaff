@@ -662,6 +662,98 @@ async def test_claude_starts_no_project_mcp_server_chief_of_staff_turned_off(bac
         await session.disconnect()
 
 
+def marking(markers: Path, name: str) -> dict:
+    """Hooks (settings' format) that mark `name` as run before each Bash command."""
+    command = {"type": "command", "command": f"echo {name} >> {markers / name}"}
+    return {"PreToolUse": [{"matcher": "Bash", "hooks": [command]}]}
+
+
+def marking_frontmatter(markers: Path, name: str, what: str) -> str:
+    """A skill's or a subagent's file whose frontmatter hooks mark `name` as run."""
+    return (
+        f"---\nname: {what}\ndescription: A {what} that marks.\nhooks:\n  PreToolUse:\n"
+        "    - matcher: Bash\n      hooks:\n        - type: command\n"
+        f'          command: "echo {name} >> {markers / name}"\n---\nDo as you are told.\n'
+    )
+
+
+async def test_a_sandboxed_claude_worker_runs_no_hook_one_acting_unsandboxed_runs_them(
+    backend, tmp_path, monkeypatch
+):
+    """Claude Code (2.1.322) runs hooks outside its sandbox: the owner's own, a trusted
+    repository's settings' hooks, its skills' and subagents' (their frontmatter), the owner's
+    skills', a plugin's. Its one switch is disableAllHooks (allowManagedHooksOnly and
+    strictPluginOnlyCustomization are read from managed settings only, and hooks given in flag
+    settings are off with it too): a sandboxed worker runs none of them, while Chief of Staff's
+    own checks (the SDK's hooks) still run. One acting unsandboxed runs them all, as the owner's
+    Claude does."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    if not sandbox_supported():
+        pytest.skip("Claude's sandbox does not run on this machine.")
+    config = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    plugin = tmp_path / "plugin"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / "hooks").mkdir()
+    (plugin / ".claude-plugin" / "plugin.json").write_text('{"name": "marks"}')
+    # A plugin in the worker's session (as Settings' skills are: claude_tools.skills_plugin).
+    monkeypatch.setattr(backend_claude, "skills_plugin", lambda folder, skills: plugin)
+    checked = []
+    checking = backend_claude.ClaudeWorker.pre_tool_use
+
+    async def counted(self, *args, **kwargs):
+        checked.append(1)
+        return await checking(self, *args, **kwargs)
+
+    monkeypatch.setattr(backend_claude.ClaudeWorker, "pre_tool_use", counted)
+    everyone = ["agent_project", "plugin", "project", "skill_project", "skill_user", "user"]
+    for sandboxed in (True, False):
+        markers, folder = tmp_path / f"marks-{sandboxed}", tmp_path / f"work-{sandboxed}"
+        markers.mkdir()
+        for place in ("skills/marks-project", "agents"):
+            (folder / ".claude" / place).mkdir(parents=True)
+        (config / "skills" / "marks-user").mkdir(parents=True, exist_ok=True)
+        (config / "settings.json").write_text(json.dumps({"hooks": marking(markers, "user")}))
+        (folder / ".claude" / "settings.json").write_text(
+            json.dumps({"hooks": marking(markers, "project")})
+        )
+        (folder / ".claude" / "skills" / "marks-project" / "SKILL.md").write_text(
+            marking_frontmatter(markers, "skill_project", "marks-project")
+        )
+        (config / "skills" / "marks-user" / "SKILL.md").write_text(
+            marking_frontmatter(markers, "skill_user", "marks-user")
+        )
+        (folder / ".claude" / "agents" / "marks.md").write_text(
+            marking_frontmatter(markers, "agent_project", "marks")
+        )
+        (plugin / "hooks" / "hooks.json").write_text(
+            json.dumps({"hooks": marking(markers, "plugin")})
+        )
+        trusted = {"projects": {str(folder): {"hasTrustDialogAccepted": True}}}
+        (config / ".claude.json").write_text(json.dumps(trusted))  # Its settings load.
+        policy = SandboxPolicy(readwrite=(str(folder),)) if sandboxed else None
+        session, turn = await open_session(
+            backend, folder, sandbox=policy, skill_directories=[str(plugin)]
+        )
+        checked.clear()
+        for prompt in (
+            'Use Claude\'s Skill tool with {"skill": "marks-project"}. Then reply with just: a',
+            'Use Claude\'s Skill tool with {"skill": "marks-user"}. Then reply with just: b',
+            "Run the shell command `echo main > main.txt` and then reply with just: c",
+            "Use Claude's Agent tool with "
+            '{"subagent_type": "marks", "description": "marks", "prompt": '
+            '"Run the shell command `echo sub > sub.txt` and then reply with just: d"}. '
+            "Then reply with just: e",
+        ):
+            await session.send(prompt)
+            await turn.wait()
+        await session.disconnect()
+        assert (folder / "main.txt").exists() and (folder / "sub.txt").exists(), "both ran"
+        assert len(checked) >= 4, "Chief of Staff's own check ran before each tool"
+        ran = sorted(marker.name for marker in markers.iterdir())
+        assert ran == ([] if sandboxed else everyone), sandboxed
+
+
 async def test_the_owners_edit_rules_widen_claudes_sandbox_so_a_sandboxed_worker_does_not_start(
     backend, tmp_path, monkeypatch
 ):

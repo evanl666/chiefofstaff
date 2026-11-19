@@ -201,6 +201,8 @@ PLAN_NOTES = {
     "claudePlan": "On a Claude plan, Claude workers count against your plan's usage limits, "
     "under Anthropic's terms."
 }
+# What an agent's workers do differently while workers are sandboxed (its row says so).
+SANDBOX_NOTES = {"claude": "Sandboxed Claude workers don't run hooks."}
 # A plan's limits, as Claude's stream names their windows.
 WINDOWS = {
     "five_hour": "5-hour limit",

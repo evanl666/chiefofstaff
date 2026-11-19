@@ -138,6 +138,7 @@ class Fake:
                 "appended": self.appended,
                 "plugins": flags.get("plugin-dir"),
                 "env_file": os.environ.get("CLAUDE_ENV_FILE"),
+                "hooks_off": isinstance(settings, dict) and settings.get("disableAllHooks") is True,
                 "disabled_servers": (settings if isinstance(settings, dict) else {}).get(
                     "disabledMcpjsonServers"
                 ),

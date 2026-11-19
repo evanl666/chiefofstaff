@@ -470,6 +470,7 @@ async def test_claude_runs_no_sandboxed_worker_its_own_settings_would_widen(
         assert runtime.blocked_on("claude", row) == "", "unsandboxed, its settings are its own"
         found = await runtime.look_for_agents()
         assert all("sandbox" not in agent for agent in found["agents"])
+        assert all("sandbox_note" not in agent for agent in found["agents"])
     finally:
         await runtime.stop()
 
@@ -1088,6 +1089,14 @@ async def test_a_sandboxed_claude_workers_commands_use_its_own_caches(
         assert script == runtime.cache_scripts / worker / "init.sh"
         seen = Path(harness.store.session(worker)["cwd"]) / "seen"
         assert seen.read_text().strip() == str(runtime.cache_tier / "npm")
+        # Nor does it run hooks, which Claude runs outside its sandbox: its tooltip and Claude's
+        # row in Settings say so.
+        assert start["hooks_off"]
+        notes = runtime.view(harness.store.session(worker))["agent_notes"]
+        assert "Your Claude hooks are off for it" in notes
+        found = await runtime.look_for_agents()
+        (entry,) = [agent for agent in found["agents"] if agent["name"] == "claude"]
+        assert entry["sandbox_note"] == "Sandboxed Claude workers don't run hooks."
     finally:
         await runtime.stop()
 

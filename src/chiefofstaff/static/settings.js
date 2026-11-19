@@ -1120,8 +1120,9 @@ function agentRow(agent, disabled) {
   const most = Math.max(0, ...(agent.usage || []).map((entry) => entry.used));
   const chip = most >= USED_CHIP ? el("span", { class: `chip ${most >= 100 ? "blocked" : "waiting"}`, text: `${most}% used`, title: usageLine(agent.usage) }) : null;
   const usage = agent.usage?.length ? el("small", { class: "agent-usage", text: usageLine(agent.usage) }) : null;
-  // A plan's limit as its workers last heard it, and the one line its sign-in calls for.
-  const notes = [agent.limit_line, agent.problem ? "" : agent.note].filter(Boolean).map((text) => el("small", { class: "agent-note", text }));
+  // A plan's limit as its workers last heard it, the one line its sign-in calls for, and what
+  // its workers do differently sandboxed.
+  const notes = [agent.limit_line, ...(agent.problem ? [] : [agent.note, agent.sandbox_note])].filter(Boolean).map((text) => el("small", { class: "agent-note", text }));
   const list = el("datalist", { id: `agent-${agent.name}-models` }, ...(agent.models || []).map((model) => el("option", { value: model.id, label: model.name })));
   const errorId = `agent-${agent.name}-limit-error`;
   const limit = el("input", { name: `agent_${agent.name}_limit`, type: "text", inputmode: "numeric", placeholder: "No limit", value: agent.limit ? grouped(agent.limit) : "", autocomplete: "off", "aria-describedby": errorId });
