@@ -528,6 +528,8 @@ async def test_the_router_hands_a_pr_over_with_spawn_workers_field(world):
     runtime = await world.start(worker=False)
     router = runtime.router_id()
     tools = {tool.name: tool for tool in runtime.options(runtime.store.session(router))["tools"]}
+    # Its own tools, with the `shepherd` field too, are never behind Copilot's tool search.
+    assert {tool.defer for tool in tools.values()} == {"never"}
     answer = await tools["spawn_worker"].handler(
         ToolInvocation(
             session_id=router,
