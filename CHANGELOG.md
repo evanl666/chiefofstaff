@@ -33,6 +33,8 @@
 - Just after a worker reports, its card says *Checking what it changed…* until its changes are
   read, instead of "no tests or changes observed" for a second or more (the API's receipts say
   `checking` meanwhile).
+- **Security:** opentelemetry-api, which FastAPI brings in, is 1.45.2: 1.45.1 and earlier took
+  quadratic time to parse a long `traceparent` header (a denial of service; Dependabot alert 1).
 
 ## 0.1.47 (2026-11-19)
 
