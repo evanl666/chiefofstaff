@@ -372,7 +372,7 @@ def test_frozen_evidence_valid_only_on_exactly_what_was_planned():
     assert "something else" in integrity.frozen_validity(PLANNED, extra, TREES)
     edited = [Ran("bash", PLANNED[0]), Ran("edit"), Ran("bash", PLANNED[1])]
     assert "edit" in integrity.frozen_validity(PLANNED, edited, TREES)
-    assert integrity.frozen_validity(PLANNED, ran[:1], TREES) == "not every command ran"
+    assert integrity.frozen_validity(PLANNED, ran[:1], TREES) == "not every command ran (1 of 2)"
     dirty = {**TREES, "/f1": ("h1", "h1", "", " M tests/test_a.py")}
     assert "changed files" in integrity.frozen_validity(PLANNED, ran, dirty)
     moved = {**TREES, "/f0": ("h0", "zz", "", "")}

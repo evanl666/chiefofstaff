@@ -454,6 +454,11 @@ class Steps:
                     "commit the fix without it: never a secret in code. Then report again."
                 )
             result["commit"] = full
+            evidence = step["evidence"] or {}
+            again = (
+                step["h1"] == full and evidence.get("planned")
+                and evidence.get("command") == result["test_command"]
+            )  # fmt: skip
             self.control.move_step(step["id"], RUNNING, h1=full, result=result)
             command_line = result["test_command"]
             if not command_line:
@@ -461,7 +466,9 @@ class Steps:
                     "Recorded (no test command: the fix is not checked on frozen commits). End "
                     "your turn now."
                 )
-            planned = await self.freeze(step, full, command_line)
+            # The same fix reported again: its frozen runs so far still count (asked anew,
+            # what ran before would be forgotten).
+            planned = evidence["planned"] if again else await self.freeze(step, full, command_line)
             if not planned:
                 return (
                     "Recorded (in your own clone, the fix is not checked on frozen commits). "

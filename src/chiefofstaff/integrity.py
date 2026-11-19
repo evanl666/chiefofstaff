@@ -716,8 +716,8 @@ def frozen_validity(
     if extra := next((item.command for item in commands if item.command.strip() not in asked),
                      None):  # fmt: skip
         return f"it ran something else too: {extra[:120]}"
-    if asked - done:
-        return "not every command ran"
+    if missing := [line.strip() for line in planned if line.strip() not in done]:
+        return f"not every command ran ({len(planned) - len(missing)} of {len(planned)})"
     for folder, (head0, head1, status0, status1) in trees.items():
         if head0 != head1:
             return f"{folder} moved to another commit"

@@ -79,6 +79,30 @@ async def fixed(world, runtime):
     return runtime.shepherd.control.step(step["id"]), sha
 
 
+async def test_the_same_fix_reported_again_keeps_its_frozen_runs(world):
+    """A model may report its fix again after running the frozen lines (outcome "fixed" where
+    "checked" was asked): the runs it made still count, and it is asked for the same lines."""
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    sha = world.commit_fix(step["tree"])
+    report = {"step": step["id"], "outcome": "fixed", "summary": "timeout() returned 31.",
+              "commit": sha, "test_command": TEST_COMMAND}  # fmt: skip
+    answer = said(await step_result(runtime, world.worker, **report))
+    lines = [line.split(". ", 1)[1] for line in answer.splitlines() if line[:2] in NUMBERED]
+    for index, line in enumerate(lines):
+        await world.ran(line, f"c{index}")
+    again = said(await step_result(runtime, world.worker, **report))
+    assert [line.split(". ", 1)[1] for line in again.splitlines() if line[:2] in NUMBERED] == lines
+    await step_result(runtime, world.worker, step=step["id"], outcome="checked", summary="ran")
+    world.session().emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    evidence = runtime.shepherd.control.step(step["id"])["plan"]["evidence"]
+    assert evidence["checked"] and evidence["holds"], evidence
+
+
 async def test_a_failing_ci_fix_prepared_checked_approved_and_pushed(world):
     runtime = await claimed(world)
     step, sha = await fixed(world, runtime)
