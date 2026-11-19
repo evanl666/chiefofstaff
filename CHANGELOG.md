@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: workers with many MCP tools failed every turn on the Copilot Chief of Staff runs when
+  your CLI is newer than it supports.** That Copilot (1.0.112) leaves tool search off unless a
+  session asks for it, so every MCP tool's definition went with each turn: with three servers
+  (about 250 tools), 169k tokens instead of 17k. Turns on the model's usual context failed at
+  once ("…static system messages and tool definitions exceed this model's context budget"),
+  long context left tools out (Chief of Staff's own `report`, `check_back` and
+  `draft_github_review` among them), and the Router, told a worker had "failed 3 times", started
+  replacements that failed the same way. Now every session asks for tool search (unless you
+  turned it off for your own Copilot sessions: yours applies), Chief of Staff's own tools are
+  always loaded, and a turn whose tools still don't fit goes on by itself: first with every MCP
+  tool behind tool search, then on the model's long context where it has one, then on a model
+  with a larger context, each said in one line where it changes what you pay or which model
+  runs. Only when nothing fits does the worker fail, in one line, and the Router hears that this
+  isn't a worker out of context, and starts no other for it until you write to it. If Copilot
+  still leaves tools out, the worker's timeline says so once.
+- **Fixed: a message sent while Chief of Staff connected to Copilot again could fail**
+  ("Delivery failed: SDK protocol version mismatch", or "Copilot is not connected"): it went to
+  your CLI, which had just been refused, or found no connection yet. Now it waits until Copilot
+  runs, then goes.
+- The Copilot SDK is pinned to the version this release was tested with (1.0.28): `uvx
+  chiefofstaff` installed newer ones that no test had run.
+
 ## 0.1.46 (2026-11-18)
 
 Workers can no longer plant agent settings that load for them (Codex's `.codex/`, Copilot's
