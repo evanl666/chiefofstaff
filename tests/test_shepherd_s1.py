@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import call_tool, settle
 from shepherd_world import BRANCH, REPO, TARGET, World, run
-from test_shepherd import claimed, fixed, said, step_result
+from test_shepherd import STANCES, addressed, claimed, comments, fixed, said, step_result
 
 from chiefofstaff import publish, workspaces
 from chiefofstaff.publish import approve, reconcile_all
@@ -474,6 +474,41 @@ async def test_after_a_crash_a_push_is_read_on_github_never_sent_again(
     assert not any("push" in call[0] for call in world.github.calls[before:])
     if state == "sent":
         assert control.explains(control.claim(TARGET), sha)
+
+
+@pytest.mark.parametrize("pushed", [True, False])
+async def test_after_a_crash_mid_plan_the_rest_of_what_was_approved_goes_out(
+    world, monkeypatch, pushed
+):
+    """Stopped while it published an approved plan, sending its push (live SY3): at the next
+    start the push is read on GitHub, and the replies after it go out, once each; none when
+    the push had not gone out (they say "done in" it)."""
+    runtime = await world.start()
+    comments(world)
+    await runtime.shepherd.tick()
+    step, sha = await addressed(world, runtime, STANCES)
+    control = runtime.shepherd.control
+    send = publish.dispatch
+
+    async def stopped(shepherd, step_id):
+        pass
+
+    monkeypatch.setattr(publish, "dispatch", stopped)
+    await approve(runtime.shepherd, step["id"], {"disclosure": "no"})
+    push = control.actions(step["id"])[0]
+    claim = control.claim(TARGET)
+    consent = control.step(step["id"])["consent"]
+    assert control.dispatching(push["id"], claim["holder"], claim["generation"], consent) == ""
+    if pushed:
+        run("git", "push", "-q", str(world.remote), f"{sha}:refs/heads/{BRANCH}", cwd=world.clone)
+    monkeypatch.setattr(publish, "dispatch", send)
+    await runtime.shepherd.start()
+    await settle(runtime)
+    await settle(runtime)
+    state = control.step(step["id"])["state"]
+    assert state == ("published" if pushed else "failed"), control.actions(step["id"])
+    replies = [w[3] for w in world.github.writes if w[0] == "reply"]
+    assert replies == ([STANCES[0]["reply"], STANCES[1]["reply"]] if pushed else [])
 
 
 # The Router hands a PR over; the owner's other PRs found and handed.

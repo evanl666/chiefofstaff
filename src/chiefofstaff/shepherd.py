@@ -53,6 +53,7 @@ from .control import (
     HANDING,
     IDLE,
     PAUSED,
+    PLANNED,
     PREPARED,
     QUEUED,
     RUNNING,
@@ -507,7 +508,7 @@ class Shepherd(Keeping, Steps):
             self.control.ensure()  # On in its settings, its tables never made: made now.
         if not self.control.exists():
             return
-        from .publish import reconcile_all
+        from .publish import dispatch, reconcile_all
 
         with suppress(Exception):
             await reconcile_all(self)
@@ -519,7 +520,12 @@ class Shepherd(Keeping, Steps):
                                    why="Chief of Staff restarted during it")  # fmt: skip
             self.release_claim(step["target"])
         for step in self.control.steps("", APPLYING):
-            self.finish_applying(step["id"])
+            if self.control.actions(step["id"], PLANNED):
+                # Approved, and stopped before all of it went out: the rest goes now, each
+                # operation through the barrier again (a change of hands, or off, withdraws it).
+                self.runtime.background(dispatch(self, step["id"]))
+            else:
+                self.finish_applying(step["id"])
 
     async def crashed(self, session_id: str, step_id: str = ""):
         """A worker left marked by a stop mid-attempt: never continued in its normal profile;
