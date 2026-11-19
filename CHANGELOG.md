@@ -7,11 +7,14 @@
   Now it keeps that refusal in its data folder and runs Copilot 1.0.112 straight away while your
   CLI (its path and the version it says it is) and the Copilot SDK stay the same; when either
   changes, your CLI is tried again. The refusal is one line in the log, no longer a traceback.
-- **The sidebar says when a newer Chief of Staff is out**, in one quiet line with the command that
-  updates it the way it was installed (`uvx chiefofstaff@latest`: plain `uvx chiefofstaff` runs
-  the version uv cached first, however old; `uv tool upgrade chiefofstaff`). Chief of Staff reads
-  its own page on PyPI for that, at most once a day, sending nothing about you; Settings → General
-  turns it off. When Copilot can't start at all, the error says that command too.
+- **Chief of Staff updates itself in one click.** When a newer release is out, the sidebar says
+  so in one quiet line. Started with `uvx` or installed with `uv tool`, **Update and restart**
+  waits until no turn is running (it never stops one), gets the new version, and starts it in its
+  own place: same terminal, port and private link, so the page reloads by itself and every
+  session goes on. Installed another way, the line says the command (`uvx chiefofstaff@latest`:
+  plain `uvx chiefofstaff` runs the version uv cached first, however old). Chief of Staff reads
+  its own page on PyPI for this, at most once a day, sending nothing about you; Settings → General
+  turns it off. When Copilot can't start at all, the error says the update command too.
 - **Security: Chief of Staff's own git in workers' clones, hardened further** (from the 0.1.46
   review). A replace ref (`refs/replace/`) no longer changes what it reads, in any repository; an
   index naming a path out of its tree or in a `.git` is not used (one is made from the last

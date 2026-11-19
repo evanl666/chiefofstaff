@@ -239,6 +239,7 @@ summary { min-height: 28px; }
 .foot-row .usage svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
 #status-line .bad { color: var(--red); }
 #status-line .demo { color: var(--accent); }
+#status-line .update button { color: var(--accent); }
 #status-line button { padding: 0; font-size: var(--small); justify-self: start; }
 
 /* Main */

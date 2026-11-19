@@ -1,15 +1,21 @@
 """Whether a newer Chief of Staff is out: PyPI's JSON for it read at most once a day, off the
 hot path (a plain GET that sends nothing about this machine or its owner), unless Settings turns
-it off; and the command that updates it the way it was installed."""
+it off; how it was launched, and so how it updates: started with uvx or installed with `uv tool`,
+Chief of Staff updates itself and starts again in its own place (the same process, terminal and
+private link: __main__.restart_into); otherwise the command is said."""
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 
@@ -22,6 +28,11 @@ PYPI_URL = "https://pypi.org/pypi/chiefofstaff/json"
 CHECK_EVERY = 24 * 3600
 # What was read last (kv): when, and the newest release then ("" when it could not be read).
 LAST = "update_check"
+# In the data folder: what a restart to update could not do (__main__.restart_into), said at
+# the next start (Runtime.after_update).
+UPDATE_NOTE = "update-note"
+# What a restart to update was for (kv): the version it ran and the one it was to run.
+UPDATING = "updating_from"
 RELEASE = re.compile(r"\d+(?:\.\d+){1,3}")
 
 
@@ -44,19 +55,88 @@ def newer(latest: str, current: str) -> bool:
     return parts(latest) > parts(current)
 
 
+@dataclass(frozen=True)
+class Launch:
+    """How this Chief of Staff was launched: `how` ("uvx", "tool", "pipx", "pip", "source": a
+    checkout of its code), the command that updates it, and what runs in its place to update
+    it (none: the owner runs the command)."""
+
+    how: str
+    command: str
+    restart: tuple[str, ...] = ()
+
+    def to(self, version: str) -> Launch:
+        """What runs in its place to update to this version: with uvx, that very version (the
+        one the owner was told of), not whatever is newest by then."""
+        if self.how != "uvx" or not RELEASE.fullmatch(version):
+            return self
+        pinned = tuple(f"chiefofstaff@{version}" if word == "chiefofstaff@latest" else word
+                       for word in self.restart)  # fmt: skip
+        return Launch(self.how, self.command, pinned)
+
+
 @functools.cache
-def upgrade_command(prefix: str = sys.prefix) -> str:
-    """How the owner updates it, as it was installed: uvx runs a cached one unless told the
-    latest; `uv tool` and pipx upgrade their own; else pip in its environment."""
+def editable() -> bool:
+    """Whether it runs from a checkout of its code (an editable install: `uv run` there)."""
+    try:
+        said = metadata.distribution("chiefofstaff").read_text("direct_url.json") or "{}"
+        return bool(json.loads(said).get("dir_info", {}).get("editable"))
+    except (metadata.PackageNotFoundError, ValueError, AttributeError):
+        return True
+
+
+def own_args(argv: tuple[str, ...] | None = None) -> list[str]:
+    """Its arguments (sys.argv's), to start again with: the page it had reconnects (no other)."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    return args if "--no-browser" in args else [*args, "--no-browser"]
+
+
+def launched(prefix: str = sys.prefix, argv: tuple[str, ...] | None = None) -> Launch:
+    """How it was launched (see Launch); `argv`: its own arguments (sys.argv's)."""
+    args = own_args(argv)
+    here = Path(prefix).resolve()
+    if editable():
+        return Launch("source", "git pull")
+    windows = sys.platform == "win32"  # (No exec there: the owner restarts it.)
     if throwaway(prefix):
-        return "uvx chiefofstaff@latest"
-    posix = Path(prefix).as_posix()
+        uvx = shutil.which("uvx")
+        restart = (uvx, "chiefofstaff@latest", *args) if uvx and not windows else ()
+        return Launch("uvx", "uvx chiefofstaff@latest", restart)
+    posix = here.as_posix()
     tools = os.environ.get("UV_TOOL_DIR")
-    if re.search(r"/uv/(?:data/)?tools/", posix) or (tools and Path(prefix).is_relative_to(tools)):
-        return "uv tool upgrade chiefofstaff"
+    if re.search(r"/uv/(?:data/)?tools/", posix) or (tools and here.is_relative_to(tools)):
+        entry = here / "bin" / "chiefofstaff"
+        restart = (str(entry), *args) if shutil.which("uv") and not windows else ()
+        return Launch("tool", "uv tool upgrade chiefofstaff", restart)
     if "/pipx/venvs/" in posix:
-        return "pipx upgrade chiefofstaff"
-    return "pip install --upgrade chiefofstaff"
+        return Launch("pipx", "pipx upgrade chiefofstaff")
+    return Launch("pip", "pip install --upgrade chiefofstaff")
+
+
+@functools.cache
+def upgrade_command() -> str:
+    return launched().command
+
+
+async def fetch(launch: Launch) -> tuple[bool, str]:
+    """What updating needs before Chief of Staff stops, so that it starts again at once: with
+    uvx, the release it updates to downloaded into uv's cache (`uvx chiefofstaff@<version>
+    --version`). (False, why) when it can't be."""
+    if launch.how != "uvx":
+        return True, ""
+
+    def run() -> tuple[bool, str]:
+        try:
+            done = subprocess.run(  # noqa: S603  (uvx, which launched it, and its package)
+                [*launch.restart[:2], "--version"], capture_output=True, text=True,
+                timeout=600, check=False, stdin=subprocess.DEVNULL,
+            )  # fmt: skip
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, str(exc)
+        said = (done.stderr or done.stdout).strip().splitlines()
+        return done.returncode == 0, said[-1][:300] if said else ""
+
+    return await asyncio.to_thread(run)
 
 
 async def fetch_latest() -> str:
@@ -90,16 +170,24 @@ async def check(store: Store, now: float | None = None, force: bool = False) -> 
 
 
 def notice(store: Store) -> dict | None:
-    """What the page says, when a newer release is out and the notice is on."""
+    """What the page says, when a newer release is out and the notice is on: the version, the
+    command, and whether Chief of Staff updates itself (`automatic`). None from a checkout of
+    its code."""
     if not store.settings().update_notice:
         return None
     try:
         latest = str(json.loads(store.get(LAST) or "{}").get("latest") or "")
     except (ValueError, AttributeError):
         return None
-    if not newer(latest, installed()):
+    launch = launch_now()
+    if not newer(latest, installed()) or launch.how == "source":
         return None
-    return {"version": latest, "command": upgrade_command()}
+    return {"version": latest, "command": launch.command, "automatic": bool(launch.restart)}
+
+
+@functools.cache
+def launch_now() -> Launch:
+    return launched()
 
 
 def start_hint(store: Store) -> str:

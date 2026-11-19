@@ -780,6 +780,12 @@ class GitIdentity(StrictModel):
     digest: str = Field(min_length=1, max_length=64)
 
 
+class UpdateRequest(StrictModel):
+    """The owner's Update and restart (or, `cancel`, not after all)."""
+
+    cancel: bool = False
+
+
 class GitQuarantine(StrictModel):
     """The owner's word on a git file that appeared in a .git a worker can write: use it, or
     (in Chief of Staff's own worktree folders) keep it removed."""

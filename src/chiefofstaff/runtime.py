@@ -191,8 +191,10 @@ PROMPTS = {
     WORKER: prompts.WORKER,
     WATCHDOG: prompts.WATCHDOG,
 }
-# How long after its start Chief of Staff first looks whether a newer one is out (updates.py).
+# How long after its start Chief of Staff first looks whether a newer one is out (updates.py),
+# and how often an update waiting for the running work to end looks again.
 UPDATE_DELAY = 60
+UPDATE_POLL = 2.0
 
 ROUTER_TOOLS = [
     "spawn_worker",
@@ -532,6 +534,12 @@ class Runtime:
         self.alive_job: asyncio.Task | None = None
         # Whether a newer Chief of Staff is out (updates.py), looked at once a day.
         self.update_job: asyncio.Task | None = None
+        # Updating itself (the owner's Update and restart): the version it goes to, and where
+        # that stands ("waiting" for the running work to end, "fetching", "restarting",
+        # "failed" with why); the job doing it; and how to stop to start again (__main__).
+        self.updating: dict | None = None
+        self.updater: asyncio.Task | None = None
+        self.restarter: Callable[[updates.Launch], None] | None = None
         self.started_at: float | None = None
         # Watches that Copilot's CLI still runs; reconnects after it stopped by itself, or once
         # the Router is no longer open in a terminal.
@@ -693,6 +701,7 @@ class Runtime:
         self.asks.expire_requests()
         self.task_actions.settle_old_reports(TASKS_SHOWN_HOURS)
         await self.connect()
+        self.after_update()
         await self.recover_agents()
         for source in self.all_sources():
             await source.start()
@@ -735,6 +744,94 @@ class Runtime:
             if updates.notice(self.store) != before:
                 self.publish_state()
             await asyncio.sleep(3600)
+
+    def work_running(self) -> bool:
+        """Whether any session has a turn running or starting (an update waits for none)."""
+        return any(
+            row["status"] in {"working", "starting"} or self.states[row["id"]].busy
+            for row in self.store.open_sessions()
+        )
+
+    async def update_now(self, cancel: bool = False) -> dict:
+        """The owner's Update and restart: once no turn runs (never stopping one), Chief of
+        Staff updates itself and starts again in its own place, as after any restart; or, with
+        `cancel`, it doesn't. ValueError when it can't update itself (the command says how)."""
+        if cancel:
+            if self.updater and self.updating and self.updating.get("state") != "restarting":
+                self.updater.cancel()
+                self.updater, self.updating = None, None
+            self.publish_state()
+            return self.snapshot().get("update") or {}
+        found = updates.notice(self.store)
+        launch = updates.launch_now()
+        if not found:
+            raise ValueError("This is the newest Chief of Staff.")
+        if not launch.restart or not self.restarter:
+            raise ValueError(f"Update it with: {launch.command}")
+        if not (self.updater and not self.updater.done()):
+            self.updating = {"to": found["version"], "state": "waiting"}
+            launch = launch.to(found["version"])
+            self.updater = self.background(self.update_when_idle(launch, found["version"]))
+        self.publish_state()
+        return self.snapshot().get("update") or {}
+
+    async def update_when_idle(self, launch: updates.Launch, version: str):
+        fetched = False
+        while True:
+            if self.work_running():
+                self.set_updating("waiting")
+                await asyncio.sleep(UPDATE_POLL)
+                continue
+            if fetched:
+                break
+            self.set_updating("fetching")
+            fetched, why = await updates.fetch(launch)
+            if not fetched:
+                logger.warning("Could not update Chief of Staff: %s", why)
+                self.set_updating("failed", why or "it could not be downloaded")
+                return
+        self.set_updating("restarting")
+        self.store.set(updates.UPDATING, json.dumps({"from": updates.installed(), "to": version}))
+        await asyncio.sleep(0.5)  # (The page hears it.)
+        if self.restarter:
+            self.restarter(launch)
+
+    def set_updating(self, state: str, error: str = ""):
+        if self.updating and (self.updating.get("state"), self.updating.get("error")) != (
+            state,
+            error or None,
+        ):
+            self.updating = {
+                "to": self.updating["to"],
+                "state": state,
+                **({"error": error} if error else {}),
+            }
+            self.publish_state()
+
+    def after_update(self):
+        """After a restart to update: on Home, in one line, that it did, or why it didn't."""
+        if not (asked := self.store.get(updates.UPDATING)):
+            return
+        self.store.delete(updates.UPDATING)
+        note = self.store.directory / updates.UPDATE_NOTE
+        why = ""
+        with suppress(OSError):
+            why = note.read_text().strip()[:300]
+            note.unlink()
+        try:
+            asked_for = json.loads(asked)
+            wanted, before = str(asked_for["to"]), str(asked_for["from"])
+        except (ValueError, TypeError, KeyError):
+            return
+        running = updates.installed()
+        if updates.newer(running, before) and not updates.newer(wanted, running):
+            text = f"Chief of Staff updated to {running}."
+        else:
+            text = f"Chief of Staff could not update to {wanted}"
+            text += f" ({why})" if why else ""
+            text += f"; it runs {running} as before."
+        if router := self.store.get("router_id"):
+            self.add_message(router, "notice", text)
 
     def uptime(self) -> list[tuple[float, float]]:
         """Chief of Staff's runs, this one's running until now."""
@@ -6614,8 +6711,12 @@ class Runtime:
                 else {}
             ),
             "demo": getattr(self, "demo", False),
-            # A newer Chief of Staff, and the command that updates it (none: no line).
-            **({"update": notice} if (notice := updates.notice(self.store)) else {}),
+            # A newer Chief of Staff, how it updates, and where its update stands (no line).
+            **(
+                {"update": {**notice, **(self.updating or {})}}
+                if (notice := updates.notice(self.store))
+                else {}
+            ),
             "focus": self.focus.state(),
             "router_id": self.store.get("router_id"),
             "sessions": [self.view(row) for row in self.store.open_sessions()],

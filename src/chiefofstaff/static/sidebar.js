@@ -192,7 +192,7 @@ export function renderStatusLine() {
   if (until) nodes.push(el("div", { class: "demo", text: `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` }));
   if (snap.runtime.warning) nodes.push(el("div", { class: "bad", text: snap.runtime.warning }));
   // A newer release: one quiet line (Settings → General turns it off).
-  if (snap.update) nodes.push(el("div", { class: "update", text: `Chief of Staff ${snap.update.version} is out: ${snap.update.command}` }));
+  if (snap.update) nodes.push(updateLine(snap.update));
   if (snap.settings.slack_enabled && snap.slack.error) {
     // What to do about it, here: fix it in Settings, or stop watching Slack.
     nodes.push(
@@ -243,6 +243,27 @@ async function turnOffSlack() {
   } catch (error) {
     toast(error.message, "error");
   }
+}
+// Where an update stands, in a few words; Chief of Staff does it, or says the command.
+function updateLine({ version, command, automatic, state: stage, error }) {
+  const ask = (cancel) => async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      const { update } = await api("/api/update", { method: "POST", body: { cancel } });
+      state.snapshot = { ...state.snapshot, update };
+      renderStatusLine();
+    } catch (failed) {
+      toast(failed.message, "error");
+    }
+  };
+  const button = (text, cancel = false) => el("button", { type: "button", class: "link", text, onclick: ask(cancel) });
+  const line = (...parts) => el("div", { class: "update" }, ...parts);
+  if (stage === "waiting") return line(`Chief of Staff ${version} installs once the running work ends `, button("Cancel", true));
+  if (stage === "fetching") return line(`Getting Chief of Staff ${version}…`);
+  if (stage === "restarting") return line(`Restarting with Chief of Staff ${version}…`);
+  if (stage === "failed") return line(`Couldn't update to ${version}: ${error} `, button("Try again"));
+  if (!automatic) return line(`Chief of Staff ${version} is out: ${command}`);
+  return line(`Chief of Staff ${version} is out `, button("Update and restart"));
 }
 async function reconnect() {
   try {

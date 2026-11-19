@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import secrets
@@ -39,10 +40,12 @@ from .models import (
     SlackToken,
     TaskNote,
     Unfollow,
+    UpdateRequest,
 )
 from .runtime import Runtime
 from .storage import StorageDelete, StorageKeep, StorageSession
 from .store import Store
+from .updates import installed
 
 logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -256,6 +259,11 @@ def create_app(
         response.delete_cookie(f"chiefofstaff_{port}")
         return {"ok": True}
 
+    @app.post("/api/update")
+    async def update(payload: UpdateRequest):
+        """The owner's word only: no tool, Slack or Send to Chief reaches this."""
+        return {"ok": True, "update": await runtime.update_now(cancel=payload.cancel)}
+
     @app.get("/api/health")
     async def health():
         return {"status": "ready"}
@@ -268,7 +276,8 @@ def create_app(
     async def events():
         async def stream():
             async with bus.subscribe() as queue:
-                yield 'data: {"type": "hello"}\n\n'
+                # Its version: a page of an earlier one loads again (it updated itself).
+                yield f"data: {json.dumps({'type': 'hello', 'data': {'version': installed()}})}\n\n"
                 while True:
                     try:
                         payload = await asyncio.wait_for(queue.get(), timeout=15)

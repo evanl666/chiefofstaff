@@ -1218,14 +1218,18 @@ commands run in.
 
 ## Updating
 
-Installed as a tool, `uv tool upgrade chiefofstaff` (or `pipx upgrade chiefofstaff`) updates
-it. Without installing, start it with `uvx chiefofstaff@latest`: plain `uvx chiefofstaff` runs
-the version uv cached the first time, however old (a newer Copilot CLI may need a newer Chief of
-Staff). When a newer release is out, one quiet line at the bottom of the sidebar says so, with
-the command that updates it the way you installed it. Chief of Staff reads its own page on PyPI
-for that, at most once a day, and sends nothing about you or your machine; *Say when a newer
-Chief of Staff is out* (Settings → General) turns it off. When Copilot can't start at all, the
-error says that command too.
+When a newer release is out, one quiet line at the bottom of the sidebar says so. Started with
+`uvx` or installed with `uv tool`, **Update and restart** does the rest: once no turn is running
+(it waits, never stopping one; *Cancel* stops waiting), Chief of Staff gets the new version
+(`uvx chiefofstaff@<version>`, or `uv tool upgrade chiefofstaff`), stops as on Ctrl+C and starts
+again in its own place: the same terminal, port and private link. The page reloads by itself,
+every session goes on as after any restart, and Home says it updated (or why it couldn't: it then
+runs the version it had). Installed another way (pip, pipx), or on Windows, the line says the
+command to run. Plain `uvx chiefofstaff` runs the version uv cached the first time, however old:
+start it with `uvx chiefofstaff@latest`. Chief of Staff reads its own page on PyPI for this, at
+most once a day, and sends nothing about you or your machine; *Say when a newer Chief of Staff is
+out* (Settings → General) turns it off. When Copilot can't start at all, the error says the
+command that updates Chief of Staff.
 
 ## Data
 

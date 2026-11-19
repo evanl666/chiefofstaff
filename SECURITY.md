@@ -175,8 +175,11 @@ Everything stays on your machine: a SQLite database and work folders in the data
 (owner-only permissions), plus Copilot's own session storage (`~/.copilot`). Chief of Staff sends
 no telemetry. To say when a newer release is out, it reads its own public page on PyPI
 (`pypi.org/pypi/chiefofstaff/json`) at most once a day, a plain request that sends nothing about
-you or your machine; Settings → General turns that off. GitHub Copilot itself works under
-GitHub's terms and settings.
+you or your machine; Settings → General turns that off. Its *Update and restart* runs only on
+your click on its page (no tool, Slack or Send to Chief reaches it): it runs `uvx` or `uv tool
+upgrade` for Chief of Staff alone, then starts the new version in its own process, which keeps
+the private link's token (in that process's environment, as its own variable, never a worker's).
+GitHub Copilot itself works under GitHub's terms and settings.
 
 To learn how you write (Settings → *How you work*), Chief of Staff stores your own words in that
 database: Slack messages you sent, your PR reviews and review comments, your commit messages and

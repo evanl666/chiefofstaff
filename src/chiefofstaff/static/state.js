@@ -179,6 +179,9 @@ async function resync() {
 }
 function handleEvent({ type, data }) {
   if (type === "hello") {
+    // Chief of Staff updated itself and started again: its own page, not this one's code.
+    if (state.version && data?.version && data.version !== state.version) return location.reload();
+    state.version = data?.version || state.version;
     if (state.connectedOnce) resync().catch(() => {});
     // What changed between the first read and the stream starting is read again.
     else if (othersOn()) syncOthers();

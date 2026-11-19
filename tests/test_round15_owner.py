@@ -3,11 +3,16 @@ sent", a result and its reply as one decision, the task a direct message is file
 update shown as new, and one piece of work shown twice."""
 
 import asyncio
+import json
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
+import pytest
 from conftest import call_tool, settle
 from test_progress import busy_worker, spawn
+
+from chiefofstaff.updates import Launch
 
 
 async def nothing():
@@ -465,6 +470,9 @@ async def test_a_new_task_whose_message_never_went_is_rolled_back(harness, monke
     assert runtime.view(harness.store.session(worker))["display_title"] == second["title"]
 
 
+UVX = Launch("uvx", "uvx chiefofstaff@latest", ("uvx", "chiefofstaff@latest", "--no-browser"))
+
+
 async def test_a_newer_release_is_one_quiet_line_read_from_pypi_once_a_day(harness, monkeypatch):
     """Owner's ask (a stale uvx cache kept a user on 0.1.45): when a newer Chief of Staff is
     out, the page says so in one line with the command that updates it; PyPI is read at most
@@ -480,7 +488,7 @@ async def test_a_newer_release_is_one_quiet_line_read_from_pypi_once_a_day(harne
 
     monkeypatch.setattr(updates, "fetch_latest", latest)
     monkeypatch.setattr(updates, "installed", lambda: "0.1.47")
-    monkeypatch.setattr(updates, "upgrade_command", lambda: "uvx chiefofstaff@latest")
+    monkeypatch.setattr(updates, "launch_now", lambda: UVX)
     monkeypatch.setattr(runtime_module, "UPDATE_DELAY", 0)
     runtime = await harness.connect()
     assert "update" not in runtime.snapshot()
@@ -489,6 +497,7 @@ async def test_a_newer_release_is_one_quiet_line_read_from_pypi_once_a_day(harne
     assert runtime.snapshot()["update"] == {
         "version": "9.0.0",
         "command": "uvx chiefofstaff@latest",
+        "automatic": True,
     }
     watching.cancel()
     at = time.time()
@@ -504,18 +513,33 @@ async def test_a_newer_release_is_one_quiet_line_read_from_pypi_once_a_day(harne
     assert "update" not in runtime.snapshot(), "not newer than this one"
 
 
-def test_the_update_command_is_the_way_chief_of_staff_was_installed():
-    from chiefofstaff.updates import newer, upgrade_command
+def test_how_it_updates_is_how_it_was_launched(monkeypatch):
+    """uvx starts the newest again in its place (`@latest`: plain uvx runs what it cached
+    first); a `uv tool` install is upgraded, then started again; others say their command."""
+    from chiefofstaff import updates
 
-    command = upgrade_command.__wrapped__
-    assert command("/Users/acme/.cache/uv/archive-v0/x1y2") == "uvx chiefofstaff@latest"
-    assert command("/Users/acme/.local/share/uv/tools/chiefofstaff") == (
-        "uv tool upgrade chiefofstaff"
+    monkeypatch.setattr(updates, "editable", lambda: False)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(updates.sys, "platform", "darwin")
+    args = ("--port", "8800")
+    uvx = updates.launched("/Users/acme/.cache/uv/archive-v0/x1y2", args)
+    assert (uvx.how, uvx.command) == ("uvx", "uvx chiefofstaff@latest")
+    assert uvx.restart == ("/bin/uvx", "chiefofstaff@latest", "--port", "8800", "--no-browser")
+    tool = updates.launched("/Users/acme/.local/share/uv/tools/chiefofstaff", ("--no-browser",))
+    assert (tool.command, tool.restart) == (
+        "uv tool upgrade chiefofstaff",
+        ("/Users/acme/.local/share/uv/tools/chiefofstaff/bin/chiefofstaff", "--no-browser"),
     )
-    assert command("/Users/acme/.local/pipx/venvs/chiefofstaff") == "pipx upgrade chiefofstaff"
-    assert command("/Users/acme/tools/.venv") == "pip install --upgrade chiefofstaff"
-    assert newer("0.1.10", "0.1.9") and not newer("0.1.47", "0.1.47")
-    assert not newer("0.2.0rc1", "0.1.47"), "never a pre-release"
+    pipx = updates.launched("/Users/acme/.local/pipx/venvs/chiefofstaff", args)
+    assert (pipx.command, pipx.restart) == ("pipx upgrade chiefofstaff", ())
+    venv = updates.launched("/Users/acme/tools/.venv", args)
+    assert (venv.command, venv.restart) == ("pip install --upgrade chiefofstaff", ())
+    monkeypatch.setattr(updates.sys, "platform", "win32")
+    assert updates.launched("/Users/acme/.cache/uv/archive-v0/x1y2", args).restart == ()
+    monkeypatch.setattr(updates, "editable", lambda: True)
+    assert updates.launched("/Users/acme/tools/.venv", args).how == "source"
+    assert updates.newer("0.1.10", "0.1.9") and not updates.newer("0.1.47", "0.1.47")
+    assert not updates.newer("0.2.0rc1", "0.1.47"), "never a pre-release"
 
 
 async def test_copilot_that_cannot_start_says_how_to_update_chief_of_staff(harness, monkeypatch):
@@ -535,3 +559,106 @@ async def test_copilot_that_cannot_start_says_how_to_update_chief_of_staff(harne
     assert runtime.status["error"].endswith(
         " A newer Chief of Staff may fix this: uvx chiefofstaff@latest"
     )
+
+
+async def test_update_and_restart_waits_for_running_work_then_starts_again(harness, monkeypatch):
+    """Owner's ask (binding): updating takes one click. Chief of Staff waits until no turn
+    runs (never stopping one; Cancel stops waiting), gets the new version first (uvx), then
+    stops to start again in its own place, updated; its next start says so on Home."""
+    from chiefofstaff import runtime as runtime_module
+    from chiefofstaff import updates
+
+    monkeypatch.setattr(updates, "launch_now", lambda: UVX)
+    monkeypatch.setattr(updates, "installed", lambda: "0.1.47")
+    monkeypatch.setattr(runtime_module, "UPDATE_POLL", 0.01)
+    fetched = []
+
+    async def fetch(launch):
+        fetched.append(launch)
+        return True, ""
+
+    monkeypatch.setattr(updates, "fetch", fetch)
+    runtime = await harness.connect()
+    harness.store.set(updates.LAST, json.dumps({"at": time.time(), "latest": "9.0.0"}))
+    restarts = []
+    runtime.restarter = restarts.append
+    worker, _, _ = await busy_worker(runtime, harness, "Long build")
+    assert (await runtime.update_now())["state"] == "waiting"
+    await asyncio.sleep(0.1)
+    assert not restarts and not fetched, "a turn runs: it waits"
+    assert runtime.snapshot()["update"]["state"] == "waiting"
+    await runtime.update_now(cancel=True)
+    assert "state" not in runtime.snapshot()["update"]
+    await runtime.update_now()
+    runtime.states[worker].busy = False
+    runtime.update_session(worker, status="idle")
+    await runtime.updater
+    pinned = Launch("uvx", "uvx chiefofstaff@latest", ("uvx", "chiefofstaff@9.0.0", "--no-browser"))
+    assert restarts == [pinned] and fetched == [pinned], "the version the owner was told of"
+    assert runtime.snapshot()["update"]["state"] == "restarting"
+    assert json.loads(harness.store.get(updates.UPDATING)) == {"from": "0.1.47", "to": "9.0.0"}
+    # Started again, updated: Home says so once.
+    monkeypatch.setattr(updates, "installed", lambda: "9.0.0")
+    runtime.after_update()
+    runtime.after_update()
+    notices = [
+        m["text"] for m in harness.store.messages(harness.router_id) if m["kind"] == "notice"
+    ]
+    assert notices[-1] == "Chief of Staff updated to 9.0.0." and len(notices) == len(set(notices))
+
+
+async def test_an_update_that_failed_says_why_and_runs_as_before(harness, monkeypatch):
+    from chiefofstaff import updates
+
+    monkeypatch.setattr(updates, "installed", lambda: "0.1.47")
+    runtime = await harness.connect()
+    harness.store.set(updates.UPDATING, json.dumps({"from": "0.1.47", "to": "9.0.0"}))
+    (harness.store.directory / updates.UPDATE_NOTE).write_text("error: no network")
+    runtime.after_update()
+    notices = [
+        m["text"] for m in harness.store.messages(harness.router_id) if m["kind"] == "notice"
+    ]
+    assert notices[-1] == (
+        "Chief of Staff could not update to 9.0.0 (error: no network); it runs 0.1.47 as before."
+    )
+    assert not (harness.store.directory / updates.UPDATE_NOTE).exists()
+    monkeypatch.setattr(updates, "launch_now", lambda: SimpleNamespace(
+        how="pip", command="pip install --upgrade chiefofstaff", restart=()))  # fmt: skip
+    harness.store.set(updates.LAST, json.dumps({"at": time.time(), "latest": "9.0.0"}))
+    runtime.restarter = print
+    with pytest.raises(ValueError, match=r"^Update it with: pip install --upgrade chiefofstaff$"):
+        await runtime.update_now()
+
+
+def test_a_restart_to_update_runs_the_new_version_in_its_place(tmp_path, monkeypatch):
+    """`uv tool upgrade` first (a tool install), then the new version in this process's place,
+    with the private link's token (the page it had goes on); when that can't start, this one
+    again, its next start saying why."""
+    from chiefofstaff import __main__ as main_module
+    from chiefofstaff.updates import UPDATE_NOTE, Launch
+
+    ran, execs = [], []
+
+    def run(command, **options):
+        ran.append(command)
+        return SimpleNamespace(returncode=1, stderr="error: offline", stdout="")
+
+    def execve(path, argv, environment):
+        execs.append((path, argv, environment[main_module.RESTART_TOKEN]))
+        if len(execs) == 1:
+            raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(main_module.subprocess, "run", run)
+    monkeypatch.setattr(main_module.os, "execve", execve)
+    monkeypatch.setattr(main_module.sys, "argv", ["chiefofstaff", "--port", "8800"])
+    tool = Launch("tool", "uv tool upgrade chiefofstaff", ("/t/bin/chiefofstaff", "--no-browser"))
+    main_module.restart_into(tool, "k" * 43, tmp_path)
+    assert ran[0][1:] == ["tool", "upgrade", "chiefofstaff"]
+    assert execs[0] == ("/t/bin/chiefofstaff", ["/t/bin/chiefofstaff", "--no-browser"], "k" * 43)
+    assert execs[1][1][1:] == ["-m", "chiefofstaff", "--port", "8800", "--no-browser"]
+    assert "could not be started" in (tmp_path / UPDATE_NOTE).read_text()
+    monkeypatch.setenv(main_module.RESTART_TOKEN, "k" * 43)
+    assert main_module.launch_token() == ("k" * 43, True)
+    assert main_module.RESTART_TOKEN not in main_module.os.environ
+    monkeypatch.setenv(main_module.RESTART_TOKEN, "not one")
+    assert main_module.launch_token()[1] is False

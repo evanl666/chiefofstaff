@@ -1,7 +1,9 @@
 import argparse
 import logging
 import os
+import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -17,10 +19,15 @@ from pathlib import Path
 import uvicorn
 from platformdirs import user_data_path
 
+from .updates import UPDATE_NOTE, Launch, own_args
 from .web import create_app
 
 # The running instance's private URL, so starting Chief of Staff again opens it.
 LAUNCH_FILE = "launch-url"
+# Its private link's token, kept across a restart to update it (restart_into): the page it had
+# goes on.
+RESTART_TOKEN = "CHIEFOFSTAFF_RESTART_TOKEN"  # noqa: S105  (a variable's name)
+TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 
 
 def lock_data_file(file):
@@ -70,6 +77,14 @@ class Server(uvicorn.Server):
     def __init__(self, config: uvicorn.Config, bus):
         super().__init__(config)
         self.bus = bus
+        # How to start again once stopped, to update (Runtime.update_when_idle).
+        self.launch: Launch | None = None
+
+    def restart(self, launch: Launch):
+        """Stop as on Ctrl+C, to start again updated (restart_into); on the server's loop."""
+        self.launch = launch
+        self.bus.close()
+        self.should_exit = True
 
     def handle_exit(self, sig, frame):
         # Open browser tabs keep an event stream open; ending them now lets the server stop at
@@ -77,6 +92,43 @@ class Server(uvicorn.Server):
         if self.bus.loop and not self.bus.loop.is_closed():
             self.bus.loop.call_soon_threadsafe(self.bus.close)
         super().handle_exit(sig, frame)
+
+
+def launch_token() -> tuple[str, bool]:
+    """Its private link's token: the one it had before a restart to update it (the page it had
+    goes on), else a new one; and whether it is that restart."""
+    kept = os.environ.pop(RESTART_TOKEN, "")
+    if TOKEN.fullmatch(kept):
+        return kept, True
+    return secrets.token_urlsafe(32), False
+
+
+def restart_into(launch: Launch, token: str, directory: Path):
+    """Chief of Staff, stopped to update, updated (`uv tool upgrade`) and started again in this
+    process's place (its terminal, its arguments, its private link); when that fails, this
+    version again, and its start says why (Runtime.after_update)."""
+    print("Updating Chief of Staff and starting it again…", flush=True)
+    environment = {**os.environ, RESTART_TOKEN: token}
+    note = directory / UPDATE_NOTE
+    note.unlink(missing_ok=True)
+    if launch.how == "tool":
+        try:
+            done = subprocess.run(  # noqa: S603  (uv, which installed it, and its package)
+                [shutil.which("uv") or "uv", "tool", "upgrade", "chiefofstaff"],
+                capture_output=True, text=True, timeout=900, check=False,
+                stdin=subprocess.DEVNULL,
+            )  # fmt: skip
+            if done.returncode:
+                said = (done.stderr or done.stdout).strip()[-500:]
+                note.write_text(said or "uv tool upgrade failed")
+        except (OSError, subprocess.SubprocessError) as exc:
+            note.write_text(str(exc))
+    sys.stderr.flush()
+    try:
+        os.execve(launch.restart[0], list(launch.restart), environment)  # noqa: S606
+    except OSError as exc:
+        note.write_text(f"{launch.restart[0]} could not be started ({exc.strerror or exc})")
+    os.execve(sys.executable, [sys.executable, "-m", "chiefofstaff", *own_args()], environment)  # noqa: S606
 
 
 def running_instance(directory: Path) -> str:
@@ -207,7 +259,7 @@ def main():
             "Another Chief of Staff process is using this data directory and is not answering. "
             "Stop it (Ctrl+C in its terminal), or choose another --data-dir."
         )
-    token = secrets.token_urlsafe(32)
+    token, restarted = launch_token()
     url = f"http://127.0.0.1:{args.port}/#token={token}"
     # Bind before opening the browser so an unrelated listener cannot receive the launch token.
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -235,19 +287,23 @@ def main():
     )
     if args.demo:
         print("Demo mode: scripted sessions, no account needed. The scenario plays by itself.")
-    if not args.no_browser:
+    if not args.no_browser and not restarted:
         threading.Thread(target=open_when_ready, args=(args.port, url), daemon=True).start()
     config = uvicorn.Config(
         app, host="127.0.0.1", port=args.port, access_log=False, timeout_graceful_shutdown=3
     )
+    server = Server(config, app.state.bus)
+    app.state.runtime.restarter = server.restart
     try:
-        Server(config, app.state.bus).run(sockets=[listener])
+        server.run(sockets=[listener])
     except KeyboardInterrupt:
         pass
     finally:
         launch.unlink(missing_ok=True)
         listener.close()
         data_lock.close()
+    if server.launch:
+        restart_into(server.launch, token, directory)
 
 
 if __name__ == "__main__":

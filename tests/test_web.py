@@ -13,6 +13,7 @@ from chiefofstaff.__main__ import LAUNCH_FILE, running_instance
 from chiefofstaff.bus import Bus
 from chiefofstaff.runtime import Runtime
 from chiefofstaff.sources.slack import SlackSource
+from chiefofstaff.updates import installed
 from chiefofstaff.web import create_app
 
 TOKEN = "launch-token"
@@ -58,7 +59,8 @@ def test_api_needs_the_launch_token_and_a_trusted_origin(app_client):
     assert app_client.get(f"/api/attachments/shot.png?key={TOKEN}").status_code == 401
     with app_client.stream("GET", f"/api/events?key={TOKEN}") as stream:
         assert stream.status_code == 200
-        assert next(stream.iter_lines()) == 'data: {"type": "hello"}'
+        hello = json.loads(next(stream.iter_lines()).removeprefix("data: "))
+        assert hello == {"type": "hello", "data": {"version": installed()}}
     sign_in(app_client)
     state = app_client.get("/api/state").json()
     assert state["runtime"]["state"] == "ready"
