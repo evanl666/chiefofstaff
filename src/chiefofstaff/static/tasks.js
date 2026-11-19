@@ -7,8 +7,9 @@ import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, t
 import { openFile } from "./files.js";
 import { byId, closedWorkers, DELIVERY_WORDS, latestDelivery, loadState, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
-import { refreshChips, select } from "./session.js";
+import { continueWith, refreshChips, select } from "./session.js";
 import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
+import { agentName, markOf, marksShown, ready, statusOf } from "./agentpick.js";
 import { showChanges } from "./diff.js";
 // Chief of Staff's own helpers (learning how the owner works, checks, the profile): their
 // results come as cards to approve; the work itself is not the owner's.
@@ -20,22 +21,16 @@ function elsewhereItems(task, named = false) {
   const on = state.snapshot.agents;
   const session = byId(task.session_id);
   if (task.stopped !== PLAN_STOP || !on || !session) return [];
-  const names = { copilot: "Copilot", ...on.names };
   return ["copilot", ...on.on]
-    .filter((name) => name !== (session.agent || "copilot"))
-    .map((name) => ({
-      text: named ? names[name] : `Continue with ${names[name]}…`,
-      onclick: async () => {
-        if (!confirm(`Continue it with ${names[name]}? A new worker there goes on from a summary of this one's work, in the same folders; this one closes.`)) return;
-        try {
-          const made = await api(`/api/sessions/${session.id}/continue`, { method: "POST", body: { agent: name } });
-          toast(`Continuing on ${names[name]}.`);
-          select(made.session_id);
-        } catch (error) {
-          toast(error.message, "error");
-        }
-      },
-    }));
+    .filter((name) => name !== (session.agent || "copilot") && (name === "copilot" || ready(statusOf(name) || { status: "ready" })))
+    .map((name) => ({ text: named ? agentName(name) : `Continue with ${agentName(name)}…`, onclick: () => continueWith(session, name) }));
+}
+// Paused by its agent's limit: Continue with the one other agent that can run it (a button),
+// or a menu of them.
+function elsewhereControl(task) {
+  const items = elsewhereItems(task, true);
+  if (items.length === 1) return el("button", { type: "button", class: "secondary", text: `Continue with ${items[0].text}…`, "data-tip": "A new worker there goes on from a summary of this one's work; this one stays open", onclick: items[0].onclick });
+  return moreMenu(items, "Continue on another agent: a new worker there goes on from a summary of this one's work", "Continue on another agent…") || "";
 }
 export function isHelperTask(task) {
   if (task.helper) return true;
@@ -404,6 +399,8 @@ function taskCard(task, phase = phaseOf(task)) {
       { class: "head" },
       el("span", { class: dotClass(task, phase), "data-tip": unread(task, phase) ? "Not read yet" : undefined }),
       el("button", { type: "button", class: "title", text: task.title, "data-tip": titleTip(task, phase), "aria-expanded": row ? String(unfolded.has(task.id)) : undefined, onclick: () => (row ? unfoldTask(node, undefined, true) : openAt?.()), disabled: !openAt && !row }),
+      // While more than one agent is on: its worker's agent (its model on hover).
+      markOf(sessionById(task.session_id)),
       el("span", { class: "tid", text: task.id, "data-tip": "Task id" }),
       el("span", { class: "meta", "data-tip": help }, ...metaParts(meta)),
       menu,
@@ -697,7 +694,7 @@ function taskCard(task, phase = phaseOf(task)) {
       else {
         const when = resetTime(resets);
         main = resets > Date.now() ? el("button", { type: "button", text: `Go on at ${when}`, "data-tip": "It goes on by itself once its limit resets", onclick: () => act(`/api/tasks/${task.id}/go-on-at-reset`, {}, `It goes on at ${when}.`) }) : el("button", { type: "button", text: "Go on", onclick: goOn });
-        shown = [moreMenu(elsewhereItems(task, true), "Continue on another agent: a new worker there goes on from a summary of this one's work", "Continue on another agent…") || ""];
+        shown = [elsewhereControl(task)];
         more = [resets > Date.now() ? now : null, { text: "Go on with a note…", onclick: () => reply("What should it do now?", "Sent to the worker.") }, named, worker, cancel];
       }
     } else if (task.status === "waiting" && task.stopped) {

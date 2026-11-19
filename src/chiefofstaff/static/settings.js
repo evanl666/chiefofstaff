@@ -5,6 +5,7 @@ import { codeHtml, lines, plural, since } from "./text.js";
 import { closedWorkers, followOthers, HOME, loadState, sessions, state } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { EFFORTS, renderHeader, select } from "./session.js";
+import { agentMark, fixLine, statusText } from "./agentpick.js";
 // Settings opens on the tab last used, or the one asked for ("you" for what was learned).
 const TAB = "cos.settingsTab";
 export function showSettingsTab(tab) {
@@ -1033,7 +1034,8 @@ function agentsTab() {
       "div",
       { id: "agents-places", class: "agents-places", hidden: true },
       el("label", { id: "agents-choice", class: "agents-choice", hidden: true }, el("span", { text: "New workers start on" }), select),
-      el("div", { id: "agents-roles", class: "agents-roles" }),
+      // Where Chief of Staff's own sessions run: folded away (Copilot unless chosen).
+      el("details", { id: "agents-system", class: "agents-system", hidden: true }, el("summary", { text: "System agents" }), el("div", { id: "agents-roles", class: "agents-roles" })),
     ),
     el("div", { id: "agents-rows", class: "agents-rows" }),
     el("small", { id: "agents-hint", class: "agents-hint", hidden: true }),
@@ -1092,6 +1094,7 @@ function roleRow(role) {
   const lineId = `role-${role.role}-line`;
   const select = el("select", { name: `role_${role.role}`, "data-chosen": role.chosen });
   if (role.line) select.setAttribute("aria-describedby", lineId);
+  select.addEventListener("change", () => newWorkersChoices($("#settings-form").agent_new_workers.value));
   return el(
     "div",
     { class: "agents-role", "data-role": role.role, "data-agents": role.agents.join(" "), hidden: true },
@@ -1137,9 +1140,15 @@ function agentRow(agent, disabled) {
   const id = `agent-${agent.name}-state`;
   const box = el("input", { type: "checkbox", name: `agent_${agent.name}_enabled`, "aria-describedby": id });
   box.checked = Boolean(agent.enabled);
-  // Off, it is turned on only where it can run; on, it can always be turned off.
-  box.disabled = disabled || (!agent.enabled && Boolean(agent.problem));
-  const line = el("small", { id, role: "status", class: agent.problem ? "agent-problem" : "agent-state", html: codeHtml(agent.problem || agent.state || "") });
+  // Off, it is turned on only once it is ready (installed, signed in) and can run here; on, it
+  // can always be turned off.
+  const unready = Boolean(agent.status) && agent.status !== "ready";
+  box.disabled = disabled || (!agent.enabled && (Boolean(agent.problem) || unready));
+  // Its status as the @ picker says it ("Ready · Uses your ChatGPT sign-in"), its version on
+  // hover; why it can't run, else; the command that makes it ready, under it.
+  const said = unready && agent.fix ? agent.said : agent.status && !agent.problem ? statusText({ ...agent, on: true }) : agent.problem || agent.state || "";
+  const line = el("small", { id, role: "status", class: agent.problem || unready ? "agent-problem" : "agent-state", title: agent.state || undefined, html: codeHtml(said) });
+  const fix = unready && agent.fix ? el("small", { class: "agent-note" }, fixLine(agent.fix)) : null;
   const most = Math.max(0, ...(agent.usage || []).map((entry) => entry.used));
   const chip = most >= USED_CHIP ? el("span", { class: `chip ${most >= 100 ? "blocked" : "waiting"}`, text: `${most}% used`, title: usageLine(agent.usage) }) : null;
   const usage = agent.usage?.length ? el("small", { class: "agent-usage", text: usageLine(agent.usage) }) : null;
@@ -1166,9 +1175,9 @@ function agentRow(agent, disabled) {
     fields.hidden = !box.checked;
     newWorkersChoices($("#settings-form").agent_new_workers.value);
   });
-  const head = el("div", { class: "agent-head" }, el("strong", { text: agent.label }), chip, el("label", { class: "check agent-switch" }, box, " Available for workers"));
+  const head = el("div", { class: "agent-head" }, agentMark(agent.name), el("strong", { text: agent.label }), chip, el("label", { class: "check agent-switch" }, box, " Available for workers"));
   // One that cannot be turned on looks it, its reason in its line.
-  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, head, line, usage, ...notes, fields);
+  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, head, line, fix, usage, ...notes, fields);
 }
 // New workers start on Copilot or on an agent available above that can run now (as the form
 // has it, saved or not): the line shows once another agent is on, with how to ask for one for
@@ -1178,8 +1187,9 @@ function newWorkersChoices(chosen) {
   const on = (agentsLooked?.agents || []).filter((agent) => form[`agent_${agent.name}_enabled`]?.checked);
   const ready = on.filter((agent) => !agent.problem && !(agentsLooked.sandboxed && agent.sandbox));
   const select = form.agent_new_workers;
-  select.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...ready.map((agent) => el("option", { value: agent.name, text: agent.label })));
-  select.value = ready.some((agent) => agent.name === chosen) ? chosen : "copilot";
+  // Last used: the agent last chosen for a worker (never the default unless picked).
+  select.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...ready.map((agent) => el("option", { value: agent.name, text: agent.label })), el("option", { value: "last", text: "Last used" }));
+  select.value = chosen === "last" || ready.some((agent) => agent.name === chosen) ? chosen : "copilot";
   $("#agents-choice").hidden = !on.length;
   for (const row of document.querySelectorAll("#agents-roles .agents-role")) {
     const runs = on.filter((agent) => row.dataset.agents.split(" ").includes(agent.name));
@@ -1189,6 +1199,15 @@ function newWorkersChoices(chosen) {
     choice.value = runs.some((agent) => agent.name === kept) ? kept : "copilot";
     row.hidden = !runs.length;
   }
+  // Folded, its line saying where any of them runs other than on Copilot.
+  const system = $("#agents-system");
+  const shownRoles = [...document.querySelectorAll("#agents-roles .agents-role:not([hidden])")];
+  system.hidden = !shownRoles.length;
+  const elsewhere = shownRoles
+    .map((row) => [row.querySelector(".agents-choice span").textContent.replace(/ runs on$/, ""), row.querySelector("select")])
+    .filter(([, choice]) => choice.value !== "copilot")
+    .map(([label, choice]) => `${label} on ${choice.selectedOptions[0]?.text || choice.value}`);
+  system.querySelector("summary").textContent = ["System agents", ...elsewhere].join(" · ");
   $("#agents-places").hidden = !on.length;
   const hint = $("#agents-hint");
   hint.hidden = !on.length;

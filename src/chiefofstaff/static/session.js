@@ -8,6 +8,7 @@ import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
+import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, marksShown, ready, statusOf } from "./agentpick.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
@@ -162,7 +163,7 @@ export function renderHeader() {
   if (session.role === "worker" && !session.closed_at && !session.helper && idle && state.snapshot.agents) {
     const names = { copilot: "Copilot", ...state.snapshot.agents.names };
     const others = ["copilot", ...state.snapshot.agents.on].filter((name) => name !== (session.agent || "copilot"));
-    items.push(el("hr"), ...others.map((name) => menuButton(`Continue with ${names[name]}…`, () => continueWith(session, name, names[name]))));
+    items.push(el("hr"), ...others.map((name) => menuButton(`Continue with ${names[name]}…`, () => continueWith(session, name))));
   }
   if (session.role === "worker" && !session.closed_at) {
     items.push(
@@ -190,15 +191,100 @@ export function renderHeader() {
       : { placeholder: session.closed_at ? "Message to reopen this worker…" : placeholders[session.role] || chatPlaceholder(session) },
   );
 }
-async function continueWith(session, agent, label) {
-  if (!confirm(`Continue “${workerTitle(session)}” with ${label}? A new worker on ${label} goes on from a summary of this one's work, in the same folders; this one closes.`)) return;
+// Continue with <agent>…: what goes to the new worker, in one line (its summary's length and
+// the changes it brings), then Continue; the worker stays open (a copy of its worktree goes).
+export async function continueWith(session, agent) {
+  $("#session-more").hidden = true;  // (Its menu, chosen from, closed.)
+  const label = agentName(agent);
+  const line = el("p", { class: "continue-line", role: "status", text: "Checking what it sends…" });
+  const go = el("button", { type: "button", text: "Continue", disabled: true });
+  const cancel = el("button", { type: "button", class: "text", text: "Cancel", onclick: () => dialog.close() });
+  const dialog = el(
+    "dialog",
+    { class: "continue-dialog", "aria-label": `Continue with ${label}` },
+    el("h2", {}, agentMark(agent), ` Continue “${shorten(workerTitle(session), 60)}” with ${label}`),
+    line,
+    el("footer", {}, el("span", { class: "spacer" }), cancel, go),
+  );
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
   try {
-    const made = await api(`/api/sessions/${session.id}/continue`, { method: "POST", body: { agent } });
-    toast(`Continuing on ${label}.`);
-    select(made.session_id);
+    const preview = await api(`/api/sessions/${session.id}/continue?agent=${encodeURIComponent(agent)}`);
+    line.textContent = preview.line;
+    go.disabled = false;
+    go.focus();
+  } catch (error) {
+    line.textContent = error.message;
+    line.classList.add("error");
+    return;
+  }
+  go.onclick = async () => {
+    go.disabled = true;
+    try {
+      const made = await api(`/api/sessions/${session.id}/continue`, { method: "POST", body: { agent } });
+      dialog.close();
+      toast(`Continuing on ${label}.`);
+      select(made.session_id);
+    } catch (error) {
+      go.disabled = false;
+      line.textContent = error.message;
+      line.classList.add("error");
+    }
+  };
+}
+// Restart on <agent>: before a worker's first step, its task on another agent at once (nothing
+// was done to lose: no step to confirm).
+export async function restartOn(session, picked) {
+  try {
+    const made = await api(`/api/sessions/${session.id}/restart`, { method: "POST", body: { agent: picked.agent, model: picked.model || "", effort: picked.effort || "" } });
+    toast(`Restarted on ${agentName(picked.agent)}.`);
+    if (state.selected === session.id) select(made.session_id);
   } catch (error) {
     toast(error.message, "error");
   }
+}
+// Agents another worker can start on now (on, and ready as last known).
+const runnable = (name) => name === "copilot" || ready(statusOf(name) || { status: "ready" });
+// A worker's agent as a chip (its start line in the Router chat), while more than one agent is
+// on: before its first step, Restart on each other agent; after it, idle, Continue with….
+export function agentChip(sessionId) {
+  const first = byId(sessionId);
+  if (!first || first.role !== "worker" || !marksShown()) return null;
+  const agent = first.agent || "copilot";
+  const menu = el("div", { class: "menu", role: "menu", hidden: true });
+  const button = el(
+    "button",
+    {
+      type: "button",
+      class: "agent-chip",
+      title: [agentName(agent), first.model].filter(Boolean).join(" · "),
+      "aria-haspopup": "menu",
+      onclick: (event) => {
+        event.stopPropagation();
+        const session = byId(sessionId);
+        const open = menu.hidden;
+        menu.hidden = true;
+        if (!open || !session || session.closed_at) return;
+        const idle = !["working", "queued", "starting"].includes(session.status) && !session.background && !session.elsewhere;
+        const others = agentsOn().filter((name) => name !== (session.agent || "copilot") && runnable(name));
+        const items = session.untouched
+          ? others.map((name) => ({ text: `Restart on ${agentName(name)}`, onclick: () => restartOn(session, { agent: name }) }))
+          : idle
+            ? others.map((name) => ({ text: `Continue with ${agentName(name)}…`, onclick: () => continueWith(session, name) }))
+            : [];
+        if (!items.length) {
+          toast(session.untouched || idle ? "No other agent can run it now." : "It is at work: Continue with… is offered once it is done.");
+          return;
+        }
+        menu.replaceChildren(...items.map((item) => el("button", { type: "button", role: "menuitem", text: item.text, onclick: (inner) => { inner.stopPropagation(); menu.hidden = true; item.onclick(); } })));
+        menu.hidden = false;
+      },
+    },
+    agentMark(agent),
+    el("span", { text: agentName(agent) }),
+  );
+  return el("span", { class: "menu-wrap agent-chip-wrap" }, button, menu);
 }
 // A worker with several tasks: the one the owner chose in its chat, which what they write is
 // about (bug QA6-3: it was filed under the one given last, whatever they looked at): the task
@@ -267,14 +353,36 @@ const AGENT = Symbol("agent");
 const FALLBACK = Symbol("fallback");
 function agentMeta(session, parts) {
   const notes = session.agent_notes || [];
-  const name = el("span", { text: session.agent_name, title: notes.join("\n") || undefined });
-  const fallback = el("span", { text: "Copilot", title: session.agent_fallback || undefined });
+  const name = agentBadge(session, session.agent_name, notes.join("\n"));
+  const fallback = agentBadge(session, "Copilot", session.agent_fallback || "");
   const nodes = parts.flatMap((part, index) => [index ? " · " : "", part === AGENT ? name : part === FALLBACK ? fallback : part]);
   if (notes.length) {
     name.setAttribute("aria-describedby", "session-agent-notes");
     nodes.push(el("span", { id: "session-agent-notes", hidden: true, text: notes.join(". ") }));
   }
   $("#session-meta").replaceChildren(...nodes);
+}
+// Its agent in its header: with its mark while more than one agent is on; before its first
+// step, a button whose popover changes its agent (Restart on…), model and effort.
+function agentBadge(session, text, title) {
+  const agent = session.agent || "copilot";
+  const mark = marksShown() ? agentMark(agent, session.model) : "";
+  if (!session.untouched || session.closed_at || !marksShown()) return el("span", { class: "agent-name", title: title || undefined }, mark, text);
+  const button = el("button", { type: "button", class: "agent-chip", "aria-haspopup": "dialog", title: title || "Agent, model and effort, before it begins" }, mark, el("span", { text }), el("span", { class: "caret", "aria-hidden": "true", text: "▾" }));
+  button.onclick = () =>
+    agentPopover(button, { agent, model: session.model_choice || "", effort: session.effort_choice || "" }, async (picked) => {
+      if (picked.agent !== agent) {
+        closeAgentPopover();
+        await restartOn(session, picked);
+        return;
+      }
+      try {
+        upsertSession(await api(`/api/sessions/${session.id}/model`, { method: "POST", body: { model: picked.model, effort: picked.effort } }));
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    }, { title: "Runs on" });
+  return button;
 }
 const tokenCount = (count) => (count >= 1e6 ? `${+(count / 1e6).toFixed(1)}M` : count >= 1000 ? `${Math.round(count / 1000)}k` : String(count));
 export const EFFORTS = { none: "none", low: "low", medium: "medium", high: "high", xhigh: "extra high", max: "max" };
@@ -767,9 +875,12 @@ function homeEntry(message) {
       if (meta.away_reply) return eventLine({ mark: "↩", text, time });
       if (meta.agent_refused) return refusalCard(text, meta, time);
       // "Started “X” · new because …": the why is on hover (a " · " in the title is the title's).
-      const started = /^(Started|New task|Continued)/.test(text);
+      const started = /^(Started|New task|Continued|Restarted)/.test(text);
       const node = eventLine({ mark: started ? "" : "·", kind: started ? "started" : "", text: headOf(text), time, view: meta.session_id ? () => focusTask(meta.task_id || "", meta.session_id) : null });
       node.querySelector(".what").title = text;
+      // Its agent (while more than one is on): Restart on another before its first step.
+      const chip = /^(Started|Queued|Restarted)/.test(text) && meta.session_id ? agentChip(meta.session_id) : null;
+      if (chip) node.querySelector(".what").after(chip);
       return node;
     }
     default:
@@ -940,15 +1051,20 @@ function refusalCard(text, meta, time) {
       toast(error.message, "error");
     }
   };
-  const copilot = el("button", { type: "button", class: "secondary", text: "Run on Copilot instead" });
+  // The agent it is offered on instead: the one new workers start on, else Copilot.
+  const copilot = el("button", { type: "button", class: "secondary", text: `Run on ${agentName(meta.instead || "copilot")} instead` });
   const wait = el("button", { type: "button", class: "text", text: "Wait" });
   copilot.onclick = () => answer("copilot", copilot);
   wait.onclick = () => answer("wait", wait);
+  // The command that makes it ready, the owner's to run (else a link to the guide).
+  const fix = meta.fix ? fixLine(meta.fix) : null;
   const node = el(
     "div",
     { class: "card agent-refused", title: clock(time) },
-    el("p", { text }),
-    open ? el("div", { class: "actions" }, el("a", { class: "link", href: SIGN_IN_HELP, target: "_blank", rel: "noreferrer", text: "Sign-in help" }), el("span", { class: "spacer" }), wait, copilot) : null,
+    el("p", {}, meta.agent ? agentMark(meta.agent) : "", ` ${text}`),
+    open
+      ? el("div", { class: "actions" }, fix || el("a", { class: "link", href: SIGN_IN_HELP, target: "_blank", rel: "noreferrer", text: "Sign-in help" }), el("span", { class: "spacer" }), wait, copilot)
+      : null,
   );
   return node;
 }
@@ -1040,7 +1156,8 @@ function ownerMessage(text, meta = {}, time = "", delivery = "", messageId = 0) 
   // Sent from Home straight to one worker.
   if (meta.to) node.append(el("button", { type: "button", class: "to", text: `→ ${meta.to_title}`, title: "Open this worker", onclick: () => select(meta.to) }));
   // The agent chosen for it with @ (its work runs there).
-  if (meta.agent) node.append(el("span", { class: "to", text: `On ${{ copilot: "Copilot", codex: "Codex", claude: "Claude" }[meta.agent] || meta.agent}` }));
+  if (meta.agents?.length) node.append(el("span", { class: "to", text: `Compare on ${meta.agents.map(agentName).join(" and ")}` }));
+  else if (meta.agent) node.append(el("span", { class: "to", text: `On ${[agentName(meta.agent), meta.agent_model].filter(Boolean).join(" · ")}` }));
   const files = meta.attachments || [];
   if (files.length) {
     node.append(

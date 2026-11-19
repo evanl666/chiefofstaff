@@ -5431,9 +5431,9 @@ async def main():
                           round_ten, round_scale, round_qa, round_eleven, round_twelve,
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
-                          round_send, round_agents, round_picker, round_roles, round_qa6,
-                          round_qa7_life, round_qa8_report, round_layout, round_fresh_start,
-                          round_qa8_auth, round_qa8_approvals):  # fmt: skip
+                          round_send, round_agents, round_picker, round_roles, round_picker_ux,
+                          round_qa6, round_qa7_life, round_qa8_report, round_layout,
+                          round_fresh_start, round_qa8_auth, round_qa8_approvals):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -8371,7 +8371,7 @@ async def round_roles(runtime, browser, failures: list[str]):
             group = page.locator("#settings-pane .tab[data-tab=agents]")
             codex = group.locator(".agent-row[data-agent=codex]")
             await expect(codex.locator("small[role=status]")).to_have_text(
-                "0.167.2 · signed in with ChatGPT", timeout=20000
+                "Ready · Uses your ChatGPT sign-in", timeout=20000
             )
             await expect(group.locator("#agents-places")).to_be_hidden()  # None on.
             await expect(group.locator(".agents-intro")).to_have_text(
@@ -8382,6 +8382,11 @@ async def round_roles(runtime, browser, failures: list[str]):
             await codex.locator("input[type=checkbox]").check()
             places = group.locator("#agents-places")
             await expect(places).to_be_visible()
+            # Where they run: under System agents, folded until opened.
+            system = group.locator("#agents-system")
+            await expect(system.locator("summary")).to_have_text("System agents")
+            await expect(group.locator("select[name=role_router]")).to_be_hidden()
+            await system.locator("summary").click()
             shown = group.locator("#agents-roles .agents-role:not([hidden])")
             await expect(shown.locator("label > span")).to_have_text(
                 ["The Router runs on", "The Watchdog runs on"]
@@ -8396,7 +8401,12 @@ async def round_roles(runtime, browser, failures: list[str]):
             await codex.locator("input[type=checkbox]").uncheck()
             await expect(places).to_be_hidden()
             await codex.locator("input[type=checkbox]").check()
+            if not await system.evaluate("n => n.open"):
+                await system.locator("summary").click()
             await choose.select_option("codex")
+            await expect(system.locator("summary")).to_have_text(
+                "System agents · The Router on Codex"
+            )
             mark = max((m["id"] for m in runtime.store.messages(router)), default=0)
             runtime.store.set(f"sent:{router}", str(mark))
             await page.locator("#settings-form footer button[type=submit]").click()
@@ -8449,6 +8459,8 @@ async def round_roles(runtime, browser, failures: list[str]):
                 assert runtime.agent(router) == "copilot"
                 await page.locator("#settings-button").click()
                 await page.locator("#settings-tabs [data-tab=agents]").click()
+                if not await system.evaluate("n => n.open"):
+                    await system.locator("summary").click()
                 why = group.locator("#role-router-line")
                 await expect(why).to_have_text(
                     "On Copilot for now: Codex is not signed in: run codex login in a terminal.",
@@ -8559,7 +8571,10 @@ async def picker_settings(runtime, browser):
         tab = page.locator("#settings-pane .tab[data-tab=agents]")
         codex = tab.locator(".agent-row[data-agent=codex]")
         await expect(codex.locator("small[role=status]")).to_have_text(
-            "0.167.2 · signed in with ChatGPT", timeout=20000
+            "Ready · Uses your ChatGPT sign-in", timeout=20000
+        )
+        await expect(codex.locator("small[role=status]")).to_have_attribute(
+            "title", "0.167.2 · signed in with ChatGPT"
         )
         claude = tab.locator(".agent-row[data-agent=claude]")
         await expect(claude.locator(".agent-head .chip")).to_have_text("84% used")
@@ -8572,13 +8587,15 @@ async def picker_settings(runtime, browser):
         await expect(codex.locator(".agent-head .chip")).to_have_count(0)
         await expect(tab.locator("#agents-choice")).to_be_visible()
         choose = tab.locator("select[name=agent_new_workers]")
-        await expect(choose.locator("option")).to_have_text(["Copilot", "Codex"])
+        await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Last used"])
         await expect(codex.locator("input[name=agent_codex_model]")).to_be_visible()
         await expect(claude.locator(".agent-fields")).to_be_hidden()
         await picker_shoot(page, "settings-rows", scheme, "#settings-dialog")
         # Claude turned on: where new workers start lists it, and the hint names both.
         await claude.locator("input[name=agent_claude_enabled]").check()
-        await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Claude"])
+        await expect(choose.locator("option")).to_have_text(
+            ["Copilot", "Codex", "Claude", "Last used"]
+        )
         await expect(tab.locator("#agents-hint")).to_have_text(
             "For a single task, say \u201cdo this with Codex\u201d or type @codex or @claude."
         )
@@ -8606,11 +8623,13 @@ async def picker_composer(runtime, browser):
         await box.press("End")
         await box.type("c")
         options = page.locator("#mention-list li.agent .name")
-        await expect(options).to_have_text(["Copilot", "Codex"])
+        # Every agent, Claude too (ready, off for workers: dimmed, with Turn on).
+        await expect(options).to_have_text(["Copilot", "Codex", "Claude"])
+        await expect(page.locator("#mention-list li.agent.dim .name")).to_have_text(["Claude"])
         await picker_shoot(page, "composer-autocomplete", scheme, focus=page.locator("#composer"))
         await page.locator("#mention-list li.agent", has_text="Codex").click()
         chip = page.locator("#composer-to")
-        await expect(chip).to_have_text("On Codex\u00d7")
+        await expect(chip).to_have_text("On Codex▾\u00d7")
         await expect(box).to_have_value("")
         await box.fill("Port the parser to Rust")
         await picker_shoot(page, "composer-chip", scheme, focus=page.locator("#composer"))
@@ -8622,7 +8641,7 @@ async def picker_composer(runtime, browser):
             await expect(chip).to_be_hidden()
             await page.locator("#composer-input").fill("@cod")
             await page.locator("#mention-list li.agent", has_text="Codex").click()
-            await expect(chip).to_have_text("On Codex\u00d7")
+            await expect(chip).to_have_text("On Codex▾\u00d7")
             await chip.locator("button.clear").click()
             await box.fill("")
             await expect(mine).to_have_count(1)
@@ -8689,11 +8708,10 @@ async def picker_workers(runtime, browser):
         pick = page.locator("#timeline .msg", has_text="On Codex: a long refactor")
         await picker_shoot(page, "router-pick", scheme, focus=pick)
         row = page.locator("#session-list .item", has_text="Port the parser")
-        await expect(row.locator(".agent-badge")).to_have_text("Codex")
+        await expect(row.locator(".agent-mark")).to_have_attribute("aria-label", "Codex · gpt-test")
         other = page.locator("#session-list .item", has_text="Tidy the changelog")
-        await expect(other.locator(".agent-badge")).to_have_text("Copilot")
-        await expect(other.locator(".agent-badge")).to_have_attribute(
-            "title", "Started on Copilot: Codex is signed out."
+        await expect(other.locator(".agent-mark")).to_have_attribute(
+            "aria-label", re.compile(r"^Copilot · .*Started on Copilot: Codex is signed out\.$")
         )
         await sidebar_shoot(page, "sidebar-badges", scheme)
         await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
@@ -8707,7 +8725,8 @@ async def picker_workers(runtime, browser):
         await page.evaluate(
             "id => import('/static/session.js').then((m) => m.select(id))", fallback["session_id"]
         )
-        why = page.locator("#session-meta span", has_text="Copilot")
+        # (Its agent, before its first step, is a button: its popover changes it.)
+        why = page.locator("#session-meta .agent-chip, #session-meta .agent-name").first
         await expect(why).to_have_attribute("title", "Started on Copilot: Codex is signed out.")
         await picker_shoot(page, "worker-fallback-header", scheme, "#session-header")
         assert not errors, errors
@@ -8716,18 +8735,29 @@ async def picker_workers(runtime, browser):
     context, page, errors, _ = await agents_page(browser, "light")
     await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
     await page.locator("#session-more-button").click()
-    page.once("dialog", lambda dialog: asyncio.ensure_future(dialog.accept()))
     await page.locator("#session-menu-items button", has_text="Continue with Copilot…").click()
+    # What it sends, in one line; the worker stays open.
+    dialog = page.locator("dialog.continue-dialog")
+    await expect(dialog.locator(".continue-line")).to_have_text(
+        re.compile(r"^Sends a summary \(\d+ words\) and no changes to a new Copilot worker; "
+                   r"this one stays open\.$")
+    )  # fmt: skip
+    await picker_shoot(page, "continue-dialog", "light", focus=dialog)
+    await dialog.get_by_role("button", name="Continue").click()
     await expect(page.locator("#session-title")).to_have_text("Port the parser", timeout=10000)
-    await until(lambda: store.session(worker)["closed_at"], 10)
-    moved = store.get(f"continued:{worker}")
-    assert moved and runtime.agent(moved) == "copilot"
+
+    def successor():
+        return next((r["id"] for r in store.open_sessions("worker")
+                     if store.get(f"continues:{r['id']}") == worker), "")  # fmt: skip
+
+    await until(successor, 10)
+    moved = successor()
+    assert runtime.agent(moved) == "copilot" and not store.session(worker)["closed_at"]
     notices = page.locator("#timeline .notice", has_text="Continues “Port the parser”")
     await expect(notices).to_have_count(1)
     # On Copilot, it says so as every worker does while another agent is on: its row, its header.
-    badge = page.locator("#session-list .item.selected .agent-badge")
-    await expect(badge).to_have_text("Copilot")
-    await expect(badge).to_have_attribute("title", re.compile(r"^Copilot( · \S.*)?$"))
+    badge = page.locator("#session-list .item.selected .agent-mark")
+    await expect(badge).to_have_attribute("aria-label", re.compile(r"^Copilot( · \S.*)?$"))
     await expect(page.locator("#session-meta")).to_contain_text("Copilot")
     await picker_shoot(page, "worker-continued", "light", "#main")
     assert not errors, errors
@@ -8750,11 +8780,12 @@ async def picker_workers(runtime, browser):
         await at_home(page)
         card = page.locator("#timeline .card.agent-refused")
         await expect(card.locator("p")).to_have_text(
-            "“Benchmark the importer” did not start on Codex: Codex is not signed in: run codex "
-            "login in a terminal."
+            "“Benchmark the importer” did not start on Codex: sign-in needed."
         )
-        await expect(card.locator(".actions a, .actions button")).to_have_text(
-            ["Sign-in help", "Wait", "Run on Copilot instead"]
+        # The command that makes it ready (the owner's to run), and what they can do now.
+        await expect(card.locator(".agent-fix")).to_have_text("Run codex login in a terminal Copy")
+        await expect(card.locator(".actions > button")).to_have_text(
+            ["Wait", "Run on Copilot instead"]
         )
         await picker_shoot(page, "recovery-card", scheme, focus=card)
         assert not errors, errors
@@ -8805,15 +8836,15 @@ async def picker_workers(runtime, browser):
         await expect(card.locator(".head")).to_contain_text("Paused")
         assert (await card.inner_text()).count("Paused") == 1, "said once"
         await expect(card.get_by_role("button", name=f"Go on at {when}")).to_be_visible()
-        elsewhere = card.get_by_role("button", name="Continue on another agent…")
+        # The one other agent that can run it: Continue with it (what it sends, then).
+        elsewhere = card.get_by_role("button", name="Continue with Copilot…")
         await expect(elsewhere).to_be_visible()
         await picker_shoot(page, "plan-limit-paused", scheme, "#main", focus=card, tab="needs")
-        await page.set_viewport_size({"width": 1500, "height": 900})
         await elsewhere.click()
-        await expect(card.get_by_role("menuitem")).to_have_text(["Copilot"])
-        await quiet_for(page)  # (Shown once it has opened.)
-        await page.screenshot(path=PICKER_SHOTS / f"plan-limit-paused-menu-1500-{scheme}.png")
-        await page.keyboard.press("Escape")
+        dialog = page.locator("dialog.continue-dialog")
+        await expect(dialog.locator(".continue-line")).to_contain_text("to a new Copilot worker")
+        await dialog.get_by_role("button", name="Cancel").click()
+        await expect(dialog).to_have_count(0)
         assert not errors, errors
         await context.close()
     # Go on at its reset: under Monitoring until then, saying when; nothing sent before.
@@ -8839,6 +8870,283 @@ async def picker_workers(runtime, browser):
     assert runtime.tasks.get(task_id)["status"] == "waiting"
     assert len(store.messages(paused["session_id"])) == sent
     log("picker: badges, Continue with…, the recovery card, a paused task, the Router's pick")
+
+
+UX_SHOTS = Path(os.environ.get("UI_PICKER_UX_SHOTS") or SHOTS / "picker")
+UX_WIDTHS = tuple(int(w) for w in os.environ.get("UI_PICKER_UX_WIDTHS", "800,1280").split(","))
+
+
+async def ux_shoot(page, name: str, scheme: str, target: str = "#main", focus=None):
+    """`name` at 800 and 1280 px (UI_PICKER_UX_WIDTHS), light or dark, into files/shots/picker
+    (UI_PICKER_UX_SHOTS); nothing of `target` cut off or spilling over."""
+    UX_SHOTS.mkdir(parents=True, exist_ok=True)
+    for width in UX_WIDTHS:
+        await page.set_viewport_size({"width": width, "height": 900})
+        if focus is not None:
+            await focus.evaluate("n => n.scrollIntoView({block: 'center', inline: 'nearest'})")
+        await quiet_for(page)
+        await page.screenshot(path=UX_SHOTS / f"{name}-{width}-{scheme}.png")
+        found = await page.locator(target).evaluate(SCROLLED_OVERFLOWS)
+        assert not found, (name, width, found)
+        # A popover open stays inside the window.
+        for box in await page.locator(".agent-popover").evaluate_all(
+            "nodes => nodes.map((n) => n.getBoundingClientRect().toJSON())"
+        ):
+            assert box["left"] >= 0 and box["right"] <= width, (name, width, box)
+    await page.set_viewport_size({"width": 1280, "height": 900})
+
+
+async def round_picker_ux(runtime, browser, failures: list[str]):
+    """The agent picker as the owner's research asked (2026-11-19): @ lists every agent with its
+    status (Ready, Sign-in needed, Not installed; one not ready dimmed, with the command and
+    Copy); the chip's popover (agent, its models and effort, whose plan it uses); two agents
+    picked to compare, their workers under one row; each worker's agent mark on its row, task
+    and header; the start line's chip (Restart on… before its first step); Settings' status
+    lines, Available off until ready, Last used, System agents."""
+    from copilot.tools import ToolInvocation
+
+    from chiefofstaff import agents
+
+    folder, _ = codex_on_path()
+    store = runtime.store
+    router = store.get("router_id")
+    store.delete("agentlimit:codex")
+    os.environ["FAKE_CLAUDE_SIGNED_OUT"] = "1"
+    try:
+        runtime.found_cache = (float("-inf"), [])
+        runtime.glanced.clear()
+        await agents_saved(runtime, {"codex": {"enabled": True}})
+        await runtime.refresh_agent_status()
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await at_home(page)
+            box = page.locator("#composer-input")
+            await box.fill("@")
+            await box.press("End")
+            names = page.locator("#mention-list li.agent .name")
+            await expect(names).to_have_text(["Copilot", "Codex", "Claude"])
+            claude = page.locator("#mention-list li.agent.dim", has_text="Claude")
+            await expect(claude.locator(".status")).to_contain_text("Sign-in needed")
+            await expect(claude.locator(".agent-fix")).to_have_text(
+                "Run claude then /login in a terminal Copy"
+            )
+            await expect(claude).to_have_attribute("aria-disabled", "true")
+            await ux_shoot(page, "at-statuses", scheme, focus=page.locator("#composer"))
+            await claude.click(force=True)  # Dimmed: nothing chosen.
+            await expect(page.locator("#composer-to")).to_be_hidden()
+            await page.locator("#mention-list li.agent", has_text="Codex").click()
+            chip = page.locator("#composer-to .agent-chip")
+            await expect(chip).to_have_text("Codex▾")
+            await chip.click()
+            pop = page.locator(".agent-popover")
+            await expect(pop.locator(".agent-pop-agent .name")).to_have_text(
+                ["Copilot", "Codex", "Claude"]
+            )
+            await expect(pop.locator(".agent-pop-pays")).to_have_text("Uses your ChatGPT sign-in")
+            model = pop.locator("select[aria-label=Model]")
+            await expect(model.locator("option")).to_have_text(
+                ["Default", "GPT-TEST", "GPT-MINI"], timeout=10000
+            )
+            await model.select_option("gpt-mini")
+            await expect(chip).to_have_text("Codexgpt-mini▾")
+            await ux_shoot(page, "chip-popover", scheme, focus=pop)
+            await pop.locator(".agent-pop-agent", has_text="Copilot").click()
+            await expect(pop.locator(".agent-pop-pays")).to_have_text("Uses your Copilot plan")
+            await expect(chip).to_have_text("Copilot▾")
+            await page.keyboard.press("Escape")
+            await expect(pop).to_have_count(0)
+            # A second agent picked: the task on each (Compare).
+            await box.fill("@cod")
+            await page.locator("#mention-list li.agent", has_text="Codex").click()
+            await expect(page.locator("#composer-to")).to_be_visible()
+            await expect(page.locator("#composer-to")).to_have_text(
+                "Compare on Copilot and Codex\u00d7"
+            )
+            await box.fill("Make the importer twice as fast")
+            await ux_shoot(page, "compare-chip", scheme, focus=page.locator("#composer"))
+            if scheme == "dark":
+                await page.locator("#composer-to button.clear").click()
+                await box.fill("")
+                assert not errors, errors
+                await context.close()
+                continue
+            sent: list = []
+            page.on("request", lambda r, sent=sent: sent.append(r.post_data_json)
+                    if r.method == "POST" and r.url.endswith("/messages") else None)  # fmt: skip
+            await box.press("Enter")
+            await until(lambda sent=sent: sent)
+            assert sent[0]["agents"] == ["copilot", "codex"], sent
+            mine = page.locator("#timeline .msg.owner", has_text="Make the importer")
+            await expect(mine.locator("span.to")).to_have_text("Compare on Copilot and Codex")
+            assert not errors, errors
+            await context.close()
+        # The Router compares: a worker on each, grouped; each one's mark; the start line's chip.
+        last = store.value("SELECT max(id) FROM messages WHERE session_id=?", (router,))
+        store.set(f"idle:{router}", str(last or 0))
+        spawn = runtime.toolset.spawn_on(["codex"])
+
+        async def spawned(title, text, **more):
+            found = await spawn.handler(
+                ToolInvocation(session_id=router, tool_call_id="t", tool_name="spawn_worker",
+                               arguments={"title": title, "instructions": text, "why_new": "t",
+                                          **more})
+            )  # fmt: skip
+            return json.loads(found.text_result_for_llm)
+
+        made = await spawned("Speed up the importer", "Make it twice as fast",
+                             agent="copilot", compare_with=["codex"])  # fmt: skip
+        pair = [worker["session_id"] for worker in made["workers"]]
+        assert [runtime.agent(i) for i in pair] == ["copilot", "codex"]
+        fresh = await spawned("Draft the release notes", "Draft them")
+        untouched = fresh["session_id"]
+        assert runtime.view(store.session(untouched))["untouched"]
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await at_home(page)
+            group = page.locator("#session-list .compare-group")
+            await expect(group).to_have_text("Compare: Speed up the importer (2)")
+            nested = page.locator("#session-list .item.nested .label")
+            await expect(nested).to_have_text(["Copilot", "Codex"])
+            row = page.locator("#session-list .item", has_text="Draft the release notes")
+            await expect(row.locator(".agent-mark")).to_have_attribute(
+                "aria-label", re.compile(r"^Copilot")
+            )
+            await sidebar_shoot_to(page, "compare-sidebar", scheme)
+            line = page.locator("#timeline .event.started", has_text="Draft the release notes")
+            start = line.locator(".agent-chip")
+            await expect(start).to_have_text("Copilot")
+            await start.click()
+            menu = line.locator(".agent-chip-wrap .menu")
+            await expect(menu.get_by_role("menuitem")).to_have_text(["Restart on Codex"])
+            await ux_shoot(page, "start-chip-restart", scheme, focus=line)
+            await page.keyboard.press("Escape")
+            await page.mouse.click(5, 5)
+            if await page.locator("#home-tabs").is_visible():
+                await page.locator("#home-tabs [data-tab=tasks]").click()
+            task = page.locator(f'#panel .card.task[data-session="{pair[1]}"]')
+            await expect(task.locator(".head .agent-mark")).to_have_attribute(
+                "aria-label", re.compile(r"^Codex")
+            )
+            await ux_shoot(page, "task-marks", scheme, focus=task)
+            assert not errors, errors
+            await context.close()
+        # A worker on Codex in the @ list is a worker (to message), not the agent Codex.
+        context, page, errors, _ = await agents_page(browser, "light")
+        await at_home(page)
+        box = page.locator("#composer-input")
+        await box.fill("@Speed")
+        await box.press("End")
+        listed = page.locator("#mention-list li")
+        await expect(listed.locator(".name")).to_have_text(
+            ["Speed up the importer", "Speed up the importer"]
+        )
+        await expect(page.locator("#mention-list li.agent")).to_have_count(0)
+        await listed.nth(1).click()
+        await expect(page.locator("#composer-to")).to_have_text(
+            re.compile("^To Speed up the importer")
+        )
+        await page.locator("#composer-to button.clear").click()
+        await context.close()
+        # Before its first step, its header's agent opens the popover; Restart on Codex: at once.
+        context, page, errors, _ = await agents_page(browser, "light")
+        await page.evaluate(
+            "id => import('/static/session.js').then((m) => m.select(id))", untouched
+        )
+        badge = page.locator("#session-meta .agent-chip")
+        await expect(badge).to_have_text("Copilot▾")
+        await badge.click()
+        pop = page.locator(".agent-popover")
+        await expect(pop.locator(".agent-pop-agent[aria-checked=true] .name")).to_have_text(
+            "Copilot"
+        )
+        await ux_shoot(page, "header-popover", "light", focus=pop)
+        await pop.locator(".agent-pop-agent", has_text="Codex").click()
+        await expect(page.locator(".toast").first).to_contain_text("Restarted on Codex.")
+        await until(lambda: store.session(untouched)["closed_at"], 10)
+        moved = store.get(f"continued:{untouched}")
+        assert moved and runtime.agent(moved) == "codex"
+        await at_home(page)
+        restarted = page.locator(
+            "#timeline .event.started", has_text="Restarted “Draft the release"
+        )
+        await expect(restarted).to_have_count(1)
+        await ux_shoot(page, "restarted-line", "light", focus=restarted)
+        assert not errors, errors
+        await context.close()
+        # Settings: each row's status and whose plan; Claude's sign-in needed: Available off,
+        # with its command; Last used; System agents, folded.
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await page.locator("#settings-button").click()
+            await page.locator("#settings-tabs [data-tab=agents]").click()
+            tab = page.locator("#settings-pane .tab[data-tab=agents]")
+            codex = tab.locator(".agent-row[data-agent=codex]")
+            await expect(codex.locator("small[role=status]")).to_have_text(
+                "Ready · Uses your ChatGPT sign-in", timeout=20000
+            )
+            claude = tab.locator(".agent-row[data-agent=claude]")
+            await expect(claude.locator("small[role=status]")).to_have_text("Sign-in needed")
+            await expect(claude.locator(".agent-fix")).to_have_text(
+                "Run claude then /login in a terminal Copy"
+            )
+            await expect(claude.locator("input[name=agent_claude_enabled]")).to_be_disabled()
+            choose = tab.locator("select[name=agent_new_workers]")
+            await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Last used"])
+            await expect(tab.locator("#agents-system summary")).to_have_text("System agents")
+            await expect(tab.locator("#agents-system")).not_to_have_attribute("open", "")
+            await ux_shoot(page, "settings-rows", scheme, "#settings-dialog")
+            await page.keyboard.press("Escape")
+            assert not errors, errors
+            await context.close()
+        # Not installed: dimmed in the @ list, with the command that installs it.
+        runtime.found_cache = (time.monotonic(), ["codex"])
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await at_home(page)
+            box = page.locator("#composer-input")
+            await box.fill("@cl")
+            await box.press("End")
+            missing = page.locator("#mention-list li.agent.dim", has_text="Claude")
+            await expect(missing.locator(".status")).to_contain_text("Not installed")
+            await expect(missing.locator(".agent-fix code")).to_have_text(
+                "npm install -g @anthropic-ai/claude-code"
+            )
+            await ux_shoot(page, "at-not-installed", scheme, focus=page.locator("#composer"))
+            await box.fill("")
+            assert not errors, errors
+            await context.close()
+        assert agents.turned_on(store) == ["codex"]
+        log("picker UX: @ statuses with their fix, the chip's popover, Compare grouped, marks, "
+            "Restart on before a first step, Settings' status lines")  # fmt: skip
+    finally:
+        os.environ.pop("FAKE_CLAUDE_SIGNED_OUT", None)
+        runtime.found_cache = (float("-inf"), [])
+        runtime.glanced.clear()
+        for row in store.open_sessions("worker"):
+            if store.get(f"compare:{row['id']}") or store.get(f"continues:{row['id']}"):
+                await runtime.workers.close(row["id"], by="you")
+        await agents_saved(runtime, {"codex": {"enabled": False}})
+        codex_off_path(folder)
+
+
+async def sidebar_shoot_to(page, name: str, scheme: str):
+    """The sidebar (opened over the page where it folds away), into files/shots/picker."""
+    UX_SHOTS.mkdir(parents=True, exist_ok=True)
+    for width in UX_WIDTHS:
+        await page.set_viewport_size({"width": width, "height": 900})
+        await page.mouse.move(1, 1)
+        folded = await page.locator("#sidebar-toggle").is_visible()
+        if folded:
+            await page.locator("#sidebar-toggle").click()
+            await expect(page.locator("#sidebar")).to_be_visible()
+            await page.wait_for_timeout(300)
+        await quiet_for(page)
+        await page.screenshot(path=UX_SHOTS / f"{name}-{width}-{scheme}.png")
+        found = await page.locator("#sidebar").evaluate(SCROLLED_OVERFLOWS)
+        assert not found, (name, width, found)
+        if folded:
+            await page.keyboard.press("Escape")
+    await page.set_viewport_size({"width": 1280, "height": 900})
 
 
 if __name__ == "__main__":

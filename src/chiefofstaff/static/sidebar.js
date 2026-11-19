@@ -9,6 +9,7 @@ import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings, watchGaps } from "./settings.js";
 import { ownTasks } from "./tasks.js";
 import { duck, setMood } from "./mascot.js";
+import { agentName, markOf } from "./agentpick.js";
 // The captain beside the name says how Home stands, as the dots do: it salutes when something
 // needs the owner, steers while the Router or a worker is at work, keeps watch while tasks wait
 // on something, and is quiet otherwise; it cheers a moment when a task is done (and nothing
@@ -39,7 +40,7 @@ function captain(needs, where) {
 }
 // One count in the whole sidebar, on Home: what needs the owner. Workers show only their dot,
 // which says where each stands as Home does (Needs you, Running, Monitoring).
-function sessionItem(session, label, where) {
+function sessionItem(session, label, where, nested = false) {
   const dot = where?.dot || "idle";
   const named = label !== session.title ? `\nStarted as “${session.title}”` : "";
   // Its turn over, a command it left running (a dev server) goes on: not at work, not idle.
@@ -48,24 +49,36 @@ function sessionItem(session, label, where) {
     "button",
     {
       type: "button",
-      class: `item ${dot.split(" ")[0]}${state.selected === session.id ? " selected" : ""}`,
+      class: `item ${dot.split(" ")[0]}${state.selected === session.id ? " selected" : ""}${nested ? " nested" : ""}`,
       title: [where?.text, background ? "Waiting for background process" : session.activity].filter(Boolean).join(" · ") + named,
       "data-id": session.id,
       onclick: () => select(session.id),
     },
     el("span", { class: `dot ${dot}`, title: where?.text || "" }),
     el("span", { class: "label", text: label }),
-    agentBadge(session),
+    // While more than one agent is on: its agent's mark (its model on hover).
+    markOf(session),
     // A marker in words (queued, overdue…), not a color of its own.
     where?.sub || background ? el("span", { class: "sub", text: where?.sub || "background" }) : null,
   );
 }
-// While other coding agents are on: every worker's agent, Copilot too, its model on hover, and
-// why one that was to run on another runs on Copilot (none at all with Copilot alone).
-function agentBadge(session) {
-  if (!state.snapshot.agents) return null;
-  const name = session.agent ? session.agent_name : "Copilot";
-  return el("span", { class: "agent-badge", text: name, title: session.agent_fallback || [name, session.model].filter(Boolean).join(" · ") });
+// Workers as rows, the workers of one Compare under one row ("Compare: <title> (2)"), each
+// named by its agent.
+function workerRows(list, where) {
+  const shown = new Set();
+  return list.flatMap((worker) => {
+    const group = worker.compare;
+    if (!group) return [sessionItem(worker, workerTitle(worker), where.get(worker.id))];
+    if (shown.has(group.id)) return [];
+    shown.add(group.id);
+    // In the order the agents were chosen.
+    const order = (other) => (group.agents || []).indexOf(other.agent || "copilot");
+    const members = list.filter((other) => other.compare?.id === group.id).sort((a, b) => order(a) - order(b));
+    return [
+      el("div", { class: "compare-group", title: `The same task on ${members.map((other) => agentName(other.agent || "copilot")).join(" and ")}` }, el("span", { class: "label", text: `Compare: ${group.title} (${members.length})` })),
+      ...members.map((other) => sessionItem(other, agentName(other.agent || "copilot"), where.get(other.id), true)),
+    ];
+  });
 }
 const ORDER = Object.fromEntries([...WORKER_STATES.map(([dot]) => dot), "open"].map((dot, index) => [dot, index]));
 // What the dots mean, under "Workers" when asked.
@@ -88,12 +101,14 @@ export function renderSidebar() {
     nodes.push(el("div", { class: "group" }, el("span", { text: "Workers" }), toggle));
     if (state.legend) nodes.push(legend());
     // Workers with nothing open fold away: the ones that need you, work or wait come first.
-    const idle = (worker) => (where.get(worker.id)?.dot || "idle") === "idle" && state.selected !== worker.id;
+    const alone = (worker) => (where.get(worker.id)?.dot || "idle") === "idle" && state.selected !== worker.id;
+    // (A Compare's workers stay together: up here while any of them is.)
+    const idle = (worker) => (worker.compare ? workers.filter((other) => other.compare?.id === worker.compare.id) : [worker]).every(alone);
     const busy = workers.filter((worker) => !idle(worker));
     const resting = workers.filter(idle);
-    nodes.push(...busy.map((worker) => sessionItem(worker, workerTitle(worker), where.get(worker.id))));
+    nodes.push(...workerRows(busy, where));
     if (resting.length) {
-      const fold = el("details", { class: "idle-workers", open: Boolean(state.idleOpen) }, el("summary", { text: `Nothing open · ${resting.length}`, title: "Workers whose tasks are all finished" }), ...resting.map((worker) => sessionItem(worker, workerTitle(worker), where.get(worker.id))));
+      const fold = el("details", { class: "idle-workers", open: Boolean(state.idleOpen) }, el("summary", { text: `Nothing open · ${resting.length}`, title: "Workers whose tasks are all finished" }), ...workerRows(resting, where));
       fold.addEventListener("toggle", () => {
         state.idleOpen = fold.open;
       });

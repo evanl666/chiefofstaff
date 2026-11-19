@@ -28,6 +28,10 @@
   --shadow: 0 1px 2px rgb(0 0 0 / 4%), 0 1px 1px rgb(0 0 0 / 2%);
   --shadow-pop: 0 12px 32px rgb(0 0 0 / 14%), 0 2px 6px rgb(0 0 0 / 6%);
   --ease: cubic-bezier(0.2, 0, 0, 1);
+  /* Each coding agent's mark (agentpick.js): the same colour wherever it shows. */
+  --agent-copilot: #6e56cf;
+  --agent-codex: #0f8a6c;
+  --agent-claude: #c2603e;
   color-scheme: light dark;
 }
 
@@ -53,6 +57,9 @@
     --green-soft: #1b2b20;
     --accent-soft: #1c2438;
     --red-soft: #2f1c1c;
+    --agent-copilot: #a08cf0;
+    --agent-codex: #3fc39f;
+    --agent-claude: #e58a68;
   }
 }
 
@@ -690,7 +697,71 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 .msg.owner .to { display: flex; align-items: center; min-height: 28px; margin: -6px 0 0; font-size: var(--small); font-weight: 400; color: var(--muted); background: none; border: 0; padding: 0; cursor: pointer; }
 .msg.owner span.to { cursor: default; }
 /* A worker's agent where it is not the default (its name; why it fell back to Copilot). */
-.item .agent-badge { flex: none; font-size: var(--small); color: var(--muted); }
+/* An agent's mark: a small diamond of its colour (a status dot is round). */
+.agent-mark { flex: none; display: inline-block; width: 7px; height: 7px; margin: 0 2px; border-radius: 1.5px; transform: rotate(45deg); background: var(--agent-copilot); vertical-align: middle; }
+.agent-mark[data-agent="codex"] { background: var(--agent-codex); }
+.agent-mark[data-agent="claude"] { background: var(--agent-claude); }
+.item .agent-mark { margin-left: 2px; }
+/* A Compare's workers, under one row. */
+.compare-group { display: flex; align-items: center; min-height: 28px; padding: 0 10px; font-size: var(--small); font-weight: 600; color: var(--soft); }
+.compare-group .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item.nested { padding-left: 26px; }
+/* The agent chosen, as a chip: its popover picks the agent, its model and effort. */
+.agent-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--text); font: inherit; font-size: var(--small); cursor: pointer; }
+.agent-chip:hover { background: var(--hover); }
+.agent-chip strong { font-weight: 600; }
+.agent-chip .detail, .agent-chip .caret { color: var(--muted); }
+.agent-chip-name { display: inline-flex; align-items: center; gap: 4px; }
+#composer #composer-to .agent-chip { display: inline-flex; width: auto; height: 26px; min-height: 0; padding: 0 9px; border-radius: 999px; }
+#composer-to .agent-chip { margin: 0 2px; }
+/* Its list's buttons (Copy, Turn on) as links, not the composer's round icons. */
+#composer #mention-list button { display: inline; width: auto; height: auto; padding: 0; border-radius: 0; }
+.event .agent-chip-wrap { position: relative; flex: none; }
+.event .agent-chip-wrap .menu { right: auto; left: 0; }
+#session-meta .agent-name { display: inline; }
+#session-meta .agent-name .agent-mark { margin: 0 5px 0 1px; vertical-align: 1px; }
+#session-meta .agent-chip { display: inline-block; height: 18px; min-height: 0; padding: 0 7px; line-height: 16px; vertical-align: top; }
+#session-meta .agent-chip > * { vertical-align: top; }
+#session-meta .agent-chip .agent-mark { margin: 0 5px 0 1px; vertical-align: 1px; }
+/* The @ list: an agent not ready, dimmed, with the command that makes it ready. */
+#mention-list li.agent .status { display: grid; justify-items: end; gap: 2px; max-width: 60%; }
+#mention-list li.dim { cursor: default; }
+#mention-list li.dim .name, #mention-list li.dim .agent-mark { opacity: 0.5; }
+#mention-list li .fix { white-space: normal; }
+.agent-fix { color: var(--muted); font-size: var(--small); }
+.agent-fix code { font-family: var(--mono); font-size: 0.95em; padding: 1px 4px; border-radius: 4px; background: var(--bubble); color: var(--text); }
+.agent-fix .copy-fix, #composer #mention-list .agent-fix .copy-fix, #mention-list .fix .link { margin-left: 4px; font-size: var(--small); color: var(--accent); }
+/* The popover: agents on the left, the chosen one's model and effort on the right, whose plan
+   it uses under it. */
+.agent-popover { position: fixed; z-index: 30; display: grid; gap: 8px; padding: 10px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-pop); }
+.agent-pop-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.agent-pop-agents { display: grid; gap: 2px; align-content: start; }
+.agent-pop-row { display: grid; gap: 2px; }
+.agent-pop-row .agent-fix { padding-left: 22px; }
+.agent-pop-agent { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 4px 8px; border: 0; border-radius: 7px; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.agent-pop-agent:hover { background: var(--hover); }
+.agent-pop-agent[aria-checked="true"] { background: var(--bubble); font-weight: 600; }
+.agent-pop-agent.dim { cursor: default; color: var(--muted); }
+.agent-pop-agent.dim .agent-mark { opacity: 0.5; }
+.agent-pop-agent .status { margin-left: auto; color: var(--muted); font-weight: 400; }
+.agent-pop-models { display: grid; gap: 8px; align-content: start; }
+.agent-pop-models label { display: grid; gap: 4px; font-size: var(--small); color: var(--muted); }
+.agent-pop-models select { width: 100%; min-height: 32px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: var(--body); padding: 0 8px; }
+.agent-pop-pays, .agent-pop-loading { color: var(--muted); font-size: var(--small); }
+@media (max-width: 560px) {
+  .agent-pop-body { grid-template-columns: minmax(0, 1fr); }
+}
+/* Continue with…: what it sends, in one line. */
+.continue-dialog { width: min(520px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); color: var(--text); box-shadow: var(--shadow-pop); }
+.continue-dialog h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: var(--title); }
+.continue-dialog .continue-line { margin: 0 0 16px; color: var(--soft); }
+.continue-dialog .continue-line.error { color: var(--red); }
+.continue-dialog footer { display: flex; gap: 8px; }
+.continue-dialog .spacer { flex: 1; }
+.card.agent-refused .actions { align-items: center; flex-wrap: wrap; }
+/* System agents: where Chief of Staff's own sessions run, folded. */
+.agents-system summary { cursor: pointer; color: var(--soft); }
+.agents-system[open] summary { margin-bottom: 10px; }
 #file-dialog { width: min(900px, calc(100vw - 32px)); }
 #file-dialog .file-head {
   display: flex;
