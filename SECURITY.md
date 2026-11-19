@@ -318,7 +318,11 @@ replies for your PRs in their worker, and publishes only what you approve:
 - **What goes out is the plan you approved.** The plan's operations are journaled before any is
   sent, in order, one writer per account, within GitHub's limits. A push is exactly the commit
   that was checked, to the PR's own branch, leased on the commit the plan was made on, with hooks
-  off; replies are the text you saw (or edited). After a stop mid-send, each operation is read
+  off; replies are the text you saw (or edited). Chief of Staff's own git reads and pushes that
+  commit through the worktree's repository as it recorded it, never through what the worktree's
+  `.git` says now (the turn could rewrite it), and makes no copy of a clone a worker made in its
+  folder (a fix is prepared there only while that clone is at the PR's latest commit). After a
+  stop mid-send, each operation is read
   back on GitHub before anything else happens, and none is sent again blindly.
 - **A commit nobody explains stops it.** Any commit on the PR that Chief of Staff did not push
   from an approved plan (a teammate's, yours, a worker's in an ordinary turn) pauses the PR

@@ -222,6 +222,12 @@ def section_at(text: str | None, lines: list[int], opener: re.Pattern) -> set[st
 TOML_TABLE = re.compile(r"^\s*\[+[^\]]*\]+")
 
 
+# The files whose content (not only their hunk) says whether a change configures tests or checks.
+MAKEFILES = frozenset({"Makefile", "makefile", "GNUmakefile", "justfile", "Justfile",
+                       "Taskfile.yml"})  # fmt: skip
+TOOL_CONFIGS = frozenset({"pyproject.toml", "Cargo.toml", "package.json", *MAKEFILES})
+
+
 def tool_config(path: str, hunk: Hunk, old: str | None, new: str | None) -> bool:
     """A pyproject.toml or Cargo.toml hunk in a table that configures tests, coverage, lint or
     types; a package.json hunk in its test or lint scripts; a Makefile hunk in a test target."""
@@ -242,7 +248,7 @@ def tool_config(path: str, hunk: Hunk, old: str | None, new: str | None) -> bool
             or json_key_in(old, hunk.old_lines, "scripts")
             or json_key_in(new, hunk.new_lines, "scripts")
         )
-    if name in {"Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", "Taskfile.yml"}:
+    if name in MAKEFILES:
         targets = section_at(old, hunk.old_lines, MAKE_TARGET) | section_at(
             new, hunk.new_lines, MAKE_TARGET
         )
