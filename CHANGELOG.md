@@ -18,6 +18,9 @@
   commit, and the log says so); a filter only the clone's own config defines no longer keeps
   files out of what it reads; clones whose refs are in a reftable (git's default from 3.0) are
   read instead of refused.
+- **A PR waits for work it would leave behind**: files a git filter keeps (git-lfs) that may
+  have changed (*Open it anyway* still opens it), and a submodule's commit staged and not
+  committed.
 - A Copilot session deleted while open no longer logs a traceback ("'destroy' is not a valid
   ShutdownType").
 

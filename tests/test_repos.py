@@ -3092,7 +3092,10 @@ async def test_a_workers_clone_with_lfs_and_crlf_files_reads_as_its_own_git_stat
         assert (await workspaces_module.snapshot(taken))["tree"] == head_tree
         found = await workspaces_module.changes(taken)
         assert (found["uncommitted"], found["unchecked"]) == (0, 1), found
-        assert await runtime.task_actions.pr_plan(taken) is None, "nothing of its own to commit"
+        with pytest.raises(MayHoldWorkError, match=r"may have uncommitted changes in 1 file a "
+                           r"git filter keeps \(e\.g\. git-lfs\)\.$"):  # fmt: skip
+            await runtime.task_actions.pr_plan(taken)
+        assert await runtime.task_actions.pr_plan(taken, anyway=True) is None, "none of its own"
         (clone / "a.py").write_text("x = 2\n")
         (clone / "model.bin").write_text("REAL other\n")
         found = await workspaces_module.changes(taken)
@@ -5872,3 +5875,35 @@ async def test_a_workers_clone_with_a_reftable_is_read(tmp_path):
     assert branches.split() == ["refs/heads/feature", "refs/heads/main"]
     commit(clone, "c.txt", "c\n")  # A new table: read again.
     assert (await private(clone, "rev-parse", "HEAD")).strip() != main
+
+
+async def test_a_pr_waits_for_a_submodules_commit_staged_and_not_committed(tmp_path, monkeypatch):
+    """The worker moved a submodule to a commit of its own and staged it (`git add lib`), not
+    committed: no PR opens without it (git status, which leaves submodules out, says nothing)."""
+    gc = ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always"]
+    sub, repo = tmp_path / "sub", tmp_path / "repo"
+    run("git", "init", "-q", "-b", "main", str(sub))
+    commit(sub, "s.txt", "hi\n")
+    run("git", "init", "-q", "-b", "main", str(repo))
+    commit(repo, "t.txt", "top\n")
+    run("git", *gc, "submodule", "add", "-q", str(sub), "lib", cwd=repo)
+    run("git", *gc, "commit", "-qm", "sub", cwd=repo)
+    trusting(tmp_path, monkeypatch, repo)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, repo)
+        await settle(runtime)
+        run("git", *gc, "submodule", "update", "--init", "-q", cwd=cwd)  # Its commands.
+        commit(cwd / "lib", "s.txt", "fixed\n")
+        run("git", "add", "lib", cwd=cwd)
+        [checkout] = runtime.workspaces.checkouts(harness.store.session(worker))
+        assert await workspaces_module.checkout_git(checkout, str(cwd), "status",
+                                                    "--porcelain") == ""  # fmt: skip
+        with pytest.raises(ValueError, match=r"has uncommitted changes in lib\. Follow up"):
+            await runtime.task_actions.pr_plan(checkout)
+        run("git", *gc, "commit", "-qm", "lib fixed", cwd=cwd)
+        with pytest.raises(ValueError, match="no GitHub remote"):  # Committed: past it.
+            await runtime.task_actions.pr_plan(checkout)
+    finally:
+        await runtime.stop()

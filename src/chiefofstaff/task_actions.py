@@ -46,6 +46,7 @@ from .workspaces import (
     snapshot,
     submodule_work,
     tree_names,
+    unchecked_files,
     untracked_work,
     version,
     worth_committing,
@@ -2688,17 +2689,27 @@ class TaskActions:
         live = await asyncio.to_thread(os.path.isdir, tree)
         status = await checkout_git(checkout, tree, "status", "--porcelain") if live else ""
         changed, unread = await submodule_work(checkout, tree) if live else ([], [])
+        if live:
+            # A submodule's commit staged and not committed (status leaves submodules out).
+            with suppress(ValueError):
+                staged = await checkout_git(checkout, tree, "diff-index", "--cached",
+                                            "--ignore-submodules=none", "--name-only", "-z",
+                                            "HEAD")  # fmt: skip
+                changed += [path for path in staged.split("\0") if path and path not in changed]
         if worth_committing(status) or changed:
             where = f" in {', '.join(changed)}" if changed and not worth_committing(status) else ""
             raise ValueError(
                 f"The {name} repository has uncommitted changes{where}. Follow up and ask the "
                 "worker to commit them, then create the PR."
             )
-        if unread and not anyway:
-            where = "; ".join(f"{path}, which Chief of Staff couldn't read ({why})"
-                              for path, why in unread)  # fmt: skip
+        kept = await unchecked_files(checkout, tree) if live and not anyway else 0
+        if (unread or kept) and not anyway:
+            where = [f"{path}, which Chief of Staff couldn't read ({why})" for path, why in unread]
+            if kept:
+                files = "1 file" if kept == 1 else f"{kept} files"
+                where.append(f"{files} a git filter keeps (e.g. git-lfs)")
             raise MayHoldWorkError(
-                f"The {name} repository may have uncommitted changes in {where}."
+                f"The {name} repository may have uncommitted changes in {'; '.join(where)}."
             )
         if live:
             # The branch it is on now (one the owner named, say), not the one it was given.
