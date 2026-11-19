@@ -1,6 +1,6 @@
 """Live: workers on Claude Code (real: the owner's own `claude`, its sign-in and plan), the Router
 and Copilot workers on Copilot (real), each shard its own Chief of Staff (more-agents.md 5.12.10,
-shards E-H: 40 scenarios). Each scenario passes or fails on its own (a failure dumps the sessions
+shards E-H: 41 scenarios). Each scenario passes or fails on its own (a failure dumps the sessions
 and the shard goes on); the summary lists each, with the Claude tokens and Copilot credits the
 shard spent, and the exit code says whether all passed.
 
@@ -70,6 +70,8 @@ H6  not signed in (a Claude configuration folder of the test's own, empty): the 
 H7  another `claude` version on the PATH mid-run: checked before its workers go on
 H8  --prepare-downgrade: Claude's workers stopped and none of its processes left
 H9  a worker with a schedule is not let go of while idle; closed, its schedule fires no more
+H10 sandboxed, a worker runs no hook: a skill of Settings' skill folders whose hook would mark
+    it, used before a command, marks nothing; the sandbox off, it marks
 
     env LIVE_AGENTS_ROOT=<tree>/.cos-live \\
         uv run --extra claude --with playwright python scripts/live_claude.py E [E1 E3 …]
@@ -1145,6 +1147,34 @@ async def h9_schedule_not_released(ctx: Ctx):
     log(f"H9 passed ({task['id']})")
 
 
+async def h10_sandboxed_runs_no_hook(ctx: Ctx):
+    skills, marks = ctx.root / "h10-skills", ctx.root / "h10-marks"
+    marks.mkdir(exist_ok=True)
+    mark = marks / "hook"
+    write(skills / "live-marks" / "SKILL.md", (
+        "---\nname: live-marks\ndescription: Marks the checks of this test.\nhooks:\n"
+        "  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n"
+        f'          command: "echo ran >> {mark}"\n---\n'
+        "Once this skill is used, run the shell command `echo checked` and say done.\n"
+    ))  # fmt: skip
+    await la.settings(ctx, skill_folders=[str(skills)])
+    try:
+        for sandboxed in (True, False):
+            await la.settings(ctx, worker_sandbox=sandboxed)
+            mark.unlink(missing_ok=True)
+            worker = await claude_worker(
+                ctx,
+                "No project, a new worker: use your skill chiefofstaff:live-marks (the Skill "
+                "tool), run the shell command `echo checked` as it says, then report 'done'.",
+            )
+            await la.task_ended(ctx, worker, "the skill and its command", statuses=la.ENDED)
+            log(f"H10: sandboxed {sandboxed}, marked {mark.exists()}")
+            assert mark.exists() is not sandboxed, "only an unsandboxed worker runs its hook"
+    finally:
+        await la.settings(ctx, worker_sandbox=False, skill_folders=[])
+    log("H10 passed")
+
+
 SCENARIOS: dict[str, list] = {
     "E": [
         e1_task_and_follow_up, e2_receipts, e3_stop_cancel_close, e4_dev_server, e5_in_place,
@@ -1158,7 +1188,8 @@ SCENARIOS: dict[str, list] = {
           g5_follow_up_routed, g6_three_agents, g7_outside_session,
           g8_send_message_between_workers],
     "H": [h1_restart_mid_turn, h2_claude_killed, h3_limit, h4_sandbox_on, h5_off_while_serving,
-          h6_not_signed_in, h7_another_version, h8_prepare_downgrade, h9_schedule_not_released],
+          h6_not_signed_in, h7_another_version, h8_prepare_downgrade, h9_schedule_not_released,
+          h10_sandboxed_runs_no_hook],
 }  # fmt: skip
 
 
