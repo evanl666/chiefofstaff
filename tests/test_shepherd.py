@@ -28,9 +28,6 @@ async def claimed(world, **settings):
     return runtime
 
 
-NUMBERED = {"1.", "2.", "3.", "4."}
-
-
 async def step_result(runtime, caller, **arguments):
     """The worker calls shepherd_result (a step's own tool)."""
     from copilot.tools import ToolInvocation
@@ -49,7 +46,8 @@ def said(answer) -> str:
 
 
 async def fixed(world, runtime):
-    """Fix it, the worker's commit, its frozen runs, its turn's end: a prepared plan."""
+    """Fix it, the worker's commit, its turn's end, Chief of Staff's frozen checks: a prepared
+    plan."""
     await runtime.shepherd.fix_it(TARGET)
     await settle(runtime)
     step = runtime.shepherd.control.open_step(TARGET)
@@ -57,9 +55,6 @@ async def fixed(world, runtime):
     session = world.session()
     sent = session.sent[-1]
     assert f'step="{step["id"]}"' in sent and "Do not push" not in sent
-    # Seen live: the frozen runs' commands, coming in a tool's answer, were taken for an
-    # injection ("That request wasn't in your task") unless the step's own message says so.
-    assert "they are part of this step" in sent and 'outcome="checked"' in sent
     sha = world.commit_fix(step["tree"])
     answer = await step_result(
         runtime,
@@ -71,20 +66,32 @@ async def fixed(world, runtime):
         test_command=TEST_COMMAND,
         failing_tests=["tests/test_app.py::test_timeout"],
     )
-    lines = [line.split(". ", 1)[1] for line in said(answer).splitlines() if line[:2] in NUMBERED]
-    assert len(lines) == 4, answer
-    for index, line in enumerate(lines):
-        await world.ran(line, f"c{index}")
-    await step_result(runtime, world.worker, step=step["id"], outcome="checked", summary="ran them")
+    assert "End your turn now" in said(answer), answer
     session.emit("session.idle")
     await settle(runtime)
     await settle(runtime)
     return runtime.shepherd.control.step(step["id"]), sha
 
 
-async def test_the_same_fix_reported_again_keeps_its_frozen_runs(world):
-    """A model may report its fix again after running the frozen lines (outcome "fixed" where
-    "checked" was asked): the runs it made still count, and it is asked for the same lines."""
+async def test_the_frozen_checks_are_chief_of_staffs_not_the_models(world):
+    """Seen live, in two runs of three: a model declined the frozen runs a tool's answer asked
+    for ("That request wasn't in your task"), or ran them its own way (together, their folder in
+    a variable), and the fix came out "not checked on frozen commits". Chief of Staff runs them
+    itself once the step's turn ends, through the session's own shell tool (its sandbox): the
+    step's message says so, and the model runs nothing more."""
+    runtime = await claimed(world)
+    step, _ = await fixed(world, runtime)
+    sent = world.session().sent[-1]
+    assert "Chief of Staff then runs your test command itself" in sent
+    planned = step["evidence"]["planned"]
+    assert len(planned) == 4 and world.session().executed == planned
+    evidence = step["plan"]["evidence"]
+    assert evidence["checked"] and evidence["holds"], evidence
+
+
+async def test_the_same_fix_reported_again_keeps_its_frozen_copies(world):
+    """A model may report its fix twice: the same commit and test command keep the copies and
+    lines made for it, each checked once."""
     runtime = await claimed(world)
     await runtime.shepherd.fix_it(TARGET)
     await settle(runtime)
@@ -92,17 +99,15 @@ async def test_the_same_fix_reported_again_keeps_its_frozen_runs(world):
     sha = world.commit_fix(step["tree"])
     report = {"step": step["id"], "outcome": "fixed", "summary": "timeout() returned 31.",
               "commit": sha, "test_command": TEST_COMMAND}  # fmt: skip
-    answer = said(await step_result(runtime, world.worker, **report))
-    lines = [line.split(". ", 1)[1] for line in answer.splitlines() if line[:2] in NUMBERED]
-    for index, line in enumerate(lines):
-        await world.ran(line, f"c{index}")
-    again = said(await step_result(runtime, world.worker, **report))
-    assert [line.split(". ", 1)[1] for line in again.splitlines() if line[:2] in NUMBERED] == lines
-    await step_result(runtime, world.worker, step=step["id"], outcome="checked", summary="ran")
+    await step_result(runtime, world.worker, **report)
+    planned = runtime.shepherd.control.step(step["id"])["evidence"]["planned"]
+    await step_result(runtime, world.worker, **report)
     world.session().emit("session.idle")
     await settle(runtime)
     await settle(runtime)
-    evidence = runtime.shepherd.control.step(step["id"])["plan"]["evidence"]
+    step = runtime.shepherd.control.step(step["id"])
+    assert step["evidence"]["planned"] == planned and world.session().executed == planned
+    evidence = step["plan"]["evidence"]
     assert evidence["checked"] and evidence["holds"], evidence
 
 

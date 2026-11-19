@@ -1338,16 +1338,10 @@ async def test_a_fix_that_does_not_hold_on_its_own_commit_is_not_offered(world):
     run("git", "add", "-A", cwd=tree)
     run("git", "commit", "-qm", "Not a fix", cwd=tree)
     sha = run("git", "rev-parse", "HEAD", cwd=tree)
-    answer = await step_result(
+    await step_result(
         runtime, world.worker, step=step["id"], outcome="fixed", summary="Fixed it.",
         commit=sha, test_command="python -m pytest -q -p no:cacheprovider",
     )  # fmt: skip
-    from test_shepherd import NUMBERED
-
-    lines = [line.split(". ", 1)[1] for line in said(answer).splitlines() if line[:2] in NUMBERED]
-    for index, line in enumerate(lines):
-        await world.ran(line, f"c{index}")
-    await step_result(runtime, world.worker, step=step["id"], outcome="checked", summary="ran")
     world.session().emit("session.idle")
     await settle(runtime)
     await settle(runtime)

@@ -136,11 +136,27 @@ class FakeSession:
             if params.shell is not None:
                 self.shell_scripts.append([script.path for script in params.shell.init_scripts])
 
+        # A tool Copilot runs itself in the session (session.rpc.tools.execute, as the shepherd's
+        # frozen checks are run): its shell command runs here, for real, as Copilot answers.
+        self.executed: list[str] = []
+
+        async def execute(request, **_options):
+            command = str((request.arguments or {}).get("command") or "")
+            self.executed.append(command)
+            done = await asyncio.to_thread(
+                subprocess.run, ["/bin/sh", "-c", command], capture_output=True, text=True,
+                check=False,
+            )  # fmt: skip
+            text = f"{done.stdout[-2000:]}\n<shellId: 0 completed with exit code {done.returncode}>"
+            return {"textResultForLlm": text, "resultType": "success",
+                    "toolTelemetry": {"properties": {"sandboxApplied": "true"}}}  # fmt: skip
+
         self.rpc = SimpleNamespace(
             options=SimpleNamespace(update=update_options),
             mcp=SimpleNamespace(oauth=SimpleNamespace(login=login)),
             tasks=SimpleNamespace(list=listed, cancel=cancel),
             queue=SimpleNamespace(pending_items=pending_items, remove_at=remove_at),
+            tools=SimpleNamespace(execute=execute),
         )
 
     async def set_model(self, model, **tuning):
