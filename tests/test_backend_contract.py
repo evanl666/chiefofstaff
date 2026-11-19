@@ -1589,7 +1589,7 @@ async def test_a_yolo_codex_workers_edit_in_the_owners_checkout_is_refused(tmp_p
     home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(home))
     model = scripted_model.Model()
-    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex = CodexBackend(CODEX_COMMAND)  # Found before the tests hide the owner's agents.
     codex.arguments += model.arguments(tmp_path)
     codex.needs_sign_in = False
     codex.created = []
