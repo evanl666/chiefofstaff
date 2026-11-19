@@ -31,7 +31,7 @@ from .policy import (
     settings_write,
     written_file,
 )
-from .roles import ROUTER, SLACK, WORKER
+from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .store import now
 
 if TYPE_CHECKING:
@@ -847,6 +847,9 @@ class Events:
         context = int(self.store.get(f"context:{session_id}") or 0)
         if row["role"] == ROUTER and context > self.runtime.router_context_limit(row):
             self.runtime.background(self.runtime.rotate_router())
+        if row["role"] in {ROUTER, WATCHDOG} and self.runtime.agents:
+            # Put on another agent (or back) during its turn: switched now that it is over.
+            self.runtime.background(self.runtime.place_role(row["role"]))
         if row["role"] == WORKER:
             self.runtime.background(self.runtime.workers.pump())
             if owed:
@@ -895,6 +898,17 @@ class Events:
         self.states[session_id].retuned = False
         self.states[session_id].awaiting = None  # Copilot said what went wrong.
         self.states[session_id].steps.clear()
+        if (
+            row["role"] != WORKER
+            and not self.runtime.on_copilot(session_id)
+            and self.runtime.role_turn_failed(
+                row,
+                message,
+                getattr(event.data, "error_type", "") or "",
+                getattr(event.data, "limit", None),
+            )
+        ):
+            return  # Chief of Staff's own session goes on on Copilot (Runtime.role_failed).
         if getattr(event.data, "error_type", "") == "plan_limit" and row["role"] == WORKER:
             self.plan_limited(row, message, getattr(event.data, "limit", None))
             return

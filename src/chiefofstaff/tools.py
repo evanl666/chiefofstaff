@@ -1589,12 +1589,23 @@ class Tools:
         if row["status"] in {"queued", "starting", "working"} and not row["closed_at"]:
             raise ValueError(f"“{row['title']}” is at work already.")
         # Held as reopening does: a removal of its folder started when it closed waits.
+        # Watch for you's run on the agent Settings put it on (Copilot until that can run it).
+        agent = await self.runtime.helper_agent(special) if special == "connector" else ""
         async with self.states[session_id].checkouts, self.states[session_id].lifecycle:
             await self.runtime.drop_handle(session_id)
             fresh = str(uuid4())
             self.store.set(f"alias:{fresh}", session_id)
-            self.store.set(f"copilot:{session_id}", fresh)
-            self.store.delete(f"created:{session_id}")
+            if agent and agent != self.runtime.agent(session_id):
+                self.runtime.set_agent(session_id, agent)
+            if self.runtime.on_copilot(session_id):
+                self.store.set(f"copilot:{session_id}", fresh)
+                self.store.delete(f"created:{session_id}")
+            else:
+                # Made anew there with this id (Runtime.made, open_live); one to resume only,
+                # for an earlier version.
+                self.store.delete(f"copilot:{session_id}")
+                self.store.set(f"rerun:{session_id}", fresh)
+                self.store.set(f"created:{session_id}", "1")
             self.store.set(f"context:{session_id}", "0")  # The fresh conversation holds nothing.
             for key in ("style_refused", "lessons_done", "learned_styles"):
                 self.store.delete(f"{key}:{session_id}")
@@ -1723,6 +1734,9 @@ class Tools:
                         "again, and start it nowhere else."
                     ) from exc
                 raise
+        if special == "connector":
+            # Watch for you on the agent Settings put it on, once that can run it.
+            agent = await self.runtime.helper_agent(special)
         if agent == agents.COPILOT:
             await self.runtime.check_model(params.model)
         else:

@@ -35,7 +35,7 @@ import time
 import weakref
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -345,6 +345,32 @@ SCHEDULES_DELETE_SECONDS = 120.0
 # starting another (never a loop of starts).
 AGENT_CHECK_AGAIN = 60.0
 AGENT_LOST_AGAIN = 120.0
+# Chief of Staff's own sessions Settings can put on another agent and that keep a session of
+# their own (agent-roles.md): placed by Runtime.place_role. Watch for you runs as a helper
+# worker, on its agent from its next run.
+PLACED_ROLES = (ROUTER, WATCHDOG)
+# A role on Copilot because its agent failed it (its sign-in, its process) tries that agent
+# again after this long (seconds), doubling up to the most; after a plan's limit with no reset
+# said, after ROLE_LIMIT_WAIT.
+ROLE_RETRY = float(os.environ.get("CHIEFOFSTAFF_ROLE_RETRY", "300"))
+ROLE_RETRY_MOST = 3600.0
+ROLE_LIMIT_WAIT = 1800.0
+# What an agent says when it is not signed in any more (Codex's and Claude's words).
+SIGNED_OUT = re.compile(
+    r"\b401\b|unauthori[sz]ed|not (?:signed|logged) in|invalid api key|please run /login"
+    r"|oauth token has expired|authentication (?:failed|error)",
+    re.IGNORECASE,
+)
+
+
+def plain_why(why: str) -> str:
+    """Why an agent can't run something, as one line says it after a colon ("Codex is not
+    signed in: …", not "Codex could not start: Codex is not signed in: …")."""
+    head, _, rest = why.partition(" could not start: ")
+    if rest.startswith(head + " "):
+        why = rest
+    why = why.strip()
+    return why if why.endswith((".", "!", "?")) else why + "."
 
 
 def clock_time(at: float) -> str:
@@ -661,6 +687,10 @@ class Runtime:
         self.spend_stopping: set[str] = set()
         # Why another agent last failed to start for a new worker (agent_unavailable).
         self.agent_failed: dict[str, str] = {}
+        # One placement of each of Chief of Staff's own sessions at a time (place_role), and
+        # the agent each was put on as last saved (agents_saved: a new choice is tried at once).
+        self.role_locks: dict[str, asyncio.Lock] = {}
+        self.roles_seen: dict[str, str] = agents.roles(store) if self.agents else {}
         # Workers whose dropped schedules are being deleted in Claude now.
         self.deleting_schedules: set[str] = set()
         self.states = SessionStates()
@@ -1462,7 +1492,11 @@ class Runtime:
         logger.warning("%s's %s process stopped by itself.", worker, name)
         again = time.monotonic() - self.lost_at.get(worker, -AGENT_LOST_AGAIN) < AGENT_LOST_AGAIN
         self.lost_at[worker] = time.monotonic()
-        if agents.limit(self.store, agent) and self.store.agent_unknown(worker):
+        if (
+            agents.limit(self.store, agent)
+            and not self.role_key(row)
+            and self.store.agent_unknown(worker)
+        ):
             await self.stop_for_spend(row)
             return
         if not working:
@@ -1553,16 +1587,22 @@ class Runtime:
             return f"This session runs on {agent}, which is not available."
         if entry is None or not entry.enabled():
             return self.turned_off(agent)
-        if row["role"] != WORKER or self.special(row):
+        role = self.role_key(row)
+        if role in PLACED_ROLES or role == SLACK:
+            return self.role_block(role, agent)
+        if role and (why := self.role_block(role, agent)):
+            return why
+        if (row["role"] != WORKER or self.special(row)) and not role:
             return f"Only your own workers run on {name}."
         refused = self.agent_refused(agent)
         sandbox = refused.get("sandbox", SANDBOX_UNPROVEN)
         if row["slack"]:
             # The same guarantees as a Copilot worker that reads Slack: its commands sandboxed
             # (GitHub only), and asking first, on a version shown to do both. Not on Claude for
-            # now: its Slack safeguards are under review (2026-11-15).
+            # now: its Slack safeguards are under review (2026-11-15); Watch for you neither,
+            # until agents.SLACK_READERS has Claude (role_block).
             why = (
-                SLACK_NOT_ON_CLAUDE if agent == "claude"
+                SLACK_NOT_ON_CLAUDE if agent == "claude" and not role
                 else "this computer can't sandbox workers" if not self.sandbox_host
                 else sandbox or refused.get("ask_first") or (
                     "it acts on its own" if self.yolo(row) else ""
@@ -1590,7 +1630,7 @@ class Runtime:
             return why
         if not self.yolo(row) and (why := refused.get("ask_first")):
             return why
-        if limit := agents.limit(self.store, agent):
+        if (limit := agents.limit(self.store, agent)) and not role:
             if self.store.agent_unknown(row["id"]):
                 return (
                     f"{name} stopped in the middle of a turn, so what this worker spent then is "
@@ -1599,6 +1639,312 @@ class Runtime:
             if (spent := self.store.agent_spent(row["id"])) >= limit:
                 return f"This worker used its {name} token limit ({spent:,} of {limit:,})."
         return ""
+
+    # Chief of Staff's own sessions on another agent (agent-roles.md): the Router and the
+    # Watchdog run where Settings → Coding agents puts them; on Copilot while that agent can't
+    # run them (said in one line), and back by themselves once it can.
+
+    def role_key(self, row: dict) -> str:
+        """Which of the roles Settings can put on another agent a session is (agents.ROLES; ""
+        for the owner's workers and the other helpers)."""
+        if row["role"] in {ROUTER, WATCHDOG, SLACK}:
+            return row["role"]
+        return "connector" if row["role"] == WORKER and self.special(row) == "connector" else ""
+
+    def role_row(self, role: str) -> dict | None:
+        """The open session of a role Runtime.place_role places (none yet: made on first use)."""
+        if role == ROUTER:
+            router = self.store.get("router_id")
+            row = self.store.find_session(router) if router else None
+        else:
+            rows = self.store.open_sessions(role)
+            row = rows[0] if rows else None
+        return row if row and not row["closed_at"] else None
+
+    def role_held(self, role: str) -> dict:
+        """Why a role's agent last failed it, until when it waits before trying it again."""
+        try:
+            held = json.loads(self.store.get(f"roleheld:{role}") or "{}")
+        except ValueError:
+            return {}
+        return held if isinstance(held, dict) else {}
+
+    def role_block(self, role: str, agent: str) -> str:
+        """Why a role can't run on that agent now ("" when it can, as far as is known before it
+        starts there)."""
+        if agent == COPILOT_AGENT:
+            return ""
+        name = agents.display(agent)
+        if sys.platform == "win32":
+            return f"{name} needs macOS or Linux for now."
+        entry = self.agents.get(agent)
+        if entry is None or not entry.enabled():
+            return self.turned_off(agent)
+        if why := agents.role_refusal(role, agent):
+            return why
+        if not shutil.which(agents.command(agent)):
+            return f"{name} is not found on this computer: install {agents.INSTALL[agent]}."
+        if entry.offline:
+            return f"{name} stopped and could not start again."
+        if (why := self.agent_failed.get(agent)) and not (entry.backend and entry.backend.alive()):
+            return why
+        refused = self.agent_refused(agent)
+        if (
+            (why := refused.get("acting"))
+            and callable(limited := getattr(entry.backend, "limit_refusal", None))
+            and why == limited()
+        ):
+            why = agents.limit_line(getattr(entry.backend, "limit", {}), name=agent)
+        if why := why or refused.get("ask_first"):
+            return why
+        held = self.role_held(role)
+        if held.get("agent") == agent and time.time() < float(held.get("until") or 0):
+            return str(held.get("why") or f"{name} could not run it.")
+        limit = agents.live_limit(self.store, agent, getattr(entry.backend, "limit", None))
+        resets = limit.get("resets_at")
+        if agents.blocked(limit) and isinstance(resets, int | float) and resets > time.time():
+            return agents.limit_line(limit, name=agent)
+        return ""
+
+    def role_target(self, role: str) -> tuple[str, str]:
+        """Where a role runs now: the agent chosen for it, else Copilot (with why, when that
+        agent can't run it now)."""
+        wanted = agents.role_agent(self.store, role) if self.agents else COPILOT_AGENT
+        why = self.role_block(role, wanted)
+        return (COPILOT_AGENT, why) if why else (wanted, "")
+
+    def role_line(self, role: str) -> str:
+        """Settings' line under a role's choice: why it runs on Copilot for now ("" when it runs
+        where it was put)."""
+        if not self.agents or agents.role_agent(self.store, role) == COPILOT_AGENT:
+            return ""
+        _, why = self.role_target(role)
+        return f"On Copilot for now: {plain_why(why)}" if why else ""
+
+    def agent_start_failed(self, agent: str, error: BaseException) -> str:
+        why = f"{agents.display(agent)} could not start: {describe(error)}"
+        self.agent_failed[agent] = why
+        return why
+
+    async def place_role(self, role: str):
+        """Put a role's session where it runs now (role_target), its agent started first: one
+        that can't start leaves it on Copilot, saying why. Switched at once when it is at rest
+        (its agent stopped under it, too), else at its turn's end (Events.idle)."""
+        if not self.agents or role not in PLACED_ROLES:
+            return
+        async with self.role_locks.setdefault(role, asyncio.Lock()):
+            if (row := self.role_row(role)) is None:
+                return
+            fell = self.store.get(f"rolefallback:{role}")
+            target, why = await self.role_start(role)
+            row = self.store.session(row["id"])
+            if target == self.agent(row["id"]):
+                if why and why != fell:
+                    # Chosen for an agent that can't run it now: said once, where it runs.
+                    label = agents.ROLES[role]
+                    self.add_message(
+                        row["id"], "notice", f"{label} runs on Copilot for now: {plain_why(why)}"
+                    )
+                return
+            busy = row["status"] == "working" or self.states[row["id"]].busy
+            if busy and self.states.handle(row["id"]):
+                return  # At its turn's end.
+            kind = "fallback" if why else ""
+            try:
+                await self.switch_role(row, role, target, kind, why)
+            except Exception as exc:
+                if target == COPILOT_AGENT:
+                    raise
+                why = self.agent_start_failed(target, exc)
+                self.hold_role(role, target, why)
+                self.store.set(f"rolefallback:{role}", why)
+                if self.agent(row["id"]) != COPILOT_AGENT:
+                    await self.switch_role(row, role, COPILOT_AGENT, "fallback", why)
+        self.publish_state()
+
+    async def role_start(self, role: str) -> tuple[str, str]:
+        """Where a role runs now (role_target), its agent started (one that can't start leaves
+        it on Copilot, with why), and why it is on Copilot kept for Settings' line."""
+        target, why = self.role_target(role)
+        if target != COPILOT_AGENT:
+            try:
+                await self.connect_agent(target)
+                await self.recheck_agent(target)
+            except Exception as exc:
+                why = self.agent_start_failed(target, exc)
+                self.hold_role(role, target, why)
+                target = COPILOT_AGENT
+            else:
+                self.agent_failed.pop(target, None)
+                if why := self.role_block(role, target):  # What its check found.
+                    target = COPILOT_AGENT
+        if why:
+            self.store.set(f"rolefallback:{role}", why)
+        else:
+            self.store.delete(f"rolefallback:{role}")
+        return target, why
+
+    async def helper_agent(self, role: str) -> str:
+        """The agent a helper's next run starts on (Watch for you): the one chosen for it once
+        it can run it, else Copilot."""
+        if not self.agents:
+            return COPILOT_AGENT
+        async with self.role_locks.setdefault(role, asyncio.Lock()):
+            return (await self.role_start(role))[0]
+
+    async def switch_role(self, row: dict, role: str, target: str, kind: str, why: str):
+        """A role's session on another agent (or Copilot): a fresh one there takes over, the
+        Router's with a summary of what it knew (handover); its timeline stays one, and the one
+        before stays in its agent's own history. What a turn cut short was given goes to it."""
+        session_id = row["id"]
+        state = self.states[session_id]
+        locks = [self.rotate_lock] if role == ROUTER else []
+        async with AsyncExitStack() as stack:
+            for lock in [*locks, state.lifecycle, state.sending]:
+                await stack.enter_async_context(lock)
+            row = self.store.session(session_id)
+            cut = row["status"] == "working"
+            before, old = self.agent(session_id), self.copilot_id(session_id)
+            self.store.set(f"alias:{old}", session_id)
+            if before == COPILOT_AGENT and self.store.get(f"created:{session_id}"):
+                # Its Copilot session, for an earlier version to go on with (prepare_downgrade).
+                self.store.set(f"rolecopilot:{session_id}", old)
+            await self.drop_handle(session_id)
+            if before != COPILOT_AGENT:
+                self.spending(session_id, False)
+            self.set_agent(session_id, target)
+            fresh = str(uuid4())
+            self.store.set(f"alias:{fresh}", session_id)
+            try:
+                session = await self.open_live(row, create=True, copilot=fresh)
+            except BaseException:
+                self.store.delete(f"alias:{fresh}")
+                self.set_agent(session_id, before)
+                raise
+            self.store.set(f"copilot:{session_id}", session.session_id)
+            for key in ("agentmodel", "rotated", "rotate_after"):
+                self.store.delete(f"{key}:{session_id}")
+            self.store.set(f"context:{session_id}", "0")
+            if role == ROUTER:
+                was = agents.display(before)
+                self.store.set(f"preamble:{session_id}", self.handover(f"on {was}"))
+            if cut and (sent := self.store.get(f"prevsent:{session_id}")) is not None:
+                self.store.set(f"sent:{session_id}", sent)  # Its turn was cut short.
+            if cut:
+                self.update_session(session_id, status="idle", activity="")
+        label, name = agents.ROLES[role], agents.display(target)
+        summary = ", with a summary of what it knew" if role == ROUTER else ""
+        if kind == "fallback":
+            text = f"{label} runs on Copilot for now: {plain_why(why)}"
+        elif kind == "renew":
+            text = (
+                f"{label}'s {name} session could not be resumed ({why.strip()[:160]}): a fresh "
+                f"one took over{summary}."
+            )
+        else:
+            text = f"{label} runs on {name} now{summary}."
+        self.add_message(session_id, "notice", text)
+        if self.delivery.has_unsent(session_id):
+            self.delivery.schedule_flush(session_id, 0)
+
+    def set_agent(self, session_id: str, agent: str):
+        """The agent a session runs on from now (Copilot's: no entry)."""
+        if agent == COPILOT_AGENT:
+            self.store.delete(f"agent:{session_id}")
+        else:
+            self.store.set(f"agent:{session_id}", agent)
+
+    async def open_role(self, role: str):
+        """A role's session placed and opened ahead of its first message."""
+        try:
+            await self.place_role(role)
+            if row := self.role_row(role):
+                await self.session_for(row["id"])
+        except Exception:
+            logger.warning("The %s could not open.", role, exc_info=True)
+
+    async def place_roles(self):
+        for role in PLACED_ROLES:
+            try:
+                await self.place_role(role)
+            except Exception:
+                logger.warning("Could not place the %s.", role, exc_info=True)
+
+    def role_failed(self, row: dict, why: str, until: float = 0.0) -> bool:
+        """A role's turn on its agent failed for what keeps that agent from running it (its
+        plan's limit, its sign-in, its process): it goes on on Copilot, given again what that
+        turn was given, and back once the agent can run it (roles_check). False for any other
+        session (it fails as it does)."""
+        role, agent = self.role_key(row), self.agent(row["id"])
+        if role not in PLACED_ROLES or agent == COPILOT_AGENT:
+            return False
+        self.hold_role(role, agent, why, until)
+        self.states[row["id"]].busy = False
+        row = self.store.session(row["id"])
+        if row["status"] == "working":
+            # Its turn ended there: what it was given goes to it where it runs next.
+            if (sent := self.store.get(f"prevsent:{row['id']}")) is not None:
+                self.store.set(f"sent:{row['id']}", sent)
+            self.update_session(row["id"], status="idle", activity="")
+        self.background(self.place_role(role))
+        return True
+
+    def hold_role(self, role: str, agent: str, why: str, until: float = 0.0):
+        """A role's agent failed it: it is tried again after `until`, else after a wait that
+        doubles with each failure in a row (up to ROLE_RETRY_MOST; afresh after that long)."""
+        held = self.role_held(role)
+        tries = 1
+        if held.get("agent") == agent and time.time() - float(held.get("until") or 0) < (
+            ROLE_RETRY_MOST
+        ):
+            tries = int(held.get("tries") or 0) + 1
+        wait = min(ROLE_RETRY * 2 ** (tries - 1), ROLE_RETRY_MOST)
+        record = {"agent": agent, "why": why, "until": until or time.time() + wait, "tries": tries}
+        self.store.set(f"roleheld:{role}", json.dumps(record))
+
+    def role_turn_failed(self, row: dict, message: str, kind: str, limit: Any) -> bool:
+        """A role's turn its agent refused for a plan's limit or a sign-in: role_failed."""
+        agent = self.agent(row["id"])
+        if kind == "plan_limit":
+            limit = dict(limit) if isinstance(limit, dict) else {}
+            resets = limit.get("resets_at")
+            until = resets if isinstance(resets, int | float) and resets > time.time() else 0
+            line = agents.limit_line(limit, name=agent) or (
+                f"{agents.display(agent)} refused it for a limit of its plan or account."
+            )
+            return self.role_failed(row, line, until or time.time() + ROLE_LIMIT_WAIT)
+        if SIGNED_OUT.search(message):
+            return self.role_failed(row, f"{agents.display(agent)} is signed out: {message[:200]}")
+        return False
+
+    async def roles_check(self):
+        """Roles on Copilot because their agent failed them go back once it can run them: its
+        wait over, it is started (signed in again, installed, its limit reset), then placed."""
+        if not self.agents:
+            return
+        for role in PLACED_ROLES:
+            wanted = agents.role_agent(self.store, role)
+            row = self.role_row(role)
+            if wanted == COPILOT_AGENT or row is None or self.agent(row["id"]) == wanted:
+                continue
+            held = self.role_held(role)
+            if held.get("agent") == wanted and time.time() < float(held.get("until") or 0):
+                continue
+            if agents.role_refusal(role, wanted) or not (entry := self.agents.get(wanted)):
+                continue
+            if not entry.enabled():
+                continue
+            try:
+                await self.connect_agent(wanted)
+            except Exception as exc:
+                self.hold_role(role, wanted, self.agent_start_failed(wanted, exc))
+                continue
+            self.agent_failed.pop(wanted, None)
+            entry.offline = False
+            try:
+                await self.place_role(role)
+            except Exception:
+                logger.warning("Could not put the %s back on %s.", role, wanted, exc_info=True)
 
     def sandboxed_refusal(self, agent: str) -> str:
         """Why none of an agent's workers can start while workers are sandboxed, on its row in
@@ -1708,8 +2054,10 @@ class Runtime:
         if woken and row["role"] == WORKER and self.events.stopped_work(row):
             # What it was on is stopped or cancelled: it does not start again by itself.
             return "What it was on is stopped or cancelled."
-        await self.usage_settled(row, session)
-        await self.ensure_spend_card(row)  # Refused for spend not known: its Go on is there.
+        if not self.role_key(row):
+            # (Chief of Staff's own sessions have no token limit: none waits for its spend.)
+            await self.usage_settled(row, session)
+            await self.ensure_spend_card(row)  # Refused for spend not known: its Go on is there.
         async with self.admission:
             if why := self.agent_block(row):
                 return why
@@ -1758,6 +2106,8 @@ class Runtime:
         for row in self.store.open_sessions():
             if named.get(row["id"], COPILOT_AGENT) == COPILOT_AGENT:
                 continue
+            if self.role_key(row) in PLACED_ROLES:
+                continue  # Placed where it can run instead (place_role), never stopped.
             if not (why := self.agent_block(row)):
                 continue
             if (
@@ -1857,8 +2207,16 @@ class Runtime:
             self.store.delete(f"agentpids:{name}")
             await asyncio.to_thread(agents.clear_private, self.agent_folder(name))
             self.agents[name].offline = False
+        chosen = agents.roles(self.store)
+        for role, agent in chosen.items():
+            if agent != self.roles_seen.get(role, COPILOT_AGENT):
+                # The owner's choice: tried now, whatever failed it before.
+                self.store.delete(f"roleheld:{role}")
+                self.agent_failed.pop(agent, None)
+        self.roles_seen = chosen
         if was_on != now or (chose is not None and chose != agents.router_chooses(self.store)):
             await self.refresh(ROUTER)  # Its spawn_worker and prompt name the agents on.
+        await self.place_roles()  # (Opened anew where it runs now, with those.)
         retuned = {
             name
             for name in now
@@ -1970,11 +2328,13 @@ class Runtime:
         runs no turn until the owner accepts that (Go on); without one there is nothing to
         keep, so it is recorded as accepted (Usage still shows it)."""
         agent = self.agent(session_id)
+        row = self.store.find_session(session_id)
+        limited = agents.limit(self.store, agent) and not (row and self.role_key(row))
         return {
             "agent": agent,
             "session_id": session_id,
             "kind": "unknown",
-            "accepted": 0 if agents.limit(self.store, agent) else 1,
+            "accepted": 0 if limited else 1,
             "at": time.time(),
         }
 
@@ -1996,6 +2356,8 @@ class Runtime:
             row = self.store.find_session(session_id)
             if not row or row["closed_at"] or not agents.limit(self.store, agent):
                 continue
+            if self.role_key(row):
+                continue  # No token limit of its own.
             if ended or self.store.agent_unknown(session_id):
                 await self.stop_for_spend(row)
 
@@ -2096,7 +2458,7 @@ class Runtime:
                 }
             )
         self.store.record_agent_usage(entries, key, epoch)
-        limit = agents.limit(self.store, agent)
+        limit = 0 if self.role_key(row) else agents.limit(self.store, agent)
         if (
             limit
             and not row["closed_at"]
@@ -2170,6 +2532,7 @@ class Runtime:
         if (
             row["closed_at"]
             or self.on_copilot(row["id"])
+            or self.role_key(row)
             or not agents.limit(self.store, self.agent(row["id"]))
             or not self.store.agent_unknown(row["id"])
         ):
@@ -3204,13 +3567,7 @@ class Runtime:
         settings = self.store.settings()
         sandbox = self.sandbox_policy(row)
         prompt = self.session_prompt(row, sandbox)
-        tools = [self.tools[name] for name in self.tool_names(row)]
-        if row["role"] == ROUTER and (on := self.agents_on()):
-            # Its spawn_worker names the agents on (as without them otherwise), and it can move a
-            # worker's work to another (continue_worker).
-            spawn = self.toolset.spawn_on(on, chooses=agents.router_chooses(self.store))
-            tools = [spawn if tool.name == "spawn_worker" else tool for tool in tools]
-            tools.append(self.toolset.continue_on(on))
+        tools = self.session_tools(row)
         options: dict[str, Any] = {
             # Copilot's record of past sessions, which the owner's own sessions can search: for
             # workers that do not read Slack. Sessions that read Slack are not recorded in it,
@@ -3292,6 +3649,46 @@ class Runtime:
 
     def all_searched(self, row: dict) -> bool:
         return self.searchable(row) and bool(self.store.get(f"toolfit:{row['id']}"))
+
+    def session_tools(self, row: dict) -> list:
+        """Chief of Staff's tools a session has, on whichever agent it runs."""
+        tools = [self.tools[name] for name in self.tool_names(row)]
+        if row["role"] == ROUTER and (on := self.agents_on()):
+            # Its spawn_worker names the agents on (as without them otherwise), and it can move a
+            # worker's work to another (continue_worker).
+            spawn = self.toolset.spawn_on(on, chooses=agents.router_chooses(self.store))
+            tools = [spawn if tool.name == "spawn_worker" else tool for tool in tools]
+            tools.append(self.toolset.continue_on(on))
+        return tools
+
+    def role_options(self, row: dict) -> dict:
+        """What one of Chief of Staff's own sessions (the Router, the Watchdog) runs with on
+        another agent, in neutral form for its adapter to map: its instructions and tools as on
+        Copilot, and nothing else (`role_only`: none of the agent's own tools, servers, hooks or
+        plugins; every other call asks, and on_permission refuses it), asking first, its agent's
+        model in Settings or the one chosen in its chat."""
+        agent = self.agent(row["id"])
+        cwd = row["cwd"] or str(self.role_dir("scratch"))
+        chosen = agents.configured(self.store).get(agent, {})
+        chosen = chosen | {k: v for k, v in self.agent_choice(row["id"]).items() if v}
+        options: dict[str, Any] = {
+            "system_message": {"content": self.session_prompt(row, None)},
+            "tools": self.session_tools(row),
+            "working_directory": cwd,
+            "on_permission_request": self.events.on_permission,
+            "ask_first": True,
+            "role_only": True,
+            "folders": [cwd],
+            "worker": row["id"],
+            "children": [],
+            "private_folders": self.private_folders(),
+            "on_accounting": lambda kind, data: self.agent_accounting(row["id"], kind, data),
+        }
+        if model := chosen.get("model"):
+            options["model"] = model
+        if effort := chosen.get("effort"):
+            options["reasoning_effort"] = effort
+        return options
 
     def helper_options(self, row: dict) -> dict:
         """A worker that only reads what it is given and calls its own tools."""
@@ -3921,6 +4318,19 @@ class Runtime:
             "new_workers": agents.new_workers(self.store),
             "router_chooses": bool(agents.stored(self.store).get(agents.ROUTER_CHOOSES)),
             "sandboxed": bool(settings.worker_sandbox and self.sandbox_host),
+            # Chief of Staff's own sessions this release runs on another agent: where each was
+            # put, and why it runs on Copilot for now.
+            "roles": [
+                {
+                    "role": role,
+                    "label": label,
+                    "agents": sorted(agents.role_agents(role)),
+                    "chosen": agents.role_agent(self.store, role),
+                    "line": self.role_line(role),
+                }
+                for role, label in agents.ROLES.items()
+                if agents.role_agents(role)
+            ],
         }
 
     async def look_for_agent(self, name: str) -> dict:
@@ -4134,7 +4544,7 @@ class Runtime:
             "context": "",
             "credits": 0,
             "tokens": self.store.agent_spent(row["id"]),
-            "token_limit": agents.limit(self.store, agent),
+            "token_limit": 0 if self.role_key(row) else agents.limit(self.store, agent),
             "agent_notes": notes(not self.yolo(row), self.sandboxed(row))
             if (notes := getattr(backend, "notes_for", None))
             else [],
@@ -4677,7 +5087,9 @@ class Runtime:
                 if line := await self.settings_refusal(row):
                     raise SettingsChangedError(line)
                 await self.ready_caches(row)
-            options, trusted = self.agent_options(row), {}
+            placed = self.role_key(row) in PLACED_ROLES
+            options = self.role_options(row) if placed else self.agent_options(row)
+            trusted = {}
             if (
                 agent == "claude"
                 and row["role"] == WORKER
@@ -4691,7 +5103,9 @@ class Runtime:
             if row["slack"] and agent == "claude" and (proxy := await self.slack.read_proxy()):
                 options["slack_proxy"] = proxy
                 options["slack_tools"] = [tool["name"] for tool in proxy["tools"]]
-        copilot_id = copilot or self.copilot_id(row["id"])
+        # A helper's fresh run on another agent has an id of its own (Tools.rerun_special).
+        rerun = self.store.get(f"rerun:{row['id']}") if create and agent != COPILOT_AGENT else ""
+        copilot_id = copilot or rerun or self.copilot_id(row["id"])
         # Copilot refuses a session name with a double quote ("Write "x" to y").
         name = ("Chief of Staff · " + clean_title(row["title"]).replace('"', "'"))[:100]
         _, connection = self.connection(agent)
@@ -4711,8 +5125,10 @@ class Runtime:
                 self.store.set(f"alias:{copilot_id}", row["id"])
                 self.store.set(f"copilot:{row['id']}", copilot_id)
             elif agent != COPILOT_AGENT:
-                # It took the row's own id (Claude's): made, as made() reads an agent's row.
+                # It took the id it was given (Claude's): made, as made() reads an agent's row.
                 self.store.set(f"copilot:{row['id']}", copilot_id)
+            if rerun:
+                self.store.delete(f"rerun:{row['id']}")
             if agent == COPILOT_AGENT:
                 # Copilot keeps a session only once it has had a message: until then it cannot
                 # be resumed after a restart, and is created again instead.
@@ -6915,6 +7331,43 @@ class Runtime:
     async def session_for(self, session_id: str):
         if session := self.states.handle(session_id):
             return session
+        row = self.store.find_session(session_id) if self.agents else None
+        if row and (role := self.role_key(row)) in PLACED_ROLES:
+            return await self.role_session(row, role)
+        return await self.open_session(session_id)
+
+    async def role_session(self, row: dict, role: str):
+        """A role's session where it runs now (place_role): its agent's, or Copilot's while
+        that can't open it (said in one line; back once it can). An agent that runs but no
+        longer has its session gives it a fresh one there, with a summary for the Router."""
+        session_id = row["id"]
+        await self.place_role(role)
+        try:
+            return await self.open_session(session_id)
+        except OpenElsewhereError:
+            raise
+        except Exception as exc:
+            agent = self.agent(session_id)
+            if agent == COPILOT_AGENT or self.states.handle(session_id):
+                raise
+            why = f"{agents.display(agent)} could not open it: {describe(exc)}"
+            backend, _ = self.connection(agent)
+            if backend is not None and backend.alive() and self.made(session_id):
+                logger.warning("The %s's %s session could not be resumed.", role, agent,
+                               exc_info=True)  # fmt: skip
+                try:
+                    async with self.role_locks.setdefault(role, asyncio.Lock()):
+                        await self.switch_role(row, role, agent, "renew", describe(exc))
+                    return await self.open_session(session_id)
+                except Exception as again:
+                    why = f"{agents.display(agent)} could not open it: {describe(again)}"
+            self.hold_role(role, agent, why)
+            await self.place_role(role)
+            return await self.open_session(session_id)
+
+    async def open_session(self, session_id: str):
+        if session := self.states.handle(session_id):
+            return session
         if (agent := self.agent(session_id)) != COPILOT_AGENT:
             await self.agent_ready(agent, self.store.find_session(session_id))  # On first use.
         elif not self.backend:
@@ -7165,6 +7618,19 @@ class Runtime:
     async def ensure_router(self):
         router_id = self.store.get("router_id")
         row = self.store.find_session(router_id) if router_id else None
+        if (
+            row
+            and not row["closed_at"]
+            and self.agents
+            and (
+                not self.on_copilot(row["id"])
+                or agents.role_agent(self.store, ROUTER) != COPILOT_AGENT
+            )
+        ):
+            # On another agent (or to be): it starts there aside, Chief of Staff ready
+            # meanwhile; on Copilot while that agent can't run it (place_role).
+            self.background(self.open_role(ROUTER))
+            return
         if row and not row["closed_at"]:
             # The Router is never replaced: its timeline, tasks and what the owner told it stay.
             async with self.states[row["id"]].lifecycle:
@@ -7434,6 +7900,8 @@ class Runtime:
         )
 
     def fail(self, row: dict, message: str):
+        if self.agents and self.role_failed(row, message):
+            return  # On Copilot now, given again what it was on.
         self.states[row["id"]].busy = False
         self.add_message(row["id"], "error", message)
         self.delivery.defer_pending(row["id"])  # Not a turn by itself after a restart.
@@ -8446,6 +8914,8 @@ class Runtime:
                 self.asks.expire_questions,
                 self.focus.check,
                 self.workers.refresh_elsewhere,
+                # Chief of Staff's own sessions back on the agent chosen for them, once it can.
+                self.roles_check,
                 # Disk space: read, measured and cleaned in the background (see storage.py).
                 self.storage.tick,
             )

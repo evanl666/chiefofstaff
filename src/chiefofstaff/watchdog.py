@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from . import agents
 from .envelope import short, wrap
 from .roles import WATCHDOG, WORKER
 
@@ -269,5 +270,8 @@ class Watchdog:
         row = self.store.create_session(
             str(uuid4()), WATCHDOG, "Watchdog", "idle", cwd=str(self.runtime.role_dir(WATCHDOG))
         )
-        await self.runtime.open_live(row, create=True)
+        if self.runtime.agents and agents.role_agent(self.store, WATCHDOG) != agents.COPILOT:
+            await self.runtime.session_for(row["id"])  # Where Settings put it (place_role).
+        else:
+            await self.runtime.open_live(row, create=True)
         return row["id"]

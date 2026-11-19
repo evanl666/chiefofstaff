@@ -991,7 +991,13 @@ class Connector:
         its last turn failed (bug E102: every scan went to the failed conversation)."""
         row = self.session()
         context = int(self.store.get(f"context:{row['id']}") or 0) if row else 0
-        if not row or context > FRESH_AFTER or row["status"] == "failed":
+        # Put on another agent (or back) in Settings since its last run: a fresh run there.
+        moved = bool(
+            row
+            and self.runtime.agents
+            and self.runtime.agent(row["id"]) != self.runtime.role_target(SPECIAL)[0]
+        )
+        if not row or context > FRESH_AFTER or row["status"] == "failed" or moved:
             await self.runtime.toolset.start_special(SPECIAL, TITLE, text, slack=True)
             return
         await self.runtime.delivery.deliver(

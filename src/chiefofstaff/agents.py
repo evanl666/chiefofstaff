@@ -30,6 +30,20 @@ NEW_WORKERS = "new_workers"
 ROUTER_CHOOSES = "router_chooses"
 # Whether the owner answered an agent's first-run card (kv `agentoffer:<agent>`).
 OFFERED = "agentoffer:"
+# Chief of Staff's own sessions that can run on another agent, as Settings names each ("The
+# Router runs on"): their choices are kept in the configuration under ROLE_CHOICES ({role:
+# agent}, none for Copilot). Watch for you is the connector helper.
+ROLES = {
+    "router": "The Router",
+    "connector": "Watch for you",
+    "watchdog": "The Watchdog",
+    "slack": "Slack",
+}
+ROLE_CHOICES = "roles"
+# The agents what reads Slack for Chief of Staff runs on beside Copilot (Watch for you): none
+# until Claude's Slack safeguards are reviewed again, as for workers that read Slack (d82aff5);
+# never Codex, which has no sandbox Chief of Staff's checks passed for what it runs.
+SLACK_READERS: frozenset[str] = frozenset()
 
 
 def stored(store: Store) -> dict[str, Any]:
@@ -79,6 +93,46 @@ def new_workers(store: Store) -> str:
     return chosen if isinstance(chosen, str) and chosen in turned_on(store) else COPILOT
 
 
+def role_agents(role: str) -> frozenset[str]:
+    """The agents beside Copilot this release runs a role on: the Router and the Watchdog with
+    nothing but their own tools; Watch for you only where what reads Slack runs; Slack none."""
+    if role in {"router", "watchdog"}:
+        return frozenset(NAMES)
+    if role == "connector":
+        return SLACK_READERS & {"claude"}
+    return frozenset()
+
+
+def role_refusal(role: str, name: str) -> str:
+    """Why this release does not run a role on that agent ("" when it does)."""
+    if name == COPILOT or name in role_agents(role):
+        return ""
+    label = ROLES.get(role, role)
+    if role == "connector" and name == "codex":
+        return f"{label} stays on Copilot: Codex can't sandbox what it runs as it reads."
+    if role in {"connector", "slack"}:
+        return f"{label} stays on Copilot: what reads your Slack runs on Copilot for now."
+    return f"{label} stays on Copilot."
+
+
+def roles(store: Store) -> dict[str, str]:
+    """The agent the owner chose for each role, while it is on and the role can run on it
+    (Copilot otherwise)."""
+    chosen = stored(store).get(ROLE_CHOICES)
+    chosen = chosen if isinstance(chosen, dict) else {}
+    on = turned_on(store)
+    return {
+        role: name
+        if isinstance(name := chosen.get(role), str) and name in on and name in role_agents(role)
+        else COPILOT
+        for role in ROLES
+    }
+
+
+def role_agent(store: Store, role: str) -> str:
+    return roles(store).get(role, COPILOT)
+
+
 def limit(store: Store, name: str) -> int:
     """The tokens each of its workers may spend (0: no limit)."""
     value = configured(store).get(name, {}).get("limit")
@@ -117,7 +171,7 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
         raise ValueError("Coding agents: expected each agent's settings.")
     plan: dict[str, Any] = {**stored(store)}
     for name, entry in change.items():
-        if name == NEW_WORKERS:
+        if name in {NEW_WORKERS, ROLE_CHOICES}:
             continue
         if name == ROUTER_CHOOSES:
             if not isinstance(entry, bool):
@@ -155,6 +209,26 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
             raise ValueError("New workers start on: Copilot, or an agent turned on below.")
         chosen = COPILOT  # The agent they used is off now.
     plan[NEW_WORKERS] = chosen
+    # Each role on the agent chosen for it: one turned off puts it back on Copilot.
+    kept = stored(store).get(ROLE_CHOICES)
+    kept = {r: agent for r, agent in kept.items() if agent in on} if isinstance(kept, dict) else {}
+    if ROLE_CHOICES in change:
+        asked = change[ROLE_CHOICES]
+        if not isinstance(asked, dict):
+            raise ValueError("Coding agents: expected the agent of each role.")
+        for role, agent in asked.items():
+            if role not in ROLES:
+                raise ValueError(f"Coding agents: no role {role!r}.")
+            if agent not in (COPILOT, *on):
+                raise ValueError(f"{ROLES[role]} runs on: Copilot, or an agent turned on below.")
+            if why := role_refusal(role, agent):
+                raise ValueError(why)
+            kept[role] = agent
+    kept = {role: agent for role, agent in kept.items() if agent != COPILOT}
+    if kept:
+        plan[ROLE_CHOICES] = dict(sorted(kept.items()))
+    else:
+        plan.pop(ROLE_CHOICES, None)
     return plan
 
 
@@ -381,6 +455,7 @@ def prepare_downgrade(store: Store) -> tuple[list[str], dict[int, str]]:
     from .tasks import TaskBook
 
     named = {key: agent for key, agent in store.items("agent:").items() if agent != COPILOT}
+    put_back_on_copilot(store, named)
     tasks = TaskBook(store)
     stopped = []
     for row in store.open_sessions():
@@ -409,6 +484,40 @@ def prepare_downgrade(store: Store) -> tuple[list[str], dict[int, str]]:
         else:
             store.delete(f"agentpids:{agent}")  # None runs: nothing for a later start to end.
     return stopped, left
+
+
+def put_back_on_copilot(store: Store, named: dict[str, str]):
+    """Before a downgrade: Chief of Staff's own sessions on another agent (the Router, the
+    Watchdog, Watch for you), which an earlier version runs only on Copilot, are put back on
+    it (`named` loses them): the Router and the Watchdog on the Copilot session they had (a
+    fresh one, made there, when they never had one), Watch for you on a fresh run."""
+    from uuid import uuid4
+
+    from .roles import ROUTER, WATCHDOG
+
+    for key in list(named):
+        row = store.find_session(key)
+        if not row:
+            continue
+        helper = bool(store.get(f"connector:{key}"))
+        if row["role"] not in {ROUTER, WATCHDOG} and not helper:
+            continue
+        del named[key]
+        store.delete(f"agent:{key}")
+        store.delete(f"rerun:{key}")
+        session = "" if helper else store.get(f"rolecopilot:{key}") or ""
+        if not session:
+            session = str(uuid4())
+            store.set(f"fresh:{session}", "1")  # Made there on its first use.
+            if helper:
+                store.delete(f"created:{key}")
+        store.set(f"alias:{session}", key)
+        store.set(f"copilot:{key}", session)
+        if row["status"] == "working":
+            store.update_session(key, status="idle", activity="")
+    if (config := stored(store)).get(ROLE_CHOICES):
+        config.pop(ROLE_CHOICES)
+        store.set(CONFIG, json.dumps(config, sort_keys=True))
 
 
 # The agents whose own sandbox Chief of Staff can give a worker as its own sandbox, once the
