@@ -6752,8 +6752,9 @@ async def send_pins(runtime, browser):
 # Other coding agents (docs/design/more-agents.md 5.10, the agent picker): Settings' Coding agents
 # tab (each of its rows' states), a worker on Codex in its header, menu, task rows and Usage, a
 # save that stops workers, and Go on for one whose spend is unknown.
-AGENT_SHOTS = SHOTS / "agents-m2"
-AGENT_WIDTHS = (800, 1024, 1440)
+AGENT_SHOTS = Path(os.environ.get("UI_AGENT_SHOTS") or SHOTS / "agents-m2")
+# (UI_AGENT_WIDTHS, UI_PICKER_WIDTHS, comma-separated: other widths, for a review's shots.)
+AGENT_WIDTHS = tuple(int(w) for w in os.environ.get("UI_AGENT_WIDTHS", "800,1024,1440").split(","))
 SIGNED_OUT_CODEX = "Codex is not signed in: run codex login in a terminal."
 OLD_CODEX = "Codex 0.160.0 is older than the versions tested (0.167.2): update it."
 SANDBOXED_CODEX = (
@@ -6794,10 +6795,16 @@ def codex_on_path() -> tuple[Path, Path]:
     (folder / "claude-config" / ".claude.json").write_text("{}\n")
     OWNERS_CLAUDE_CONFIG.append(os.environ.get("CLAUDE_CONFIG_DIR"))
     os.environ["CLAUDE_CONFIG_DIR"] = str(folder / "claude-config")
+    # Codex set up (its folder there): the tests' home has none (conftest), and Codex runs
+    # nowhere it was never set up.
+    (folder / "codex-home").mkdir()
+    OWNERS_CODEX_HOME.append(os.environ.get("CODEX_HOME"))
+    os.environ["CODEX_HOME"] = str(folder / "codex-home")
     return folder, folder / "runs"
 
 
 OWNERS_CLAUDE_CONFIG: list[str | None] = []
+OWNERS_CODEX_HOME: list[str | None] = []
 
 
 CLAUDE_HIDDEN = ("FAKE_CODEX_HOME", "FAKE_CODEX_RUNS", "FAKE_CLAUDE_HOME", "FAKE_CLAUDE_RUNS")
@@ -6813,6 +6820,11 @@ def codex_off_path(folder: Path):
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
             os.environ["CLAUDE_CONFIG_DIR"] = owners
+    if OWNERS_CODEX_HOME:
+        if (owners := OWNERS_CODEX_HOME.pop()) is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = owners
     shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -7152,9 +7164,11 @@ async def agents_states(browser, scheme: str):
             box = rows.locator("input[type=checkbox]")
             await expect(box).to_have_attribute("aria-describedby", f"agent-{shown['name']}-state")
             line = rows.locator("small[role=status]")
+            # Why it can't run while workers are sandboxed, when so, is its row's problem.
+            problem = shown["problem"] or (answer["sandboxed"] and shown.get("sandbox")) or ""
             # A command in it shows as code, its marks not as they are.
-            await expect(line).to_have_text((shown["problem"] or shown["state"]).replace("`", ""))
-            notes = [shown.get("limit_line"), "" if shown["problem"] else shown.get("note")]
+            await expect(line).to_have_text((problem or shown["state"]).replace("`", ""))
+            notes = [shown.get("limit_line"), "" if problem else shown.get("note")]
             await expect(rows.locator(".agent-note")).to_have_text([n for n in notes if n])
             assert "`" not in await rows.inner_text(), "no code marks shown as they are"
             label = rows.locator("label.check")
@@ -7563,7 +7577,9 @@ async def agents_stopped_by_settings(runtime, browser, spawned):
 
 # The agent picker (the owner's decisions of 2026-11-14): each surface, checked and photographed at
 # the widths the owner reviews, light and dark.
-PICKER_WIDTHS = (1500, 760, 400, 352)
+PICKER_WIDTHS = tuple(
+    int(w) for w in os.environ.get("UI_PICKER_WIDTHS", "1500,760,400,352").split(",")
+)
 PICKER_SHOTS = Path(os.environ.get("UI_PICKER_SHOTS") or SHOTS / "claude-m2")
 
 
