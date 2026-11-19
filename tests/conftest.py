@@ -25,6 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import codex_schema
 import pytest
@@ -280,6 +281,7 @@ class FakeClient:
         mcp_sign_in=True,
         sandbox=True,
         echoes=False,  # Tests emit user.message themselves where it matters.
+        fork=True,
     )
 
     def __init__(self):
@@ -296,6 +298,8 @@ class FakeClient:
         self.home: Path | None = None
         self.pids: set[int] = set()  # Its CLI's processes.
         self.crashed = False  # Its CLI exited by itself.
+        self.forks: list[tuple[str, str]] = []  # Sessions forked: (from, the fork).
+        self.deleted: list[str] = []
 
     async def start(self):
         pass
@@ -362,6 +366,24 @@ class FakeClient:
         self.sessions[session_id] = session
         self.resumed.append(session_id)
         return session
+
+    async def fork_session(self, session_id, name):
+        """As Copilot's: a new session with what this one was sent (its conversation)."""
+        if session_id not in self.sessions:
+            raise RuntimeError("Session not found")
+        source = self.sessions[session_id]
+        forked = FakeSession(str(uuid4()), {})
+        forked.sent, forked.raw_sent = list(source.sent), list(source.raw_sent)
+        if session_id in self.logs:  # Its log, copied with the events' own ids and times.
+            self.logs[forked.session_id] = list(self.logs[session_id])
+        self.sessions[forked.session_id] = forked
+        self.names[forked.session_id] = name
+        self.forks.append((session_id, forked.session_id))
+        return forked.session_id
+
+    async def delete_session(self, session_id):
+        self.sessions.pop(session_id, None)
+        self.deleted.append(session_id)
 
     async def list_sessions(self):
         return self.metas

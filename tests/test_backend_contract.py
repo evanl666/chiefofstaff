@@ -170,6 +170,11 @@ async def contract_brain(session, prompt):
     if "What word did I ask you to remember" in prompt:
         yield Say(session.backend.memory)
         return
+    if "What codename did I ask you to remember" in prompt:
+        # From its own conversation (a fork's is what it was given).
+        said = " ".join(text for who, text in session.history if who == "user")
+        yield Say(m.group(1) if (m := re.search(r"the codename '([\w-]+)'", said)) else "none")
+        return
     if match := re.search(r"Leave the command `([^`]+)` running for ([\d.]+) s", prompt):
         yield Background(match.group(1), seconds=float(match.group(2)), exit_code=3)
     if match := re.search(r"Have a child agent call the (\w+) tool with text '([^']*)'", prompt):
@@ -511,6 +516,53 @@ async def test_a_session_resumes_with_its_conversation(backend, tmp_path):
     await turn.wait()
     assert "pineapple" in turn.said().lower()
     await resumed.disconnect()
+
+
+async def test_a_fork_has_the_conversation_before_the_turn_in_progress(backend, tmp_path):
+    """forks.py: a busy session's fork, made while a tool of its turn runs, has what it was told
+    in its finished turns and nothing of that turn; resumed in another folder, it answers from
+    it, and the session forked finishes its turn undisturbed."""
+    if not backend.capabilities.fork:
+        pytest.skip("This agent's sessions are not forked (forks.py).")
+    started = asyncio.Event()
+
+    async def slow(params: Echo, invocation):
+        started.set()
+        await asyncio.sleep(15)
+        return "checked"
+
+    tool = define_tool("slow_check", description="A slow check", params_type=Echo, handler=slow)
+    session, turn = await open_session(backend, tmp_path, tools=[tool])
+    await session.send("Remember the codename 'BLUEBIRD-42'. Reply with just: ok")
+    await turn.wait()
+    await session.send("Call the slow_check tool with text 'wait', then reply with just: done")
+    await asyncio.wait_for(started.wait(), 120)
+    forked = await backend.fork_session(session.session_id, "contract fork")
+    backend.created.append(forked)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    options = {
+        "working_directory": str(elsewhere),
+        "tools": [tool],
+        "on_permission_request": lambda request, inv: PermissionDecisionApproveOnce(),
+    }
+    if not isinstance(backend, ScriptedBackend):
+        options["model"] = MODEL
+    second = await backend.resume_session(forked, **options)
+    told = Turn(second)
+    await second.send("What codename did I ask you to remember? Reply with just the codename.")
+    await told.wait()
+    assert "BLUEBIRD-42" in told.said().upper()
+    given = [
+        getattr(event.data, "content", "") or ""
+        for event in await second.get_events()
+        if event.type.value == "user.message"
+    ]
+    assert any("BLUEBIRD-42" in text for text in given)
+    assert not any("slow_check" in text for text in given), "nothing of the turn in progress"
+    await turn.wait()
+    assert "done" in turn.said().lower(), "the session forked finished its own turn"
+    await second.disconnect()
 
 
 async def test_abort_ends_the_turn_and_its_command(backend, tmp_path):

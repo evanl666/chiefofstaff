@@ -111,6 +111,7 @@ SCRIPTED = Capabilities(
     permission_callbacks=True,
     mcp_sign_in=False,
     sandbox=False,
+    fork=True,
 )
 
 
@@ -188,12 +189,16 @@ class ScriptedSession:
         return [event(kinds[who], content=text) for who, text in self.history if who in kinds]
 
     async def run(self):
+        # Its conversation up to here is all a fork made while this turn runs gets (fork_session).
+        self.backend.settled[self.session_id] = len(self.history)
         try:
             while self.inbox and not self.closed:
                 await self.answer(self.inbox.pop(0))
         except Exception as exc:  # A script failed: report it as the CLI reports errors.
             self.emit("session.error", message=f"{type(exc).__name__}: {exc}")
             return
+        finally:
+            self.backend.settled.pop(self.session_id, None)
         self.emit("session.idle")
 
     async def answer(self, prompt: str):
@@ -359,6 +364,8 @@ class ScriptedBackend:
     ):
         self.brain = brain
         self.histories: dict[str, list[tuple[str, str]]] = {}
+        # Sessions in a turn: how much of their history came before it.
+        self.settled: dict[str, int] = {}
         self.sessions: dict[str, ScriptedSession] = {}
         # Sessions of the owner that Chief of Staff does not manage: their metadata (as
         # list_sessions returns it), "open" (in a terminal) and "log" (their events).
@@ -436,6 +443,20 @@ class ScriptedBackend:
         session = self.session_type(self, session_id, options)
         self.sessions[session_id] = session
         return session
+
+    async def fork_session(self, session_id: str, name: str) -> str:
+        """A new session with this one's conversation before its turn in progress."""
+        if session_id not in self.histories:
+            raise RuntimeError("Session not found")
+        history = self.histories[session_id]
+        forked = str(uuid4())
+        self.histories[forked] = list(history[: self.settled.get(session_id, len(history))])
+        return forked
+
+    async def delete_session(self, session_id: str) -> None:
+        self.histories.pop(session_id, None)
+        if session := self.sessions.pop(session_id, None):
+            await session.disconnect()
 
     async def mcp_sign_in_url(self, session: Any, server: str) -> str:
         return ""
