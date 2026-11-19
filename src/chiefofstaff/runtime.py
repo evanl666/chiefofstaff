@@ -91,6 +91,7 @@ from .envelope import (
 )
 from .events import EFFORT_REFUSED, MODEL_REFUSED, ROUTER_CONTEXT, Events
 from .focus import Focus
+from .forks import Forks
 from .habits import Habits
 from .handled import Handled
 from .learning import Learning
@@ -883,6 +884,8 @@ class Runtime:
         self.peers = Peers(self)
         self.relations = Relations(self)
         self.teams = Teams(self)
+        # A busy worker's new task, given to a second worker with its context (forks.py).
+        self.forks = Forks(self)
         self.learning = Learning(self)
         self.habits = Habits(self)
         self.checks = Checks(self)
@@ -3974,6 +3977,8 @@ class Runtime:
                 notes=self.cache_plan(row).notes if sandbox else [],
                 held=self.held_shown(row) if sandbox else None,
             )
+        if row["role"] == ROUTER and settings.fork_busy:
+            prompt = prompts.with_fork_rule(prompt)
         if row["role"] == ROUTER and settings.send_to_chief:
             prompt = prompts.with_send_rule(prompt)
         if row["role"] == ROUTER and (on := self.agents_on()):
@@ -4106,6 +4111,10 @@ class Runtime:
         if on:
             # It can move a worker's work to another (continue_worker).
             tools.append(self.toolset.continue_on(on))
+        if row["role"] == ROUTER and self.store.settings().fork_busy:
+            # Its message_session can keep a new task for a busy worker (forks.py).
+            forks = self.toolset.message_forks
+            tools = [forks if tool.name == "message_session" else tool for tool in tools]
         return tools
 
     def role_options(self, row: dict) -> dict:
@@ -10457,6 +10466,8 @@ class Runtime:
             "elsewhere": bool(self.is_elsewhere(row)) and not row["closed_at"],
             "terminal": self.terminal.get(row["id"]),
             **(self.progress(row) if row["role"] == WORKER else {}),
+            # A second worker: the one it was started from, with that one's context.
+            **({"fork_of": origin} if (origin := self.forks.origin(row["id"])) else {}),
             # Only for a worker on another agent (none without agents).
             **(
                 self.agent_view(row, agent)
@@ -11083,6 +11094,8 @@ class Runtime:
         if old.worker_sandbox and not new.worker_sandbox:
             # Without the sandbox nothing waits for its folder's settings: held ones go on.
             self.background(self.release_unguarded())
+        if old.fork_busy != new.fork_busy:
+            await self.refresh(ROUTER)  # Its rule and same_worker, from its next turn.
         if self.agents and (
             old.worker_sandbox != new.worker_sandbox or old.worker_yolo != new.worker_yolo
         ):

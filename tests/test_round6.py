@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from conftest import Harness, call_tool, settle
 
+from chiefofstaff.models import Settings
 from chiefofstaff.store import now
 from chiefofstaff.tools import owner_words
 
@@ -122,7 +123,7 @@ async def test_one_more_thing_on_a_task_just_given_is_asked_about_once(tmp_path)
     """T12: "oh wait, one more thing: accents too" became a second task (two results, two
     replies to the asker). The Router, which reads it, says why a task for a worker given one
     minutes ago is new (why_new, shown to the owner); without it, it is asked once."""
-    harness = Harness(tmp_path / "data")
+    harness = Harness(tmp_path / "data", Settings(fork_busy=False))  # Its tasks stay its own.
     runtime = await harness.connect()
     made = await spawn(runtime, harness.router_id, "Add slugify")
     worker = made["session_id"]

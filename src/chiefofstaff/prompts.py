@@ -1019,6 +1019,23 @@ SEND_RULE = (
     "outside this UI is only as surely the owner's as their computer is."
 )
 
+# A busy worker's new task (forks.py): the Router's last rule while the setting is on.
+FORK_RULE = (
+    "- A related worker that is busy is still the one to give the work to with message_session "
+    "(not a reason for spawn_worker): while it is busy with other tasks and a worker slot is "
+    "free, a second worker that has its conversation so far takes the new task at once, in a "
+    "folder and branch of its own (the result gives that worker's session_id: message it about "
+    "that task from then on). Pass same_worker=true only when that worker itself must do it "
+    "after its current work: on its branch or in its pull request, with what it is making now, "
+    "or because the owner wants that worker to do it once it is free."
+)
+
+
+def with_fork_rule(prompt: str) -> str:
+    """The Router's role with the rule for busy workers' new tasks after its others."""
+    head, end, tail = prompt.rpartition("\n</chiefofstaff_role>")
+    return f"{head}\n{FORK_RULE}{end}{tail}"
+
 
 # A worker on another coding agent gets WORKER with its few lines in Copilot's terms said in
 # that agent's (more-agents.md 5.4); Copilot's text is unchanged. Codex: a session of its own;

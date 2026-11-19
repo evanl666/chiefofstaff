@@ -322,6 +322,7 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         3195,
         "191b56edb83b3a16d25742a53b3a83a1af3d0f2f178d0ce510c61cdf892b3c3f",
     ),
+    # With the rule for busy workers' new tasks (forks.py), on by default.
     "router with Slack, created": (
         29510,
         "cd1fd6b85d2a57d0be3631cc1106d3838382039b81ad34f2454da8270a186839",

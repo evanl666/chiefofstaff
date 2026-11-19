@@ -452,6 +452,9 @@ class Settings(StrictModel):
     # Send to Chief: `chiefofstaff send` hands the Router a note, a link or text through a socket
     # in the data directory only the owner's user can use (see sendsocket.py); none while off.
     send_to_chief: bool = False
+    # A new task the Router gives a busy worker goes to a second worker that starts at once with
+    # that worker's conversation so far (see forks.py).
+    fork_busy: bool = True
     # Prepared for you (shepherd.py): Chief of Staff keeps the owner's PRs moving (failing CI
     # and review comments prepared for their approval, a merge of a head they accepted on PRs
     # they opt in) and lists what it finds on their other PRs. Off: nothing of it runs or shows.

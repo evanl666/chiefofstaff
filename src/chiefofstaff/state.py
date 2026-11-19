@@ -16,6 +16,7 @@ this order, and none is held while waiting for the owner:
 """
 
 import asyncio
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,8 +26,10 @@ from typing import Any
 class SessionState:
     # The live Copilot session, or None while disconnected.
     handle: Any = None
-    # A worker turn is running or starting; this is what max_workers counts.
-    busy: bool = False
+    # A worker turn is running or starting (busy); this is what max_workers counts. Since when
+    # (time.monotonic) it has been, without a break: 0 while not.
+    _busy: bool = field(default=False, repr=False)
+    busy_since: float = 0.0
     # A delayed flush of held messages is scheduled.
     flush_scheduled: bool = False
     # The model changed during this turn: messages wait for the next turn, which uses it.
@@ -128,6 +131,18 @@ class SessionState:
     # The repositories (their checkouts' real paths) whose copy Chief of Staff tried to make for
     # it once (Runtime.own_copy): never again, made or not.
     copies_tried: set[str] = field(default_factory=set)
+
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    @busy.setter
+    def busy(self, value: bool):
+        if value and not self._busy:
+            self.busy_since = time.monotonic()
+        elif not value:
+            self.busy_since = 0.0
+        self._busy = value
 
     def step(self) -> tuple[float, str]:
         """The longest-running step it is in now: when it started and what it is for; (0, "")

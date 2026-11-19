@@ -10,6 +10,7 @@ import pytest
 from conftest import Harness, call_tool, settle
 from test_round7_split import shell
 
+from chiefofstaff.models import Settings
 from chiefofstaff.store import now
 from chiefofstaff.task_actions import FAILING_READS, NO_TASK
 
@@ -177,6 +178,7 @@ async def test_a_review_is_its_tasks_not_every_task_of_its_worker(harness):
 async def test_a_follow_from_before_follows_had_tasks_is_one_tasks(harness):
     """QA E17: a worker followed a PR before follows were tied to tasks; every task of it whose
     title named the PR followed it too, and Home kept the one updated last, not its maker's."""
+    harness.store.save_settings(Settings(fork_busy=False))  # Each worker's tasks are its own.
     runtime = await harness.connect()
     router = harness.router_id
     worker, made = await spawn(runtime, router, "Fix the login redirect")

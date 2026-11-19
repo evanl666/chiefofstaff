@@ -1190,6 +1190,7 @@ class Events:
         if (
             (reason := private_denial(request, self.runtime.private_folders()))
             or (reason := owners_checkout(row, request, self.workspaces.checkouts(row)))
+            or (reason := self.runtime.forks.refused_write(row, request))
             or (reason := settings_write(row, request, self.runtime.held_run_files(row)))
             or (stepping and (reason := self.runtime.shepherd.denial(row, request)))
             or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
