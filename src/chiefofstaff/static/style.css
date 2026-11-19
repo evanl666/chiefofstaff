@@ -852,8 +852,18 @@ label.hours input { width: 118px; }
 .agent-limit { display: grid; gap: 4px; align-content: start; }
 .agent-limit .field-error { color: var(--red); }
 .agents-choice { display: grid; gap: 6px; max-width: 260px; }
+/* Where new workers start, then where the Router and the Watchdog run: label and select on one
+   line each, aligned; why one runs on Copilot for now under it. */
+.agents-places { display: grid; gap: 10px; }
+.agents-roles { display: grid; gap: 10px; }
+.agents-roles:empty { display: none; }
+.agents-places .agents-choice { grid-template-columns: 170px minmax(0, 200px); align-items: center; gap: 12px; max-width: none; }
+.agents-role { display: grid; gap: 4px; }
+.agents-role-line { color: var(--soft); padding-left: 182px; }
 .agents-hint, .agents-intro { color: var(--muted); }
 @media (max-width: 560px) {
+  .agents-places .agents-choice { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .agents-role-line { padding-left: 0; }
   .agent-head { flex-wrap: wrap; }
   .agent-head .agent-switch { margin-left: 0; flex-basis: 100%; }
   .agent-fields { grid-template-columns: minmax(0, 1fr); }

@@ -1015,8 +1015,8 @@ function agentsTab() {
   const help = "https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#workers-on-other-coding-agents";
   const button = el("button", { type: "button", role: "tab", "data-tab": "agents", id: "agents-tab", text: "Coding agents" });
   $("#settings-tabs [data-tab=models]").after(button);
-  // Where new workers start (once another agent is on), a row per agent, how to ask for one
-  // for a single task, and what stays on Copilot.
+  // Where new workers start and where Chief of Staff's own sessions run (once another agent is
+  // on), a row per agent, how to ask for one for a single task, and what stays on Copilot.
   const select = el("select", { name: "agent_new_workers" });
   // Picking an agent there makes it available (as its row's switch says).
   select.addEventListener("change", () => {
@@ -1029,10 +1029,15 @@ function agentsTab() {
   const section = el(
     "section",
     { class: "tab agents-tab", "data-tab": "agents", hidden: true },
-    el("label", { id: "agents-choice", class: "agents-choice", hidden: true }, el("span", { text: "New workers start on" }), select),
+    el(
+      "div",
+      { id: "agents-places", class: "agents-places", hidden: true },
+      el("label", { id: "agents-choice", class: "agents-choice", hidden: true }, el("span", { text: "New workers start on" }), select),
+      el("div", { id: "agents-roles", class: "agents-roles" }),
+    ),
     el("div", { id: "agents-rows", class: "agents-rows" }),
     el("small", { id: "agents-hint", class: "agents-hint", hidden: true }),
-    el("small", { class: "agents-intro" }, "Workers can also run on another coding agent you have installed and signed in to. The Router, the Slack session, the Watchdog and Watch for you stay on Copilot. ", el("a", { class: "link", href: help, target: "_blank", rel: "noreferrer", text: "What differs" })),
+    el("small", { class: "agents-intro" }, "Workers, the Router and the Watchdog can also run on another coding agent you have installed and signed in to. Slack and Watch for you stay on Copilot. ", el("a", { class: "link", href: help, target: "_blank", rel: "noreferrer", text: "What differs" })),
   );
   $("#settings-form .tab[data-tab=models]").after(section);
 }
@@ -1046,8 +1051,10 @@ function renderAgentsLine() {
   }
   if (!$("#agents-tab")) agentsTab();
   $("#agents-rows").replaceChildren();
+  $("#agents-roles").replaceChildren();
   $("#settings-form").agent_new_workers.replaceChildren(el("option", { value: "copilot", text: "Copilot" }));
   $("#agents-choice").hidden = true;
+  $("#agents-places").hidden = true;
   $("#agents-hint").hidden = true;
 }
 async function lookForAgents() {
@@ -1056,7 +1063,9 @@ async function lookForAgents() {
   // Loading: each row says so until the agents answer.
   const loading = (state.snapshot.agents_found || Object.keys(AGENTS)).map((name) => agentRow({ name, label: AGENTS[name] || name, found: true, state: "Checking…", problem: "", models: [] }, true));
   $("#agents-rows").replaceChildren(...loading);
+  $("#agents-roles").replaceChildren();
   $("#agents-choice").hidden = true;
+  $("#agents-places").hidden = true;
   $("#agents-hint").hidden = true;
   let found;
   try {
@@ -1074,7 +1083,21 @@ async function lookForAgents() {
   $("#agents-rows").replaceChildren(
     ...(found.agents.length ? found.agents.map((agent) => agentRow(found.sandboxed && agent.sandbox ? { ...agent, problem: agent.sandbox } : agent, false)) : [el("small", { class: "agents-none", role: "status", text: noAgentWords(found.supported) })]),
   );
+  $("#agents-roles").replaceChildren(...(found.roles || []).map(roleRow));
   newWorkersChoices(found.new_workers);
+}
+// Where one of Chief of Staff's own sessions runs ("The Router runs on"): shown only while an
+// agent it can run on is on, listing only those; under it, why it runs on Copilot for now.
+function roleRow(role) {
+  const lineId = `role-${role.role}-line`;
+  const select = el("select", { name: `role_${role.role}`, "data-chosen": role.chosen });
+  if (role.line) select.setAttribute("aria-describedby", lineId);
+  return el(
+    "div",
+    { class: "agents-role", "data-role": role.role, "data-agents": role.agents.join(" "), hidden: true },
+    el("label", { class: "agents-choice" }, el("span", { text: `${role.label} runs on` }), select),
+    role.line ? el("small", { id: lineId, class: "agents-role-line", role: "status", text: role.line }) : "",
+  );
 }
 // A token count as the page shows it (200,000), and as the owner types it: grouped or not, as
 // their locale groups digits; null when it is not a whole number of tokens.
@@ -1158,6 +1181,15 @@ function newWorkersChoices(chosen) {
   select.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...ready.map((agent) => el("option", { value: agent.name, text: agent.label })));
   select.value = ready.some((agent) => agent.name === chosen) ? chosen : "copilot";
   $("#agents-choice").hidden = !on.length;
+  for (const row of document.querySelectorAll("#agents-roles .agents-role")) {
+    const runs = on.filter((agent) => row.dataset.agents.split(" ").includes(agent.name));
+    const choice = row.querySelector("select");
+    const kept = choice.value || choice.dataset.chosen;
+    choice.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...runs.map((agent) => el("option", { value: agent.name, text: agent.label })));
+    choice.value = runs.some((agent) => agent.name === kept) ? kept : "copilot";
+    row.hidden = !runs.length;
+  }
+  $("#agents-places").hidden = !on.length;
   const hint = $("#agents-hint");
   hint.hidden = !on.length;
   if (on.length) hint.textContent = `For a single task, say \u201cdo this with ${on[0].label}\u201d or type ${on.map((agent) => `@${agent.name}`).join(" or ")}.`;
@@ -1180,6 +1212,13 @@ function agentsBody() {
     if (enabled !== Boolean(agent.enabled) || model !== (agent.model || "") || limit !== (agent.limit || 0)) body[agent.name] = { enabled, model, limit };
   }
   if (form.agent_new_workers.value !== agentsLooked.new_workers) body.new_workers = form.agent_new_workers.value;
+  const roles = {};
+  for (const row of document.querySelectorAll("#agents-roles .agents-role")) {
+    const choice = row.querySelector("select");
+    const value = row.hidden ? "copilot" : choice.value;
+    if (value !== choice.dataset.chosen) roles[row.dataset.role] = value;
+  }
+  if (Object.keys(roles).length) body.roles = roles;
   return Object.keys(body).length ? body : null;
 }
 // None of the coding agents it supports is on this computer (bug E80): which they are, and

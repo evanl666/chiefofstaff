@@ -5431,9 +5431,9 @@ async def main():
                           round_ten, round_scale, round_qa, round_eleven, round_twelve,
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
-                          round_send, round_agents, round_picker, round_qa6, round_qa7_life,
-                          round_qa8_report, round_layout, round_fresh_start, round_qa8_auth,
-                          round_qa8_approvals):  # fmt: skip
+                          round_send, round_agents, round_picker, round_roles, round_qa6,
+                          round_qa7_life, round_qa8_report, round_layout, round_fresh_start,
+                          round_qa8_auth, round_qa8_approvals):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -7611,8 +7611,8 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     looked = [json.loads(line) for line in claude_runs.read_text().splitlines()[claude_ran:]]
     assert looked == [["--version"], ["auth", "status", "--json"]], looked
     await expect(group.locator(".agents-intro")).to_have_text(
-        "Workers can also run on another coding agent you have installed and signed in to. The "
-        "Router, the Slack session, the Watchdog and Watch for you stay on Copilot. What differs"
+        "Workers, the Router and the Watchdog can also run on another coding agent you have "
+        "installed and signed in to. Slack and Watch for you stay on Copilot. What differs"
     )
     box = rows.locator("input[type=checkbox]")
     await expect(rows.locator(".agent-head strong")).to_have_text("Codex")
@@ -7644,7 +7644,8 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
         "For a single task, say \u201cdo this with Codex\u201d or type @codex."
     )
     first = await group.evaluate("g => [...g.children].find((c) => !c.hidden)?.id")
-    assert first == "agents-choice", f"the first line: {first}"
+    assert first == "agents-places", f"the first line: {first}"
+    await expect(group.locator("#agents-places > :not([hidden])").first).to_have_id("agents-choice")
     assert await group.locator("input[name=agent_router_chooses]").count() == 0
     for width in AGENT_WIDTHS:
         await shoot(page, "tab-enabling", scheme, width)
@@ -8316,6 +8317,140 @@ async def at_home(page):
     await page.evaluate("() => import('/static/session.js').then((m) => m.select('home'))")
     if await page.locator("#home-tabs").is_visible():
         await page.locator("#home-tabs [data-tab=chat]").click()
+
+
+ROLE_SHOTS = Path(os.environ.get("UI_ROLE_SHOTS") or SHOTS / "roles")
+ROLE_WIDTHS = (800, 1280)
+
+
+async def role_shoot(page, name: str, scheme: str, focus=None):
+    """The Coding agents tab (or what `focus` is) at each width, nothing overflowing."""
+    ROLE_SHOTS.mkdir(parents=True, exist_ok=True)
+    for width in ROLE_WIDTHS:
+        await page.set_viewport_size({"width": width, "height": 900})
+        await page.mouse.move(1, 1)
+        target = focus or page.locator("#settings-dialog")
+        await target.evaluate("n => n.scrollIntoView({block: 'center', inline: 'nearest'})")
+        await quiet_for(page)
+        found = await page.locator("#settings-dialog" if focus is None else "body").evaluate(
+            OVERFLOWS
+        )
+        assert not found, (name, width, found)
+        await page.screenshot(path=ROLE_SHOTS / f"{name}-{width}-{scheme}.png")
+    await page.set_viewport_size({"width": 1280, "height": 900})
+
+
+async def round_roles(runtime, browser, failures: list[str]):
+    """Where Chief of Staff's own sessions run (agent-roles.md): "The Router runs on" and "The
+    Watchdog runs on" under where new workers start, only once an agent that can run them is
+    on, listing only those; nothing for Slack nor Watch for you; the Router put on Codex says
+    so in its chat, whose header names Codex; Codex signed out, one line under its choice says
+    why it runs on Copilot for now."""
+    from chiefofstaff import agents
+
+    folder, _ = codex_on_path()
+    runtime.found_cache = (float("-inf"), [])
+    router = runtime.store.get("router_id")
+    try:
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            saved: list = []
+            page.on(
+                "request",
+                lambda r, saved=saved: (
+                    saved.append(r.post_data_json) if r.url.endswith("/api/settings") else None
+                ),
+            )
+            await page.locator("#settings-button").click()
+            await page.locator("#settings-tabs [data-tab=agents]").click()
+            group = page.locator("#settings-pane .tab[data-tab=agents]")
+            codex = group.locator(".agent-row[data-agent=codex]")
+            await expect(codex.locator("small[role=status]")).to_have_text(
+                "0.167.2 · signed in with ChatGPT", timeout=20000
+            )
+            await expect(group.locator("#agents-places")).to_be_hidden()  # None on.
+            await expect(group.locator(".agents-intro")).to_have_text(
+                "Workers, the Router and the Watchdog can also run on another coding agent you "
+                "have installed and signed in to. Slack and Watch for you stay on Copilot. What "
+                "differs"
+            )
+            await codex.locator("input[type=checkbox]").check()
+            places = group.locator("#agents-places")
+            await expect(places).to_be_visible()
+            shown = group.locator("#agents-roles .agents-role:not([hidden])")
+            await expect(shown.locator("label > span")).to_have_text(
+                ["The Router runs on", "The Watchdog runs on"]
+            )
+            assert "Slack runs on" not in await group.inner_text()
+            assert "Watch for you runs on" not in await group.inner_text()
+            choose = group.locator("select[name=role_router]")
+            await expect(choose.locator("option")).to_have_text(["Copilot", "Codex"])
+            await expect(choose).to_have_value("copilot")
+            await role_shoot(page, "roles-codex-on", scheme)
+            # Unchecked again: the role lines go with it.
+            await codex.locator("input[type=checkbox]").uncheck()
+            await expect(places).to_be_hidden()
+            await codex.locator("input[type=checkbox]").check()
+            await choose.select_option("codex")
+            # (At rest: the stand-in Copilot ends no turn by itself; a turn would be finished
+            # first.)
+            if (handle := runtime.states.handle(router)) is not None:
+                handle.emit("session.idle")
+                await settle(runtime)
+            mark = max((m["id"] for m in runtime.store.messages(router)), default=0)
+            await page.locator("#settings-form footer button[type=submit]").click()
+            await expect(page.locator("#settings-dialog")).to_be_hidden()
+            assert saved[-1]["agents"] == {
+                "codex": {"enabled": True, "model": "", "limit": 0},
+                "roles": {"router": "codex"},
+            }, saved[-1].get("agents")
+            await until(lambda: runtime.agent(router) == "codex", 30)
+            # Its chat on Home: one line says it; its ⋯ menu lists Codex's models.
+            said = "The Router runs on Codex now, with a summary of what it knew."
+            notices = [
+                m["text"]
+                for m in runtime.store.messages(router)
+                if m["kind"] == "notice" and m["id"] > mark
+            ]
+            assert notices == [said], notices
+            line = page.locator("#timeline").get_by_text(said, exact=True).last
+            await expect(line).to_be_visible(timeout=10000)
+            await page.locator("#session-more-button").click()
+            await expect(page.locator("#session-model option")).to_have_text(
+                ["Default · GPT-TEST", "GPT-TEST", "GPT-MINI"], timeout=10000
+            )
+            await role_shoot(page, "roles-router-chat", scheme, line)
+            await page.keyboard.press("Escape")
+            # Signed out: on Copilot for now, the line under its choice says why.
+            os.environ["FAKE_CODEX_SIGNED_OUT"] = "1"
+            try:
+                await agents_saved(runtime, {"codex": {"enabled": False}})
+                runtime.found_cache = (float("-inf"), [])
+                await agents_saved(
+                    runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"}}
+                )
+                assert runtime.agent(router) == "copilot"
+                await page.locator("#settings-button").click()
+                await page.locator("#settings-tabs [data-tab=agents]").click()
+                why = group.locator("#role-router-line")
+                await expect(why).to_have_text(
+                    "On Copilot for now: Codex is not signed in: run codex login in a terminal.",
+                    timeout=20000,
+                )
+                await expect(choose).to_have_attribute("aria-describedby", "role-router-line")
+                await expect(choose).to_have_value("codex")
+                await role_shoot(page, "roles-fallback", scheme)
+            finally:
+                os.environ.pop("FAKE_CODEX_SIGNED_OUT", None)
+            await agents_saved(runtime, {"codex": {"enabled": False}})
+            assert agents.role_agent(runtime.store, "router") == "copilot"
+            assert not errors, errors
+            await context.close()
+        log("roles: the Router and the Watchdog's lines once Codex is on; on Codex; on Copilot "
+            "for now, saying why")  # fmt: skip
+    finally:
+        await agents_saved(runtime, {"codex": {"enabled": False}})
+        codex_off_path(folder)
 
 
 async def round_picker(runtime, browser, failures: list[str]):
