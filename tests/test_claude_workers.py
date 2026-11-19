@@ -1176,10 +1176,13 @@ async def test_a_claude_workers_worktrees_go_with_its_checkouts_when_it_closes(
         await until(lambda: harness.store.session(worker)["status"] == "done", 30)
         await call_tool(runtime, "close_worker", harness.router_id, session_id=worker)
         await until(lambda: not tree.exists() and not cwd.exists(), 30)
-        listed = (await asyncio.to_thread(
-            subprocess.run, ["git", "worktree", "list"], cwd=app, capture_output=True, text=True,
-            check=True,
-        )).stdout  # fmt: skip
-        assert "feat" not in listed and str(cwd) not in listed
+
+        def listed() -> str:
+            return subprocess.run(
+                ["git", "worktree", "list"], cwd=app, capture_output=True, text=True, check=True
+            ).stdout
+
+        # Out of its place first, then deleted, and git told (0.1.46's removal, in the trash).
+        await until(lambda: "feat" not in listed() and str(cwd) not in listed(), 30)
     finally:
         await runtime.stop()
