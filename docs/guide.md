@@ -1213,8 +1213,9 @@ limit per worker stops runaway workers.
 
 Your workers can also run on [Codex](https://developers.openai.com/codex/cli), OpenAI's coding
 agent, or on [Claude Code](https://docs.claude.com/en/docs/claude-code), Anthropic's, each with
-your own sign-in. The Router, the Slack session, the Watchdog, *Watch for you* and Chief of
-Staff's own helpers stay on Copilot. With neither installed, nothing of this shows anywhere.
+your own sign-in, and so can the Router and the Watchdog. The Slack session, *Watch for you* and
+Chief of Staff's own helpers stay on Copilot. With neither installed, nothing of this shows
+anywhere.
 
 **Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once per
 agent: *Codex is ready. Allow workers to use it?* *Allow* makes it available to workers (new
@@ -1242,6 +1243,25 @@ says so beside its name in the sidebar, and with its model in its header.
   on at* that time (it goes on by itself then, unless you or another worker have told it
   something since), *Go on* once it has, or *Continue with* another agent from the task's **⋯**.
   Nothing switches by itself.
+
+**The Router and the Watchdog on another agent.** Once Codex or Claude is available, the same
+tab has *The Router runs on* and *The Watchdog runs on* (Copilot by default). Put on Codex or
+Claude, each runs there with nothing but its own tools, as on Copilot: none of the agent's
+commands, files, web search, subagents, hooks or MCP servers. The switch needs nothing from you:
+a fresh session on that agent takes over (the Router's with a summary of what it knew: your
+open work, cards, decisions and your conversation), your chat stays one, and one line in it says
+so ("The Router runs on Codex now, with a summary of what it knew."). Its **⋯** then lists that
+agent's models; it uses the *Model* of the agent's row unless you pick one there. Its spend is
+tokens on that agent (in *Usage*), with no limit per worker. If the agent can't run it (signed
+out, not installed, a plan's limit reached, its process stopped), it goes on on Copilot by itself,
+with what it was answering, says why in one line ("The Router runs on Copilot for now: Codex is
+not signed in: …", also under its choice in Settings), and goes back by itself once the agent can
+(once the limit resets; within a couple of minutes of signing in again). The agent compacts a long
+conversation itself, where on Copilot the Router moves to a fresh session with a summary. The
+Slack session and *Watch for you* read your messages as you: they stay on Copilot (Watch for you
+runs commands, which only Copilot's and Claude's sandboxes hold, and what reads Slack doesn't run
+on Claude yet). Turning an agent off puts them back on Copilot; so does
+`chiefofstaff --prepare-downgrade`.
 
 **Continue with another agent.** An idle worker's **⋯** has *Continue with Claude…* (or another
 agent on), and you can ask the Router ("hand this to Claude"): a new worker on that agent goes

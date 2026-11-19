@@ -4,7 +4,7 @@
 
 Workers can run on Claude Code too, with your own sign-in; choosing an agent is simpler (a card
 when one is ready, `@codex` and `@claude` in the message box, a *Coding agents* tab); workers on
-Codex and Claude can do what Copilot workers can.
+Codex and Claude can do what Copilot workers can; the Router and the Watchdog can run on them too.
 
 - **Workers on Claude Code.** If you also use
   [Claude Code](https://docs.claude.com/en/docs/claude-code), workers can run on it, with whatever your `claude` is signed in with (a Claude plan, an API
@@ -38,6 +38,13 @@ Codex and Claude can do what Copilot workers can.
   Copilot; your settings keep their meaning. Type `@codex`, `@claude` or `@copilot` (or say
   "do this with Codex") to run one task there. While another agent is on, every worker's row
   and header names its agent (Copilot too) and model.
+- **The Router and the Watchdog on Codex or Claude.** Settings → *Coding agents* has *The Router
+  runs on* and *The Watchdog runs on* once another agent is on. Each runs there with nothing but
+  its own tools; switching needs nothing from you (a fresh session takes over, the Router's with
+  a summary of what it knew; one line in its chat says so). While the agent can't run it (signed
+  out, a plan's limit, not installed), it runs on Copilot, says why in one line, and goes back by
+  itself once it can. The Slack session and *Watch for you* stay on Copilot. See
+  [Workers on other coding agents](docs/guide.md#workers-on-other-coding-agents).
 - **When an agent can't run:** a task you put on it is not moved elsewhere: the Router's card
   offers sign-in help, waiting, or running it on Copilot. A worker whose plan's usage limit (or
   a rate limit) is reached mid-task pauses under *Needs you* with when it resets (*Go on at*
