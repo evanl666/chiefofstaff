@@ -1220,32 +1220,53 @@ anywhere.
 **Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once per
 agent: *Codex is ready. Allow workers to use it?* *Allow* makes it available to workers (new
 workers stay on Copilot); *Not now* leaves it off and is not asked again. Settings → *Coding
-agents* (a tab that shows once one is installed) has a row per agent: its version and how it is
-signed in ("0.167.2 · signed in with ChatGPT"), how much of its plan's limits is used, and
-*Available for workers*; while it is available, the *Model* its workers use (empty: the agent's
-default) and a *Limit per worker* in tokens (empty: none). Once one is available, the first line
-is *New workers start on* (Copilot by default; it lists each agent that is available and can
-run, and picking one makes it available). A worker keeps the agent it started on.
+agents* (a tab that shows once one is installed) has a row per agent: its status and whose plan
+or key it uses ("Ready · Uses your ChatGPT sign-in"; its version on hover), how much of its
+plan's limits is used, and *Available for workers*, which turns on only once it is ready: signed
+out or not installed, its row says so with the command that fixes it, to run in a terminal
+(`codex login`; `claude`, then `/login`; Chief of Staff never signs in for you) and a *Copy*
+button. While it is available: the *Model* its workers use (empty: the agent's default) and a
+*Limit per worker* in tokens (empty: none). Once one is available, the first line is *New workers
+start on*: Copilot by default, each agent that is available and can run (picking one makes it
+available), or *Last used* (the agent you last chose for a worker). A worker keeps the agent it
+started on.
 
-**Choosing it for one task.** Type `@codex`, `@claude` or `@copilot` in Home's message box: the
-agent becomes a chip above it ("On Codex", × removes it), and the Router starts that work there.
-Saying so works too ("do this with Claude"). The chip wins over the Router's own choice. A
-worker keeps its agent: one on Codex or Claude
-says so beside its name in the sidebar, and with its model in its header.
+**Choosing it for one task.** Type `@` in Home's message box: it lists every agent first, each
+with its status (*Ready*, *Sign-in needed*, *Not installed*; one not ready is dimmed, with the
+command that makes it ready and *Copy*), then your workers. The agent you pick becomes a chip
+above the box ("On Codex", × removes it), and the Router starts that work there; click the chip
+to pick another agent, or that agent's model and effort, with whose plan it uses under them.
+Saying so works too ("do this with Claude"). The chip wins over the Router's own choice.
+While more than one agent is on, each worker shows its agent's mark (a small diamond of its
+colour, its model on hover) on its sidebar row, its tasks and its header, and on the line that
+says it started in your chat.
+
+**Comparing two agents.** Pick two agents (`@codex`, then `@claude`: "Compare on Codex and
+Claude"), or say "do this with Codex and Claude": the same task runs on each, a worker each in a
+worktree of its own, grouped in the sidebar under one row ("Compare: … (2)"); the Router gives
+you both results side by side once both have reported.
+
+**Starting over on another agent.** Until a worker has done anything (no step yet), its line in
+your chat and its header show its agent as a chip: *Restart on Claude* (or another agent that can
+run it) starts the same task there at once, with the first worker closed; its header's chip also
+picks that agent's model and effort. Once it has begun, *Continue with…* is what moves it.
 
 **When it can't run.**
 
-- An agent you named that cannot run (signed out, too old, turned off): the Router says why and
-  nothing starts elsewhere; its card offers *Sign-in help*, *Wait* or *Run on Copilot instead*.
+- An agent you named that cannot run (signed out, too old, turned off): one line in your chat
+  says why, with the command that makes it ready (and *Copy*), and nothing starts elsewhere; its
+  card offers *Wait*, or *Run on Copilot instead* (on the agent new workers start on, where that
+  is another that can run it).
 - The agent new workers use cannot run: they start on Copilot, and their name says why.
 - A plan's usage limit, or a rate limit the agent gave up on, reached in the middle of a task:
   the worker pauses under *Needs you*, saying when the limit resets when the agent says it. *Go
   on at* that time (it goes on by itself then, unless you or another worker have told it
-  something since), *Go on* once it has, or *Continue with* another agent from the task's **⋯**.
-  Nothing switches by itself.
+  something since), *Go on* once it has, or *Continue with* the other agent (a menu of them,
+  where there are several). Nothing switches by itself.
 
 **The Router and the Watchdog on another agent.** Once Codex or Claude is available, the same
-tab has *The Router runs on* and *The Watchdog runs on* (Copilot by default). Put on Codex or
+tab has *System agents*, folded: *The Router runs on* and *The Watchdog runs on* (Copilot by
+default; its line names any that runs elsewhere). Put on Codex or
 Claude, each runs there with nothing but its own tools, as on Copilot: none of the agent's
 commands, files, web search, subagents, hooks or MCP servers. The switch needs nothing from you:
 a fresh session on that agent takes over (the Router's with a summary of what it knew: your
@@ -1264,10 +1285,13 @@ on Claude yet). Turning an agent off puts them back on Copilot; so does
 `chiefofstaff --prepare-downgrade`.
 
 **Continue with another agent.** An idle worker's **⋯** has *Continue with Claude…* (or another
-agent on), and you can ask the Router ("hand this to Claude"): a new worker on that agent goes
-on from a summary of this one's work (its task, reports, last messages, and each folder's branch
-and uncommitted changes), in the same folders, and this one closes.
-Its checkouts are handed over, so two workers never write the same one.
+agent on), and you can ask the Router ("hand this to Claude"). A dialog says in one line what
+goes ("Sends a summary (180 words) and its changes (3 files, +40 −12) to a new Claude worker in a
+copy of its worktree; this one stays open."), then a new worker on that agent goes on from that
+summary (its task, reports, last messages, and each folder's branch and uncommitted changes) in a
+copy of its worktree: the same commit, its uncommitted changes and new files. This one stays
+open, as it was. One that works in your own folder (in place) hands that folder over and closes,
+so two workers never write the same one.
 
 **Usage.** Each agent's row says how much of its plan's limits is used and when they reset,
 where the agent says it (Codex reads its own rate limits; Claude's come from what its workers
