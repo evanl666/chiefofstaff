@@ -14,6 +14,8 @@
 - Home's *Where is your code?* card (and a focus summary) has room of its own above the
   Router's chat: the chat's first lines no longer run on under its edge, cut as if hidden by it;
   lines scrolled up fade out there.
+- In the Router's chat, a message of yours to one worker has its *→ worker* line above its text,
+  no longer over its first line's top.
 - **In a folder of yours, a file a worker only read is not its change** (live N): when you edited
   a file while a worker's command that read it was still running (`cat notes.py; sleep 40`), your
   edit showed in the worker's changes and receipts. A program that only reads what it names

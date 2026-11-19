@@ -5147,15 +5147,22 @@ async def main():
 
 
 async def round_layout(runtime, browser, failures: list[str]):
-    """0.1.48 (worker-fork's QA): Home's "Where is your code?" card lay over the top of the
-    Router's timeline, hiding its first lines. At 800 and 1280 px, light and dark: the card
-    takes room of its own above the timeline."""
+    """0.1.48's two overlaps (worker-fork's QA): Home's "Where is your code?" card lay over the
+    top of the Router's timeline, hiding its first lines; and in the Router's chat, an owner's
+    message to a worker had its "→ worker" line over its text ("Go on where you stopped."). At
+    800 and 1280 px, light and dark: the card takes room of its own above the timeline, and the
+    line stands above the text."""
     store = runtime.store
     router = store.get("router_id")
     before = store.settings()
     store.save_settings(before.model_copy(update={"projects": [], "code_folder": ""}))
+    spawned = await call_tool(runtime, "spawn_worker", router, title="Pick up the importer",
+                              instructions="Pick it up", why_new="test")  # fmt: skip
+    worker = json.loads(spawned.text_result_for_llm)["session_id"]
+    await settle(runtime)
     for number in range(24):
         runtime.add_message(router, "notice", f"Closed “Keep the old notes {number}”")
+    runtime.owner_told(store.session(worker), "Go on where you stopped.")
     await settle(runtime)
     runtime.publish_state()
     shots = SHOTS / "0149"
@@ -5186,11 +5193,20 @@ async def round_layout(runtime, browser, failures: list[str]):
                 faded = await timeline.evaluate("node => getComputedStyle(node).maskImage")
                 if top["y"] - (held["y"] + held["height"]) < 8 or "gradient" not in faded:
                     problems.append(f"{width} {scheme}: the timeline under the card {held} {top}")
+                message = page.locator("#timeline .msg.owner", has_text="Go on where you stopped.")
+                await message.scroll_into_view_if_needed()
+                to, text = message.locator(".to"), message.locator(".text")
+                await expect(to).to_have_text("→ Pick up the importer")
+                above, below = await to.bounding_box(), await text.bounding_box()
+                assert above and below
+                await message.screenshot(path=shots / f"to-line-{width}-{scheme}.png")
+                if above["y"] + above["height"] > below["y"] + 0.5:
+                    problems.append(f"{width} {scheme}: the → line over the text {above} {below}")
                 await context.close()
     finally:
         store.save_settings(before)
     assert not problems, problems
-    log("0.1.49: the code folder's card above the timeline")
+    log("0.1.49: the code folder's card above the timeline, the → line above its message")
 
 
 async def round_storage(runtime, browser, failures: list[str]):

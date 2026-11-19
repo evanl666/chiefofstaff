@@ -336,6 +336,8 @@ def gallery(runtime, seeded: dict) -> list[dict]:
         ("The staging deploy is down: Ann is blocked on you today.", True),
     ]:  # fmt: skip
         runtime.add_message(router, "update", text, {"needs_action": not urgent, "urgent": urgent})
+    # A message of the owner's to one worker, as Home shows it: its "→ worker" line above it.
+    runtime.owner_told(store.session(compare), "Go on where you stopped.")
     return drafts
 
 
