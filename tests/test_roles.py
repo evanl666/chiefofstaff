@@ -479,3 +479,25 @@ async def test_watch_for_you_scans_on_claude_once_claude_reads_slack(
         assert harness.session(row["id"]).sent, "a fresh run on Copilot"
     finally:
         await runtime.stop()
+
+
+async def test_signed_in_again_the_router_goes_back_without_waiting_out_its_retry(
+    tmp_path, codex_log, monkeypatch
+):
+    monkeypatch.setattr(runtime_module, "ROLE_GLANCE", 0.0)
+    harness, runtime = await started(tmp_path)
+    router = harness.router_id
+    try:
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        await saved(runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"}})
+        assert runtime.agent(router) == "copilot"
+        held = runtime.role_held(ROUTER)
+        assert held["kind"] == "start" and held["until"] > time.time() + 200
+        await runtime.roles_check()
+        assert runtime.agent(router) == "copilot", "a glance: still signed out"
+        monkeypatch.delenv("FAKE_CODEX_SIGNED_OUT")
+        await runtime.roles_check()
+        assert runtime.agent(router) == "codex", "signed in: back at once"
+        assert runtime.role_held(ROUTER) == {}
+    finally:
+        await runtime.stop()

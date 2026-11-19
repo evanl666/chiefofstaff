@@ -355,6 +355,9 @@ PLACED_ROLES = (ROUTER, WATCHDOG)
 ROLE_RETRY = float(os.environ.get("CHIEFOFSTAFF_ROLE_RETRY", "300"))
 ROLE_RETRY_MOST = 3600.0
 ROLE_LIMIT_WAIT = 1800.0
+# Meanwhile, an agent that could not start (signed out, not installed) is glanced at this often
+# (its CLI's version and sign-in, as for a first-run card): signed in again, it is tried at once.
+ROLE_GLANCE = float(os.environ.get("CHIEFOFSTAFF_ROLE_GLANCE", "60"))
 # What an agent says when it is not signed in any more (Codex's and Claude's words).
 SIGNED_OUT = re.compile(
     r"\b401\b|unauthori[sz]ed|not (?:signed|logged) in|invalid api key|please run /login"
@@ -690,6 +693,7 @@ class Runtime:
         # One placement of each of Chief of Staff's own sessions at a time (place_role), and
         # the agent each was put on as last saved (agents_saved: a new choice is tried at once).
         self.role_locks: dict[str, asyncio.Lock] = {}
+        self.role_glanced: dict[str, float] = {}
         self.roles_seen: dict[str, str] = agents.roles(store) if self.agents else {}
         # Workers whose dropped schedules are being deleted in Claude now.
         self.deleting_schedules: set[str] = set()
@@ -1870,7 +1874,7 @@ class Runtime:
             except Exception:
                 logger.warning("Could not place the %s.", role, exc_info=True)
 
-    def role_failed(self, row: dict, why: str, until: float = 0.0) -> bool:
+    def role_failed(self, row: dict, why: str, until: float = 0.0, kind: str = "lost") -> bool:
         """A role's turn on its agent failed for what keeps that agent from running it (its
         plan's limit, its sign-in, its process): it goes on on Copilot, given again what that
         turn was given, and back once the agent can run it (roles_check). False for any other
@@ -1878,7 +1882,7 @@ class Runtime:
         role, agent = self.role_key(row), self.agent(row["id"])
         if role not in PLACED_ROLES or agent == COPILOT_AGENT:
             return False
-        self.hold_role(role, agent, why, until)
+        self.hold_role(role, agent, why, until, kind)
         self.states[row["id"]].busy = False
         row = self.store.session(row["id"])
         if row["status"] == "working":
@@ -1889,9 +1893,11 @@ class Runtime:
         self.background(self.place_role(role))
         return True
 
-    def hold_role(self, role: str, agent: str, why: str, until: float = 0.0):
+    def hold_role(self, role: str, agent: str, why: str, until: float = 0.0, kind: str = "start"):
         """A role's agent failed it: it is tried again after `until`, else after a wait that
-        doubles with each failure in a row (up to ROLE_RETRY_MOST; afresh after that long)."""
+        doubles with each failure in a row (up to ROLE_RETRY_MOST; afresh after that long).
+        `kind`: "start" (it could not start: signed out, not installed; glanced at meanwhile),
+        "limit" (its plan's), "lost" (its process, its session)."""
         held = self.role_held(role)
         tries = 1
         if held.get("agent") == agent and time.time() - float(held.get("until") or 0) < (
@@ -1899,7 +1905,13 @@ class Runtime:
         ):
             tries = int(held.get("tries") or 0) + 1
         wait = min(ROLE_RETRY * 2 ** (tries - 1), ROLE_RETRY_MOST)
-        record = {"agent": agent, "why": why, "until": until or time.time() + wait, "tries": tries}
+        record = {
+            "agent": agent,
+            "why": why,
+            "until": until or time.time() + wait,
+            "tries": tries,
+            "kind": kind,
+        }
         self.store.set(f"roleheld:{role}", json.dumps(record))
 
     def role_turn_failed(self, row: dict, message: str, kind: str, limit: Any) -> bool:
@@ -1912,9 +1924,10 @@ class Runtime:
             line = agents.limit_line(limit, name=agent) or (
                 f"{agents.display(agent)} refused it for a limit of its plan or account."
             )
-            return self.role_failed(row, line, until or time.time() + ROLE_LIMIT_WAIT)
+            return self.role_failed(row, line, until or time.time() + ROLE_LIMIT_WAIT, "limit")
         if SIGNED_OUT.search(message):
-            return self.role_failed(row, f"{agents.display(agent)} is signed out: {message[:200]}")
+            why = f"{agents.display(agent)} is signed out: {message[:200]}"
+            return self.role_failed(row, why, kind="start")
         return False
 
     async def roles_check(self):
@@ -1927,18 +1940,30 @@ class Runtime:
             row = self.role_row(role)
             if wanted == COPILOT_AGENT or row is None or self.agent(row["id"]) == wanted:
                 continue
-            held = self.role_held(role)
-            if held.get("agent") == wanted and time.time() < float(held.get("until") or 0):
-                continue
             if agents.role_refusal(role, wanted) or not (entry := self.agents.get(wanted)):
                 continue
             if not entry.enabled():
                 continue
+            held = self.role_held(role)
+            if held.get("agent") == wanted and time.time() < float(held.get("until") or 0):
+                # Its wait goes on; one that could not start is glanced at meanwhile (signed in
+                # again, installed: tried at once).
+                if held.get("kind", "start") != "start":
+                    continue
+                if time.monotonic() - self.role_glanced.get(role, float("-inf")) < ROLE_GLANCE:
+                    continue
+                self.role_glanced[role] = time.monotonic()
+                try:
+                    await agents.glance(wanted, self.agent_folder(wanted))
+                except Exception as exc:
+                    logger.debug("%s still can't run the %s: %s", wanted, role, describe(exc))
+                    continue
             try:
                 await self.connect_agent(wanted)
             except Exception as exc:
                 self.hold_role(role, wanted, self.agent_start_failed(wanted, exc))
                 continue
+            self.store.delete(f"roleheld:{role}")  # It runs: tried now.
             self.agent_failed.pop(wanted, None)
             entry.offline = False
             try:
