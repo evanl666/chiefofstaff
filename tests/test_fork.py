@@ -319,6 +319,18 @@ async def test_a_fork_never_reaches_a_copilot_that_could_not_start(tmp_path, mon
     assert calls == []
 
 
+def test_parallel_work_for_a_worker_in_a_turn_but_not_busy_gets_a_worker_of_its_own():
+    """Live routing (f3): told that a busy related worker is still the one to message, the
+    Router gave work the owner wanted in parallel to a worker in a turn whose load did not say
+    busy, and it waited behind that turn. Busy is what the load says."""
+    rule = " ".join(prompts.FORK_RULE.split())
+    assert "A related worker whose load says busy is still the one to give the work to" in rule
+    assert (
+        "One in a turn whose load does not say busy takes a new task after that turn: work that "
+        "must run in parallel with what it is doing now gets its own worker (spawn_worker)"
+    ) in rule
+
+
 @pytest.mark.parametrize(
     ("kinds", "cut"),
     [
