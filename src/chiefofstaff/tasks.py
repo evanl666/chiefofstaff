@@ -59,9 +59,13 @@ HELPERS = " UNION ".join(
 
 
 class TaskBook:
-    def __init__(self, store: Store, on_change: Callable[[dict], None] = lambda task: None):
+    def __init__(
+        self, store: Store, on_change: Callable[[dict, str | None], None] = lambda task, was: None
+    ):
         self.store = store
-        self.on_change = on_change  # Called with every created or changed task.
+        # Called with every created or changed task, and the status it had when this change
+        # set its status (else None).
+        self.on_change = on_change
         # Whether an accepted task still has something followed up for it (a PR waiting for
         # its review, a run under way): set by TaskActions, see its `monitoring`.
         self.monitored: Callable[[dict], bool] = lambda task: False
@@ -221,20 +225,25 @@ class TaskBook:
         if status == "running":
             self.start_run(identifier, "start")
         task = self.get(identifier)
-        self.on_change(task)
+        self.on_change(task, None)
         return task
 
     def update(self, task_id: str, **values: Any) -> dict:
         if not values.keys() <= TASK_FIELDS:
             raise ValueError(f"Invalid task fields: {sorted(values.keys() - TASK_FIELDS)}")
         values["updated_at"] = now()
+        was = (
+            self.store.value("SELECT status FROM tasks WHERE id=?", (task_id,))
+            if "status" in values
+            else None
+        )
         columns = ",".join(f"{key}=?" for key in values)
         self.store.execute(
             f"UPDATE tasks SET {columns} WHERE id=?",  # noqa: S608  (names checked above)
             (*values.values(), task_id),
         )
         task = self.get(task_id)
-        self.on_change(task)
+        self.on_change(task, was)
         return task
 
     def start_run(self, task_id: str, reason: str) -> dict:
