@@ -2656,16 +2656,30 @@ class Runtime:
     async def apply_cache_env(self, row: dict, session: Any):
         """A sandboxed worker's shell gets its tools pointed at its caches: an init script
         Copilot sources before each of its commands (set at every open, created or resumed)."""
+        path = await self.cache_script(row)
+        try:
+            if path is not None and not await shell_init(session, [str(path)]):
+                logger.warning("Worker %s's tools could not be given their caches", row["id"])
+        except Exception:
+            logger.warning("Worker %s's tools could not be given their caches", row["id"],
+                           exc_info=True)  # fmt: skip
+
+    async def cache_script(self, row: dict) -> Path | None:
+        """A sandboxed worker's init script, which points its tools at its caches (made at every
+        open; its temporary folder and links first): its path, None when it could not be made.
+        Workers' caches are filled from the owner's soon after."""
         found = self.cache_plan(row)
+        path = None
         try:
             path = await asyncio.to_thread(caches.prepare, found, row["id"], self.cache_scripts)
-            if path is None or not await shell_init(session, [str(path)]):
+            if path is None:
                 logger.warning("Worker %s's tools could not be given their caches", row["id"])
         except Exception:
             logger.warning("Worker %s's tools could not be given their caches", row["id"],
                            exc_info=True)  # fmt: skip
         if not row["slack"]:
             self.seed_caches_soon()
+        return path
 
     def seed_caches_soon(self):
         """Fill workers' caches from the owner's, in the background (at most every
@@ -4631,6 +4645,15 @@ class Runtime:
                     raise SettingsChangedError(line)
                 await self.ready_caches(row)
             options, trusted = self.agent_options(row), {}
+            if (
+                agent == "claude"
+                and row["role"] == WORKER
+                and options.get("sandbox")
+                and (script := await self.cache_script(row))
+            ):
+                # Its commands' caches, as a Copilot worker's: the same init script, which
+                # Claude sources before each command (CLAUDE_ENV_FILE).
+                options["env_file"] = str(script)
             # Slack's read tools in this process: its token never reaches Claude's.
             if row["slack"] and agent == "claude" and (proxy := await self.slack.read_proxy()):
                 options["slack_proxy"] = proxy

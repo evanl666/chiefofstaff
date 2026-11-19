@@ -18,8 +18,8 @@ Codex and Claude can do what Copilot workers can.
   holds what a worker scheduled, and *Cancel* deletes it in Claude too; in plan mode it writes
   only its plan until that is approved; another session's message is marked unverified); Claude's
   own settings in a worker's folder (`.claude/settings.json`, `.mcp.json`, subagents, the
-  scripts their hooks run) are held as Copilot's are, with *Use these settings* when they change;
-  its auto memory is off in workers; its spend is counted in tokens as it goes. Workers that read
+  scripts their hooks run) are held as Copilot's are, with *Use these settings* when they change,
+  and a sandboxed worker's commands use workers' own caches; its auto memory is off in workers; its spend is counted in tokens as it goes. Workers that read
   Slack stay on Copilot for now, and a sandboxed Claude worker doesn't start where your Claude
   settings would widen its sandbox. On a Claude plan, Claude workers count against your plan's
   usage limits, under Anthropic's terms. See

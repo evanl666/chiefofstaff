@@ -1348,7 +1348,8 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   [Where workers work](#where-workers-work)): one that changed keeps the worker waiting, with
   "Claude settings in this folder changed (added .mcp.json); Chief of Staff won't start the
   worker there until you say to use them." and **Use these settings**; an MCP server whose files
-  changed is off for it instead. Another Claude session's message is shown
+  changed is off for it instead. A sandboxed worker's commands use
+  workers' own caches, as a Copilot worker's do. Another Claude session's message is shown
   labelled with the name it gives itself, unverified (any program of yours could send it), never
   as yours, and can approve nothing; a message to a session that isn't one of your workers asks
   you each time. In plan mode the worker reads and writes only its plan, and removes no

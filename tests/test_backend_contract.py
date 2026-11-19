@@ -614,6 +614,30 @@ async def test_claudes_sandbox_holds_the_settings_chief_of_staffs_policy_holds(b
     )
 
 
+async def test_claude_sources_a_workers_env_file_before_each_sandboxed_command(backend, tmp_path):
+    """A sandboxed worker's caches: its init script, which Claude (2.1.322) sources before each
+    of its commands when CLAUDE_ENV_FILE names it (Runtime.cache_script), in its sandbox."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    if not sandbox_supported():
+        pytest.skip("Claude's sandbox does not run on this machine.")
+    folder, scripts = tmp_path / "work", tmp_path / "scripts"
+    folder.mkdir()
+    scripts.mkdir()
+    script = scripts / "init.sh"
+    script.write_text(f"export npm_config_cache={tmp_path / 'tier' / 'npm'}\n")
+    session, turn = await open_session(
+        backend, folder, sandbox=SandboxPolicy(readwrite=(str(folder),)), env_file=str(script)
+    )
+    for word in ("first", "second"):
+        await session.send(
+            f"Run the shell command `echo $npm_config_cache > {word}.txt` and then reply with "
+            f"just: {word}"
+        )
+        await turn.wait()
+        assert (folder / f"{word}.txt").read_text() == f"{tmp_path / 'tier' / 'npm'}\n", word
+
+
 async def test_claude_starts_no_project_mcp_server_chief_of_staff_turned_off(backend, tmp_path):
     """A server its folder's settings run that changed since the owner last let workers use it
     (Runtime.servers_off): Claude (2.1.322) does not start it when its flag settings name it in
