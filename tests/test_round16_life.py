@@ -584,3 +584,34 @@ async def test_a_worker_stopped_mid_turn_for_its_settings_offers_them_not_go_on(
         "Go on would wait for the same word: the card asks for it"
     )
     assert needs(runtime).markers.get(fix["id"]) == "settings"
+
+
+# E90/E91: an action's reply is the task (or worker) as it is once the action is done.
+
+
+def test_an_actions_reply_is_how_things_are_once_it_is_done(app_client, monkeypatch):  # noqa: F811
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+    result = app_client.portal.call(
+        lambda: call_tool(
+            runtime, "spawn_worker", router, title="Docs", instructions="Docs", why_new="test"
+        )
+    )
+    spawned = json.loads(result.text_result_for_llm)
+    task_id, worker = spawned["task_id"], spawned["session_id"]
+    app_client.portal.call(
+        lambda: call_tool(runtime, "report", worker, status="failed", summary="No access.")
+    )
+    retry = runtime.task_actions.retry
+
+    async def failing_again(task_id, text=""):  # Its turn fails as the Retry reaches it.
+        moved = await retry(task_id, text)
+        runtime.tasks.move(task_id, "failed", progress="Failed again.")
+        return moved
+
+    monkeypatch.setattr(runtime.task_actions, "retry", failing_again)
+    shown = app_client.post(f"/api/tasks/{task_id}/retry", json={"text": ""}, headers=ORIGIN)
+    assert shown.json()["status"] == "failed", "not the running it was moved to on the way"
+    closed = app_client.post(f"/api/sessions/{worker}/close", headers=ORIGIN).json()
+    assert closed["ok"] and closed["id"] == worker and closed["closed_at"], "the worker as it is"

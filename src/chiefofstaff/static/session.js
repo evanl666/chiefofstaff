@@ -130,7 +130,8 @@ export function renderHeader() {
     items.push(el("label", {}, el("span", { text: "Permission checks" }), checks, reason));
   }
   if (session.role === "worker" && session.cwd) {
-    const open = (app) => api(`/api/sessions/${session.id}/open`, { method: "POST", body: { app } }).catch((error) => toast(error.message, "error"));
+    const where = { finder: /Windows/.test(navigator.userAgent) ? "File Explorer" : "Finder", vscode: "VS Code" };
+    const open = (app) => api(`/api/sessions/${session.id}/open`, { method: "POST", body: { app } }).then(() => toast(`Opened in ${where[app]}.`), (error) => toast(error.message, "error"));
     items.push(
       el("hr"),
       menuButton(/Windows/.test(navigator.userAgent) ? "Open in File Explorer" : "Open in Finder", () => open("finder")),
@@ -141,11 +142,12 @@ export function renderHeader() {
   if (session.role === "worker" && !session.closed_at) {
     items.push(
       el("hr"),
-      session.status === "working" ? menuButton("Stop what it is doing", () => post(`/api/sessions/${session.id}/stop`)) : "",
+      session.status === "working" ? menuButton("Stop what it is doing", () => post(`/api/sessions/${session.id}/stop`, "Stopped.")) : "",
       menuButton(
         "Close worker",
         () => {
-          if (session.status !== "working" || confirm("This worker is still working. Close it?")) post(`/api/sessions/${session.id}/close`);
+          // Undone within the toast's time: reopened with what closing cancelled.
+          if (session.status !== "working" || confirm("This worker is still working. Close it?")) post(`/api/sessions/${session.id}/close`, "Worker closed.", { text: "Undo", onclick: () => reopen(session.id) });
         },
         "danger",
       ),
@@ -314,13 +316,18 @@ async function agentModels(session) {
 async function reopen(sessionId) {
   try {
     upsertSession(await api(`/api/sessions/${sessionId}/reopen`, { method: "POST" }));
+    toast("Worker reopened.");
   } catch (error) {
     toast(error.message, "error");
   }
 }
-async function post(path) {
+// An action on a worker, said when done (bug E91: Close and Stop said nothing); `undo`: a
+// button in that toast.
+async function post(path, done = "", undo = null) {
   try {
-    await api(path, { method: "POST" });
+    const view = await api(path, { method: "POST" });
+    if (view?.id) upsertSession(view);
+    if (done) toast(done, "", null, undo);
   } catch (error) {
     toast(error.message, "error");
   }
@@ -1115,7 +1122,7 @@ export function updateWorkingLine() {
       // The captain at the wheel while it thinks; on watch while its command runs on.
       duck(background ? "watching" : "working"),
       el("span", { text: background ? "Waiting for background process" : session.activity || "Thinking…", title: background ? "Its turn is over; a command it started (a dev server, a watcher) still runs. Stop ends it." : undefined }),
-      el("button", { type: "button", class: "link", text: "Stop", title: "Interrupt what it is doing now", onclick: () => post(`/api/sessions/${session.id}/stop`) }),
+      el("button", { type: "button", class: "link", text: "Stop", title: "Interrupt what it is doing now", onclick: () => post(`/api/sessions/${session.id}/stop`, "Stopped.") }),
     ),
   );
   scrollToBottom();

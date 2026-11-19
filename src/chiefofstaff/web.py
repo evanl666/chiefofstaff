@@ -529,14 +529,20 @@ def create_app(
     async def task_diff(task_id: str):
         return await runtime.task_actions.diff(task_id)
 
+    def fresh(task: dict) -> dict:
+        """A task as it is once the action returns, not as the action left it: what changed
+        since (its turn failed as a Retry was delivered, say) is not set back on the page by
+        this reply (bug E90)."""
+        return runtime.task_actions.view(runtime.tasks.get(task["id"]))
+
     @app.post("/api/tasks/{task_id}/pr")
     async def task_pr(task_id: str, payload: OpenPr | None = None):
         anyway = bool(payload and payload.anyway)
-        return runtime.task_actions.view(await runtime.task_actions.create_pr(task_id, anyway))
+        return fresh(await runtime.task_actions.create_pr(task_id, anyway))
 
     @app.post("/api/tasks/{task_id}/accept")
     async def accept_task(task_id: str):
-        return runtime.task_actions.view(runtime.task_actions.accept(task_id))
+        return fresh(runtime.task_actions.accept(task_id))
 
     @app.post("/api/questions/{question_id}/answer")
     async def answer_question(question_id: str, payload: OwnerMessage):
@@ -558,15 +564,15 @@ def create_app(
 
     @app.post("/api/tasks/{task_id}/news-seen")
     async def task_news_seen(task_id: str):
-        return runtime.task_actions.view(runtime.task_actions.news_seen(task_id))
+        return fresh(runtime.task_actions.news_seen(task_id))
 
     @app.post("/api/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, payload: TaskNote):
-        return runtime.task_actions.view(await runtime.task_actions.cancel(task_id, payload.text))
+        return fresh(await runtime.task_actions.cancel(task_id, payload.text))
 
     @app.post("/api/tasks/{task_id}/retry")
     async def retry_task(task_id: str, payload: TaskNote):
-        return runtime.task_actions.view(await runtime.task_actions.retry(task_id, payload.text))
+        return fresh(await runtime.task_actions.retry(task_id, payload.text))
 
     @app.post("/api/tasks/{task_id}/rename")
     async def rename_task(task_id: str, payload: TaskNote):
@@ -628,16 +634,12 @@ def create_app(
     async def follow_up_task(task_id: str, payload: OwnerMessage):
         if not payload.text.strip():
             raise ValueError("Write what the worker should do.")
-        return runtime.task_actions.view(
-            await runtime.task_actions.follow_up(task_id, payload.text)
-        )
+        return fresh(await runtime.task_actions.follow_up(task_id, payload.text))
 
     @app.post("/api/tasks/{task_id}/request-changes")
     async def request_changes(task_id: str, payload: OwnerMessage):
         """The owner does not accept the result: its worker changes it as they say."""
-        return runtime.task_actions.view(
-            await runtime.task_actions.request_changes(task_id, payload.text)
-        )
+        return fresh(await runtime.task_actions.request_changes(task_id, payload.text))
 
     @app.post("/api/sessions/{session_id}/send-now")
     async def send_now(session_id: str):
@@ -647,7 +649,7 @@ def create_app(
     @app.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str):
         await runtime.workers.interrupt(session_id)
-        return {"ok": True}
+        return {"ok": True, **runtime.view(store.session(session_id))}
 
     @app.post("/api/sessions/{session_id}/reopen")
     async def reopen(session_id: str):
@@ -679,7 +681,7 @@ def create_app(
     @app.post("/api/sessions/{session_id}/close")
     async def close(session_id: str):
         await runtime.workers.close(session_id, by="you")
-        return {"ok": True}
+        return {"ok": True, **runtime.view(store.session(session_id))}
 
     @app.get("/api/external")
     async def external(refresh: bool = False):

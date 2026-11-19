@@ -120,11 +120,24 @@ const moreName = (task) => `More actions for “${task.title}”`;
 // The longest title the server keeps (clean_title).
 const TITLE_MAX = 80;
 // What cancelling came to, as the server has the task after it: one that had finished is set
-// aside (its result kept), not cancelled.
-export const cancelledWords = (view) => (view?.set_aside ? "It had finished: set aside, its result is kept." : "Task cancelled.");
+// aside (its result kept), a follow-up on finished work ends with its result standing (bug
+// E91: "Task cancelled." beside a card that said otherwise).
+export const cancelledWords = (view) =>
+  view?.set_aside
+    ? "It had finished: set aside, its result is kept."
+    : ["review", "done"].includes(view?.status)
+      ? "Follow-up cancelled; its result stands."
+      : view?.status === "cancelled" || !view
+        ? "Task cancelled."
+        : `Not cancelled: it is ${view.status}.`;
 // Runs its worker said go on that nothing told of for a day (see showActions): their links.
 const unknownItems = (task) => (Array.isArray(task.monitoring) ? task.monitoring : []).filter((item) => item.kind === "flow" && item.unknown);
 const unknownRuns = (task) => unknownItems(task).map((item) => item.url);
+// What else chooses a card's buttons (bug E90: they stayed as they were when only this changed).
+const choosing = (task, phase) => {
+  const found = [task.spend_stop ? "spend" : "", task.go_on ? "go-on" : "", phase.inDraft ? "in-draft" : "", task.settings?.digest || ""].filter(Boolean);
+  return found.length ? `:${found.join(",")}` : "";
+};
 // The key covers what changes a card's actions and layout; the version, what only its text.
 // `phase`: where it is on the board ({section, marker, why}: see board.js).
 export function taskItem(task, phase = phaseOf(task)) {
@@ -134,7 +147,7 @@ export function taskItem(task, phase = phaseOf(task)) {
   const made = [task.artifacts, task.links, task.files, task.made_links, task.link_names, task.watch_kind, task.watch_changed_at, task.deliverables, task.monitoring, state.snapshot?.artifacts_hidden];
   const asked = askedOf(task);
   return {
-    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}`,
+    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}${choosing(task, phase)}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
     version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}`,
@@ -423,7 +436,7 @@ function taskCard(task, phase = phaseOf(task)) {
       // What it sent its worker: its row says whether it got there.
       if (sends) noteSent(task, at);
       showActions();  // The form is done: the card may be rebuilt from now on.
-      upsertTask(view);
+      upsertTask(view, true);
       // After the board is redrawn: a card that moved is gone by then; one that stays shows.
       requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("leaving")));
       // What it came to, as the server has it now (a cancelled task that had finished is set
@@ -436,8 +449,8 @@ function taskCard(task, phase = phaseOf(task)) {
       error.textContent = failure.message;
       // What the owner may do all the same, having read why not: one button after it.
       if (failure.anyway) error.append(" ", el("button", { type: "button", class: "link", text: failure.anyway, onclick: () => act(path, { ...payload, anyway: true }, done, moves, sends) }));
-      // Redrawn meanwhile (it finished as the owner cancelled it, say): why, where it is seen.
-      if (!error.isConnected) toast(failure.message, "error");
+      // In a toast too (bug E91: inline only, easily missed at the end of a long card).
+      toast(failure.message, "error");
       for (const button of actions.querySelectorAll("button")) button.disabled = false;
       renderSidebar();
       scheduleHome();
@@ -1373,8 +1386,12 @@ function showCopy(text) {
   dialog.showModal();
   area.select();
 }
-export function upsertTask(task) {
+// `reply`: an action's answer, which may come after the task's newer news (pushed as it changed
+// again): it does not set that back (bug E90). What is pushed comes in order, and always holds.
+export function upsertTask(task, reply = false) {
   if (!state.snapshot) return;
+  const held = tasks().find((item) => item.id === task.id);
+  if (reply && held?.updated_at && task.updated_at && task.updated_at < held.updated_at) return;
   const list = tasks().filter((item) => item.id !== task.id);
   list.push(task);
   state.snapshot.tasks = list;

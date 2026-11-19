@@ -161,9 +161,17 @@ function scheduleReload() {
 let events = null;
 export function connectEvents() {
   const source = new EventSource(withKey("/api/events"));
-  source.onmessage = (event) => handleEvent(JSON.parse(event.data));
+  source.onmessage = (event) => {
+    state.heardAt = Date.now();
+    handleEvent(JSON.parse(event.data));
+  };
   events = source;
   followOthers();
+  // Back to the page after a minute with no event (asleep, a stream gone quiet): read again, so
+  // nothing stays as it was before (bug E90).
+  window.addEventListener("focus", () => {
+    if (state.snapshot && Date.now() - (state.heardAt || 0) > 60000) scheduleReload();
+  });
 }
 async function resync() {
   await loadState(true);
