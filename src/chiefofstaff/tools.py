@@ -2201,6 +2201,17 @@ class Tools:
                 "on after the new one, 'superseded' when the new task replaces it (it is "
                 "cancelled)."
             )
+        agent = self.runtime.agent(target["id"]) if target["role"] == WORKER else agents.COPILOT
+        if agent != agents.COPILOT and not (
+            (entry := self.runtime.agents.get(agent)) and entry.enabled()
+        ):
+            # Its agent is off: no task is given or reopened that it could not take up (live G1:
+            # one stayed running, its delivery failed).
+            raise ValueError(
+                f"Not sent: {self.runtime.turned_off(agent)} The owner sees this worker's "
+                "results; for more work, tell them, or give it to a new worker on an agent that "
+                "is on."
+            )
         # Checked before anything changes: a closed worker is not reopened for a refused title.
         title = deliverable_title(params.title) if params.task == "new" else ""
         if title:
