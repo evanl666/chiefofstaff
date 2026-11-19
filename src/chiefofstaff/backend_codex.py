@@ -680,11 +680,6 @@ def merged_into(config: dict, layer: dict):
             config[key] = json.loads(json.dumps(value)) if isinstance(value, dict | list) else value
 
 
-def codex_home() -> str:
-    given = os.environ.get("CODEX_HOME")
-    return os.path.realpath(Path(given).expanduser() if given else Path.home() / SETTINGS)
-
-
 def codex_settings_path(path: str) -> bool:
     """Whether an edit would write Codex's own settings: in a `.codex` folder (a repository's,
     the owner's), or in CODEX_HOME, by its path or where its links lead; names compared as a
@@ -693,7 +688,7 @@ def codex_settings_path(path: str) -> bool:
     def folded(text: str) -> str:
         return unicodedata.normalize("NFC", text).casefold()
 
-    home = folded(codex_home())
+    home = folded(os.path.realpath(codex_home()))
     for spelled in {path, os.path.realpath(path)}:
         if SETTINGS in map(folded, Path(spelled).parts):
             return True

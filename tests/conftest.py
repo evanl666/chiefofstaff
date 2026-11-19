@@ -19,7 +19,6 @@ os.environ["XDG_CONFIG_HOME"] = os.environ["HOME"] + "/.config"
 os.environ["GIT_CONFIG_GLOBAL"] = os.environ["HOME"] + "/.gitconfig"
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 import atexit
-import shutil
 import statistics
 import subprocess
 import time
