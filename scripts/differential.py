@@ -223,8 +223,12 @@ EXAMPLE = Feature(
 # ask_decision's task, Watch scans that failed, drafts' has_final, tasks' settings and aged,
 # follow_thread's description) are the baseline's own behaviour.
 FIXES: list[Allow] = [
-    # Since qa8 (the owner's decision), only for workers that run sandboxed: this run's, without
-    # the sandbox, keep none where 0.1.46-0.1.48 kept them.
+    # Not a difference of behaviour: a .git folder's identity (0.1.46, workspaces.identity_of)
+    # holds its inode number, and each side's run makes its folders anew.
+    Allow(
+        ".git identities' inode numbers, each run's own",
+        data=r"\.db\.kv\.gitid:.*\.value(\[3\]\.id)?\[2\]$",
+    ),
     # 0.1.50: a command the task itself asks a worker to run, a sleep included, runs as asked (a
     # Codex worker skipped the owner's `sleep 240`, live C5, citing "Never sit and wait").
     Allow(
