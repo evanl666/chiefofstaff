@@ -190,8 +190,15 @@ class Fake:
             sys.exit(1)
 
     def save(self):
+        # Each file whole at any time (a reader, the SDK's get_session_info say, never finds one
+        # half written).
+        def written(path: Path, text: str):
+            part = path.with_name(f".{path.name}.{os.getpid()}")
+            part.write_text(text)
+            part.replace(path)
+
         (HOME / "sessions").mkdir(parents=True, exist_ok=True)
-        (HOME / "sessions" / f"{self.session_id}.json").write_text(json.dumps(self.state))
+        written(HOME / "sessions" / f"{self.session_id}.json", json.dumps(self.state))
         with contextlib.suppress(Exception):
             from claude_agent_sdk._internal.sessions import _get_project_dir
 
@@ -208,7 +215,7 @@ class Fake:
                 }
                 lines.append(json.dumps(line))
                 parent = entry["uuid"]
-            (folder / f"{self.session_id}.jsonl").write_text("\n".join(lines) + "\n")
+            written(folder / f"{self.session_id}.jsonl", "\n".join(lines) + "\n")
 
     def record(self, kind: str, content):
         self.state["transcript"].append(
@@ -456,6 +463,7 @@ class Fake:
         reason: str = "completed",
         **more,
     ):
+        self.save()  # (As Claude: its transcript is written before the turn's end is said.)
         self.send(
             more
             | {
@@ -473,7 +481,6 @@ class Fake:
                 "uuid": str(uuid.uuid4()),
             }
         )
-        self.save()
 
     async def turn(self, entry: dict):
         text = self.text(entry["content"])
