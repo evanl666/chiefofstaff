@@ -343,6 +343,8 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
     live_e2e.BASE = f"http://127.0.0.1:{port}"
     serve_in_thread(Workspace(), SLACK_TOKEN, slack_port)
     parent = os.environ.get("LIVE_AGENTS_ROOT") or None
+    if parent:
+        Path(parent).mkdir(parents=True, exist_ok=True)  # (Named, not made yet: made here.)
     root = Path(tempfile.mkdtemp(prefix=f"cos-roles-{shard}-", dir=parent)).resolve()
     home, project, truth = setup(root)
     agent = "claude" if shard in {"S", "W"} else "codex"
