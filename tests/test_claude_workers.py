@@ -1015,7 +1015,12 @@ async def test_a_claude_workers_changed_mcp_server_is_off_for_it_not_a_wait(
     (app / "tools" / "serve.py").write_text("print('serving')\n")
     servers = {"mcpServers": {"x": {"command": "python3", "args": ["tools/serve.py"]}}}
     (app / ".mcp.json").write_text(json.dumps(servers))
-    for arguments in (["add", "-A"], ["commit", "-qm", "server"], ["push", "-q", "origin", "main"]):
+    named = ["-c", "user.email=t@t", "-c", "user.name=t"]  # (Linux runners have none.)
+    for arguments in (
+        ["add", "-A"],
+        [*named, "commit", "-qm", "server"],
+        ["push", "-q", "origin", "main"],
+    ):
         await asyncio.to_thread(subprocess.run, ["git", *arguments], cwd=app, check=True)
     harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
     try:
