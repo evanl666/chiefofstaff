@@ -1408,6 +1408,8 @@ class Tools:
                 self.t_draft_github_review,
             ),
         ]
+        # Always loaded, never behind Copilot's tool search: a session with many MCP tools
+        # defers those, and Chief of Staff's own stay in sight.
         return {
             name: define_tool(
                 name,
@@ -1415,6 +1417,7 @@ class Tools:
                 params_type=leak_proof(params),
                 handler=self.handler(handler),
                 skip_permission=True,
+                defer="never",
             )
             for name, description, params, handler in definitions
         }
@@ -1446,6 +1449,7 @@ class Tools:
                 params_type=leak_proof(params),
                 handler=self.handler(self.t_spawn_worker),
                 skip_permission=True,
+                defer="never",
             )
         return self.spawn_tools[key]
 
@@ -1599,6 +1603,13 @@ class Tools:
             if (params.project)
             else ""
         )
+        if (
+            not special
+            and agent == agents.COPILOT
+            and (refusal := self.runtime.fit_refusal(project))
+        ):
+            # Another worker would fail as the last one did: never a run of replacements.
+            raise ValueError(refusal)
         why_new = " ".join(params.why_new.split())[:200]
         if not special and not why_new:
             related = self.related_workers(

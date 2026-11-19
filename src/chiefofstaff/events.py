@@ -117,6 +117,13 @@ TRANSIENT = re.compile(
     re.IGNORECASE,
 )
 RETRIES = 2
+# Copilot would not call the model: the instructions and tool definitions a session starts each
+# turn with exceed what the model takes (its warning `compaction_static_context_blocked`, then
+# this error). Not a long conversation: tried again as it is, it fails the same way.
+STATIC_BLOCKED = re.compile(
+    r"static system messages and tool definitions exceed|compaction_static_context_blocked",
+    re.IGNORECASE,
+)
 # How long Copilot waits for Chief of Staff's answer before a tool at most (Events.pre_tool).
 PRE_TOOL_SECONDS = float(os.environ.get("CHIEFOFSTAFF_PRE_TOOL_SECONDS", "2"))
 PRE_TOOL_UNANSWERED = (
@@ -186,6 +193,30 @@ def edited_paths(name: str, arguments: Any) -> list[str]:
     return []
 
 
+def main_call(state: Any) -> dict | None:
+    """From a usage checkpoint's prompt-cache state (session.usage_checkpoint): what Copilot
+    sent at the main conversation's last model call (tool_count, tool_tokens, tools, …)."""
+    for conversation in state if isinstance(state, list) else []:
+        if not isinstance(conversation, dict) or conversation.get("conversation", "main") != "main":
+            continue
+        models = conversation.get("models")
+        last = models.get(conversation.get("lastActiveModel")) if isinstance(models, dict) else None
+        if isinstance(last, dict):
+            return last
+    return None
+
+
+def tools_left_out(state: Any) -> tuple[int, set[str]] | None:
+    """How many tools Copilot left out of the main conversation's last model call to fit
+    (`tools_truncated`), and the names of those it sent; None when it left none out."""
+    last = main_call(state) or {}
+    count, sent = last.get("tools_truncated"), last.get("tools")
+    if not isinstance(count, int) or count <= 0:
+        return None
+    sent = sent if isinstance(sent, list) else []
+    return count, {str(tool.get("name")) for tool in sent if isinstance(tool, dict)}
+
+
 class Events:
     """Turns session events into state, timeline entries, commands and usage."""
 
@@ -196,6 +227,9 @@ class Events:
         self.tasks = runtime.tasks
         self.delivery = runtime.delivery
         self.workspaces = runtime.workspaces
+        # Sessions whose turn Copilot said it would not run: their tools do not fit the model
+        # (its warning compaction_static_context_blocked, before the turn's error).
+        self.blocked: set[str] = set()
         # The events Chief of Staff acts on; Copilot sends many more.
         self.handlers: dict[str, Callable[[dict, Any], None]] = {
             "user.message": self.user_message,
@@ -212,6 +246,8 @@ class Events:
             "agent.child": lambda row, event: self.runtime.agent_child(row, event.data.thread_id),
             "session.mcp_server_status_changed": self.mcp_status,
             "session.mcp_server_tools_loaded": self.mcp_status,
+            "session.usage_checkpoint": self.checkpoint,
+            "session.warning": self.warning,
             "session.idle": self.idle,
             "assistant.idle": self.loop_idle,
             "assistant.turn_end": self.turn_end,
@@ -489,6 +525,7 @@ class Events:
             self.runtime.background(self.stop_waking(row["id"]))
             return
         self.states[row["id"]].awaiting = None  # It started.
+        self.blocked.discard(row["id"])
         self.states[row["id"]].held = False
         self.states[row["id"]].turn_mark += 1
         if row["role"] == WORKER:
@@ -627,6 +664,26 @@ class Events:
 
     def mcp_status(self, row: dict, event: Any):
         self.runtime.asks.mcp_connected(row["id"], event.data)
+        count = getattr(event.data, "tool_count", None)
+        if isinstance(count, int) and (server := getattr(event.data, "server_name", "")):
+            # How many tools each of its MCP servers has (said if its tools do not fit).
+            self.runtime.mcp_tools.setdefault(row["id"], {})[server] = count
+
+    def checkpoint(self, row: dict, event: Any):
+        """What Copilot sent the model at its last call: tools it left out to fit (see
+        Runtime.tools_dropped)."""
+        # (Internal to Copilot: the SDK keeps it as a private field.)
+        state = getattr(event.data, "_prompt_cache_break_state", None) or getattr(
+            event.data, "prompt_cache_break_state", None
+        )
+        if isinstance(tokens := (main_call(state) or {}).get("tool_tokens"), int):
+            self.runtime.tool_tokens[row["id"]] = tokens  # (Said if they do not fit.)
+        if found := tools_left_out(state):
+            self.runtime.tools_dropped(row, *found)
+
+    def warning(self, row: dict, event: Any):
+        if getattr(event.data, "warning_type", "") == "compaction_static_context_blocked":
+            self.blocked.add(row["id"])  # Its turn's error follows (Events.error).
 
     def loop_idle(self, row: dict, event: Any):
         """Its turn is over (assistant.idle); session.idle follows unless a command it left
@@ -791,6 +848,15 @@ class Events:
             self.runtime.update_session(session_id, status="idle", activity="")
             self.runtime.background(self.refused(row, message))
             return
+        blocked = session_id in self.blocked
+        self.blocked.discard(session_id)
+        if copilot and (blocked or STATIC_BLOCKED.search(message)):
+            # Its tools do not fit its model: it goes on once they do (Runtime.fit_tools).
+            if row["role"] == WORKER:
+                self.states[session_id].retrying = True
+            self.runtime.update_session(session_id, status="idle", activity="")
+            self.runtime.background(self.runtime.fit_tools(row, message))
+            return
         if row["role"] == ROUTER and self.store.get(f"rotated:{session_id}"):
             self.runtime.update_session(session_id, status="idle", activity="")
             self.runtime.background(self.router_failed(row, message))
@@ -824,6 +890,24 @@ class Events:
             self.store.delete(f"retries:{session_id}")
             return False
         self.store.set(f"retries:{session_id}", json.dumps([*recent, time.time()]))
+        self.turn_again(row, message)
+        if row["role"] != WORKER:
+            self.runtime.update_session(session_id, status="idle", activity="")
+            self.delivery.schedule_flush(session_id, RETRY_DELAY * (len(recent) + 1))
+        else:
+            # Its task stays at work; its slot is free until the turn is sent again.
+            state.retrying = True
+            self.runtime.update_session(session_id, status="idle", activity="")
+            self.runtime.background(self.resend_later(session_id, len(recent) + 1))
+        logger.info("Retrying %s after %s", session_id, message[:200])
+        return True
+
+    def turn_again(self, row: dict, message: str):
+        """A failed turn goes again with the session's next send: as it was given when nothing
+        was done yet; after some steps, a note to finish it (sending it again could do those
+        steps twice)."""
+        session_id = row["id"]
+        state = self.states[session_id]
         acted = state.turn_tools > 0
         state.turn_tools = 0
         if not acted and (before := self.store.get(f"prevsent:{session_id}")) is not None:
@@ -836,16 +920,6 @@ class Events:
             self.runtime.add_message(
                 session_id, "notice", note, {"prompt": wrap("system", "retry", note)}
             )
-        if row["role"] != WORKER:
-            self.runtime.update_session(session_id, status="idle", activity="")
-            self.delivery.schedule_flush(session_id, RETRY_DELAY * (len(recent) + 1))
-        else:
-            # Its task stays at work; its slot is free until the turn is sent again.
-            state.retrying = True
-            self.runtime.update_session(session_id, status="idle", activity="")
-            self.runtime.background(self.resend_later(session_id, len(recent) + 1))
-        logger.info("Retrying %s after %s", session_id, message[:200])
-        return True
 
     async def resend_later(self, session_id: str, attempt: int):
         try:

@@ -62,6 +62,7 @@ from .backend import (
     copilot_trusts,
     end_processes,
     older,
+    owner_tool_search,
     sandbox_supported,
     shell_init,
     switch_model,
@@ -400,6 +401,17 @@ def describe_model(model: Any) -> dict:
     }
 
 
+def model_price(model: Any) -> tuple[float, float]:
+    """What a model's tokens cost (input, output), at its default context; unknown: the most."""
+    prices = model.billing.token_prices if getattr(model, "billing", None) else None
+
+    def price(name: str) -> float:
+        value = getattr(prices, name, None)
+        return float(value) if isinstance(value, int | float) else float("inf")
+
+    return price("input_price"), price("output_price")
+
+
 def described(model: Any) -> dict:
     """One of another agent's models, as describe_model has Copilot's, and whether it is that
     agent's default."""
@@ -554,6 +566,13 @@ class Runtime:
         # {session: {server: those files}}; and those its live session was opened without.
         self.servers_off: dict[str, dict[str, list[str]]] = {}
         self.servers_opened: dict[str, frozenset[str]] = {}
+        # Copilot workers whose live session was opened with every MCP tool behind tool search
+        # (all_searched); the tool count of each MCP server a session loaded; models' prices
+        # (input, output), cheapest first when one is chosen for a session (larger_model).
+        self.searched_opened: dict[str, bool] = {}
+        self.mcp_tools: dict[str, dict[str, int]] = {}
+        self.tool_tokens: dict[str, int] = {}  # Its tools' size at its last model call.
+        self.model_prices: dict[str, tuple[float, float]] = {}
         # Copilot workers whose session was opened with Chief of Staff's pre-tool hook
         # (pre_tool_wanted): {session: whether it is sandboxed}. The others are glanced at as
         # each tool starts, not waited for.
@@ -2577,10 +2596,7 @@ class Runtime:
             # servers, skills and custom agents (by default an SDK session loads only the
             # owner's MCP servers).
             options["enable_config_discovery"] = True
-            # Copilot hides MCP tools behind a search once a session has more than 30 tools.
-            # Chief of Staff's own tools must not tip a worker over sooner than the owner's own
-            # sessions: their MCP tools stay in plain sight in both, or are searched in both.
-            options["tool_search"] = {"defer_threshold": COPILOT_DEFER_THRESHOLD + len(tools)}
+            options["tool_search"] = self.tool_search(row, len(tools))
             # Workers ask the owner directly: Copilot's ask_user, MCP forms and links.
             options["on_user_input_request"] = self.asks.on_user_input
             options["on_elicitation_request"] = self.asks.on_elicitation
@@ -2617,7 +2633,29 @@ class Runtime:
             slack_tools = [f"slack-{name}" for name in mcp["tools"]] if mcp else []
             options["available_tools"] = [tool.name for tool in tools] + slack_tools
             options["disabled_mcp_servers"] = [GITHUB_MCP]
+            options["tool_search"] = self.tool_search(row, len(options["available_tools"]))
         return options
+
+    def tool_search(self, row: dict, count: int) -> dict:
+        """Copilot's tool search for a session with `count` tools of Chief of Staff's own (or,
+        limited to a list, that many in all): on, whatever Copilot's own default is (off in
+        1.0.112), unless the owner turned it off for their own sessions (Copilot keeps that over
+        a session's). Copilot hides MCP tools behind a search once a session has more than 30
+        tools: Chief of Staff's own (never hidden) must not tip a session over sooner than the
+        owner's own sessions, whose MCP tools stay in plain sight in both, or are searched in
+        both. Every MCP tool is searched once a worker's did not fit its model (fit_tools)."""
+        enabled = owner_tool_search() is not False
+        if self.all_searched(row):
+            return {"enabled": enabled, "defer_threshold": 0}
+        return {"enabled": enabled, "defer_threshold": COPILOT_DEFER_THRESHOLD + count}
+
+    def searchable(self, row: dict) -> bool:
+        """Whether a session loads MCP tools it does not list (a worker's), which a search can
+        find: other sessions have their own tools only (and Slack's), all in sight."""
+        return row["role"] == WORKER and self.special(row) not in TOOLLESS
+
+    def all_searched(self, row: dict) -> bool:
+        return self.searchable(row) and bool(self.store.get(f"toolfit:{row['id']}"))
 
     def helper_options(self, row: dict) -> dict:
         """A worker that only reads what it is given and calls its own tools."""
@@ -2630,6 +2668,7 @@ class Runtime:
             "system_message": {"mode": "append", "content": prompts.HELPER},
             "working_directory": str(self.role_dir("scratch")),
             "client_name": "chiefofstaff",
+            "tool_search": self.tool_search(row, len(tools)),
         }
         if model := self.model_for(row):
             options["model"] = model
@@ -3040,6 +3079,217 @@ class Runtime:
         self.background(self.delivery.resume(session_id))
         return True
 
+    # A session whose tools do not fit its model: Copilot would not call the model, as the
+    # instructions and tool definitions each turn starts with exceed what it takes
+    # (Events.error, STATIC_BLOCKED). The steps that may make them fit, each taken once per
+    # session, in this order; `toolfit:<id>` lists those taken ("none" once nothing is left).
+
+    def next_fit(self, row: dict) -> str:
+        """The next step for a session whose tools did not fit: "search" (every MCP tool behind
+        tool search, Chief of Staff's own loaded; where the owner did not turn tool search off,
+        which Copilot keeps over a session's), "long" (its model's long context, where it has
+        one), "model" (a model whose own context is larger: larger_model); "" when none is."""
+        taken = [step for step in (self.store.get(f"toolfit:{row['id']}") or "").split(",") if step]
+        steps = ["search", "long", "model"]
+        left = steps[steps.index(taken[-1]) + 1 :] if taken and taken[-1] in steps else steps
+        if taken and taken[-1] not in steps:
+            left = []
+        info = self.model_info(self.effective_model(row))
+        for step in left:
+            if (
+                (step == "search" and self.searchable(row) and owner_tool_search() is not False)
+                or (
+                    step == "long"
+                    and info
+                    and info["long_context"]
+                    and row.get("context") != "long_context"
+                )
+                or (step == "model" and self.larger_model(row))
+            ):
+                return step
+        return ""
+
+    def larger_model(self, row: dict) -> str:
+        """The model a session runs on once its tools fit neither its model's context nor that
+        model's long context: one whose own context is larger than the largest tried, of the
+        same maker where one is, the cheapest of those. "" when none is (or its model is not
+        known)."""
+        current = self.effective_model(row)
+        if not (info := self.model_info(current)):
+            return ""
+        tried = info["context"]
+        if row.get("context") == "long_context":
+            tried = max(tried, info["long_context"])
+        skip = self.refused_models() | {current, "auto"}
+        larger = [m for m in self.models_cache[1] if m["id"] not in skip and m["context"] > tried]
+        if not larger:
+            return ""
+        maker = current.split("-")[0]
+        unknown = (float("inf"), float("inf"))
+        chosen = min(
+            larger,
+            key=lambda m: (
+                m["id"].split("-")[0] != maker,
+                self.model_prices.get(m["id"], unknown),
+                m["context"],
+            ),
+        )
+        return chosen["id"]
+
+    async def fit_tools(self, row: dict, message: str):
+        """A session's tools did not fit its model: the next step (next_fit) is taken, said in
+        a quiet line when it changes what the owner pays or which model runs, and its turn goes
+        again on a session opened with it. With none left, it fails (tools_dont_fit)."""
+        session_id = row["id"]
+        try:
+            if not (step := self.next_fit(row)):
+                await self.tools_dont_fit(row)
+                return
+            taken = self.store.get(f"toolfit:{session_id}") or ""
+            self.store.set(f"toolfit:{session_id}", f"{taken},{step}".lstrip(","))
+            was = self.effective_model(row)
+            noun = "worker" if row["role"] == WORKER else "session"
+            if step == "long":
+                row = self.update_session(session_id, context="long_context")
+                self.add_message(
+                    session_id,
+                    "notice",
+                    f"Used long context for this {noun}: its tools didn't fit {was}'s usual "
+                    "context (long context costs more).",
+                )
+            elif step == "model":
+                chosen = self.larger_model(row)
+                row = self.update_session(session_id, model=chosen, context="")
+                self.add_message(
+                    session_id,
+                    "notice",
+                    f"Ran this {noun} on {chosen}: its tools didn't fit {was}.",
+                )
+            logger.info("%s's tools did not fit its model: %s.", session_id, step)
+            await self.detach(session_id)  # Opened again with it, for the turn that goes again.
+            self.events.turn_again(row, message)
+            if row["role"] == WORKER:
+                await self.delivery.resume(session_id)
+            else:
+                self.delivery.schedule_flush(session_id, 0)
+        finally:
+            self.states[session_id].retrying = False
+
+    async def tools_dont_fit(self, row: dict):
+        """Nothing made a session's tools fit: its turn fails, said in one plain line. A worker's
+        task of that turn fails (those queued behind it wait, as they were), and the Router
+        hears, once until the owner writes to it, that this is not a worker out of context: a
+        new one fails the same way, and none starts for the same project (fit_refusal)."""
+        session_id = row["id"]
+        taken = [s for s in (self.store.get(f"toolfit:{session_id}") or "").split(",") if s]
+        if "none" not in taken:
+            self.store.set(f"toolfit:{session_id}", ",".join([*taken, "none"]))
+        words = {"search": "tool search", "long": "long context", "model": "a larger model"}
+        tried = [words[step] for step in taken if step in words]
+        tried = [", ".join(tried[:-1]), tried[-1]] if len(tried) > 1 else tried
+        servers = sorted(self.mcp_tools.get(session_id, {}).items(), key=lambda item: -item[1])
+        most = ", ".join(f"{name} ({count} tools)" for name, count in servers[:2] if count)
+        model = self.effective_model(row)
+        info = self.model_info(model)
+        size = ""
+        if (tokens := self.tool_tokens.get(session_id)) and info:
+            takes = info["long_context"] if row.get("context") == "long_context" else 0
+            size = f" ({tokens:,} tokens of tools; it takes {takes or info['context']:,})"
+        line = (
+            f"Couldn't run this {'worker' if row['role'] == WORKER else 'session'}: its tools "
+            f"don't fit {model or 'the model'}'s context{size}"
+            + (f", even with {' and '.join(tried)}" if tried else "")
+            + (f". Its MCP servers with the most tools: {most}" if most else "")
+            + ". With fewer MCP servers it fits."
+        )
+        self.add_message(session_id, "error", line)
+        if row["role"] != WORKER:
+            self.update_session(session_id, status="idle", activity="")
+            return
+        self.update_session(session_id, status="failed", activity="")
+        # The task its turn was on, else the one given first: never one given after it that
+        # it has not taken up, nor one queued (bug E84: every open task failed).
+        working = [t for t in self.tasks.for_session(session_id) if t["status"] in OPEN_WORK]
+        turn = self.turn_task(session_id)
+        task = next((t for t in working if t["id"] == turn), working[0] if working else None)
+        if task:
+            self.tasks.move(task["id"], "failed", progress=line[:500])
+            self.background(self.task_actions.record_end(task))
+        mark = self.owner_mark()
+        if not self.special(row):
+            self.store.set(f"nofit:{row.get('project') or ''}", str(mark))
+        told = self.store.get(f"nofittold:{session_id}")
+        self.store.set(f"nofittold:{session_id}", str(mark))
+        if told is None or mark > int(told or 0):
+            await self.tell_router(
+                row,
+                "failed",
+                f"{line} This is not the worker running out of context: a new worker fails the "
+                "same way, so don't start one for it (spawn_worker refuses one on this project "
+                "until the owner writes to you). Tell the owner in one line.",
+                task,
+            )
+        self.background(self.workers.pump())
+
+    def owner_mark(self) -> int:
+        """The owner's latest message to the Router (its id; 0 for none)."""
+        router_id = self.store.get("router_id")
+        found = self.store.value(
+            "SELECT max(id) FROM messages WHERE session_id=? AND kind='owner'", (router_id,)
+        )
+        return int(found or 0)
+
+    def fit_refusal(self, project: str) -> str:
+        """Why no new Copilot worker starts on this project: one's tools fit no model
+        (tools_dont_fit) and the owner has not written to the Router since; "" otherwise."""
+        key = f"nofit:{project}"
+        if (mark := self.store.get(key)) is None:
+            return ""
+        if self.owner_mark() > int(mark or 0):
+            self.store.delete(key)
+            return ""
+        return (
+            "Not started: a worker on this project just failed because its tools don't fit any "
+            "model's context. That is not running out of context: a new worker fails the same "
+            "way. Tell the owner in one line; once they write to you, one can start again."
+        )
+
+    def tools_dropped(self, row: dict, count: int, sent: set[str]):
+        """Copilot left `count` of a session's tools out of its model call to fit (`sent`: those
+        it sent). A worker's MCP tools all go behind tool search from its next turn (its own
+        stay loaded: next_fit's first step, taken silently); if tools are still left out, the
+        owner hears it once, and whether Chief of Staff's own were among them."""
+        session_id = row["id"]
+        if not self.on_copilot(session_id):
+            return
+        if self.next_fit(row) == "search":
+            taken = self.store.get(f"toolfit:{session_id}") or ""
+            self.store.set(f"toolfit:{session_id}", f"{taken},search".lstrip(","))
+            logger.info(
+                "%s: %d tools left out; its MCP tools go behind tool search.", session_id, count
+            )
+            return
+        if self.store.get(f"toolsdropped:{session_id}"):
+            return
+        self.store.set(f"toolsdropped:{session_id}", "1")
+        own = sorted(set(self.tool_names(row)) - sent)
+        named = ", ".join(own[:3]) + ("…" if len(own) > 3 else "")
+        noun = "worker" if row["role"] == WORKER else "session"
+        # (Copilot keeps the owner's tool search off over a session's: said, as why.)
+        off = (
+            " (tool search is off in your Copilot settings)" if owner_tool_search() is False else ""
+        )
+        self.add_message(
+            session_id,
+            "notice",
+            f"Copilot left out {count} of this {noun}'s tools to fit its model{off}, "
+            + (
+                f"Chief of Staff's own among them ({named})."
+                if own
+                else "none of Chief of Staff's own."
+            ),
+        )
+
     def effort_clearable(self, row: dict) -> bool:
         """Whether a turn refused for its thinking effort is cleared and sent again: once an
         hour at most (else it fails as any refused turn)."""
@@ -3120,11 +3370,13 @@ class Runtime:
         cached_at, models = self.models_cache
         if models and time.monotonic() - cached_at < 600:
             return models
-        models = [
-            describe_model(model)
+        listed = [
+            model
             for model in await self.connected().list_models()
             if not model.policy or model.policy.state != "disabled"
         ]
+        models = [describe_model(model) for model in listed]
+        self.model_prices = {model.id: model_price(model) for model in listed}
         self.models_cache = (time.monotonic(), models)
         return models
 
@@ -3279,6 +3531,7 @@ class Runtime:
         self.states[session_id].handle = session
         if agent == COPILOT_AGENT and row["role"] == WORKER:
             self.servers_opened[session_id] = frozenset(self.servers_off.get(session_id, {}))
+            self.searched_opened[session_id] = self.all_searched(row)
             if "hooks" in options:
                 self.pre_tool_on[session_id] = "sandbox_config" in options
             else:
@@ -4038,11 +4291,11 @@ class Runtime:
         not in one already running). `claimed`: its worker slot is taken for this turn."""
         if not self.states.is_live(session_id):
             return
+        row = self.store.session(session_id)
         if self.servers_opened.get(session_id, frozenset()) == frozenset(
             self.servers_off.get(session_id, {})
-        ):
+        ) and self.searched_opened.get(session_id, False) == self.all_searched(row):
             return
-        row = self.store.session(session_id)
         state = self.states[session_id]
         if row["status"] == "working" or state.held or (state.busy and not claimed):
             state.stale = True
@@ -6388,6 +6641,10 @@ class Runtime:
                     continue
                 if await self.agent_mode_changed(row, asks_first=not new.worker_yolo):
                     stopped.append(agents.switched_to_ask_first(self.agent(row["id"])))
+        if old.mcp_servers != new.mcp_servers:
+            # Other MCP servers: a worker's tools may fit now (fit_refusal).
+            for key in self.store.keys("nofit:"):
+                self.store.delete(key)
         defaults = ("model", "role_models", "role_efforts")
         if any(getattr(old, key) != getattr(new, key) for key in defaults):
             # Models and efforts chosen now are tried, even where Copilot refused one before.

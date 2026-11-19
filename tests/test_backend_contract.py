@@ -12,7 +12,9 @@ before upgrading the Copilot SDK or CLI, or Codex.
 
 import asyncio
 import contextlib
+import dataclasses
 import json
+import logging
 import os
 import re
 import shutil
@@ -513,6 +515,96 @@ async def test_a_sandboxed_workers_commands_write_nothing_in_home_but_their_own(
         for path in configs:
             path.unlink(missing_ok=True)
         write_files(kept)
+
+
+async def one_turn(backend, options: dict, prompt: str) -> dict:
+    """One turn of a new session opened with these options: what Copilot said, its errors, and
+    the tools of its last model call (session.usage_checkpoint)."""
+    session = await backend.create_session(session_id=str(uuid4()), name="contract test", **options)
+    turn = Turn(session)
+    try:
+        await session.send(prompt)
+        for _ in range(900):
+            errors = [e for e in turn.events if e.type.value == "session.error"]
+            if turn.idle.is_set() or errors:
+                break
+            await asyncio.sleep(0.2)
+        await asyncio.sleep(1)  # (What follows the error.)
+        found = {"said": turn.said(), "errors": [e.data.message for e in errors]}
+        for event in turn.events:
+            if event.type.value == "session.usage_checkpoint":
+                state = event.data._prompt_cache_break_state  # (Copilot's own, as the SDK has it)
+                [model] = [c["models"][c["lastActiveModel"]] for c in state
+                           if c.get("conversation") == "main"]  # fmt: skip
+                found["model"] = model
+        return found
+    finally:
+        with contextlib.suppress(Exception):
+            await backend.client.delete_session(session.session_id)
+
+
+async def test_many_mcp_tools_are_searched_and_chief_of_staffs_own_stay_loaded(tmp_path):
+    """Copilot 1.0.112 (which runs when the owner's CLI is newer than the SDK, as 1.0.114 is)
+    leaves tool search off unless a session asks for it. A worker of 0.1.46 with MCP tools of
+    several servers' size (scripts/many_tools_mcp.py: 250) sent every definition with each turn:
+    its turn was blocked on the model's default context, or tools were left out, Chief of
+    Staff's own among them. A worker as it opens now: the MCP tools are searched, Chief of
+    Staff's own all loaded, nothing left out, and the turn runs."""
+    if not REAL:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 to check the real Copilot backend.")
+    from conftest import Harness
+    from test_progress import spawn
+
+    from chiefofstaff.models import Settings
+
+    server = {"type": "local", "command": sys.executable, "args": [MANY_TOOLS], "tools": ["*"]}
+    harness = Harness(tmp_path / "data", Settings(mcp_servers={"acme": server}))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Ping the acme tools")
+    row = harness.store.session(worker)
+    now = runtime.options(row) | {"model": MODEL, "working_directory": str(tmp_path)}
+    now.pop("sandbox_config", None)  # (The stand-in backend's: not Copilot's.)
+    own = {tool.name for tool in now["tools"]}
+    # As 0.1.46 opened it: tool search as Copilot's default has it, its own tools deferrable.
+    then = now | {
+        "tool_search": {"defer_threshold": now["tool_search"]["defer_threshold"]},
+        "tools": [dataclasses.replace(tool, defer=None) for tool in now["tools"]],
+    }
+    backend = copilot_backend("copilot")
+    await backend.start()
+    try:
+        [model] = [m for m in await backend.list_models() if m.id == MODEL]
+        prices = model.billing.token_prices if model.billing else None
+        if prices and prices.long_context:
+            # The default context, as the owner's workers ran.
+            now["context_tier"] = then["context_tier"] = "default"
+        before = await one_turn(backend, then, "Reply with just: ok")
+        after = await one_turn(backend, now, "Reply with just: ok")
+    finally:
+        await backend.stop()
+        await runtime.stop()
+    logging.getLogger(__name__).info(
+        "Copilot %s: before %s %s, after %s",
+        backend.fallback,
+        {k: v for k, v in before.get("model", {}).items() if k in TOOL_FACTS},
+        before["errors"],
+        {k: v for k, v in after.get("model", {}).items() if k in TOOL_FACTS},
+    )
+    blocked = any("tool definitions exceed" in error for error in before["errors"])
+    if not blocked:
+        sent = {tool["name"] for tool in before["model"]["tools"]}
+        assert before["model"]["tools_truncated"] > 0 and not own <= sent, before
+    assert not after["errors"], after["errors"]
+    assert "ok" in after["said"].lower()
+    facts = after["model"]
+    sent = {tool["name"] for tool in facts["tools"]}
+    assert facts["tools_truncated"] == 0 and "tool_search_tool" in sent
+    assert own <= sent, f"Chief of Staff's own left out: {sorted(own - sent)}"
+    assert not any(name.startswith("acme-") for name in sent), "the MCP tools are searched"
+
+
+TOOL_FACTS = {"tool_count", "tool_tokens", "tools_truncated", "prompt_tokens"}
+MANY_TOOLS = str(Path(__file__).resolve().parent.parent / "scripts" / "many_tools_mcp.py")
 
 
 async def test_copilots_base_profile_reads_what_chief_of_staff_leaves_out(tmp_path):

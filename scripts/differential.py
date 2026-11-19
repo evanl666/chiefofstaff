@@ -216,6 +216,15 @@ FIXES: list[Allow] = [
     # 0.1.46 (QA6-3): where the owner's next message in a worker's chat goes (null with one task
     # or none: nothing to choose from).
     Allow("a session's chat_task", data=r"\.chat_task$"),
+    # 0.1.47: every Copilot session asks for tool search (Copilot 1.0.112, which runs when the
+    # owner's CLI is newer than the SDK, leaves it off), and Chief of Staff's own tools are never
+    # deferred behind it.
+    Allow("Copilot's tool search, asked for", data=r"\.options\.tool_search(\.enabled)?$"),
+    Allow(
+        "Chief of Staff's own tools, never deferred",
+        data=r"\.options\.tools\[\d+\]\.defer$",
+        value="never",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

@@ -2073,12 +2073,273 @@ async def test_a_one_line_answer_to_an_explanation_is_sent_back_once(harness):
     assert again.result_type == "success", "the second time it is taken as the whole answer"
 
 
-async def test_chief_of_staffs_tools_do_not_hide_a_workers_mcp_tools_sooner(harness):
+async def test_tool_search_is_on_and_chief_of_staffs_own_tools_stay_loaded(tmp_path, monkeypatch):
+    """0.1.46 left tool search to Copilot's own default, which is off in Copilot 1.0.112 (the
+    one it falls back to): every MCP tool loaded with each turn (169k tokens with three servers),
+    the default context's turns were blocked and long context's left tools out, Chief of
+    Staff's own among them. Every session turns it on now (as the owner's own sessions have it,
+    unless they turned it off: Copilot keeps theirs), and Chief of Staff's own tools are never
+    deferred. They still don't tip a session over sooner than the owner's own sessions."""
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Work")
     options = harness.session(worker).options
-    assert options["tool_search"]["defer_threshold"] == 30 + len(options["tools"])
-    assert "tool_search" not in harness.session(harness.router_id).options
+    own = 30 + len(options["tools"])
+    assert options["tool_search"] == {"enabled": True, "defer_threshold": own}
+    assert {tool.defer for tool in options["tools"]} == {"never"}
+    for row in (harness.store.session(harness.router_id), *harness.store.open_sessions("slack")):
+        listed = harness.session(row["id"]).options
+        # Nothing of theirs is ever deferred: they have only the tools they list.
+        assert listed["tool_search"] == {
+            "enabled": True,
+            "defer_threshold": 30 + len(listed["available_tools"]),
+        }
+    (tmp_path / "copilot").mkdir()
+    (tmp_path / "copilot" / "settings.json").write_text('// Copilot\n{"toolSearch": false}')
+    assert runtime.options(harness.store.session(worker))["tool_search"] == {
+        "enabled": False,
+        "defer_threshold": own,
+    }
+
+
+TOOLS_DONT_FIT = (
+    "No response was returned because static system messages and tool definitions exceed this "
+    "model's context budget."
+)
+
+
+def bigger_models(harness):
+    """Copilot's models with two whose own context is larger than smart-model's long context:
+    one of another maker, cheaper, and one of smart-model's own."""
+    listed = harness.client.list_models
+
+    async def list_models():
+        models = await listed()
+
+        def model(name, context, price):
+            prices = SimpleNamespace(
+                max_prompt_tokens=context, context_max=None, long_context=None,
+                input_price=price, output_price=price,
+            )  # fmt: skip
+            return SimpleNamespace(
+                id=name, name=name, policy=None, billing=SimpleNamespace(token_prices=prices),
+                capabilities=SimpleNamespace(limits=SimpleNamespace(max_prompt_tokens=context)),
+                supported_reasoning_efforts=[], default_reasoning_effort=None,
+            )  # fmt: skip
+
+        return [*models, model("acme-huge", 3_000_000, 1), model("smart-model-xl", 2_000_000, 9)]
+
+    harness.client.list_models = list_models
+
+
+async def test_a_turn_whose_tools_dont_fit_its_model_goes_on_once_they_do(tmp_path, monkeypatch):
+    """Copilot would not call the model: the session's instructions and tool definitions are
+    more than it takes. Not a long conversation, and not a failure on Copilot's side to try again
+    as it was (0.1.46 tried it three times, then the Router started workers that failed the same
+    way). Each step that may make them fit is taken once, and the turn goes again after it:
+    every MCP tool behind tool search, long context, a model with a larger context (of the same
+    maker). Only when none is left does it fail, in one line; the Router hears not to start
+    another, and can't until the owner writes to it."""
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    harness = Harness(tmp_path / "data", Settings(model="smart-model"))
+    bigger_models(harness)
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Triage the alerts")
+    task = harness.session(worker).sent[-1]
+    router = harness.session(harness.router_id)
+    to_router = len(router.sent)
+
+    async def blocked():
+        session = harness.session(worker)
+        session.emit("assistant.turn_start")
+        session.emit(
+            "session.warning",
+            warning_type="compaction_static_context_blocked",
+            message="Static system messages and tool definitions exceed the model's usable "
+            "context budget. Reduce static context or switch to a larger-context model.",
+        )
+        session.emit("session.error", error_type="query", message=TOOLS_DONT_FIT)
+        session.emit("session.idle")
+        await settle(runtime)
+        return harness.session(worker)
+
+    opened = await blocked()
+    assert opened.options["tool_search"] == {"enabled": True, "defer_threshold": 0}
+    assert opened.options["model"] == "smart-model" and "context_tier" not in opened.options
+    assert opened.sent[-1] == task and harness.store.session(worker)["status"] == "working"
+    assert not notices(harness, worker), "every MCP tool searched: nothing to tell"
+
+    opened = await blocked()
+    assert opened.options["context_tier"] == "long_context"
+    assert opened.options["tool_search"]["defer_threshold"] == 0, "still searched"
+    assert opened.sent[-1] == task
+    assert notices(harness, worker) == [
+        "Used long context for this worker: its tools didn't fit smart-model's usual context "
+        "(long context costs more)."
+    ]
+
+    opened = await blocked()
+    assert opened.options["model"] == "smart-model-xl", "the same maker's, larger"
+    assert opened.sent[-1] == task and len(opened.sent) == 4, "once after each step"
+    assert notices(harness, worker)[-1] == (
+        "Ran this worker on smart-model-xl: its tools didn't fit smart-model."
+    )
+    assert len(router.sent) == to_router, "the Router hears nothing while it goes on"
+
+    await blocked()
+    assert len(harness.session(worker).sent) == 4, "nothing left to try: not sent again"
+    assert harness.store.session(worker)["status"] == "failed"
+    assert runtime.tasks.current(worker)["status"] == "failed"
+    line = (
+        "Couldn't run this worker: its tools don't fit smart-model-xl's context, even with tool "
+        "search, long context and a larger model. With fewer MCP servers it fits."
+    )
+    assert notices(harness, worker)[-1] == line
+    assert not any("times" in text for text in notices(harness, worker)), "never retried"
+    told = router.sent[-1]
+    assert 'status="failed"' in told and "not the worker running out of context" in told
+    assert "a new worker fails the same way, so don't start one" in told
+
+    refused = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="Triage the alerts again",
+        instructions="Triage the alerts", why_new="the last one failed",
+    )  # fmt: skip
+    assert refused.result_type == "failure"
+    assert "its tools don't fit any model's context" in refused.text_result_for_llm
+    assert len(harness.store.open_sessions("worker")) == 1, "no replacement"
+    await runtime.owner_send(harness.router_id, "I removed some MCP servers; try again.")
+    await spawn(runtime, harness.router_id, "Triage the alerts again", why_new="retry")
+    assert len(harness.store.open_sessions("worker")) == 2, "the owner wrote: it may"
+
+
+async def test_when_nothing_fits_only_that_turns_task_fails_and_the_router_hears_once(
+    tmp_path, monkeypatch
+):
+    """E82 with E84: a failed turn failed every open task of its worker, the one queued behind
+    it too, and the Router heard of each failure. Tools that fit no model fail the task of that
+    turn only, said with what is known of their size; the Router hears it once until the owner
+    writes to it. Copilot's warning tells such a turn apart whatever its error says."""
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    harness = Harness(tmp_path / "data", Settings(model="fast-model"))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Measure coverage")
+    first = runtime.tasks.current(worker)
+    # Queued behind it on the same worker (as a task given with after= is).
+    second = runtime.tasks.create(worker, "Write the plan", "Then the plan.", after=[first["id"]])
+    assert second["status"] == "queued"
+    checkpoint(harness.session(worker), ["bash", "report"], truncated=0)
+    router = harness.session(harness.router_id)
+
+    async def blocked():
+        session = harness.session(worker)
+        session.emit("assistant.turn_start")
+        session.emit("session.warning", warning_type="compaction_static_context_blocked",
+                     message="Static system messages and tool definitions exceed …")  # fmt: skip
+        session.emit("session.error", error_type="query", message="Execution failed.")
+        await settle(runtime)
+
+    await blocked()  # Every MCP tool searched: it goes again.
+    assert harness.store.get(f"toolfit:{worker}") == "search"
+    told = len(router.sent)
+    await blocked()  # Nothing else: fast-model has no long context, no model is larger.
+    assert runtime.tasks.get(first["id"])["status"] == "failed"
+    assert runtime.tasks.get(second["id"])["status"] == "queued", "not its turn's task"
+    assert notices(harness, worker)[-1] == (
+        "Couldn't run this worker: its tools don't fit fast-model's context (169,396 tokens of "
+        "tools; it takes 200,000), even with tool search. With fewer MCP servers it fits."
+    )
+    assert (
+        len(router.sent) == told + 1
+        and "not the worker running out of context" in (router.sent[-1])
+    )
+    await runtime.owner_send(worker, "Try once more.")
+    await blocked()
+    assert notices(harness, worker)[-1].startswith("Couldn't run this worker")
+    assert len(router.sent) == told + 1, "told once until the owner writes to the Router"
+    assert runtime.tasks.get(second["id"])["status"] == "queued"
+
+
+async def test_where_tool_search_cant_help_the_next_step_is_taken(tmp_path, monkeypatch):
+    """The owner turned tool search off (Copilot keeps that over a session's), or a session has
+    only the tools it lists (the Router): long context first, without a step that changes
+    nothing; and a model without long context goes to a larger one."""
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    (tmp_path / "copilot").mkdir()
+    (tmp_path / "copilot" / "settings.json").write_text('{"toolSearch": false}')
+    harness = Harness(tmp_path / "data", Settings(model="smart-model"))
+    bigger_models(harness)
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Triage the alerts")
+    harness.session(worker).emit("session.error", message=TOOLS_DONT_FIT)
+    await settle(runtime)
+    assert harness.session(worker).options["context_tier"] == "long_context"
+    assert harness.store.get(f"toolfit:{worker}") == "long"
+
+    router = harness.session(harness.router_id)
+    await runtime.owner_send(harness.router_id, "What is open?")
+    asked = router.sent[-1]
+    await runtime.set_session_model(harness.router_id, "fast-model")
+    harness.session(harness.router_id).emit("session.error", message=TOOLS_DONT_FIT)
+    await settle(runtime)
+    opened = harness.session(harness.router_id)
+    assert opened.options["model"] == "acme-huge", "none larger of its maker: the cheapest"
+    assert opened.options["tool_search"]["defer_threshold"] > 0, "its listed tools stay in sight"
+    assert opened.sent[-1] == asked
+
+
+def notices(harness, session_id) -> list[str]:
+    return [
+        m["text"] for m in harness.store.messages(session_id) if m["kind"] in {"notice", "error"}
+    ]
+
+
+def checkpoint(session, sent: list[str], truncated: int):
+    """A usage checkpoint (session.usage_checkpoint) as Copilot 1.0.112 writes it: the tools it
+    sent at the last model call, and how many it left out."""
+    state = [{
+        "conversation": "main",
+        "lastActiveModel": "smart-model",
+        "models": {"smart-model": {
+            "tool_count": len(sent) + truncated, "tool_tokens": 169_396,
+            "tools": [{"name": name, "schema_hash": "x", "safe": False} for name in sent],
+            "tools_overflow": [], "tools_truncated": truncated,
+        }},
+    }]  # fmt: skip
+    session.emit("session.usage_checkpoint", _prompt_cache_break_state=state)
+
+
+async def test_tools_left_out_to_fit_are_searched_and_never_chief_of_staffs_own(
+    tmp_path, monkeypatch
+):
+    """Copilot left tools out of a turn to fit its model (tool search was off): every MCP tool
+    of that worker is searched from its next turn, which keeps Chief of Staff's own loaded,
+    without a word. If tools are still left out, the owner hears it once, and whether Chief of
+    Staff's own were among them."""
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    harness = Harness(tmp_path / "data", Settings(model="smart-model"))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Find the flaky test")
+    session = harness.session(worker)
+    session.emit("assistant.turn_start")
+    checkpoint(session, ["bash", "view", "acme-list_tickets_0"], truncated=214)
+    session.emit("session.idle")
+    await settle(runtime)
+    # Without its report tool it did not report: asked for one, on a session opened again.
+    assert notices(harness, worker) == ["It stopped without a report: asked for one."]
+    opened = harness.session(worker)
+    assert opened is not session and len(opened.sent) == len(session.sent) == 2
+    assert opened.options["tool_search"] == {"enabled": True, "defer_threshold": 0}
+    assert {tool.defer for tool in opened.options["tools"]} == {"never"}
+
+    own = sorted(tool.name for tool in opened.options["tools"])
+    for _ in range(2):
+        checkpoint(opened, ["bash", *own[1:]], truncated=3)
+        await settle(runtime)
+    assert notices(harness, worker)[1:] == [
+        f"Copilot left out 3 of this worker's tools to fit its model, Chief of Staff's own "
+        f"among them ({own[0]})."
+    ]
 
 
 async def test_a_background_call_on_another_model_is_not_copilots_default(harness):

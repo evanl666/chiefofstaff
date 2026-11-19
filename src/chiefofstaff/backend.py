@@ -628,6 +628,20 @@ def copilot_trusts(path: str) -> bool:
     return any(target.is_relative_to(folder) for folder in folders)
 
 
+def owner_tool_search() -> bool | None:
+    """The owner's own choice of Copilot's tool search (`toolSearch` in its settings.json, only
+    read), None when they made none. Copilot applies theirs over a session's."""
+    try:
+        text = (copilot_home() / "settings.json").read_text()
+        settings = json.loads(
+            "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+        )
+    except (OSError, ValueError):
+        return None
+    chosen = settings.get("toolSearch") if isinstance(settings, dict) else None
+    return chosen if isinstance(chosen, bool) else None
+
+
 def own_processes() -> set[int]:
     """This process and its descendants (the Copilot CLI it runs)."""
     table = process_table()
