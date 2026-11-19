@@ -72,6 +72,11 @@ class AskDecision(NestedArguments):
         description="After ask_decision listed the owner's earlier decisions on similar questions: "
         "true when none of them settles yours",
     )
+    task_id: str = Field(
+        default="",
+        description="The task (t…) the decision is for, when you have several; by default the "
+        "one you are working on",
+    )
 
 
 class RecordDecision(BaseModel):
@@ -195,7 +200,13 @@ class Decisions:
         question = clean(params.question, 300)
         if not question:
             raise ValueError("Say what the owner should decide.")
-        task = self.tasks.current(caller)
+        if params.task_id.strip():
+            task = self.tasks.find(params.task_id.strip())
+            if not task or task["session_id"] != caller:
+                raise ValueError(f"You have no task {params.task_id.strip()}.")
+        else:
+            # The task it is at work on (bug E101: not the one given last, which may wait).
+            task = self.runtime.at_work(caller)
         asker = {
             "session_id": caller,
             "task_id": task["id"] if task else "",

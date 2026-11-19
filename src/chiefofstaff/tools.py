@@ -1960,14 +1960,10 @@ class Tools:
             if not named or named["session_id"] != target["id"]:
                 raise ValueError(f"That worker has no task {params.task_id}.")
             task = named
-        elif target["role"] == WORKER and params.task == "continue":
-            open_ = [t for t in self.tasks.for_session(target["id"]) if t["status"] in OPEN]
-            if len(open_) > 1:
-                listed = "; ".join(f"{t['id']} “{t['title']}” ({t['status']})" for t in open_)
-                raise ValueError(
-                    f"That worker has {len(open_)} open tasks ({listed}): give task_id, or "
-                    "task='new' for another subject."
-                )
+        elif target["role"] == WORKER and params.task != "new":
+            # (“Thanks, received.”: nothing more to do on it, a note: see below.)
+            acked = params.task == "continue" and acknowledgement(params.text)
+            task = self.unnamed_task(target["id"], "note" if acked else params.task)
         if task and params.task == "continue" and acknowledgement(params.text):
             # “Thanks, received.”: nothing more to do on it, so nothing reopens.
             params = params.model_copy(update={"task": "note"})
@@ -2142,6 +2138,11 @@ class Tools:
                 # back, rather than losing it.
                 self.store.set(f"reopened:{task['id']}", task["status"])
                 task = self.tasks.move(task["id"], "running", reason="follow-up")
+            elif task and task["status"] == "running" and target["task_id"] != task["id"]:
+                # The task it is on now (as a reopened one is): not the one given last.
+                self.store.execute(
+                    "UPDATE sessions SET task_id=? WHERE id=?", (task["id"], target["id"])
+                )
             prompt = wrap(
                 "router",
                 "message",
@@ -2159,6 +2160,9 @@ class Tools:
             target["id"], to_follow, task_id=task["id"] if task else "", asked=params.follow
         )
         meta: dict[str, Any] = {"task_id": task["id"]} if task else {}
+        if params.task == "note" and target["status"] == "working":
+            # Into its turn on whatever it is at: what it says next is about that (Workers).
+            meta["mid_turn"] = True
         if images := self.runtime.attachments_in(params.text):
             meta["attachments"] = images  # The owner's images it names come with it.
         await self.delivery.deliver(
@@ -2177,6 +2181,41 @@ class Tools:
             {"session_id": target["id"], **({"task_id": task["id"]} if task else {})},
         )
         return f"Delivered (task {task['id']})." if task else "Delivered."
+
+    def unnamed_task(self, worker: str, how: str) -> dict | None:
+        """The task a continue or note naming none is about (bug E86: the task given last, done
+        long ago, while another was open): its one open task; of several, the one it is at work
+        on for a note (a continue names one); with none open, a note is about the one it is at
+        work on or did last, and a continue names the finished one it is more of."""
+        tasks = self.tasks.for_session(worker)
+        open_ = [t for t in tasks if t["status"] in OPEN]
+        at = self.runtime.at_work(worker)
+        if len(open_) == 1:
+            return open_[0]
+        if len(open_) > 1 and how == "note" and at and at["status"] in OPEN:
+            return at
+        if len(open_) > 1:
+            listed = "; ".join(f"{t['id']} “{t['title']}” ({t['status']})" for t in open_)
+            raise ValueError(
+                f"That worker has {len(open_)} open tasks ({listed}): give task_id, or "
+                "task='new' for another subject."
+            )
+        if how == "note" or not tasks:
+            return at
+        recent = sorted(tasks, key=lambda t: t["updated_at"])[-5:]
+        last = at or recent[-1]
+        was = {
+            "cancelled": "was cancelled",
+            "done": "was accepted by the owner and is done",
+        }.get(last["status"], f"is finished ({last['status']})")
+        listed = "; ".join(f"{t['id']} “{t['title']}” ({t['status']})" for t in reversed(recent))
+        raise ValueError(
+            f"That worker has no open task: its task {last['id']} “{last['title']}” {was}. More "
+            f"of a task in review or failed (a correction, a missing piece): call again with its "
+            f"task_id, e.g. task_id='{last['id']}' (its latest tasks: {listed}). More work on "
+            "accepted work, or another subject: task='new' with a title. Only telling it "
+            "something: task='note'."
+        )
 
     async def settle_earlier(self, earlier: list[dict], how: str, new: dict) -> list[str]:
         """What a worker is told about its running tasks when it gets a new one: report them
@@ -2608,10 +2647,12 @@ class Tools:
 
     def session_entry(self, row: dict) -> dict:
         """A session as list_sessions shows it: what tells it apart; read_session has the rest."""
+        worker = row["role"] == WORKER
         entry: dict[str, Any] = {
             "session_id": row["id"],
             "role": row["role"],
-            "title": row["title"],
+            # As the owner sees it named (bug E88: the title it was started with).
+            "title": self.runtime.display_title(row),
             "status": row["status"],
             "cwd": row["cwd"],
         }
@@ -2631,7 +2672,9 @@ class Tools:
             entry["agent"] = agent
             if model := self.runtime.agent_choice(row["id"]).get("model"):
                 entry["model"] = model
-        if task := self.tasks.current(row["id"]):
+        # The task it is on, as the owner sees it (bug E86: the one given last, done long ago).
+        on = self.runtime.working_on(row["id"]) if worker else ""
+        if task := (self.tasks.find(on) if on else None) or self.tasks.current(row["id"]):
             entry["task"] = {
                 "task_id": task["id"],
                 "title": task["title"],
@@ -2642,7 +2685,7 @@ class Tools:
             if since := self.drafts_since_report(row):
                 # Its report may say a draft "awaits approval" that was sent since.
                 entry["drafts_since_report"] = since
-        working = row["role"] == WORKER and row["status"] == "working"
+        working = worker and row["status"] == "working"
         if working and (now := self.runtime.progress_line(row, brief=True)):
             entry["now"] = now
         return entry

@@ -383,7 +383,7 @@ TOOL_SCHEMAS: dict[str, tuple[int, str]] = {
     "add_repo": (768, "c36420ef475289ef84a7c2f17ea128f818ef2d3788c54b2abc9f6180175df812"),
     "add_watch": (1057, "df0be8b658c68d8022836f7ee07746db6a1df51a3e4cbfdb76948edc6a626704"),
     "answer_session": (589, "f941f9f2f7819460b968b9e19a394eea6cbb2552d4355e97aec8f26c329e5fda"),
-    "ask_decision": (2210, "6dd625c09a0a9adc7872a7133db62066d7498c04dbbd66ef9838fea5738fcb6c"),
+    "ask_decision": (2414, "9cd90aff65c767a88c079ff34393ced8971017089666a6f3151129381d122757"),
     "ask_session": (706, "9d28cb03a14fa235bbbd43fecd0aed807dd41851213dae53b61a44838639610d"),
     "ask_workspace": (1179, "b671e7e233c3536dd067b5567471879a2c2d4fa17a21a33ae0b65a15967a014c"),
     "assess_worker": (1286, "921119a4af034fe578ef48ebe1b1d226851e3a5627c915bf9629e9ee972c3926"),
