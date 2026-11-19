@@ -216,13 +216,20 @@ EXAMPLE = Feature(
 )
 
 # Deliberate fixes of how the baseline looks, not any feature's: allowed in every run (the plain
-# one, and each feature's off and on), each with why. None against v0.1.48: those of 0.1.41 to
-# 0.1.48 (the one-line heading, workers' batch CLI line, learning from talked sessions, the runs
-# kept, role rules, the Router's title rule, a check-back's runs, workers' own caches, agent
-# settings snapshots, .git identities, held messages, a chat's task, tool search, the Router's
-# rule for a crossed report, ask_decision's task, Watch scans that failed, drafts' has_final,
-# tasks' settings and aged, follow_thread's description) are its own behaviour.
-FIXES: list[Allow] = []
+# one, and each feature's off and on), each with why. Those of 0.1.41 to 0.1.48 (the one-line
+# heading, workers' batch CLI line, learning from talked sessions, the runs kept, role rules, the
+# Router's title rule, a check-back's runs, workers' own caches, agent settings snapshots, .git
+# identities, held messages, a chat's task, tool search, the Router's rule for a crossed report,
+# ask_decision's task, Watch scans that failed, drafts' has_final, tasks' settings and aged,
+# follow_thread's description) are the baseline's own behaviour.
+FIXES: list[Allow] = [
+    # Not a difference of behaviour: a .git folder's identity (0.1.46, workspaces.identity_of)
+    # holds its inode number, and each side's run makes its folders anew.
+    Allow(
+        ".git identities' inode numbers, each run's own",
+        data=r"\.db\.kv\.gitid:.*\.value(\[3\]\.id)?\[2\]$",
+    ),
+]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
 # by default (the owner agreed), so it is compared switched off against the baseline. On, the
