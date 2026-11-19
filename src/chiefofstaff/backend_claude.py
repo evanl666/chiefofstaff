@@ -135,6 +135,9 @@ WATCH_SECONDS = 0.5
 CAUGHT_UP_SECONDS = 2.0
 # How long a background command's end waits for the notice that says its exit code.
 NOTICE_SECONDS = 2.0
+# How long a background command's end waits for the turn its notice wakes (a prompt at its
+# gate) before its session is idle without one.
+WAKE_SECONDS = 10.0
 # Claude's model aliases, offered before any worker's process has listed its models.
 ALIASES = (("default", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"))
 # Of `claude auth status --json`, only these are read; the rest (who, which organization, which
@@ -1164,6 +1167,9 @@ class ClaudeWorker:
         self.running_tasks: dict[str, dict] = {}
         self.background: dict[str, str] = {}
         self.settled_tasks: set[str] = set()
+        # Commands that ended and whose notice is to wake it (the turn it starts by itself):
+        # task id -> the timer that gives up on it.
+        self.waking: dict[str, asyncio.TimerHandle] = {}
         # The text of its own loop's latest response, not yet told (narration or its answer).
         self.pending_text: tuple[str, str] | None = None
         self.streaming = ""
@@ -1421,6 +1427,7 @@ class ClaudeWorker:
                 logger.warning("Claude's process of %s failed: %r", self.worker, exc)
         finally:
             self.stopping = True
+            self.drop_wakes()  # (Its notices wake nothing now.)
             if stopped:
                 stopped.cancel()
             if client is not None:
@@ -1825,6 +1832,7 @@ class ClaudeWorker:
         self.running_calls.clear()
         self.running_tasks.clear()
         self.background.clear()
+        self.drop_wakes()
         self.pending_text = None
         self.allowed.clear()
         self.servers = None
@@ -1845,7 +1853,9 @@ class ClaudeWorker:
     def idle(self) -> bool:
         """Nothing of it runs: no turn (nor one starting), no command it left running, no
         subagent."""
-        return not (self.turn or self.starting or self.background or self.agent_tasks)
+        return not (
+            self.turn or self.starting or self.background or self.agent_tasks or self.waking
+        )
 
     def usage_pending(self) -> bool:
         """Whether something of it may still spend (a turn whose result has not come, a
@@ -2294,6 +2304,12 @@ class ClaudeWorker:
             return
         self.settled_tasks.add(task_id)
         del self.background[task_id]
+        if status in {"completed", "failed"} and self.query is not None:
+            # Claude wakes it with this end's notice: its session is idle once that turn is
+            # over (or none came), not before. (Let go of meanwhile, its process would end as
+            # that turn begins, its tools then refused: live G3.)
+            loop = asyncio.get_running_loop()
+            self.waking[task_id] = loop.call_later(WAKE_SECONDS, self.woke_none, task_id)
         code = None
         if status in {"completed", "failed"} and (found := NOTICE_CODE.search(summary)):
             code = int(found.group(1))
@@ -2302,9 +2318,15 @@ class ClaudeWorker:
         self.after_background()
 
     def after_background(self):
-        """A command its turn left running (or a subagent) ended: once nothing is left and no
-        turn runs, its session is idle."""
-        if self.turn is None and not self.starting and not self.background and not self.agent_tasks:
+        """A command its turn left running (or a subagent) ended: once nothing is left, no turn
+        runs and none is due to wake it (a command's end), its session is idle."""
+        if (
+            self.turn is None
+            and not self.starting
+            and not self.background
+            and not self.agent_tasks
+            and not self.waking
+        ):
             self.emit("session.idle")
             if self.handle is None or self.handle.closed:
                 self.release_if_idle()
@@ -2379,9 +2401,9 @@ class ClaudeWorker:
         return {"status": "limited", "resets_at": 0}
 
     def rest(self):
-        """No turn: what it left running (a command, a subagent) holds the session; else it is
-        idle."""
-        if self.background or self.agent_tasks:
+        """No turn: what it left running (a command, a subagent), or the turn a command's end
+        is to wake, holds the session; else it is idle."""
+        if self.background or self.agent_tasks or self.waking:
             self.emit("assistant.idle")  # What it left running holds session.idle.
         else:
             self.emit("session.idle")
@@ -2519,7 +2541,28 @@ class ClaudeWorker:
     async def gate_wakeup(self, prompt: str) -> dict:
         """A background command's end wakes the worker: within a turn in progress (or one
         admitted and starting), part of it; else a turn it starts by itself, once admitted
-        (counted to its task's run before it spends)."""
+        (counted to its task's run before it spends). Refused, its session is idle now."""
+        taken = False
+        for task_id in TASK_ID.findall(prompt):
+            if timer := self.waking.pop(task_id.strip(), None):
+                timer.cancel()
+                taken = True
+        decision = await self.wakeup_decision(prompt)
+        if taken and decision.get("decision") == "block":
+            self.after_background()
+        return decision
+
+    def woke_none(self, task_id: str):
+        """A command's end whose notice woke no turn in time: its session is idle."""
+        if self.waking.pop(task_id, None):
+            self.after_background()
+
+    def drop_wakes(self):
+        for timer in self.waking.values():
+            timer.cancel()
+        self.waking.clear()
+
+    async def wakeup_decision(self, prompt: str) -> dict:
         if self.turn:
             return {}
         if self.starting and any(s.kind == "turn" and not s.stopped for s in self.at_gate):

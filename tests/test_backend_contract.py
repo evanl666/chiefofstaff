@@ -857,6 +857,40 @@ async def test_the_owners_edit_rules_widen_claudes_sandbox_so_a_sandboxed_worker
     assert (outside / "made.txt").exists(), "the rule widens Claude's sandbox on this version"
 
 
+async def test_a_turn_a_claude_commands_end_wakes_calls_chief_of_staffs_tools(backend, tmp_path):
+    """A command it left running ends after its turn: Claude's notice wakes it (a turn admitted
+    at its gate) and that turn calls Chief of Staff's tools as any. Its session is idle only
+    after that turn: the runtime lets go of an idle worker (Runtime.reattach), which would end
+    its process as the turn begins (live G3: its report refused)."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    calls = []
+
+    def echo(params: Echo, invocation):
+        calls.append(params.text)
+        return f"echo: {params.text}"
+
+    tool = define_tool("echo", description="Echo text back", params_type=Echo, handler=echo)
+    session, turn = await open_session(backend, tmp_path, tools=[tool], ask_first=False)
+
+    letting_go = []
+
+    def let_go(event):
+        if event.type.value == "session.idle":
+            letting_go.append(asyncio.ensure_future(session.disconnect()))
+
+    session.on(let_go)
+    await session.send(
+        "Leave the command `true` running for 3 s, then reply with just: up. "
+        "Once it ends, call the echo tool with text 'woke'"
+    )
+    await wait_for(lambda: calls == ["woke"], 60)
+    kinds = turn.kinds()
+    ended = kinds.index("system.notification")
+    assert kinds[ended + 1] == "assistant.turn_start", kinds
+    assert "session.idle" not in kinds[: ended + 1], kinds
+
+
 async def test_schedules_deleted_in_claude_do_not_come_back_with_claude_resume(backend, tmp_path):
     """Claude Code (2.1.322) brings a session's crons back on `claude --resume`, as the owner's
     terminal runs it, unless a CronDelete named them: what Chief of Staff asks once a worker's
