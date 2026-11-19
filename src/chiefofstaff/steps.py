@@ -583,10 +583,17 @@ class Steps:
         evidence = {**evidence, "exits": exits, "unsandboxed": unsandboxed}
         self.control.move_step(step["id"], RUNNING, result=result, evidence=evidence)
 
-    async def stop_step(self: Shepherd, session_id: str, state: str, why: str):  # type: ignore[misc]
+    async def stop_step(
+        self: Shepherd,  # type: ignore[misc]
+        session_id: str,
+        state: str,
+        why: str,
+        again: bool = False,
+    ):
         """Stop a running attempt now (the owner's message or Stop, turned off, paused, a head
         nobody explains, its spend): its turn and commands end, its session is let go of and
-        unmarked. Counted against the caps, like every attempt."""
+        unmarked. Counted against the caps, like every attempt; `again` (stopped for the owner's
+        work) only against the day's."""
         step = self.step_of(session_id)
         runtime_state = self.runtime.states[session_id]
         runtime_state.after_abort = True  # Its turn's end owes no report.
@@ -603,12 +610,23 @@ class Steps:
             self.end_step(step, state, why)
             self.runtime.add_message(session_id, "notice", why, {"shepherd_step": step["id"]})
             self.runtime.background(self.settle(step["id"]))
+            if again:
+                # Not tried for its fix or round (the day's attempts count it): the PR's next
+                # read queues it again if its signal is still current, behind the owner's work.
+                ended = self.control.step(step["id"]) or step
+                evidence = {**(ended["evidence"] or {}), "again": True}
+                self.control.move_step(step["id"], state, evidence=evidence)
+                if step["clicked"]:
+                    self.store.set(f"clickfirst:{step['target']}", "1")  # Still the owner's ask.
+                self.read_at[step["target"]] = 0
         self.runtime.background(self.runtime.workers.pump())
 
     async def yield_to(self: Shepherd, session_id: str):  # type: ignore[misc]
         """Something else for the worker (the owner's message, the Router's): its step stops
         first; an ordinary message never reaches a session in the step profile."""
-        await self.stop_step(session_id, "interrupted", "Stopped preparing it for your message.")
+        await self.stop_step(
+            session_id, "interrupted", "Stopped preparing it for your message.", again=True
+        )
 
     async def failed(self: Shepherd, session_id: str, why: str):  # type: ignore[misc]
         await self.stop_step(session_id, "failed", f"Preparing it failed: {why[:300]}")
