@@ -136,8 +136,9 @@ Settings → *Coding agents*). For such a worker:
 - **Workers that read Slack** run on Copilot: not on Codex, and not on Claude yet.
 - **The Router and the Watchdog** can run on Codex or Claude too (Settings → *Coding agents*),
   with nothing but Chief of Staff's tools, as on Copilot: on Codex, its commands, image viewing
-  and making, web search, hooks and plugins off, your MCP servers not started, ChatGPT's apps and
-  subagents off, each of those features read back off before the session is used; on Claude, no
+  and making, goals, its own questions, web search, hooks and plugins off, your MCP servers not
+  started, ChatGPT's apps and subagents off, each of those features read back off before the
+  session is used (its `apply_patch` stays, and every patch it tries is refused); on Claude, no
   built-in tool (`--tools ""`), no MCP server but Chief of Staff's (`--strict-mcp-config`), your
   hooks off, and a turn that shows any other tool stops. Every other call still asks Chief of
   Staff, which refuses it to them as to their Copilot sessions. The Slack session and *Watch for
