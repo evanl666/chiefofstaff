@@ -152,4 +152,4 @@ async def test_no_coding_agent_found_says_which_are_supported(tmp_path, monkeypa
     runtime = await harness.connect()
     monkeypatch.setattr("shutil.which", lambda name, *args, **kwargs: None)
     found = await runtime.look_for_agents()
-    assert found["agents"] == [] and found["supported"] == ["the Codex CLI"]
+    assert found["agents"] == [] and found["supported"] == ["the Codex CLI", "Claude Code"]

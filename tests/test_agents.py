@@ -1017,7 +1017,7 @@ async def test_prepare_downgrade_stops_codex_workers_at_work_and_leaves_copilots
     await runtime.stop()
 
 
-@pytest.mark.parametrize("hashed", [True, False], ids=["hashed", "as-0.1.45-kept-them"])
+@pytest.mark.parametrize("hashed", [True, False], ids=["hashed", "as-0.1.46-kept-them"])
 async def test_prepare_downgrade_says_what_is_left_running_and_fails(
     tmp_path, monkeypatch, capsys, hashed
 ):
