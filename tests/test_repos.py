@@ -5789,11 +5789,11 @@ async def test_a_replace_ref_changes_nothing_chief_of_staffs_git_reads(tmp_path)
     real, fake = two_commits(clone)
     run("git", "replace", real, fake, cwd=clone)
     assert run("git", "show", "HEAD:a.txt", cwd=clone) == "fake\n", "git there reads the other"
-    assert (await private(clone, "show", "HEAD:a.txt")) == "real\n"
+    assert (await private(clone, "show", "HEAD:a.txt")).split() == ["real"]  # (\r\n on Windows)
     run("git", "pack-refs", "--all", cwd=clone)  # (Packed, as a clone has them.)
-    assert (await private(clone, "show", "HEAD:a.txt")) == "real\n"
+    assert (await private(clone, "show", "HEAD:a.txt")).split() == ["real"]
     owners = await workspaces_module.git("-C", str(clone), "show", "HEAD:a.txt")
-    assert owners == "real\n"
+    assert owners.split() == ["real"]
 
 
 def forged_index(repo: Path, name: str, forged: str):

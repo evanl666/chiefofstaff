@@ -242,8 +242,8 @@ async def test_commands_chief_of_staff_runs_never_see_its_own_variables(monkeypa
 @pytest.mark.skipif(sys.platform == "win32", reason="a shell filter")
 async def test_a_clone_whose_config_would_run_code_is_read_without_it(tmp_path):
     """A clone in a worker's folder whose config names a filter some of its files use: read
-    through a git folder of Chief of Staff's own, so the filter never runs (and the files it
-    keeps are not compared: said as not checked)."""
+    through a git folder of Chief of Staff's own, so the filter never runs; and a filter only
+    the clone defines hides nothing: its files are compared as they are."""
     clone = tmp_path / "clone"
     marker = tmp_path / "pwned"
 
@@ -263,8 +263,8 @@ async def test_a_clone_whose_config_would_run_code_is_read_without_it(tmp_path):
     await asyncio.to_thread(made)
     checkout = {"repo": str(clone), "path": str(clone), "remote": "acme/x", "branch": "b"}
     status = await checkout_git(checkout, str(clone), "status", "--porcelain")
-    assert status.splitlines() == [" M g.txt"]
-    assert await unchecked_files(checkout, str(clone)) == 1
+    assert status.splitlines() == [" M f.bin", " M g.txt"]
+    assert await unchecked_files(checkout, str(clone)) == 0
     assert not marker.exists()
 
 
