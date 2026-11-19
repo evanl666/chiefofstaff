@@ -2947,7 +2947,8 @@ async def round_nine(runtime, browser, failures: list[str]):
             refused = "It finished just now: its result is under Recently finished."
             await route.fulfill(status=409, json={"detail": refused})
         else:
-            await route.fulfill(json=set_aside)
+            # Made as the server makes it: after the action (an older reply sets nothing back).
+            await route.fulfill(json={**set_aside, "updated_at": datetime.now(UTC).isoformat()})
 
     await page.route("**/api/tasks/*/cancel", cancelling)
     await row.click()
