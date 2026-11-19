@@ -20,7 +20,6 @@ import contextlib
 import functools
 import hashlib
 import os
-import pwd
 import random
 import re
 import shutil
@@ -35,6 +34,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+
+from own_home import account_home
 
 DEFAULT = {"main", "master"}
 BASH = shutil.which("bash") or "/bin/bash"
@@ -420,7 +421,7 @@ class Sandbox:
 
 # The owner's own home (the system's account's, whatever HOME says: what a shell's `~` is
 # where HOME is unset), and its git configuration: no line run here may change it.
-REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+REAL_HOME = Path(account_home())
 SANDBOX_EXEC = shutil.which("sandbox-exec")
 
 

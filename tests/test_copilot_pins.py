@@ -84,6 +84,7 @@ def machine(tmp_path, monkeypatch):
     monkeypatch.setattr(caches_module, "path_folders", lambda home, slack=False: [])
     monkeypatch.setattr(caches_module, "global_npmrc", list)
     monkeypatch.setattr(caches_module, "SYSTEM_PREFIXES", ())  # Homebrew's, where it is.
+    monkeypatch.setattr(caches_module, "SYSTEM_CONFIGS", ())  # /etc/pip.conf, where it is.
     caches = workspaces_module.PLATFORM_CACHES["darwin"]
     monkeypatch.setattr(workspaces_module, "PLATFORM_CACHES", {"darwin": caches, "linux": caches})
     return SimpleNamespace(root=tmp_path, home=home, copilot=copilot)
