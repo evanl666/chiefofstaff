@@ -280,6 +280,14 @@ FIXES: list[Allow] = [
         value="Follow a Slack thread, DM or PR: its new messages come straight to you (a PR "
         "merged or closed already: for 14 days, and a closed one's reopening).",
     ),
+    # Live C5: a Codex worker skipped the `sleep` its task said to run, citing the rule against
+    # waiting; the rule now says a command the task itself says to run is run as asked.
+    Allow(
+        "workers' rule against waiting: a command the task says to run is not waiting",
+        data=r"\.system_message\.content$",
+        lines=r"^  (reviews or long runs \(a Flyte or Airflow run, an eval\)\. "
+        r"|run, even a sleep, is not waiting: run it as asked\.\) Do everything else first)",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

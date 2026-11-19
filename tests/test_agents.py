@@ -661,6 +661,15 @@ def test_a_codex_worker_is_told_in_codex_terms_what_copilot_is_told_in_its_own()
     assert prompts.worker_on("copilot", prompts.WORKER) == prompts.WORKER
 
 
+def test_a_command_the_task_says_to_run_is_not_the_waiting_a_worker_is_told_not_to_do():
+    # A Codex worker skipped its task's `sleep`, citing "no sleep or polling loops" (live C5).
+    for agent in ("copilot", "codex"):
+        said = " ".join(prompts.worker_on(agent, prompts.WORKER).split())
+        assert "no sleep or polling loops" in said
+        command = "A command the task itself says to run, even a sleep, is not waiting: run it"
+        assert f"{command} as asked." in said, agent
+
+
 async def test_a_codex_worker_has_its_words_and_a_copilot_worker_its_own(tmp_path, codex_on_path):
     harness, runtime, worker, _ = await codex_worker(tmp_path)
     try:

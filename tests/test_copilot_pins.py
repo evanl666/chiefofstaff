@@ -307,8 +307,8 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         3264,
         "4df73869b2dae13f0c13102ea0964554acb846342671e08bbb3f9c85ab3ed1a4",
     ),
-    "distill, created": (18139, "cbcaa465ed6beb2ba3cb9bdd33f4d97f85440d2e5aa9c127650e574879836892"),
-    "distill, resumed": (18102, "dd4a1930ac4a2225d08fcb98d849802846e772a9a1e83850dfd4409196782772"),
+    "distill, created": (18230, "8148388021f8efd7b2d8ad57493476224443297d7f285a1cf08685ca48c13d00"),
+    "distill, resumed": (18193, "698c5b4afe80513a4245b5fb76b0a1fe8c534fbd9d75d2ef6803c64b76827bd9"),
     "learner, created": (731, "91982fd00db66c9f3230d5c596dd31a401298730e43d30595f7d819572d6f061"),
     "learner, resumed": (696, "469981aa96e8edf4f853edc4c8599332cc702b9ce2a0f1b2fd2cbfe6caa640c1"),
     "messenger, created": (
@@ -339,39 +339,39 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "watchdog, created": (3382, "e3ae732c64bc3796a98d0ee8015e8485f26b7b4695757da463dfea17e52fd1c5"),
     "watchdog, resumed": (3344, "ba4828117ea24e74adedd35a373d08e7375e550c3f143742141d4f822dcd5e24"),
     "worker asking first, sandboxed, created": (
-        21092,
-        "23d00567a300e036f1ee942ea37f7caa0b4b7ddf93023e72d2e23195e048f33e",
+        21183,
+        "73dc058065d85ba365a4b63666aaffd35212c59579b627effb352c6e4a0e1d96",
     ),
     "worker asking first, sandboxed, resumed": (
-        21047,
-        "c72ccff37cec65e5d1ead09ec2a8c897531e791d228e55adcb7117b2cae3bf8d",
+        21138,
+        "50a4c656f74609be910e9f9d6017adb556fe23d0f73543fe24becb2ccf57f08d",
     ),
     "worker in a trusted worktree, created": (
-        18707,
-        "3b7b8a2c8d6095b234b924e8d2c365361c16cf6e920c0e23e545e44339dd3c68",
+        18798,
+        "af65336c1af93172a39710e19584873577fba0a2df4a2088b624558b3eae27e7",
     ),
     "worker in a trusted worktree, resumed": (
-        18631,
-        "6a117eb153f651b1166692beb4aa5d072a2ddd3eb3acf0a0477ef439c7f4e4f7",
+        18722,
+        "0f312ec9481230e08ba44a294d14ecaa8022cfea53b33f52c2e0ecb2e75e02af",
     ),
     "worker that reads Slack, created": (
-        21331,
-        "1d6f8e9d4d33d2ab19a1f247a81f3e44edfe85964ac8505cbd0d4204a8b8b158",
+        21422,
+        "1bdeef97049a371ed7fc309800b941df6a3269769dcafe6cc5f933a3c8ffd619",
     ),
     "worker that reads Slack, resumed": (
-        21284,
-        "b5f9e23914a3b9a777d991cb645e46522ffe08bcb895c726ab6f88caadcec68a",
+        21375,
+        "398e9f26d209c92dbed94af01720f966560373720c677e8845f3afd280689c07",
     ),
     "worker with its model, created": (
-        18241,
-        "281ac490c8fd35dc5db98a59dad534b6bbe7ef7b6ed71277a7b9b7c22dc07f9c",
+        18332,
+        "9d7cf0dc78f5a87c5a03667bdb4194c388145cdef62a1bff72cb8cb64960c894",
     ),
     "worker with its model, resumed": (
-        18194,
-        "d69610aaa37011e557e19b70593c9f55ae4ed98769e32c362b3c98ba8b886d72",
+        18285,
+        "ed0456f09e9209d3d6ab98116860efd79cdacd9aaca4709f816cefbfb535ff99",
     ),
-    "worker, created": (18191, "9d97942a866772a1a2bdd92176f7a054954ebe3b06321950f48ead221befc5e2"),
-    "worker, resumed": (18143, "4f004e2e145b40c22530dc0cf46768bed8f2f79dce1fe81a931cda1e529d7815"),
+    "worker, created": (18282, "8514af25bf9d916a00a3b7865365b5f6f74b9b55a63b4998699e365b3d3a47a2"),
+    "worker, resumed": (18234, "400a67c9660fc66d9e20e2449cd0c1d2262405a309bd49e82ecd5e0c8cd2f74f"),
 }
 
 
