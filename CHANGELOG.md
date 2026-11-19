@@ -33,6 +33,8 @@
 - Just after a worker reports, its card says *Checking what it changed…* until its changes are
   read, instead of "no tests or changes observed" for a second or more (the API's receipts say
   `checking` meanwhile).
+- A decision the Router records in the same step as it starts the task relying on it is linked
+  to that task (it was linked to none, so changing the decision reached no worker).
 - **Security:** opentelemetry-api, which FastAPI brings in, is 1.45.2: 1.45.1 and earlier took
   quadratic time to parse a long `traceparent` header (a denial of service; Dependabot alert 1).
 
