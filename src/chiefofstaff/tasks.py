@@ -26,12 +26,15 @@ from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
-from .store import Store, now
+from .store import Store, hours_ago, now
 
 STATUSES = ("queued", "running", "waiting", "review", "done", "failed", "cancelled")
 OPEN = frozenset({"queued", "running", "waiting"})
 FINISHED = frozenset({"review", "done"})  # Dependencies on these are met.
 ENDED = frozenset({"done", "failed", "cancelled"})
+# A failed task neither retried nor dismissed is listed this long (Needs you for the first
+# three days, see TaskActions.aged).
+FAILED_KEPT_HOURS = 7 * 24
 # How a run ends when its task moves to this status.
 RUN_ENDS = {
     "review": "succeeded",
@@ -106,13 +109,17 @@ class TaskBook:
         does not go quiet out of sight). Not the placeholder task of an adopted session, until
         it is continued."""
         since = include_ended_since or now()
+        # A failed task neither retried nor dismissed stays longer (Recently finished, once out
+        # of Needs you: bug E89, it went unresolved and unseen).
+        failed = min(since, hours_ago(FAILED_KEPT_HOURS)) if include_ended_since else since
         found = self.store.all(
             f"""SELECT * FROM tasks WHERE (status IN ('queued','running','waiting','review')
             OR (ended_at IS NOT NULL AND ended_at>=?)
+            OR (status='failed' AND ended_at>=?)
             OR 'news:' || id IN (SELECT key FROM kv WHERE key LIKE 'news:%'))
             AND NOT (status='done' AND result=?) AND session_id NOT IN ({HELPERS})
             ORDER BY created_at""",  # noqa: S608  (HELPERS: constant SQL)
-            (since, ADOPTED),
+            (since, failed, ADOPTED),
         )
         # Only a worker still open follows anything up: what it follows, the runs it said go
         # on. So the list stays as long as the open workers' work, not every task ever.

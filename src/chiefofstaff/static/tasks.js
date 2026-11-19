@@ -632,7 +632,9 @@ function taskCard(task, phase = phaseOf(task)) {
       more = [named, worker, cancel];
     } else if (task.status === "failed") {
       main = el("button", { type: "button", text: "Retry", onclick: () => act(`/api/tasks/${task.id}/retry`, {}, "Retrying.") });
-      more = [{ text: "Retry with a note…", onclick: retryWithNote }, named, worker, cancel];
+      // Not wanted any more (bug E89: Retry was the only way out): over, its worker as it is.
+      shown = [quiet("Dismiss", () => act(`/api/tasks/${task.id}/cancel`, { text: "" }, "Dismissed."), "Not wanted: it is cancelled, and nothing of its worker reopens")];
+      more = [{ text: "Retry with a note…", onclick: retryWithNote }, named, worker];
     } else if (task.status === "running" && ["stalled", "overdue", "idle", "check-failed"].includes(phase.marker)) {
       // Nothing moves on it: ask its worker where it stands, or end it.
       main = nudge;

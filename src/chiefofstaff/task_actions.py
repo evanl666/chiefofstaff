@@ -28,7 +28,7 @@ from .roles import WORKER
 from .sources.github import MISSING_TRIES, NOT_FOUND
 from .sources.slack import describe
 from .store import hours_ago, now
-from .tasks import ADOPTED, ENDED, OPEN
+from .tasks import ADOPTED, OPEN
 from .workspaces import (
     CommandRun,
     Scope,
@@ -2846,12 +2846,31 @@ class TaskActions:
             lines.append(f"<sub>Orchestrated with [Chief of Staff]({PROJECT_URL})</sub>")
         return "\n".join(lines).strip() + "\n"
 
-    def fail(self, session_id: str, message: str):
-        """Its session failed: none of its open tasks goes on."""
-        for task in self.tasks.for_session(session_id):
-            if task["status"] in OPEN:
-                self.tasks.move(task["id"], "failed", progress=message[:500])
-                self.runtime.background(self.record_end(task))  # See cancel.
+    def fail(self, session_id: str, message: str) -> dict | None:
+        """Its turn failed (or its start): the task that turn was on fails; its other tasks stay
+        as they were (bug E84: every open one failed, queued ones too, and their Retry started
+        them out of turn). The task that failed, if one did (not for a turn about finished
+        work: news on it, say)."""
+        task = self.tasks.find(self.runtime.turn_task(session_id))
+        if not task or task["session_id"] != session_id:
+            task = self.tasks.current(session_id)
+        if not task or task["status"] not in OPEN:
+            return None
+        self.end_follows(task)
+        failed = self.tasks.move(task["id"], "failed", progress=message[:500])
+        self.runtime.background(self.record_end(failed))  # See cancel.
+        return failed
+
+    def reopened(self, task_id: str) -> str:
+        """Where finished work taken up again (a follow-up) goes back to when only that
+        follow-up ends: "review" or "done"; "" for none. A failed or cancelled task taken up
+        again has no result to go back to (bug E83: an earlier version kept "failed", and
+        cancelling it or closing its worker brought it back as Failed)."""
+        was = self.store.get(f"reopened:{task_id}") or ""
+        if was not in {"review", "done"}:
+            self.store.delete(f"reopened:{task_id}")
+            return ""
+        return was
 
     def report_task(self, caller: str, reference: str) -> dict | None:
         """The task a report is about: the one it names; else its only open task (not the one
@@ -2921,8 +2940,11 @@ class TaskActions:
     async def cancel(self, task_id: str, reason: str = "", by: str = "you") -> dict:
         """End a task for good. Its worker stops if it is on this task, and stays open."""
         task = self.tasks.get(task_id)
-        if task["status"] in ENDED:
+        if task["status"] in {"done", "cancelled"}:
             raise ValueError(f"Task {task_id} is {task['status']} already.")
+        # A failed one is dismissed (bug E89: refused, Retry was the only way out, and it
+        # reopened its worker): nothing of its worker is stopped or reopened.
+        failed = task["status"] == "failed"
         row = self.store.find_session(task["session_id"])
         # At work on it now: the task its turn is on (not merely the one it was given last).
         on_it = (
@@ -2955,7 +2977,7 @@ class TaskActions:
             # Finished already: nothing to stop, its result stands.
             self.store.delete(f"cancelask:{task_id}")
             return self.set_aside(task, why, reason, by)
-        if was := self.store.get(f"reopened:{task_id}"):
+        if was := self.reopened(task_id):
             # Only the follow-up on finished work is cancelled: its result stands.
             self.store.delete(f"reopened:{task_id}")
             started = self.store.value(
@@ -2965,9 +2987,11 @@ class TaskActions:
             task = self.tasks.move(task_id, was, progress=f"Follow-up cancelled ({why})")
         else:
             self.withdraw_drafts(task, why)
+            self.end_follows(task)
             task = self.tasks.move(task_id, "cancelled", progress=why)
-            # Where it stopped: retried later, what other tasks did meanwhile is not its own.
-            self.runtime.background(self.record_end(task))
+            if not failed:  # (Where a failed one stopped was recorded as it failed.)
+                # Where it stopped: retried later, what other tasks did meanwhile is not its own.
+                self.runtime.background(self.record_end(task))
         others = [
             other
             for other in self.tasks.for_session(task["session_id"])
@@ -3164,11 +3188,22 @@ class TaskActions:
         self.runtime.background(self.runtime.workers.pump())
         return task
 
-    def drop_follows(self, task: dict):
+    def drop_follows(self, task: dict) -> dict[str, float]:
         """Its worker stops following what it followed for this task only (not a thread another
-        of its tasks follows too)."""
+        of its tasks follows too). What it followed for it, with since when (see end_follows)."""
         session_id = task["session_id"]
-        for key in self.followed_for(task, self.store.follows(session_id)):
+        follows = self.store.follows(session_id)
+        if task["status"] in {"cancelled", "failed"}:
+            # Ended already (before ending dropped its follows): those tied to it.
+            keys = [k for k in follows if task["id"] in self.store.follow_tasks(session_id, k)]
+        else:
+            keys = self.followed_for(task, follows)
+        dropped = {}
+        for key in keys:
+            dropped[key] = self.store.value(
+                "SELECT since FROM subscriptions WHERE thread=? AND session_id=?",
+                (key, session_id),
+            )
             bound = [
                 t
                 for t in self.store.follow_tasks(session_id, key)
@@ -3180,6 +3215,33 @@ class TaskActions:
                 self.store.unfollow(key, session_id)
         if row := self.store.find_session(session_id):
             self.runtime.publish_session(row)
+        return dropped
+
+    def end_follows(self, task: dict):
+        """A task failing or cancelled: what its worker followed for it alone it follows no
+        longer (news there would wake it for work nobody wants now); kept for its Retry."""
+        if dropped := self.drop_follows(task):
+            self.store.set(f"unfollowed:{task['id']}", json.dumps(dropped))
+
+    def restore_follows(self, task: dict):
+        """A failed or cancelled task at work again: its worker follows again what it followed
+        for it (from where it left off), unless the owner or the Router stopped that since."""
+        dropped = json.loads(self.store.get(f"unfollowed:{task['id']}") or "{}")
+        self.store.delete(f"unfollowed:{task['id']}")
+        session_id = task["session_id"]
+        row = self.store.find_session(session_id)
+        if not dropped or not row or row["closed_at"]:
+            return
+        for key, since in dropped.items():
+            if self.store.get(f"stopped:{session_id}:{key}") or self.store.get(
+                f"stoppedfor:{task['id']}:{key}"
+            ):
+                continue
+            self.store.follow(key, session_id, since=since)
+            bound = self.store.follow_tasks(session_id, key)
+            if task["id"] not in bound:
+                self.store.set(f"followtask:{session_id}:{key}", json.dumps([*bound, task["id"]]))
+        self.runtime.publish_session(self.store.session(session_id))
 
     def withdraw_drafts(self, task: dict, why: str, since: str = "") -> list[dict]:
         """Its replies and reviews still waiting for the owner go with it (`since`: only those
@@ -3553,7 +3615,7 @@ class TaskActions:
         else:
             for key in ("followup", "morefor", "newresult", "ownchange"):
                 self.store.delete(f"{key}:{task['id']}")
-            if task["status"] in OPEN and (was := self.store.get(f"reopened:{task['id']}")):
+            if task["status"] in OPEN and (was := self.reopened(task["id"])):
                 self.tasks.move(task["id"], was)
             self.store.set(f"turntask:{task['session_id']}", made["id"])
         if task["result"]:
@@ -3794,8 +3856,10 @@ class TaskActions:
                 self.drop_cancelled_note(self.runtime.router_id(), task_id)
         self.store.delete(f"setaside:{task_id}")  # Wanted after all.
         if before in {"review", "done", "failed", "cancelled"}:
-            # Cancelling this follow-up gives the finished result back.
-            self.store.set(f"reopened:{task_id}", before)
+            if before in {"review", "done"}:
+                # Cancelling this follow-up gives the finished result back (not a failed or
+                # cancelled task's state: bug E83).
+                self.store.set(f"reopened:{task_id}", before)
             task = self.tasks.move(task_id, "running", reason="follow-up")
         elif before == "waiting" and self.store.get(f"askedafter:{task_id}"):
             # Finished work it asked the owner about: answered, it is back where it was. What
@@ -3885,12 +3949,25 @@ class TaskActions:
             raise ValueError(
                 f"Task {task_id} is {task['status']}; only failed or cancelled tasks are retried."
             )
+        if (instead := self.tasks.find(self.store.get(f"replacedby:{task_id}") or "")) and (
+            instead["status"] not in {"failed", "cancelled"}
+        ):
+            # Its work goes on in the task that replaced it (bug E83: a Retry ran it twice).
+            raise ValueError(
+                f"It was replaced by {instead['id']} “{instead['title']}”, which is "
+                f"{instead['status']}: open that one instead."
+            )
         row = self.store.session(task["session_id"])
         # The owner asked it to go: what it spent unknown (another agent's) is accepted, before
         # it is reopened (its agent refuses it otherwise).
         self.runtime.accept_spend(row["id"])
         if row["closed_at"]:
+            closer = self.store.get(f"closedby:{row['id']}")
             await self.runtime.workers.reopen(row["id"])
+            if closer:
+                # Closed on purpose: reopened for this, said so (bug E83: nobody was told, and
+                # the Router had the work done again elsewhere).
+                self.reopened_for_retry(row, task, closer)
             task = self.tasks.get(task_id)
             if task["status"] not in {"failed", "cancelled"}:
                 return task  # Retried meanwhile (a second click): once is enough.
@@ -3902,12 +3979,12 @@ class TaskActions:
                 owner=text,
                 scope=self.runtime.learning.scope_of(task["session_id"]),
             )
-        self.store.set(f"reopened:{task_id}", before["status"])
         if before["status"] == "cancelled":
             self.drop_cancelled_note(row["id"], task_id)  # Moot: it is wanted after all.
             with suppress(RuntimeError):
                 self.drop_cancelled_note(self.runtime.router_id(), task_id)
         task = self.tasks.move(task_id, "running", reason="retry", progress="")
+        self.restore_follows(task)
         body = f"The owner asks you to try task {task_id} “{task['title']}” again."
         if text.strip():
             body += f"\n\n{text.strip()}"
@@ -3925,12 +4002,70 @@ class TaskActions:
                 meta={"task_id": task_id},
             )
         except Exception:
-            self.store.delete(f"reopened:{task_id}")
             self.tasks.move(task_id, before["status"], progress=before["progress"])
             raise
         # What the owner did, as their chat shows it: the task's id is for its worker only.
         self.runtime.owner_told(row, shown, message)
         return task
+
+    @staticmethod
+    def aged(task: dict) -> bool:
+        """A failed task out of Needs you: it failed longer ago than ended tasks are shown
+        there (it stays listed a while longer, see TaskBook.listed)."""
+        if task["status"] != "failed" or not task["ended_at"]:
+            return False
+        from .runtime import TASKS_SHOWN_HOURS
+
+        return task["ended_at"] < hours_ago(TASKS_SHOWN_HOURS)
+
+    async def remind_failed(self):
+        """A failed task neither retried nor dismissed is told to the owner once, a day before
+        it leaves Needs you (bug E89: it left unresolved, unsaid)."""
+        from .runtime import TASKS_SHOWN_HOURS
+
+        for task in self.store.all(
+            "SELECT * FROM tasks WHERE status='failed' AND ended_at<? AND ended_at>=?",
+            (hours_ago(TASKS_SHOWN_HOURS - 24), hours_ago(TASKS_SHOWN_HOURS)),
+        ):
+            if self.store.get(f"failedtold:{task['id']}") or not self.store.find_session(
+                task["session_id"]
+            ):
+                continue
+            self.store.set(f"failedtold:{task['id']}", now())
+            text = (
+                f"“{task['title']}” failed two days ago and was not retried: retry or dismiss "
+                "it. Tomorrow it moves from Needs you to Recently finished."
+            )
+            with suppress(RuntimeError):
+                self.runtime.add_message(
+                    self.runtime.router_id(),
+                    "notice",
+                    text,
+                    {"session_id": task["session_id"], "task_id": task["id"]},
+                )
+            self.runtime.alert(text, session_id=task["session_id"], needs_action=True)
+
+    def reopened_for_retry(self, row: dict, task: dict, closer: str):
+        """The owner's Retry reopened a worker the owner or the Router closed: the Router hears
+        it with its next message (it may have closed it for good reason, or given the work to
+        another), and the owner sees it on Home."""
+        title = self.runtime.display_title(row)
+        who = "you" if closer == "you" else "the Router"
+        display = f"Reopened “{title}” (closed by {who}) to retry “{task['title']}”"
+        with suppress(RuntimeError):
+            router = self.runtime.router_id()
+            text = (
+                f"The owner retried task {task['id']} “{task['title']}”: worker "
+                f"{row['id'][:8]} “{title}”, which {'the owner' if closer == 'you' else 'you'} "
+                "closed, was reopened for it. If another task does that work now, tell the owner."
+            )
+            self.delivery.hold(
+                router,
+                wrap("system", "reopened", text, task=task["id"], title=task["title"]),
+                kind="notice",
+                display=display,
+                meta={"session_id": row["id"], "task_id": task["id"]},
+            )
 
     def followed_for(self, task: dict, follows: list[str]) -> list[str]:
         """The threads and PRs its worker follows for this task: those it was given or started
@@ -4221,6 +4356,8 @@ class TaskActions:
             ),
             # Stopped by the owner (or the Watchdog) mid-work: it waits to be told to go on.
             "stopped": self.store.get(f"stopped:{task['id']}") or "",
+            # Failed days ago, neither retried nor dismissed: under Recently finished now.
+            "aged": self.aged(task),
             # What it made or runs, as its worker last said: a short name and status each.
             "artifacts": json.loads(self.store.get(f"artifacts:{task['id']}") or "[]"),
             # Every link its reports gave, and those it was given (not its own work).
@@ -4275,6 +4412,8 @@ class TaskActions:
             asked = self.open_question(task) or {}
             return "question", clip(" ".join((asked.get("text") or task["progress"]).split()), 300)
         if status == "failed":
+            if self.aged(task):
+                return "", ""  # Out of Needs you, under Recently finished (bug E89).
             return "failed", clip(" ".join((task["progress"] or "").split()), 300)
         if status == "running":
             check = self.check_back(task) or {}
@@ -4958,6 +5097,10 @@ class TaskActions:
             # Once: the workers it works with stop waiting for it.
             self.store.set(f"peerstop:{task['id']}", "1")
             self.runtime.background(self.runtime.peers.stopped(task))
+        elif task["status"] in OPEN and self.store.get(f"peerstop:{task['id']}"):
+            # At work again (retried, reopened): what they were told will not come may.
+            self.store.delete(f"peerstop:{task['id']}")
+            self.runtime.background(self.runtime.peers.back(task))
         # Whether a task is blocked depends on the tasks it waits for.
         for dependent in self.tasks.dependents(task["id"]):
             if dependent["status"] in OPEN:

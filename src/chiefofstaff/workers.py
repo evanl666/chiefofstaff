@@ -835,6 +835,13 @@ class Workers:
         self.store.unfollow_session(session_id)
         # The decision cards each of its tasks waits on: reopened, it waits on them again.
         deciding = self.runtime.decisions.waited_on(session_id)
+        if by:
+            # Closed on purpose (the owner, the Router): no check-back of its opens it again (bug
+            # E107; closed for being idle, one comes back when due), and a Retry that reopens it
+            # says so (TaskActions.retry).
+            self.store.set(f"closedby:{session_id}", "you" if by == "you" else "router")
+            for task in self.tasks.for_session(session_id):
+                self.store.delete(f"checkback:{task['id']}")
         self.runtime.decisions.drop_asker(session_id)
         self.states[session_id].last_output = ""
         self.states[session_id].close_after_turn = False
@@ -857,7 +864,7 @@ class Workers:
         for task in self.tasks.for_session(session_id):
             if task["status"] not in OPEN:
                 continue
-            if was := self.store.get(f"reopened:{task['id']}"):
+            if was := self.runtime.task_actions.reopened(task["id"]):
                 # Only its follow-up ends: the result it had stands.
                 self.store.delete(f"reopened:{task['id']}")
                 self.tasks.move(task["id"], was, progress="Follow-up ended: its worker was closed.")
@@ -1062,6 +1069,7 @@ class Workers:
             row = self.runtime.update_session(
                 session_id, closed_at=None, status=status, activity=""
             )
+            self.store.delete(f"closedby:{session_id}")
         restored = []
         for task in self.tasks.for_session(session_id):
             was = json.loads(self.store.get(f"closedtask:{task['id']}") or "null")

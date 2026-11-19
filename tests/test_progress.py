@@ -3025,10 +3025,12 @@ async def test_the_owners_follow_up_or_retry_cancelled_or_closed_gives_the_resul
     after = runtime.tasks.get(task["id"])
     assert after["status"] == "review" and after["result"] == "The numbers."
 
+    # A failed task retried has no result to go back to: cancelled, it is cancelled (bug E83:
+    # it came back as Failed, with a Retry that reopened its closed worker).
     runtime.tasks.move(task["id"], "failed", progress="Crashed")
     await runtime.task_actions.retry(task["id"], "Once more")
     await runtime.task_actions.cancel(task["id"])
-    assert runtime.tasks.get(task["id"])["status"] == "failed"
+    assert runtime.tasks.get(task["id"])["status"] == "cancelled"
 
 
 async def test_a_closed_worker_reopened_does_not_get_what_it_never_received(tmp_path):

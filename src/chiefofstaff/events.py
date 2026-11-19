@@ -870,8 +870,7 @@ class Events:
         self.runtime.add_message(session_id, "error", message)
         if row["role"] == WORKER:
             self.runtime.update_session(session_id, status="failed", activity="")
-            self.runtime.task_actions.fail(session_id, message)
-            task = self.tasks.current(session_id)
+            task = self.runtime.task_actions.fail(session_id, message)
             self.runtime.background(self.runtime.tell_router(row, "failed", message, task))
             self.runtime.background(self.runtime.workers.pump())
         else:
@@ -945,8 +944,7 @@ class Events:
         self.runtime.add_message(row["id"], "error", message)
         if row["role"] == WORKER:
             self.runtime.update_session(row["id"], status="failed", activity="")
-            self.runtime.task_actions.fail(row["id"], message)
-            task = self.tasks.current(row["id"])
+            task = self.runtime.task_actions.fail(row["id"], message)
             await self.runtime.tell_router(row, "failed", message, task)
 
     def hook_failed(self, row: dict, message: str):

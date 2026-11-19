@@ -321,6 +321,42 @@ class Peers:
                 steer=True,
             )
 
+    async def back(self, task: dict):
+        """A task they were told would not come is at work again (retried, reopened): each
+        worker told so hears it may come after all; one that has not received that yet (held
+        for it) never will."""
+        row = self.store.find_session(task["session_id"])
+        if not row:
+            return
+        text = (
+            f"“{row['title']}”'s task “{task['title']}” is open again (retried or reopened): what "
+            "you may wait for from it can come after all."
+        )
+        for peer in self.open(row["id"]):
+            told = self.store.one(
+                "SELECT id, meta FROM messages WHERE session_id=? AND kind='notice' "
+                "AND json_extract(meta, '$.prompt') LIKE ? ORDER BY id DESC LIMIT 1",
+                (peer["id"], f'%type="peer-stopped"%task="{task["id"]}"%'),
+            )
+            if not told:
+                continue
+            if told["id"] > int(self.store.get(f"sent:{peer['id']}") or 0):
+                # Not received yet: withdrawn, not delivered late.
+                meta = json.loads(told["meta"])
+                kept = {key: value for key, value in meta.items() if key != "prompt"}
+                self.store.update_message_meta(told["id"], {**kept, "dropped": True})
+                self.delivery.publish_delivery(peer["id"], [self.store.message(told["id"])])
+                continue
+            if peer["task_row"] and peer["task_row"]["status"] in OPEN:
+                await self.delivery.deliver(
+                    peer["id"],
+                    wrap("system", "peer-back", text, worker=short(row["id"]), task=task["id"]),
+                    kind="notice",
+                    display=text,
+                    meta={"peer": row["id"], "session_id": row["id"]},
+                    steer=True,
+                )
+
 
 def same(name: str, title: str) -> bool:
     return " ".join(name.split()).casefold() == " ".join(title.split()).casefold()

@@ -1711,7 +1711,7 @@ class Tools:
             self.states[caller].turn_tasks.append(task["id"])
             decisions = self.with_turn_decisions(caller, params.decisions)
         self.link_decisions(task["id"], decisions)
-        await self.replace(replaced, task)
+        moved = await self.replace(replaced, task)
         if not special:
             # Again now that it exists: another task started at the same time may exist now.
             self.runtime.peers.want(session_id, wanted)
@@ -1803,6 +1803,8 @@ class Tools:
             )
         elif row["status"] == "queued":
             result["note"] = "Queued until a worker slot frees up."
+        if moved:
+            result["dependents"] = moved
         return result
 
     async def follow_own_pulls(self, caller: str, text: str, task: dict | None):
@@ -2112,6 +2114,7 @@ class Tools:
             return "Delivered."
         # The worker as the owner knows it now, before a new task renames it.
         worker_name = self.runtime.display_title(target)
+        moved = ""
         if params.task == "new":
             criteria = clean_criteria(params.done_when)
             decisions = self.with_turn_decisions(caller, params.decisions)
@@ -2159,9 +2162,11 @@ class Tools:
             restate = bool(task and task["status"] in {"review", "done"} and task["result"])
             if task and task["status"] in {"review", "failed"}:
                 # Reopened for a follow-up: cancelling that follow-up gives the finished result
-                # back, rather than losing it.
-                self.store.set(f"reopened:{task['id']}", task["status"])
+                # back, rather than losing it (a failed task has none to give back: bug E83).
+                if task["status"] == "review":
+                    self.store.set(f"reopened:{task['id']}", task["status"])
                 task = self.tasks.move(task["id"], "running", reason="follow-up")
+                self.runtime.task_actions.restore_follows(task)
             elif task and task["status"] == "running" and target["task_id"] != task["id"]:
                 # The task it is on now (as a reopened one is): not the one given last.
                 self.store.execute(
@@ -2208,7 +2213,7 @@ class Tools:
         if params.task == "new" and task:
             # What the new task does instead ends once it has the new task (bug E108: told to
             # go on with a task it had not been given yet).
-            await self.replace(replaced, task)
+            moved = await self.replace(replaced, task)
             if params.earlier == "superseded":
                 for old in earlier:
                     with suppress(ValueError):
@@ -2221,7 +2226,9 @@ class Tools:
             notice,
             {"session_id": target["id"], **({"task_id": task["id"]} if task else {})},
         )
-        return f"Delivered (task {task['id']})." if task else "Delivered."
+        if not task:
+            return "Delivered."
+        return f"Delivered (task {task['id']})." + (f" {moved}" if moved else "")
 
     def unnamed_task(self, worker: str, how: str) -> dict | None:
         """The task a continue or note naming none is about (bug E86: the task given last, done
@@ -2299,10 +2306,13 @@ class Tools:
             found.append(task)
         return found
 
-    async def replace(self, old: list[dict], new: dict):
-        """Tasks a new one does instead are over: a failed one is not offered for a retry."""
+    async def replace(self, old: list[dict], new: dict) -> str:
+        """Tasks a new one does instead are over: a failed one is not offered for a retry. The
+        tasks that waited for them wait for it now (said in what is returned, for the Router)."""
         why = f"Replaced by {new['id']} “{new['title']}”."
+        moved = [found for task in old for found in self.move_dependents(task, new)]
         for task in old:
+            self.store.set(f"replacedby:{task['id']}", new["id"])  # Not retried: see retry.
             task = self.tasks.get(task["id"])
             if task["status"] in OPEN:
                 with suppress(ValueError):
@@ -2310,6 +2320,7 @@ class Tools:
                 continue
             if task["status"] != "failed":
                 continue
+            self.runtime.task_actions.end_follows(task)  # (Failed before it dropped them.)
             self.tasks.move(task["id"], "cancelled", progress=why)
             row = self.store.find_session(task["session_id"])
             if (
@@ -2320,6 +2331,38 @@ class Tools:
                 )
             ):
                 self.runtime.update_session(row["id"], status="done")  # Nothing of it is left.
+        if not moved:
+            return ""
+        listed = "; ".join(f"{task['id']} “{task['title']}”" for task in moved)
+        return f"Waiting for {new['id']} now instead of the task(s) it replaces: {listed}."
+
+    def move_dependents(self, task: dict, new: dict) -> list[dict]:
+        """The queued tasks that wait for a task a new one replaces wait for the new one (with
+        what they needed of it): not blocked on the replaced one, nor told so. Not one the new
+        task itself waits for (neither would ever start)."""
+        before = {dep["id"] for dep in self.tasks.deps(new["id"])}
+        waits = set(before)
+        while before:
+            before = {dep["id"] for one in before for dep in self.tasks.deps(one)} - waits
+            waits |= before
+        moved = []
+        for dependent in self.tasks.dependents(task["id"]):
+            if dependent["status"] != "queued" or dependent["id"] in {new["id"], *waits}:
+                continue
+            self.store.execute(
+                "INSERT OR IGNORE INTO task_deps(task_id, depends_on, needs) SELECT task_id, ?, "
+                "needs FROM task_deps WHERE task_id=? AND depends_on=?",
+                (new["id"], dependent["id"], task["id"]),
+            )
+            self.store.execute(
+                "DELETE FROM task_deps WHERE task_id=? AND depends_on=?",
+                (dependent["id"], task["id"]),
+            )
+            self.store.delete(f"depblocked:{dependent['id']}")
+            self.store.delete(f"handed:{dependent['id']}")
+            self.runtime.task_actions.publish(self.tasks.get(dependent["id"]))
+            moved.append(dependent)
+        return moved
 
     async def ask_to_continue(self, params: MessageSession) -> str:
         reference = params.session_id
@@ -3434,6 +3477,7 @@ class Tools:
                 )
             elif params.status == "failed":
                 # It cannot be done: under Needs you with why, for the owner to retry or drop.
+                self.runtime.task_actions.end_follows(task)
                 task = self.tasks.move(task["id"], "failed", progress=params.summary[:6000])
                 # Where it stopped: retried later, what other tasks did meanwhile is not its own.
                 self.runtime.background(self.runtime.task_actions.record_end(task))

@@ -236,7 +236,8 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   // Its question is about its own draft: decided on that draft's card, which holds it.
   if (task.status === "waiting" && onCard && task.question_draft) return at("", "", "On its draft's card under Needs you");
   if (task.status === "waiting") return at("needs", "question", "It waits for your answer");
-  if (task.status === "failed") return at("needs", "failed", "");
+  // Failed days ago and neither retried nor dismissed (bug E89): out of Needs you, still here.
+  if (task.status === "failed") return task.aged ? at("finished", "failed", "Failed days ago; not retried") : at("needs", "failed", "");
   if (task.status === "cancelled") return at("finished", "cancelled");
   if (checkBack?.attempts >= 3) return at("needs", "check-failed", `Its check-back could not wake its worker: ${checkBack.error || "unknown error"}`);
   if (task.status === "review" || task.status === "done") {

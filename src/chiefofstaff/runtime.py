@@ -2483,10 +2483,7 @@ class Runtime:
             self.update_session(session_id, status="idle", activity="")
             return
         self.update_session(session_id, status="failed", activity="")
-        task = self.tasks.current(session_id)
-        self.task_actions.fail(session_id, message)
-        if task:
-            task = self.tasks.get(task["id"])
+        task = self.task_actions.fail(session_id, message)
         self.background(self.tell_router(row, "failed", message, task))
         self.background(self.workers.pump())
 
@@ -5270,16 +5267,8 @@ class Runtime:
         self.add_message(row["id"], "error", message)
         self.update_session(row["id"], status="failed", activity="")
         self.delivery.defer_pending(row["id"])  # Not a turn by itself after a restart.
-        task = None
-        if row["role"] == WORKER:
-            # The task it was on; failing to start, the one it was given (still queued).
-            open_ = [t for t in self.tasks.for_session(row["id"]) if t["status"] in OPEN]
-            current = self.tasks.current(row["id"])
-            task = self.tasks.find(self.working_on(row["id"]) or "") or (
-                current if current and current["status"] in OPEN else None
-            )
-            task = task or (open_[-1] if open_ else None)
-        self.task_actions.fail(row["id"], message)
+        # The task it was on; failing to start, the one it was given (still queued).
+        task = self.task_actions.fail(row["id"], message) if row["role"] == WORKER else None
         if row["role"] == WORKER:
             self.background(self.workers.pump())  # Its slot is free for a queued worker.
             if not self.special(row):
@@ -6211,6 +6200,7 @@ class Runtime:
                 self.drafts.check_posted_by_owner,
                 self.task_actions.wake_check_backs,
                 self.task_actions.nudge_stalled,
+                self.task_actions.remind_failed,
                 # Queued work starts once memory frees up, not only when a turn ends.
                 self.workers.pump,
                 self.digest_once,
@@ -6650,7 +6640,8 @@ class Runtime:
         """Which of a worker's tasks a followed thread is about: for a PR, the task that made
         it (its news is that work's, whichever later task of the worker follows or names it
         too), unless it no longer follows it (stopped for it, or followed for other tasks
-        only); else the newest one the follow was made for. None when neither is known: a task
+        only); else the newest one the follow was made for, not failed or cancelled (bug E99:
+        its news woke its worker for work nobody wants). None when neither is: a task
         that only names it (its report, its instructions) does not make it its own (bug E46:
         news and drafts went to the latest that did); the Router is told instead."""
         maker = self.pr_maker(session_id, thread)
@@ -6663,7 +6654,7 @@ class Runtime:
         ):
             return maker
         for task in reversed(self.tasks.for_session(session_id)):
-            if task["id"] in bound:
+            if task["id"] in bound and task["status"] not in {"cancelled", "failed"}:
                 return task
         return None
 
