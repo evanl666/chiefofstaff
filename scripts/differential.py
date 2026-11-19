@@ -396,7 +396,7 @@ FEATURES["send_to_chief"] = Feature(
 
 # More agents (docs/design/more-agents.md): workers on other coding agents (Codex), not a setting
 # but the owner's Coding agents tab in Settings. Off and never used, on a machine with `codex` and
-# `claude` on the PATH (every run has them): v0.1.45's last line of Settings → Models is gone,
+# `claude` on the PATH (every run has them): v0.1.46's last line of Settings → Models is gone,
 # and the picker shows what INSTALLED says; nothing else of agents runs or is imported (both
 # captured, so either is a difference). Its "on" mode is turned on and then off again, before
 # the script (5.11): it may leave its configuration (marked off) and its usage table, empty; the
@@ -571,7 +571,7 @@ FEATURES["codex_on_claude_never"] = Feature(
 )
 
 # The agent picker with other coding agents installed and never decided on (the stand-ins are on
-# the PATH in every run but --copilot-alone): v0.1.45's last line of Settings → Models is gone;
+# the PATH in every run but --copilot-alone): v0.1.46's last line of Settings → Models is gone;
 # Settings has a Coding agents tab after Models, which looks at them only when shown (left out
 # here, so the page never shows it); at its start the app glances at each once (its CLI's version,
 # then its sign-in, in its own folder) for a first-run card on Home: the stand-in `claude` is
@@ -580,7 +580,7 @@ FEATURES["codex_on_claude_never"] = Feature(
 # features.
 INSTALLED = [
     Allow(
-        "v0.1.45's line at the end of Settings → Models, gone (the Coding agents tab instead)",
+        "v0.1.46's line at the end of Settings → Models, gone (the Coding agents tab instead)",
         element="#settings-dialog #agents-line",
         views=r"^settings-models-",
     ),
@@ -611,12 +611,12 @@ INSTALLED = [
 ]  # fmt: skip
 
 # Copilot alone (--copilot-alone: no other coding agent on the PATH, the owner's hidden too): the
-# agent picker shows nothing of other agents anywhere, so this tree is v0.1.45 itself but for the
-# one line v0.1.45 ended Settings → Models with, which is gone. Nothing looked for or run, no
+# agent picker shows nothing of other agents anywhere, so this tree is v0.1.46 itself but for the
+# one line v0.1.46 ended Settings → Models with, which is gone. Nothing looked for or run, no
 # agent module imported, no request about them, no snapshot key: each would be a difference.
 COPILOT_ALONE = [
     Allow(
-        "v0.1.45's line at the end of Settings → Models, gone (nothing of other agents shows)",
+        "v0.1.46's line at the end of Settings → Models, gone (nothing of other agents shows)",
         element="#settings-dialog #agents-line",
         views=r"^settings-models-",
     ),

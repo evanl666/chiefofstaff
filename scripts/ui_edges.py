@@ -7730,7 +7730,10 @@ async def agents_states(browser, scheme: str):
     }  # fmt: skip
     claude = found | {"name": "claude", "label": "Claude"}
     states = {
-        "none-found": {"agents": [], "new_workers": "copilot", "sandboxed": False},
+        "none-found": {
+            "agents": [], "new_workers": "copilot", "sandboxed": False,
+            "supported": ["the Codex CLI", "Claude Code"],
+        },
         "signed-out": {
             "agents": [found | {"problem": SIGNED_OUT_CODEX}],
             "new_workers": "copilot", "sandboxed": False,
