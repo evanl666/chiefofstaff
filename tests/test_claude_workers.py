@@ -975,13 +975,19 @@ async def test_claude_settings_changed_in_a_workers_folder_wait_for_the_owner_to
         )
         with pytest.raises(ValueError, match=re.escape(handover)):
             await runtime.terminal_command(worker)
-        await runtime.owner_send(worker, "Run the shell command `echo next`. Report done: next")
+        (task,) = runtime.tasks.for_session(worker)
+        await runtime.task_actions.follow_up(
+            task["id"], "Run the shell command `echo next`. Report done: next"
+        )
         line = f"{reason}; Chief of Staff won't start the worker there until you say to use them."
         await until(lambda: ("notice", line) in harness.kinds(worker), 10)
         assert harness.store.session(worker)["activity"] == SETTINGS_WAIT
         assert not runtime.states.is_live(worker), "let go of: its next process would load them"
         (said,) = [m for m in harness.store.messages(worker) if m["text"] == line]
         digest = said["meta"]["agent_settings"]["digest"]
+        # One card under Needs you, with Use these settings, as a Copilot worker's (0.1.48).
+        shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+        assert (shown["attention"], shown["settings"]["digest"]) == ("settings", digest)
         with pytest.raises(SettingsChangedError, match=re.escape(reason)):
             await runtime.session_for(worker)
         assert await runtime.accept_settings(worker, digest) == (
