@@ -266,12 +266,17 @@ class Server:
         config = (thread or {}).get("config") or {}
         kept = json.loads(os.environ.get("FAKE_CODEX_FEATURES") or "{}")
         default = {"multi_agent_v2": False}
+        # As Codex: unified exec stays on unless managed requirements turn it off.
+        forced = {"unified_exec": True}
         data = [
             {
                 "name": name,
                 "stage": "stable",
                 "defaultEnabled": default.get(name, True),
-                "enabled": kept.get(name, config.get(f"features.{name}", default.get(name, True))),
+                "enabled": kept.get(
+                    name,
+                    forced.get(name, config.get(f"features.{name}", default.get(name, True))),
+                ),
             }
             for name in (
                 "apps", "multi_agent", "multi_agent_v2", "memories", "shell_tool", "unified_exec",

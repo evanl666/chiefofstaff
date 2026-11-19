@@ -177,7 +177,6 @@ async def test_the_router_runs_on_codex_with_nothing_but_its_tools(tmp_path, cod
             "features.multi_agent": False,
             "features.multi_agent_v2": False,
             "features.shell_tool": False,
-            "features.unified_exec": False,
             "features.view_image": False,
             "features.image_generation": False,
             "features.hooks": False,

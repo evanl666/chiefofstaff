@@ -206,10 +206,10 @@ FULL_ACCESS = "dangerFullAccess"
 # and nothing else, as their Copilot sessions do: Codex's commands, image viewing and making,
 # web search, hooks and plugins off (codex-rs 0.167.2 spec_plan.rs), the owner's MCP servers off,
 # and, as with Ask first, ChatGPT's apps and subagents. Each feature Codex lists must read back
-# off, or the session does not open.
+# off, or the session does not open. (Not unified_exec, which only managed requirements turn off:
+# with shell_tool off, Codex offers no command tool at all.)
 ROLE_FEATURES = (
     "shell_tool",
-    "unified_exec",
     "view_image",
     "image_generation",
     "hooks",
