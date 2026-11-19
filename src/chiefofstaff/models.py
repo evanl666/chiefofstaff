@@ -684,6 +684,12 @@ class FollowRetry(StrictModel):
     key: str = Field(min_length=1, max_length=500)  # The PR it follows: github:owner/repo#n.
 
 
+class CheckBackAction(StrictModel):
+    """The owner's word on a check-back that could not wake its worker."""
+
+    how: Literal["retry", "stop"]
+
+
 class RunsEnded(StrictModel):
     """The owner's word on runs of a task its worker said go on (see TaskActions.end_runs)."""
 

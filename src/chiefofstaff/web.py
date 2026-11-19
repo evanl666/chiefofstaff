@@ -20,6 +20,7 @@ from .bus import Bus
 from .models import (
     AgentSettings,
     ArtifactHide,
+    CheckBackAction,
     DraftDecision,
     FocusRequest,
     FollowRetry,
@@ -587,6 +588,13 @@ def create_app(
     async def task_runs(task_id: str, payload: RunsEnded):
         """Runs its worker said go on: marked ended, or no longer followed."""
         return runtime.task_actions.end_runs(task_id, payload.urls, payload.how)
+
+    @app.post("/api/tasks/{task_id}/check-back")
+    async def task_check_back(task_id: str, payload: CheckBackAction):
+        """A check-back that could not wake its worker: tried again now, or dropped."""
+        if payload.how == "retry":
+            return await runtime.task_actions.check_back_again(task_id)
+        return runtime.task_actions.stop_check_back(task_id)
 
     @app.post("/api/artifacts/hide")
     async def hide_artifact(payload: ArtifactHide):

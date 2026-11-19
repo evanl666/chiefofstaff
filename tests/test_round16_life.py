@@ -209,6 +209,40 @@ async def test_a_check_back_reopens_a_worker_closed_for_being_idle(harness):
     assert not harness.store.session(worker)["closed_at"], "reopened when due"
 
 
+# E109: a failed check-back on accepted work, one rule on Home and on the server.
+
+
+async def failed_check_back(harness):
+    runtime, worker, a, _b, session = await checking(harness, with_b=False)
+    found = json.loads(harness.store.get(f"checkback:{a['id']}"))
+    found |= {"attempts": 3, "error": "Copilot is not running"}
+    harness.store.set(f"checkback:{a['id']}", json.dumps(found))
+    return runtime, worker, a, session
+
+
+async def test_a_failed_check_back_on_accepted_work_needs_the_owner_on_the_server_too(harness):
+    runtime, _worker, a, _session = await failed_check_back(harness)
+    shown = view(runtime, a["id"])
+    assert shown["status"] == "done" and shown["attention"] == "check-failed"
+    assert a["id"] in needs(runtime).markers
+    assert needs(runtime).markers[a["id"]] == "check-failed"
+
+
+async def test_a_failed_check_back_is_retried_or_dropped_by_the_owner(harness):
+    runtime, _worker, a, session = await failed_check_back(harness)
+    sent = len(session.sent)
+    await runtime.task_actions.check_back_again(a["id"])
+    await settle(runtime)
+    assert len(session.sent) == sent + 1 and "which you reported done" in session.sent[-1]
+    assert view(runtime, a["id"])["attention"] != "check-failed"
+    runtime, _worker, b, _session = await failed_check_back(Harness(harness.store.directory.parent
+                                                                    / "again"))  # fmt: skip
+    runtime.task_actions.stop_check_back(b["id"])
+    shown = view(runtime, b["id"])
+    assert not shown["check_back"] and shown["attention"] != "check-failed"
+    assert not runtime.task_actions.runs_going(b["id"]), "nothing is followed up for it now"
+
+
 # E83: a retried task cancelled, or its worker closed, is cancelled (not Failed again).
 
 

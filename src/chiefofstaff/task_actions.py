@@ -2034,6 +2034,36 @@ class TaskActions:
                 self.waking.discard(task_id)
             self.publish(self.tasks.get(task_id))
 
+    async def check_back_again(self, task_id: str) -> dict:
+        """The owner's "Retry check-back" on one that could not wake its worker: it is tried
+        now, its failures forgotten (they come back if it fails again)."""
+        found = json.loads(self.store.get(f"checkback:{task_id}") or "null")
+        if not found or not self.check_back(self.tasks.get(task_id)):
+            raise ValueError("It has no check-back now.")
+        moment = datetime.now(UTC)
+        found = {k: v for k, v in found.items() if k not in {"attempts", "error", "due"}}
+        self.store.set(f"checkback:{task_id}", json.dumps(found | {"at": moment.isoformat()}))
+        await self.wake_check_backs(moment)
+        return self.view(self.tasks.get(task_id))
+
+    def stop_check_back(self, task_id: str) -> dict:
+        """The owner's "Stop following up": its check-back goes, and the runs it was on are no
+        longer tracked (as they were last said to stand); its result stays as it is."""
+        task = self.tasks.get(task_id)
+        found = json.loads(self.store.get(f"checkback:{task_id}") or "null")
+        if not found:
+            raise ValueError("It has no check-back now.")
+        self.store.delete(f"checkback:{task_id}")
+        covered = {threads.link_key(item["url"]) for item in self.covered_going(task_id, found)}
+        if covered and task["status"] in {"review", "done"}:
+            known = json.loads(self.store.get(f"artifacts:{task_id}") or "[]")
+            for item in known:
+                if threads.link_key(item["url"]) in covered:
+                    item |= {"untracked": True, "changed_at": now()}
+            self.store.set(f"artifacts:{task_id}", json.dumps(known))
+        self.publish(self.tasks.get(task_id))
+        return self.view(self.tasks.get(task_id))
+
     async def learn_pr_titles(self, text: str):
         """The titles of the PRs a text names, read from GitHub once (a few at a time)."""
         learned = False
@@ -4415,12 +4445,12 @@ class TaskActions:
             if self.aged(task):
                 return "", ""  # Out of Needs you, under Recently finished (bug E89).
             return "failed", clip(" ".join((task["progress"] or "").split()), 300)
-        if status == "running":
+        if status in {"running", "review", "done"}:
+            # Accepted work's too (bug E109): Home counted it, nothing else did.
             check = self.check_back(task) or {}
             if check.get("attempts", 0) >= 3:
                 error = check.get("error") or "unknown error"
                 return "check-failed", f"Its check-back could not wake its worker: {error}"
-            return "", ""
         if status not in {"review", "done"} or self.store.get(f"setaside:{task_id}"):
             return "", ""
         row = self.store.find_session(task["session_id"])

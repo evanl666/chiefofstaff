@@ -600,7 +600,14 @@ function taskCard(task, phase = phaseOf(task)) {
     let main = null;
     let shown = [];
     let more = [];
-    if (task.status === "done" && PR_TO_FIX.includes(phase.marker)) {
+    if (phase.marker === "check-failed" && task.status !== "running") {
+      // Finished work whose check-back could not wake its worker (bug E109): tried again now,
+      // or no longer followed up; its result stays as it is.
+      const how = (value, said) => () => act(`/api/tasks/${task.id}/check-back`, { how: value }, said);
+      main = el("button", { type: "button", text: "Retry check-back", onclick: how("retry", "Checking back now.") });
+      shown = [quiet("Stop following up", how("stop", "No longer followed up."), "Drop the check-back and stop tracking the runs it was on")];
+      more = [task.status === "review" ? { text: "Accept", onclick: accept } : null, followUp, copy, named, worker];
+    } else if (task.status === "done" && PR_TO_FIX.includes(phase.marker)) {
       // Its PR has failing CI, merge conflicts or changes asked for: tell its worker what to do
       // about it (a result not accepted yet can be, as it is).
       const about = { "pr-failing": "the failing checks", "pr-conflicts": "the merge conflicts", "pr-changes": "the changes asked for" }[phase.marker];
