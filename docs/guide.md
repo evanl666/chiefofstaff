@@ -24,6 +24,7 @@ bounds, see [SECURITY.md](../SECURITY.md).
 - [Models and usage](#models-and-usage)
 - [Daily summary and your profile](#daily-summary-and-your-profile)
 - [Settings and environment variables](#settings-and-environment-variables)
+- [Updating](#updating)
 - [Data](#data)
 
 ## Home
@@ -1207,9 +1208,20 @@ Most settings are in the UI. Environment variables for tuning and tests:
 | `CHIEFOFSTAFF_RELEASE_IDLE_MINUTES` | `10` | A quiet worker lets go of its Copilot session after this long |
 | `CHIEFOFSTAFF_DISK_WARNING_GB`, `_WARNING_PERCENT` | `30`, `5` | Below this much free space (whichever is more) the disk is low: an alert |
 | `CHIEFOFSTAFF_DISK_CRITICAL_GB`, `_CRITICAL_PERCENT` | `10`, `2` | Below this, new worker turns wait for space |
+| `CHIEFOFSTAFF_UPDATE_CHECK` | | `0`: never read PyPI for a newer release (tests), whatever Settings says |
 
 Chief of Staff removes its own `CHIEFOFSTAFF_*` variables from the environment Copilot and its
 commands run in.
+
+## Updating
+
+Installed as a tool, `uv tool upgrade chiefofstaff` (or `pipx upgrade chiefofstaff`) updates
+it. Without installing, start it with `uvx chiefofstaff@latest`: plain `uvx chiefofstaff` runs
+the version uv cached the first time, however old (a newer Copilot CLI may need a newer Chief of
+Staff). When a newer release is out, one quiet line at the bottom of the sidebar says so, with
+the command that updates it the way you installed it. Chief of Staff reads its own page on PyPI
+for that, at most once a day, and sends nothing about you or your machine; *Say when a newer
+Chief of Staff is out* (Settings → General) turns it off.
 
 ## Data
 

@@ -394,6 +394,9 @@ class Settings(StrictModel):
     # their turn, working…), read from the logs Copilot keeps (see others.py): local files, no
     # model call, nothing stored.
     other_sessions: bool = True
+    # A quiet line when a newer Chief of Staff is out (updates.py: PyPI read once a day at most,
+    # nothing sent about this machine).
+    update_notice: bool = True
     # Send to Chief: `chiefofstaff send` hands the Router a note, a link or text through a socket
     # in the data directory only the owner's user can use (see sendsocket.py); none while off.
     send_to_chief: bool = False

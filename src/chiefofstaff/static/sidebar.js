@@ -191,6 +191,8 @@ export function renderStatusLine() {
   const until = snap.focus?.until && new Date(snap.focus.until) > new Date() ? new Date(snap.focus.until) : null;
   if (until) nodes.push(el("div", { class: "demo", text: `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` }));
   if (snap.runtime.warning) nodes.push(el("div", { class: "bad", text: snap.runtime.warning }));
+  // A newer release: one quiet line (Settings → General turns it off).
+  if (snap.update) nodes.push(el("div", { class: "update", text: `Chief of Staff ${snap.update.version} is out: ${snap.update.command}` }));
   if (snap.settings.slack_enabled && snap.slack.error) {
     // What to do about it, here: fix it in Settings, or stop watching Slack.
     nodes.push(

@@ -7,6 +7,11 @@
   Now it keeps that refusal in its data folder and runs Copilot 1.0.112 straight away while your
   CLI (its path and the version it says it is) and the Copilot SDK stay the same; when either
   changes, your CLI is tried again. The refusal is one line in the log, no longer a traceback.
+- **The sidebar says when a newer Chief of Staff is out**, in one quiet line with the command that
+  updates it the way it was installed (`uvx chiefofstaff@latest`: plain `uvx chiefofstaff` runs
+  the version uv cached first, however old; `uv tool upgrade chiefofstaff`). Chief of Staff reads
+  its own page on PyPI for that, at most once a day, sending nothing about you; Settings → General
+  turns it off.
 - A Copilot session deleted while open no longer logs a traceback ("'destroy' is not a valid
   ShutdownType").
 

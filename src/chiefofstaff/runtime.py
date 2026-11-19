@@ -43,7 +43,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from . import agents, caches, prompts, settings_guard, threads
+from . import agents, caches, prompts, settings_guard, threads, updates
 from . import workspaces as workspaces_module
 from .abilities import Abilities
 from .asks import Asks
@@ -191,6 +191,9 @@ PROMPTS = {
     WORKER: prompts.WORKER,
     WATCHDOG: prompts.WATCHDOG,
 }
+# How long after its start Chief of Staff first looks whether a newer one is out (updates.py).
+UPDATE_DELAY = 60
+
 ROUTER_TOOLS = [
     "spawn_worker",
     "ask_workspace",
@@ -527,6 +530,8 @@ class Runtime:
         self.watch_job: asyncio.Task | None = None
         # Keeps when this run was last known running (see alive).
         self.alive_job: asyncio.Task | None = None
+        # Whether a newer Chief of Staff is out (updates.py), looked at once a day.
+        self.update_job: asyncio.Task | None = None
         self.started_at: float | None = None
         # Watches that Copilot's CLI still runs; reconnects after it stopped by itself, or once
         # the Router is no longer open in a terminal.
@@ -679,6 +684,8 @@ class Runtime:
         self.started_at = time.time()
         self.alive()  # Before its commands of before are ended (end_commands, at connect).
         self.alive_job = asyncio.create_task(self.keep_alive())
+        if not getattr(self, "demo", False) and os.environ.get("CHIEFOFSTAFF_UPDATE_CHECK") != "0":
+            self.update_job = asyncio.create_task(self.watch_updates())
         self.store.execute(
             "UPDATE drafts SET status='uncertain', outcome=? WHERE status='sending'",
             ("Chief of Staff stopped while sending. Check whether it was delivered.",),
@@ -717,6 +724,18 @@ class Runtime:
             await asyncio.sleep(ALIVE_EVERY)
             self.alive()
 
+    async def watch_updates(self):
+        """Whether a newer Chief of Staff is out: a minute after the start (not on its way),
+        then each hour, PyPI read when the last look is a day old (updates.check)."""
+        await asyncio.sleep(UPDATE_DELAY)
+        while True:
+            before = updates.notice(self.store)
+            with suppress(Exception):
+                await updates.check(self.store)
+            if updates.notice(self.store) != before:
+                self.publish_state()
+            await asyncio.sleep(3600)
+
     def uptime(self) -> list[tuple[float, float]]:
         """Chief of Staff's runs, this one's running until now."""
         runs = [run for run in runs_of(self.store) if run[0] != self.started_at]
@@ -741,6 +760,7 @@ class Runtime:
             self.watch_job,
             self.mirror_job,
             self.alive_job,
+            self.update_job,
         ):
             if job:
                 job.cancel()
@@ -6587,6 +6607,8 @@ class Runtime:
                 else {}
             ),
             "demo": getattr(self, "demo", False),
+            # A newer Chief of Staff, and the command that updates it (none: no line).
+            **({"update": notice} if (notice := updates.notice(self.store)) else {}),
             "focus": self.focus.state(),
             "router_id": self.store.get("router_id"),
             "sessions": [self.view(row) for row in self.store.open_sessions()],

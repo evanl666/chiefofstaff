@@ -173,7 +173,10 @@ Workers can also run on Codex (off by default; Settings → Models). For such a 
 
 Everything stays on your machine: a SQLite database and work folders in the data directory
 (owner-only permissions), plus Copilot's own session storage (`~/.copilot`). Chief of Staff sends
-no telemetry. GitHub Copilot itself works under GitHub's terms and settings.
+no telemetry. To say when a newer release is out, it reads its own public page on PyPI
+(`pypi.org/pypi/chiefofstaff/json`) at most once a day, a plain request that sends nothing about
+you or your machine; Settings → General turns that off. GitHub Copilot itself works under
+GitHub's terms and settings.
 
 To learn how you write (Settings → *How you work*), Chief of Staff stores your own words in that
 database: Slack messages you sent, your PR reviews and review comments, your commit messages and

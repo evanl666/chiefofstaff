@@ -358,6 +358,7 @@ export function fillSettings() {
   form.stall_hours.value = settings.stall_hours ?? 4;
   form.mac_notifications.checked = settings.mac_notifications;
   form.other_sessions.checked = Boolean(settings.other_sessions);
+  form.update_notice.checked = settings.update_notice !== false;
   // When none of them can say where it stands, its line says why.
   const why = settings.other_sessions ? state.othersWhy : "";
   if (why) form.other_sessions.parentElement.title = why;
@@ -851,6 +852,7 @@ export function settingsBody() {
     stall_hours: number("stall_hours", settings.stall_hours ?? 4),
     mac_notifications: form.mac_notifications.checked,
     other_sessions: form.other_sessions.checked,
+    update_notice: form.update_notice.checked,
     watchdog_enabled: form.watchdog_enabled.checked,
     slack_enabled: form.slack_enabled.checked,
     slack_poll_seconds: number("slack_poll_seconds"),

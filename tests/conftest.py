@@ -50,6 +50,17 @@ def said(text: str) -> str:
 
 
 @pytest.fixture(autouse=True)
+def no_pypi(monkeypatch):
+    """No test reads PyPI for a newer release (updates.py): one that wants one says which."""
+    from chiefofstaff import updates
+
+    async def nothing() -> str:
+        return ""
+
+    monkeypatch.setattr(updates, "fetch_latest", nothing)
+
+
+@pytest.fixture(autouse=True)
 def terse_titles(request, monkeypatch):
     """Tests name tasks tersely ("Lint", "A"): a new task's title is checked as a rename's is
     (it says what it delivers, see deliverable_title) only in tests marked `titles`."""

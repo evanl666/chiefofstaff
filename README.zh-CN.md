@@ -15,7 +15,7 @@ Copilot 做完，再用你的口吻回话：做了什么都有证据，每句话
 ![首页：对话、需要你处理的事、每个任务的实时进度](docs/images/home.png)
 
 ```bash
-uvx chiefofstaff --demo    # 用脚本模拟的 session 先体验，不需要登录
+uvx chiefofstaff@latest --demo    # 用脚本模拟的 session 先体验，不需要登录
 ```
 
 ## 为什么做这个
@@ -70,13 +70,13 @@ Copilot session，跟踪所有进展，只在需要我做决定、或者有草�
 ```bash
 npm install -g @github/copilot
 copilot login
-uvx chiefofstaff           # 或者：pipx install chiefofstaff && chiefofstaff
+uvx chiefofstaff@latest    # 或者：uv tool install chiefofstaff && chiefofstaff
 ```
 
 浏览器会通过终端里打印的私密链接打开 Chief of Staff（这个链接别给别人）。告诉它你的代码放在哪，比如 `~/workspace`，然后说你要做什么。
 
 所有东西都在你的电脑上跑，数据存在 `~/Library/Application Support/chiefofstaff`（macOS）或
-`~/.local/share/chiefofstaff`（Linux）或 `%LOCALAPPDATA%\chiefofstaff\chiefofstaff`（Windows；若使用从应用商店安装的 Python，Windows 会把它放在该 Python 的 `%LOCALAPPDATA%\Packages\...\LocalCache` 下，启动时 `Data:` 一行会显示实际位置）。Ctrl+C 停止，下次启动时 session 会接着之前的进度。参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：`uvx chiefofstaff@latest`。
+`~/.local/share/chiefofstaff`（Linux）或 `%LOCALAPPDATA%\chiefofstaff\chiefofstaff`（Windows；若使用从应用商店安装的 Python，Windows 会把它放在该 Python 的 `%LOCALAPPDATA%\Packages\...\LocalCache` 下，启动时 `Data:` 一行会显示实际位置）。Ctrl+C 停止，下次启动时 session 会接着之前的进度。参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：用 `uvx` 启动时务必写 `uvx chiefofstaff@latest`（不带 `@latest` 的 `uvx chiefofstaff` 会一直运行第一次缓存的旧版本）；用 `uv tool install` 安装的，运行 `uv tool upgrade chiefofstaff`。有新版本时侧边栏会提示（可在 Settings → General 关闭）。
 
 Windows 支持为实验性：暂不支持 Send to Chief、Copilot 命令沙箱、沙箱内的自动检查，以及 Storage
 中的目录大小统计（依赖 `du`）；worker

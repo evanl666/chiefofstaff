@@ -16,7 +16,7 @@ knows how you work.
 ![Home: the chat, what needs you, and every task's live progress](docs/images/home.png)
 
 ```bash
-uvx chiefofstaff --demo    # try it with scripted sessions, no sign-in needed
+uvx chiefofstaff@latest --demo    # try it with scripted sessions, no sign-in needed
 ```
 
 ## Why
@@ -95,9 +95,11 @@ Everything runs on your machine; data stays in `~/Library/Application Support/ch
 `%LOCALAPPDATA%\Packages\...\LocalCache` instead: the `Data:` line at startup says where).
 Ctrl+C stops it, and sessions pick up where they left off next time. Options: `--port`,
 `--data-dir`, `--no-browser`, `--demo`. Update with
-`uv tool upgrade chiefofstaff`. Launching `uvx chiefofstaff@latest` again and again works too,
-but each new version leaves a cached environment behind in uv's cache: `uv cache prune` removes
-the ones nothing uses. Never run `uv cache clean` while Chief of Staff is running: it can delete
+`uv tool upgrade chiefofstaff` (or `pipx upgrade chiefofstaff`); the sidebar says when a newer
+version is out (Settings → General turns that off). Without installing, start it with
+`uvx chiefofstaff@latest`: plain `uvx chiefofstaff` runs the version uv cached the first time,
+however old. Each new version leaves a cached environment behind in uv's cache: `uv cache prune`
+removes the ones nothing uses. Never run `uv cache clean` while Chief of Staff is running: it can delete
 the environment it runs from. Workers' folders, and how much disk they take, are under Storage
 (the disk icon at the bottom of the sidebar).
 

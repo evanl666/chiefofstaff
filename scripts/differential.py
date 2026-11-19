@@ -342,6 +342,29 @@ FEATURES["more_agents"] = Feature(
     on_action="agents_drained",
 )
 
+# The notice of a newer release (updates.py): on by default (the owner asked for it), so it is
+# compared switched off against the baseline. PyPI is never read here (CHIEFOFSTAFF_UPDATE_CHECK
+# is 0 on both sides): on, only its switch line is checked.
+FEATURES["update_notice"] = Feature(
+    off={"update_notice": False},
+    on={"update_notice": True},
+    allow_off=[
+        Allow("its setting, off", setting="update_notice", value=False),
+        Allow(
+            "its switch line in Settings → General",
+            element="#settings-dialog label:has(> input[name=update_notice])",
+            views=r"^settings-general-",
+        ),
+    ],
+    allow_on=[
+        Allow(
+            "its switch line in Settings → General, checked",
+            element="#settings-dialog label:has(> input[name=update_notice])",
+            views=r"^settings-general-",
+        ),
+    ],
+)
+
 # What another coding agent would leave if it were used while off: its CLI run, its modules.
 AGENT_MODULES = ("chiefofstaff.backend_codex", "chiefofstaff.agentrun", "chiefofstaff.codex_check")
 AGENT_CLIS = ("codex", "claude")
@@ -1154,6 +1177,7 @@ def make_run(run: Path) -> dict:
         "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp,
         "CHIEFOFSTAFF_EVENT_DEBOUNCE": "0",
         "CHIEFOFSTAFF_RETRY_DELAY": "0.01",
+        "CHIEFOFSTAFF_UPDATE_CHECK": "0",
         "DIFFERENTIAL_GH_LOG": str(run / "gh.log"),
         "DIFFERENTIAL_AGENTS_LOG": str(run / "agents.log"),
     }  # fmt: skip

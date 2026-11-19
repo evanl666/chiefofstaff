@@ -2,6 +2,8 @@
 sent", a result and its reply as one decision, the task a direct message is filed under, an old
 update shown as new, and one piece of work shown twice."""
 
+import asyncio
+import time
 from dataclasses import replace
 
 from conftest import call_tool, settle
@@ -461,3 +463,56 @@ async def test_a_new_task_whose_message_never_went_is_rolled_back(harness, monke
     assert [t["id"] for t in runtime.tasks.for_session(worker)] == [_first["id"], second["id"]]
     assert runtime.tasks.current(worker)["id"] == second["id"]
     assert runtime.view(harness.store.session(worker))["display_title"] == second["title"]
+
+
+async def test_a_newer_release_is_one_quiet_line_read_from_pypi_once_a_day(harness, monkeypatch):
+    """Owner's ask (a stale uvx cache kept a user on 0.1.45): when a newer Chief of Staff is
+    out, the page says so in one line with the command that updates it; PyPI is read at most
+    once a day, never while Settings turns the line off."""
+    from chiefofstaff import runtime as runtime_module
+    from chiefofstaff import updates
+
+    reads = []
+
+    async def latest() -> str:
+        reads.append(1)
+        return "9.0.0"
+
+    monkeypatch.setattr(updates, "fetch_latest", latest)
+    monkeypatch.setattr(updates, "installed", lambda: "0.1.47")
+    monkeypatch.setattr(updates, "upgrade_command", lambda: "uvx chiefofstaff@latest")
+    monkeypatch.setattr(runtime_module, "UPDATE_DELAY", 0)
+    runtime = await harness.connect()
+    assert "update" not in runtime.snapshot()
+    watching = asyncio.create_task(runtime.watch_updates())
+    await settle(runtime)
+    assert runtime.snapshot()["update"] == {
+        "version": "9.0.0",
+        "command": "uvx chiefofstaff@latest",
+    }
+    watching.cancel()
+    at = time.time()
+    assert await updates.check(harness.store, now=at + 3600) == "9.0.0" and len(reads) == 1
+    assert await updates.check(harness.store, now=at + 86400) == "9.0.0" and len(reads) == 2
+    harness.store.save_settings(
+        harness.store.settings().model_copy(update={"update_notice": False})
+    )
+    assert "update" not in runtime.snapshot()
+    assert await updates.check(harness.store, now=at + 3 * 86400) == "" and len(reads) == 2
+    monkeypatch.setattr(updates, "installed", lambda: "9.0.0")
+    harness.store.save_settings(harness.store.settings().model_copy(update={"update_notice": True}))
+    assert "update" not in runtime.snapshot(), "not newer than this one"
+
+
+def test_the_update_command_is_the_way_chief_of_staff_was_installed():
+    from chiefofstaff.updates import newer, upgrade_command
+
+    command = upgrade_command.__wrapped__
+    assert command("/Users/acme/.cache/uv/archive-v0/x1y2") == "uvx chiefofstaff@latest"
+    assert command("/Users/acme/.local/share/uv/tools/chiefofstaff") == (
+        "uv tool upgrade chiefofstaff"
+    )
+    assert command("/Users/acme/.local/pipx/venvs/chiefofstaff") == "pipx upgrade chiefofstaff"
+    assert command("/Users/acme/tools/.venv") == "pip install --upgrade chiefofstaff"
+    assert newer("0.1.10", "0.1.9") and not newer("0.1.47", "0.1.47")
+    assert not newer("0.2.0rc1", "0.1.47"), "never a pre-release"
