@@ -21,7 +21,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from . import agents, prompts, receipts, threads
 from .backend import stop_background
-from .envelope import wrap
+from .envelope import TASK_CONTINUED, wrap
 from .models import this_computer as loopback
 from .policy import within
 from .roles import WORKER
@@ -3853,6 +3853,21 @@ class TaskActions:
             raise
         self.runtime.owner_told(row, shown, message)
         return task
+
+    def continued(self, session_id: str, prompt: str):
+        """More on a task (a continue, a follow-up) that its worker reads after it reported the
+        task: it is at work on it again, a follow-up (bug E93: it stayed to accept, its work
+        under way). Its next report replaces the result; cancelled, the result stands."""
+        for task_id in dict.fromkeys(TASK_CONTINUED.findall(prompt or "")):
+            task = self.tasks.find(task_id)
+            if not task or task["session_id"] != session_id:
+                continue
+            if task["status"] not in {"review", "done"}:
+                continue
+            self.store.set(f"reopened:{task_id}", task["status"])
+            if task["result"]:
+                self.store.set(f"morefor:{task_id}", "1")  # Its next report is checked (Tools).
+            self.tasks.move(task_id, "running", reason="follow-up")
 
     def drop_cancelled_note(self, session_id: str, task_id: str):
         """The note that a task was cancelled, not sent yet, is moot once it is wanted again."""

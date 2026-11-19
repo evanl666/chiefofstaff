@@ -473,6 +473,8 @@ class Events:
             # News on a thread it follows for a task: its turn is on that task.
             delivery = getattr(getattr(event.data, "delivery", None), "value", "")
             self.runtime.took_up(row["id"], named, switch=delivery != "steering", news=True)
+        if row["role"] == WORKER and not stopped:
+            self.runtime.task_actions.continued(row["id"], getattr(event.data, "content", ""))
         seen = digest(getattr(event.data, "content", "") or "")
         if state.unread:
             # It sees a message now: that one (or, changed on the way, the oldest).

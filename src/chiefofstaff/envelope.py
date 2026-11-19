@@ -170,6 +170,12 @@ TASK_NAMED = re.compile(
 )
 
 
+# More on a task (the Router's continue, the owner's follow-up): its work goes on.
+TASK_CONTINUED = re.compile(
+    r'<message from="(?:router|owner)" type="message"[^>]*?\btask="(t[0-9a-f]+)"'
+)
+
+
 def task_named(text: str) -> str:
     """The task the last instruction in a message to a worker is about ("" for none)."""
     found = tasks_named(text)

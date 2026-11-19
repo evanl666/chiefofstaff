@@ -202,10 +202,10 @@ export function monitorWhy(task, now = Date.now()) {
 // The task a worker's steps are for now: the one its latest instruction named while that is
 // open, or finished and the owner asked about it since (a follow-up); else the one it is on;
 // else its newest running one. A task it reported is not what it works on: a note about it
-// does not make it so either.
+// does not make it so either; nor one it has not seen yet (it waits for the turn to end).
 export function activeTaskId(worker, list) {
   if (!worker) return "";
-  const running = list.filter((task) => task.status === "running").sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const running = list.filter((task) => task.status === "running" && task.started !== false).sort((a, b) => a.created_at.localeCompare(b.created_at));
   const turn = list.find((task) => task.id === worker.turn_task);
   if (turn && (["running", "waiting"].includes(turn.status) || (turn.follow_up && ["review", "done"].includes(turn.status)))) return turn.id;
   if (running.some((task) => task.id === worker.task?.task_id)) return worker.task.task_id;

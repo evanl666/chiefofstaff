@@ -43,7 +43,7 @@ COMMAND = Path(sys.executable).parent / "chiefofstaff"
 # The Router's system message in a fresh store, as 0.1.38 sent it (and since, how to write a task
 # kept out of its title, E44): while Send to Chief is off it must not change by a byte. (Change it
 # here only with a deliberate change to the Router's prompt.)
-ROUTER_PROMPT = (25130, "8d7545cabd15585c6d7407a2b0d37bb12e592ebda00859469e30c743741eaf4e")
+ROUTER_PROMPT = (25355, "c5c0d5c44ba9fd2b3949d97c6f28d8bc2fb80907b94d538cd6b09dec288598c7")
 
 HELP = """\
 usage: chiefofstaff [-h] [--version] [--port PORT] [--data-dir DATA_DIR] [--no-browser] [--demo]
