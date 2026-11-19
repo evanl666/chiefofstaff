@@ -12,7 +12,10 @@ R4  the owner's standing decision, recorded (record_decision) as on Copilot
 R5  back on Copilot: one line, and what it was told on Codex comes with it
 
 Shard S, the same on Claude (Claude's cheapest model, LIVE_CLAUDE_MODEL, default "haiku"; the
-owner's Claude files recorded before and checked after, as scripts/live_claude.py does):
+owner's Claude files recorded before and checked after, and the run's one Claude budget, as
+scripts/live_claude.py has them: LIVE_CLAUDE_BUDGET, default 3,000,000 tokens, shared through
+LIVE_CLAUDE_SPENT by every suite of the run LIVE_CLAUDE_RUN names; a scenario stops as it runs
+out, and the shard stops at a limit of the owner's plan):
 S1-S5 as R1-R5
 
 Shard W, Watch for you (Claude on):
@@ -24,9 +27,11 @@ the owner's own, run with a Codex folder of the shard's own, empty, while a flag
 F1  Codex signed out: the Router stays on Copilot, says why in one line, and answers there
 F2  signed in again (the flag gone): the Router is back on Codex by itself, and answers there
 
-    uv run --extra claude --with playwright python scripts/live_roles.py R|S|W|F [R1 R3 …]
+    env LIVE_AGENTS_ROOT=<tree>/.cos-live \
+        uv run --extra claude --with playwright python scripts/live_roles.py R|S|W|F [R1 R3 …]
 
-(no shard: R, S, W and F, one after another). Ports 20500-20513.
+(no shard: R, S, W and F, one after another; once Claude stops one, no Claude shard runs). For
+one budget across suites, give each the same LIVE_CLAUDE_SPENT file. Ports 20500-20513.
 """
 
 import asyncio
@@ -47,6 +52,7 @@ from live_e2e import SLACK_TOKEN, App, cleanup, git, log, wait_for
 from live_parity import setup
 
 SHARDS = {"R": (20500, 20510), "S": (20501, 20511), "W": (20502, 20512), "F": (20503, 20513)}
+CLAUDE_SHARDS = {"S", "W"}
 CODEX = shutil.which("codex") or "codex"
 NOTICE_ON = "The {label} runs on {agent} now, with a summary of what it knew."
 
@@ -336,7 +342,10 @@ async def archive(ctx: Ctx):
         await codex.stop()
 
 
-async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float, str]]:
+async def run_shard(
+    shard: str, wanted: set[str], spent_before: int = 0
+) -> tuple[list[tuple[str, bool, float, str]], int, str]:
+    """Its results, the Claude tokens it spent and why it stopped early ("": it did not)."""
     port, slack_port = SHARDS[shard]
     live_e2e.PORT, live_e2e.SLACK_PORT = port, slack_port
     live_e2e.BASE = f"http://127.0.0.1:{port}"
@@ -346,7 +355,7 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
         Path(parent).mkdir(parents=True, exist_ok=True)  # (Named, not made yet: made here.)
     root = Path(tempfile.mkdtemp(prefix=f"cos-roles-{shard}-", dir=parent)).resolve()
     home, project, truth = setup(root)
-    agent = "claude" if shard in {"S", "W"} else "codex"
+    agent = "claude" if shard in CLAUDE_SHARDS else "codex"
     record, allowed = root / "owner-files.json", ""
     if agent == "claude":
         allowed = await asyncio.to_thread(lc.calibrated, root, record)
@@ -366,7 +375,7 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
     ctx.agent, ctx.base_env = agent, env
     if shard == "F":
         ctx.notes["flag"] = flag
-    results = []
+    results, stopped = [], ""
     try:
         on = {"enabled": True, **({"model": lc.CLAUDE_MODEL} if agent == "claude" else {})}
         await la.settings(
@@ -381,15 +390,25 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
                 continue
             log(f"=== {name} {scenario.__name__}")
             started = time.monotonic()
-            try:
-                await scenario(ctx)
+            if agent == "claude":
+                outcome = await lc.within_budget(ctx, scenario, spent_before)
+                lc.save_spent(spent_before + ctx.claude_tokens())
+            else:
+                outcome = await outcome_of(scenario(ctx))
+            if outcome is None:
                 results.append((name, True, time.monotonic() - started, ""))
-            except Exception as exc:
-                log(f"{name} FAILED: {exc!r}")
+            else:
+                log(f"{name} FAILED: {outcome!r}")
                 await la.dump(ctx)
-                results.append((name, False, time.monotonic() - started, repr(exc)[:300]))
+                results.append((name, False, time.monotonic() - started, repr(outcome)[:300]))
                 if not (ctx.app.process and ctx.app.process.poll() is None):
                     await ctx.app.start()
+            if agent == "claude" and ctx.plan_stopped():
+                stopped = "Claude refused a turn for a limit of the plan: stopped here"
+                break
+            if agent == "claude" and spent_before + ctx.claude_tokens() >= lc.BUDGET:
+                stopped = f"the budget ({lc.BUDGET:,} Claude tokens) is spent: stopped here"
+                break
         ctx.notes["tokens"] = ctx.agent_tokens()
         ctx.notes["credits"] = ctx.copilot_credits()
     finally:
@@ -418,9 +437,19 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
     print(f"\n================ LIVE ROLES, shard {shard} ================")
     for name, ok, seconds, error in results:
         print(f"{name:5} {'pass' if ok else 'FAIL'} {seconds:5.0f}s {error}")
+    if stopped:
+        print(f"STOPPED: {stopped}")
     print(f"{label(agent)} tokens: {ctx.notes.get('tokens', 0):,}; Copilot credits: "
           f"{ctx.notes.get('credits', 0):.1f}")  # fmt: skip
-    return results
+    return results, ctx.notes.get("tokens", 0) if agent == "claude" else 0, stopped
+
+
+async def outcome_of(running) -> Exception | None:
+    try:
+        await running
+    except Exception as exc:
+        return exc
+    return None
 
 
 async def main() -> int:
@@ -431,12 +460,27 @@ async def main() -> int:
         return 2
     shards = [sys.argv[1].upper()] if len(sys.argv) > 1 else list(SCENARIOS)
     wanted = {name.upper() for name in sys.argv[2:]}
-    results = []
+    results, stopped, spent = [], "", lc.run_spent()
+    if CLAUDE_SHARDS & set(shards):
+        log(f"run {lc.RUN!r}: {spent:,} of {lc.BUDGET:,} Claude tokens spent before ({lc.SPENT})")
     for shard in shards:
-        results += await run_shard(shard, wanted)
+        # (Once Claude stopped one, no Claude shard runs; the others do.)
+        if shard in CLAUDE_SHARDS and stopped:
+            continue
+        if shard in CLAUDE_SHARDS and spent >= lc.BUDGET:
+            stopped = f"the run's budget ({lc.BUDGET:,} Claude tokens) is spent: {shard} not run"
+            continue
+        found, tokens, why = await run_shard(shard, wanted, spent)
+        results += found
+        if shard in CLAUDE_SHARDS:
+            spent += tokens
+            lc.save_spent(spent)
+            stopped = why
     passed = sum(ok for _, ok, _, _ in results)
-    print(f"{passed}/{len(results)} scenarios passed")
-    return 0 if results and passed == len(results) else 1
+    print(f"{passed}/{len(results)} scenarios passed"
+          + (f"; {spent:,} Claude tokens in run {lc.RUN!r}" if CLAUDE_SHARDS & set(shards) else "")
+          + (f"; STOPPED: {stopped}" if stopped else ""))  # fmt: skip
+    return 0 if results and passed == len(results) and not stopped else 1
 
 
 if __name__ == "__main__":
