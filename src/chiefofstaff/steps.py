@@ -16,10 +16,9 @@ import logging
 import os
 import re
 import shlex
-import subprocess
 import time
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from . import integrity
@@ -27,7 +26,7 @@ from .backend import stop_background
 from .control import PREPARED, QUEUED, RUNNING
 from .envelope import UNTRUSTED, wrap
 from .store import now
-from .workspaces import SAFE_GIT, checkout_git, command, git
+from .workspaces import SAFE_GIT, admin_dir, checkout_git, command, git
 
 if TYPE_CHECKING:
     from .shepherd import Shepherd
@@ -156,7 +155,8 @@ class Steps:
                 offset = log.stat().st_size
         run = self.runtime.tasks.start_run(task["id"], f"shepherd:{step['kind']}")
         evidence = {**(step["evidence"] or {}), "hosts": prepared["hosts"], "log_offset": offset,
-                    "reused": prepared["reused"], "git_config": prepared["git_config"]}  # fmt: skip
+                    "reused": prepared["reused"], "git_config": prepared["git_config"],
+                    "checkout": prepared["checkout"]}  # fmt: skip
         self.control.move_step(
             step_id, RUNNING, tree=prepared["tree"], folder=prepared["folder"],
             evidence=evidence, run_id=run["id"],
@@ -218,6 +218,14 @@ class Steps:
                  step["run_id"]),
             )  # fmt: skip
 
+    def tree_of(self: Shepherd, step: dict) -> dict:  # type: ignore[misc]
+        """The checkout Chief of Staff's git reads a step's tree through (checkout_git): its
+        worker's own, or the worktree prepare made, pinned from the repository's side; never
+        what the tree's `.git` says, which the step can rewrite."""
+        if found := (step.get("evidence") or {}).get("checkout"):
+            return found
+        raise ValueError("its worktree is not known")
+
     def publish_task(self: Shepherd, step: dict):  # type: ignore[misc]
         if task := self.runtime.tasks.find(step.get("task_id") or ""):
             self.runtime.task_actions.publish(task)
@@ -237,27 +245,38 @@ class Steps:
         workspace = self.runtime.workspaces.workspace(row)
         folder = workspace / STEP_FOLDER / step["id"]
         await asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True, mode=0o700)
-        login = await self.runtime.github.acting_login(repo)
-        token = await self.runtime.github.bound_token(login) if login else ""
-        env = git_env(token, self.git_config)
-        url = f"https://github.com/{details.get('head_repo') or repo}.git"
-        await command(
-            "git", *SAFE_GIT, "-C", top, "fetch", "--no-tags", "--quiet", url,
-            details.get("head_ref") or "HEAD", limit=300, env=env,
-        )  # fmt: skip
-        fetched = (await git("-C", top, "rev-parse", "FETCH_HEAD")).strip()
-        if fetched != step["h0"]:
-            raise ValueError(f"the PR has a new commit ({fetched[:7]})")
+        # A clone in its worker's folder: Chief of Staff's git never runs there (its config is
+        # the worker's to write: workspaces.private_git), so nothing is fetched into it and no
+        # worktree made of it. The step runs in it only while it is at the PR's head.
+        clone = bool(checkout.get("remote"))
+        if not clone:
+            login = await self.runtime.github.acting_login(repo)
+            token = await self.runtime.github.bound_token(login) if login else ""
+            env = git_env(token, self.git_config)
+            url = f"https://github.com/{details.get('head_repo') or repo}.git"
+            await command(
+                "git", *SAFE_GIT, "-C", top, "fetch", "--no-tags", "--quiet", url,
+                details.get("head_ref") or "HEAD", limit=300, env=env,
+            )  # fmt: skip
+            fetched = (await git("-C", top, "rev-parse", "FETCH_HEAD")).strip()
+            if fetched != step["h0"]:
+                raise ValueError(f"the PR has a new commit ({fetched[:7]})")
         head = (await checkout_git(checkout, path, "rev-parse", "HEAD")).strip()
         dirty = (
             await checkout_git(checkout, path, "status", "--porcelain", "--untracked-files=no")
         ).strip()
         reused = head == step["h0"] and not dirty
-        tree = path
+        tree, used = path, checkout
         if not reused:
+            if clone:
+                raise ValueError(
+                    f"its worker's own clone of {repo} isn't at the PR's latest commit "
+                    f"({step['h0'][:7]}), with nothing uncommitted"
+                )
             tree = str(folder / "tree")
             await git("-C", top, "worktree", "add", "--detach", "--quiet", tree, step["h0"],
                       limit=300)  # fmt: skip
+            used = await asyncio.to_thread(made_tree, checkout, tree)
         root = Path(tree)
         hosts = [
             host
@@ -269,7 +288,7 @@ class Steps:
         from .shepherd import git_config_files
 
         return {"tree": tree, "folder": str(folder), "hosts": list(dict.fromkeys(hosts)),
-                "reused": reused, "top": top,
+                "reused": reused, "top": top, "checkout": used,
                 "git_config": await asyncio.to_thread(git_config_files)}  # fmt: skip
 
     async def checkout_for(self: Shepherd, row: dict, repo: str) -> tuple[dict, str]:  # type: ignore[misc]
@@ -397,13 +416,14 @@ class Steps:
         if outcome in {"fixed", "addressed"} and commit:
             if step["level"] != "prepare":
                 raise ValueError("This step is a diagnosis: change nothing, report diagnosis.")
-            tree = step["tree"]
+            tree, checkout = step["tree"], self.tree_of(step)
             try:
                 full = (
-                    await git("-C", tree, "rev-parse", "--verify", f"{commit}^{{commit}}")
-                ).strip()
-                head = (await git("-C", tree, "rev-parse", "HEAD")).strip()
-                await git("-C", tree, "merge-base", "--is-ancestor", step["h0"], full)
+                    await checkout_git(checkout, tree, "rev-parse", "--verify",
+                                       f"{commit}^{{commit}}")
+                ).strip()  # fmt: skip
+                head = (await checkout_git(checkout, tree, "rev-parse", "HEAD")).strip()
+                await checkout_git(checkout, tree, "merge-base", "--is-ancestor", step["h0"], full)
             except ValueError as exc:
                 raise ValueError(
                     f"{commit} is not a commit on top of {step['h0'][:7]} in {tree}."
@@ -416,8 +436,9 @@ class Steps:
                 )
             # Every commit it would push, each on its own: a secret added in one and removed
             # in the next is still in the history a push publishes.
-            history = await git("-C", tree, "log", "--format=", "-p", "--no-color",
-                                "--find-renames", f"{step['h0']}..{full}", limit=120)  # fmt: skip
+            history = await checkout_git(checkout, tree, "log", "--format=", "-p", "--no-color",
+                                         "--find-renames", f"{step['h0']}..{full}",
+                                         limit=120)  # fmt: skip
             from .shepherd import token_values
 
             files = integrity.parse_diff(history)
@@ -441,6 +462,11 @@ class Steps:
                     "your turn now."
                 )
             planned = await self.freeze(step, full, command_line)
+            if not planned:
+                return (
+                    "Recorded (in your own clone, the fix is not checked on frozen commits). "
+                    "End your turn now."
+                )
             numbered = "\n".join(f"{n}. {line}" for n, line in enumerate(planned, 1))
             return (
                 "Recorded. Now run exactly these commands, one at a time, each exactly as "
@@ -456,15 +482,19 @@ class Steps:
         to run in them: the test command in each, then its collection when its runner has a
         parser. Their HEAD and tracked files are read now, and again at the end."""
         folder = Path(step["folder"])
-        top = (await git("-C", step["tree"], "rev-parse", "--path-format=absolute",
-                         "--git-common-dir")).strip()  # fmt: skip
-        frozen = {}
+        checkout = self.tree_of(step)
+        if checkout.get("remote"):
+            return []  # A clone in its worker's folder: no worktree is made of it (prepare).
+        # The worker's repository, as recorded (never as the step's tree's .git says now).
+        top = checkout_top(checkout, step["tree"])
+        frozen, pinned = {}, {}
         for name, sha in (("h0", step["h0"]), ("h1", h1)):
             tree = folder / f"frozen-{name}"
             if not tree.exists():
-                await git("--git-dir", top, "worktree", "add", "--detach", "--quiet", str(tree),
-                          sha, limit=300)  # fmt: skip
+                await git("-C", top, "worktree", "add", "--detach", "--quiet", str(tree), sha,
+                          limit=300)  # fmt: skip
             frozen[name] = str(tree)
+            pinned[name] = await asyncio.to_thread(made_tree, checkout, str(tree))
         collect = integrity.collect_command(test_command)
         planned = []
         for name in ("h0", "h1"):
@@ -478,9 +508,9 @@ class Steps:
                     f"cd {shlex.quote(frozen[name])} && {collect} > "
                     f"{shlex.quote(str(folder / f'{name}-list.txt'))} 2>&1"
                 )
-        trees = {name: await tree_state(path) for name, path in frozen.items()}
-        evidence = {**(step["evidence"] or {}), "frozen": frozen, "planned": planned,
-                    "before": trees, "command": test_command}  # fmt: skip
+        trees = {name: await tree_state(found) for name, found in pinned.items()}
+        evidence = {**(step["evidence"] or {}), "frozen": frozen, "frozen_checkouts": pinned,
+                    "planned": planned, "before": trees, "command": test_command}  # fmt: skip
         self.control.move_step(step["id"], RUNNING, evidence=evidence)
         self.seen[step["id"]] = []
         return planned
@@ -660,25 +690,23 @@ class Steps:
 
     async def change_evidence(self: Shepherd, step: dict, h1: str) -> dict:  # type: ignore[misc]
         """The commit's change classes and the frozen-SHA evidence."""
-        tree = step["tree"]
-        diff = await git("-C", tree, "diff", "--no-color", "--find-renames", step["h0"], h1,
-                         limit=120)  # fmt: skip
-        stat = await git("-C", tree, "diff", "--shortstat", step["h0"], h1)
+        tree, checkout = step["tree"], self.tree_of(step)
+        diff = await checkout_git(checkout, tree, "diff", "--no-color", "--find-renames",
+                                  step["h0"], h1, limit=120)  # fmt: skip
+        stat = await checkout_git(checkout, tree, "diff", "--shortstat", step["h0"], h1)
         files = integrity.parse_diff(diff)
-
-        def reader(sha: str):
-            def read(path: str) -> str | None:
-                found = subprocess.run(  # noqa: S603 (git, with its arguments)
-                    ["git", *SAFE_GIT, "-C", tree, "show", f"{sha}:{path}"],  # noqa: S607
-                    capture_output=True, timeout=30, check=False,
-                )  # fmt: skip
-                return found.stdout.decode(errors="replace") if found.returncode == 0 else None
-
-            return read
-
+        # The files whose tables say what they configure (integrity.tool_config), read first.
+        texts: dict[tuple[str, str], str | None] = {}
+        for item in [d for d in files if PurePosixPath(d.path).name in integrity.TOOL_CONFIGS][:20]:
+            for sha, path in ((step["h0"], item.old_path), (h1, item.path)):
+                try:
+                    texts[sha, path] = await checkout_git(checkout, tree, "show", f"{sha}:{path}")
+                except ValueError:
+                    texts[sha, path] = None
         findings = await asyncio.to_thread(
-            integrity.classify, files, reader(step["h0"]), reader(h1)
-        )
+            integrity.classify, files,
+            lambda path: texts.get((step["h0"], path)), lambda path: texts.get((h1, path)),
+        )  # fmt: skip
         evidence = step["evidence"] or {}
         words: dict[str, Any] = {"checked": False, "holds": None, "words": "", "void": ""}
         if evidence.get("planned"):
@@ -713,7 +741,10 @@ class Steps:
             for index, line in enumerate(planned):
                 if row["command"].strip() == line.strip():
                     exits[index] = row["exit_code"]
-        after = {name: await tree_state(path) for name, path in evidence["frozen"].items()}
+        after = {
+            name: await tree_state(found)
+            for name, found in (evidence.get("frozen_checkouts") or {}).items()
+        }
         trees = {
             evidence["frozen"][name]: (before[0], after[name][0], before[1], after[name][1])
             for name, before in evidence["before"].items()
@@ -755,10 +786,25 @@ def checkout_top(checkout: dict, path: str) -> str:
         "git_dir") else path))  # fmt: skip
 
 
-async def tree_state(path: str) -> tuple[str, str]:
+def made_tree(checkout: dict, tree: str) -> dict:
+    """A worktree Chief of Staff just made of a worker's repository, as checkout_git reads it:
+    its repository and its own folder there (found from the repository's side) pinned, never
+    what its `.git` file says later (the step writes the tree). Blocking: call it in a thread."""
+    common = checkout.get("git_dir") or str(Path(checkout["repo"]) / ".git")
+    admin = admin_dir(common, tree)
+    if not admin:
+        raise ValueError(f"the worktree {tree} can't be found in its repository")
+    return {"path": tree, "repo": checkout.get("repo") or "", "git_dir": common,
+            "worktree": tree, "admin": admin}  # fmt: skip
+
+
+async def tree_state(checkout: dict) -> tuple[str, str]:
     """A frozen worktree's HEAD and its tracked changes, as Chief of Staff reads them."""
-    head = (await git("-C", path, "rev-parse", "HEAD")).strip()
-    status = (await git("-C", path, "status", "--porcelain", "--untracked-files=no")).strip()
+    path = checkout["path"]
+    head = (await checkout_git(checkout, path, "rev-parse", "HEAD")).strip()
+    status = (
+        await checkout_git(checkout, path, "status", "--porcelain", "--untracked-files=no")
+    ).strip()
     return head, status
 
 

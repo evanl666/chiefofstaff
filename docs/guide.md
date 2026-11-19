@@ -846,15 +846,16 @@ row's words and its one action change:
 The row's ⋯ adds *Stop looking after this PR* (its news then comes to its worker as before),
 *Merge when ready* and *Accept this commit…*.
 
-**How a fix is checked.** The fix is a commit on top of the PR's latest commit, made in the
-worker's checkout when that is at the same commit with nothing uncommitted; otherwise in a fresh
-copy, leaving the worker's branch and any unpushed work as they are (the review says so). The
-test command that failed runs on two frozen copies, one of the PR as it is and one with the fix,
-and the review says what it showed: which tests failed before and pass now, and whether any test
-stopped running. Test names are read for pytest, Go, cargo and vitest; for other runners the
-review says which tests ran was not checked. A fix that skips or weakens a test, edits CI or
-changes what the checks check is never hidden among the rest: it is marked, and its parts come
-first.
+**How a fix is checked.** The fix is a commit on top of the PR's latest commit, made in the worker's
+checkout when that is at the same commit with nothing uncommitted; otherwise in a fresh copy,
+leaving the worker's branch and any unpushed work as they are (the review says so). A repository the
+worker cloned into its own folder is used only while it is at that commit (no copy is made of it,
+and its fix isn't run on frozen copies). The test command that failed runs on two frozen copies, one
+of the PR as it is and one with the fix, and the review says what it showed: which tests failed
+before and pass now, and whether any test stopped running. Test names are read for pytest, Go, cargo
+and vitest; for other runners the review says which tests ran was not checked. A fix that skips or
+weakens a test, edits CI or changes what the checks check is never hidden among the rest: it is
+marked, and its parts come first.
 
 **While it prepares, the worker runs restricted.** For that turn only: no GitHub (no `git push`,
 no `gh`, no GitHub hosts at all), no credentials, no MCP servers, no Slack, and the network only

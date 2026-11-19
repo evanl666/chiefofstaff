@@ -23,7 +23,7 @@ from .control import (
 )
 from .policy import DEFAULT_BRANCHES, operation_denial
 from .store import now
-from .workspaces import SAFE_GIT, command, git
+from .workspaces import SAFE_GIT, checkout_git
 
 if TYPE_CHECKING:
     from .shepherd import Shepherd
@@ -343,21 +343,23 @@ async def send_push(shepherd: Shepherd, operation: dict, login: str, step: dict)
     from .shepherd import git_env
 
     details = await head_checked(shepherd, operation)
-    tree = step["tree"]
+    # Through the repository as recorded, never what the tree's .git says now (the step could
+    # write it): its config, hooks and remotes are not the worker's to choose.
+    tree, checkout = step["tree"], shepherd.tree_of(step)
     try:
-        await git(
-            "-C", tree, "merge-base", "--is-ancestor", operation["lease"], operation["commit"]
+        await checkout_git(
+            checkout, tree, "merge-base", "--is-ancestor", operation["lease"], operation["commit"]
         )
     except ValueError as exc:
         raise RefusedError("the fix doesn't build on the PR's latest commit") from exc
     facts = {**operation, "protected": False, "default_branch": details["head_default"]}
-    argv = [
-        "git", *SAFE_GIT, "-C", tree, "push", "--no-verify",
+    words = [
+        "push", "--no-verify",
         f"--force-with-lease=refs/heads/{operation['ref']}:{operation['lease']}",
         f"https://github.com/{operation['head_repo']}.git",
         f"{operation['commit']}:refs/heads/{operation['ref']}",
     ]  # fmt: skip
-    if why := operation_denial(facts, argv):
+    if why := operation_denial(facts, ["git", *SAFE_GIT, "-C", tree, *words]):
         raise RefusedError(why)
     token = await shepherd.runtime.github.bound_token(login)
     target = f"github:{operation['repo']}#{operation['number']}"
@@ -367,7 +369,8 @@ async def send_push(shepherd: Shepherd, operation: dict, login: str, step: dict)
     # Explained before GitHub tells anyone: a read meanwhile must not take it for another's.
     shepherd.control.published(target, operation["commit"])
     try:
-        await command(*argv, limit=300, env=git_env(token, shepherd.git_config))
+        await checkout_git(checkout, tree, *words, limit=300,
+                           env=git_env(token, shepherd.git_config))  # fmt: skip
     except ValueError:
         if (
             await shepherd.runtime.github.ref_head(operation["head_repo"], operation["ref"])
