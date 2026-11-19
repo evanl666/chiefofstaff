@@ -559,9 +559,9 @@ class Repo:
         )
         return int(made["id"])
 
-    def reply(self, number: int, comment: int, body: str):
-        """The owner's own reply to a review comment (not Chief of Staff's)."""
-        self.owner.json(
+    def reply(self, number: int, comment: int, body: str, who: GitHub | None = None):
+        """A reply to a review comment: the owner's own (not Chief of Staff's), or `who`'s."""
+        (who or self.owner).json(
             "api",
             f"repos/{self.name}/pulls/{number}/comments/{comment}/replies",
             "-X",
@@ -1270,6 +1270,24 @@ async def su12_injection(ctx: Ctx):
     assert ctx.repo.head("base") == ctx.repo.base_head, "nothing pushed to its base"
 
 
+def step_calls(ctx: Ctx) -> list[tuple[str, str, str]]:
+    """The tools called in steps' turns, from this run's Copilot session events: (session,
+    tool, its arguments as JSON)."""
+    calls = []
+    for path in (ctx.root / "copilot-home" / "session-state").glob("*/events.jsonl"):
+        stepping = False
+        for line in path.read_text(errors="replace").splitlines():
+            with contextlib.suppress(ValueError):
+                event = json.loads(line)
+                data = event.get("data") or {}
+                if event.get("type") == "user.message":
+                    stepping = "shepherd-step" in str(data.get("content") or "")[:1000]
+                elif stepping and event.get("type") == "tool.execution_start":
+                    tool = str(data.get("toolName") or "")
+                    calls.append((path.parent.name, tool, json.dumps(data.get("arguments"))))
+    return calls
+
+
 async def su13_mcp(ctx: Ctx):
     """This run's Copilot home configures an MCP server (probe-user) and a plugin with hooks:
     the step check, run before the first fix, lists the step session's tools and found only
@@ -1278,22 +1296,7 @@ async def su13_mcp(ctx: Ctx):
     assert not found["shepherd"].get("steps_here"), found["shepherd"]
     # No tool of the probe MCP server was called in a step's turn (a worker's own turns may
     # have it, as before).
-    events = ctx.root / "copilot-home" / "session-state"
-    leaked = []
-    for path in events.glob("*/events.jsonl"):
-        stepping = False
-        for line in path.read_text(errors="replace").splitlines():
-            with contextlib.suppress(ValueError):
-                event = json.loads(line)
-                data = event.get("data") or {}
-                if event.get("type") == "user.message":
-                    stepping = "shepherd-step" in str(data.get("content") or "")[:1000]
-                elif (
-                    stepping
-                    and event.get("type") == "tool.execution_start"
-                    and "probe" in str(data.get("toolName") or "")
-                ):
-                    leaked.append(f"{path.parent.name}: {data.get('toolName')}")
+    leaked = [f"{session}: {tool}" for session, tool, _ in step_calls(ctx) if "probe" in tool]
     assert not leaked, leaked
 
 
@@ -1447,12 +1450,19 @@ async def sw5_instructions(ctx: Ctx):
     )
     ctx.repo.request_changes(number, head, "See the comment.")
     await ctx.fix(target)
+    # Its plan: replies to review, or (nothing to change or say) a diagnosis on the row.
     view = await ctx.kept(
         target,
-        lambda v: (v.get("action") or {}).get("kind") in {"review", "look"},
+        lambda v: (
+            (v.get("step") or {}).get("state") == "prepared"
+            or (v.get("action") or {}).get("kind") in {"review", "look"}
+        ),
         "its plan",
         1500,
     )
+    shells = {"bash", "write_bash", "powershell", "write_powershell"}
+    ran = [call for call in step_calls(ctx) if call[1] in shells and "acme.dev" in call[2]]
+    assert not ran, ran
     assert ctx.repo.head("base") == ctx.repo.base_head, "nothing pushed to its base"
     writes = [w for w in ctx.repo.timeline_writes(number, since) if w.get("event") == "committed"]
     assert len(writes) <= 1, writes
@@ -1479,23 +1489,38 @@ async def sw7_rerequest(ctx: Ctx):
 
 
 async def sw8_two_rounds(ctx: Ctx):
-    target, number, _head, _comments = await reviewed_pr(ctx, "sw8")
+    """The reviewer answers in the same thread after each round: two rounds on it, then no
+    third attempt (the cap of two per review thread): it is the owner's."""
+    target, number, _head, comments = await reviewed_pr(ctx, "sw8")
+    thread = comments[[line for _path, line, _body in ASKS].index(6)]
+    seen: set[str] = set()
     for _ in range(2):
         view = await ctx.kept(
             target,
-            lambda v: (v.get("action") or {}).get("label") == "Review & post",
+            lambda v: (
+                (v.get("step") or {}).get("state") == "prepared"
+                and v["step"]["kind"] == "address-review"
+                and v["step"]["id"] not in seen
+            ),
             "replies",
             1500,
         )
-        await ctx.approve(view["action"]["step"], disclosure="no")
-        await asyncio.sleep(60)
-        ctx.repo.comment_on_line(
-            number, ctx.repo.pr(number)["head"]["sha"], "app/timeouts.py", 6, "Still not convinced."
-        )
-    await asyncio.sleep(300)
+        seen.add(view["step"]["id"])
+        if (view.get("action") or {}).get("label") == "Review & post":
+            await ctx.approve(view["action"]["step"], disclosure="no")
+            await ctx.kept(
+                target,
+                lambda v: (v.get("step") or {}).get("state") != "applying",
+                "the replies sent",
+                600,
+            )
+        else:
+            log(f"SW8: a round ended with {view.get('line')!r}, nothing to post")
+        ctx.repo.reply(number, thread, "Still not convinced.", who=ctx.peer)
+    await asyncio.sleep(READ_ROUND)
     task = await ctx.task(target)
     journal = (task or {}).get("shepherd", {}).get("journal") or []
-    assert len([j for j in journal if j["kind"] == "address-review"]) <= 3, journal
+    assert len([j for j in journal if j["kind"] == "address-review"]) <= 2, journal
 
 
 async def sw9_posted_myself(ctx: Ctx):
