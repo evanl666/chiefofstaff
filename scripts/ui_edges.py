@@ -6949,25 +6949,23 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     assert looked == [["--version"], ["auth", "status", "--json"]], looked
     await expect(group.locator(".agents-intro")).to_have_text(
         "Workers can also run on another coding agent you have installed and signed in to. The "
-        "Router, Slack and the Watchdog stay on Copilot. What differs"
+        "Router, the Slack session, the Watchdog and Watch for you stay on Copilot. What differs"
     )
     box = rows.locator("input[type=checkbox]")
     await expect(rows.locator(".agent-head strong")).to_have_text("Codex")
     await expect(box).to_have_attribute("aria-describedby", "agent-codex-state")
     await expect(box).to_be_enabled()
-    await expect(rows.locator(".agent-advanced")).to_be_hidden()
+    fields = rows.locator(".agent-fields")
+    await expect(fields).to_be_hidden()  # Model and Limit only while it is on.
     choose = group.locator("select[name=agent_new_workers]")
-    await expect(group.locator("#agents-choice")).to_be_hidden()  # One to choose from: none.
+    await expect(group.locator("#agents-choice")).to_be_hidden()  # No other agent on: none.
+    await expect(group.locator("#agents-hint")).to_be_hidden()
     for width in AGENT_WIDTHS:
         await shoot(page, "tab-found", scheme, width)
     await page.set_viewport_size({"width": 1280, "height": 900})
-    # Available: Advanced (Model, Limit per worker) shows, folded; who new workers use shows.
+    # Available: its Model and Limit show; where new workers start shows first, with the hint.
     await box.check()
-    advanced = rows.locator(".agent-advanced")
-    await expect(advanced).to_be_visible()
-    assert not await advanced.evaluate("d => d.open")
-    await advanced.locator("summary").click()
-    fields = rows.locator(".agent-fields")
+    await expect(fields).to_be_visible()
     model = fields.locator("input[name=agent_codex_model]")
     await expect(model).to_have_attribute("placeholder", "Agent's default")
     options = fields.locator("datalist option")
@@ -6976,9 +6974,15 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     limit = fields.locator("input[name=agent_codex_limit]")
     await expect(limit).to_have_attribute("placeholder", "No limit")
     await expect(group.locator("#agents-choice")).to_be_visible()
+    await expect(group.locator("#agents-choice > span")).to_have_text("New workers start on")
     await expect(choose.locator("option")).to_have_text(["Copilot", "Codex"])
-    chooses = group.locator("input[name=agent_router_chooses]")
-    await expect(chooses).not_to_be_checked()
+    await expect(choose).to_have_value("copilot")
+    await expect(group.locator("#agents-hint")).to_have_text(
+        "For a single task, say \u201cdo this with Codex\u201d or type @codex."
+    )
+    first = await group.evaluate("g => [...g.children].find((c) => !c.hidden)?.id")
+    assert first == "agents-choice", f"the first line: {first}"
+    assert await group.locator("input[name=agent_router_chooses]").count() == 0
     for width in AGENT_WIDTHS:
         await shoot(page, "tab-enabling", scheme, width)
     await page.set_viewport_size({"width": 1280, "height": 900})
@@ -7031,7 +7035,7 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await agents_saved(runtime, {"codex": {"enabled": False}})
     assert not errors, errors
     await context.close()
-    log(f"agents ({scheme}): its own tab, which looks once shown; available, Advanced unfolds")
+    log(f"agents ({scheme}): its own tab, which looks once shown; available, Model and Limit show")
 
 
 async def agents_none(runtime, browser):
@@ -7712,8 +7716,9 @@ async def picker_offer(runtime, browser):
 
 
 async def picker_settings(runtime, browser):
-    """Coding agents: a row per agent, folded and with Advanced open; a plan's usage, with its
-    chip at 80%; who new workers use and Let the Router choose once there are two."""
+    """Coding agents: where new workers start (first, once another agent is on), a row per
+    agent with Model and Limit while it is on; a plan's usage, with its chip at 80%; picking an
+    agent where new workers start makes it available; turned off, they start on Copilot."""
     runtime.store.set(
         "agentlimit:claude",
         json.dumps({"status": "allowed_warning", "window": "five_hour", "used": 84,
@@ -7738,15 +7743,28 @@ async def picker_settings(runtime, browser):
         )
         await expect(codex.locator(".agent-head .chip")).to_have_count(0)
         await expect(tab.locator("#agents-choice")).to_be_visible()
-        await expect(tab.locator("input[name=agent_router_chooses]")).not_to_be_checked()
-        await picker_shoot(page, "settings-rows", scheme, "#settings-dialog")
-        await codex.locator(".agent-advanced summary").click()
+        choose = tab.locator("select[name=agent_new_workers]")
+        await expect(choose.locator("option")).to_have_text(["Copilot", "Codex"])
         await expect(codex.locator("input[name=agent_codex_model]")).to_be_visible()
-        await picker_shoot(page, "settings-advanced", scheme, "#settings-dialog")
+        await expect(claude.locator(".agent-fields")).to_be_hidden()
+        await picker_shoot(page, "settings-rows", scheme, "#settings-dialog")
+        # Claude turned on: where new workers start lists it, and the hint names both.
+        await claude.locator("input[name=agent_claude_enabled]").check()
+        await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Claude"])
+        await expect(tab.locator("#agents-hint")).to_have_text(
+            "For a single task, say \u201cdo this with Codex\u201d or type @codex or @claude."
+        )
+        await choose.select_option("claude")
+        await expect(claude.locator("input[name=agent_claude_enabled]")).to_be_checked()
+        await picker_shoot(page, "settings-start-on", scheme, "#settings-dialog")
+        # The one new workers start on, turned off: they start on Copilot again.
+        await claude.locator("input[name=agent_claude_enabled]").uncheck()
+        await expect(choose).to_have_value("copilot")
+        await expect(claude.locator(".agent-fields")).to_be_hidden()
         await page.keyboard.press("Escape")
         assert not errors, errors
         await context.close()
-    log("picker: Coding agents' rows, Advanced, usage and its chip at 80%")
+    log("picker: Coding agents: new workers start on, rows, usage and its chip at 80%")
 
 
 async def picker_composer(runtime, browser):

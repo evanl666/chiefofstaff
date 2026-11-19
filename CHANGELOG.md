@@ -26,11 +26,13 @@ Codex and Claude can do what Copilot workers can.
   [Workers on other coding agents](docs/guide.md#workers-on-other-coding-agents).
 - **Choosing the agent.** With only Copilot installed, nothing changes. Once Codex or Claude
   Code is installed and signed in, Home asks once whether workers may use it; Settings has a
-  *Coding agents* tab (each agent's version, sign-in and plan usage, with a chip from 80%, and
-  its model and token limit under *Advanced*) instead of a line under *Models*. Type `@codex`,
-  `@claude` or `@copilot` to run a task there; optionally let the Router choose (it says which
-  and why; your `@` wins). While another agent is on, every worker's row and header names its agent (Copilot
-  too) and model.
+  *Coding agents* tab instead of a line under *Models*: first *New workers start on* (once
+  another agent is on), then a row per agent (its version and sign-in, its plan usage with a
+  chip from 80%, *Available for workers*, and its model and token limit while it is on). It
+  replaces 0.1.46's "Use Codex for workers" box beside a default you could still set to
+  Copilot; your settings keep their meaning. Type `@codex`, `@claude` or `@copilot` (or say
+  "do this with Codex") to run one task there. While another agent is on, every worker's row
+  and header names its agent (Copilot too) and model.
 - **When an agent can't run:** a task you put on it is not moved elsewhere: the Router's card
   offers sign-in help, waiting, or running it on Copilot. A worker whose plan's usage limit (or
   a rate limit) is reached mid-task pauses under *Needs you* with when it resets (*Go on at*

@@ -1008,18 +1008,24 @@ function agentsTab() {
   const help = "https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#workers-on-other-coding-agents";
   const button = el("button", { type: "button", role: "tab", "data-tab": "agents", id: "agents-tab", text: "Coding agents" });
   $("#settings-tabs [data-tab=models]").after(button);
+  // Where new workers start (once another agent is on), a row per agent, how to ask for one
+  // for a single task, and what stays on Copilot.
+  const select = el("select", { name: "agent_new_workers" });
+  // Picking an agent there makes it available (as its row's switch says).
+  select.addEventListener("change", () => {
+    const box = $("#settings-form")[`agent_${select.value}_enabled`];
+    if (box && !box.checked) {
+      box.checked = true;
+      box.dispatchEvent(new Event("change"));
+    }
+  });
   const section = el(
     "section",
     { class: "tab agents-tab", "data-tab": "agents", hidden: true },
-    el("small", { class: "agents-intro" }, "Workers can also run on another coding agent you have installed and signed in to. The Router, Slack and the Watchdog stay on Copilot. ", el("a", { class: "link", href: help, target: "_blank", rel: "noreferrer", text: "What differs" })),
+    el("label", { id: "agents-choice", class: "agents-choice", hidden: true }, el("span", { text: "New workers start on" }), select),
     el("div", { id: "agents-rows", class: "agents-rows" }),
-    el(
-      "div",
-      { id: "agents-choice", class: "agents-choice", hidden: true },
-      el("label", { class: "short" }, el("span", { text: "New workers use" }), el("select", { name: "agent_new_workers" })),
-      el("label", { class: "check" }, el("input", { name: "agent_router_chooses", type: "checkbox" }), " Let the Router choose the agent for each task"),
-      el("small", { text: "It says which it chose and why. Ask for one with @codex or @claude, or in your own words." }),
-    ),
+    el("small", { id: "agents-hint", class: "agents-hint", hidden: true }),
+    el("small", { class: "agents-intro" }, "Workers can also run on another coding agent you have installed and signed in to. The Router, the Slack session, the Watchdog and Watch for you stay on Copilot. ", el("a", { class: "link", href: help, target: "_blank", rel: "noreferrer", text: "What differs" })),
   );
   $("#settings-form .tab[data-tab=models]").after(section);
 }
@@ -1035,6 +1041,7 @@ function renderAgentsLine() {
   $("#agents-rows").replaceChildren();
   $("#settings-form").agent_new_workers.replaceChildren(el("option", { value: "copilot", text: "Copilot" }));
   $("#agents-choice").hidden = true;
+  $("#agents-hint").hidden = true;
 }
 async function lookForAgents() {
   const looking = Symbol("looking");
@@ -1043,6 +1050,7 @@ async function lookForAgents() {
   const loading = (state.snapshot.agents_found || Object.keys(AGENTS)).map((name) => agentRow({ name, label: AGENTS[name] || name, found: true, state: "Checking…", problem: "", models: [] }, true));
   $("#agents-rows").replaceChildren(...loading);
   $("#agents-choice").hidden = true;
+  $("#agents-hint").hidden = true;
   let found;
   try {
     found = await api("/api/agents");
@@ -1059,7 +1067,6 @@ async function lookForAgents() {
   $("#agents-rows").replaceChildren(
     ...(found.agents.length ? found.agents.map((agent) => agentRow(found.sandboxed && agent.sandbox ? { ...agent, problem: agent.sandbox } : agent, false)) : [el("small", { class: "agents-none", role: "status", text: noAgentWords(found.supported) })]),
   );
-  $("#settings-form").agent_router_chooses.checked = Boolean(found.router_chooses);
   newWorkersChoices(found.new_workers);
 }
 // A token count as the page shows it (200,000), and as the owner types it: grouped or not, as
@@ -1094,8 +1101,8 @@ function resetTime(seconds) {
   const today = at.toDateString() === new Date().toDateString();
   return today ? at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : at.toLocaleDateString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
 }
-// One agent's row: its name and state, Available for workers, how much of its plan it used,
-// and its model and limit per worker under Advanced.
+// One agent's row: its name and state ("version · signed in with …"), Available for workers,
+// how much of its plan it used, and, while it is on, its model and limit per worker.
 function agentRow(agent, disabled) {
   const id = `agent-${agent.name}-state`;
   const box = el("input", { type: "checkbox", name: `agent_${agent.name}_enabled`, "aria-describedby": id });
@@ -1123,25 +1130,29 @@ function agentRow(agent, disabled) {
     el("div", { class: "agent-limit" }, el("label", {}, el("span", { text: "Limit per worker (tokens)" }), limit), el("small", { id: errorId, class: "field-error", hidden: true })),
     list,
   );
-  // A limit typed wrong opens Advanced (Save says so beside it).
-  const advanced = el("details", { class: "agent-advanced", open: Boolean(agent.limit_error) }, el("summary", { text: "Advanced" }), fields);
-  advanced.hidden = !box.checked;
+  fields.hidden = !box.checked;
   box.addEventListener("change", () => {
-    advanced.hidden = !box.checked;
+    fields.hidden = !box.checked;
     newWorkersChoices($("#settings-form").agent_new_workers.value);
   });
   const head = el("div", { class: "agent-head" }, el("strong", { text: agent.label }), chip, el("label", { class: "check agent-switch" }, box, " Available for workers"));
   // One that cannot be turned on looks it, its reason in its line.
-  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, head, line, usage, ...notes, advanced);
+  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, head, line, usage, ...notes, fields);
 }
-// New workers use Copilot or an agent available above (as the form has it, saved or not), and
-// the Router may choose among them: shown only once there are two to choose from.
+// New workers start on Copilot or on an agent available above that can run now (as the form
+// has it, saved or not): the line shows once another agent is on, with how to ask for one for
+// a single task. One turned off there goes back to Copilot.
 function newWorkersChoices(chosen) {
-  const select = $("#settings-form").agent_new_workers;
-  const on = (agentsLooked?.agents || []).filter((agent) => $("#settings-form")[`agent_${agent.name}_enabled`]?.checked);
-  select.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...on.map((agent) => el("option", { value: agent.name, text: agent.label })));
-  select.value = on.some((agent) => agent.name === chosen) ? chosen : "copilot";
+  const form = $("#settings-form");
+  const on = (agentsLooked?.agents || []).filter((agent) => form[`agent_${agent.name}_enabled`]?.checked);
+  const ready = on.filter((agent) => !agent.problem && !(agentsLooked.sandboxed && agent.sandbox));
+  const select = form.agent_new_workers;
+  select.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...ready.map((agent) => el("option", { value: agent.name, text: agent.label })));
+  select.value = ready.some((agent) => agent.name === chosen) ? chosen : "copilot";
   $("#agents-choice").hidden = !on.length;
+  const hint = $("#agents-hint");
+  hint.hidden = !on.length;
+  if (on.length) hint.textContent = `For a single task, say \u201cdo this with ${on[0].label}\u201d or type ${on.map((agent) => `@${agent.name}`).join(" or ")}.`;
 }
 // The tab as the form has it, for Save: only once it was looked at, and only what changed.
 function agentsBody() {
@@ -1154,14 +1165,13 @@ function agentsBody() {
     const input = form[`agent_${agent.name}_limit`];
     const limit = checkLimit(input);
     if (limit === null) {
-      input.closest("details").open = true;  // Said beside the field; Save goes no further.
+      input.closest(".agent-fields").hidden = false;  // Said beside the field; Save goes no further.
       showSettingsTab("agents");
       throw new Error("Limit per worker: enter a whole number of tokens.");
     }
     if (enabled !== Boolean(agent.enabled) || model !== (agent.model || "") || limit !== (agent.limit || 0)) body[agent.name] = { enabled, model, limit };
   }
   if (form.agent_new_workers.value !== agentsLooked.new_workers) body.new_workers = form.agent_new_workers.value;
-  if (form.agent_router_chooses.checked !== Boolean(agentsLooked.router_chooses)) body.router_chooses = form.agent_router_chooses.checked;
   return Object.keys(body).length ? body : null;
 }
 // None of the coding agents it supports is on this computer (bug E80): which they are, and

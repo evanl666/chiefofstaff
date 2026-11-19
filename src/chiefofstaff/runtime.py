@@ -3814,7 +3814,7 @@ class Runtime:
         for name in after:
             label, fresh = agents.display(name), name not in before
             if fresh and sys.platform == "win32":
-                raise ValueError(f"Use {label} for workers: {self.not_on_windows(name)}")
+                raise ValueError(f"{label}, Available for workers: {self.not_on_windows(name)}")
             if (
                 fresh
                 and settings.worker_sandbox
@@ -3822,8 +3822,8 @@ class Runtime:
                 and not agents.can_sandbox(name)
             ):
                 raise ValueError(
-                    f"Use {label} for workers: {label} can't run while workers are sandboxed: "
-                    f"{SANDBOX_UNPROVEN}."
+                    f"{label}, Available for workers: {label} can't run while workers are "
+                    f"sandboxed: {SANDBOX_UNPROVEN}."
                 )
             for own in agents.folders(name, home):
                 for folder in map(Path, settings.sandbox_writable):
@@ -3831,8 +3831,8 @@ class Runtime:
                         continue
                     if fresh:
                         raise ValueError(
-                            f"Use {label} for workers: first take {folder} out of Also writable "
-                            f"in the sandbox: it holds {label}'s settings and hooks."
+                            f"{label}, Available for workers: first take {folder} out of Also "
+                            f"writable in the sandbox: it holds {label}'s settings and hooks."
                         )
                     raise ValueError(
                         f"Also writable in the sandbox: the sandbox cannot open {folder}: it "
