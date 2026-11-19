@@ -1868,6 +1868,20 @@ class Tools:
         command = " ".join(found.get("command", "").split())[:160]
         return f"`{command}` exited {found.get('exit_code')}"
 
+    def test_run(self, task: dict) -> str:
+        """Which test run of the task's, in which of its runs, its last test result is: its
+        latest run (a follow-up starts one) and how many test commands it ran."""
+        latest = self.store.value(
+            "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            (task["id"],),
+        )
+        tested = self.store.value(
+            "SELECT count(*) FROM commands c JOIN runs r ON r.id=c.run_id "
+            "WHERE r.task_id=? AND c.kind='test'",
+            (task["id"],),
+        )
+        return f"{latest}:{tested}"
+
     def told_line(self, done: str, target: dict, task: dict | None) -> str:
         """'Told “Fix login”', or, for a task the worker is not on now, 'Told the worker of
         “Add tests” about “Fix login”' (its name is that of its current work)."""
@@ -3227,11 +3241,12 @@ class Tools:
             and params.status == "done"
             and task["status"] == "running"
             and (failed := self.failed_tests(task))
-            and not self.store.get(f"failing_report:{task['id']}")
+            and self.store.get(f"failing_report:{task['id']}") != (run := self.test_run(task))
         ):
-            # Once: a failure it expected (the regression test before the fix) or one that is
+            # Once for each failing run, and again in each follow-up (bug E112: once for the
+            # task): a failure it expected (the regression test before the fix) or one that is
             # not its own is reported as such.
-            self.store.set(f"failing_report:{task['id']}", "1")
+            self.store.set(f"failing_report:{task['id']}", run)
             raise ValueError(
                 f"Not reported yet: your last test run failed ({failed}). Fix what fails and "
                 "run it again; if the failure is expected or not caused by your change, call "
