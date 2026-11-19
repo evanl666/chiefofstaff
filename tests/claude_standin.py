@@ -152,7 +152,9 @@ class Handler(BaseHTTPRequestHandler):
                 number = server.number
                 server.bodies.append(body)
             tools = [t.get("name") for t in body.get("tools") or [] if isinstance(t, dict)]
-            if "Bash" in tools:
+            # A turn of its own: Claude's tools, or (Chief of Staff's own sessions, which have
+            # none of Claude's) Chief of Staff's alone.
+            if "Bash" in tools or any(str(name).startswith("mcp__chief__") for name in tools):
                 blocks, stop = answer(body)
             else:  # A side request (a title): words.
                 blocks, stop = [{"type": "text", "text": "contract"}], "end_turn"

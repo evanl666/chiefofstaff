@@ -410,7 +410,12 @@ async def test_chief_of_staffs_own_session_on_an_agent_has_its_tools_and_nothing
         ]
         assert offered, "its model was offered its tools"
         if isinstance(backend, ClaudeAgent):
-            assert all(name.startswith("mcp__chief__") for name in offered), offered
+            # (Claude Code 2.1.322 also sends a placeholder that "keeps deferred tool loading
+            # active; never call this tool": no tool of its own, and any call of it is refused.)
+            assert all(
+                name.startswith("mcp__chief__") or name == "DeferredToolPlaceholder"
+                for name in offered
+            ), offered
         else:
             assert "echo" in offered, offered
             assert not set(offered) & set(CODEX_OWN_TOOLS), offered
