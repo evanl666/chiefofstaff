@@ -1442,3 +1442,61 @@ async def test_storage_says_at_once_when_workers_start_or_stop_using_their_cache
         storage_events = [e for e in sent if e["type"] == "storage"]
         assert storage_events, status
         assert bool(storage_events[-1]["data"]["caches"]["blocked"]) == blocked
+
+
+# Chief of Staff's own git folders for workers' clones (privategit)
+
+
+def in_git(folder: Path, *arguments: str, data: bytes = b"") -> bytes:
+    environment = {**os.environ, "GIT_DIR": str(folder)}
+    done = subprocess.run(["git", *arguments], input=data, env=environment, capture_output=True,
+                          check=True)  # fmt: skip
+    return done.stdout
+
+
+async def test_a_workers_own_git_folders_count_in_its_size_and_go_with_it(tmp_path, monkeypatch):
+    """The git folder Chief of Staff keeps of a clone in a worker's folder counts in that
+    worker's size in Storage; it goes when the worker is released (made again if read again),
+    or when its clone is gone; one grown big with what Chief of Staff's own snapshots wrote is
+    packed, what it holds still read."""
+    from chiefofstaff import privategit
+
+    app = project(tmp_path)
+    harness = await harnessed(tmp_path)
+    runtime = harness.runtime
+    info = await spawn(runtime, harness.router_id, "Clone it", project=str(app))
+    await settle(runtime)
+    row = harness.store.session(info["session_id"])
+    clone = runtime.workspaces.workspace(row) / "lib"  # In its own folder.
+    run("git", "clone", "-q", str(app), str(clone))
+    checkout = {"repo": str(clone), "path": str(clone), "remote": str(clone)}
+    await workspaces_module.checkout_git(checkout, str(clone), "status", "--porcelain")
+    [(git, objects)] = privategit.folders()
+    assert objects == (clone / ".git" / "objects").resolve().as_posix()
+    blob = run("git", "hash-object", "-w", "--stdin", cwd=clone)  # (Into its own objects.)
+    written = in_git(git, "hash-object", "-w", "--stdin", data=b"snap" * 4000).decode().strip()
+    loose = git / "objects" / written[:2] / written[2:]
+    assert loose.is_file() and blob
+    sizes = {}
+
+    async def disk_used(paths, limit=600, depth=0):
+        sizes.update(dict.fromkeys(map(str, paths), 1000))
+        return {str(path): 1000 for path in paths if Path(path).exists()}  # noqa: ASYNC240
+
+    monkeypatch.setattr(machine, "disk_used", disk_used)
+    measured = await runtime.storage.measure(row)
+    assert str(git) in sizes and measured["size"] == 2000, "its folder and its git folder"
+
+    monkeypatch.setattr(privategit, "GC_SIZE", 1)
+    await runtime.storage.tidy_git()
+    assert not loose.exists(), "packed"
+    assert in_git(git, "cat-file", "-p", written) == b"snap" * 4000
+
+    await runtime.workers.close(row["id"], by="you")
+    await settle(runtime)
+    assert not git.exists(), "released: it goes"
+    await workspaces_module.checkout_git(checkout, str(clone), "status", "--porcelain")
+    assert git.exists(), "made again when read"
+    run("rm", "-rf", str(clone))
+    await runtime.storage.tidy_git()
+    assert not git.exists(), "its clone is gone"

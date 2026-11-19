@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import Field
 
-from . import caches, machine
+from . import caches, machine, privategit
 from .models import StrictModel
 from .roles import WORKER
 from .store import now
@@ -43,6 +43,7 @@ from .workspaces import (
     STAGING,
     TRASH,
     clean_tree,
+    command,
     delete_moved,
     folder_of,
     ignored_kind,
@@ -347,6 +348,12 @@ class Storage:
                 self.save_size(row["id"], {**old, "at": now(), "error": "took too long"})
                 return old
             record["size"] = sizes.get(str(folder), 0)
+            # Chief of Staff's own git folders for its clones and submodules (privategit).
+            places = self.workspaces.git_places(row, folder)
+            found = [str(git) for git, objects in await asyncio.to_thread(privategit.folders)
+                     if objects and privategit.within(objects, places)]  # fmt: skip
+            if found and (git := await machine.disk_used(found, DU_SECONDS)):
+                record["size"] += sum(git.values())
             settings = self.store.settings()
             for checkout, tree in await self.trees(row):
                 found = await sort_ignored(
@@ -485,6 +492,7 @@ class Storage:
         programs run in is read once for it all."""
         settings = self.store.settings()
         await self.empty_leftovers()
+        await self.tidy_git()
         if not settings.auto_cleanup:
             return
         closed = await self.unreleased()
@@ -523,6 +531,21 @@ class Storage:
                 await self.clean(fresh, cwds, by="automatic", caches_only=caches)
                 if caches:
                     self.caches_cleaned[fresh["id"]] = self.last_active(fresh)
+
+    async def tidy_git(self):
+        """Chief of Staff's own git folders (privategit): those whose repository is gone go;
+        one grown big with what its snapshots wrote is packed."""
+        await privategit.prune()
+        found = [str(git) for git, _ in await asyncio.to_thread(privategit.folders)]
+        async with self.du_lock:
+            sizes = (await machine.disk_used(found, DU_SECONDS) or {}) if found else {}
+        for git, size in sizes.items():
+            if size < privategit.GC_SIZE:
+                continue
+            async with privategit.lock(Path(git)):
+                with suppress(ValueError):
+                    await command("git", *privategit.GC, env={"GIT_DIR": git}, limit=600)
+                privategit.MADE.pop(git, None)
 
     async def empty_leftovers(self):
         """What a cleanup left in trash: what Chief of Staff stopped deleting (it was stopped

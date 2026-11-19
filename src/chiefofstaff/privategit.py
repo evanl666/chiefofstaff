@@ -22,6 +22,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 from .settings_guard import SpecialFileError, read_regular
@@ -119,13 +120,61 @@ def ref_name(name: str) -> bool:
                for part in name.split("/"))  # fmt: skip
 
 
+def root() -> Path:
+    """Where the git folders are."""
+    if ROOT is not None:
+        return ROOT
+    # (Only outside Chief of Staff: a script, a test of this alone.)
+    return Path(tempfile.gettempdir()) / f"chiefofstaff-git-{getattr(os, 'getuid', int)()}"
+
+
 def place(common: str, admin: str = "") -> Path:
     """The git folder Chief of Staff's git uses for a repository (and one of its worktrees)."""
-    root = ROOT
-    if root is None:  # (Only outside Chief of Staff: a script, a test of this alone.)
-        root = Path(tempfile.gettempdir()) / f"chiefofstaff-git-{getattr(os, 'getuid', int)()}"
     named = f"{os.path.realpath(common)}\0{admin and os.path.realpath(admin)}"
-    return root / hashlib.sha256(named.encode()).hexdigest()[:24]
+    return root() / hashlib.sha256(named.encode()).hexdigest()[:24]
+
+
+def folders() -> list[tuple[Path, str]]:
+    """Chief of Staff's git folders, each with the objects folder it reads (its alternates'; ""
+    for none)."""
+    found = []
+    with suppress(OSError), os.scandir(root()) as listed:
+        for entry in listed:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            try:
+                lines = (Path(entry.path) / "objects" / "info" / "alternates").read_text()
+                found.append((Path(entry.path), lines.splitlines()[0].strip()))
+            except (OSError, IndexError):
+                found.append((Path(entry.path), ""))
+    return found
+
+
+def within(path: str, places: list[str]) -> bool:
+    real = os.path.realpath(path)
+    return any(Path(real).is_relative_to(os.path.realpath(place)) for place in places if place)
+
+
+async def prune(places: list[str] | None = None) -> list[Path]:
+    """Remove the git folders whose repository is gone (its objects folder), and (`places`)
+    those of a repository in one of these folders (a released worker's): made again if it is
+    read again. The ones removed."""
+    removed = []
+    for folder, objects in await asyncio.to_thread(folders):
+        gone = not objects or not await asyncio.to_thread(os.path.isdir, objects)
+        if gone or (places and within(objects, places)):
+            async with lock(folder):
+                await asyncio.to_thread(shutil.rmtree, folder, True)
+                MADE.pop(str(folder), None)
+            removed.append(folder)
+    return removed
+
+
+# A git folder this big (what Chief of Staff's own snapshots wrote there) is packed (gc).
+GC_SIZE = 256 * 1024 * 1024
+# git's gc there: its unreachable objects (snapshots: kept two weeks, as in any repository)
+# packed too; never a worktree of its own pruned (a reftable's linked worktree has one).
+GC = ("-c", "gc.cruftPacks=true", "-c", "gc.worktreePruneExpire=never", "gc", "--quiet")
 
 
 def lock(folder: Path) -> asyncio.Lock:

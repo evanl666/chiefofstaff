@@ -507,7 +507,10 @@ Workers' builds fill folders fast, so Chief of Staff cleans up after them and wa
   worktree stays, recent cleanups, and anything it could not delete (files another user owns,
   say). From there: review a worktree's files, clean its build
   output, delete a closed worker's worktree (type "delete"; its branch stays), mark a worker
-  *Keep its files*, and set what counts as build output or must never be cleaned.
+  *Keep its files*, and set what counts as build output or must never be cleaned. A worker's
+  size includes the git folders Chief of Staff keeps, in its data folder, to read the clones in
+  that worker's folder; they go when the worker closes or the clone is deleted, and are packed
+  when they grow past 256 MB.
 - **uv's cache** is shown with its size, never deleted. Each `uvx chiefofstaff@latest` of a new
   version leaves an environment there; `uv cache prune` removes the ones nothing uses. Never run
   `uv cache clean` while Chief of Staff is running: it can delete the environment it runs from.

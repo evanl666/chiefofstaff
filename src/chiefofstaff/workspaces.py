@@ -3284,9 +3284,17 @@ class Workspaces:
         with suppress(OSError):
             # Only when nothing else is in it, like a worker's notes.
             await asyncio.to_thread(self.workspace(row).rmdir)
+        # Chief of Staff's own git folders for its clones and submodules: made again if read.
+        await privategit.prune(self.git_places(row, folder))
         if self.on_release:
             self.on_release(row, removed, kept)
         return removed
+
+    def git_places(self, row: dict, folder: Path | None) -> list[str]:
+        """Where the repositories of a worker's own git folders are (privategit): its folder
+        (clones), and its worktrees' private folders in their repositories (submodules)."""
+        admins = [checkout["admin"] for checkout in self.checkouts(row) if checkout.get("admin")]
+        return [*([str(folder)] if folder else []), *admins]
 
     async def remove_tree(self, checkout: dict, tree: str, trash: Path) -> bool:
         """Remove a worktree git status found clean (nothing uncommitted, no ignored file that
