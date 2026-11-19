@@ -22,7 +22,7 @@ from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
-from . import machine, privategit, receipts, safefs, settings_guard
+from . import machine, policy, privategit, receipts, safefs, settings_guard
 from .models import Settings
 from .policy import CODEX_SETTINGS, REPOSITORY_SETTINGS, within
 from .privategit import config_entries
@@ -1298,10 +1298,59 @@ WRITES_UNNAMED = re.compile(
 )
 
 
+# Programs that only read the files they name (policy's READERS, but those that may write what
+# they name: git's checkout or restore, sed's or perl's in place, awk's script, a sourced one).
+READS_NAMED = policy.READERS - {"git", "sed", "perl", "awk", "gawk", "source", "."}
+GIT_READS = frozenset({"status", "diff", "show", "log", "blame", "grep", "ls-files", "ls-tree",
+                       "cat-file", "rev-parse", "shortlog", "describe"})  # fmt: skip
+# `sed -n '1,80p'`: a script that prints lines, nothing more (no `w` to write a file).
+SED_PRINTS = re.compile(r"(\d+|\$)?(,(\d+|\$|\+\d+))?p")
+
+
+def reads_only(program: str) -> bool:
+    """Whether a simple command (receipts.program's) only reads the files it names: `cat`,
+    `grep`, `git diff`, `sed -n 1,80p`; not one that may write one (`sed -i`, `git checkout`,
+    `git diff --output=…`), nor one not known."""
+    words = program.split()
+    if not words:
+        return False
+    if words[0] == "git":
+        return (
+            len(words) > 1
+            and words[1] in GIT_READS
+            and not any(w.startswith(("--output", "-O", "--open-files-in-pager")) for w in words)
+        )
+    if words[0] == "sed":
+        scripts, given, rest = [], False, words[1:]
+        for at, word in enumerate(rest):
+            if given:
+                given = False
+            elif word in {"-e", "--expression"}:
+                scripts.append(rest[at + 1] if at + 1 < len(rest) else "")
+                given = True
+            elif word.startswith("--"):
+                if word.startswith(("--in-place", "--file", "--expression=")):
+                    return False
+            elif word.startswith("-"):
+                if any(flag in word[1:] for flag in "ief"):
+                    return False  # (In place, or a script from a file or with -eSCRIPT.)
+            elif not scripts:
+                scripts.append(word)
+        return bool(scripts) and all(SED_PRINTS.fullmatch(script) for script in scripts)
+    return words[0] in READS_NAMED
+
+
+def redirection(word: str) -> bool:
+    """Whether a word is a redirection that writes (`>`, `>>`, `&>`, `>|`): the next word is the
+    file it writes."""
+    return ">" in word and not word.strip("<>&|")
+
+
 class CommandRun:
     """One of a task's shell commands, as far as files go: when it ran, the words that may name
-    files (quotes respected: "release notes.txt"), and whether it may write files it does not
-    name (a glob, a variable, a script)."""
+    files it writes (quotes respected: "release notes.txt"; not those of a program that only
+    reads them, `cat` or `grep`, but where it redirects), and whether it may write files it does
+    not name (a glob, a variable, a script)."""
 
     def __init__(self, command: str, start: float = 0, end: float = 0):
         self.start, self.end = start, end
@@ -1309,10 +1358,17 @@ class CommandRun:
         unnamed = False
         for parts in receipts.simple_commands(command):
             program = receipts.program(parts)
+            reads = reads_only(program)
             first = next((w for w in parts if not re.fullmatch(r"\w+=.*", w)), "")
-            if WRITES_UNNAMED.match(program) or first.startswith(("./", "../", "/", "~/")):
+            if not reads and (
+                WRITES_UNNAMED.match(program) or first.startswith(("./", "../", "/", "~/"))
+            ):
                 unnamed = True  # A tool, or a script of the project's (`./gen.sh`).
+            target = False
             for word in parts:
+                written, target = target, redirection(word)
+                if target or (reads and not written):
+                    continue  # (A redirection's sign; a file it only reads.)
                 if any(mark in word for mark in "*?$`[{"):
                     unnamed = True
                 word = word.removeprefix("./").rstrip("/:")

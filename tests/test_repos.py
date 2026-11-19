@@ -5105,7 +5105,7 @@ def test_a_command_names_a_file_by_its_path_or_its_name():
         "python3 fix.py", "sleep 50", "cat money.py | grep x", "./scripts/gen.sh out",
     )]  # fmt: skip
     assert [run.unnamed for run in runs] == [True, False, True, False, False, True]
-    assert "release notes.txt" in runs[1].words and "money.py" in runs[4].words
+    assert "release notes.txt" in runs[1].words and "money.py" not in runs[4].words, "read"
 
 
 async def test_in_the_owners_folder_glob_and_script_edits_count_and_reads_do_not(
@@ -5523,6 +5523,33 @@ def test_a_file_stays_a_tasks_own_when_other_work_writes_it_later():
     # Seconds apart are apart: a file written 1.4 s before a command started is not its.
     scope = workspaces_module.Scope(commands=[theirs], mtimes={"CHANGES.md": now - 31.4})
     assert not scope.named(top, "CHANGES.md")
+
+
+def test_a_file_a_running_command_only_reads_is_not_its_work():
+    """Live N: in a folder of the owner's, the worker ran `cat textkit/__init__.py; sleep 40`
+    as one command; the owner edited that file meanwhile, and their line was in the worker's
+    diff. A program that only reads the files it names claims none; what it writes (a
+    redirection, `tee`, `sed -i`, `git checkout`) and anything unknown still counts."""
+    now = time.time()
+    top = Path("/nowhere")
+
+    def claims(line: str, name: str) -> bool:
+        run = workspaces_module.CommandRun(line, now - 60, now - 10)
+        return workspaces_module.Scope(commands=[run], mtimes={name: now - 30}).named(top, name)
+
+    read = "textkit/__init__.py"
+    for line in (f"cat {read}; sleep 40", f"head -5 {read} && sleep 40", f"grep -n x {read}",
+                 f"less {read}", f"wc -l {read} | sort", f"git diff -- {read}",
+                 f"git -C . log -p {read}", f"cat *.py {read}", f"diff {read} b.py 2>/dev/null",
+                 f"sudo cat {read}", f"cat < {read}", f"sed -n '1,80p' {read}; sleep 40",
+                 f"sed -e 5p -n {read}", f"bash -c 'cat {read}; sleep 40'"):  # fmt: skip
+        assert not claims(line, read), line
+    for line in (f"cat a.py > {read}", f"cat a.py >> {read}; sleep 40", f"echo x >{read}",
+                 f"grep x a.py | tee {read}", f"sed -i s/a/b/ {read}", f"sed s/a/b/ {read}",
+                 f"git checkout -- {read}", f"git diff --output=d -- {read}", f"mytool {read}",
+                 f"awk '{{print}}' {read}", "cat a.py > $OUT", f"cp a.py {read}",
+                 f"sed -ni 1p {read}", f"sed -n '1w {read}' a.py"):  # fmt: skip
+        assert claims(line, read), line
 
 
 async def test_in_the_owners_folder_a_tasks_commit_counts_and_another_worker_dates_it(tmp_path):
