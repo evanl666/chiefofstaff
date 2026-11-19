@@ -25,17 +25,23 @@ import sys
 import tempfile
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 import scripted_model
 from conftest import fake_codex
 from copilot import define_tool
-from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
+from copilot.generated.rpc import (
+    PermissionDecisionApproveOnce,
+    PermissionDecisionReject,
+    ServerSessionsApi,
+)
 from pydantic import BaseModel
 
 from chiefofstaff import settings_guard
 from chiefofstaff.backend import (
+    CopilotBackend,
     SandboxPolicy,
     copilot_backend,
     process_table,
@@ -328,6 +334,36 @@ async def test_a_session_resumes_with_its_conversation(backend, tmp_path):
     await turn.wait()
     assert "pineapple" in turn.said().lower()
     await resumed.disconnect()
+
+
+async def test_copilots_fork_is_the_rpc_this_release_calls(tmp_path, monkeypatch):
+    """sessions.fork is experimental in the Copilot SDK: its method, parameters and answer, as
+    CopilotBackend.fork_session sends and reads them through the SDK, cut where the turn in
+    progress began. A change in the SDK fails here (at run time, any fork error leaves the
+    task with the busy worker, as before)."""
+    sent = []
+
+    class Wire:
+        async def request(self, method, params, **options):
+            sent.append((method, params))
+            return {"sessionId": "f0f0f0f0-0000-4000-8000-000000000001", "name": params["name"]}
+
+    session_id = str(uuid4())
+    log = tmp_path / "copilot" / "session-state" / session_id / "events.jsonl"
+    log.parent.mkdir(parents=True)
+    kinds = ["user.message", "assistant.turn_end", "session.usage_checkpoint", "user.message",
+             "assistant.turn_start"]  # fmt: skip
+    log.write_text("".join(
+        json.dumps({"type": kind, "id": f"e{n}", "data": {}}) + "\n" for n, kind in enumerate(kinds)
+    ))  # fmt: skip
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    client = SimpleNamespace(rpc=SimpleNamespace(sessions=ServerSessionsApi(Wire())))
+    forked = await CopilotBackend(client).fork_session(session_id, "Chief of Staff · Export")
+    assert forked == "f0f0f0f0-0000-4000-8000-000000000001"
+    assert sent == [
+        ("sessions.fork", {"sessionId": session_id, "name": "Chief of Staff · Export",
+                           "toEventId": "e3"}),
+    ]  # fmt: skip
 
 
 async def test_a_fork_has_the_conversation_before_the_turn_in_progress(backend, tmp_path):

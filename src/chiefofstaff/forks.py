@@ -138,7 +138,12 @@ class Forks:
             raise RuntimeError("Its agent cannot fork a session.")
         # Copilot refuses a session name with a double quote (as Runtime.open_live).
         name = ("Chief of Staff · " + clean_title(title).replace('"', "'"))[:100]
-        return await backend.fork_session(self.runtime.copilot_id(source["id"]), name)
+        forked = await backend.fork_session(self.runtime.copilot_id(source["id"]), name)
+        # The fork is experimental in Copilot's SDK: one it does not know of is not run on.
+        if not await backend.get_session_metadata(forked):
+            await self.drop(source, forked)
+            raise RuntimeError(f"Copilot does not know the fork it answered ({forked}).")
+        return forked
 
     async def drop(self, source: dict, session_id: str):
         """A fork no worker was made of (setting it up failed): gone again."""

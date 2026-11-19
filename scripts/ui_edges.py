@@ -5181,6 +5181,23 @@ async def round_fork(runtime, browser, failures: list[str]):
     )  # fmt: skip
     second = json.loads(told.text_result_for_llm)["session_id"]
     await settle(runtime)
+    # The second worker busy too: a third, from its conversation, sits under the first as well.
+    session = runtime.states.handle(second)
+    session.emit("user.message", content=session.sent[-1])
+    session.emit("assistant.turn_start")
+    await settle(runtime)
+    runtime.update_session(second, status="working")
+    await call_tool(
+        runtime, "message_session", router, session_id=second, task="new", why_new="test",
+        earlier="keep", title="Export to Avro", text="Add an Avro export too.",
+    )  # fmt: skip
+    told = await call_tool(
+        runtime, "message_session", router, session_id=second, task="new", why_new="test",
+        title="Export to ORC", text="And an ORC export.",
+    )  # fmt: skip
+    third = json.loads(told.text_result_for_llm)["session_id"]
+    assert store.session(third)["role"] == "worker" and third not in {worker, second}
+    await settle(runtime)
     origin = runtime.display_title(store.session(worker))
     for scheme in ("light", "dark"):
         for width in (1280, 800):
@@ -5193,7 +5210,9 @@ async def round_fork(runtime, browser, failures: list[str]):
             await expect(page.locator("#application")).to_be_visible()
             if width < 1100:
                 await page.locator("#home-tabs [data-tab=chat]").click()
-            line = page.locator("#timeline .event", has_text="Started a second worker")
+            line = page.locator(
+                "#timeline .event", has_text="Started a second worker for “Export to Parquet”"
+            )
             await expect(line.locator(".what")).to_have_text(
                 f"Started a second worker for “Export to Parquet” (context from “{origin}”)"
             )
@@ -5203,8 +5222,16 @@ async def round_fork(runtime, browser, failures: list[str]):
                 "nodes => nodes.map((n) => [n.dataset.id, n.classList.contains('forked')])"
             )
             at = listed.index([worker, False])
-            assert listed[at + 1] == [second, True], listed
+            after = listed[at + 1 : at + 3]  # In the list's order: the newest first.
+            assert sorted(after) == sorted([[second, True], [third, True]]), listed
             nested = page.locator(f'#session-list .item[data-id="{second}"]')
+            lefts = [
+                await page.locator(f'#session-list .item[data-id="{id_}"] .dot').evaluate(
+                    "n => n.getBoundingClientRect().left"
+                )
+                for id_ in (second, third)
+            ]
+            assert lefts[0] == lefts[1], ("one level only", lefts)
             await expect(nested).to_have_attribute(
                 "title", re.compile(f"A second worker of “{re.escape(origin)}”")
             )
@@ -5216,7 +5243,8 @@ async def round_fork(runtime, browser, failures: list[str]):
             # Its task's row: where it came from, at its foot.
             if width < 1100:
                 await page.locator("#home-tabs [data-tab=tasks]").click()
-            row = page.locator(".card.task", has_text="Export to Parquet")
+            title = page.locator(".head .title", has_text=re.compile(r"^Export to Parquet$"))
+            row = page.locator(".card.task", has=title)
             await expect(row.locator(".worker-ref .name")).to_have_text(f"from “{origin}”")
             await expect(row.locator(".worker-ref")).to_have_attribute(
                 "data-tip", re.compile("A second worker of")

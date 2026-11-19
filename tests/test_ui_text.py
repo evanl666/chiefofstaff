@@ -1345,3 +1345,16 @@ def test_five_other_sessions_at_rest_those_waiting_first():
         ["ecdah", "bfg"],  # And the one the keyboard is on: each takes the room of the last.
         ["ecdbh", "afg"],  # One at work kept at rest keeps its place; the next goes.
     ]
+
+
+def test_second_workers_sit_one_level_under_the_first_they_came_from():
+    """A second worker sits right under the worker it came from; one of a second worker under
+    the first of them listed with it (followed back through one not listed): one level only."""
+    found = run_js(
+        f"const b = await import({json.dumps((STATIC / 'sidebar.js').as_uri())});\n"
+        "const w = (id, from) => ({ id, ...(from ? { fork_of: { id: from } } : {}) });\n"
+        "const list = [w('e'), w('c', 'b'), w('a'), w('d', 'x'), w('b', 'a'), w('f', 'z')];\n"
+        "const shown = b.withSecondWorkers(list, [w('x', 'a')]);\n"
+        "return shown.map(([worker, nested]) => worker.id + (nested ? '>' : '')).join(' ');"
+    )
+    assert found == "e a c> d> b> f"
