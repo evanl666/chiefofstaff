@@ -241,6 +241,94 @@ async def test_hooks_in_the_repository_never_run_when_it_pushes(world):
     assert not marker.exists()
 
 
+async def test_a_tree_whose_git_file_the_step_rewrote_runs_nothing_of_it(world):
+    """A step can write its tree's `.git` file: pointed at a repository of its own, whose
+    config fetches a missing object through a program of its choosing, Chief of Staff's git
+    (outside any sandbox) would run that program reading the step's commit. It reads the
+    tree through its repository as recorded instead (0.1.46's rule), and pushes from there."""
+    from shepherd_world import run
+
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    sha = world.commit_fix(step["tree"])
+    marker = world.root / "ran-as-the-owner"
+    planted = world.root / "planted"
+    run("git", "init", "-q", str(planted), cwd=world.root)
+    for key, value in (
+        ("core.repositoryformatversion", "1"),
+        ("extensions.partialclone", "origin"),
+        ("remote.origin.url", world.remote.as_uri()),
+        ("remote.origin.promisor", "true"),
+        ("remote.origin.uploadpack", f"touch '{marker}'; git-upload-pack"),
+    ):
+        run("git", "--git-dir", str(planted / ".git"), "config", key, value)
+    (planted / ".git" / "HEAD").write_text(sha + "\n")
+    (Path(step["tree"]) / ".git").write_text(f"gitdir: {planted / '.git'}\n")
+    answer = await step_result(
+        runtime, world.worker, step=step["id"], outcome="fixed", summary="Fixed.", commit=sha
+    )
+    assert not marker.exists()
+    assert "Recorded" in said(answer), said(answer)
+    world.session().emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    step = runtime.shepherd.control.step(step["id"])
+    assert step["state"] == "prepared" and step["plan"]["h1"] == sha, step
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    assert world.github.head() == sha
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("at_head", [True, False])
+async def test_a_workers_own_clone_is_worked_in_only_at_the_head_never_made_into_a_worktree(
+    world, at_head
+):
+    """A clone the worker made in its folder: its config is the worker's to write (a filter
+    there would run, as the owner, for a worktree Chief of Staff made of it). The step runs in
+    the clone itself while it is at the PR's head (read through Chief of Staff's own git folder
+    for it); otherwise it does not run, and says why."""
+    from shepherd_world import REPO, run
+
+    runtime = await claimed(world)
+    workspace = world.root / "work" / "fix-login"
+    run("git", "worktree", "remove", "--force", str(workspace / "api"), cwd=world.clone)
+    runtime.store.update_session(world.worker, repos="[]")
+    clone = workspace / "own"
+    run("git", "clone", "-q", "-b", BRANCH, str(world.remote), str(clone), cwd=world.root)
+    run("git", "remote", "set-url", "origin", f"https://github.com/{REPO}.git", cwd=clone)
+    marker = world.root / "ran-as-the-owner"
+    run("git", "config", "filter.planted.smudge", f"touch '{marker}'; cat", cwd=clone)
+    (clone / ".git" / "info" / "attributes").write_text("* filter=planted\n")
+    if not at_head:
+        run("git", "commit", "-q", "--allow-empty", "-m", "More", cwd=clone)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.steps(TARGET)[-1]
+    assert not marker.exists()
+    if not at_head:
+        assert step["state"] == "failed", step
+        assert "own clone of acme/api isn't at the PR's latest commit" in step["why"], step
+        return
+    assert step["state"] == "running" and step["tree"] == str(clone), step
+    sha = world.commit_fix(str(clone))
+    answer = await step_result(
+        runtime, world.worker, step=step["id"], outcome="fixed", summary="Fixed.", commit=sha,
+        test_command=TEST_COMMAND,
+    )  # fmt: skip
+    assert "not checked on frozen commits" in said(answer), said(answer)
+    world.session().emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    step = runtime.shepherd.control.step(step["id"])
+    assert step["state"] == "prepared" and step["plan"]["h1"] == sha, step
+    assert "return 30" in step["plan"]["diff"]
+    assert not marker.exists()
+
+
 async def test_off_has_no_tables_no_snapshot_and_no_hooks(harness, tmp_path):
     world = World(harness, tmp_path)
     world.build()

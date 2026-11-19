@@ -11,7 +11,7 @@ from conftest import call_tool, settle
 from shepherd_world import BRANCH, REPO, TARGET, World, run
 from test_shepherd import claimed, fixed, said, step_result
 
-from chiefofstaff import publish
+from chiefofstaff import publish, workspaces
 from chiefofstaff.publish import approve, reconcile_all
 from chiefofstaff.shepherd import PROBE_RETRY_SECONDS
 
@@ -375,14 +375,14 @@ async def test_the_push_carries_no_credentials_of_the_owners_and_skips_hooks(wor
     runtime = await claimed(world)
     step, sha = await fixed(world, runtime)
     seen = {}
-    sent = publish.command
+    sent = workspaces.command
 
     async def command(*argv, **options):
         if "push" in argv:
             seen.update(argv=argv, env=options.get("env") or {})
         return await sent(*argv, **options)
 
-    monkeypatch.setattr(publish, "command", command)
+    monkeypatch.setattr(workspaces, "command", command)
     await approve(runtime.shepherd, step["id"], {})
     await settle(runtime)
     await settle(runtime)
@@ -396,6 +396,8 @@ async def test_the_push_carries_no_credentials_of_the_owners_and_skips_hooks(wor
     }
     assert pairs["credential.helper"] == ""
     assert "tok-me" not in " ".join(argv)
+    # From the repository as recorded, not wherever the tree's .git points now.
+    assert env["GIT_COMMON_DIR"] == str(world.clone / ".git")
 
 
 @pytest.mark.parametrize("went_out", ["yes", "no", "under", "unreadable"])
