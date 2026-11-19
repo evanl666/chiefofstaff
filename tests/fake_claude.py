@@ -137,6 +137,9 @@ class Fake:
                 "servers": sorted(self.servers),
                 "appended": self.appended,
                 "plugins": flags.get("plugin-dir"),
+                "disabled_servers": (settings if isinstance(settings, dict) else {}).get(
+                    "disabledMcpjsonServers"
+                ),
             },
         )
         self.state = self.load() if flags.get("resume") else self.fresh()

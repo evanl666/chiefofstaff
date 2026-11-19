@@ -99,6 +99,7 @@ from .others import Others
 from .peers import Peers
 from .policy import (
     AGENT_SETTINGS,
+    CLAUDE_SETTINGS,
     CODEX_SETTINGS,
     GITHUB_MCP,
     OWN_COPY,
@@ -445,40 +446,6 @@ def default_effort(info: dict) -> str:
     return "medium" if "medium" in efforts else efforts[len(efforts) // 2]
 
 
-def file_bytes(path: Path) -> bytes | None:
-    try:
-        return path.read_bytes() if path.is_file() else None
-    except OSError:
-        return None
-
-
-async def committed_bytes(common: str, commit: str, name: str) -> bytes | None:
-    """A file as a commit has it (None: not in it), read from the owner's repository's own .git
-    (`common`, as Chief of Staff recorded it) with a git that runs nothing of a repository's: a
-    worker can change where its worktree's .git points, and a config there can run code (a
-    partial clone's lazy fetch, a transport of its own, a file-system monitor)."""
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith(("GIT_", "CHIEFOFSTAFF_"))
-    } | {
-        "GIT_DIR": common,
-        "GIT_NO_LAZY_FETCH": "1",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_NO_REPLACE_OBJECTS": "1",
-    }
-    process = await asyncio.create_subprocess_exec(
-        "git", "-c", "protocol.allow=never", "-c", "core.fsmonitor=",
-        "-c", "core.hooksPath=/dev/null", "--no-replace-objects", "show", f"{commit}:{name}",
-        cwd=common, env=environment,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-    )  # fmt: skip
-    output, _ = await process.communicate()
-    return output if process.returncode == 0 else None
-
-
 def describe_model(model: Any) -> dict:
     """The model facts the UI and session options need."""
     prices = model.billing.token_prices if model.billing else None
@@ -551,6 +518,16 @@ def git_name(path: str) -> str:
 def home_shown(path: str) -> str:
     home = str(Path.home())
     return "~" + path[len(home) :] if path.startswith(home + os.sep) else path
+
+
+def agent_settings(agent: str) -> tuple[str, ...]:
+    """The repository settings an agent loads from a worker's folder (policy)."""
+    return {"claude": CLAUDE_SETTINGS, "codex": CODEX_SETTINGS}.get(agent, REPOSITORY_SETTINGS)
+
+
+def settings_agent(names: tuple[str, ...]) -> str:
+    """Whose settings these are, as a line names them."""
+    return {CLAUDE_SETTINGS: "Claude", CODEX_SETTINGS: "Codex"}.get(names, "Copilot")
 
 
 # A command that updates a branch (and what it updates from): the subcommand as a whole word
@@ -2303,12 +2280,8 @@ class Runtime:
         if row["status"] in {"working", "starting", "queued"} or self.states[session_id].held:
             raise ValueError("It is at work: stop it first, or wait until it is done.")
         agent = self.agent(session_id)
-        if agent == "claude" and (changed := await self.claude_settings_changed(row)):
-            raise ValueError(
-                f"Claude's own settings in its folder changed since it started ({changed}): "
-                "their hooks and servers would run in your terminal's session. Look at them and "
-                "restore them (or remove a new one) first."
-            )
+        if why := await self.terminal_settings(row, agent):
+            raise ValueError(why)  # (Its timeline's line has Use these settings.)
         if self.store.get(f"schedulesdelete:{session_id}"):
             # Ended with its task, but still in its Claude conversation, which would bring them
             # back in the terminal: deleted there first (delete_dropped_schedules). Why that did
@@ -3396,8 +3369,54 @@ class Runtime:
                 ),
                 "on_peer": lambda kind, data: self.agent_peer(sid, kind, data),
                 "on_notify": lambda text: self.agent_notified(sid, text),
+                # Its folder's MCP servers whose files changed since the owner last let it use
+                # them: off for it (servers_off), as for a Copilot worker.
+                "disabled_mcp_servers": self.disabled_servers(row),
+                # Before a subagent starts (Claude loads its definition then): its folder's
+                # settings looked at, and a server off for it not started (as Events.pre_tool).
+                "on_subagent": lambda tool, arguments: self.agent_subagent(sid, tool, arguments),
             }
         return options
+
+    async def agent_subagent(self, session_id: str, tool: str, arguments: Any) -> str:
+        """Why a Claude worker's subagent may not start ("" when it may): its folder's settings
+        changed (a glance, the full check only when that changed: settings_look, which stops
+        the worker), or the subagent's own server is off for it (server_refusal)."""
+        row = self.store.find_session(session_id)
+        if not row or row["closed_at"] or not row["cwd"] or row["role"] != WORKER:
+            return ""
+        try:
+            why = await asyncio.wait_for(self.settings_look(row), SETTINGS_SECONDS)
+        except Exception:
+            logger.warning("Could not look at %s's agent settings.", session_id, exc_info=True)
+            why = "Chief of Staff could not look at this folder's settings: try again later."
+        return why or self.server_refusal(row, tool, arguments)
+
+    async def terminal_settings(self, row: dict, agent: str) -> str:
+        """Why a Claude or Codex worker may not go to a terminal now ("" when it may): its
+        folder's settings of that agent differ from what the owner last let workers use (the
+        owner's own session there would load them, with no check of Chief of Staff's), or a
+        .git there was replaced. Its timeline says so, with Use these settings."""
+        if agent not in {"claude", "codex"} or not row["cwd"]:
+            return ""
+        if replaced := await self.settings_thread(self.git_replaced, row):
+            return self.git_replaced_said(row, replaced)
+        names = agent_settings(agent)
+        verdict = await self.settings_verdict(row, names)
+        if verdict is None:
+            return ""
+        label = settings_agent(names)
+        reason = self.settings_reason(label, verdict)
+        stop = ". " if "; " in reason else ": "
+        if verdict["refused"]:
+            line = f"{reason}{stop}{label} would load them in your terminal. Remove that first."
+        else:
+            line = (
+                f"{reason}{stop}{label} would load them in your terminal. Look at them, then "
+                "Use these settings here first."
+            )
+        self.settings_said(row["id"], line, verdict, alert=False)
+        return line
 
     def agent_children(self, session_id: str) -> list[str]:
         try:
@@ -3661,31 +3680,6 @@ class Runtime:
         if delete:
             self.background(self.delete_dropped_schedules(session_id))
         return True
-
-    async def claude_settings_changed(self, row: dict) -> str:
-        """Claude's own settings in a worker's worktrees (backend_claude.CLAUDE_CONFIG_FILES)
-        that differ from where each began (its base commit's; for one carried from the owner's
-        checkout, the owner's): their hooks, apiKeyHelper and MCP servers would run as Claude
-        next starts there, outside the worker's checks. Its tools never write them; a command
-        run without the sandbox could. "" for none; else which, by folder and name."""
-        from .backend_claude import CLAUDE_CONFIG_FILES
-
-        changed: list[str] = []
-        for checkout in self.workspaces.checkouts(row):
-            tree, base = checkout.get("worktree"), checkout.get("base_ref")
-            if not tree or not base:
-                continue
-            common = checkout.get("git_dir") or str(Path(checkout["repo"]) / ".git")
-            carried = set(checkout.get("carried") or [])
-            for name in CLAUDE_CONFIG_FILES:
-                now = await asyncio.to_thread(file_bytes, Path(tree) / name)
-                if name in carried:
-                    was = await asyncio.to_thread(file_bytes, Path(checkout["repo"]) / name)
-                else:
-                    was = await committed_bytes(common, base, name)
-                if now != was:
-                    changed.append(f"{Path(tree).name}/{name}")
-        return ", ".join(changed)
 
     async def delete_dropped_schedules(self, session_id: str) -> str:
         """Its dropped schedules (drop_schedules) deleted in Claude, by a turn of Chief of
@@ -4630,12 +4624,12 @@ class Runtime:
             await self.ready_caches(row)
             options, trusted = self.options(row), self.trust(row)
         else:
-            if agent == "claude" and (changed := await self.claude_settings_changed(row)):
-                raise RuntimeError(
-                    f"Claude's own settings in its folder changed since it started ({changed}): "
-                    "their hooks and servers would run outside its checks as Claude starts "
-                    "there. Restore them (or remove a new one), then tell it to go on."
-                )
+            if agent == "claude":
+                # As a Copilot worker's: Claude loads its folder's settings as its process
+                # starts (a resume too), so not before the owner says to use them.
+                if line := await self.settings_refusal(row):
+                    raise SettingsChangedError(line)
+                await self.ready_caches(row)
             options, trusted = self.agent_options(row), {}
             # Slack's read tools in this process: its token never reaches Claude's.
             if row["slack"] and agent == "claude" and (proxy := await self.slack.read_proxy()):
@@ -4714,10 +4708,10 @@ class Runtime:
 
         session.on(forward)
         self.states[session_id].handle = session
-        if agent == COPILOT_AGENT and row["role"] == WORKER:
+        if agent in {COPILOT_AGENT, "claude"} and row["role"] == WORKER:
             self.servers_opened[session_id] = frozenset(self.servers_off.get(session_id, {}))
             self.searched_opened[session_id] = self.all_searched(row)
-            if "hooks" in options:
+            if "hooks" in options and agent == COPILOT_AGENT:
                 self.pre_tool_on[session_id] = "sandbox_config" in options
             else:
                 self.pre_tool_on.pop(session_id, None)
@@ -5114,7 +5108,7 @@ class Runtime:
         # What a Copilot server runs turns that server off when it changed (servers_off); a
         # Codex thread does not trust the folder's settings then, as for any of them.
         servers = names == CODEX_SETTINGS
-        if names == REPOSITORY_SETTINGS:
+        if names in (REPOSITORY_SETTINGS, CLAUDE_SETTINGS):
             self.servers_seen(row, settings_guard.servers_changed(now_named, then))
         found = settings_guard.changes(now_named, then, servers)
         if found and await self.settings_thread(
@@ -5186,7 +5180,7 @@ class Runtime:
             return
         snapshot["code"] = said
         settings_guard.save(self.store, top, snapshot)
-        agent = "Codex" if names == CODEX_SETTINGS else "Copilot"
+        agent = settings_agent(names)
         unique = sorted(set(code))
         listed = "; ".join(unique[:2]) + (f" and {len(unique) - 2} more" if len(unique) > 2 else "")
         self.add_message(
@@ -5409,11 +5403,11 @@ class Runtime:
         return f"{agent} settings in this folder changed ({changed})"
 
     async def settings_refusal(self, row: dict) -> str:
-        """Before a Copilot worker opens or starts a turn: why not (its folder's Copilot
-        settings differ from what the owner last let it use: Copilot would load them), "" when
-        it may; said in its timeline. Only for a sandboxed one (settings_guarded): "" at once
-        for any other. Within SETTINGS_SECONDS: past that, its folder can't be
-        checked, and it waits."""
+        """Before a Copilot or Claude worker opens or starts a turn: why not (its folder's
+        settings of its agent differ from what the owner last let it use: the agent would load
+        them), "" when it may; said in its timeline. Only for a sandboxed one
+        (settings_guarded): "" at once for any other. Within SETTINGS_SECONDS: past that, its
+        folder can't be checked, and it waits. (Any worker: a .git replaced.)"""
         if row["role"] != WORKER or not row["cwd"]:
             return ""
         if not self.settings_guarded(row):
@@ -5442,16 +5436,17 @@ class Runtime:
             return self.git_replaced_said(row, replaced)
         if self.store.get(f"gitappeared:{row['id']}") and (line := await self.git_appeared(row)):
             return line
-        if self.agent(row["id"]) != COPILOT_AGENT:
-            return ""
+        if (agent := self.agent(row["id"])) not in {COPILOT_AGENT, "claude"}:
+            return ""  # (Codex: a thread doesn't trust such a folder, codex_settings.)
+        names = agent_settings(agent)
         # Taken before they are read: a change while they are is a change at the next look.
         seen = await self.settings_thread(self.settings_signature, row)
-        verdict = await self.settings_verdict(row, REPOSITORY_SETTINGS)
+        verdict = await self.settings_verdict(row, names)
         if verdict is None:
             self.settings_unsaid(row["id"])
             self.settings_sigs[row["id"]] = seen
             return ""
-        reason = self.settings_reason("Copilot", verdict)
+        reason = self.settings_reason(settings_agent(names), verdict)
         joined = f"{reason}{'. ' if '; ' in reason else '; '}Chief of Staff won't start the worker"
         if verdict["refused"]:
             line = f"{joined} there until that's removed."
@@ -5462,7 +5457,7 @@ class Runtime:
         return line
 
     async def settings_stop(self, session_id: str):
-        """A Copilot worker whose folder's settings changed: no turn starts until the owner says
+        """A worker whose folder's settings changed: no turn starts until the owner says
         to use them (or they are as they were). One at work is stopped (their word goes on with
         it); one that is not is let go of, and what it was sent and never saw waits for it."""
         self.settings_held.add(session_id)
@@ -6060,9 +6055,11 @@ class Runtime:
         servers: list[str] = []
         if tool == "lsp":
             servers = [server for server in off if server.startswith("lsp/")]
-        elif tool == "task" and isinstance(arguments, dict):
-            # (Copilot takes the agent's name as it is written; any case here.)
-            agent = str(arguments.get("agent_type") or "").casefold()
+        elif tool in {"task", "Agent", "Task"} and isinstance(arguments, dict):
+            # (Copilot takes the agent's name as it is written; any case here. Claude's Agent
+            # tool names it its subagent_type.)
+            agent = str(arguments.get("agent_type") or arguments.get("subagent_type") or "")
+            agent = agent.casefold()
             servers = [s for s in off if agent and s.partition("@")[2].casefold() == agent]
         else:
             servers = mcp_called(off, tool)
@@ -6138,7 +6135,8 @@ class Runtime:
         """The owner says to use the servers its line names (Use these settings): what they
         run now becomes what Chief of Staff compares with; its next turn opens with them."""
         row = self.store.session(session_id)
-        verdict = await self.settings_verdict(row, REPOSITORY_SETTINGS)
+        names = agent_settings(self.agent(session_id))
+        verdict = await self.settings_verdict(row, names)
         off = self.servers_off.get(session_id, {})
         if not off:
             self.servers_said(row)
@@ -6147,9 +6145,7 @@ class Runtime:
             raise ValueError("They changed again since: look at the latest line and try again.")
         if verdict and verdict["unreadable"]:
             raise ValueError(f"These can't be checked ({verdict['unreadable']}).")
-        top, _, _, now, unreadable, _ = await self.settings_thread(
-            self.settings_read, row, REPOSITORY_SETTINGS
-        )
+        top, _, _, now, unreadable, _ = await self.settings_thread(self.settings_read, row, names)
         if unreadable:
             raise ValueError(f"These can't be checked ({unreadable}).")
         snapshot = settings_guard.load(self.store, top) or settings_guard.fresh()
@@ -6223,7 +6219,7 @@ class Runtime:
             return "Nothing waits: without the sandbox, workers use their folder's settings."
         if digest.startswith("servers:"):
             return await self.accept_servers(session_id, digest)
-        names = REPOSITORY_SETTINGS if self.agent(session_id) == COPILOT_AGENT else CODEX_SETTINGS
+        names = agent_settings(self.agent(session_id))
         verdict = await self.settings_verdict(row, names)
         if verdict is None:
             said = "They are as they were: nothing to change."

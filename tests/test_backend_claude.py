@@ -1792,23 +1792,15 @@ async def test_while_it_plans_it_removes_no_worktree(agent, tmp_path):
     assert await worker.decide("ExitWorktree", remove, "c") == "", "once its plan is approved"
 
 
-async def test_a_worker_writes_none_of_claudes_own_settings(agent, tmp_path):
-    """Their hooks, apiKeyHelper and MCP servers run as Claude next starts there, outside the
-    worker's checks (2.1.322, Ask first or not): no tool of its writes one, a link to one
-    included, and its sandbox keeps its commands from them in each folder it may write."""
-    session = await agent.create_session(session_id="b6" * 16, name="t", **options(tmp_path))
-    worker = session.worker
-    (tmp_path / "notes.txt").symlink_to(tmp_path / ".mcp.json")
-    for name in (".claude/settings.json", ".claude/settings.local.json", ".mcp.json",
-                 "sub/.mcp.json", "notes.txt"):  # fmt: skip
-        for tool, key in (("Write", "file_path"), ("Edit", "file_path")):
-            said = await worker.decide(tool, {key: str(tmp_path / name)}, "c")
-            assert said == backend_claude.CONFIG_WRITE, (tool, name)
-    assert await worker.decide("Write", {"file_path": str(tmp_path / "settings.json")}, "c") == ""
-    policy = SimpleNamespace(readwrite=(str(tmp_path),), readonly=(), denied=(),
+def test_its_sandbox_holds_what_chief_of_staffs_policy_holds_and_nothing_more(tmp_path):
+    """Claude's own settings in a worker's own folder are not held by its sandbox (a branch
+    update may change them): Chief of Staff's check before each start and turn is (Runtime.
+    settings_refusal); in the owner's checkout its policy holds them read-only, as for any
+    agent (Runtime.sandbox_policy)."""
+    held = str(tmp_path / "owner" / ".claude" / "settings.json")
+    policy = SimpleNamespace(readwrite=(str(tmp_path / "work"),), readonly=(held,), denied=(),
                              allowed_hosts=(), local_network=False)  # fmt: skip
-    denied = backend_claude.sandbox_settings(policy)["filesystem"]["denyWrite"]
-    assert {str(tmp_path / name) for name in backend_claude.CLAUDE_CONFIG_FILES} <= set(denied)
+    assert backend_claude.sandbox_settings(policy)["filesystem"]["denyWrite"] == [held]
 
 
 async def test_while_it_deletes_its_schedules_it_calls_nothing_else(agent, tmp_path):

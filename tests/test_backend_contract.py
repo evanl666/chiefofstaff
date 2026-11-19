@@ -585,10 +585,11 @@ async def test_claudes_sandbox_adds_only_its_staging_folder_to_the_global_git_ig
     assert (tmp_path / "global-git-ignore").read_text() == "**/.claude/.cc-writes/\n"
 
 
-async def test_a_sandboxed_claude_worker_writes_none_of_claudes_own_settings(backend, tmp_path):
-    """Their hooks, apiKeyHelper and MCP servers would run as Claude next starts in the folder,
-    outside the worker's checks (2.1.322): its sandbox keeps its commands from making or
-    changing them, where it writes anything else, and its Write tool is refused."""
+async def test_claudes_sandbox_holds_the_settings_chief_of_staffs_policy_holds(backend, tmp_path):
+    """Claude's own settings where its policy holds them (the owner's checkout: Runtime.
+    sandbox_policy), there or not yet (2.1.322): its commands neither change nor make them,
+    where they write anything else. (In its own folder they are not held: Chief of Staff's
+    check before each start and turn is, Runtime.settings_refusal.)"""
     if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
         pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
     if not sandbox_supported():
@@ -599,8 +600,9 @@ async def test_a_sandboxed_claude_worker_writes_none_of_claudes_own_settings(bac
     names = (".mcp.json", ".claude/settings.json", ".claude/settings.local.json")
     script = "".join(f"echo '{{}}' > {name} 2>/dev/null\n" for name in names)
     (folder / "write.sh").write_text(script + "echo ok > allowed.txt\n")
+    held = tuple(str(folder / name) for name in names)
     session, turn = await open_session(
-        backend, folder, sandbox=SandboxPolicy(readwrite=(str(folder),))
+        backend, folder, sandbox=SandboxPolicy(readwrite=(str(folder),), readonly=held)
     )
     await session.send("Run the shell command `sh write.sh` and then reply with just: finished")
     await turn.wait()
@@ -610,10 +612,30 @@ async def test_a_sandboxed_claude_worker_writes_none_of_claudes_own_settings(bac
         not (folder / ".mcp.json").exists()
         and not (folder / ".claude/settings.local.json").exists()
     )
-    write = json.dumps({"file_path": str(folder / ".mcp.json"), "content": "{}"})
-    await session.send(f"Use Claude's Write tool with {write}. Then reply with just: wrote")
-    await turn.wait()
-    assert not (folder / ".mcp.json").exists()
+
+
+async def test_claude_starts_no_project_mcp_server_chief_of_staff_turned_off(backend, tmp_path):
+    """A server its folder's settings run that changed since the owner last let workers use it
+    (Runtime.servers_off): Claude (2.1.322) does not start it when its flag settings name it in
+    disabledMcpjsonServers, even where the project's settings enable every project server."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    folder = tmp_path / "work"
+    (folder / ".claude").mkdir(parents=True)
+    (folder / ".claude" / "settings.json").write_text('{"enableAllProjectMcpServers": true}\n')
+    marker = tmp_path / "started"
+    server = {"command": "/bin/sh", "args": ["-c", f"echo run >> {marker}; sleep 5"]}
+    (folder / ".mcp.json").write_text(json.dumps({"mcpServers": {"x": server}}))
+    state = Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
+    trusted = {"projects": {str(folder): {"hasTrustDialogAccepted": True}}}
+    state.write_text(json.dumps(trusted))  # The owner trusts the folder: its settings load.
+    for disabled in (["x"], []):
+        session, turn = await open_session(backend, folder, disabled_mcp_servers=disabled)
+        await session.send("Reply with just: ready")
+        await turn.wait()
+        await asyncio.sleep(1)
+        assert marker.exists() is not bool(disabled), disabled
+        await session.disconnect()
 
 
 async def test_the_owners_edit_rules_widen_claudes_sandbox_so_a_sandboxed_worker_does_not_start(

@@ -7,6 +7,8 @@ itself)."""
 import asyncio
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -20,6 +22,8 @@ from copilot.tools import ToolInvocation
 
 from chiefofstaff import agents, backend_claude, prompts
 from chiefofstaff.models import Settings
+from chiefofstaff.settings_guard import SettingsChangedError
+from chiefofstaff.workers import SETTINGS_WAIT
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Claude workers need macOS/Linux")
 
@@ -923,74 +927,134 @@ async def test_a_claude_worker_with_schedules_is_not_handed_to_a_terminal_and_no
         await runtime.stop()
 
 
-async def test_a_worker_whose_folder_has_new_claude_settings_does_not_start_there_again(
-    tmp_path, claude_on_path
-):
-    """Claude's own settings that appeared in a worker's worktree since it began (a command run
-    without the sandbox could write one): their hooks and servers would run as Claude starts
-    there, outside its checks. Neither its next process nor the owner's terminal starts there
-    until they are restored."""
+async def claude_in_worktree(tmp_path, settings=None, instructions="Report done: made"):
+    """A Claude worker in a worktree Chief of Staff made of a project, done with its task."""
     from test_round7_split import published
 
     app = published(tmp_path, "app")
-    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    harness, runtime = await started(
+        tmp_path, (settings or Settings()).model_copy(update={"projects": [str(app)]})
+    )
+    await saved(runtime, {"claude": {"enabled": True}})
+    result = await spawn_on(
+        harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
+        instructions=instructions,
+    )  # fmt: skip
+    worker = result["session_id"]
+    await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+    return harness, runtime, worker, Path(harness.store.session(worker)["cwd"])
+
+
+async def test_claude_settings_changed_in_a_workers_folder_wait_for_the_owner_to_use_them(
+    tmp_path, claude_on_path
+):
+    """Claude loads a folder's own settings (hooks, apiKeyHelper, MCP servers, subagents) as
+    its process starts there, a worker's resumed or the owner's own in a terminal: one a
+    command wrote (its own folder's are not held by its sandbox) waits, as a Copilot worker's
+    does, until the owner clicks Use these settings on the line its timeline shows; nor is it
+    handed to a terminal meanwhile."""
+    harness, runtime, worker, cwd = await claude_in_worktree(tmp_path)
     try:
-        await saved(runtime, {"claude": {"enabled": True}})
-        result = await spawn_on(
-            harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
-            instructions="Report done: made",
-        )  # fmt: skip
-        worker = result["session_id"]
-        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
-        cwd = Path(harness.store.session(worker)["cwd"])
-        await runtime.detach(worker)
         (cwd / ".mcp.json").write_text('{"mcpServers": {"x": {"command": "true"}}}')
-        with pytest.raises(ValueError, match=r"changed since it started \(app/\.mcp\.json\)"):
+        reason = "Claude settings in this folder changed (added .mcp.json)"
+        handover = (
+            f"{reason}: Claude would load them in your terminal. Look at them, then Use these "
+            "settings here first."
+        )
+        with pytest.raises(ValueError, match=re.escape(handover)):
             await runtime.terminal_command(worker)
-        with pytest.raises(RuntimeError, match=r"changed since it started \(app/\.mcp\.json\)"):
+        await runtime.owner_send(worker, "Run the shell command `echo next`. Report done: next")
+        line = f"{reason}; Chief of Staff won't start the worker there until you say to use them."
+        await until(lambda: ("notice", line) in harness.kinds(worker), 10)
+        assert harness.store.session(worker)["activity"] == SETTINGS_WAIT
+        assert not runtime.states.is_live(worker), "let go of: its next process would load them"
+        (said,) = [m for m in harness.store.messages(worker) if m["text"] == line]
+        digest = said["meta"]["agent_settings"]["digest"]
+        with pytest.raises(SettingsChangedError, match=re.escape(reason)):
             await runtime.session_for(worker)
-        (cwd / ".mcp.json").unlink()
-        assert await runtime.session_for(worker), "restored: it starts again"
+        assert await runtime.accept_settings(worker, digest) == (
+            "You let this worker use these settings (added .mcp.json)."
+        )
+        await until(lambda: ("report", "next") in harness.kinds(worker), 30)
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        assert (await runtime.terminal_command(worker))["agent"] == "claude"
     finally:
         await runtime.stop()
 
 
-async def test_checking_claude_settings_runs_nothing_a_worker_points_git_at(
+async def test_a_claude_worker_whose_subagent_settings_changed_mid_turn_is_stopped_first(
     tmp_path, claude_on_path
 ):
-    """The settings' base is read from the owner's repository's own .git: a worktree whose .git
-    a worker pointed at a repository of its own (whose config runs code as git needs an object
-    it lacks) runs nothing."""
+    """A subagent's definition (.claude/agents) loads as the subagent starts: its folder's
+    settings are looked at before Claude runs one, and a change stops the worker there."""
+    harness, runtime, worker, cwd = await claude_in_worktree(tmp_path)
+    try:
+        (cwd / ".claude" / "agents").mkdir(parents=True)
+        (cwd / ".claude" / "agents" / "helper.md").write_text("---\nname: helper\n---\nHi\n")
+        row = harness.store.session(worker)
+        why = await runtime.agent_subagent(worker, "Agent", {"subagent_type": "helper"})
+        assert why.startswith("Claude settings in this folder changed (added .claude/agents")
+        await until(lambda: worker in runtime.settings_held, 10)
+        assert row["id"] == worker
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_workers_changed_mcp_server_is_off_for_it_not_a_wait(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """As for a Copilot worker: what its folder's MCP server runs (a repository developing its
+    own server) stays the worker's to build and edit; changed, that server is off for it from
+    its next process (Claude's disabledMcpjsonServers), said once, never a wait."""
     from test_round7_split import published
 
+    starts = tmp_path / "starts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
     app = published(tmp_path, "app")
+    (app / "tools").mkdir()
+    (app / "tools" / "serve.py").write_text("print('serving')\n")
+    servers = {"mcpServers": {"x": {"command": "python3", "args": ["tools/serve.py"]}}}
+    (app / ".mcp.json").write_text(json.dumps(servers))
+    for arguments in (["add", "-A"], ["commit", "-qm", "server"], ["push", "-q", "origin", "main"]):
+        await asyncio.to_thread(subprocess.run, ["git", *arguments], cwd=app, check=True)
     harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
     try:
         await saved(runtime, {"claude": {"enabled": True}})
         result = await spawn_on(
-            harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
+            harness, runtime, title="Server", agent="claude", project=str(app), isolate=True,
             instructions="Report done: made",
         )  # fmt: skip
         worker = result["session_id"]
         await until(lambda: harness.store.session(worker)["status"] == "done", 30)
         cwd = Path(harness.store.session(worker)["cwd"])
+        (cwd / "tools" / "serve.py").write_text("print('serving better')\n")
+        await runtime.owner_send(worker, "Report done: again")
+        await until(lambda: ("report", "again") in harness.kinds(worker), 30)
+        opened = [json.loads(line) for line in starts.read_text().splitlines()]
+        assert [entry["disabled_servers"] for entry in opened] == [None, ["x"]]
+        line = "Its MCP server x changed in this worker's folder, so it runs without it."
+        assert ("notice", line) in harness.kinds(worker)
+        assert worker not in runtime.settings_held, "never a wait"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_replaced_git_folder_keeps_a_claude_worker_from_a_terminal(
+    tmp_path, claude_on_path
+):
+    """Its worktree's folder in the repository replaced since Chief of Staff first saw it (git
+    there could run what the worker put in its place): not handed to the owner's terminal,
+    whose Claude would run git there; said with Use this .git."""
+    harness, runtime, worker, _ = await claude_in_worktree(tmp_path)
+    try:
         await runtime.detach(worker)
-        trap, marker = tmp_path / "trap", tmp_path / "PWNED"
-        made = [["init", "-q", str(trap)]] + [
-            ["-C", str(trap), "config", key, value]
-            for key, value in (
-                ("core.repositoryformatversion", "1"),
-                ("extensions.partialClone", "origin"),
-                ("remote.origin.url", str(trap)),
-                ("remote.origin.promisor", "true"),
-                ("remote.origin.uploadpack", f"touch {marker}; false"),
-            )
-        ]
-        for arguments in made:
-            await asyncio.to_thread(subprocess.run, ["git", *arguments], check=True)
-        (cwd / ".git").write_text(f"gitdir: {trap / '.git'}\n")
-        assert await runtime.claude_settings_changed(harness.store.session(worker)) == ""
-        assert not marker.exists()
+        (checkout,) = runtime.workspaces.checkouts(harness.store.session(worker))
+        admin = Path(checkout["admin"])
+        shutil.copytree(admin, tmp_path / "swapped")
+        shutil.rmtree(admin)
+        (tmp_path / "swapped").rename(admin)
+        with pytest.raises(ValueError, match=r"was replaced since Chief of Staff first saw it"):
+            await runtime.terminal_command(worker)
     finally:
         await runtime.stop()
 
