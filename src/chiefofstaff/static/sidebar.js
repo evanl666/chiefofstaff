@@ -65,26 +65,30 @@ function sessionItem(session, label, where, nested = false, forked = false) {
     where?.sub || background ? el("span", { class: "sub", text: where?.sub || "background" }) : null,
   );
 }
-// Each worker, with the second workers started from it right under it (when listed together):
-// [worker, nested].
-export function withSecondWorkers(list) {
+// Each worker, with the second workers started from it right under it, one level only: a second
+// worker of a second worker sits under the first of them listed with it (a worker followed back
+// through those it came from, listed or not). [worker, nested].
+export function withSecondWorkers(list, known = [...sessions(), ...closedWorkers()]) {
   const listed = new Set(list.map((worker) => worker.id));
-  const under = new Map();
-  for (const worker of list) {
-    const from = worker.fork_of?.id;
-    if (from && from !== worker.id && listed.has(from)) under.set(from, [...(under.get(from) || []), worker]);
-  }
-  const placed = new Set();
-  const shown = [];
-  const place = (worker, nested) => {
-    if (placed.has(worker.id)) return;
-    placed.add(worker.id);
-    shown.push([worker, nested]);
-    for (const second of under.get(worker.id) || []) place(second, true);
+  const byId = new Map(known.map((worker) => [worker.id, worker]));
+  for (const worker of list) byId.set(worker.id, worker);
+  const first = (worker) => {
+    let top = null;
+    const seen = new Set([worker.id]);
+    for (let from = worker.fork_of?.id; from && !seen.has(from); from = byId.get(from)?.fork_of?.id) {
+      seen.add(from);
+      if (listed.has(from)) top = from;
+    }
+    return top;
   };
-  for (const worker of list) if (!listed.has(worker.fork_of?.id)) place(worker, false);
-  for (const worker of list) place(worker, false);
-  return shown;
+  const under = new Map();
+  const tops = [];
+  for (const worker of list) {
+    const top = first(worker);
+    if (top) under.set(top, [...(under.get(top) || []), worker]);
+    else tops.push(worker);
+  }
+  return tops.flatMap((worker) => [[worker, false], ...(under.get(worker.id) || []).map((second) => [second, true])]);
 }
 // Workers as rows, the workers of one Compare under one row ("Compare: <title> (2)"), each
 // named by its agent, and second workers right under the worker they came from.

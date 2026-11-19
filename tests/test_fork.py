@@ -185,7 +185,7 @@ async def test_otherwise_the_worker_gets_its_new_task_as_before(tmp_path, case):
     assert any("Add a CSV export." in text for text in harness.session(worker).sent[-2:])
 
 
-@pytest.mark.parametrize("failing", ["fork", "workspace"])
+@pytest.mark.parametrize("failing", ["fork", "unknown", "workspace"])
 async def test_a_second_worker_that_cannot_be_made_leaves_the_task_with_the_busy_one(
     harness, monkeypatch, failing
 ):
@@ -195,8 +195,14 @@ async def test_a_second_worker_that_cannot_be_made_leaves_the_task_with_the_busy
     async def refused(*args, **kwargs):
         raise RuntimeError("no")
 
+    async def unknown(session_id, name):
+        harness.client.forks.append((session_id, "0f0f0f0f-0000-4000-8000-000000000000"))
+        return "0f0f0f0f-0000-4000-8000-000000000000"  # An answer of another shape, say.
+
     if failing == "fork":
         monkeypatch.setattr(harness.client, "fork_session", refused)
+    elif failing == "unknown":
+        monkeypatch.setattr(harness.client, "fork_session", unknown)
     else:
         monkeypatch.setattr(runtime.workspaces, "prepare_directory", refused)
     told = await new_task(runtime, harness, worker, "Export CSV", "Add a CSV export.")
