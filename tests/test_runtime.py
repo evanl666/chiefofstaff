@@ -1,15 +1,19 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from conftest import FakeClient, FakeSession, Harness, call_tool, env, said, settle, task_of
+from copilot.generated.session_events import ShutdownType, session_event_from_dict
 
 from chiefofstaff import backend as backend_module
 from chiefofstaff import delivery as delivery_module
@@ -17,6 +21,7 @@ from chiefofstaff.backend import (
     USAGE_RECORD,
     CopilotBackend,
     read_log,
+    running,
     scan_log,
     sessions_in_use,
 )
@@ -1442,6 +1447,93 @@ async def test_a_message_sent_while_copilot_reconnects_to_its_fallback_goes_out(
         assert made[0].starts == 1, "the refused CLI is not started again"
     finally:
         await runtime.stop()
+
+
+def fake_copilot(path: Path, version: str, protocol: int) -> str:
+    """A stand-in Copilot CLI (tests/fake_copilot.py) at `path`: this version, this protocol."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    script = Path(__file__).parent / "fake_copilot.py"
+    path.write_text(
+        f"#!/bin/sh\nexport FAKE_COPILOT_VERSION={version} FAKE_COPILOT_PROTOCOL={protocol}\n"
+        f'exec "{sys.executable}" "{script}" "$@"\n'
+    )
+    path.chmod(0o755)
+    return str(path)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shell script")
+async def test_a_refused_copilot_cli_is_remembered_until_it_or_the_sdk_changes(
+    tmp_path, monkeypatch, caplog
+):
+    """With the real SDK: the owner's Copilot CLI refused for its newer protocol is said in one
+    line (no traceback), and kept in the data folder, so that the next start goes straight to
+    Copilot FALLBACK_CLI (the refused start took 2.5-4 s), until that CLI (updated behind the
+    same path) or the SDK changes. Copilot's processes are those of the one that runs."""
+    starts = tmp_path / "starts"
+    monkeypatch.setenv("FAKE_COPILOT_STARTS", str(starts))
+    owner = tmp_path / "bin" / "copilot"
+    fake_copilot(owner, "1.0.114", 4)
+    ours = fake_copilot(tmp_path / "sdk" / "copilot-runtime", "1.0.112", 3)
+    monkeypatch.setattr(backend_module, "fallback_runtime", lambda: ours)
+    refusals = tmp_path / "data" / backend_module.REFUSED_CLI
+    refusals.parent.mkdir()
+
+    async def start() -> tuple:
+        backend = backend_module.copilot_backend(str(owner))
+        backend.refusals = refusals
+        await backend.start()
+        process = backend.cli_process()
+        assert process and process.poll() is None
+        listed = backend.processes()
+        assert process.pid in listed and len(listed) == 2, "it and the program it runs"
+        await backend.stop()
+        assert not [pid for pid in listed if running(pid)]
+        ran = starts.read_text().split()
+        starts.unlink()
+        return backend.fallback, ran
+
+    caplog.set_level(logging.INFO)
+    assert await start() == (("1.0.114", "1.0.112"), ["1.0.114", "1.0.112"])
+    assert not [record for record in caplog.records if record.exc_info], "no traceback"
+    assert [r.getMessage() for r in caplog.records if r.name == "chiefofstaff.backend"] == [
+        "Copilot CLI 1.0.114 speaks a newer protocol than this SDK (SDK supports versions 3-3, "
+        "but server reports version 4): Copilot 1.0.112 runs instead."
+    ]
+    assert await start() == (("1.0.114", "1.0.112"), ["1.0.112"]), "the owner's not tried"
+    fake_copilot(owner, "1.0.115", 4)  # It updated itself.
+    assert await start() == (("1.0.115", "1.0.112"), ["1.0.115", "1.0.112"])
+    assert (await start())[1] == ["1.0.112"]
+    monkeypatch.setattr(backend_module, "sdk_version", lambda: "1.0.99")  # Another SDK.
+    assert (await start())[1] == ["1.0.115", "1.0.112"]
+    assert (await start())[1] == ["1.0.112"]
+    fake_copilot(owner, "1.0.116", 3)  # One this SDK speaks: tried, and it runs.
+    assert await start() == (None, ["1.0.116"])
+    assert not refusals.exists()
+    assert (await start())[1] == ["1.0.116"]
+
+
+def test_a_deleted_sessions_shutdown_event_is_taken_quietly():
+    """Copilot 1.0.112 ends a session deleted while open with a session.shutdown of type
+    "destroy" (as it sent it), which SDK 1.0.28 doesn't know: the event failed, with a traceback
+    in the log, and was dropped."""
+    event = session_event_from_dict(
+        {
+            "type": "session.shutdown",
+            "data": {
+                "shutdownType": "destroy", "totalPremiumRequests": 0, "totalNanoAiu": 0,
+                "totalApiDurationMs": 0, "sessionStartTime": 1795068304748,
+                "codeChanges": {"linesAdded": 0, "linesRemoved": 0, "filesModified": []},
+                "modelMetrics": {}, "currentTokens": 4, "systemTokens": 0,
+                "conversationTokens": 0, "toolDefinitionsTokens": 0,
+            },
+            "id": "487eb139-0676-4770-8020-ef48129cc1d3",
+            "timestamp": "2026-11-19T06:05:04.804Z",
+            "parentId": "a19f297c-c375-43f9-a0c2-ee2b1b6a03eb",
+        }
+    )  # fmt: skip
+    assert event.type.value == "session.shutdown"
+    assert event.data.shutdown_type.value == "destroy"  # type: ignore[union-attr]
+    assert ShutdownType("routine") is ShutdownType.ROUTINE
 
 
 async def test_slack_session_only_has_its_own_tools(tmp_path):

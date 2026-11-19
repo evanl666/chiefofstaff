@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .backend import SESSION_ID, copilot_backend, copilot_home, running
+from .backend import REFUSED_CLI, SESSION_ID, copilot_backend, copilot_home, running
 from .habits import learned_from
 from .provenance import (
     ALIKE,
@@ -497,6 +497,7 @@ async def run(directory: Path, apply: bool, backend: Any = None) -> int:
             print(f"The Copilot CLI ({command}) was not found.", file=sys.stderr)
             return 1
         backend = copilot_backend(command)
+        backend.refusals = directory / REFUSED_CLI
         await backend.start()
     try:
         result = await survey(store, backend, home, time.time())

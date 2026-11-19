@@ -10,7 +10,10 @@ all behave the way the runtime relies on.
 from __future__ import annotations
 
 import asyncio
+import functools
+import importlib.metadata
 import json
+import logging
 import os
 import re
 import secrets
@@ -20,6 +23,7 @@ import sys
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -39,6 +43,7 @@ from copilot.generated.rpc import (
     ShellOptions,
     TasksCancelRequest,
 )
+from copilot.generated.session_events import ShutdownType
 
 from . import machine
 
@@ -47,6 +52,8 @@ from .processes import descendants as descendants
 from .processes import end_processes as end_processes
 from .processes import process_table as process_table
 from .processes import running as running
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -224,10 +231,85 @@ def fallback_runtime() -> str:
     return ensure_runtime_wrapper(FALLBACK_CLI)
 
 
-def newer_protocol(error: BaseException) -> bool:
+def newer_protocol(error: BaseException | str) -> bool:
     """Whether the SDK refused the CLI for speaking a newer protocol than it supports."""
     found = NEWER_PROTOCOL.search(str(error))
     return bool(found) and int(found.group(3)) > int(found.group(2))
+
+
+class ExpectedRefusal(logging.Filter):
+    """The SDK's warning, with its traceback, when it refuses a CLI that speaks a newer protocol:
+    expected (FALLBACK_CLI runs then), and said in one line instead (CopilotBackend.start)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        error = record.exc_info[1] if record.exc_info else None
+        return error is None or not newer_protocol(error)
+
+
+logging.getLogger("copilot.client").addFilter(ExpectedRefusal())
+
+
+def open_enum(kind: type[Enum]) -> None:
+    """An SDK enum that takes a value a later Copilot sends as a member of that value (as the
+    SDK's own open enums do), rather than failing the event: a session.shutdown's "destroy",
+    which Copilot 1.0.112 sends when a session is deleted, failed with a traceback in the log
+    and the event was dropped."""
+    if "_missing_" in vars(kind):
+        return
+
+    def missing(cls: type[Enum], value: object) -> Enum | None:
+        if not isinstance(value, str):
+            return None
+        member = object.__new__(cls)
+        member._name_ = "UNKNOWN"
+        member._value_ = value
+        return cls._value2member_map_.setdefault(value, member)
+
+    kind._missing_ = classmethod(missing)  # type: ignore[method-assign, assignment]
+
+
+open_enum(ShutdownType)
+
+# Kept in Chief of Staff's data folder (CopilotBackend.refusals): the Copilot CLI this SDK
+# refused for speaking a newer protocol, by its program's real path, the version it says it is
+# and the SDK's. While those stay the same, a start goes straight to FALLBACK_CLI: the refused
+# start took 2.5-4 s.
+REFUSED_CLI = "copilot-refused.json"
+
+
+def refusal_of(error: object) -> str:
+    """What a refusal said, in short: "SDK supports versions 3-3, but server reports version 4"."""
+    found = NEWER_PROTOCOL.search(str(error or ""))
+    return found.group(0) if found else "a newer protocol"
+
+
+@functools.cache
+def sdk_version() -> str:
+    try:
+        return importlib.metadata.version("github-copilot-sdk")
+    except importlib.metadata.PackageNotFoundError:
+        return ""
+
+
+def refused_key(command: str, version: str) -> dict[str, str]:
+    """What a refusal is kept for: the CLI (its real path and the version it says it is, which
+    changes when it updates itself behind the same path) and this SDK."""
+    return {"cli": os.path.realpath(command), "version": version, "sdk": sdk_version()}
+
+
+def read_refusal(file: Path) -> dict:
+    try:
+        kept = json.loads(file.read_text())
+    except (OSError, ValueError):
+        return {}
+    return kept if isinstance(kept, dict) and isinstance(kept.get("key"), dict) else {}
+
+
+def keep_refusal(file: Path, key: dict[str, str], refusal: str) -> None:
+    with suppress(OSError):
+        temporary = file.with_name(f".{file.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps({"key": key, "refusal": refusal}))
+        temporary.replace(file)
 
 
 async def cli_version(command: str) -> str:
@@ -303,20 +385,49 @@ class CopilotBackend:
         # is never started again (the SDK starts a client on its first use).
         self.starting: asyncio.Future | None = None
         self.refused: CopilotClient | None = None
+        # Where a refusal of the owner's CLI is kept (REFUSED_CLI, in Chief of Staff's data
+        # folder: Runtime sets it); None: not kept, the owner's is tried at each start.
+        self.refusals: Path | None = None
 
     async def start(self) -> None:
         self.starting = asyncio.get_running_loop().create_future()
         try:
-            self.watch_start()
-            try:
-                await self.client.start()
-            except RuntimeError as exc:
-                if not newer_protocol(exc):
-                    raise
-                self.refused = self.client
-                await self.start_fallback(exc)
+            await self.start_one()
         finally:
             self.starting.set_result(None)
+
+    async def start_one(self) -> None:
+        """The owner's CLI; or, refused for its newer protocol (now, or at an earlier start of
+        the same CLI and SDK, kept in `refusals`), Copilot FALLBACK_CLI."""
+        theirs = ""
+        known = await asyncio.to_thread(read_refusal, self.refusals) if self.refusals else {}
+        if known:
+            theirs = await cli_version(self.command)
+            if theirs and known["key"] == refused_key(self.command, theirs):
+                logger.info("Copilot CLI %s speaks a newer protocol than this SDK (%s, at an "
+                            "earlier start): Copilot %s runs instead.",
+                            theirs, refusal_of(known.get("refusal")), FALLBACK_CLI)  # fmt: skip
+                self.refused = self.client  # (Never started: nor on a first use.)
+                await self.start_fallback(str(known.get("refusal") or ""), theirs, tried=False)
+                return
+        self.watch_start()
+        try:
+            await self.client.start()
+        except RuntimeError as exc:
+            if not newer_protocol(exc):
+                raise
+            self.refused = self.client
+            theirs = theirs or await cli_version(self.command)
+            logger.info("Copilot CLI %s speaks a newer protocol than this SDK (%s): Copilot %s "
+                        "runs instead.", theirs or self.command, refusal_of(exc),
+                        FALLBACK_CLI)  # fmt: skip
+            if self.refusals and theirs:
+                key = refused_key(self.command, theirs)
+                await asyncio.to_thread(keep_refusal, self.refusals, key, str(exc))
+            await self.start_fallback(str(exc), theirs)
+            return
+        if known and self.refusals:
+            self.refusals.unlink(missing_ok=True)  # (It changed, and this SDK speaks it now.)
 
     async def ready_client(self) -> CopilotClient:
         """The client, once start() is over: a session opened, or a message sent, while Copilot
@@ -336,14 +447,10 @@ class CopilotBackend:
             return
 
         def taken() -> None:
-            # (The SDK keeps its stdio process as `_process`.)
-            client = self.client
-            process = getattr(client, "_cli_process", None) or getattr(client, "_process", None)
-            if pid := getattr(process, "pid", None):
+            if process := self.cli_process():
                 table = process_table()
-                self.started |= {
-                    child: table[child][1] for child in descendants(table, pid) if child in table
-                }
+                tree = descendants(table, process.pid)
+                self.started |= {child: table[child][1] for child in tree if child in table}
 
         async def verifying() -> Any:
             try:
@@ -356,14 +463,16 @@ class CopilotBackend:
 
         self.client._verify_protocol_version = verifying  # type: ignore[method-assign]
 
-    async def start_fallback(self, refused: RuntimeError) -> None:
+    async def start_fallback(self, refused: str, theirs: str = "", tried: bool = True) -> None:
         """The owner's Copilot CLI updated itself past what this SDK speaks: Copilot
         FALLBACK_CLI runs instead (downloaded once, into the SDK's own cache; the same sign-in,
-        settings and sessions, in ~/.copilot), until a release supports the new one."""
-        with suppress(Exception):
-            await self.stop()  # (What the refused CLI left running.)
+        settings and sessions, in ~/.copilot), until a release supports the new one. `tried`:
+        the owner's was started (and refused) first."""
+        if tried:
+            with suppress(Exception):
+                await self.stop()  # (What the refused CLI left running.)
         self.started = {}
-        theirs = await cli_version(self.command)
+        theirs = theirs or await cli_version(self.command)
         if self.note:
             self.note(
                 f"Your Copilot CLI{f' ({theirs})' if theirs else ''} is newer than Chief of "

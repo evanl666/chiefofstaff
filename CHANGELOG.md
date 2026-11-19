@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Chief of Staff starts about 5 seconds sooner while your Copilot CLI is newer than it
+  supports.** It started your CLI at each start, to be refused, before it ran Copilot 1.0.112.
+  Now it keeps that refusal in its data folder and runs Copilot 1.0.112 straight away while your
+  CLI (its path and the version it says it is) and the Copilot SDK stay the same; when either
+  changes, your CLI is tried again. The refusal is one line in the log, no longer a traceback.
+- A Copilot session deleted while open no longer logs a traceback ("'destroy' is not a valid
+  ShutdownType").
+
 ## 0.1.47 (2026-11-19)
 
 - **Fixed: workers with many MCP tools failed every turn on the Copilot Chief of Staff runs when

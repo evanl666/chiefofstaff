@@ -50,6 +50,7 @@ from .asks import Asks
 from .backend import (
     COPILOT_AGENT,
     OLDEST_CLI,
+    REFUSED_CLI,
     AgentBackend,
     CopilotBackend,
     SandboxPolicy,
@@ -794,6 +795,7 @@ class Runtime:
                 self.backend = self.backend_factory(self.store.settings())
                 if isinstance(self.backend, CopilotBackend):
                     self.backend.note = self.backend_note
+                    self.backend.refusals = directory / REFUSED_CLI
                 await self.backend.start()
                 auth = await self.backend.get_auth_status()
                 # It answered: its processes run now. Remembered, so they never count as the
