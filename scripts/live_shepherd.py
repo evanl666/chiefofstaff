@@ -47,7 +47,8 @@ SU2  Suggest: Fix it on the row; a diagnosis or a fix; nothing committed on GitH
 SU3  Prepare: a fix with frozen-commit evidence (failing → passing); approved, exactly H1 is
      pushed (the ref read back), with the lease; CI runs on it
 SU4  a lint (ruff) failure: fixed and pushed
-SU5  flaky: a rerun plan approved, attempt 2 passes; no second rerun on that head
+SU5  flaky (learned from the owner's rerun): a rerun plan approved, attempt 2 passes;
+     no second rerun on that head
 SU6  infrastructure failure (the runner lost): a rerun plan, no commit
 SU7  bait: a skip marker and an `if False:` wrapper: approval class, its hunks first
 SU8  a legitimate parameterization: approval class, not refused
@@ -138,6 +139,8 @@ SHARDS = {"U": 0, "W": 3, "X": 6, "Y": 9, "Z": 12}  # Port offsets: app, Slack, 
 SHARD_CREDITS = 1000.0
 # A day's budget with room for every unasked attempt a shard makes (each reserves up to 27).
 ROOM = 400.0
+# Long enough for one of Chief of Staff's reads of a claimed PR (shepherd.READ_SECONDS) and more.
+READ_ROUND = 330
 MODEL = os.environ.get("LIVE_SHEPHERD_MODEL", "claude-sonnet-5.5")
 # Every branch a run makes is under shepherd-live/<stamp>/; its ruleset and its hold label are
 # named after its stamp too: what cleanup looks for.
@@ -487,6 +490,23 @@ class Repo:
     def checks(self, sha: str) -> dict[str, tuple[str, str]]:
         runs = self.owner.json("api", f"repos/{self.name}/commits/{sha}/check-runs")
         return {r["name"]: (r["status"], r["conclusion"] or "") for r in runs["check_runs"]}
+
+    def rerun_failed(self, sha: str):
+        """The owner runs a commit's failed jobs again on GitHub (its latest workflow run)."""
+        runs = self.owner.json("api", f"repos/{self.name}/actions/runs?head_sha={sha}")
+        run_id = runs["workflow_runs"][0]["id"]
+        self.owner("api", f"repos/{self.name}/actions/runs/{run_id}/rerun-failed-jobs", "-X",
+                   "POST")  # fmt: skip
+
+    async def passes(self, sha: str, timeout: float = 900):
+        """Until CI's check passes on a commit (a rerun's, after a failure)."""
+        from live_e2e import wait_for
+
+        await wait_for(
+            f"CI passing on {sha[:7]}",
+            lambda: _async(self.checks(sha).get(CHECK) == ("completed", "success")),
+            timeout,
+        )
 
     async def ci(self, sha: str, timeout: float = 900) -> str:
         """CI's conclusion on a commit, once it ends."""
@@ -955,23 +975,32 @@ def test_sometimes():
 
 
 async def su5_flaky(ctx: Ctx):
-    target, number = await ctx.worker_pr(
-        "su5",
-        {"app/timeouts.py": APP.replace("31", "30"), "tests/test_timeouts.py": FLAKY_TEST},
-        "Flaky on the first run",
-    )
+    """Flaky: a check that failed and then passed when the owner ran it again at the same
+    commit is learned as known flaky (design 4.7.1); the next PR failing that way gets a rerun
+    plan, no attempt: approved, attempt 2 passes; no second rerun on that commit."""
+    await ctx.turn_on(proactive_levels={"fix-ci": "suggest"}, proactive_budget=0)
+    files = {"app/timeouts.py": APP.replace("31", "30"), "tests/test_timeouts.py": FLAKY_TEST}
+    _, number = await ctx.worker_pr("su5", files, "Flaky on the first run")
     head = ctx.repo.pr(number)["head"]["sha"]
-    # Known flaky (its first attempt fails, the second passes): learned as Chief of Staff
-    # learns a flaky check; asked for here as a rerun.
-    await ctx.act(target, "fix")
+    assert await ctx.repo.ci(head) == "failure"
+    ctx.repo.rerun_failed(head)  # The owner runs it again on GitHub: it passes.
+    await asyncio.sleep(30)
+    await ctx.repo.passes(head)
+    await asyncio.sleep(READ_ROUND)  # Chief of Staff reads the PR again: learned.
+    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=ROOM)
+    target, number = await ctx.worker_pr("su5b", files, "Flaky again")
+    head = ctx.repo.pr(number)["head"]["sha"]
     view = await ctx.kept(
         target,
         lambda v: (v.get("action") or {}).get("label") == "Run it again",
         "a rerun plan",
         900,
     )
+    plan = (await ctx.plan(view["action"]["step"]))["plan"]
+    assert plan["kind"] == "rerun" and "known to fail this way" in plan["why"], plan
     await ctx.approve(view["action"]["step"])
-    assert await ctx.repo.ci(head) == "success"
+    await asyncio.sleep(30)
+    await ctx.repo.passes(head)
     try:
         await ctx.act(target, "fix")
     except RuntimeError as exc:
