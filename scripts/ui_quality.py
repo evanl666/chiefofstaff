@@ -5,7 +5,8 @@ is shown (browser-shots/others/: a title keeps its width); Send to Chief's line 
 sent item's line on Home (browser-shots/send/); Monitoring's runs and Artifacts' folded runs
 (browser-shots/qa-e41/); the Coding agents group in Settings → Models and a worker on Codex
 (browser-shots/agents-m2/); a task's life: its cards, a failed task out of Needs you, failing
-Watch scans (browser-shots/qa7-life/).
+Watch scans (browser-shots/qa7-life/); a busy worker's second worker: its line, its place in
+the sidebar, its row and chat, and its switch in Settings (browser-shots/fork/).
 
 Fails on: horizontal scrolling; elements overflowing their card or overlapping each other;
 more than one main (filled) button per card or dialog footer; controls under 28 px tall or
@@ -1018,6 +1019,90 @@ async def agents_views(runtime, browser, quality: Quality):
     )
 
 
+async def fork_views(runtime, browser, quality: Quality):
+    """A busy worker's new task in a second worker with its context
+    (docs/design/worker-fork.md): its line in the Router chat, the second worker under the one
+    it came from in the sidebar, its task's row, its chat's first line; 800 to 1440 px, light and
+    dark (browser-shots/fork/)."""
+    from ui_edges import fork_switch
+
+    folder = SHOTS / "fork"
+    folder.mkdir(exist_ok=True)
+    store = runtime.store
+    router = store.get("router_id")
+    await fork_switch(runtime, True)
+    spawned = await call_tool(
+        runtime, "spawn_worker", router, title="Speed up the CSV importer",
+        instructions="Profile the CSV importer and make it faster.", why_new="test",
+    )  # fmt: skip
+    worker = json.loads(spawned.text_result_for_llm)["session_id"]
+    session = runtime.states.handle(worker)
+    session.emit("user.message", content=session.sent[-1])
+    session.emit("assistant.turn_start")
+    await settle(runtime)
+    runtime.update_session(worker, status="working")
+    await call_tool(
+        runtime, "message_session", router, session_id=worker, task="new", why_new="test",
+        earlier="keep", title="Add importer benchmarks", text="Add a benchmark for the importer.",
+    )  # fmt: skip
+    told = await call_tool(
+        runtime, "message_session", router, session_id=worker, task="new", why_new="test",
+        title="Export to Parquet", text="Add a Parquet export beside the CSV one.",
+    )  # fmt: skip
+    second = json.loads(told.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        line = page.locator("#timeline .event", has_text="Started a second worker")
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=chat]").click()
+            await line.scroll_into_view_if_needed()
+            await page.wait_for_timeout(150)
+            await page.screenshot(path=folder / f"home-chat-{width}-{scheme}.png")
+            # Its parts (the earlier rounds' rows elsewhere on Home are checked there).
+            for scope in ("#sidebar", "#timeline"):
+                await quality.check(page, f"fork home {scope} {width} {scheme}", scope)
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=tasks]").click()
+                await page.wait_for_timeout(150)
+                await page.screenshot(path=folder / f"home-tasks-{width}-{scheme}.png")
+            await quality.check(
+                page, f"fork running {width} {scheme}", "#tasks-running", KNOWN_ROW_FINDINGS
+            )
+        await quality.contrast(page, f"fork home {scheme}")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.locator(f'#session-list .item[data-id="{second}"]').click()
+        await expect(page.locator("#timeline .line.notice").first).to_contain_text(
+            "Started with the context of"
+        )
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            await page.wait_for_timeout(150)
+            await page.screenshot(path=folder / f"chat-{width}-{scheme}.png")
+            await quality.check(page, f"fork chat {width} {scheme}")
+        await quality.contrast(page, f"fork chat {scheme}")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await page.locator("#settings-button").click()
+        await page.locator("input[name=fork_busy]").scroll_into_view_if_needed()
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            await page.wait_for_timeout(100)
+            await page.screenshot(path=folder / f"settings-{width}-{scheme}.png")
+            await quality.check(page, f"fork settings {width} {scheme}", "#settings-dialog")
+        await quality.contrast(page, f"fork settings {scheme}", "#settings-dialog")
+        await context.close()
+    log(
+        "a second worker: its line, its place in the sidebar, its row and chat; browser-shots/fork/"
+    )
+
+
 async def main():
     from chiefofstaff import machine
 
@@ -1070,6 +1155,7 @@ async def main():
             log(
                 "a task's life: its cards, a failed task out of Needs you, failing scans (qa7-life/)"
             )
+            await fork_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True
         await serving

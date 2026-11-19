@@ -2,7 +2,7 @@
 
 import { $, api, el, toast, withoutBidi } from "./dom.js";
 import { ago, clock, plural, shortPath, since, span } from "./text.js";
-import { closedWorkers, DOT_HELP, HOME, loadState, otherItem, othersOn, otherStatus, routerId, sessions, state, workerTitle } from "./state.js";
+import { closedWorkers, DOT_HELP, forkOrigin, HOME, loadState, otherItem, othersOn, otherStatus, routerId, sessions, state, workerTitle } from "./state.js";
 import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer, setLayout, showDraft } from "./session.js";
 import { homeItem, needsCount, WORKER_STATES, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
@@ -39,17 +39,19 @@ function captain(needs, where) {
 }
 // One count in the whole sidebar, on Home: what needs the owner. Workers show only their dot,
 // which says where each stands as Home does (Needs you, Running, Monitoring).
-function sessionItem(session, label, where) {
+function sessionItem(session, label, where, nested = false) {
   const dot = where?.dot || "idle";
   const named = label !== session.title ? `\nStarted as “${session.title}”` : "";
+  const origin = forkOrigin(session);
+  const second = origin ? `\nA second worker of “${origin}”, started with its context` : "";
   // Its turn over, a command it left running (a dev server) goes on: not at work, not idle.
   const background = session.background && session.status !== "working";
   return el(
     "button",
     {
       type: "button",
-      class: `item ${dot.split(" ")[0]}${state.selected === session.id ? " selected" : ""}`,
-      title: [where?.text, background ? "Waiting for background process" : session.activity].filter(Boolean).join(" · ") + named,
+      class: `item ${dot.split(" ")[0]}${nested ? " forked" : ""}${state.selected === session.id ? " selected" : ""}`,
+      title: [where?.text, background ? "Waiting for background process" : session.activity].filter(Boolean).join(" · ") + named + second,
       "data-id": session.id,
       onclick: () => select(session.id),
     },
@@ -58,6 +60,27 @@ function sessionItem(session, label, where) {
     // A marker in words (queued, overdue…), not a color of its own.
     where?.sub || background ? el("span", { class: "sub", text: where?.sub || "background" }) : null,
   );
+}
+// Each worker, with the second workers started from it right under it (when listed together):
+// [worker, nested].
+export function withSecondWorkers(list) {
+  const listed = new Set(list.map((worker) => worker.id));
+  const under = new Map();
+  for (const worker of list) {
+    const from = worker.fork_of?.id;
+    if (from && from !== worker.id && listed.has(from)) under.set(from, [...(under.get(from) || []), worker]);
+  }
+  const placed = new Set();
+  const shown = [];
+  const place = (worker, nested) => {
+    if (placed.has(worker.id)) return;
+    placed.add(worker.id);
+    shown.push([worker, nested]);
+    for (const second of under.get(worker.id) || []) place(second, true);
+  };
+  for (const worker of list) if (!listed.has(worker.fork_of?.id)) place(worker, false);
+  for (const worker of list) place(worker, false);
+  return shown;
 }
 const ORDER = Object.fromEntries([...WORKER_STATES.map(([dot]) => dot), "open"].map((dot, index) => [dot, index]));
 // What the dots mean, under "Workers" when asked.
@@ -83,9 +106,10 @@ export function renderSidebar() {
     const idle = (worker) => (where.get(worker.id)?.dot || "idle") === "idle" && state.selected !== worker.id;
     const busy = workers.filter((worker) => !idle(worker));
     const resting = workers.filter(idle);
-    nodes.push(...busy.map((worker) => sessionItem(worker, workerTitle(worker), where.get(worker.id))));
+    const item = ([worker, nested]) => sessionItem(worker, workerTitle(worker), where.get(worker.id), nested);
+    nodes.push(...withSecondWorkers(busy).map(item));
     if (resting.length) {
-      const fold = el("details", { class: "idle-workers", open: Boolean(state.idleOpen) }, el("summary", { text: `Nothing open · ${resting.length}`, title: "Workers whose tasks are all finished" }), ...resting.map((worker) => sessionItem(worker, workerTitle(worker), where.get(worker.id))));
+      const fold = el("details", { class: "idle-workers", open: Boolean(state.idleOpen) }, el("summary", { text: `Nothing open · ${resting.length}`, title: "Workers whose tasks are all finished" }), ...withSecondWorkers(resting).map(item));
       fold.addEventListener("toggle", () => {
         state.idleOpen = fold.open;
       });
