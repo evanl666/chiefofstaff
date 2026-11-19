@@ -248,12 +248,11 @@ async def w1_watch_for_you(ctx: Ctx):
     await ctx.app.post("/api/watch/scan", {})
 
     async def scanned():
-        found = ctx.rows("SELECT key FROM kv WHERE key LIKE 'connector:%'")
-        if not found:
+        # Its report in (Settings' "scanned at", whatever it covered), its run over.
+        found = (await la.state(ctx))["connector"]
+        if not found["scanned_at"] or found["scanning"] or not found["session_id"]:
             return None
-        view = await la.session(ctx, found[0][0].split(":", 1)[1])
-        done = ctx.rows("SELECT value FROM kv WHERE key='watch_done_at'")
-        return view if done and view["status"] not in {"working", "queued", "starting"} else None
+        return await la.session(ctx, found["session_id"])
 
     view = await wait_for("the scan completes", scanned, 600, ctx.app)
     want = None if held else "claude"
