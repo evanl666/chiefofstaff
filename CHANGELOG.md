@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Security: a worker given your checkout only to read can't write there with a command
+  either.** Its edits there were refused, but a command such as `echo y >> AGENTS.md` went
+  through for a worker with no system sandbox (on Codex always; on Copilot with the sandbox off),
+  acting on its own or not. Now a command that writes there is refused the same way, with the
+  same line (a redirection, `tee`, `sed -i`, `cp`, `mv`, `rm`, `touch`, git that changes files,
+  the index or branches, an install, a build or a test run there), read through `cd`,
+  subshells, `sh -c` and `eval`; a program Chief of Staff can't read, run there on files there,
+  asks you first. Reads go through as before. The check takes about 0.02 ms a command (0.4 ms
+  at most on the lines measured).
+- **In a folder of yours, a file a worker only read is not its change** (live N): when you edited
+  a file while a worker's command that read it was still running (`cat notes.py; sleep 40`), your
+  edit showed in the worker's changes and receipts. A program that only reads what it names
+  (`cat`, `grep`, `head`, `less`, `git diff`, `sed -n 1,80p`) claims none of it; what it writes
+  (a redirection, `tee`, `sed -i`, `git checkout`) and any other program still count.
+
 ## 0.1.48 (2026-11-19)
 
 From the QA rounds on 0.1.46, a task's life: a failed task can be dismissed and only the task at
@@ -129,20 +146,6 @@ again by itself; Other Copilot sessions never shows an empty group without a wor
 - **Other Copilot sessions is never an empty group without a word.** It says why: Copilot not
   connected yet, the list not read, or none of yours. One session whose listing the SDK can't
   read no longer hides every other.
-- **Security: a worker given your checkout only to read can't write there with a command
-  either.** Its edits there were refused, but a command such as `echo y >> AGENTS.md` went
-  through for a worker with no system sandbox (on Codex always; on Copilot with the sandbox off),
-  acting on its own or not. Now a command that writes there is refused the same way, with the
-  same line (a redirection, `tee`, `sed -i`, `cp`, `mv`, `rm`, `touch`, git that changes files,
-  the index or branches, an install, a build or a test run there), read through `cd`,
-  subshells, `sh -c` and `eval`; a program Chief of Staff can't read, run there on files there,
-  asks you first. Reads go through as before. The check takes about 0.02 ms a command (0.4 ms
-  at most on the lines measured).
-- **In a folder of yours, a file a worker only read is not its change** (live N): when you edited
-  a file while a worker's command that read it was still running (`cat notes.py; sleep 40`), your
-  edit showed in the worker's changes and receipts. A program that only reads what it names
-  (`cat`, `grep`, `head`, `less`, `git diff`, `sed -n 1,80p`) claims none of it; what it writes
-  (a redirection, `tee`, `sed -i`, `git checkout`) and any other program still count.
 
 ## 0.1.47 (2026-11-19)
 
