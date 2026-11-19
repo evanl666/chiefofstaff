@@ -504,3 +504,38 @@ async def test_a_superseding_task_comes_before_the_note_that_names_it(harness):
     assert cancelled["status"] == "cancelled"
     assert cancelled["progress"].startswith("Cancelled by the Router")
     assert b["status"] == "running"
+
+
+def failing_run(session, call: str):
+    command = "uv run --with pytest pytest -q"
+    session.emit("tool.execution_start", tool_name="bash", arguments={"command": command},
+                 tool_call_id=call)  # fmt: skip
+    output = SimpleNamespace(content="F\n1 failed in 0.1s\n<exited with exit code 1>")
+    session.emit("tool.execution_complete", tool_call_id=call, success=True, result=output)
+
+
+async def test_each_failing_test_run_holds_back_a_done_report_once(harness):
+    """E112 (E92's pattern): "your last test run failed" held back a done report once per task,
+    ever: a later failing run, or the same one after a follow-up, went through unasked."""
+    runtime = await harness.connect()
+    worker, task = await spawn(runtime, harness.router_id, "Fix the parser")
+    session = harness.session(worker)
+    await turn(runtime, session)
+    failing_run(session, "c1")
+    await settle(runtime)
+    first = await call_tool(runtime, "report", worker, status="done", summary="Fixed.")
+    assert first.result_type == "failure" and "last test run failed" in first.text_result_for_llm
+    said = await call_tool(runtime, "report", worker, status="done",
+                           summary="Fixed; that failure is the known flaky test.")  # fmt: skip
+    assert said.result_type == "success"
+    await runtime.task_actions.follow_up(task["id"], "Also handle empty input.")
+    await turn(runtime, session)
+    again = await call_tool(runtime, "report", worker, status="done", summary="Handled it.")
+    assert again.result_type == "failure", "a follow-up's report with its tests failing"
+    await call_tool(runtime, "report", worker, status="done", summary="Handled; known flake.")
+    await runtime.task_actions.follow_up(task["id"], "And whitespace.")
+    await turn(runtime, session)
+    failing_run(session, "c2")
+    await settle(runtime)
+    later = await call_tool(runtime, "report", worker, status="done", summary="Done too.")
+    assert later.result_type == "failure", "a new failing run"
