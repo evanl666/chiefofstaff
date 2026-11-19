@@ -216,7 +216,10 @@ def test_saving_the_group_with_nothing_turned_on_stores_nothing(web, codex_on_pa
         ({"codex": {"enabled": True, "model": 5}}, "Model: a model's name"),
         ({"codex": {"enabled": True, "effort": "high"}}, "Coding agents: unknown setting"),
         ({"gemini": {"enabled": True}}, "Coding agents: Chief of Staff does not run 'gemini'."),
-        ({"new_workers": "codex"}, "New workers start on: Copilot, or an agent turned on below."),
+        (
+            {"new_workers": "codex"},
+            "New workers start on: Copilot, Last used, or an agent turned on below.",
+        ),
         ([], "Coding agents: expected each agent's settings."),
     ],
 )
