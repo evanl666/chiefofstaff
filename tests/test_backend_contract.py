@@ -1857,7 +1857,7 @@ async def reading_the_owners_checkout(tmp_path, monkeypatch, backend=None):
         home.mkdir()
         monkeypatch.setenv("CODEX_HOME", str(home))
         model = scripted_model.Model()
-        backend = CodexBackend(shutil.which("codex") or "codex")
+        backend = CodexBackend(CODEX_COMMAND)  # Found before the tests hide the owner's agents.
         backend.arguments += model.arguments(tmp_path)
         backend.needs_sign_in = False
         backend.created = []
