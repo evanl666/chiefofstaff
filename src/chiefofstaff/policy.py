@@ -4977,7 +4977,6 @@ def checkout_git(guard: CheckoutWrites, rest: list[str], positional: list[str], 
         guard.ask()  # (An alias, or a command of its own: what it does is not read here.)
 
 
-@functools.lru_cache(maxsize=256)
 def checkout_write(command: str, cwd: str, kept: tuple[str, ...]) -> str:
     """Whether a shell command line, run in `cwd`, writes in one of the owner's checkouts a
     worker was given only to read (`kept`): CHECKOUT_WRITES when it does, as far as can be

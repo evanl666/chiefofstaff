@@ -9,8 +9,8 @@
   same line (a redirection, `tee`, `sed -i`, `cp`, `mv`, `rm`, `touch`, git that changes files,
   the index or branches, an install, a build or a test run there), read through `cd`,
   subshells, `sh -c` and `eval`; a program Chief of Staff can't read, run there on files there,
-  asks you first. Reads go through as before. The check takes about 0.02 ms a command (0.4 ms
-  at most on the lines measured).
+  asks you first. Reads go through as before. The check takes 0.02 to 0.06 ms a command (the
+  median; under 0.3 ms for 99 in 100), and nothing for a worker with no checkout of yours.
 - **In a folder of yours, a file a worker only read is not its change** (live N): when you edited
   a file while a worker's command that read it was still running (`cat notes.py; sleep 40`), your
   edit showed in the worker's changes and receipts. A program that only reads what it names
