@@ -5540,6 +5540,14 @@ class Runtime:
     async def git_watch_after(self, session_id: str, closing: bool = False):
         """Its turn over (or it stopped, or closes): what appeared, said; it waits."""
         found = await self.settings_thread(self.git_watch_scan, session_id)
+        if (
+            session_id not in found
+            and session_id not in self.settings_held
+            and self.store.get(f"gitappeared:{session_id}")
+        ):
+            # Found first by the look before Chief of Staff's own git (git_guard), which says
+            # nothing: said now all the same (not again once it waits for the owner).
+            found[session_id] = []
         if closing:
             self.store.delete(f"gitwatch:{session_id}")
         for owner in found:
