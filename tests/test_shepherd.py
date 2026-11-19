@@ -134,6 +134,8 @@ async def test_the_step_profile_is_the_sessions_options_while_it_runs(world, mon
     assert step["evidence"]["git_config"] == owners and set(owners) <= set(policy.readonly)
     assert options["enable_config_discovery"] is False and options["enable_session_store"] is False
     assert "mcp_servers" not in options and "hook_directories" not in options
+    # Sandboxed, though its worker is not: asked before each tool, as sandboxed workers are.
+    assert options["hooks"] == {"on_pre_tool_use": runtime.events.pre_tool}
     assert "github-mcp-server" in options["disabled_mcp_servers"]
     assert set(options["available_tools"]) >= {"bash", "shepherd_result", "draft_github_review"}
     assert "tell_session" not in options["available_tools"]
@@ -176,23 +178,17 @@ async def test_a_step_has_none_of_the_workers_mcp_servers(world, monkeypatch, tm
 
 
 @pytest.mark.parametrize("slack", [False, True])
-async def test_a_step_reaches_only_what_the_owner_allowed_and_a_slack_reader_nothing(
-    world, monkeypatch, tmp_path, slack
-):
-    """The owner's extra hosts, the repository's own servers and the shared caches reach a
-    step; a worker that reads Slack gets none of them: no network at all."""
+async def test_a_step_reaches_only_what_the_owner_allowed_and_a_slack_reader_nothing(world, slack):
+    """The owner's extra hosts and the repository's own servers reach a step; a worker that
+    reads Slack gets none of them: no network at all."""
     from shepherd_world import REPO
 
     from chiefofstaff.models import RepositoryChoices
 
-    caches = tmp_path / "caches"
-    caches.mkdir()
-    monkeypatch.setattr("chiefofstaff.shepherd.shared_caches", lambda: [str(caches)])
     runtime = await claimed(
         world,
         step_hosts=["registry.acme.dev"],
         proactive_repos={REPO: RepositoryChoices(localhost=True)},
-        shared_caches=True,
     )
     if slack:
         runtime.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (world.worker,))
@@ -203,11 +199,37 @@ async def test_a_step_reaches_only_what_the_owner_allowed_and_a_slack_reader_not
     reach = (policy.allowed_hosts, policy.outbound, policy.local_network)
     if slack:
         assert reach == ((), False, False)
-        assert str(caches) not in policy.readwrite
     else:
         assert reach == (("registry.acme.dev",), True, True)
-        assert str(caches) in policy.readwrite
     assert "github.com" in policy.blocked_hosts and policy.credentials is False
+
+
+@pytest.mark.parametrize("sandboxed", [False, True])
+async def test_a_step_has_its_workers_caches_and_toolchains_never_the_owners_caches(
+    world, sandboxed
+):
+    """As a sandboxed worker (0.1.46): its tools' caches are workers' own (written there, its
+    shell pointed at them by its init script), the owner's caches never writable, uv's Pythons
+    and the like read-only; whatever the worker's own mode."""
+    home = Path.home()
+    npm, pythons = home / ".npm", home / ".local" / "share" / "uv" / "python"
+    for folder in (npm, pythons):
+        folder.mkdir(parents=True, exist_ok=True)
+    runtime = await claimed(world, worker_sandbox=sandboxed)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "running", step
+    policy = world.session().options["sandbox_config"]
+    plan = runtime.cache_plan(runtime.store.session(world.worker))
+    assert set(plan.readwrite) <= set(policy.readwrite)
+    assert not any(Path(path) == npm or npm in Path(path).parents for path in policy.readwrite)
+    assert str(pythons) in policy.readonly
+    script = runtime.cache_scripts / world.worker
+    assert str(script) in policy.readonly
+    assert world.session().shell_scripts[-1] == [str(script / "init.sh")]
+    # Nothing the owner gave workers beyond their folders: their SSH agent, extra folders.
+    assert not any(path.endswith(".ssh/known_hosts") for path in policy.readonly)
 
 
 async def test_hooks_in_the_repository_never_run_when_it_pushes(world):
