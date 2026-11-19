@@ -987,10 +987,11 @@ class Connector:
         return bool(row and row["status"] in {"queued", "starting", "working"})
 
     async def send(self, kind: str, text: str, display: str):
-        """A job for the connector: in its open session, or a fresh one (a new run)."""
+        """A job for the connector: in its open session, or a fresh one (a new run): also when
+        its last turn failed (bug E102: every scan went to the failed conversation)."""
         row = self.session()
         context = int(self.store.get(f"context:{row['id']}") or 0) if row else 0
-        if not row or context > FRESH_AFTER:
+        if not row or context > FRESH_AFTER or row["status"] == "failed":
             await self.runtime.toolset.start_special(SPECIAL, TITLE, text, slack=True)
             return
         await self.runtime.delivery.deliver(
@@ -1054,6 +1055,7 @@ class Connector:
                     self.store.set(f"watchfrom:{key}", str(since))
                 self.reach_back(watch.what)
             self.store.set("watch_scan", json.dumps(keys))
+            self.store.set("watch_pending", "1")  # Until it reports (else it failed, see failed).
             # Where each was covered to before it: a later report of this scan that finds one
             # partial puts it back there, even after an earlier report took it for covered. And
             # how many scans in a row had covered each only in part: this scan counts once, from
@@ -1117,6 +1119,46 @@ class Connector:
             await self.send("scan", "\n\n".join(lines), "Scan: " + shown)
             if by_owner:
                 self.runtime.publish_state()
+
+    def failed(self, message: str):
+        """Its turn failed (Copilot gave up on it). A scan under way failed: Settings and the
+        sidebar say so (not "Scanned … · 0 found" from the last one that worked), the Router
+        hears it (no task of the connector's: bug E102), and the owner too once two failed in a
+        row. What it did not cover is read by the next scan that works, from where the last one
+        covered it (as for a partial scan). The next one runs on a fresh conversation (send),
+        at once after the first failure."""
+        if not self.store.get("watch_pending"):
+            return  # Not a scan (an away notice, the owner's words): said in its timeline.
+        self.store.delete("watch_pending")
+        last = json.loads(self.store.get("watch_failed") or "{}")
+        count = int(last.get("count", 0)) + 1
+        reason = " ".join(message.split())[:300]
+        found = {"at": now(), "since": last.get("since") or now(), "count": count, "reason": reason}
+        self.store.set("watch_failed", json.dumps(found))
+        if count == 1:
+            self.store.set("watch_scanned_at", "0")  # Again at the next round, afresh.
+        said = (
+            f"Watch scan failed ({count} in a row): {reason}"
+            if count > 1
+            else (f"Watch scan failed: {reason}")
+        )
+        with suppress(RuntimeError):
+            self.runtime.delivery.hold(
+                self.runtime.router_id(),
+                wrap("system", "watch-failed", f"{said}. The next scan tries again by itself."),
+                kind="notice",
+                display=said,
+                meta={"settings": "connections"},
+            )
+        if count == 2:
+            row = self.session()
+            self.runtime.alert(
+                f"Watch for you: scans failed twice in a row ({reason[:160]})",
+                session_id=row["id"] if row else self.runtime.router_id(),
+                needs_action=False,
+                title="Watch for you",
+            )
+        self.runtime.publish_state()
 
     def restore(self, key: str, value: str | None):
         """A cursor back where it was (`value`; none when that is empty)."""
@@ -1248,6 +1290,8 @@ class Connector:
 
     async def t_report_found(self, params: ReportFound, caller: str):
         self.check(caller)
+        self.store.delete("watch_pending")
+        self.store.delete("watch_failed")  # A scan that reports ends any failure before it.
         started = self.store.get("watch_started_at") or str(time.time())
         scanned = json.loads(self.store.get("watch_scan") or "[]")
         # A watch it could not run (problems) and said nothing more about: not covered.
@@ -1428,6 +1472,9 @@ class Connector:
             "scanned_at": finished.get("at", ""),
             "last": finished,
             "scanning": self.busy(),
+            # Scans that failed since the last that worked: when, why, how many in a row, and
+            # since when (the first of them); None when the last one reported.
+            "failed": json.loads(self.store.get("watch_failed") or "null"),
             "session_id": row["id"] if row else "",
             # What watches could not check, and no scan will: the newest first, for a week after
             # each was told (or grew), however long before that it was.

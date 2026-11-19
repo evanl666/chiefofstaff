@@ -243,6 +243,65 @@ async def test_a_failed_check_back_is_retried_or_dropped_by_the_owner(harness):
     assert not runtime.task_actions.runs_going(b["id"]), "nothing is followed up for it now"
 
 
+# E102: Watch for you scans that fail.
+
+
+async def failing_watch(tmp_path):
+    watch = Watch(what="Slack DMs and mentions of me", how="Slack search")
+    harness = Harness(tmp_path / "data", Settings(watches=[watch], watch_after_hours_minutes=5))
+    runtime = await harness.connect()
+    await runtime.connector.scan()
+    await settle(runtime)
+    return harness, runtime
+
+
+async def fail_scan(harness, runtime):
+    row = runtime.connector.session()
+    session = harness.session(row["id"])
+    session.emit("session.error", message="This model's static context is too large")
+    await settle(runtime)
+    return row
+
+
+async def test_a_failed_watch_scan_says_so_and_the_router_hears_it_with_no_task(tmp_path):
+    harness, runtime = await failing_watch(tmp_path)
+    router = harness.router_id
+    sent = len(harness.session(router).sent)
+    row = await fail_scan(harness, runtime)
+    shown = runtime.connector.view()
+    assert shown["failed"]["count"] == 1 and "static context" in shown["failed"]["reason"]
+    assert shown["failed"]["at"] and shown["failed"]["since"]
+    told = [m for m in harness.store.messages(router) if "Watch scan failed" in m["text"]]
+    assert told and not told[-1]["meta"].get("task_id"), "no old task of the connector's"
+    assert 'task="' not in told[-1]["meta"]["prompt"]
+    assert not harness.notifications, "once is not yet the owner's"
+    del sent
+    # The next scan does not go to the failed conversation: a fresh one.
+    harness.store.set("watch_scanned_at", "0")
+    await runtime.connector.scan()
+    await settle(runtime)
+    again = runtime.connector.session()
+    assert again["id"] == row["id"] and again["status"] != "failed"
+    assert harness.store.get(f"copilot:{row['id']}"), "on a fresh Copilot conversation"
+    await fail_scan(harness, runtime)
+    shown = runtime.connector.view()
+    assert shown["failed"]["count"] == 2
+    assert [t for t, text in harness.notifications if "Watch for you" in text or "scan" in text]
+    told = [m for m in harness.store.messages(router) if "Watch scan failed" in m["text"]]
+    assert "2 in a row" in told[-1]["text"]
+
+
+async def test_a_scan_that_reports_ends_the_failure(tmp_path):
+    harness, runtime = await failing_watch(tmp_path)
+    await fail_scan(harness, runtime)
+    harness.store.set("watch_scanned_at", "0")
+    await runtime.connector.scan()
+    await settle(runtime)
+    row = runtime.connector.session()
+    await call_tool(runtime, "report_found", row["id"], items=[])
+    assert not runtime.connector.view()["failed"]
+
+
 # E83: a retried task cancelled, or its worker closed, is cancelled (not Failed again).
 
 

@@ -5313,7 +5313,9 @@ class Runtime:
         task = self.task_actions.fail(row["id"], message) if row["role"] == WORKER else None
         if row["role"] == WORKER:
             self.background(self.workers.pump())  # Its slot is free for a queued worker.
-            if not self.special(row):
+            if self.special(row) == "connector":
+                self.connector.failed(message)
+            elif not self.special(row):
                 # As when Copilot fails a turn: the Router and the owner hear of it.
                 self.background(self.tell_router(row, "failed", message, task))
                 self.alert(

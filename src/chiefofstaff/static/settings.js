@@ -595,11 +595,15 @@ export function renderConnections() {
     ...gaps.partial.map((item) => `watch ${item.watch} only partly covered: ${item.reason}`),
   ].filter(Boolean).join(" · ");
   const uncovered = coverageGaps(connector).join(" · ");
+  // Scans that failed since the last that worked (bug E102): that, not what the last one found.
+  const failed = connector.failed;
   const scanned = connector.scanning
     ? "Scanning now…"
-    : connector.scanned_at
-      ? `Scanned ${since(connector.scanned_at)}${last.found !== undefined ? ` · ${last.found} found` : ""}${problems ? ` · ${problems}` : ""}`
-      : "";
+    : failed
+      ? `Scan failed ${since(failed.at)}${failed.count > 1 ? ` (${failed.count} in a row)` : ""}: ${failed.reason}${connector.scanned_at ? ` · last scanned ${since(connector.scanned_at)}` : ""}`
+      : connector.scanned_at
+        ? `Scanned ${since(connector.scanned_at)}${last.found !== undefined ? ` · ${last.found} found` : ""}${problems ? ` · ${problems}` : ""}`
+        : "";
   watchSummary();
   $("#watch-state").textContent = [scanned, uncovered].filter(Boolean).join(" · ");
   // After hours (the schedule above): how often it scans now, and why; "not scanning" only when
@@ -610,7 +614,7 @@ export function renderConnections() {
   const restingText = !resting || connector.scanning || !watching ? "" : pace > 0 ? `${resting}: every ${pace} min (after-hours setting)` : `Not scanning now: ${resting.toLowerCase()}, and after hours is 0`;
   $("#watch-resting").textContent = restingText;
   $("#watch-resting").hidden = !restingText;
-  $("#watch-state").classList.toggle("error", Boolean(problems || uncovered));
+  $("#watch-state").classList.toggle("error", Boolean(problems || uncovered || (failed && !connector.scanning)));
   $("#watch-scan").disabled = Boolean(connector.scanning);
   $("#watch-activity").hidden = !connector.session_id;
   const away = connector.away || {};

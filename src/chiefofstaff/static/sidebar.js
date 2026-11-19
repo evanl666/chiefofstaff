@@ -207,9 +207,21 @@ export function renderStatusLine() {
     );
   }
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
+  // Watch scans that failed since the last that worked: nothing was read meanwhile (bug E102).
+  const failed = snap.connector?.failed;
+  if (failed && !snap.connector.scanning) {
+    nodes.push(
+      el(
+        "div",
+        { class: "bad", title: `First failed ${since(failed.since)}: ${failed.reason}` },
+        `Watch scan failed${failed.count > 1 ? ` (${failed.count} in a row)` : ""} `,
+        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections") }),
+      ),
+    );
+  }
   // A watch the last scan could not search, or saw only part of: "0 found" means nothing there.
   const { missed, partial } = watchGaps(snap.connector?.last);
-  if (missed.length || partial.length) {
+  if (!failed && (missed.length || partial.length)) {
     const many = (list, words) => (list.length ? `${list.length === 1 ? "one" : list.length} ${words}` : "");
     nodes.push(
       el(

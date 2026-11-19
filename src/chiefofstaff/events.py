@@ -871,7 +871,11 @@ class Events:
         if row["role"] == WORKER:
             self.runtime.update_session(session_id, status="failed", activity="")
             task = self.runtime.task_actions.fail(session_id, message)
-            self.runtime.background(self.runtime.tell_router(row, "failed", message, task))
+            if self.runtime.special(row) == "connector":
+                # Watch for you: its scan failed (not a task of its own, bug E102).
+                self.runtime.connector.failed(message)
+            else:
+                self.runtime.background(self.runtime.tell_router(row, "failed", message, task))
             self.runtime.background(self.runtime.workers.pump())
         else:
             self.runtime.update_session(session_id, status="idle", activity="")
@@ -945,7 +949,10 @@ class Events:
         if row["role"] == WORKER:
             self.runtime.update_session(row["id"], status="failed", activity="")
             task = self.runtime.task_actions.fail(row["id"], message)
-            await self.runtime.tell_router(row, "failed", message, task)
+            if self.runtime.special(row) == "connector":
+                self.runtime.connector.failed(message)
+            else:
+                await self.runtime.tell_router(row, "failed", message, task)
 
     def hook_failed(self, row: dict, message: str):
         """Said once a day per plugin, as a note: the work itself goes on. The same hook fails
