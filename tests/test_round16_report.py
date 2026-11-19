@@ -309,3 +309,61 @@ async def test_the_routers_note_leaves_a_stopped_task_or_a_decision_waiting(harn
     await call_tool(runtime, "ask_decision", worker, question="Ship it on Friday?")
     await router_says(runtime, harness, worker, task, "note", "FYI: the review is tomorrow.")
     assert runtime.tasks.get(task["id"])["status"] == "waiting", "its card waits for the owner"
+
+
+async def test_a_decision_asked_on_accepted_work_outlives_its_next_progress_report(harness):
+    """E100: woken to check the run of accepted work, it asked a decision and reported
+    progress as told: the card closed at once ("Its task ended."), and nobody told it."""
+    runtime, worker, a, _b, session = await checking(harness, with_b=False)
+    await woken(runtime, session)
+    await call_tool(runtime, "ask_decision", worker, question="Rerun the failed shards?")
+    card = decision_cards(harness)[0]
+    assert [x["task_id"] for x in card["target"]["askers"]] == [a["id"]]
+    await call_tool(runtime, "report", worker, status="progress", task_id=a["id"],
+                    summary="Two shards failed; asked whether to rerun them.",
+                    artifacts=[NIGHTLY])  # fmt: skip
+    assert harness.store.draft(card["id"])["status"] == "pending"
+    assert runtime.tasks.get(a["id"])["status"] == "done"
+
+
+async def test_a_worker_hears_when_the_decision_it_waits_for_expires(harness):
+    """E100: a card that really expires (its task accepted as it is) tells its worker so, with
+    its next message (no turn of its own)."""
+    runtime = await harness.connect()
+    worker, a = await spawn(runtime, harness.router_id, "Fix the login")
+    session = harness.session(worker)
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="done", summary="Fixed.")
+    await call_tool(runtime, "ask_decision", worker, question="Keep the old login page?")
+    await idle(runtime, session)
+    card = decision_cards(harness)[0]
+    sent = len(session.sent)
+    runtime.task_actions.accept(a["id"])
+    await settle(runtime)
+    assert harness.store.draft(card["id"])["status"] == "expired"
+    assert len(session.sent) == sent, "no turn of its own"
+    await runtime.owner_send(worker, "Thanks")
+    assert "Keep the old login page?" in session.sent[-1] and "will not come" in session.sent[-1]
+
+
+async def test_a_worker_reopened_waits_on_its_decision_card_again(harness):
+    """E106: closed and reopened, its task waited for "your decision" again, but the card that
+    closing expired stayed gone: only a chat reply was left, not recorded as a decision."""
+    runtime = await harness.connect()
+    worker, task = await spawn(runtime, harness.router_id, "Fix the login")
+    session = harness.session(worker)
+    await turn(runtime, session)
+    await call_tool(runtime, "ask_decision", worker, question="Keep the old login page?")
+    await idle(runtime, session)
+    card = decision_cards(harness)[0]
+    await runtime.workers.close(worker)
+    assert harness.store.draft(card["id"])["status"] == "expired", "nobody waits on it now"
+    await runtime.workers.reopen(worker, restore=True)
+    assert runtime.tasks.get(task["id"])["status"] == "waiting"
+    back = harness.store.draft(card["id"])
+    assert back["status"] == "pending"
+    assert [a["task_id"] for a in back["target"]["askers"]] == [task["id"]]
+    await runtime.decisions.answer(back, DraftDecision(action="answer", text="Keep it"))
+    await settle(runtime)
+    assert runtime.tasks.get(task["id"])["status"] == "running"
+    assert "The owner decided: Keep it" in session.sent[-1]

@@ -36,6 +36,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# How a decision card ends that nobody waits on once its worker closed.
+CLOSED = "Its worker was closed."
+
 
 def same_words(one: str, other: str) -> bool:
     """The same decision, written again (case, spacing and final punctuation aside)."""
@@ -367,14 +370,59 @@ class Decisions:
 
     def drop_asker(self, session_id: str):
         """A closed worker no longer waits; a card nobody waits for ends."""
-        self.drop_askers(
-            lambda asker: asker["session_id"] == session_id, "expired", "Its worker was closed."
-        )
+        self.drop_askers(lambda asker: asker["session_id"] == session_id, "expired", CLOSED)
 
-    def drop_task(self, task_id: str):
-        """A task that ended (done, failed, cancelled) no longer waits for a decision."""
-        self.drop_askers(
-            lambda asker: asker.get("task_id") == task_id, "expired", "Its task ended."
+    def waited_on(self, session_id: str) -> dict[str, list[str]]:
+        """The open decision cards a worker's tasks wait on: task id -> card ids."""
+        found: dict[str, list[str]] = {}
+        for card in self.open_cards("decision"):
+            for asker in card["target"]["askers"]:
+                if asker["session_id"] == session_id and asker.get("task_id"):
+                    found.setdefault(asker["task_id"], []).append(card["id"])
+        return found
+
+    def wait_again(self, task: dict, cards: list[str]):
+        """A task back from its worker's close waits on the decision cards it waited on then
+        (bug E106: its task waited for "your decision", its card gone): one that closing ended
+        is open again; one others still wait on has it back among them. Not one the owner
+        answered or dismissed meanwhile."""
+        asker = {"session_id": task["session_id"], "task_id": task["id"], "title": task["title"]}
+        for card_id in cards:
+            try:
+                card = self.store.draft(card_id)
+            except LookupError:
+                continue
+            askers = card["target"]["askers"]
+            if card["status"] == "expired" and card["outcome"] == CLOSED:
+                askers = []
+            elif card["status"] != "pending" or asker in askers:
+                continue
+            self.store.update_draft_target(card_id, {**card["target"], "askers": [*askers, asker]})
+            if card["status"] != "pending":
+                self.store.update_draft(card_id, status="pending", outcome="", resolved_at=None)
+            self.bus.publish("draft", self.store.draft(card_id))
+
+    def drop_task(self, task: dict):
+        """A task that ended (done, failed, cancelled) no longer waits for a decision. Its
+        worker hears so with its next message (bug E100: it waited on, unaware)."""
+        left = self.drop_askers(
+            lambda asker: asker.get("task_id") == task["id"], "expired", "Its task ended."
+        )
+        row = self.store.find_session(task["session_id"])
+        if not left or not row or row["closed_at"]:
+            return
+        asked = "; ".join(f"“{card['target']['question']}”" for card in left)
+        self.delivery.hold(
+            row["id"],
+            wrap(
+                "system",
+                "decision-expired",
+                f"Task {task['id']} “{task['title']}” ended ({task['status']}): the owner's "
+                f"decision on your card {asked} will not come. Do not wait for it.",
+                task=task["id"],
+            ),
+            kind="notice",
+            display=f"Its decision card closed: “{task['title']}” ended.",
         )
 
     def answered_in_chat(self, session_id: str, task: dict | None, text: str) -> list[dict]:

@@ -833,6 +833,8 @@ class Workers:
             # (Linux: what it made in a .git, looked for once more; then not again.)
             self.runtime.background(self.runtime.git_watch_after(session_id, closing=True))
         self.store.unfollow_session(session_id)
+        # The decision cards each of its tasks waits on: reopened, it waits on them again.
+        deciding = self.runtime.decisions.waited_on(session_id)
         self.runtime.decisions.drop_asker(session_id)
         self.states[session_id].last_output = ""
         self.states[session_id].close_after_turn = False
@@ -869,6 +871,7 @@ class Workers:
                             "by": by or "Chief of Staff", "status": task["status"],
                             "progress": task["progress"],
                             "stopped": self.store.get(f"stopped:{task['id']}") or "",
+                            "decisions": deciding.get(task["id"], []),
                         }),
                     )  # fmt: skip
                 self.tasks.move(task["id"], "cancelled", progress="Its worker was closed.")
@@ -1066,8 +1069,9 @@ class Workers:
             if not (restore and was and task["status"] == "cancelled"):
                 continue
             if was["status"] == "waiting" and not was["stopped"]:
-                # It waited for the owner's answer: it does again.
+                # It waited for the owner's answer: it does again (on its decision card too).
                 restored.append(self.tasks.move(task["id"], "waiting", progress=was["progress"]))
+                self.runtime.decisions.wait_again(restored[-1], was.get("decisions") or [])
                 continue
             by = was["stopped"] or was["by"]
             self.store.set(f"stopped:{task['id']}", by)

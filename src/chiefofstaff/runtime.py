@@ -631,7 +631,7 @@ class Runtime:
         workspaces_module.GIT_GUARD = weakref.WeakMethod(self.git_guard)
         workspaces_module.CLONE_REMADE = weakref.WeakMethod(self.clone_remade)
         self.workspaces.github_token = lambda repo: self.github.token_for(repo)
-        self.tasks = TaskBook(store, on_change=lambda task: self.task_changed(task))
+        self.tasks = TaskBook(store, on_change=self.task_changed)
         migrate_tasks(store)
         settle_adopted(store)
         settle_followups(store)
@@ -5233,12 +5233,18 @@ class Runtime:
             self.storage.workers_changed()  # Clear is offered while no worker uses caches.
         return row
 
-    def task_changed(self, task: dict):
-        """Every created or changed task: shown, and once it ended (done, failed, cancelled),
-        a decision card it waited on no longer waits for it."""
+    def task_changed(self, task: dict, was: str | None = None):
+        """Every created or changed task: shown, and as it ends (done, failed, cancelled), a
+        decision card it waited on no longer waits for it. Not at every change of a task that
+        ended before (bug E100: finished work's own card closed at its next progress report).
+        `was`: its status before, when this change set it."""
         self.task_actions.publish(task)
-        if task["status"] in ENDED:
-            self.decisions.drop_task(task["id"])
+        if (
+            task["status"] in ENDED
+            and was is not None
+            and (was not in ENDED or (task["status"] != was and task["status"] != "done"))
+        ):
+            self.decisions.drop_task(task)
         if task["status"] != "waiting" and self.waits_for_nothing(task["session_id"]):
             # Its question settled some other way (the draft it asked about sent, say): its
             # worker no longer waits for the owner (bug bash 9: its box kept "waits for you").
