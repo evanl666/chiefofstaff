@@ -124,7 +124,9 @@ def field(result: Any, *names: str) -> Any:
     return None
 
 
-async def run_tool(session: Any, name: str, arguments: dict) -> tuple[bool, str, bool]:
+async def run_tool(
+    session: Any, name: str, arguments: dict, seconds: float = 60
+) -> tuple[bool, str, bool]:
     """(it ran, its output, the sandbox was applied to it) for one tool call through the
     session's own pipeline."""
     from copilot.generated.rpc import ToolsExecuteRequest
@@ -134,7 +136,7 @@ async def run_tool(session: Any, name: str, arguments: dict) -> tuple[bool, str,
             ToolsExecuteRequest(
                 name=name, arguments=arguments, tool_call_id=f"probe-{uuid4().hex[:8]}"
             ),
-            timeout=60,
+            timeout=seconds,
         )
     except Exception as exc:
         return False, str(exc)[:500], False
