@@ -6063,6 +6063,30 @@ class Runtime:
             return current["id"]
         return open_[-1]["id"] if open_ else ""
 
+    def at_work(self, session_id: str) -> dict | None:
+        """The task a worker's words, reports and asks belong to now: in a turn, the one that
+        turn is on (turn_task: finished work it checks on too, not one that ended without a
+        result); else the one it is on (working_on); else the one it was given or finished
+        last. Not that one first (bug E86): it may be done long ago, or wait its turn."""
+        if turn := self.in_turn_on(session_id):
+            return turn
+        on = self.working_on(session_id)
+        return (self.tasks.find(on) if on else None) or self.tasks.current(session_id)
+
+    def in_turn_on(self, session_id: str) -> dict | None:
+        """The task of the turn a worker is in now (finished work it checks on, or reported in
+        it, too; not one that ended without a result); None between turns."""
+        if not self.states[session_id].busy:
+            return None
+        turn = self.tasks.find(self.turn_task(session_id) or "")
+        if (
+            turn
+            and turn["session_id"] == session_id
+            and turn["status"] not in {"cancelled", "failed"}
+        ):
+            return turn
+        return None
+
     def progress(self, row: dict) -> dict:
         """What a session is doing now and what it said last: progress at a glance."""
         since, step, command = self.states[row["id"]].current_step()
@@ -6109,6 +6133,9 @@ class Runtime:
         tasks = self.tasks.for_session(row["id"])
         if not tasks:
             return row["title"]
+        # The task its turn is on (bug E88: not one given since, nor one a note was about).
+        if turn := self.in_turn_on(row["id"]):
+            return turn["title"]
         # The task it works on now (not one given last that waits its turn).
         if (on := self.working_on(row["id"])) and (task := self.tasks.find(on)):
             return task["title"]
@@ -6126,7 +6153,13 @@ class Runtime:
                     (row["id"], split["mark"], task["id"]),
                 )
                 return (1, worked) if worked else (0, 0)
-            return (1, self.task_actions.last_message(row["id"], task["id"]))
+            # Not what Chief of Staff told it about the task (cancelled, closed: bug E88).
+            worked = self.store.value(
+                "SELECT max(id) FROM messages WHERE session_id=? AND kind!='notice' "
+                "AND json_extract(meta, '$.task_id')=?",
+                (row["id"], task["id"]),
+            )
+            return (1, worked or 0)
 
         return max(tasks, key=last_active)["title"]
 

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import agents, caches, catalog, machine
 from .backend import COPILOT_AGENT, stop_background
-from .envelope import clean_title, owner_text, sendable, short, wrap
+from .envelope import clean_title, owner_text, sendable, sender, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
 from .provenance import LEFT_OUT, managed, whose
 from .roles import ROUTER, WORKER
@@ -111,6 +111,21 @@ def turn_open(events: list[dict], before: bool) -> bool:
         elif event.get("type") in TURN_ENDS:
             before = False
     return before
+
+
+def router_note(message: dict) -> bool:
+    """The Router's note to a worker (message_session task="note"): it tells it something and
+    changes no task."""
+    return message["kind"] == "router" and str(message["meta"].get("prompt") or "").startswith(
+        '<message from="router" type="note"'
+    )
+
+
+def router_message(message: dict) -> bool:
+    """The Router's continue to a worker: more on a task."""
+    return message["kind"] == "router" and str(message["meta"].get("prompt") or "").startswith(
+        '<message from="router" type="message"'
+    )
 
 
 class Workers:
@@ -254,7 +269,8 @@ class Workers:
     def checking_finished(self, recent: list[dict]) -> bool:
         """Whether a turn (`recent`: from its instruction on) was about finished work, not
         about a task it owes a report on: woken by a check-back on a task that is not running
-        (a run of finished work), or told about such a task while a check-back is set on it.
+        (a run of finished work), told about such a task while a check-back is set on it, or
+        started by the Router's note about one (a note changes no task: bug E96).
         What it says then (or not) is no report of another of its tasks, nor a result of that
         one. (A turn that reported on it owes nothing either way: see ask_what_it_waits_for.)"""
         if not recent or not instruction(recent[0]):
@@ -264,7 +280,62 @@ class Workers:
         task = self.tasks.find(about) if about else None
         if not task or task["status"] == "running":
             return False
-        return bool(asked["meta"].get("check_back") or self.store.get(f"checkback:{about}"))
+        return bool(
+            asked["meta"].get("check_back")
+            or self.store.get(f"checkback:{about}")
+            or (
+                router_note(asked)
+                and task["status"] != "queued"
+                and not asked["meta"].get("mid_turn")
+            )
+        )
+
+    def answer_for_router(self, recent: list[dict]) -> bool:
+        """Whether a turn (`recent`: from its instruction on) answered the Router, not work it
+        owes a report on: started by the Router's note about work that is not going on
+        (finished, waiting: bug E96), or the Router's note or continue on a task that waits on
+        something outside (a check-back set: bug E85). Not a check-back's own wake."""
+        if not recent or recent[0]["kind"] != "router" or recent[0]["meta"].get("check_back"):
+            return False
+        asked = recent[0]
+        task = self.tasks.find(asked["meta"].get("task_id") or "")
+        if not task or not (router_note(asked) or router_message(asked)):
+            return False
+        if task["status"] == "running":
+            return bool(self.store.get(f"checkback:{task['id']}"))
+        return router_note(asked) and self.checking_finished(recent)
+
+    async def answer_router(self, session_id: str):
+        """A turn that answered the Router (answer_for_router) and ended without a report: the
+        worker's answer in its chat goes to the Router, once (bug E85: it went nowhere), not
+        into a report of any task (bug E96). Not an acknowledgement."""
+        recent = since_last_instruction(recent_messages(self.store, session_id))
+        if not self.answer_for_router(recent):
+            return
+        asked = recent[0]
+        if any(m["kind"] == "report" for m in recent):
+            return  # Its report reached the Router.
+        if self.store.get(f"routeranswer:{asked['id']}"):
+            return
+        answers = [m for m in recent if m["kind"] == "assistant" and not m["meta"].get("narration")]
+        text = answers[-1]["text"].strip() if answers else ""
+        from .tools import acknowledgement
+
+        if not text or acknowledgement(text):
+            return
+        self.store.set(f"routeranswer:{asked['id']}", "1")
+        row = self.store.session(session_id)
+        task = self.tasks.get(asked["meta"]["task_id"])
+        title = self.runtime.display_title(row)
+        with suppress(Exception):
+            await self.delivery.deliver(
+                self.runtime.router_id(),
+                wrap(sender(row), "answer", text[:4000], task=task["id"], title=title),
+                batch=True,
+                kind="inbound",
+                display=text[:4000],
+                meta={"answered_by": session_id, "title": f"“{title}”", "task_id": task["id"]},
+            )
 
     async def ask_for_report(self, session_id: str):
         """A turn that ended on its task without report(): the owner sees only reports. Its
@@ -275,6 +346,7 @@ class Workers:
         row = self.store.session(session_id)
         if row["status"] not in {"working", "starting", "queued"} and not row["closed_at"]:
             self.answer_on_home(session_id)  # Its turn is over: what it answered is all.
+            await self.answer_router(session_id)
         if row["status"] not in {"working", "starting", "queued"} and not row["closed_at"]:
             await self.report_chat_change(session_id)
         running = [t for t in self.tasks.for_session(session_id) if t["status"] == "running"]
@@ -300,10 +372,17 @@ class Workers:
             return
         asked = recent[0]
         if self.checking_finished(recent):
-            return  # On finished work (its run): no report of another task, nor a result.
+            # On finished work (its run, the Router's note): no report of another task, nor a
+            # result (its answer to a note went to the Router: answer_router).
+            return
+        # The running task the turn was on: the one its instruction named; else the one it is
+        # at work on (bug E86: not the one given last, which may wait its turn).
+        at = self.runtime.at_work(session_id)
         named = next((t for t in running if t["id"] == asked["meta"].get("task_id")), None)
         if named:
             task = named
+        elif at and at["status"] == "running":
+            task = at
         if self.store.get(f"checkback:{task['id']}"):
             return  # It said when it looks again: woken then, it reports.
         nudged = bool(asked["meta"].get("report_nudge"))
@@ -370,11 +449,11 @@ class Workers:
             from .tools import Report
 
             status = "question" if answer.endswith("?") else "done"
-            # The task its last instruction was about, when it has several open.
-            about = asked["meta"].get("task_id") or task["id"]
             try:
+                # The task it is asked to report on (bug E96: not a finished task its last
+                # instruction named, whose result it replaced).
                 await self.runtime.toolset.t_report(
-                    Report(status=status, summary=answer, task_id=about), session_id
+                    Report(status=status, summary=answer, task_id=task["id"]), session_id
                 )
             except ValueError as exc:
                 # Not taken as it is (a check fails, an asked-for table is missing): the worker
@@ -858,15 +937,18 @@ class Workers:
         )
 
     def card(self, row: dict) -> dict:
-        """What the Router needs to recognize a worker's task."""
+        """What the Router needs to recognize a worker's task: named as the owner sees it, its
+        task the one it is on (bug E88: its first title, the task given last)."""
+        on = self.runtime.working_on(row["id"])
         return {
             "session_id": row["id"],
-            "title": row["title"],
+            "title": self.runtime.display_title(row),
             "status": row["status"],
             "closed": bool(row["closed_at"]),
             "task": row["task"][:300],
             "current_task": self.runtime.toolset.task_brief(
-                self.tasks.current(row["id"]), router=True
+                (self.tasks.find(on) if on else None) or self.tasks.current(row["id"]),
+                router=True,
             ),
             "project": row["project"],
             "cwd": row["cwd"],
