@@ -2098,7 +2098,6 @@ class Tools:
             if params.review:
                 self.store.set(f"reviewreq:{task['id']}", "1")
             self.link_decisions(task["id"], decisions)
-            await self.replace(replaced, task)
             self.states[caller].turn_tasks.append(task["id"])
             spoken, note = self.report_language(caller, params.text)
             prompt = wrap(
@@ -2113,7 +2112,7 @@ class Tools:
                 prompt += "\n\n" + wrap("system", "context", note)
             prompt += "".join(
                 "\n\n" + wrap("system", "context", text)
-                for text in await self.settle_earlier(earlier, params.earlier, task)
+                for text in self.settle_earlier(earlier, params.earlier)
             )
             notice = f"New task “{title}” for the worker of “{worker_name}”" + self.new_because(
                 why_new
@@ -2178,6 +2177,16 @@ class Tools:
             meta=meta or None,
             steer=steer,
         )
+        if params.task == "new" and task:
+            # What the new task does instead ends once it has the new task (bug E108: told to
+            # go on with a task it had not been given yet).
+            await self.replace(replaced, task)
+            if params.earlier == "superseded":
+                for old in earlier:
+                    with suppress(ValueError):
+                        await self.runtime.task_actions.cancel(
+                            old["id"], f"Superseded by “{task['title']}”.", by="the Router"
+                        )
         self.runtime.add_message(
             caller,
             "notice",
@@ -2221,17 +2230,18 @@ class Tools:
             "something: task='note'."
         )
 
-    async def settle_earlier(self, earlier: list[dict], how: str, new: dict) -> list[str]:
+    @staticmethod
+    def settle_earlier(earlier: list[dict], how: str) -> list[str]:
         """What a worker is told about its running tasks when it gets a new one: report them
-        first, go back to them after, or nothing (they are cancelled: superseded)."""
+        first, go back to them after, or drop them (superseded: they are cancelled once it has
+        the new one)."""
         notes = []
         for task in earlier:
             named = f"task {task['id']} “{task['title']}”"
             if how == "superseded":
-                with suppress(ValueError):
-                    await self.runtime.task_actions.cancel(
-                        task["id"], f"Superseded by “{new['title']}”.", by="router"
-                    )
+                notes.append(
+                    f"This task replaces {named}: it is cancelled. Stop work on it; no report."
+                )
             elif how == "finish":
                 notes.append(
                     f"Before you start this, report {named}: done if what it delivers is "
