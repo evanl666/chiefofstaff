@@ -368,6 +368,7 @@ class Repo:
             "tests/test_timeouts.py": TEST,
             "pyproject.toml": PYPROJECT,
             ".github/workflows/ci.yml": WORKFLOW,
+            ".gitignore": "__pycache__/\n.pytest_cache/\n.ruff_cache/\n.venv/\n",
         }.items():
             (seed / path).parent.mkdir(parents=True, exist_ok=True)
             (seed / path).write_text(text)
