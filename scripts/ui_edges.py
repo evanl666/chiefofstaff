@@ -5193,7 +5193,10 @@ async def round_layout(runtime, browser, failures: list[str]):
                 faded = await timeline.evaluate("node => getComputedStyle(node).maskImage")
                 if top["y"] - (held["y"] + held["height"]) < 8 or "gradient" not in faded:
                     problems.append(f"{width} {scheme}: the timeline under the card {held} {top}")
-                message = page.locator("#timeline .msg.owner", has_text="Go on where you stopped.")
+                # (Other rounds' owners said "Go on where you stopped." too: this worker's.)
+                message = page.locator(
+                    "#timeline .msg.owner", has=page.locator(".to", has_text="Pick up the importer")
+                ).last
                 await message.scroll_into_view_if_needed()
                 to, text = message.locator(".to"), message.locator(".text")
                 await expect(to).to_have_text("→ Pick up the importer")
