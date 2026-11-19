@@ -2050,6 +2050,17 @@ class Tools:
             # task does not answer it; another task's question stays).
             self.runtime.asks.answered(target["id"], task["id"] if task else "", by="router")
             self.runtime.asks.answered(target["id"], "", by="router")
+            if (
+                task
+                and task["status"] == "waiting"
+                and not self.runtime.decisions.waits_on(task["id"])
+            ):
+                # Answered, it goes on now, as with the owner's answer (bug E97: it stayed
+                # under Needs you until its next report). A task stopped stays stopped; one
+                # waiting on its decision card waits for the owner.
+                task = self.runtime.asks.go_on(
+                    task, chat=params.task == "note", told=params.task == "continue"
+                )
         elif target["role"] == SLACK:
             self.answer_slack_question(target["id"], params.text, quoted)
         if (

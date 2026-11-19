@@ -191,6 +191,14 @@ class Decisions:
     def open_cards(self, kind: str) -> list[dict]:
         return [draft for draft in self.store.drafts() if draft["kind"] == kind]
 
+    def waits_on(self, task_id: str) -> bool:
+        """Whether a task waits on an open decision card."""
+        return any(
+            asker.get("task_id") == task_id
+            for card in self.open_cards("decision")
+            for asker in card["target"]["askers"]
+        )
+
     # Asking the owner
 
     async def t_ask_decision(self, params: AskDecision, caller: str):
