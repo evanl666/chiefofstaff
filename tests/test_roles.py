@@ -179,10 +179,12 @@ async def test_the_router_runs_on_codex_with_nothing_but_its_tools(tmp_path, cod
             "features.shell_tool": False,
             "features.view_image": False,
             "features.image_generation": False,
+            "features.goals": False,
             "features.hooks": False,
             "features.plugins": False,
             "web_search": "disabled",
         }
+        assert config["tools"] == {"experimental_request_user_input": {"enabled": False}}
         offered = [tool["name"] for tool in started_thread["dynamicTools"]]
         assert offered == [
             tool.name for tool in runtime.session_tools(harness.store.session(router))

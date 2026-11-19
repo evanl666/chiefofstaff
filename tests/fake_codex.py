@@ -280,7 +280,7 @@ class Server:
             }
             for name in (
                 "apps", "multi_agent", "multi_agent_v2", "memories", "shell_tool", "unified_exec",
-                "view_image", "image_generation", "hooks", "plugins",
+                "view_image", "image_generation", "goals", "hooks", "plugins",
             )
         ]  # fmt: skip
         return {"data": data, "nextCursor": None}

@@ -370,7 +370,10 @@ async def test_send_returns_at_once_and_the_turn_reports_its_progress(backend, t
 
 # What the real agents' own tools are called in what their model is offered: none of them may
 # reach Chief of Staff's own sessions (agent-roles.md).
-CODEX_OWN_TOOLS = ("exec_command", "write_stdin", "shell", "view_image", "web_search", "image_gen")
+CODEX_OWN_TOOLS = (
+    "exec_command", "write_stdin", "shell", "view_image", "web_search", "image_gen",
+    "request_user_input", "create_goal", "get_goal", "update_goal",
+)  # fmt: skip
 
 
 async def test_chief_of_staffs_own_session_on_an_agent_has_its_tools_and_nothing_else(

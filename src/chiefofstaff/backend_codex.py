@@ -204,14 +204,17 @@ REVIEWER = "user"
 FULL_ACCESS = "dangerFullAccess"
 # Chief of Staff's own sessions on Codex (the Router, the Watchdog: `role_only`) have their tools
 # and nothing else, as their Copilot sessions do: Codex's commands, image viewing and making,
-# web search, hooks and plugins off (codex-rs 0.167.2 spec_plan.rs), the owner's MCP servers off,
-# and, as with Ask first, ChatGPT's apps and subagents. Each feature Codex lists must read back
-# off, or the session does not open. (Not unified_exec, which only managed requirements turn off:
-# with shell_tool off, Codex offers no command tool at all.)
+# goals, web search, hooks and plugins off (codex-rs 0.167.2 spec_plan.rs), its own question to
+# the user off, the owner's MCP servers off, and, as with Ask first, ChatGPT's apps and subagents.
+# Each feature Codex lists must read back off, or the session does not open. (Not unified_exec,
+# which only managed requirements turn off: with shell_tool off, Codex offers no command tool
+# at all.) What is left is apply_patch, from the model's catalog: every patch asks first, and
+# Chief of Staff refuses any write but a worker's.
 ROLE_FEATURES = (
     "shell_tool",
     "view_image",
     "image_generation",
+    "goals",
     "hooks",
     "plugins",
 )
@@ -1804,6 +1807,7 @@ class CodexBackend:
             for name in ROLE_FEATURES:
                 config[f"features.{name}"] = False
             config["web_search"] = "disabled"
+            config["tools"] = {"experimental_request_user_input": {"enabled": False}}
             # The owner's MCP servers do not start for it (nothing of theirs is its to call).
             config["mcp_servers"] = {name: {"enabled": False} for name in owner_servers(read)}
         if checking := options.get("checking"):
