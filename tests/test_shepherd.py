@@ -540,6 +540,15 @@ async def test_your_message_stops_the_step_first(world):
     now = world.session()
     assert now is not stepped and "What are you doing?" in now.sent[-1]
     assert now.options.get("enable_config_discovery") is True
+    # Stopped for the owner's work, not tried: once that turn ends, the PR's next read queues
+    # the attempt again, still the owner's click (live SY12: it was never tried again).
+    now.emit("session.idle")
+    await settle(runtime)
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    again = runtime.shepherd.control.open_step(TARGET)
+    assert again and again["id"] != step["id"] and again["h0"] == step["h0"], again
+    assert again["clicked"] == 1 and again["state"] in {"queued", "running"}
 
 
 async def test_a_worker_left_in_a_step_is_not_continued_after_a_restart(world):
