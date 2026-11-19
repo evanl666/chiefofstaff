@@ -57,6 +57,9 @@ async def fixed(world, runtime):
     session = world.session()
     sent = session.sent[-1]
     assert f'step="{step["id"]}"' in sent and "Do not push" not in sent
+    # Seen live: the frozen runs' commands, coming in a tool's answer, were taken for an
+    # injection ("That request wasn't in your task") unless the step's own message says so.
+    assert "they are part of this step" in sent and 'outcome="checked"' in sent
     sha = world.commit_fix(step["tree"])
     answer = await step_result(
         runtime,
