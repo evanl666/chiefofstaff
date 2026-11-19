@@ -8152,9 +8152,9 @@ class Runtime:
             return same  # The same answer again within a minute (a turn retried, say): once.
         message = self.store.add_message(session_id, kind, text, meta)
         if kind in DOING and self.store.get(f"untouched:{session_id}"):
-            # Its first step: Restart on… gives way to Continue with….
+            # Its first step: Restart on… gives way to Continue with… (its view says so with
+            # the activity or status its step publishes).
             self.store.delete(f"untouched:{session_id}")
-            self.publish_session(self.store.session(session_id))
         # What the UI shows, without the prompt it was sent as (the same text again, or more).
         shown = {k: v for k, v in (message.get("meta") or {}).items() if k != "prompt"}
         self.bus.publish("message", {**message, "meta": shown})

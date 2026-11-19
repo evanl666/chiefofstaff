@@ -568,8 +568,22 @@ FEATURES["codex_on_claude_never"] = Feature(
             added=r', "available": \["codex"\]',
         ),
         Allow(
-            "while another agent is on, every worker's row names its agent: Copilot's too",
-            element='#session-list .agent-badge[title^="Copilot"]',
+            "while another agent is on, each worker shows its agent's mark (Copilot's too): its "
+            "sidebar row, its tasks, its header",
+            element='.agent-mark[data-agent="copilot"]',
+        ),
+        Allow(
+            "while another agent is on, the line that says a worker started has its agent's "
+            "chip (Restart on… before its first step)",
+            element="#timeline .agent-chip-wrap",
+        ),
+        Allow(
+            "a worker started while another agent is on can restart on it until its first step",
+            data=r"(\.db\.kv\.untouched:<uuid-\d+>|\.untouched)$",
+        ),
+        Allow(
+            "spawn_worker can compare agents (compare_with), when the owner asks",
+            data=r"\.options\.tools\[\d+\]\.parameters\.properties\.compare_with$",
         ),
     ],
 )
@@ -596,6 +610,11 @@ INSTALLED = [
     Allow("the agents found on the PATH, in the page's state", data=r"\./api/state\.agents_found$",
           value=["codex", "claude"]),
     Allow("Claude's first-run card, in the page's state", data=r"\./api/state\.agent_offers$"),
+    Allow(
+        "each agent's status for the @ picker (ready, sign-in needed, not installed), in the "
+        "page's state",
+        data=r"\./api/state\.agents_status$",
+    ),
     Allow(
         "Claude's first-run card on Home (the notices it alone is in)",
         element="#notices:has(> #agent-offer:only-child), #notices[hidden]:empty",

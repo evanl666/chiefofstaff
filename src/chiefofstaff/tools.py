@@ -1880,8 +1880,9 @@ class Tools:
         self.store.create_session(
             session_id, WORKER, title, "queued", cwd=cwd, branch=branch, slack=slack
         )
-        if not special:
-            self.store.set(f"untouched:{session_id}", "1")  # Until its first step (restart_on).
+        if not special and self.runtime.agents_on():
+            # Until its first step, it can start over on another agent (restart_on).
+            self.store.set(f"untouched:{session_id}", "1")
         if agent != agents.COPILOT:
             self.store.set(f"agent:{session_id}", agent)  # For its life.
             # Read by an earlier version, which runs every worker on Copilot: one to resume,

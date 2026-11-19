@@ -7,7 +7,7 @@ import { boardOf, followingUp, workerSection } from "./board.js";
 import { renderSidebar, renderStatusLine } from "./sidebar.js";
 import { renderHeader, scrollToBottom, select } from "./session.js";
 import { draftCard, draftKey, relabel, uncertainCard, YOUR_OK, yourOkCard, yourOkKey } from "./drafts.js";
-import { expandTask, followUpItem, inTerminal, ownTasks, questionParts, taskItem, terminalItem, unfoldTask } from "./tasks.js";
+import { expandTask, followUpItem, inTerminal, ownTasks, questionParts, syncTaskMarks, taskItem, terminalItem, unfoldTask } from "./tasks.js";
 import { artifactItems } from "./artifacts.js";
 import { duck } from "./mascot.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
@@ -293,6 +293,7 @@ function renderPanel() {
   const order = [running, monitoring, recent, made];
   if (order.some((node, index) => taskBox.children[index] !== node) || taskBox.children.length !== order.length) taskBox.replaceChildren(...order);
   if (panel.children[0] !== needs || panel.children[1] !== taskBox) panel.replaceChildren(needs, taskBox);
+  syncTaskMarks(panel);
   const active = runningItems.length + sections.monitoring.length;
   const tabs = document.querySelectorAll("#home-tabs .count");
   tabs[0].textContent = needCount ? String(needCount) : "";

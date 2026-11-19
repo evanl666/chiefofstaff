@@ -9,7 +9,7 @@ import { byId, closedWorkers, DELIVERY_WORDS, latestDelivery, loadState, ownerQu
 import { renderSidebar } from "./sidebar.js";
 import { continueWith, refreshChips, select } from "./session.js";
 import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
-import { agentName, markOf, marksShown, ready, statusOf } from "./agentpick.js";
+import { agentName, markOf, ready, statusOf } from "./agentpick.js";
 import { showChanges } from "./diff.js";
 // Chief of Staff's own helpers (learning how the owner works, checks, the profile): their
 // results come as cards to approve; the work itself is not the owner's.
@@ -31,6 +31,19 @@ function elsewhereControl(task) {
   const items = elsewhereItems(task, true);
   if (items.length === 1) return el("button", { type: "button", class: "secondary", text: `Continue with ${items[0].text}…`, "data-tip": "A new worker there goes on from a summary of this one's work; this one stays open", onclick: items[0].onclick });
   return moreMenu(items, "Continue on another agent: a new worker there goes on from a summary of this one's work", "Continue on another agent…") || "";
+}
+// While more than one agent is on, each task card's worker's agent (its model on hover), after
+// its title: kept as its worker's is now, apart from the card's own drawing.
+export function syncTaskMarks(root) {
+  for (const card of root.querySelectorAll(".card.task[data-session]")) {
+    const head = card.querySelector(":scope > .head");
+    if (!head) continue;
+    const have = head.querySelector(":scope > .agent-mark");
+    const want = markOf(sessionById(card.dataset.session));
+    if (!want) have?.remove();
+    else if (!have) head.querySelector(":scope > .title")?.after(want);
+    else if (have.dataset.agent !== want.dataset.agent || have.title !== want.title) have.replaceWith(want);
+  }
 }
 export function isHelperTask(task) {
   if (task.helper) return true;
@@ -399,8 +412,6 @@ function taskCard(task, phase = phaseOf(task)) {
       { class: "head" },
       el("span", { class: dotClass(task, phase), "data-tip": unread(task, phase) ? "Not read yet" : undefined }),
       el("button", { type: "button", class: "title", text: task.title, "data-tip": titleTip(task, phase), "aria-expanded": row ? String(unfolded.has(task.id)) : undefined, onclick: () => (row ? unfoldTask(node, undefined, true) : openAt?.()), disabled: !openAt && !row }),
-      // While more than one agent is on: its worker's agent (its model on hover).
-      markOf(sessionById(task.session_id)),
       el("span", { class: "tid", text: task.id, "data-tip": "Task id" }),
       el("span", { class: "meta", "data-tip": help }, ...metaParts(meta)),
       menu,
