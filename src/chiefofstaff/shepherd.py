@@ -983,6 +983,7 @@ class Shepherd(Keeping, Steps):
             return None  # One attempt per PR at a time: the next read brings this one back.
         print_ = ""
         threads_asked: list[str] = []
+        said: list[str] = []
         evidence: dict[str, Any] = {}
         if kind == "fix-ci":
             repo = details["repo"]
@@ -1002,9 +1003,11 @@ class Shepherd(Keeping, Steps):
             if why:
                 return self.rerun_plan(claim, task, signal, details, runs, why, print_)
         else:
-            threads_asked = [ask["thread"] for ask in signal.get("threads") or [] if ask["writer"]]
+            asks = [ask for ask in signal.get("threads") or [] if ask["writer"]]
+            threads_asked = [ask["thread"] for ask in asks]
+            said = [ask["last"] for ask in asks]
         if why := self.control.cap_reached(target, kind, print_, head, threads_asked,
-                                           clicked=clicked):  # fmt: skip
+                                           clicked=clicked, said=said):  # fmt: skip
             logger.info("No attempt on %s (%s): %s.", target, kind, why)
             self.store.set(f"capped:{target}", json.dumps({"kind": kind, "why": why, "head": head}))
             self.runtime.task_actions.publish(task)

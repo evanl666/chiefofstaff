@@ -274,6 +274,25 @@ def test_two_rounds_per_review_thread(control):
     assert control.cap_reached(T, "address-review", "", H0, ["th1", "th2"]) == ""
 
 
+def test_comments_a_decided_plan_had_are_not_tried_again(control):
+    control.give(T, "t1", H0)
+    signal = {"threads": [{"thread": "th1", "last": 501}, {"thread": "th2", "last": 502}]}
+    step = control.add_step(
+        T, "address-review", "prepare", h0=H0, threads=["th1", "th2"], signal=signal,
+        started_at="x",
+    )  # fmt: skip
+    control.move_step(step["id"], QUEUED, state="stale")
+    # A plan gone stale was never decided on: its comments may be tried again.
+    assert control.cap_reached(T, "address-review", "", H1, ["th2"], said=[502]) == ""
+    control.move_step(step["id"], "stale", state="published")
+    assert control.cap_reached(T, "address-review", "", H1, ["th2"], said=[502]) == (
+        "you decided on these comments already"
+    )
+    assert control.cap_reached(T, "address-review", "", H1, ["th2"], said=[502, 503]) == ""
+    assert control.cap_reached(T, "address-review", "", H1, ["th2"], said=[502],
+                               clicked=True) == ""  # fmt: skip
+
+
 def test_one_approval_wins_and_operations_are_journaled(control):
     control.give(T, "t1", H0)
     step = step_of(control, state=PREPARED)
