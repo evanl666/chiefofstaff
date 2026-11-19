@@ -1050,10 +1050,15 @@ async def su5_flaky(ctx: Ctx):
     plan, no attempt: approved, attempt 2 passes; no second rerun on that commit."""
     await ctx.turn_on(proactive_levels={"fix-ci": "suggest"}, proactive_budget=0)
     files = {"app/timeouts.py": APP.replace("31", "30"), "tests/test_timeouts.py": FLAKY_TEST}
-    _, number = await ctx.worker_pr("su5", files, "Flaky on the first run")
+    first, number = await ctx.worker_pr("su5", files, "Flaky on the first run")
     head = ctx.repo.pr(number)["head"]["sha"]
     assert await ctx.repo.ci(head) == "failure"
-    ctx.repo.rerun_failed(head)  # The owner runs it again on GitHub: it passes.
+    # Chief of Staff saw it fail (its row offers Fix it), then the owner runs it again on
+    # GitHub: it passes.
+    await ctx.kept(
+        first, lambda v: (v.get("action") or {}).get("kind") == "fix", "the failure seen", 900
+    )
+    ctx.repo.rerun_failed(head)
     await asyncio.sleep(30)
     await ctx.repo.passes(head)
     await asyncio.sleep(READ_ROUND)  # Chief of Staff reads the PR again: learned.
