@@ -64,6 +64,16 @@ def answer(body: dict) -> tuple[list[dict], str]:
                 {"command": command, "description": "left running", "run_in_background": True},
             )
         )
+    told = "\n".join(
+        text
+        for message in body.get("messages") or []
+        if isinstance(message, dict)
+        for text in texts(message.get("content"))
+    )
+    if (found := re.search(r"Once it ends, call the (\w+) tool with text '([^']*)'", told)) and (
+        "<task-notification>" in after
+    ):
+        plan.append(call(f"mcp__chief__{found.group(1)}", {"text": found.group(2)}))
     if found := re.search(r"Fill the form of (\w+)", prompt):
         plan.append(call(f"mcp__{found.group(1)}__form", {}))
     if found := re.search(r"Use Claude's (\w+) tool with (\{.*?\})(?:\.|$)", prompt):

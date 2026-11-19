@@ -791,6 +791,10 @@ class Fake:
 
         if found := re.search(r"Call the (\w+) tool with text '([^']*)'", text):
             call(f"mcp__chief__{found.group(1)}", {"text": found.group(2)})
+        if found := re.search(r"Once it ends, call the (\w+) tool with text '([^']*)'", text):
+            self.state["on_wake"] = [found.group(1), found.group(2)]
+        if text.startswith("<task-notification>") and (woke := self.state.pop("on_wake", None)):
+            call(f"mcp__chief__{woke[0]}", {"text": woke[1]})
         if found := re.search(r"Run the shell command `([^`]+)`", text):
             call("Bash", {"command": found.group(1), "description": "a command"})
         if found := re.search(r"Leave the command `([^`]+)` running for ([\d.]+) s", text):

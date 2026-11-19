@@ -215,18 +215,55 @@ async def test_a_command_left_running_holds_the_turn_and_its_end_wakes_it_once_a
         shell.rstrip(">"),
         3,
     )
-    kinds = turn.kinds()
-    ending = kinds.index("system.notification")
-    assert kinds[ending + 1] == "session.idle", kinds  # (The woken turn may already follow.)
-    await turn.ended()  # The turn its end started, admitted as one the worker starts itself.
+    await until(lambda: turn.kinds()[-1:] == ["session.idle"])
+    # The turn its end started, admitted as one the worker starts itself; its session idle
+    # only once that turn is over (as Copilot's: an idle before it says it did not go on).
+    ending = turn.kinds().index("system.notification")
     assert admitted == [False, True]
-    assert turn.kinds()[ending + 2 :] == [
+    assert turn.kinds()[ending + 1 :] == [
         "assistant.turn_start",
         "assistant.message",
         "session.idle",
     ]
     assert turn.said()[-1] == "noted"
     assert await session.running_background() == 0
+
+
+async def test_a_worker_let_go_of_at_its_idle_still_takes_the_turn_a_commands_end_wakes(
+    agent, tmp_path
+):
+    """The runtime lets go of an idle worker whose options changed (Runtime.reattach), and its
+    process ends with nothing of it running: a command's end is not that while the turn its
+    notice wakes is to come (live G3: that turn's report was refused, its process gone)."""
+    calls = []
+
+    def echo(invocation):
+        calls.append(invocation.arguments["text"])
+        return "echoed"
+
+    tool = SimpleNamespace(
+        name="echo",
+        description="Echo text back",
+        parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+        handler=echo,
+    )
+    session = await agent.create_session(
+        session_id="9" * 32, name="t", **options(tmp_path, tools=[tool])
+    )
+    letting_go = []
+
+    def on_event(event):
+        if event.type.value == "session.idle":
+            letting_go.append(asyncio.ensure_future(session.disconnect()))
+
+    session.on(on_event)
+    await session.send(
+        "Leave the command `echo up` running for 0.3 s, then reply with just: up. "
+        "Once it ends, call the echo tool with text 'woke'"
+    )
+    await until(lambda: calls == ["woke"])
+    worker = session.backend
+    await until(lambda: worker.task.done())  # Let go of, its process ends after that turn.
 
 
 async def test_a_wakeup_not_admitted_is_blocked_before_the_model(agent, tmp_path):
