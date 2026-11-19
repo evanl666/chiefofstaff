@@ -5166,6 +5166,7 @@ async def round_fork(runtime, browser, failures: list[str]):
         instructions="Profile the CSV importer and make it faster.", why_new="test",
     )  # fmt: skip
     worker = json.loads(spawned.text_result_for_llm)["session_id"]
+    await settle(runtime)  # Started (its session opened, its task sent).
     session = runtime.states.handle(worker)
     session.emit("user.message", content=session.sent[-1])
     session.emit("assistant.turn_start")

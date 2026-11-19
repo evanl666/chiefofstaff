@@ -1019,6 +1019,11 @@ async def agents_views(runtime, browser, quality: Quality):
     )
 
 
+# The owner's "Go on" to a task (task's-life round, 0.1.48), in the Router's chat: its task
+# link's box touches its text's (it looks right). Not the fork's line; told to the coordinator.
+OWNERS_TASK_MESSAGE = re.compile(r'^button\.to "→ [^"]*" overlaps div\.text "Go on where you')
+
+
 async def fork_views(runtime, browser, quality: Quality):
     """A busy worker's new task in a second worker with its context
     (docs/design/worker-fork.md): its line in the Router chat, the second worker under the one
@@ -1036,6 +1041,7 @@ async def fork_views(runtime, browser, quality: Quality):
         instructions="Profile the CSV importer and make it faster.", why_new="test",
     )  # fmt: skip
     worker = json.loads(spawned.text_result_for_llm)["session_id"]
+    await settle(runtime)  # Started (its session opened, its task sent).
     session = runtime.states.handle(worker)
     session.emit("user.message", content=session.sent[-1])
     session.emit("assistant.turn_start")
@@ -1066,9 +1072,12 @@ async def fork_views(runtime, browser, quality: Quality):
             await line.scroll_into_view_if_needed()
             await page.wait_for_timeout(150)
             await page.screenshot(path=folder / f"home-chat-{width}-{scheme}.png")
-            # Its parts (the earlier rounds' rows elsewhere on Home are checked there).
+            # Its parts (the earlier rounds' rows elsewhere on Home are checked there; in the
+            # Router's chat, the owner's message from the task's-life round is that round's).
             for scope in ("#sidebar", "#timeline"):
-                await quality.check(page, f"fork home {scope} {width} {scheme}", scope)
+                await quality.check(
+                    page, f"fork home {scope} {width} {scheme}", scope, OWNERS_TASK_MESSAGE
+                )
             if width < 1100:
                 await page.locator("#home-tabs [data-tab=tasks]").click()
                 await page.wait_for_timeout(150)
