@@ -1020,6 +1020,67 @@ async def test_every_edit_asks_with_each_file_and_a_refused_one_is_not_written(b
     assert {d.tool_name for d in edits} <= {"create", "edit", "bash"}, edits
 
 
+@pytest.mark.codex
+async def test_a_yolo_codex_workers_edit_in_the_owners_checkout_is_refused(tmp_path, monkeypatch):
+    """Live B2's check, on real Codex with the stand-in model (a live model may decline to try):
+    a Codex worker acting on its own, given the owner's checkout to read, edits a file there with
+    apply_patch; Chief of Staff's own answer (Events.on_permission, policy.owners_checkout)
+    refuses it, says why, and nothing is written there. In its own folder, the same edit is
+    written."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    from conftest import Harness
+    from test_round7_split import published, spawn
+
+    from chiefofstaff.models import Settings
+
+    app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Read", instructions="the first line",
+                       project=str(app))  # fmt: skip
+    harness.store.execute("UPDATE sessions SET yolo='on' WHERE id=?", (info["session_id"],))
+    row = harness.store.session(info["session_id"])
+    assert runtime.yolo(row) and row["cwd"] == str(app.resolve()), "the owner's, to read"
+    own = runtime.workspaces.workspace(row)
+    own.mkdir(parents=True, exist_ok=True)  # (Its own folder, where it may write.)
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    model = scripted_model.Model()
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    codex.arguments += model.arguments(tmp_path)
+    codex.needs_sign_in = False
+    codex.created = []
+    await codex.start()
+    try:
+        session, turn = await open_session(
+            codex,
+            Path(row["cwd"]),
+            on_permission_request=lambda request, invocation: runtime.events.on_permission(
+                request, {"session_id": row["id"]}
+            ),
+        )
+        await session.send(
+            f"Write the file `{app / 'notes.txt'}` and the file `{app / 'more.txt'}` with your "
+            "file editing tool (apply_patch). Then reply with just: written"
+        )
+        await turn.wait()
+        assert not (app / "notes.txt").exists() and not (app / "more.txt").exists()
+        notices = [m["text"] for m in harness.store.messages(row["id"]) if m["kind"] == "notice"]
+        assert any("owner's own checkout" in text for text in notices), notices
+        await session.send(
+            f"Write the file `{own / 'notes.txt'}` and the file `{own / 'more.txt'}` with your "
+            "file editing tool (apply_patch). Then reply with just: written"
+        )
+        await turn.wait()
+        assert (own / "notes.txt").exists() and (own / "more.txt").exists(), "its own: written"
+    finally:
+        await codex.stop()
+        model.close()
+        await runtime.stop()
+
+
 async def test_with_ask_first_every_mcp_call_asks_and_githubs_writes_stay_refused(
     backend, tmp_path, monkeypatch
 ):
