@@ -225,9 +225,10 @@ def in_repository(endpoint: str) -> bool:
 
 
 def run(command: list[str], cwd: Path | None = None, env: dict | None = None) -> str:
-    return subprocess.run(
-        command, cwd=cwd, env=env, capture_output=True, text=True, check=True
-    ).stdout
+    done = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, check=False)
+    if done.returncode:
+        raise RuntimeError(f"{' '.join(command[:4])}: {done.stderr.strip()[-2000:]}")
+    return done.stdout
 
 
 def git_env(token: str) -> dict[str, str]:
@@ -431,7 +432,8 @@ class Repo:
         who = who or self.owner
         ref, start = self.ref(name), self.ref(base)
         self.git("fetch", "-q", "origin", start, who=who)
-        self.git("checkout", "-q", "-B", ref, "FETCH_HEAD")
+        # Detached: a worker's worktree in this clone may have that branch checked out.
+        self.git("checkout", "-q", "--detach", "FETCH_HEAD")
         for path, text in files.items():
             (self.clone / path).parent.mkdir(parents=True, exist_ok=True)
             (self.clone / path).write_text(text)
@@ -446,7 +448,6 @@ class Repo:
             message,
         )
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{ref}", who=who)
-        self.git("checkout", "-q", "--detach")
         return self.head(name)
 
     def head(self, branch: str) -> str:
