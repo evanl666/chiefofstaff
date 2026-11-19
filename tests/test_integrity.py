@@ -377,3 +377,17 @@ def test_frozen_evidence_valid_only_on_exactly_what_was_planned():
     assert "changed files" in integrity.frozen_validity(PLANNED, ran, dirty)
     moved = {**TREES, "/f0": ("h0", "zz", "", "")}
     assert "another commit" in integrity.frozen_validity(PLANNED, ran, moved)
+
+
+def test_frozen_evidence_holds_through_its_own_result_and_reading_and_in_any_order():
+    """Seen live: the step's own `shepherd_result(outcome="checked")`, which it is told to call
+    once it ran them, voided its frozen runs ("it also used shepherd_result in between"); so
+    would saying what it is at, or reading a file. The lines run in another order, or one run
+    again, are the same evidence. What types into a shell is not."""
+    ran = [
+        Ran("report_intent"), Ran("bash", PLANNED[1]), Ran("view"), Ran("bash", PLANNED[0]),
+        Ran("bash", PLANNED[0]), Ran("shepherd_result"),
+    ]  # fmt: skip
+    assert integrity.frozen_validity(PLANNED, ran, TREES) == ""
+    typed = [*ran, Ran("write_bash")]
+    assert "write_bash" in integrity.frozen_validity(PLANNED, typed, TREES)

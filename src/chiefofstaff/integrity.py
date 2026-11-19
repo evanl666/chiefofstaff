@@ -690,29 +690,34 @@ class Ran:
     output: str = ""
 
 
+# The shell tools a step runs its commands with.
+SHELLS = frozenset({"bash", "shell", "zsh"})
+# What a step may call between and after its frozen runs without voiding them: reading a shell's
+# output or stopping it, reading files, saying what it is at, and its own result tools. (Not
+# write_bash: what it types runs.)
+CHANGE_NOTHING = frozenset({"read_bash", "stop_bash", "list_bash", "view", "glob", "grep",
+                            "report_intent", "shepherd_result", "draft_github_review"})  # fmt: skip
+
+
 def frozen_validity(
     planned: list[str], ran: list[Ran], trees: dict[str, tuple[str, str, str, str]]
 ) -> str:
     """Why the frozen-SHA evidence is void ("" when valid): `planned`, the command lines asked
-    for, in order; `ran`, every command and edit the session made since it was asked; `trees`,
-    per frozen folder, (HEAD before, HEAD after, tracked changes before, after) as Chief of
-    Staff read them."""
-    commands = [item for item in ran if item.tool in {"bash", "shell", "zsh"}]
-    others = [
-        item for item in ran if item.tool not in {"bash", "shell", "zsh", "read_bash", "stop_bash"}
-    ]
+    for; `ran`, every tool call the session made since it was asked; `trees`, per frozen
+    folder, (HEAD before, HEAD after, tracked changes before, after) as Chief of Staff read
+    them. Each planned line must have run, in any order (again, too), and nothing else that
+    could change anything: another command, an edit, typing into a shell."""
+    commands = [item for item in ran if item.tool in SHELLS]
+    others = [item for item in ran if item.tool not in SHELLS | CHANGE_NOTHING]
     if others:
         return f"it also used {others[0].tool} in between"
-    if [item.command.strip() for item in commands] != [line.strip() for line in planned]:
-        extra = next(
-            (
-                item.command
-                for item in commands
-                if item.command.strip() not in {p.strip() for p in planned}
-            ),
-            "",
-        )
-        return f"it ran something else too: {extra[:120]}" if extra else "not every command ran"
+    asked = {line.strip() for line in planned}
+    done = {item.command.strip() for item in commands}
+    if extra := next((item.command for item in commands if item.command.strip() not in asked),
+                     None):  # fmt: skip
+        return f"it ran something else too: {extra[:120]}"
+    if asked - done:
+        return "not every command ran"
     for folder, (head0, head1, status0, status1) in trees.items():
         if head0 != head1:
             return f"{folder} moved to another commit"
