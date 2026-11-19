@@ -662,6 +662,89 @@ async def test_claude_starts_no_project_mcp_server_chief_of_staff_turned_off(bac
         await session.disconnect()
 
 
+async def test_a_claude_workers_process_runs_no_update_of_the_owners(
+    backend, tmp_path, monkeypatch
+):
+    """Claude Code (2.1.322) refreshes the owner's plugin marketplaces (their
+    known_marketplaces.json) within ten minutes of a session's start, unless its updates are
+    off: a worker's process has them off (DISABLE_AUTOUPDATER), as its own debug log says."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    # (Its traffic not called nonessential here, which turns updates off by itself: what it
+    # tries to reach is still caught on this machine.)
+    monkeypatch.delenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", raising=False)
+    debug = tmp_path / "debug.txt"
+    making = backend_claude.ClaudeWorker.client_options
+
+    def logged(self):
+        found = making(self)
+        found.extra_args = {**found.extra_args, "debug-file": str(debug)}
+        return found
+
+    monkeypatch.setattr(backend_claude.ClaudeWorker, "client_options", logged)
+    session, turn = await open_session(backend, tmp_path)
+    await session.send("Reply with just: ok")
+    await turn.wait()
+    await session.disconnect()
+    for _ in range(100):
+        if not session.worker.alive():
+            break
+        await asyncio.sleep(0.1)
+    assert "Plugin autoupdate: skipped (auto-updater disabled)" in debug.read_text()
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")  # (For the rest.)
+    await asyncio.sleep(2)  # (What its process tried last, recorded by the catcher.)
+    backend.catcher.seen.clear()  # (Caught, as asked above: none of it left this machine.)
+
+
+async def test_claude_makes_a_worktree_in_its_repositorys_main_checkout_so_none_for_a_worker(
+    backend, tmp_path, monkeypatch
+):
+    """Claude Code (2.1.322) makes EnterWorktree's worktree in the repository's main checkout
+    (<it>/.claude/worktrees), even from a linked worktree: for a worker in one Chief of Staff
+    made, the owner's checkout. So it is refused there (claude_tools.worktrees_home); a worktree
+    the worker makes in its own folder, it enters by its path."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    repo, work = tmp_path / "repo", tmp_path / "work"
+    repo.mkdir()
+
+    def git(*arguments, cwd=repo):
+        subprocess.run(["git", *arguments], cwd=cwd, check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "init")
+    git("worktree", "add", "-q", "-b", "work", str(work))
+    session, turn = await open_session(backend, work)
+    await session.send(
+        'Use Claude\'s EnterWorktree tool with {"name": "exp"}. Then reply with just: tried'
+    )
+    await turn.wait()
+    refused = [e for e in turn.events if e.type.value == "tool.execution_complete"]
+    assert refused and "main checkout" in str(refused[-1].data.error), "refused"
+    assert not (repo / ".claude").exists(), "nothing made in the owner's checkout"
+    git("worktree", "add", "-q", "-b", "mine", ".claude/worktrees/mine", cwd=work)
+    await session.send(
+        'Use Claude\'s EnterWorktree tool with {"path": ".claude/worktrees/mine"}. Then reply '
+        "with just: entered"
+    )
+    await turn.wait()
+    entered = [e for e in turn.events if e.type.value == "tool.execution_complete"][-1]
+    assert entered.data.success, "its own one, entered"
+    # What Claude does unchecked: the worktree in the main checkout, not the worker's folder.
+    monkeypatch.setattr(backend_claude.ClaudeWorker, "worktree_refusal", fake_allowed)
+    session, turn = await open_session(backend, work)
+    await session.send(
+        'Use Claude\'s EnterWorktree tool with {"name": "exp"}. Then reply with just: made'
+    )
+    await turn.wait()
+    assert (repo / ".claude" / "worktrees" / "exp").is_dir()
+    assert not (work / ".claude" / "worktrees" / "exp").exists()
+
+
+async def fake_allowed(self, *args, **kwargs) -> str:
+    return ""
+
+
 def marking(markers: Path, name: str) -> dict:
     """Hooks (settings' format) that mark `name` as run before each Bash command."""
     command = {"type": "command", "command": f"echo {name} >> {markers / name}"}
