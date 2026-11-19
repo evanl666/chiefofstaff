@@ -11,6 +11,9 @@
   subshells, `sh -c` and `eval`; a program Chief of Staff can't read, run there on files there,
   asks you first. Reads go through as before. The check takes 0.02 to 0.06 ms a command (the
   median; under 0.3 ms for 99 in 100), and nothing for a worker with no checkout of yours.
+- Home's *Where is your code?* card (and a focus summary) has room of its own above the
+  Router's chat: the chat's first lines no longer run on under its edge, cut as if hidden by it;
+  lines scrolled up fade out there.
 - **In a folder of yours, a file a worker only read is not its change** (live N): when you edited
   a file while a worker's command that read it was still running (`cat notes.py; sleep 40`), your
   edit showed in the worker's changes and receipts. A program that only reads what it names

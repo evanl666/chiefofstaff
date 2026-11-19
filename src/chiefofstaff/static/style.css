@@ -974,6 +974,14 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .home-item .label { font-weight: 600; }
 #notices { padding: 16px 24px 0; display: grid; gap: 12px; }
 #notices > .card { width: 100%; max-width: 760px; margin: 0 auto; }
+/* A card above the timeline (where your code is, a focus summary) has room of its own: the
+   timeline starts below it, and lines scrolled up fade out there rather than being cut at its
+   edge, as if under it. */
+#notices:not([hidden]) { padding-bottom: 8px; }
+#notices:not([hidden]) + #scroller {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 16px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px);
+}
 #panel {
   width: clamp(340px, 30vw, 400px);
   flex: none;

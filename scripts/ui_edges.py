@@ -5134,7 +5134,8 @@ async def main():
                           round_ten, round_scale, round_qa, round_eleven, round_twelve,
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
-                          round_send, round_agents, round_qa6, round_qa7_life):  # fmt: skip
+                          round_send, round_agents, round_qa6, round_qa7_life,
+                          round_layout):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -5143,6 +5144,53 @@ async def main():
         if failures:
             raise AssertionError(f"browser errors: {failures}")
     print("UI EDGE CASES PASSED")
+
+
+async def round_layout(runtime, browser, failures: list[str]):
+    """0.1.48 (worker-fork's QA): Home's "Where is your code?" card lay over the top of the
+    Router's timeline, hiding its first lines. At 800 and 1280 px, light and dark: the card
+    takes room of its own above the timeline."""
+    store = runtime.store
+    router = store.get("router_id")
+    before = store.settings()
+    store.save_settings(before.model_copy(update={"projects": [], "code_folder": ""}))
+    for number in range(24):
+        runtime.add_message(router, "notice", f"Closed “Keep the old notes {number}”")
+    await settle(runtime)
+    runtime.publish_state()
+    shots = SHOTS / "0149"
+    shots.mkdir(parents=True, exist_ok=True)
+    problems = []
+    try:
+        for width in (800, 1280):
+            for scheme in ("light", "dark"):
+                context = await browser.new_context(
+                    viewport={"width": width, "height": 900}, color_scheme=scheme
+                )
+                page = await context.new_page()
+                page.on("pageerror", lambda error: failures.append(str(error)))
+                await page.goto(f"{BASE}/#token={TOKEN}")
+                if width < 1100:
+                    await page.locator("#home-tabs [data-tab=chat]").click()
+                card = page.locator("#home-setup")
+                await expect(card).to_be_visible()
+                await expect(card).to_contain_text("Where is your code?")
+                timeline = page.locator("#scroller")
+                await timeline.evaluate("node => { node.scrollTop = node.scrollHeight; }")
+                await page.wait_for_timeout(200)
+                held, top = await card.bounding_box(), await timeline.bounding_box()
+                assert held and top
+                await page.screenshot(path=shots / f"setup-card-{width}-{scheme}.png")
+                # Room of its own: the timeline, scrolled, starts below it (it ran on at its edge,
+                # lines cut there as if under it), and fades in where it is cut.
+                faded = await timeline.evaluate("node => getComputedStyle(node).maskImage")
+                if top["y"] - (held["y"] + held["height"]) < 8 or "gradient" not in faded:
+                    problems.append(f"{width} {scheme}: the timeline under the card {held} {top}")
+                await context.close()
+    finally:
+        store.save_settings(before)
+    assert not problems, problems
+    log("0.1.49: the code folder's card above the timeline")
 
 
 async def round_storage(runtime, browser, failures: list[str]):
