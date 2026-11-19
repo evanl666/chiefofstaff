@@ -4271,27 +4271,771 @@ def settings_write(row: dict, request: Any, ran: Iterable[str] = ()) -> str | No
     return None
 
 
+OWNERS_CHECKOUT = (
+    "This folder is the owner's own checkout: nothing is written there. To change it or run "
+    "what writes files (installs, builds, tests), add_repo it: you get your own worktree and "
+    "branch, and work there."
+)
+OWNERS_CHECKOUT_ASK = (
+    "This runs a program Chief of Staff can't read on files in the owner's own checkout, where "
+    'nothing is written: if it only reads them, ask the owner with report(status="question"). '
+    "To change them or run what writes files (installs, builds, tests), add_repo it: you get "
+    "your own worktree and branch, and work there."
+)
+# What a shell command line does in a checkout of the owner's given only to read: see
+# checkout_write.
+CHECKOUT_WRITES, CHECKOUT_ASKS = "writes", "asks"
+# Programs that write none of the files they name (only where their output is redirected).
+CHECKOUT_READERS = (READERS - {"git", "sed", "perl", "awk", "gawk", "source", "."}) | frozenset(
+    {"sleep", "pwd", "which", "type", "whereis", "date", "uname", "id", "whoami", "hostname",
+     "printenv", "du", "df", "tree", "column", "fold", "fmt", "rev", "tac", "paste", "join",
+     "expand", "unexpand", "look", "tr", "sum", "seq", "yes", "expr", "ps", "pgrep", "lsof",
+     "kill", "pkill", "history", "jobs", "wait", "exit", "return", "break", "continue",
+     "shift", "export", "unset", "set", "shopt", "local", "declare", "typeset", "readonly",
+     "let", "read", "getopts", "hash", "alias", "unalias", "popd", "dirs", "nproc", "sysctl",
+     "sw_vers", "locale", "tput", "clear", "uptime", "free", "vm_stat", "env", "diff3",
+     "sdiff", "numfmt", "factor", "shuf", "tsort", "fd", "zcat", "zgrep", "zless", "bzcat",
+     "xzcat", "lz4cat", "iconv", "gh", "[", "[[", "test", "true", "false", ":"}
+)  # fmt: skip
+# Programs whose every argument is a file they write, move or remove.
+CHECKOUT_MAKERS = frozenset(
+    {"rm", "rmdir", "unlink", "touch", "mkdir", "shred", "mkfifo", "mknod", "tee", "gzip",
+     "gunzip", "bzip2", "bunzip2", "xz", "unxz", "zstd", "lz4", "truncate", "mktemp", "chflags",
+     "setfacl", "xattr", "mv", "compress", "uncompress", "srm", "trash"}
+)  # fmt: skip
+# Their first argument is what they set (a mode, an owner), the rest the files.
+CHECKOUT_MODES = frozenset({"chmod", "chown", "chgrp", "chattr"})
+# Their last argument is where they write (or `-t DIR`).
+CHECKOUT_COPIERS = frozenset({"cp", "install", "ln", "rsync", "scp", "ditto", "rclone"})
+# Installs, builds, tests and what runs them: they write in the folder they run in.
+CHECKOUT_BUILDERS = frozenset(
+    {"npm", "npx", "pnpm", "pnpx", "yarn", "bun", "bunx", "deno", "pip", "pip3", "pipx", "uv",
+     "uvx", "poetry", "pipenv", "pdm", "hatch", "rye", "pixi", "conda", "mamba", "micromamba",
+     "cargo", "rustup", "go", "make", "gmake", "cmake", "ninja", "meson", "gradle", "gradlew",
+     "mvn", "mvnw", "ant", "bazel", "bazelisk", "sbt", "dotnet", "swift", "xcodebuild", "pytest",
+     "py.test", "tox", "nox", "pre-commit", "ruff", "black", "isort", "prettier", "eslint",
+     "tsc", "jest", "vitest", "mypy", "pyright", "coverage", "bundle", "rake", "gem",
+     "composer", "mix", "stack", "cabal", "flutter", "dart", "terraform", "tofu", "pod",
+     "mise", "asdf", "volta", "corepack", "maturin", "twine", "lerna", "nx", "turbo",
+     "webpack", "vite", "rollup", "esbuild", "babel", "jupyter", "sphinx-build", "mkdocs",
+     "hugo", "jekyll", "rails", "django-admin", "alembic", "venv", "virtualenv", "build",
+     "unittest", "nose2", "behave", "playwright", "cypress"}
+)  # fmt: skip
+# What a builder is asked that writes nothing where it runs: its version, its help, a list.
+CHECKOUT_BUILDER_READS = frozenset(
+    {"--version", "-V", "--help", "-h", "help", "version", "list", "ls", "show", "view", "info",
+     "outdated", "freeze", "doc", "metadata", "search", "why", "explain"}
+)  # fmt: skip
+# Options of a builder whose value is the folder it runs in.
+CHECKOUT_FOLDER_OPTIONS = frozenset(
+    {"-C", "--directory", "--prefix", "--cwd", "--project", "--project-dir", "--root",
+     "--manifest-path", "--dir", "--chdir", "--working-directory"}
+)  # fmt: skip
+# Programs that run another one (past their options): what that one does counts.
+CHECKOUT_WRAPPERS = frozenset(
+    {"env", "nice", "nohup", "stdbuf", "time", "command", "builtin", "exec", "caffeinate",
+     "sudo", "doas", "ionice", "chrt", "taskset", "timeout", "xargs", "watch", "unbuffer",
+     "flock", "setsid"}
+)  # fmt: skip
+# Their options that take a value (given apart).
+CHECKOUT_WRAPPER_VALUED = frozenset(
+    {"-n", "-u", "-o", "-e", "-i", "-I", "-L", "-P", "-d", "-E", "-s", "-k", "-c", "-t", "-g",
+     "-a", "--signal", "--kill-after", "--max-args", "--max-procs", "--delimiter", "-S",
+     "--user", "--group"}
+)  # fmt: skip
+# git's commands that change nothing of a checkout: its work tree, index or branches (fetch
+# and push move remote branches only; where a push goes is checked on its own). With
+# --output, what they write is read.
+GIT_READS_ONLY = frozenset(
+    {"status", "diff", "show", "log", "blame", "annotate", "grep", "ls-files", "ls-tree",
+     "ls-remote", "cat-file", "rev-parse", "rev-list", "shortlog", "describe", "for-each-ref",
+     "show-ref", "show-branch", "merge-base", "name-rev", "count-objects", "help", "version",
+     "var", "check-ignore", "check-attr", "check-ref-format", "whatchanged", "range-diff",
+     "fetch", "verify-commit", "verify-tag", "cherry", "diff-tree", "diff-files", "diff-index",
+     "get-tar-commit-id", "fsck", "difftool", "push", "send-pack"}
+)  # fmt: skip
+# git's commands that only list or show when given one of these words, or (GIT_BARE_LISTS)
+# none and only GIT_LIST_OPTIONS.
+GIT_LISTING = {"branch": (), "tag": (), "stash": ("list", "show"), "worktree": ("list",),
+               "remote": ("show", "get-url"), "reflog": ("show", "exists"),
+               "notes": ("list", "show"), "submodule": ("status", "summary"),
+               "sparse-checkout": ("list",), "lfs": ("ls-files", "status", "env", "version"),
+               "bisect": ("log", "visualize", "view")}  # fmt: skip
+GIT_BARE_LISTS = frozenset({"branch", "tag", "remote", "reflog", "notes", "submodule"})
+GIT_LIST_OPTIONS = frozenset(
+    {"-a", "--all", "-r", "--remotes", "-l", "--list", "-v", "-vv", "--verbose",
+     "--show-current", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+     "--sort", "--format", "--column", "--no-column", "--color", "--no-color", "-n",
+     "--ignore-case", "--abbrev", "-q", "--quiet", "--cached", "--recursive"}
+)  # fmt: skip
+GIT_CHANGES = frozenset(
+    {"add", "am", "apply", "bisect", "branch", "checkout", "cherry-pick", "clean", "commit",
+     "config", "gc", "merge", "mv", "notes", "prune", "pull", "read-tree", "rebase", "replace",
+     "repack", "reset", "restore", "revert", "rm", "sparse-checkout", "stash", "submodule",
+     "switch", "symbolic-ref", "tag", "update-index", "update-ref", "worktree", "checkout-index",
+     "merge-file", "maintenance", "lfs", "filter-branch", "filter-repo", "commit-tree",
+     "hash-object", "write-tree", "remote", "reflog", "pack-refs", "prune-packed",
+     "commit-graph", "multi-pack-index", "rerere", "mergetool", "stage", "unpack-objects",
+     "index-pack", "fast-import", "init", "clone", "format-patch"}
+)  # fmt: skip
+# Interpreters: a program not known, but `-m TOOL` runs that tool (a builder: pytest, pip);
+# with a script, that script is the program they run.
+CHECKOUT_INTERPRETERS = re.compile(r"python[\d.]*|py|pypy[\d.]*")
+SCRIPT_RUNNERS = re.compile(
+    r"python[\d.]*|py|pypy[\d.]*|node|ruby|php|Rscript|julia|lua|osascript|tclsh|"
+    r"bash|sh|zsh|dash|ksh|fish"
+)
+GLOB = re.compile(r"[*?\[]")
+# A sed script's `w FILE` (or `s///w FILE`): a file it writes.
+SED_WRITES = re.compile(r"(?:^|[;{}\n])\s*[0-9,$/]*\s*[wW]\s*\S|/[gpiIme0-9]*w\s*\S")
+HOME = str(Path("~").expanduser())
+
+
+def checkout_places(kept: tuple[str, ...]) -> tuple[str, ...]:
+    """The read-only checkouts' folders as they may be named: as given, and as the system
+    resolves them (macOS's /var is /private/var)."""
+    places = set()
+    for folder in kept:
+        for form in (os.path.normpath(folder), os.path.realpath(folder)):
+            places.add(form.rstrip("/") or "/")
+    return tuple(sorted(places))
+
+
+class CheckoutWrites:
+    """What a line does in a checkout of the owner's given only to read (`kept`), as
+    checkout_write reads it: `found` is CHECKOUT_WRITES (it writes there), CHECKOUT_ASKS (a
+    program not known runs there on its files, or what it writes could not be read in a line
+    that runs or names one there), or ""."""
+
+    def __init__(self, text: str, kept: tuple[str, ...]):
+        self.places = checkout_places(kept)
+        text = text.replace("\\\n", "")
+        self.mentioned = any(place in text for place in self.places) or any(
+            place.startswith(HOME + "/") and "~" + place[len(HOME) :] in text
+            for place in self.places
+        )
+        self.found = ""
+        self.links: dict[str, str] = {}  # Links the line makes (`ln -s`): where to, what.
+
+    def inside(self, path: str, real: bool = False) -> bool:
+        if any(path == place or path.startswith(place + "/") for place in self.places):
+            return True
+        if not real:
+            return False
+        resolved = os.path.realpath(path)  # (A link into it: where the system writes.)
+        return any(resolved == place or resolved.startswith(place + "/") for place in self.places)
+
+    def there(self, folder: str | None) -> bool:
+        """Whether a folder is in a read-only checkout (one not known: when the line names
+        one)."""
+        return self.mentioned if folder is None else self.inside(folder, real=True)
+
+    def near(self, folder: str | None) -> bool:
+        """Whether what a line writes where it can't be read may be in a read-only checkout:
+        it runs in one (or where is not known), or names one."""
+        return self.mentioned or folder is None or self.inside(folder, real=True)
+
+    def ask(self):
+        self.found = self.found or CHECKOUT_ASKS
+
+    def place(self, word: str, folder: str | None) -> str | None:
+        """Where a word names a file, from `folder` (None: not known, as a variable's)."""
+        if not word or "$" in word or "`" in word or MADE_UP in word:
+            return None
+        if word.startswith("~"):
+            if not word.startswith(("~/", "~")) or (word != "~" and not word.startswith("~/")):
+                return None  # (Another account's home.)
+            word = HOME + word[1:]
+        if match := GLOB.search(word):
+            word = word[: match.start()].rpartition("/")[0] or ("/" if word[0] == "/" else ".")
+        if not word.startswith("/"):
+            if folder is None:
+                return None
+            word = f"{folder}/{word}"
+        return os.path.normpath(word)
+
+    def writes(self, word: str, folder: str | None):
+        """A file the line writes (or moves, or removes); through a link it made, its target."""
+        where = self.place(word, folder)
+        for link, target in self.links.items():
+            if where is not None and (where == link or where.startswith(link + "/")):
+                where = target + where[len(link) :]
+        if where is None:
+            if self.near(folder):
+                self.ask()
+        elif self.inside(where, real=True):
+            self.found = CHECKOUT_WRITES
+
+    def runs_in(self, folder: str | None):
+        """A program that writes in the folder it runs in (an install, a build, a test run)."""
+        if folder is None:
+            if self.mentioned:
+                self.ask()
+        elif self.inside(folder, real=True):
+            self.found = CHECKOUT_WRITES
+
+    def unknown(self, name: str, arguments: list[str], folder: str | None):
+        """A program not known: asked about when it is in a read-only checkout, or runs in one
+        on files there."""
+        if "/" in name and (program := self.place(name, folder)) and self.inside(program, True):
+            self.ask()
+            return
+        if folder is None or not self.inside(folder, real=True):
+            return
+        for word in arguments:
+            value = word.partition("=")[2] if word.startswith("-") else word
+            where = self.place(value, folder) if value else None
+            if where and self.inside(where) and ("/" in value or os.path.lexists(where)):
+                self.ask()
+                return
+
+    def either(self, one: str | None, other: str | None) -> str | None:
+        """Where a command runs that may run in either folder: one in a read-only checkout, if
+        either is (or one not known)."""
+        if one is None or other is None:
+            return None
+        return one if self.inside(one, real=True) or not self.inside(other, real=True) else other
+
+    def moved(self, folder: str | None, target: str) -> str | None:
+        """The folder `cd target` goes to from `folder` (None: not known)."""
+        if not target or target == "-" or GLOB.search(target):
+            return None
+        return self.place(target, folder)
+
+    def command(self, words: list[str], targets: list[str], folder: str | None) -> list[str]:
+        """One simple command (its redirections' targets apart): what it writes. The lines it
+        runs (`sh -c '…'`, `eval`)."""
+        for target in targets:
+            self.writes(target, folder)
+        name, start = command_name(words)
+        rest = list(words[start:])
+        fed = False  # Its files come from its input (xargs).
+        base = name.rsplit("/", 1)[-1]
+        while base in CHECKOUT_WRAPPERS and "/" not in name:
+            if base == "env":
+                while rest and (rest[0].startswith("-") or ASSIGNMENT.match(rest[0])):
+                    option = rest.pop(0)
+                    if option in {"-C", "--chdir"} and rest:
+                        folder = self.moved(folder, rest.pop(0))
+                    elif option in {"-u", "--unset", "-S", "--split-string"} and rest:
+                        rest.pop(0)
+            else:
+                fed = fed or base == "xargs"
+                while rest and rest[0].startswith("-") and rest[0] != "-":
+                    option = rest.pop(0)
+                    if option in CHECKOUT_WRAPPER_VALUED and rest:
+                        rest.pop(0)
+                if base == "timeout" and rest:
+                    rest.pop(0)  # (Its duration.)
+            if not rest:
+                return []
+            name, rest = rest[0], rest[1:]
+            base = name.rsplit("/", 1)[-1]
+        if not name or (words[:1] and words[0] in {"for", "select", "case"}):
+            return []  # (A loop's or a case's words: what it runs comes after `do`, `)`.)
+        scripts = inner_scripts([name, *rest]) + evaluated([name, *rest])[0]
+        if scripts:
+            return scripts
+        positional = [word for word in rest if not word.startswith("-") or word == "-"]
+        if fed and base not in CHECKOUT_READERS:
+            # Its files come from its input: wherever the line runs or names.
+            if base in CHECKOUT_MAKERS | CHECKOUT_MODES | CHECKOUT_COPIERS | {"sed", "perl"}:
+                if self.there(folder) or self.mentioned:
+                    self.found = CHECKOUT_WRITES
+            elif self.there(folder):
+                self.ask()
+        if base in CHECKOUT_READERS:
+            if base == "gh" and rest[:2] in (["pr", "checkout"], ["repo", "clone"]):
+                self.runs_in(folder)
+            return []
+        if base in CHECKOUT_MAKERS:
+            for word in positional:
+                self.writes(word, folder)
+        elif base in CHECKOUT_MODES:
+            reference = any(word.startswith("--reference") for word in rest)
+            for word in positional if reference else positional[1:]:
+                self.writes(word, folder)
+        elif base in CHECKOUT_COPIERS:
+            self.copies(base, rest, positional, folder)
+        elif handler := CHECKOUT_SPECIAL.get(base):
+            handler(self, rest, positional, folder)
+        elif CHECKOUT_INTERPRETERS.fullmatch(base) and "-m" in rest:
+            module = rest[rest.index("-m") + 1] if rest.index("-m") + 1 < len(rest) else ""
+            if module.split(".")[0] in CHECKOUT_BUILDERS | {"pip"}:
+                self.runs_in(folder)
+            else:
+                self.unknown(name, rest, folder)
+        elif base in CHECKOUT_BUILDERS:
+            self.builds(base, rest, folder)
+        elif SCRIPT_RUNNERS.fullmatch(base) and positional and positional[0] != "-":
+            self.unknown(positional[0], rest, folder)  # (Its script: the program it runs.)
+        else:
+            self.unknown(name, rest, folder)
+        return []
+
+    def copies(self, base: str, rest: list[str], positional: list[str], folder: str | None):
+        """cp, ln, install, rsync…: where they write (`-t DIR`, or their last argument)."""
+        targets = [b for a, b in itertools.pairwise(rest) if a in {"-t", "--target-directory"}]
+        targets += [w.partition("=")[2] for w in rest if w.startswith("--target-directory=")]
+        plain = [w for w in positional if not (base in {"rsync", "scp"} and ":" in w)]
+        if not targets:
+            if base == "ln" and len(plain) == 1:
+                targets = [plain[0].rstrip("/").rsplit("/", 1)[-1]]  # (Made where it runs.)
+            elif base == "install" and "-d" in rest:
+                targets = plain
+            else:
+                targets = plain[-1:]
+        for target in targets:
+            self.writes(target, folder)
+        if base == "ln" and plain:
+            # What it writes through the links later (`chmod`, `>`): their targets.
+            source = self.place(plain[0], folder)
+            for target in targets:
+                if (link := self.place(target, folder)) and source:
+                    self.links[link] = source
+
+    def builds(self, base: str, rest: list[str], folder: str | None):
+        """An install, build or test tool: it writes in the folder it runs in (or the one an
+        option names), unless all it is asked is its version, its help or a list."""
+        plain = [word for word in rest if not word.startswith("-")]
+        if (plain[:1] and plain[0] in CHECKOUT_BUILDER_READS) or (
+            not plain and rest and set(rest) <= CHECKOUT_BUILDER_READS
+        ):
+            return
+        where = folder
+        for at, word in enumerate(rest):
+            option, _, value = word.partition("=")
+            if option in CHECKOUT_FOLDER_OPTIONS:
+                value = value or (rest[at + 1] if at + 1 < len(rest) else "")
+                if option == "--manifest-path":
+                    value = value.rpartition("/")[0] or "."
+                where = self.moved(where, value)
+        self.runs_in(where)
+
+    def line(self, text: str, folder: str | None) -> list[tuple[str, str | None]]:
+        """A line's simple commands, each where it runs (`cd`, `pushd`, `popd`; a subshell's
+        moves end with it): what each writes. The lines its commands run, and where."""
+        if len(text) > MOST_LINE:
+            raise TooComplexError
+        unheredoc, bodies = heredocs(text)
+        plain, inside = without_substitutions(without_comments(unheredoc).replace("\\\n", ""))
+        for body, quoted in bodies:
+            if not quoted:
+                inside += without_substitutions(body, quoted=True)[1]
+        runs = [(body, folder) for body in inside]
+        tokens = shell_words(plain)
+        words: list[str] = []
+        targets: list[str] = []
+        stack: list[str | None] = []
+        pushed: list[str | None] = []
+        target = ""
+        fed_shell = False
+        # What joined this command to the one before ("" for none: a list's start); whether a
+        # move in its `&&` list may not have run, so that after the list, where is not known.
+        joiner, unsure, start_of_list = "", False, folder
+        for index, token in enumerate([*tokens, Separator(";")]):
+            if isinstance(token, Separator):
+                following = tokens[index + 1] if index + 1 < len(tokens) else None
+                ampersand = str(token) == "&"
+                if ampersand and target == ">" and following is not None:
+                    target = "copy"  # (`2>&1`, `>&2`: a descriptor's copy, not a file.)
+                    continue
+                if ampersand and isinstance(following, Redirecting):
+                    continue  # (`&>log`: its file read with the redirection.)
+                name, start = command_name(words)
+                base = name.rsplit("/", 1)[-1]
+                if base in {"cd", "pushd", "popd"}:
+                    rest = [word for word in words[start:] if not word.startswith("-")]
+                    before = folder
+                    if base == "popd":
+                        folder = pushed.pop() if pushed else None
+                    else:
+                        if base == "pushd":
+                            pushed.append(folder)
+                        folder = self.moved(folder, rest[0] if rest else "~")
+                    if joiner == "||":
+                        folder = self.either(before, folder)  # (It may not have run.)
+                    elif (joiner == "&&" or words[:1] in (["then"], ["do"], ["else"])) and (
+                        folder != before
+                    ):
+                        unsure, start_of_list = True, before  # (Sure in its `&&` list.)
+                elif base in {"source", "."}:
+                    self.unknown(name, words[start:], folder)
+                    file = words[start] if start < len(words) else ""
+                    if (where := self.place(file, folder)) and self.inside(where, real=True):
+                        self.ask()
+                    folder = None  # (Where it leaves the shell: not known.)
+                elif words or targets:
+                    if base in FED_SHELLS and not any(w[:1] != "-" for w in words[start:]):
+                        fed_shell = True  # (A shell running what its input says.)
+                    runs += [(script, folder) for script in self.command(words, targets, folder)]
+                words, targets, target = [], [], ""
+                operator = token.strip("()")
+                joiner = (
+                    "||" if "||" in operator else "&&" if "&&" in operator
+                    else "|" if "|" in operator else ";" if operator else joiner
+                )  # fmt: skip
+                if joiner in {";", "|"} and unsure and "(" not in token:
+                    folder, unsure = self.either(start_of_list, folder), False
+                if "(" in token:
+                    stack.append(folder)
+                    joiner = ""
+                if ")" in token and stack:
+                    folder = stack.pop()
+                continue
+            if target:
+                if target == ">":
+                    targets.append(token)
+                target = ""
+                continue
+            if isinstance(token, Redirecting):
+                operator = token[token.at :]
+                found = REDIRECTION.match(operator)
+                writes = ">" in operator[: found.end() if found else 0]
+                file = operator[found.end() :] if found else ""
+                if file and writes and not file.startswith("&"):
+                    targets.append(file)
+                elif not file:
+                    target = ">" if writes else "<"
+                head = token[: token.at]
+                if head and not head.isdigit():
+                    words.append(head)
+                continue
+            words.append(token)
+        if fed_shell:
+            runs += [(body, folder) for body, _ in bodies]
+        return runs
+
+
+CheckoutHandler = Callable[[CheckoutWrites, list[str], list[str], "str | None"], None]
+CHECKOUT_SPECIAL: dict[str, CheckoutHandler] = {}
+
+
+def reads_for(*names: str) -> Callable[[CheckoutHandler], CheckoutHandler]:
+    """How a program's words say what it writes (CheckoutWrites.command)."""
+
+    def register(handler: CheckoutHandler) -> CheckoutHandler:
+        for name in names:
+            CHECKOUT_SPECIAL[name] = handler
+        return handler
+
+    return register
+
+
+@reads_for("sed")
+def checkout_sed(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    """sed changes its files in place with -i; a script's `w FILE` writes where that is not
+    read here."""
+    scripts = [b for a, b in itertools.pairwise(rest) if a in {"-e", "--expression", "-f"}]
+    files = positional if scripts else positional[1:]
+    if any(w.startswith("--in-place") or (w[:2] != "--" and w[:1] == "-" and "i" in w)
+           for w in rest):  # fmt: skip
+        for word in files:
+            guard.writes(word, folder)
+    elif SED_WRITES.search(" ".join(scripts or positional[:1])) and guard.near(folder):
+        guard.ask()
+
+
+@reads_for("perl")
+def checkout_perl(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    """perl changes its files in place with -i; else it runs code: a program not known."""
+    scripts = [b for a, b in itertools.pairwise(rest) if a in {"-e", "-E"}]
+    if any(w[:2] != "--" and w[:1] == "-" and "i" in w for w in rest):
+        files = [w for w in positional if w not in scripts]
+        for word in files if scripts else files[1:]:
+            guard.writes(word, folder)
+    else:
+        guard.unknown("perl", rest, folder)
+
+
+@reads_for("awk", "gawk", "mawk", "nawk")
+def checkout_awk(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    """awk changes its files in place with `-i inplace`; a program that prints into a file or
+    runs a command writes where that is not read here."""
+    if "inplace" in rest:
+        for word in positional[1:]:
+            guard.writes(word, folder)
+    elif positional and re.search(r">|\bsystem\b|\|", positional[0]) and guard.near(folder):
+        guard.ask()
+
+
+@reads_for("sort")
+def checkout_sort(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    for before, word in itertools.pairwise(["", *rest]):
+        if before in {"-o", "--output"}:
+            guard.writes(word, folder)
+        elif word.startswith("--output="):
+            guard.writes(word.partition("=")[2], folder)
+        elif word.startswith("-o") and len(word) > 2:
+            guard.writes(word[2:], folder)
+
+
+@reads_for("uniq", "xxd")
+def checkout_second(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    """uniq IN OUT, xxd [-r] IN OUT: their second file is written."""
+    if len(positional) > 1:
+        guard.writes(positional[1], folder)
+
+
+@reads_for("dd")
+def checkout_dd(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    for word in rest:
+        if word.startswith("of="):
+            guard.writes(word[3:], folder)
+
+
+@reads_for("split", "csplit")
+def checkout_split(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    prefix = [b for a, b in itertools.pairwise(rest) if a in {"-f", "--prefix"}]
+    guard.writes(prefix[-1] if prefix else (positional[1] if len(positional) > 1 else "x"), folder)
+
+
+@reads_for("patch")
+def checkout_patch(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    """patch writes the files its diff names, where it runs (or -d DIR), or the one named."""
+    where = folder
+    for before, word in itertools.pairwise(["", *rest]):
+        if before in {"-d", "--directory"}:
+            where = guard.moved(where, word)
+        elif before in {"-o", "--output"}:
+            guard.writes(word, folder)
+    for word in positional[:1]:
+        guard.writes(word, where)
+    guard.runs_in(where)
+
+
+@reads_for("tar", "bsdtar", "gtar")
+def checkout_tar(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    """tar: extracting writes where it runs (or -C DIR); creating writes its archive (-f)."""
+    first = rest[0] if rest else ""
+    letters = first.lstrip("-") if not first.startswith("--") else ""
+    options = {word.split("=")[0] for word in rest if word.startswith("--")}
+    extract = "x" in letters or bool(options & {"--extract", "--get"})
+    create = bool(set(letters) & set("cru")) or bool(options & {"--create", "--append"})
+    where, archive = folder, ""
+    for at, word in enumerate(rest):
+        value = rest[at + 1] if at + 1 < len(rest) else ""
+        if word in {"-C", "--directory"}:
+            where = guard.moved(where, value)
+        elif word.startswith("--directory="):
+            where = guard.moved(where, word.partition("=")[2])
+        elif word in {"-f", "--file"} or (at == 0 and "f" in letters and word == first):
+            archive = value
+        elif word.startswith("--file="):
+            archive = word.partition("=")[2]
+    if extract:
+        guard.runs_in(where)
+    if create and archive and archive != "-":
+        guard.writes(archive, folder)
+
+
+@reads_for("unzip")
+def checkout_unzip(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    if set(rest) & {"-l", "-t", "-v", "-Z", "-p", "-z", "-lv"}:
+        return
+    where = folder
+    for before, word in itertools.pairwise(["", *rest]):
+        if before == "-d":
+            where = guard.moved(where, word)
+    guard.runs_in(where)
+
+
+@reads_for("zip")
+def checkout_zip(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    for word in positional[:1]:
+        guard.writes(word, folder)
+
+
+@reads_for("curl")
+def checkout_curl(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    where = folder
+    for at, word in enumerate(rest):
+        option, _, value = word.partition("=")
+        value = value or (rest[at + 1] if at + 1 < len(rest) else "")
+        if option in {"-o", "--output", "-D", "--dump-header", "-c", "--cookie-jar", "--trace",
+                      "--trace-ascii", "--libcurl", "--etag-save"}:  # fmt: skip
+            if value != "-":
+                guard.writes(value, folder)
+        elif option == "--output-dir":
+            where = guard.moved(folder, value)
+        elif option in {"--remote-name", "--remote-name-all", "--remote-header-name"} or (
+            option[:1] == "-" and option[1:2] != "-" and ("O" in option or "J" in option)
+        ):
+            guard.runs_in(where)
+
+
+@reads_for("wget")
+def checkout_wget(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    where, named = folder, False
+    for at, word in enumerate(rest):
+        option, _, value = word.partition("=")
+        value = value or (rest[at + 1] if at + 1 < len(rest) else "")
+        if option in {"-O", "--output-document", "-o", "--output-file", "-a", "--append-output"}:
+            named = named or option in {"-O", "--output-document"}
+            if value != "-":
+                guard.writes(value, folder)
+        elif option in {"-P", "--directory-prefix"}:
+            where = guard.moved(folder, value)
+        elif option == "--spider":
+            named = True
+    if not named:
+        guard.runs_in(where)
+
+
+@reads_for("find")
+def checkout_find(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    """find: what it deletes or writes (-delete, -fprint…) under the folders it searches, and
+    the commands it runs on what it finds there (-exec…)."""
+    roots: list[str] = []
+    for word in rest:
+        if word[:1] in {"-", "(", "!"}:
+            break
+        roots.append(word)
+    places = [guard.place(root, folder) for root in roots] or [folder]
+    if not any(guard.there(place) for place in places):
+        return
+    for at, word in enumerate(rest):
+        if word in {"-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}:
+            guard.found = CHECKOUT_WRITES
+        elif word in {"-exec", "-execdir", "-ok", "-okdir"}:
+            run = list(itertools.takewhile(lambda part: part not in {";", "+"}, rest[at + 1 :]))
+            name = run[0].rsplit("/", 1)[-1] if run else ""
+            in_place = name in {"sed", "perl"} and any(
+                part[:1] == "-" and part[:2] != "--" and "i" in part for part in run[1:]
+            )
+            if name in CHECKOUT_MAKERS | CHECKOUT_MODES | CHECKOUT_COPIERS or in_place:
+                guard.found = CHECKOUT_WRITES
+            elif name not in CHECKOUT_READERS | {"sed"}:
+                guard.ask()
+
+
+@reads_for("git")
+def checkout_git(guard: CheckoutWrites, rest: list[str], positional: list[str], folder):
+    """git: a command that changes a read-only checkout's work tree, index or repository
+    (commit, checkout, stash, branch -d, config…) writes there; one git does not have (an
+    alias), asked about; one that reads, only what it writes out (--output)."""
+    places: list[str | None] = [folder]
+    at = 0
+    while at < len(rest) and rest[at].startswith("-"):
+        option, _, value = rest[at].partition("=")
+        if option in GIT_VALUED and not value:
+            at += 1
+            value = rest[at] if at < len(rest) else ""
+        if option == "-C":
+            places[0] = guard.moved(places[0], value)
+        elif option in {"--work-tree", "--git-dir"}:
+            places.append(guard.moved(folder, value))
+        at += 1
+    command, words = (rest[at], rest[at + 1 :]) if at < len(rest) else ("", [])
+    plain = [word for word in words if not word.startswith("-")]
+    options = {word.split("=")[0] for word in words if word.startswith("-")}
+    for word in words:
+        if word.startswith("--output="):
+            guard.writes(word.partition("=")[2], places[0])
+    if command == "clone":
+        made = plain[0].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") if plain else ""
+        guard.writes(plain[1] if len(plain) > 1 else made or ".", places[0])
+        return
+    if command == "init":
+        guard.writes(plain[0] if plain else ".", places[0])
+        return
+    if command in {"archive", "bundle", "format-patch"}:
+        for before, word in itertools.pairwise(["", *words]):
+            if before in {"-o", "--output", "--output-directory"}:
+                guard.writes(word, places[0])
+        if command == "bundle" and plain[:1] == ["create"] and len(plain) > 1:
+            guard.writes(plain[1], places[0])
+        if command == "format-patch" and not options & {"-o", "--output-directory", "--stdout"}:
+            guard.runs_in(places[0])
+        return
+    if not command or not any(guard.there(place) for place in places):
+        return
+    if command in GIT_READS_ONLY:
+        return
+    if command in GIT_LISTING:
+        bare = command in GIT_BARE_LISTS and not plain and options <= GIT_LIST_OPTIONS
+        if bare or (plain[:1] and plain[0] in GIT_LISTING[command]):
+            return
+        if command == "tag" and options & {"-l", "--list"}:
+            return
+    reads_config = (
+        bool(options & CONFIG_READS)
+        or plain[:1] in (["get"], ["list"])
+        or (not options & CONFIG_CHANGES and len(plain) < 2 and plain[:1] != ["set"])
+    )
+    if command == "config" and reads_config and not config_change(["config", *words])[0]:
+        return
+    checks = options & {"--check", "--stat", "--numstat", "--summary"}
+    applies = options & {"--index", "--cached", "--3way", "-3", "--apply"}
+    if command == "apply" and checks and not applies:
+        return
+    if command == "clean" and options & {"-n", "--dry-run"}:
+        return
+    if command in GIT_CHANGES:
+        guard.found = CHECKOUT_WRITES
+    else:
+        guard.ask()  # (An alias, or a command of its own: what it does is not read here.)
+
+
+@functools.lru_cache(maxsize=256)
+def checkout_write(command: str, cwd: str, kept: tuple[str, ...]) -> str:
+    """Whether a shell command line, run in `cwd`, writes in one of the owner's checkouts a
+    worker was given only to read (`kept`): CHECKOUT_WRITES when it does, as far as can be
+    read (a redirection or a program writing a file there; git changing its work tree, index
+    or repository; an install, a build or a test run there); CHECKOUT_ASKS for a program not
+    known run there on files there, or a write where it can't be read in a line that runs in
+    one or names one; "" otherwise. Read as the shell reads it: `cd` in the line, subshells,
+    `sh -c`, `eval`, substitutions, a shell's script on its input (MOST_NESTED deep). A line
+    past what is read here, run in one or naming one: CHECKOUT_ASKS."""
+    if not kept:
+        return ""
+    guard = CheckoutWrites(command, kept)
+    pending: list[tuple[str, str | None, int]] = [(command, cwd or None, 0)]
+    try:
+        while pending and guard.found != CHECKOUT_WRITES:
+            text, folder, depth = pending.pop()
+            if depth > MOST_NESTED:
+                raise TooComplexError
+            pending += [(line, where, depth + 1) for line, where in guard.line(text, folder)]
+    except (ValueError, TooComplexError, IndexError):
+        if guard.near(cwd or None):
+            return guard.found or CHECKOUT_ASKS
+    return guard.found
+
+
 def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | None:
-    """Why a worker may not write this file: it is in a git checkout of the owner's it was given
-    only to read (a task that changes no code, see Workspaces.writes). Also when it acts without
-    permission checks (yolo): the owner's checkouts are never written."""
-    if row["role"] != WORKER or getattr(request, "kind", "") != "write":
+    """Why a worker may not write this file, or run this command line: it is in (it writes in)
+    a git checkout of the owner's it was given only to read (a task that changes no code, see
+    Workspaces.writes); a program not known, run there on its files, asks first. Also when it
+    acts without permission checks (yolo), and with no system sandbox (Codex always; Copilot
+    with the worker sandbox off): the owner's checkouts are never written."""
+    kind = getattr(request, "kind", "")
+    if row["role"] != WORKER or kind not in {"write", "shell"}:
         return None
-    target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "")
-    if not Path(target).is_absolute():
-        target = str(Path(row["cwd"]) / target)
     kept = [
         c["path"]
         for c in checkouts
         if c.get("shared") and c.get("git_dir") and not c.get("in_place")
     ]
+    if not kept:
+        return None
+    if kind == "shell":
+        command = getattr(request, "full_command_text", "") or ""
+        folder = (
+            getattr(request, "resolved_working_directory", None)
+            or getattr(request, "cwd", None)
+            or row["cwd"]
+        )
+        found = checkout_write(command, str(folder or ""), tuple(kept))
+        if found == CHECKOUT_WRITES:
+            return OWNERS_CHECKOUT
+        return OWNERS_CHECKOUT_ASK if found == CHECKOUT_ASKS else None
+    target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "")
+    if not Path(target).is_absolute():
+        target = str(Path(row["cwd"]) / target)
     if not any(within(target, folder) for folder in kept):
         return None
-    return (
-        "This folder is the owner's own checkout: nothing is written there. To change it or run "
-        "what writes files (installs, builds, tests), add_repo it: you get your own worktree and "
-        "branch, and work there."
-    )
+    return OWNERS_CHECKOUT
 
 
 def permission_denial(row: dict, request: Any, writable: list[str] | None = None) -> str | None:

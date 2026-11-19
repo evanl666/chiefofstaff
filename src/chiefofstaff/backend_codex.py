@@ -2870,6 +2870,7 @@ class CodexSession:
                 kind="shell",
                 full_command_text=text,
                 shell=shell,  # As the policy reads it (zsh: Tally.zsh).
+                cwd=params.get("cwd") or None,  # Where it runs (policy.owners_checkout).
                 intention=params.get("reason") or "",
                 commands=[],
                 possible_paths=[],

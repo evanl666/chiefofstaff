@@ -310,8 +310,12 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   changes, on branch `chief/<task>`, started from the latest default branch of `origin`. Your
   checkouts are never touched, and parallel workers never share one: two agents in one folder
   would overwrite each other's files and switch each other's branches. A task that changes no
-  code may read your own checkout, but nothing it does writes there (its edits are refused and,
-  sandboxed, its commands cannot): to run tests or install, it takes a worktree of its own.
+  code may read your own checkout, but nothing it does writes there: its edits are refused, and
+  so are its commands that write there (a redirection, `tee`, `sed -i`, `cp`, `mv`, `rm`,
+  `touch`, git that changes files, the index or branches, an install, a build or a test run),
+  with or without the sandbox, acting on its own or not; a program Chief of Staff can't read,
+  run there on files there, asks you first. To run tests or install, it takes a worktree of its
+  own.
   Ask in so many words for the work to be done directly in your folder (no worktree), and that
   worker may change it.
 - Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
@@ -1156,7 +1160,8 @@ new workers use cannot run, they start on Copilot and their chat says why.
   sessions keep them; a Codex worker's name says so in its tooltip when you have them on.
 - **Sandbox:** Codex workers run as Copilot workers do with the sandbox off, with your caches,
   tools and network (`danger-full-access`); your own Codex `sandbox_mode` is not applied to them.
-  Every edit still asks Chief of Staff first, so your own checkouts stay read-only to them.
+  Every edit and every command that writes still asks Chief of Staff first, so your own
+  checkouts stay read-only to them.
   Their commands run without a login shell, with the environment and `PATH` a Copilot worker's
   commands get; Codex puts its own helpers first on `PATH` and sets a few variables of its own
   (such as `LANG` and `LC_ALL` to `C.UTF-8`, `TERM=dumb`, `PAGER=cat`).

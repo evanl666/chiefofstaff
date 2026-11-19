@@ -452,6 +452,46 @@ async def test_a_worker_given_the_owners_checkout_to_read_cannot_write_there(tmp
     assert "owner's own checkout" in notices[-1] and "add_repo" in notices[-1]
 
 
+async def test_a_worker_given_the_owners_checkout_to_read_cannot_write_there_by_a_command(
+    tmp_path,
+):
+    """With no system sandbox (a Codex worker; Copilot with it off), acting on its own or not:
+    `echo y >> AGENTS.md` in the owner's checkout it was given to read was let through (only its
+    edits were refused). Now refused as they are, saying why; a read goes through, and a program
+    not known run there on files there asks the owner."""
+    from types import SimpleNamespace
+
+    from conftest import Harness
+    from test_round7_split import published, spawn
+
+    app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)], worker_sandbox=False))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Count", instructions="count lines",
+                       project=str(app))  # fmt: skip
+    (app / "tool.py").write_text("print(1)\n")
+
+    async def decided(line: str, cwd: str | None = None) -> str:
+        request = SimpleNamespace(kind="shell", full_command_text=line, cwd=cwd, commands=[],
+                                  possible_paths=[], possible_urls=[], intention="",
+                                  has_write_file_redirection=">" in line,
+                                  can_offer_session_approval=False)  # fmt: skip
+        decision = await runtime.events.on_permission(request, {"session_id": info["session_id"]})
+        return getattr(decision, "feedback", "") or type(decision).__name__
+
+    for yolo in ("on", "off"):
+        harness.store.execute("UPDATE sessions SET yolo=? WHERE id=?", (yolo, info["session_id"]))
+        assert "owner's own checkout" in await decided(f"echo y >> {app}/AGENTS.md"), yolo
+        assert "owner's own checkout" in await decided("git add -A && git commit -m x"), yolo
+        assert "owner's own checkout" in await decided("touch notes.txt", cwd=str(app)), yolo
+        assert await decided("head -1 README.md") == "PermissionDecisionApproveOnce", yolo
+        assert "ask the owner" in await decided("python3 tool.py"), yolo
+    assert (app / "README.md").read_text() == "# app\n" and not (app / "notes.txt").exists()
+    notices = [m["text"] for m in harness.store.messages(info["session_id"])
+               if m["kind"] == "notice"]  # fmt: skip
+    assert any("owner's own checkout" in text and "add_repo" in text for text in notices)
+
+
 def test_the_folder_a_git_command_makes_is_read_from_its_arguments():
     """Code review: a substring test took "app" as made by `git worktree add ../app-docs`
     (and `… && cd ../app`), leaving the task's own "app" checkout out of its receipts."""

@@ -2765,3 +2765,87 @@ def test_a_repository_config_that_would_stall_git_does_not_stall_the_check(tmp_p
     started = time.monotonic()
     assert policy.current_branches(str(work)) == set()
     assert time.monotonic() - started < 3
+
+
+# A shell line run in the owner's checkout given to read (K) or in the worker's own folder (O),
+# and what owners_checkout says of it: refused (W: it writes there), asked about (A: a program
+# not known runs there on its files), or let through ("").
+CHECKOUT_LINES = [
+    ("echo y >> {K}/AGENTS.md", "O", "W"), ("echo y >> AGENTS.md", "K", "W"),
+    ("cat AGENTS.md; sleep 1", "K", ""), ("grep -rn x src | head -5", "K", ""),
+    ("sed -n '1,80p' src/app.py", "K", ""), ("sed -i 's/1/2/' src/app.py", "K", "W"),
+    ("perl -pi -e 's/1/2/' {K}/src/app.py", "O", "W"), ("cat AGENTS.md | tee n.txt", "K", "W"),
+    ("cat {K}/AGENTS.md | tee n.txt", "O", ""), ("cp {K}/src/app.py .", "O", ""),
+    ("cp src/app.py src/b.py", "K", "W"), ("mv src/app.py src/c.py", "K", "W"),
+    ("rm -rf {K}/src", "O", "W"), ("touch new.txt", "K", "W"), ("mkdir -p build", "K", "W"),
+    ("chmod +x tool.py", "K", "W"), ("chmod 755 {O}/x", "K", ""), ("ln -s src/app.py l", "K", "W"),
+    ("git status", "K", ""), ("git diff HEAD~1 -- src", "K", ""), ("git branch -a", "K", ""),
+    ("git fetch origin", "K", ""), ("git stash list", "K", ""), ("git config user.name", "K", ""),
+    ("git add -A", "K", "W"), ("git commit -m x", "K", "W"), ("git checkout -b f", "K", "W"),
+    ("git stash", "K", "W"), ("git branch new", "K", "W"), ("git -C {K} reset --hard", "O", "W"),
+    ("git config user.name x", "K", "W"), ("git worktree add ../wt", "K", "W"),
+    ("git co main", "K", "A"), ("npm install", "K", "W"), ("npm --version", "K", ""),
+    ("uv run pytest", "K", "W"), ("python3 -m pytest -q", "K", "W"), ("make -C {K}", "O", "W"),
+    ("make", "O", ""), ("python3 tool.py", "K", "A"), ("python3 {K}/tool.py", "O", "A"),
+    ("./tool.py", "K", "A"), ("mytool src/app.py", "K", "A"), ("mytool --version", "K", ""),
+    ("python3 -c 'print(1)'", "K", ""), ("cd {K} && echo y > AGENTS.md", "O", "W"),
+    ("(cd {K} && cat AGENTS.md); echo y > AGENTS.md", "O", ""),
+    ("pushd {K}; touch z; popd; touch z", "O", "W"), ("cd {K}/src && touch ../a", "O", "W"),
+    ("bash -c 'echo y >> {K}/AGENTS.md'", "O", "W"), ("eval 'echo y > {K}/a'", "O", "W"),
+    ("cat > {K}/notes.md <<'EOF'\nhello\nEOF", "O", "W"),
+    ("bash <<'EOF'\necho y > {K}/a\nEOF", "O", "W"), ("echo y > $OUT", "K", "A"),
+    ("echo y > $OUT", "O", ""), ("find {K} -name '*.pyc' -delete", "O", "W"),
+    ("find {K} -name '*.py' -exec grep -l x {{}} +", "O", ""),
+    ("find {K} -name '*.pyc' | xargs rm", "O", "W"), ("tar -xzf {O}/a.tgz -C {K}", "O", "W"),
+    ("tar -czf {O}/a.tgz -C {K} .", "O", ""), ("curl -sL https://x/y -o {K}/y", "O", "W"),
+    ("wget https://x/y", "K", "W"), ("dd if=/dev/zero of={K}/z count=1", "O", "W"),
+    ("sort {K}/AGENTS.md > {O}/s.txt", "O", ""), ("ls 2>/dev/null; echo x >&2", "K", ""),
+    ("ls &> out.txt", "K", "W"), ("env A=1 timeout 5 rm -f a", "K", "W"),
+    ("awk '{{print > \"out\"}}' AGENTS.md", "K", "A"), ("awk '{{print $1}}' AGENTS.md", "K", ""),
+    ("touch {O}/../kept/a", "O", "W"), ("gh pr checkout 1", "K", "W"),
+    ("for f in *.py; do echo $f; done", "K", ""),
+    ("for f in *.py; do echo x >> $f; done", "K", "A"),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(("line", "where", "said"), CHECKOUT_LINES)
+def test_a_command_that_writes_in_the_owners_checkout_given_to_read_is_refused(
+    tmp_path, line, where, said
+):
+    """A worker given the owner's checkout to read, acting on its own (yolo) or with no system
+    sandbox (Codex; Copilot with it off): its edits there were refused, its shell commands not
+    (`echo y >> AGENTS.md` wrote there). What a command writes there is refused as the edits
+    are; a program not known run there on files there asks the owner; reads go through."""
+    kept, own = tmp_path / "kept", tmp_path / "own"
+    (kept / "src").mkdir(parents=True)
+    own.mkdir()
+    subprocess.run(["git", "init", "-q", str(kept)], check=True)
+    for name in ("AGENTS.md", "src/app.py", "tool.py"):
+        (kept / name).write_text("x\n")
+    command = line.format(K=kept, O=own)
+    row = {"role": "worker", "cwd": str(kept if where == "K" else own)}
+    checkouts = [{"path": str(kept), "shared": True, "git_dir": str(kept / ".git")},
+                 {"path": str(own), "branch": "chief/x"}]  # fmt: skip
+    request = SimpleNamespace(kind="shell", full_command_text=command)
+    found = policy.owners_checkout(row, request, checkouts)
+    expected = {"W": policy.OWNERS_CHECKOUT, "A": policy.OWNERS_CHECKOUT_ASK, "": None}[said]
+    assert found == expected, command
+    assert said != "W" or "owner's own checkout" in found
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="real bash")
+def test_what_the_checkout_check_lets_through_writes_nothing_there_in_real_bash(tmp_path, capsys):
+    """Lines of a safe vocabulary (tests/checkout_oracle.py), generated with a fixed seed, and
+    each command of it on its own, run in real bash in a sandbox with the owner's checkout given
+    to read: none the check lets through changed it (its files, index, HEAD, branches, stashes,
+    config). The rates are printed (pytest -s)."""
+    import checkout_oracle as oracle
+
+    generator = oracle.Generator(0)
+    cases = [generator.line() for _ in range(300)] + oracle.seeds()
+    outcomes = oracle.run(policy, cases, tmp_path)
+    unsound = [(o.where, o.line) for o in outcomes if o.changed and not o.verdict]
+    with capsys.disabled():
+        print(f"\ncheckout oracle: {oracle.rates(outcomes)}")  # noqa: T201
+    assert not unsound, unsound
+    assert sum(o.changed for o in outcomes) > 50, "the vocabulary writes there often enough"
