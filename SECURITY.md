@@ -155,8 +155,13 @@ Settings → *Coding agents*). For such a worker:
   is Claude Code's own, with no setting to turn it off: at a sandboxed worker's first command in a
   git repository, it adds the line `**/.claude/.cc-writes/` to your global git ignore file
   (unless git already ignores that folder) and makes an empty `.claude/.cc-writes/` staging
-  folder there and in the repository's main checkout. Each Claude worker runs your installed
-  `claude` itself, unmodified. Codex's
+  folder there and in the repository's main checkout. A worker's process updates nothing
+  (`DISABLE_AUTOUPDATER`: neither Claude nor your plugins or their marketplaces); it keeps
+  Claude's own caches as any of your signed-in sessions does (the hour's cache of your
+  Consumer Terms answer in `.claude.json`, the mark of each claude.ai skill sync round), and
+  never marks a notice as seen. A worktree Claude would make in your checkout (its repository's
+  main checkout, where `EnterWorktree` and a worktree-isolated subagent put one) is refused.
+  Each Claude worker runs your installed `claude` itself, unmodified. Codex's
   settings folder (`~/.codex`, and `$CODEX_HOME`) and Claude's (`~/.claude`, and
   `$CLAUDE_CONFIG_DIR`) cannot be added to *Also writable in the sandbox* while that agent is on:
   their hooks run outside any sandbox.

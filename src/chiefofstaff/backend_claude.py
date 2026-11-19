@@ -87,6 +87,7 @@ from .claude_tools import (
     under,
     widened_words,
     widening_found,
+    worktrees_home,
 )
 from .machine import kill_process_tree
 from .policy import GITHUB_MCP, private_denial, reads_only
@@ -1291,6 +1292,11 @@ class ClaudeWorker:
             "CHIEFOFSTAFF_AGENT_UNSET": " ".join(key for key in own if OWN_NAME.fullmatch(key)),
         }
         environment |= {"CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"}
+        # No updates from a worker's process (2.1.322's plugin autoupdate pass refreshes the
+        # owner's marketplaces, known_marketplaces.json, within ten minutes of a start; and
+        # Claude's own): the owner's own sessions keep them, and a new Claude version is
+        # checked before its workers go on.
+        environment |= {"DISABLE_AUTOUPDATER": "1"}
         if env_file := self.options.get("env_file"):
             # Its commands' caches (a sandboxed worker's init script, Runtime.cache_script):
             # Claude sources it before each command, as Copilot does a worker's.
@@ -2780,7 +2786,9 @@ class ClaudeWorker:
         this call may go on, why not when it may not, None for any other tool. A call the owner
         must allow first is marked to ask (`carded`: can_use_tool shows their card)."""
         if name in SUBAGENT_TOOLS:
-            return self.subagent_call(arguments, call)
+            return self.subagent_call(arguments, call) or await self.isolated_call(
+                arguments, call, cwd
+            )
         if name == "Workflow":
             return (
                 "Its agents' actions may not all reach Chief of Staff's checks, and this worker "
@@ -2851,6 +2859,23 @@ class ClaudeWorker:
             )
         return ""
 
+    async def isolated_call(self, arguments: dict, call: str, cwd: str) -> str:
+        """A subagent isolated in a worktree, which Claude makes in the repository's main
+        checkout (worktrees_home): as EnterWorktree, only where the worker may write."""
+        kind = str(arguments.get("subagent_type") or "general-purpose")
+        definition = None
+        if kind not in set((self.agent.checked or {}).get("agents") or BUILTIN_AGENTS):
+            folders = definition_folders(
+                config_folder(), self.cwd, project=self.trusted, plugins=self.plugin_paths
+            )
+            definition = agent_definition(kind, folders)
+        isolation = str(arguments.get("isolation") or (definition or {}).get("isolation") or "")
+        if isolation != "worktree":
+            return ""
+        if not (home := await asyncio.to_thread(worktrees_home, cwd)):
+            return ""
+        return await self.worktree_refusal(str(Path(home) / "agent"), call, "Agent")
+
     def cloud_call(self, call: str, what: str) -> str:
         """What runs in Anthropic's cloud: never for a worker that asks first, nor one with a
         token limit; else the owner's OK each time (their card)."""
@@ -2913,21 +2938,38 @@ class ClaudeWorker:
         return PermissionResultDeny(message="The owner said no: do it here instead.")
 
     async def entering_worktree(self, arguments: dict, cwd: str, call: str) -> str:
-        """A worktree Claude makes (in <repository>/.claude/worktrees/) or enters: as any write
-        there (not in a checkout it may only read, nor in another's)."""
+        """A worktree Claude makes (in its repository's main checkout: worktrees_home) or
+        enters: as any write there (not in a checkout it may only read, nor in another's)."""
         if given := str(arguments.get("path") or ""):
             target = joined(cwd, given)
         else:
-            top = next((f for f in [Path(cwd), *Path(cwd).parents] if (f / ".git").exists()), None)
-            if top is None:
+            if not (home := await asyncio.to_thread(worktrees_home, cwd)):
                 return ""  # Not in a repository: Claude says so itself.
-            target = str(top / ".claude" / "worktrees" / str(arguments.get("name") or ""))
+            target = str(Path(home) / str(arguments.get("name") or "worktree"))
+        return await self.worktree_refusal(target, call, "EnterWorktree")
+
+    async def worktree_refusal(self, target: str, call: str, tool: str) -> str:
+        """Why Claude may not make (or enter) a worktree at `target` ("" when it may): only in
+        the worker's own folders, where it is one of its checkouts (Runtime.agent_worktree),
+        and as any write there."""
+        instead = (
+            "Make it in your own folder instead (`git worktree add .claude/worktrees/<name>` "
+            "there), then use EnterWorktree with its path, or give a subagent that path as its "
+            "cwd."
+        )
+        if not await asyncio.to_thread(
+            under, target, [self.cwd, *(self.options.get("folders") or [])]
+        ):
+            return (
+                "Claude makes such a worktree in its repository's main checkout "
+                f"({Path(target).parent}), outside your folders. {instead}"
+            )
         request = SimpleNamespace(
             kind="write", file_name=target, resolved_path=target, diff="", intention="",
-            can_offer_session_approval=False, tool_call_id=call, tool_name="EnterWorktree",
+            can_offer_session_approval=False, tool_call_id=call, tool_name=tool,
         )  # fmt: skip
         if why := await self.permitted(request):
-            return f"{why} (add_repo gives you a worktree of your own)."
+            return f"{why} {instead}"
         return ""
 
     async def message_out(self, arguments: dict, call: str) -> str:

@@ -317,6 +317,34 @@ def under(path: str, folders: list[str]) -> bool:
     return False
 
 
+def worktrees_home(cwd: str) -> str:
+    """Where Claude (2.1.322) makes a worktree from `cwd` (EnterWorktree with a name, a subagent's
+    worktree isolation): <main checkout>/.claude/worktrees, the main checkout of its repository
+    (the folder of its common git dir), even from a linked worktree, whose own folder it is
+    not. "" outside a repository, or where its git files can't be read as regular files."""
+    from .settings_guard import read_regular
+
+    top = next((f for f in [Path(cwd), *Path(cwd).parents] if (f / ".git").exists()), None)
+    if top is None:
+        return ""
+    common = top / ".git"
+    try:
+        if not common.is_dir():
+            pointer = read_regular(common, 65536).decode(errors="replace").strip()
+            if not pointer.startswith("gitdir:"):
+                return ""
+            gitdir = Path(top, pointer.removeprefix("gitdir:").strip())
+            common = gitdir
+            if (gitdir / "commondir").exists():
+                named = read_regular(gitdir / "commondir", 65536).decode(errors="replace")
+                common = Path(gitdir, named.strip())
+    except OSError:
+        return ""
+    common = Path(os.path.normpath(common))
+    host = common.parent if common.name == ".git" else common
+    return str(host / ".claude" / "worktrees")
+
+
 def claude_worktree(path: str) -> bool:
     """Whether a folder is one of Claude's own worktrees (<repository>/.claude/worktrees/…)."""
     parts = Path(path).parts

@@ -139,6 +139,7 @@ class Fake:
                 "plugins": flags.get("plugin-dir"),
                 "env_file": os.environ.get("CLAUDE_ENV_FILE"),
                 "hooks_off": isinstance(settings, dict) and settings.get("disableAllHooks") is True,
+                "no_updates": os.environ.get("DISABLE_AUTOUPDATER") == "1",
                 "disabled_servers": (settings if isinstance(settings, dict) else {}).get(
                     "disabledMcpjsonServers"
                 ),
@@ -836,6 +837,8 @@ class Fake:
             )
         if found := re.search(r"Enter a worktree named (\w+)", text):
             call("EnterWorktree", {"name": found.group(1)})
+        if found := re.search(r"Enter the worktree at (\S+?)\.? ", text):
+            call("EnterWorktree", {"path": found.group(1)})
         if "Leave the worktree and remove it" in text:
             call("ExitWorktree", {"action": "remove", "discard_changes": True})
         if found := re.search(r"Schedule '([^']+)' every minute( durably)?", text):
@@ -1031,10 +1034,21 @@ class Fake:
         report what they made); None for any other tool."""
         structured: dict | None = None
         text = "ok"
-        if name == "EnterWorktree":
-            top = await self.git("rev-parse", "--show-toplevel")
+        if name == "EnterWorktree" and data.get("path"):
+            # Into one already made (in `git worktree list`), as 2.1.322 switches.
+            path = str((Path(self.cwd) / str(data["path"])).resolve())
+            listed = await self.git("worktree", "list", "--porcelain")
+            if f"worktree {path}" not in listed.splitlines():
+                return self.tool_result(
+                    call, f"{path} is not a worktree of this repository", True, None
+                )
+            self.entered.append(self.cwd)
+            self.cwd = path
+            structured = {"worktreePath": path, "message": f"Switched to worktree at {path}"}
+            text = structured["message"]
+        elif name == "EnterWorktree":
             label = data.get("name") or f"w{uuid.uuid4().hex[:6]}"
-            path = str(Path(top) / ".claude" / "worktrees" / label)
+            path = str(Path(await self.worktrees_home()) / label)
             await self.git("worktree", "add", "-q", "-b", f"worktree-{label}", path)
             self.entered.append(self.cwd)
             self.cwd = path
@@ -1107,6 +1121,13 @@ class Fake:
             call,
         )  # fmt: skip
         return result
+
+    async def worktrees_home(self) -> str:
+        """Where 2.1.322 makes a worktree: in the main checkout of the repository (the folder
+        of its common git dir), from a linked worktree too."""
+        common = Path(self.cwd, await self.git("rev-parse", "--git-common-dir"))
+        common = common.resolve()  # noqa: ASYNC240
+        return str((common.parent if common.name == ".git" else common) / ".claude" / "worktrees")
 
     async def git(self, *arguments: str) -> str:
         process = await asyncio.create_subprocess_exec(
@@ -1185,8 +1206,7 @@ class Fake:
         agent_id = f"a{uuid.uuid4().hex[:16]}"
         cwd = self.cwd
         if data.get("isolation") == "worktree":
-            top = await self.git("rev-parse", "--show-toplevel")
-            cwd = str(Path(top) / ".claude" / "worktrees" / f"agent-{agent_id[:8]}")
+            cwd = str(Path(await self.worktrees_home()) / f"agent-{agent_id[:8]}")
             await self.git("worktree", "add", "-q", "-b", f"worktree-agent-{agent_id[:8]}", cwd)
         background = bool(data.get("run_in_background"))
         self.system(

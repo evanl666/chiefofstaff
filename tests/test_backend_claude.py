@@ -790,6 +790,21 @@ async def test_its_workers_and_check_run_whichever_of_chief_of_staffs_variables_
     assert found["ran"] is True and found["acting"] == "" and found["ask_first"] == ""
 
 
+async def test_a_workers_process_updates_nothing_of_the_owners(agent, tmp_path, monkeypatch):
+    """Claude's updates (its own, and the plugin autoupdate pass that refreshes the owner's
+    marketplaces within ten minutes of a start, 2.1.322) never run in a worker's process: the
+    owner's own sessions keep them."""
+    starts = tmp_path / "starts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
+    monkeypatch.delenv("DISABLE_AUTOUPDATER", raising=False)
+    session = await agent.create_session(session_id="c4" * 16, name="t", **options(tmp_path))
+    turn = Turn(session)
+    await session.send("Reply with just: ok")
+    await turn.ended()
+    (started,) = [json.loads(line) for line in starts.read_text().splitlines()]
+    assert started["no_updates"]
+
+
 async def test_a_repositorys_python_files_never_run_as_chief_of_staff(agent, tmp_path, monkeypatch):
     # Its supervisor starts in Chief of Staff's own folder, isolated; only Claude enters the
     # worker's folder, where a repository's typing.py or chiefofstaff/ would have run as it.
@@ -1608,7 +1623,9 @@ async def test_a_worktree_claude_makes_is_the_workers_and_its_paths_are_from_the
     await session.send("Enter a worktree named other. Reply with just: ok")
     await turn.ended()
     refused = [d for d in turn.of("tool.execution_complete") if d.success is False]
-    assert "Not in a checkout it may only read. (add_repo gives you" in refused[-1].error.message
+    assert "Not in a checkout it may only read. Make it in your own folder instead" in (
+        refused[-1].error.message
+    )
     assert not (repo / ".claude" / "worktrees" / "other").exists()
 
 
@@ -1954,6 +1971,26 @@ async def test_a_subagent_is_told_chief_of_staffs_rules_and_checked_where_it_wor
     assert ("shell", "pwd") in asked, "its calls are checked as the worker's"
     nested = [d for d in turn.of("tool.execution_start") if getattr(d, "parent_tool_call_id", "")]
     assert [d.tool_name for d in nested] == ["bash"]
+
+
+async def test_claude_makes_no_worktree_outside_a_workers_folders(agent, tmp_path, monkeypatch):
+    """From a linked worktree (the one Chief of Staff made for the worker), Claude (2.1.322)
+    makes a worktree in the repository's main checkout, the owner's: EnterWorktree by name and
+    a subagent isolated in a worktree are refused there, with how to make one in its folder."""
+    subagents = tmp_path / "subagents.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_SUBAGENTS", str(subagents))
+    repo, work = repository(tmp_path / "repo"), tmp_path / "work"
+    adding = ["git", "worktree", "add", "-q", "-b", "w", str(work)]
+    await asyncio.to_thread(subprocess.run, adding, cwd=repo, check=True)
+    session = await agent.create_session(session_id="a8" * 16, name="t", **options(work))
+    turn = Turn(session)
+    for prompt in ("Enter a worktree named feat.", "Have a subagent in a worktree run `pwd`."):
+        await session.send(f"{prompt} Reply with just: ok")
+        await turn.ended()
+        refused = [d for d in turn.of("tool.execution_complete") if d.success is False]
+        assert "main checkout" in refused[-1].error.message, prompt
+        assert "git worktree add .claude/worktrees/<name>" in refused[-1].error.message
+    assert not (repo / ".claude").exists() and logged(subagents) == []
 
 
 async def test_a_background_subagent_holds_the_worker_and_its_report_wakes_it_admitted(

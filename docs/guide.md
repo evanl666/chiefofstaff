@@ -1227,7 +1227,13 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   `~/.config/git/ignore`), unless git already ignores that folder. It also makes an empty
   `.claude/.cc-writes/` folder, where it stages whole-file writes, in the worker's folder and in
   the repository's main checkout; git shows neither. No setting of Claude Code 2.1.322 turns
-  this off.
+  this off. Nor does a worker's process update anything (`DISABLE_AUTOUPDATER`: Claude itself,
+  your plugins, their marketplaces); your own sessions keep those. What any session of a
+  signed-in Claude keeps up to date, a worker's does too: in `~/.claude.json`, the time
+  Anthropic's server last confirmed your Consumer Terms answer (`groveChoiceSeenAt`, an hour's
+  cache; a session without a terminal never marks their notice as seen, it only says to run
+  `claude`), and, with skills synced from claude.ai, each sync round's mark in
+  `~/.claude/skills/synced/` (turning that off for workers would hide those skills from them).
   Codex's commands run without a login shell, with the environment and `PATH` a Copilot worker's
   commands get; Codex puts its own helpers first on `PATH` and sets a few variables of its own
   (such as `LANG` and `LC_ALL` to `C.UTF-8`, `TERM=dumb`, `PAGER=cat`).
@@ -1250,7 +1256,11 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   form reaches you too. An MCP server that needs a sign-in is signed in from a terminal:
   `codex mcp login <name>` or `claude mcp login <name>`.
 - **Claude's own tools** are tied into Chief of Staff: a worktree it makes is one of the
-  worker's checkouts (receipts, *Storage*, removed with the others); what it schedules (`/loop`,
+  worker's checkouts (receipts, *Storage*, removed with the others). Claude makes one
+  (`EnterWorktree`, a subagent isolated in a worktree) in its repository's main checkout, which
+  for a worker in a worktree of Chief of Staff's is your own: that is refused, and the worker
+  makes it in its own folder (`git worktree add .claude/worktrees/<name>`) and enters it by its
+  path. What it schedules (`/loop`,
   a reminder) runs as a turn of its own, admitted, shown and stopped as any: *Stop* holds it
   until you say *Go on*; *Cancel*, *Set aside* and closing the worker end it, and delete it in
   Claude too, with one short turn of the worker's (Claude would bring it back when the session

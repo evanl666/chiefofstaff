@@ -736,8 +736,10 @@ async def test_a_copilot_session_a_claude_worker_made_is_its_not_the_owners(
 
 
 async def test_a_worktree_a_claude_worker_makes_is_one_of_its_checkouts(tmp_path, claude_on_path):
-    """Its receipts, Storage and folders count it as they do a checkout Chief of Staff made;
-    removed by Claude, it is no longer one."""
+    """Claude makes a worktree in its repository's main checkout (2.1.322), the owner's own for
+    a worker in a worktree Chief of Staff made: refused there, it makes one in its own folder
+    and enters it. Its receipts, Storage and folders count it as they do a checkout Chief of
+    Staff made; removed by Claude, it is no longer one."""
     from test_round7_split import published
 
     app = published(tmp_path, "app")
@@ -746,9 +748,18 @@ async def test_a_worktree_a_claude_worker_makes_is_one_of_its_checkouts(tmp_path
         await saved(runtime, {"claude": {"enabled": True}})
         result = await spawn_on(
             harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
-            instructions="Enter a worktree named feat. Report done: made",
+            instructions="Enter a worktree named feat. Report done: tried",
         )  # fmt: skip
         worker = result["session_id"]
+        await until(lambda: ("tool", "EnterWorktree") in harness.kinds(worker), 30)
+        await until(lambda: runtime.states[worker].busy is False, 30)
+        assert not (app / ".claude").exists(), "refused: nothing made in the owner's checkout"
+        assert len(json.loads(harness.store.session(worker)["repos"])) == 1
+        await runtime.owner_send(
+            worker,
+            "Run the shell command `git worktree add -q -b worktree-feat .claude/worktrees/feat`. "
+            "Enter the worktree at .claude/worktrees/feat. Report done: made",
+        )
         await until(lambda: harness.store.session(worker)["status"] == "done", 30)
         tree = str(Path(harness.store.session(worker)["cwd"]) / ".claude" / "worktrees" / "feat")
         made = f"Made the worktree {tree} on worktree-feat: one of its checkouts now."
@@ -1273,7 +1284,9 @@ async def test_a_claude_workers_worktrees_go_with_its_checkouts_when_it_closes(
         await saved(runtime, {"claude": {"enabled": True}})
         result = await spawn_on(
             harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
-            instructions="Enter a worktree named feat. Report done: made",
+            instructions="Run the shell command `git worktree add -q -b worktree-feat "
+            ".claude/worktrees/feat`. Enter the worktree at .claude/worktrees/feat. Report "
+            "done: made",
         )  # fmt: skip
         worker = result["session_id"]
         cwd = Path(harness.store.session(worker)["cwd"])

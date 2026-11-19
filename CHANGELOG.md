@@ -20,7 +20,9 @@ Codex and Claude can do what Copilot workers can.
   own settings in a worker's folder (`.claude/settings.json`, `.mcp.json`, subagents, the
   scripts their hooks run) are held as Copilot's are, with *Use these settings* when they change,
   and a sandboxed worker's commands use workers' own caches and runs no hooks (Claude runs them
-  outside its sandbox, and turns off all or none); its auto memory is off in workers; its spend is counted in tokens as it goes. Workers that read
+  outside its sandbox, and turns off all or none); a worktree Claude would make in your own
+  checkout is made in the worker's folder instead; a worker's process updates nothing of
+  yours (Claude, your plugins, their marketplaces); its auto memory is off in workers; its spend is counted in tokens as it goes. Workers that read
   Slack stay on Copilot for now, and a sandboxed Claude worker doesn't start where your Claude
   settings would widen its sandbox. On a Claude plan, Claude workers count against your plan's
   usage limits, under Anthropic's terms. See
