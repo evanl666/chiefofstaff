@@ -34,7 +34,7 @@ makes a mistake.
 | Workers never see your GitHub token; `git` and `gh` authenticate through Copilot's local proxy | **OS sandbox** + Copilot's credential proxy | Sandbox is on |
 | Workers cannot read `~/.ssh` keys or other files outside their folders' read rules | **OS sandbox** | Sandbox is on |
 | Workers that read Slack reach only GitHub hosts over the network, and not localhost. Other workers may use localhost (servers their tests start, their build daemon) and so reach your local services; the tokens of your Gradle daemons and Jupyter servers are unreadable to them, and Unix sockets (Docker's) stay closed | **OS sandbox** | Sandbox is on |
-| The Router, the Slack session and the Watchdog have no shell, file or web tools | **Copilot** (session tool allowlist) | Always |
+| The Router, the Slack session and the Watchdog have no shell, file or web tools | **Copilot** (session tool allowlist); on Codex or Claude (the Router, the Watchdog), **that agent** with its own tools, servers, hooks and plugins off, read back as each session opens (see below) | Always |
 | Slack messages are sent only after you approve a draft | **Chief of Staff** (Slack write tools are refused; only the app sends) | Always for the Slack tools; sessions are never given your Slack token |
 | PR reviews are published only after you approve a draft | **Chief of Staff** (permission check refuses GitHub MCP writes, `gh pr review/merge/comment` and `gh api` writes) | Yolo is off for the worker (it is on by default, except for workers that read Slack). With yolo on, a worker's `gh` can still write to GitHub |
 | No force pushes, no pushes to `main`/`master`, no recursive delete of home or root, no `sudo`, no `curl \| sh` | **Chief of Staff** (permission check on each command) | Yolo is off for the worker (on by default, except for workers that read Slack). These checks read commands as text, which can't be fully parsed: the push and delete checks are a best effort, not a sandbox, and an agent determined to evade them can (protect your default branch on the server, too) |
@@ -134,6 +134,14 @@ Settings → *Coding agents*). For such a worker:
   of its own on 127.0.0.1, that each kind of action asks it first; a version that fails runs no
   worker that asks first (or none at all, when its edits do not ask).
 - **Workers that read Slack** run on Copilot: not on Codex, and not on Claude yet.
+- **The Router and the Watchdog** can run on Codex or Claude too (Settings → *Coding agents*),
+  with nothing but Chief of Staff's tools, as on Copilot: on Codex, its commands, image viewing
+  and making, web search, hooks and plugins off, your MCP servers not started, ChatGPT's apps and
+  subagents off, each of those features read back off before the session is used; on Claude, no
+  built-in tool (`--tools ""`), no MCP server but Chief of Staff's (`--strict-mcp-config`), your
+  hooks off, and a turn that shows any other tool stops. Every other call still asks Chief of
+  Staff, which refuses it to them as to their Copilot sessions. The Slack session and *Watch for
+  you* (which read your messages) stay on Copilot.
 - **What reaches a worker from outside.** A repository's own agent settings (Codex's `.codex/`,
   Claude's `.claude/` and `.mcp.json`) load only where you trust its folder in that agent; a
   worktree is trusted as its repository is. Elsewhere none of them loads, and its `AGENTS.md` or

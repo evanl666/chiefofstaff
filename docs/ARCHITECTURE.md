@@ -223,6 +223,22 @@ Chief of Staff shows an error and connects again once it is closed there; a Copi
 that cannot be resumed (Copilot no longer has it) gets a successor with the same handover
 (`Runtime.renew_router`), so its timeline and what the owner told it stay.
 
+## The Router and the Watchdog on another agent
+
+The `agents` configuration's `roles` names the agent each of Chief of Staff's own sessions runs
+on (none: Copilot). `Runtime.place_role` puts the Router or the Watchdog there: at connect (the
+agent starts aside, Chief of Staff is ready as soon as Copilot is), with a Settings save, at a
+turn's end, and from `session_for`. A switch (`switch_role`) is a rotation onto another agent: a
+fresh session there (`role_options`: its tools and prompt, `role_only` so the adapter turns the
+agent's own tools, servers, hooks and plugins off), the handover as its preamble, `alias:` for
+every session it had, `agent:<row>` changed (none for Copilot). While the agent can't run it
+(`role_block`: not installed, signed out, its check, a plan's limit, its process lost) it runs on
+Copilot (`rolefallback:` says why, `roleheld:` until when; a turn cut short is sent again);
+`roles_check` in the periodic round brings it back (a glance at a signed-out agent each minute).
+On another agent there is no rotation: the agent compacts its own thread. Watch for you (the
+connector) takes its agent at each fresh run (`helper_agent`), only where what reads Slack runs
+(`agents.SLACK_READERS`, none for now).
+
 ## The UI
 
 The UI is plain ES modules in `static/`, with no build step: `app.js` starts the page;
