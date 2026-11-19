@@ -743,8 +743,11 @@ class Ctx:
     async def approve(self, step: str, **choices):
         return await self.app.post(f"/api/shepherd/steps/{step}", {"action": "approve", **choices})
 
-    async def worker_pr(self, branch: str, files: dict[str, str], title: str) -> tuple[str, int]:
-        """A PR a worker opens for the owner (its task makes and follows it): its target."""
+    async def worker_pr(
+        self, branch: str, files: dict[str, str], title: str, kept: bool = True
+    ) -> tuple[str, int]:
+        """A PR a worker opens for the owner (its task makes and follows it): its target; with
+        `kept`, once its task keeps it moving (never while Prepared for you is off)."""
         patch = self.root / f"{branch}.json"
         patch.write_text(json.dumps(files))
         ref, base = self.repo.ref(branch), self.repo.base
@@ -764,7 +767,8 @@ class Ctx:
 
         number = await wait_for(f"the worker's PR from {branch}", opened, 900)
         target = f"github:{self.repo.name.lower()}#{number}"
-        await self.kept(target, lambda view: True, f"{target} kept moving", 900)
+        if kept:
+            await self.kept(target, lambda view: True, f"{target} kept moving", 900)
         return target, number
 
 
@@ -813,13 +817,15 @@ BROKEN = APP  # timeout() returns 31: test_timeout fails.
 
 
 async def su1_off(ctx: Ctx):
-    target, number = await ctx.worker_pr("su1", {"app/timeouts.py": BROKEN}, "Tidy timeouts")
+    # (Off: no task keeps it moving, so none is waited for.)
+    target, number = await ctx.worker_pr(
+        "su1", {"app/timeouts.py": BROKEN}, "Tidy timeouts", kept=False
+    )
     pr = ctx.repo.pr(number)
     assert await ctx.repo.ci(pr["head"]["sha"]) == "failure"
     await ctx.settings(proactive=False)
     await asyncio.sleep(180)  # A few reads of the followed PR.
-    task = await ctx.task(target)
-    assert task is None or "shepherd" not in task, task
+    assert await ctx.task_of(target) is None, "no task's row says it keeps it moving"
     assert ctx.repo.head("su1") == pr["head"]["sha"], "nothing pushed"
     ctx.notes["su1"] = target
 
