@@ -58,7 +58,8 @@ F6  a subagent with isolation "remote" is refused; one with isolation "worktree"
 Shard G, workers on different agents (Copilot for new workers; Codex and Claude on):
 G1  "use claude for …" goes to Claude; with Claude off, the Router says so and nothing starts
 G2  a Claude worker asks a Codex worker (ask_session) and uses the answer
-G3  a Copilot worker tells a Claude worker mid-turn: it uses the note within the turn
+G3  a Copilot worker tells a Claude worker whose command runs in the background: it uses the
+    note in the turn its command's end wakes (its process kept for that turn)
 G4  a Claude worker tells a Codex worker mid-turn
 G5  a follow-up on the Claude worker's subject goes to it
 G6  three workers on three agents that work together: introductions, results, a cancel's news
@@ -70,11 +71,13 @@ Shard H, lifecycle (Claude for new workers, a token limit):
 H1  Chief of Staff restarts mid-turn: the spend then is unknown; Go on finishes it
 H2  Claude killed mid-turn: the crash path; Go on finishes it
 H3  a small token limit: stopped once crossed; raised, Go on finishes it
-H4  the worker sandbox turned on while a Claude worker works: it is stopped, and says why
+H4  the worker sandbox turned on while a Claude worker works: stopped, saying why, where its
+    version's sandbox is not shown to hold; else its turn ends as it began, the next sandboxed
 H5  Claude turned off while its worker runs a dev server: no Claude process, nor the server
 H6  not signed in (a Claude configuration folder of the test's own, empty): the row says so,
     and a named task is refused with the reason
-H7  another `claude` version on the PATH mid-run: checked before its workers go on
+H7  a `claude` whose version is not its process's (an update after the check): no worker runs
+    on it, and its task says why
 H8  --prepare-downgrade: Claude's workers stopped and none of its processes left
 H9  a worker with a schedule is not let go of while idle; closed, its schedule fires no more
 H10 sandboxed, a worker runs no hook: a skill of Settings' skill folders whose hook would mark
@@ -177,6 +180,13 @@ def on_claude(view: dict) -> bool:
     return view.get("agent") == "claude"
 
 
+def in_turn(seconds: str) -> str:
+    """A command that holds its worker's turn while it runs: Claude 2.1.322 refuses a
+    foreground command that starts with a long `sleep` (it says to run it in the background,
+    and a worker then ends its turn), so something comes before it."""
+    return f"echo waiting; sleep {seconds}"
+
+
 async def claude_worker(ctx: Ctx, text: str) -> str:
     worker = await la.delegate(ctx, text)
     view = await la.session(ctx, worker)
@@ -272,8 +282,8 @@ async def e3_stop_cancel_close(ctx: Ctx):
         seconds = la.unique(300)
         worker = await claude_worker(
             ctx,
-            f"No project, a new worker: run `sleep {seconds}` in your folder and wait for it to "
-            f"finish (about five minutes), then report 'slept'. ({action} test)",
+            f"No project, a new worker: run `{in_turn(seconds)}` in your folder, in the "
+            f"foreground with a 600000 ms timeout, then report 'slept'. ({action} test)",
         )
         pid = await la.wait_command(ctx, f"sleep {seconds}")
         task = await la.latest_task(ctx, worker)
@@ -517,8 +527,8 @@ async def e12_steering(ctx: Ctx):
     seconds = la.unique(90)
     worker = await claude_worker(
         ctx,
-        f"No project, a new worker: run `sleep {seconds}` (let it finish), then report the code "
-        "word the owner gives you meanwhile, word for word (or 'none' if none came).",
+        f"No project, a new worker: run `{in_turn(seconds)}` in the foreground (let it finish), "
+        "then report the code word the owner gives you meanwhile, word for word (or 'none').",
     )
     await la.wait_command(ctx, f"sleep {seconds}")
     await ctx.app.post(f"/api/sessions/{worker}/messages", {"text": "The code word is HERON-77."})
@@ -829,7 +839,7 @@ async def g1_named_agent(ctx: Ctx):
     await la.worker_on(ctx, worker, "claude")
     task = await la.task_ended(ctx, worker, "south's rows")
     assert "180" in task["result"]
-    ctx.notes["g1_worker"] = worker
+    ctx.notes["g1_worker"], ctx.notes["g1_task"] = worker, task["id"]
     await la.settings(ctx, agents={"claude": {"enabled": False}})
     try:
         before = {s["id"] for s in (await la.state(ctx))["sessions"]}
@@ -870,8 +880,9 @@ async def g3_copilot_tells_claude(ctx: Ctx):
     seconds = la.unique(90)
     waiter = await la.delegate(
         ctx,
-        f"Use claude for this: a worker titled 'Waiter' that runs `sleep {seconds}` (let it "
-        "finish), then reports any message other workers sent it while it waited, word for word.",
+        f"Use claude for this: a worker titled 'Waiter' that starts `sleep {seconds}` in the "
+        "background (run_in_background) and ends its turn; when its end notice comes, it reports "
+        "any message other workers sent it meanwhile, word for word.",
     )
     await la.worker_on(ctx, waiter, "claude")
     await la.wait_command(ctx, f"sleep {seconds}")
@@ -915,7 +926,15 @@ async def g5_follow_up_routed(ctx: Ctx):
         ctx, "About that count of south rows in sales.csv: also give me south's total units."
     )
     assert worker == owner, "the Claude worker that owns the subject"
-    await la.task_ended(ctx, worker, "south's units")
+
+    async def units():
+        # The task it continued (G1's, reopened), or a new one: its latest task by creation
+        # need not be it.
+        tasks = [t for t in (await la.state(ctx))["tasks"] if t["session_id"] == worker]
+        found = [t for t in tasks if t["status"] in la.FINISHED and "units" in t["result"]]
+        return found[0] if found else None
+
+    await wait_for("south's units", units, 900, ctx.app)
     log("G5 passed")
 
 
@@ -951,11 +970,12 @@ async def g6_three_agents(ctx: Ctx):
 
 
 async def g7_outside_session(ctx: Ctx):
-    seconds = la.unique(120)
+    seconds = la.unique(100)
     worker = await la.delegate(
         ctx,
-        f"Use claude for this: a worker titled 'Busy' that runs `sleep {seconds}` (let it "
-        "finish), then reports 'busy done' and nothing else of what others said.",
+        f"Use claude for this: a worker titled 'Busy' that runs `{in_turn(seconds)}` in the "
+        "foreground (let it finish), then reports 'busy done' and nothing else of what others "
+        "said.",
     )
     await la.worker_on(ctx, worker, "claude")
     await la.wait_command(ctx, f"sleep {seconds}")
@@ -987,8 +1007,9 @@ async def g8_send_message_between_workers(ctx: Ctx):
     seconds = la.unique(90)
     receiver = await la.delegate(
         ctx,
-        f"Use claude for this: a worker titled 'Receiver' that runs `sleep {seconds}` (let it "
-        "finish), then reports any message other workers sent it, word for word.",
+        f"Use claude for this: a worker titled 'Receiver' that runs `{in_turn(seconds)}` in the "
+        "foreground (let it finish), then reports any message other workers sent it, word for "
+        "word.",
     )
     await la.worker_on(ctx, receiver, "claude")
     await la.wait_command(ctx, f"sleep {seconds}")
@@ -1013,7 +1034,9 @@ async def g8_send_message_between_workers(ctx: Ctx):
 async def h1_restart_mid_turn(ctx: Ctx):
     seconds = la.unique(60)
     worker = await claude_worker(
-        ctx, f"No project, a new worker: run `sleep {seconds}`, then report 'restart-ok'."
+        ctx,
+        f"No project, a new worker: run `{in_turn(seconds)}` in the foreground, then report "
+        "'restart-ok'.",
     )
     await la.wait_command(ctx, f"sleep {seconds}")
     await ctx.app.stop()
@@ -1029,7 +1052,9 @@ async def h1_restart_mid_turn(ctx: Ctx):
 async def h2_claude_killed(ctx: Ctx):
     seconds = la.unique(60)
     worker = await claude_worker(
-        ctx, f"No project, a new worker: run `sleep {seconds}`, then report 'crash-ok'."
+        ctx,
+        f"No project, a new worker: run `{in_turn(seconds)}` in the foreground, then report "
+        "'crash-ok'.",
     )
     await la.wait_command(ctx, f"sleep {seconds}")
     for pid in ctx.claude_processes():
@@ -1065,18 +1090,36 @@ async def h3_limit(ctx: Ctx):
 
 
 async def h4_sandbox_on(ctx: Ctx):
-    seconds = la.unique(120)
+    seconds = la.unique(60)
+    outside = ctx.root / f"outside-{seconds}"
     worker = await claude_worker(
-        ctx, f"No project, a new worker: run `sleep {seconds}`, then report 'sandbox-ok'."
+        ctx,
+        f"No project, a new worker: run `{in_turn(seconds)}` in the foreground, then report "
+        "'sandbox-ok'.",
     )
     await la.wait_command(ctx, f"sleep {seconds}")
     try:
         saved = await la.settings(ctx, worker_sandbox=True)
         log(f"H4: toast {saved.get('stopped')!r}")
-        await la.until("its command ended", lambda: not la.running(f"sleep {seconds}"), 30)
-        view = await la.session(ctx, worker)
-        assert view["status"] != "working"
-        assert saved.get("stopped"), "one toast says it stopped workers"
+        if saved.get("stopped"):
+            # Its version's sandbox not shown to hold: stopped at once, saying why.
+            await la.until("its command ended", lambda: not la.running(f"sleep {seconds}"), 30)
+            assert (await la.session(ctx, worker))["status"] != "working"
+        else:
+            # Its sandbox shown to hold: as a Copilot worker, it ends its turn as it began, and
+            # its next turn runs sandboxed (a write outside its folder fails).
+            task = await la.task_ended(ctx, worker, "it ends its turn", timeout=300)
+            await la.follow_up(
+                ctx, task, f"Run `touch {outside}` once and report what it printed. Nothing else."
+            )
+
+            async def reported():
+                now = await la.latest_task(ctx, worker)
+                done = now and now["status"] in la.FINISHED and now["result"] != task["result"]
+                return now if done else None
+
+            await wait_for("its sandboxed command", reported, 300, ctx.app)
+            assert not outside.exists(), "its next turn ran sandboxed"
     finally:
         await la.settings(ctx, worker_sandbox=False)
     log("H4 passed")
@@ -1128,6 +1171,9 @@ async def h6_not_signed_in(ctx: Ctx):
 
 
 async def h7_another_version(ctx: Ctx):
+    """A `claude` whose version is not the one its process runs (as an update between Chief of
+    Staff's check and a worker's start looks): nothing runs on the version not checked, and the
+    task says why. (H8, after this one's restart, starts a worker on the version checked.)"""
     path = ctx.root / "other-claude"
     path.mkdir(exist_ok=True)
     wrapper = path / "claude"
@@ -1142,19 +1188,26 @@ async def h7_another_version(ctx: Ctx):
         worker = await claude_worker(
             ctx, "No project, a new worker: run `echo version-ok` and report 'version-ok'."
         )
-        await la.task_ended(ctx, worker, "it runs on the version checked", timeout=900)
-        kept = ctx.rows("SELECT key FROM kv WHERE key LIKE 'agentcheck:%' OR key LIKE "
-                        "'claudecheck:%'")  # fmt: skip
-        log(f"H7: checks {kept}")
+        task = await la.task_ended(
+            ctx, worker, "its start refused", timeout=300, statuses={"failed", "waiting"}
+        )
+        report = json.dumps(await ctx.app.get(f"/api/tasks/{task['id']}/report"))
+        log(f"H7: {task['status']}: {report[:300]!r}")
+        assert re.search(r"was updated \(2\.1\.999 to ", report), "says why"
+        assert not ctx.rows(
+            "SELECT 1 FROM commands WHERE session_id=? AND command LIKE '%version-ok%'", worker
+        ), "nothing ran on it"
     finally:
         await restarted(ctx)
     log("H7 passed")
 
 
 async def h8_prepare_downgrade(ctx: Ctx):
-    seconds = la.unique(300)
+    seconds = la.unique(100)
     worker = await claude_worker(
-        ctx, f"No project, a new worker: run `sleep {seconds}`, then report 'downgrade'."
+        ctx,
+        f"No project, a new worker: run `{in_turn(seconds)}` in the foreground, then report "
+        "'downgrade'.",
     )
     await la.wait_command(ctx, f"sleep {seconds}")
     await ctx.app.stop()
