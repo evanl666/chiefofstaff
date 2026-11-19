@@ -1209,6 +1209,8 @@ async def w57_reply_to_your_comment(ctx: Ctx):
         capture_output=True, text=True, check=True, env={**os.environ, "GH_TOKEN": token},
     )  # fmt: skip
 
+    waited: list[float] = []
+
     async def told():
         rows = await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
         news = [m for m in rows if m["kind"] == "inbound" and m["meta"].get("from") == reviewer]
@@ -1221,11 +1223,20 @@ async def w57_reply_to_your_comment(ctx: Ctx):
             t for t in snap["tasks"]
             if t["session_id"] == reviewer and t["status"] == "waiting" and t["updated_at"] > since
         ]  # fmt: skip
-        return (news, asking, waiting) if news or asking or waiting else None
+        if waiting and not waited:
+            waited.append(time.monotonic())
+        # Its task waiting on the owner may come a moment before its words do (its report to the
+        # Router, a card): those are waited for a while, then its question (progress) is read.
+        late = bool(waited) and time.monotonic() - waited[0] > 60
+        return (news, asking, waiting) if news or asking or late else None
 
-    news, asking, _ = await wait_for("the owner hears of the reply", told, 900, ctx.app)
-    log(f"W57: news {[m['text'][:300] for m in news]}; cards {[d['kind'] for d in asking]}")
-    said = " ".join(m["text"] for m in news) + " ".join(d["text"] for d in asking)
+    news, asking, waiting = await wait_for("the owner hears of the reply", told, 900, ctx.app)
+    log(f"W57: news {[m['text'][:300] for m in news]}; cards {[d['kind'] for d in asking]}; "
+        f"waiting {[(t.get('progress') or '')[:300] for t in waiting]}")  # fmt: skip
+    said = " ".join(
+        [*(m["text"] for m in news), *(d["text"] for d in asking),
+         *((t.get("progress") or "") for t in waiting)]
+    )  # fmt: skip
     assert re.search(r"valid|leave|repl|answer|回复", said, re.IGNORECASE), "what happened"
     # GitHub wraps a reply in a review with no text: that is not news of its own.
     assert not re.search(r"no text|empty review|without (a )?(text|body)", said, re.IGNORECASE)
@@ -2307,7 +2318,10 @@ async def peers_ok(ctx: Ctx, since: str, giver: dict, takers: list[dict], value:
         # to the others still at work: workers of the same request, never the Router.
         group = {giver["session_id"], *(t["session_id"] for t in takers)}
         assert any(m["meta"].get("told_by") == giver["session_id"] for m in inbound)
-        assert all(m["meta"].get("told_by") in group for m in inbound)
+        # (A taker that asked the giver too gets its answer: `answered_by`, as direct.)
+        assert all(
+            (m["meta"].get("told_by") or m["meta"].get("answered_by")) in group for m in inbound
+        ), [m["meta"] for m in inbound]
         assert not relayed, "the Router did not relay it"
         assert not waited, "waiting for a peer needs no report"
     assert told >= {t["session_id"] for t in takers}, "told with tell_session"
@@ -4020,7 +4034,22 @@ async def n1_glob_edits_count_and_a_read_file_does_not(ctx: Ctx):
         ).stdout.split()  # fmt: skip
         edited = owners.stat().st_mtime
         began = min((datetime.fromisoformat(s).timestamp() for s in loops), default=edited + 99)
-        if edited < began - 3:
+        # Nor overlap a command that names that file (`cat textkit/__init__.py; sleep 40` run as
+        # one line): a file that changed while a command naming it ran is its work, by design.
+        reads = subprocess.run(
+            ["sqlite3", "-separator", " ", db, "select started_at, coalesce(ended_at, '') "
+             "from commands where command like '%textkit/__init__.py%'"],
+            capture_output=True, text=True, check=False,
+        ).stdout.splitlines()  # fmt: skip
+        across = [
+            line for line in reads
+            if (span := line.split()) and datetime.fromisoformat(span[0]).timestamp() - 1
+            <= edited <= (datetime.fromisoformat(span[1]).timestamp() if len(span) > 1
+                          else time.time()) + 1
+        ]  # fmt: skip
+        if across:
+            log(f"N1: the owner's edit came as a command naming it ran ({across}): not judged")
+        elif edited < began - 3:
             assert "the owner's own line" not in diff, "it only read that file"
             assert changed["files"] >= 1 and changed.get("not_counted", 0) >= 1, changed
         else:
