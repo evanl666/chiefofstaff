@@ -814,8 +814,8 @@ class Ctx:
             f"In {self.repo.clone}, on a new branch `{ref}` from origin/{base}, write each file "
             f"in {patch} (a JSON object: path -> full text) exactly as given, commit with the "
             f"message “{title}”, push the branch and open a PR to `{base}` titled “{title}”. "
-            "Then report done. (It is a first draft: if its CI fails, fixing it later is "
-            "welcome.)"
+            "Then report done. (It is a first draft: fixing it later, when you are asked to, "
+            "is welcome.)"
         )
         from live_e2e import wait_for
 
@@ -932,9 +932,22 @@ async def su1_off(ctx: Ctx):
     pr = ctx.repo.pr(number)
     assert await ctx.repo.ci(pr["head"]["sha"]) == "failure"
     await ctx.settings(proactive=False)
-    await asyncio.sleep(180)  # A few reads of the followed PR.
+    from live_e2e import wait_for
+
+    async def told() -> bool:
+        # The CI news reached its worker, as before (what it does then is its own: it may
+        # well fix it and push, as a worker did before this feature).
+        for session in (await ctx.state())["sessions"]:
+            if session.get("role") != "worker":
+                continue
+            for message in await ctx.app.get(f"/api/sessions/{session['id']}/messages"):
+                meta = message.get("meta") or {}
+                if message.get("kind") == "inbound" and meta.get("thread") == target:
+                    return True
+        return False
+
+    await wait_for("the CI news in its worker's chat", told, 600)
     assert await ctx.task_of(target) is None, "no task's row says it keeps it moving"
-    assert ctx.repo.head("su1") == pr["head"]["sha"], "nothing pushed"
     ctx.notes["su1"] = target
 
 
