@@ -240,6 +240,7 @@ def test_a_workers_temporary_folder_is_made_only_as_its_own(tmp_path, monkeypatc
     # The worker (none other can write there) puts a link in its place: never followed.
     victim = tmp_path / "victim"
     victim.mkdir()
+    victim.chmod(0o755)  # Whatever the umask: the check below is that its mode is untouched.
     (victim / "keep").write_text("x")
     (folder / "jest-cache").rmdir()
     folder.rmdir()
