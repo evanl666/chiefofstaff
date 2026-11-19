@@ -181,6 +181,9 @@ summary { min-height: 28px; }
 .item .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item.done .label { color: var(--soft); }
 .item .sub { font-size: var(--small); color: var(--muted); flex-shrink: 0; }
+/* A second worker, right under the worker it was started from: on a thin line from that one's dot. */
+.item.forked { position: relative; padding-left: 28px; }
+.item.forked::after { content: ""; position: absolute; left: 16px; top: -10px; height: calc(50% + 10px); width: 7px; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); border-bottom-left-radius: 4px; pointer-events: none; }
 
 .badge {
   min-width: 20px;

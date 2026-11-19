@@ -134,6 +134,7 @@
               <label title="When the day's summary comes; empty turns it off"><span>Daily summary at</span><input name="digest_time" type="time" /></label>
             </div>
             <small>More tasks wait in the queue, and new work also waits while this computer is low on memory. Idle finished workers close; you can reopen them. Clear <em>Daily summary at</em> to turn the summary off.</small>
+            <label class="check" title="One with several tasks, or long at work. Only when a worker slot is free; otherwise the task waits for it as before"><input name="fork_busy" type="checkbox" /> Give a busy worker's new task to a second worker with its context</label>
             <label class="check"><input name="mac_notifications" type="checkbox" /> Desktop notifications</label>
             <label class="check"><input name="other_sessions" type="checkbox" /> Show where my other Copilot sessions stand</label>
             <label class="check" title="Chief of Staff reads its own page on PyPI once a day, and sends nothing about you"><input name="update_notice" type="checkbox" /> Say when a newer Chief of Staff is out</label>

@@ -85,6 +85,14 @@ export const focusing = () => new Date(state.snapshot?.focus?.until || 0) > new 
 export function workerTitle(session) {
   return session?.display_title || session?.title || "";
 }
+// The worker a second worker was started from, with its context (`fork_of`): by its name now,
+// open or closed, else as it was then; "" for any other worker.
+export function forkOrigin(session) {
+  const from = session?.fork_of;
+  if (!from) return "";
+  const origin = byId(from.id) || closedWorkers().find((other) => other.id === from.id);
+  return workerTitle(origin) || from.title || "";
+}
 // Where a message sent to a session stands (`delivery`: the owner's, the Router's, a notice),
 // in words for the chat and for the row the owner sent it from: queued, held for its next
 // message (it was stopped), sent, its conversation shows it (received), the turn it was in

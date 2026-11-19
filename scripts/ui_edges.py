@@ -61,7 +61,7 @@ SETTINGS_FIELDS = {
 SETTINGS_FIELDS |= {
     "skill_folders", "plugins", "mcp_servers", "watches", "watch_hours", "watch_minutes",
     "watch_after_hours_minutes", "away_notify", "away_minutes", "away_how", "other_sessions",
-    "send_to_chief", "update_notice", "slack_delegate_reply",
+    "send_to_chief", "update_notice", "slack_delegate_reply", "fork_busy",
 }  # fmt: skip
 # (With Copilot alone, as here: Coding agents' fields are made only where an agent is installed.)
 # Prepared for you: its switch in General (its tab's fields come only while it is on).
@@ -6061,7 +6061,7 @@ async def main():
                           round_layout, round_fresh_start, round_qa8_auth,
                           round_qa8_approvals, round_e125, round_teams,
                           round_usage, round_relations, round_shepherd,
-                          round_stacked_merge):  # fmt: skip
+                          round_stacked_merge, round_fork):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -6544,6 +6544,119 @@ async def round_fresh_start(runtime, browser, failures: list[str]):
         log("with no fresh session either: one plain line, Start a fresh worker; kept, then sent")
     finally:
         client.resume_session, client.create_session = resume, create
+
+
+async def fork_switch(runtime, on: bool):
+    old = runtime.store.settings()
+    new = old.model_copy(update={"fork_busy": on})
+    runtime.store.save_settings(new)
+    await runtime.settings_changed(old, new)
+
+
+async def round_fork(runtime, browser, failures: list[str]):
+    """A busy worker's new task goes to a second worker with its context
+    (docs/design/worker-fork.md): one line in the Router chat; in the sidebar the second worker
+    right under the one it came from, on a thin line; its task's row says where it came from;
+    the first line of each one's chat opens the other; one switch in Settings → General."""
+    store = runtime.store
+    router = store.get("router_id")
+    await fork_switch(runtime, True)
+    spawned = await call_tool(
+        runtime, "spawn_worker", router, title="Speed up the CSV importer",
+        instructions="Profile the CSV importer and make it faster.", why_new="test",
+    )  # fmt: skip
+    worker = json.loads(spawned.text_result_for_llm)["session_id"]
+    session = runtime.states.handle(worker)
+    session.emit("user.message", content=session.sent[-1])
+    session.emit("assistant.turn_start")
+    await settle(runtime)
+    runtime.update_session(worker, status="working")
+    await call_tool(
+        runtime, "message_session", router, session_id=worker, task="new", why_new="test",
+        earlier="keep", title="Add importer benchmarks", text="Add a benchmark for the importer.",
+    )  # fmt: skip
+    told = await call_tool(
+        runtime, "message_session", router, session_id=worker, task="new", why_new="test",
+        title="Export to Parquet", text="Add a Parquet export beside the CSV one.",
+    )  # fmt: skip
+    second = json.loads(told.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    origin = runtime.display_title(store.session(worker))
+    for scheme in ("light", "dark"):
+        for width in (1280, 800):
+            context = await browser.new_context(
+                viewport={"width": width, "height": 900}, color_scheme=scheme
+            )
+            page = await context.new_page()
+            page.on("pageerror", lambda error: failures.append(str(error)))
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=chat]").click()
+            line = page.locator("#timeline .event", has_text="Started a second worker")
+            await expect(line.locator(".what")).to_have_text(
+                f"Started a second worker for “Export to Parquet” (context from “{origin}”)"
+            )
+            # The sidebar: right under the busy worker, nested on a thin line.
+            items = page.locator("#session-list .item")
+            listed = await items.evaluate_all(
+                "nodes => nodes.map((n) => [n.dataset.id, n.classList.contains('forked')])"
+            )
+            at = listed.index([worker, False])
+            assert listed[at + 1] == [second, True], listed
+            nested = page.locator(f'#session-list .item[data-id="{second}"]')
+            await expect(nested).to_have_attribute(
+                "title", re.compile(f"A second worker of “{re.escape(origin)}”")
+            )
+            left = await nested.locator(".dot").evaluate("n => n.getBoundingClientRect().left")
+            first = page.locator(f'#session-list .item[data-id="{worker}"] .dot')
+            assert left > await first.evaluate("n => n.getBoundingClientRect().left") + 8
+            found = await page.locator("#session-list").evaluate(OVERFLOWS)
+            assert not found, (width, found)
+            # Its task's row: where it came from, at its foot.
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=tasks]").click()
+            row = page.locator(".card.task", has_text="Export to Parquet")
+            await expect(row.locator(".worker-ref .name")).to_have_text(f"from “{origin}”")
+            await expect(row.locator(".worker-ref")).to_have_attribute(
+                "data-tip", re.compile("A second worker of")
+            )
+            found = await row.evaluate(OVERFLOWS)
+            assert not found, (width, found)
+            await page.screenshot(path=SHOTS / f"fork-home-{width}-{scheme}.png")
+            # Its chat starts with where its context came from, which opens that worker.
+            await nested.click()
+            first_line = page.locator("#timeline .line.notice").first
+            await expect(first_line).to_have_text(f"Started with the context of “{origin}”")
+            await page.screenshot(path=SHOTS / f"fork-chat-{width}-{scheme}.png")
+            await first_line.click()
+            await expect(page.locator(f'#session-list .item[data-id="{worker}"]')).to_have_class(
+                re.compile(r"\bselected\b")
+            )
+            gone = page.locator("#timeline .line.notice", has_text="Its context went to")
+            await expect(gone).to_have_text(
+                "Its context went to a second worker for “Export to Parquet”"
+            )
+            await gone.click()
+            await expect(nested).to_have_class(re.compile(r"\bselected\b"))
+            await context.close()
+    log("a second worker: one line, nested under its worker, its row and chats linked")
+    # The switch: one line in Settings → General, on; off when saved off.
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await page.locator("#settings-button").click()
+    switch = page.locator("#settings-dialog input[name=fork_busy]")
+    await expect(switch).to_be_visible()
+    await expect(switch).to_be_checked()
+    await page.wait_for_timeout(300)  # (The dialog fades in.)
+    await page.screenshot(path=SHOTS / "fork-settings-1280.png")
+    await switch.uncheck()
+    await page.locator("#settings-dialog").get_by_role("button", name="Save", exact=True).click()
+    await until(lambda: not store.settings().fork_busy)
+    await context.close()
+    await fork_switch(runtime, True)  # As it is by default.
+    log("its switch: one line in Settings → General")
 
 
 async def round_storage(runtime, browser, failures: list[str]):

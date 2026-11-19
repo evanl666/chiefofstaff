@@ -2,7 +2,7 @@
 
 import { $, api, el, toast, withoutBidi } from "./dom.js";
 import { ago, clock, plural, shortPath, since, span } from "./text.js";
-import { closedWorkers, DOT_HELP, HOME, loadState, otherItem, othersOn, otherStatus, routerId, sessions, state, workerTitle } from "./state.js";
+import { closedWorkers, DOT_HELP, forkOrigin, HOME, loadState, otherItem, othersOn, otherStatus, routerId, sessions, state, workerTitle } from "./state.js";
 import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer, setLayout, showDraft } from "./session.js";
 import { homeItem, needsCount, WORKER_STATES, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
@@ -41,17 +41,19 @@ function captain(needs, where) {
 }
 // One count in the whole sidebar, on Home: what needs the owner. Workers show only their dot,
 // which says where each stands as Home does (Needs you, Running, Monitoring).
-function sessionItem(session, label, where, nested = false) {
+function sessionItem(session, label, where, nested = false, forked = false) {
   const dot = where?.dot || "idle";
   const named = label !== session.title ? `\nStarted as “${session.title}”` : "";
+  const origin = forkOrigin(session);
+  const second = origin ? `\nA second worker of “${origin}”, started with its context` : "";
   // Its turn over, a command it left running (a dev server) goes on: not at work, not idle.
   const background = session.background && session.status !== "working";
   return el(
     "button",
     {
       type: "button",
-      class: `item ${dot.split(" ")[0]}${state.selected === session.id ? " selected" : ""}${nested ? " nested" : ""}`,
-      title: [where?.text, background ? "Waiting for background process" : session.activity].filter(Boolean).join(" · ") + named,
+      class: `item ${dot.split(" ")[0]}${forked ? " forked" : ""}${state.selected === session.id ? " selected" : ""}${nested ? " nested" : ""}`,
+      title: [where?.text, background ? "Waiting for background process" : session.activity].filter(Boolean).join(" · ") + named + second,
       "data-id": session.id,
       onclick: () => select(session.id),
     },
@@ -63,13 +65,34 @@ function sessionItem(session, label, where, nested = false) {
     where?.sub || background ? el("span", { class: "sub", text: where?.sub || "background" }) : null,
   );
 }
+// Each worker, with the second workers started from it right under it (when listed together):
+// [worker, nested].
+export function withSecondWorkers(list) {
+  const listed = new Set(list.map((worker) => worker.id));
+  const under = new Map();
+  for (const worker of list) {
+    const from = worker.fork_of?.id;
+    if (from && from !== worker.id && listed.has(from)) under.set(from, [...(under.get(from) || []), worker]);
+  }
+  const placed = new Set();
+  const shown = [];
+  const place = (worker, nested) => {
+    if (placed.has(worker.id)) return;
+    placed.add(worker.id);
+    shown.push([worker, nested]);
+    for (const second of under.get(worker.id) || []) place(second, true);
+  };
+  for (const worker of list) if (!listed.has(worker.fork_of?.id)) place(worker, false);
+  for (const worker of list) place(worker, false);
+  return shown;
+}
 // Workers as rows, the workers of one Compare under one row ("Compare: <title> (2)"), each
-// named by its agent.
+// named by its agent, and second workers right under the worker they came from.
 function workerRows(list, where) {
   const shown = new Set();
-  return list.flatMap((worker) => {
+  return withSecondWorkers(list).flatMap(([worker, forked]) => {
     const group = worker.compare;
-    if (!group) return [sessionItem(worker, workerTitle(worker), where.get(worker.id))];
+    if (!group) return [sessionItem(worker, workerTitle(worker), where.get(worker.id), false, forked)];
     if (shown.has(group.id)) return [];
     shown.add(group.id);
     // In the order the agents were chosen.

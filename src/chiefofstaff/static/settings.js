@@ -420,6 +420,7 @@ export function fillSettings() {
   form.scratch_directory.value = settings.scratch_directory;
   form.scratch_directory.placeholder = settings.code_folder ? `${settings.code_folder}/.chief` : `${state.snapshot.data_directory}/work/workspaces`;
   form.max_workers.value = settings.max_workers;
+  form.fork_busy.checked = Boolean(settings.fork_busy);
   form.worker_yolo.checked = settings.worker_yolo;
   form.worker_sandbox.checked = settings.worker_sandbox;
   form.shared_caches.checked = settings.shared_caches;
@@ -937,6 +938,7 @@ export function settingsBody() {
     code_folder: form.code_folder.value.trim(),
     scratch_directory: form.scratch_directory.value.trim(),
     max_workers: number("max_workers"),
+    fork_busy: form.fork_busy.checked,
     worker_yolo: form.worker_yolo.checked,
     worker_sandbox: form.worker_sandbox.checked,
     shared_caches: form.shared_caches.checked,

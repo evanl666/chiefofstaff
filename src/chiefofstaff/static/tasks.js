@@ -5,7 +5,7 @@ import { monitorParts, obligationsOf, PLAN_STOP, PR_TO_FIX, resetTime, SECTION_D
 import { ago, changesText, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel, uncheckedText } from "./text.js";
 import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
-import { byId, closedWorkers, DELIVERY_WORDS, latestDelivery, loadState, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
+import { byId, closedWorkers, DELIVERY_WORDS, forkOrigin, latestDelivery, loadState, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { continueWith, refreshChips, select } from "./session.js";
 import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
@@ -122,7 +122,9 @@ export function workerName(session, title) {
 export function workerRef(session, title, taskId = "") {
   if (!session) return "";
   const name = workerName(session, title);
-  const tip = [`Open its worker's chat${taskId ? " at this task" : ""}`, name ? `Worker: “${name}”` : ""].filter(Boolean).join("\n");
+  // A second worker, started with another's context: from that one, when it has no other name.
+  const origin = forkOrigin(session);
+  const tip = [`Open its worker's chat${taskId ? " at this task" : ""}`, name ? `Worker: “${name}”` : "", origin ? `A second worker of “${origin}”, started with its context` : ""].filter(Boolean).join("\n");
   return el(
     "button",
     { type: "button", class: "worker-ref link", "data-tip": tip, "aria-label": `Open the worker of “${title}”`, onclick: (event) => {
@@ -131,7 +133,7 @@ export function workerRef(session, title, taskId = "") {
     } },
     el("span", { class: "icon", "aria-hidden": "true" }),
     el("span", { class: "who", text: "Worker" }),
-    el("span", { class: "name", text: name || "chat" }),
+    el("span", { class: "name", text: name || (origin ? `from “${origin}”` : "chat") }),
   );
 }
 // Where a task is when no board placed it (a card elsewhere): as the board would place it.
