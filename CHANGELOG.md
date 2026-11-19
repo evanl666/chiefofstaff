@@ -16,8 +16,9 @@ Codex and Claude can do what Copilot workers can.
   without a model); Claude's worktrees, scheduled turns, plan mode, subagents and messages from
   other Claude sessions are tied into Chief of Staff's checks, receipts and timeline (*Stop*
   holds what a worker scheduled, and *Cancel* deletes it in Claude too; in plan mode it writes
-  only its plan until that is approved; another session's message is marked unverified); a
-  worker doesn't write Claude's own settings (`.claude/settings.json`, `.mcp.json`) in its folders;
+  only its plan until that is approved; another session's message is marked unverified); Claude's
+  own settings in a worker's folder (`.claude/settings.json`, `.mcp.json`, subagents, the
+  scripts their hooks run) are held as Copilot's are, with *Use these settings* when they change;
   its auto memory is off in workers; its spend is counted in tokens as it goes. Workers that read
   Slack stay on Copilot for now, and a sandboxed Claude worker doesn't start where your Claude
   settings would widen its sandbox. On a Claude plan, Claude workers count against your plan's

@@ -552,6 +552,33 @@ async def test_codex_settings_a_worker_changed_are_not_loaded(tmp_path, monkeypa
         await runtime.stop()
 
 
+async def test_a_codex_worker_whose_codex_settings_changed_is_not_handed_to_a_terminal(
+    tmp_path, monkeypatch
+):
+    """`codex resume` in the owner's terminal would load its folder's `.codex/` as it is, with
+    no check of Chief of Staff's: not while it differs from what the owner last let workers
+    use; the line, with Use these settings, is in its timeline."""
+    main, wt, base = trusted_worktree(tmp_path, monkeypatch)
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        handed(harness, runtime, main, wt, base)
+        harness.store.set("agent:w1", "codex")
+        harness.store.set("copilot:w1", "thread-1")
+        (wt / ".codex" / "config.toml").write_text('model = "planted-model"\n')
+        refused = (
+            "Codex settings in this folder changed (changed .codex/config.toml): Codex would load "
+            "them in your terminal. Look at them, then Use these settings here first."
+        )
+        with pytest.raises(ValueError, match=re.escape(refused)):
+            await runtime.terminal_command("w1")
+        (said,) = settings_lines(harness)
+        assert said["text"] == refused
+        await runtime.accept_settings("w1", said["meta"]["agent_settings"]["digest"])
+        assert (await runtime.terminal_command("w1"))["agent"] == "codex"
+    finally:
+        await runtime.stop()
+
+
 async def test_codex_settings_as_handed_out_stay_trusted(tmp_path, monkeypatch):
     """A repository that ships its own `.codex/` keeps it for its workers: as its worktree was
     made (git's checkout having made its line ends CRLF). One made before that was kept: the

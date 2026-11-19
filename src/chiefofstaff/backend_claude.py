@@ -577,30 +577,6 @@ def clip(text: str, most: int) -> str:
     return text if len(text) <= most else text[: most - 1] + "…"
 
 
-# Claude's own settings in a folder (2.1.322): their hooks, apiKeyHelper and MCP servers run as
-# its next process there starts (a worker's resumed, or the owner's own session), outside the
-# worker's sandbox and Chief of Staff's checks, Ask first or not. No worker writes them.
-CLAUDE_CONFIG_FILES = (".claude/settings.json", ".claude/settings.local.json", ".mcp.json")
-CONFIG_WRITE = (
-    "Claude's own settings (.claude/settings.json, .claude/settings.local.json, .mcp.json) run "
-    "their hooks and servers outside a worker's checks as Claude next starts there: a worker may "
-    "not write them. Say what to change, and the owner changes them."
-)
-
-
-def claude_config_file(path: str) -> bool:
-    """Whether a path is one of Claude's settings files in a folder (CLAUDE_CONFIG_FILES), as
-    named or as it resolves (a link to one is one)."""
-    for each in {path, os.path.realpath(path)}:
-        parts = Path(each).parts
-        if parts[-1:] == (".mcp.json",) or parts[-2:] in {
-            (".claude", "settings.json"),
-            (".claude", "settings.local.json"),
-        }:
-            return True
-    return False
-
-
 def joined(folder: str, path: str) -> str:
     """A path a tool names, from its folder (`..` taken away, links not followed)."""
     return os.path.normpath(Path(folder) / path)
@@ -884,16 +860,7 @@ def sandbox_settings(policy: Any) -> dict:
         "allowAppleEvents": False,
         "filesystem": {
             "allowWrite": [path for path in policy.readwrite if path not in sockets],
-            # Claude's own settings in each folder it may write: never written by a command.
-            "denyWrite": [
-                *policy.readonly,
-                *(
-                    str(Path(path) / file)
-                    for path in policy.readwrite
-                    if path not in sockets
-                    for file in CLAUDE_CONFIG_FILES
-                ),
-            ],
+            "denyWrite": list(policy.readonly),
             "denyRead": list(policy.denied),
         },
         "network": network,
@@ -1304,6 +1271,10 @@ class ClaudeWorker:
             settings["sandbox"] = sandbox_settings(policy)
         if self.ask_first:
             settings["disableAllHooks"] = True  # The owner's hooks and mods: off (5.7).
+        if disabled := [str(name) for name in self.options.get("disabled_mcp_servers") or []]:
+            # Its folder's MCP servers whose files changed since the owner last let it use them
+            # (Runtime.servers_off): not started in this process.
+            settings["disabledMcpjsonServers"] = disabled
         # Its settings as flags, kept whole: a new effort in place sends them all again (retune).
         self.flag_settings = dict(settings)
         files = self.private_files()
@@ -2715,10 +2686,12 @@ class ClaudeWorker:
             return why
         if why := self.private_refusal(name, arguments, cwd):
             return why
-        if name in WRITE_TOOLS and claude_config_file(
-            joined(cwd, str(arguments.get(WRITE_TOOLS[name]) or ""))
+        if (
+            name in SUBAGENT_TOOLS
+            and (check := self.options.get("on_subagent"))
+            and (why := await check(name, arguments))
         ):
-            return CONFIG_WRITE
+            return why  # Its folder's settings, looked at before Claude loads the subagent.
         if (
             name in SHELL_TOOLS
             and arguments.get("dangerouslyDisableSandbox")

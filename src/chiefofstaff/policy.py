@@ -4374,6 +4374,16 @@ REPOSITORY_SETTINGS = (
 SANDBOX_HELD = (".mcp.json", ".github/mcp.json")
 # Codex's own (a trusted folder's rules, MCP servers, environment, model, hooks).
 CODEX_SETTINGS = (".codex",)
+# Claude Code's own, of those (2.1.322): what it loads from a folder as its process starts there
+# (a worker's, resumed; the owner's own in a terminal): its settings (hooks, apiKeyHelper,
+# permissions, MCP and plugin switches), MCP servers and subagents (with their hooks and
+# servers). Its skills, commands and CLAUDE.md stay a worker's to write.
+CLAUDE_SETTINGS = (
+    ".mcp.json",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/agents",
+)
 # Every agent's: what a folder's snapshot holds (settings_guard).
 AGENT_SETTINGS = REPOSITORY_SETTINGS + CODEX_SETTINGS
 RUN_WRITE = (
