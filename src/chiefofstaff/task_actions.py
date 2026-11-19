@@ -2878,13 +2878,17 @@ class TaskActions:
         return "\n".join(lines).strip() + "\n"
 
     def fail(self, session_id: str, message: str) -> dict | None:
-        """Its turn failed (or its start): the task that turn was on fails; its other tasks stay
-        as they were (bug E84: every open one failed, queued ones too, and their Retry started
-        them out of turn). The task that failed, if one did (not for a turn about finished
-        work: news on it, say)."""
+        """Its turn failed (or its start): the task that turn was on fails; with no turn of its
+        own, the first it is at work on (never one given after it that it has not taken up),
+        else, failing to start, the one it was given. Its other tasks stay as they were (bug
+        E84: every open one failed, queued ones too, and their Retry started them out of turn).
+        The task that failed, if one did (not for a turn about finished work: news on it, say).
+        The one place a failure picks its task (Runtime.worker_failed)."""
         task = self.tasks.find(self.runtime.turn_task(session_id))
         if not task or task["session_id"] != session_id:
-            task = self.tasks.current(session_id)
+            given = self.tasks.for_session(session_id)
+            working = (t for t in given if t["status"] in OPEN - {"queued"})
+            task = next(working, None) or self.tasks.current(session_id)
         if not task or task["status"] not in OPEN:
             return None
         self.end_follows(task)

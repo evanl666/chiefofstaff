@@ -82,7 +82,10 @@ again by itself; Other Copilot sessions never shows an empty group without a wor
   retried (open its replacement), and a Retry that reopens a worker you or the Router closed
   says so on Home and to the Router.
 - **Fixed: one failed turn failed every open task of its worker**, queued ones too, and their
-  Retry started them out of turn (E84). Only the task that turn was on fails.
+  Retry started them out of turn (E84). Only the task that turn was on fails, the same way
+  however it failed (0.1.47's tools that fit no model, a message Copilot never started on, a
+  worker that could not start): it stops following what it followed, and a Watch for you scan
+  that fails so is said as one.
 - **A failed task can be dismissed** (E89). *Cancel task* answered "is failed already", and Retry
   was the only way out. Its card has **Dismiss** beside Retry: it is cancelled, and nothing of
   its worker is reopened (the Router's `cancel_task` too). One neither retried nor dismissed is

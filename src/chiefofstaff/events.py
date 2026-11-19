@@ -869,14 +869,7 @@ class Events:
             message = f"Copilot failed on this turn {RETRIES + 1} times: {message}"
         self.runtime.add_message(session_id, "error", message)
         if row["role"] == WORKER:
-            self.runtime.update_session(session_id, status="failed", activity="")
-            task = self.runtime.task_actions.fail(session_id, message)
-            if self.runtime.special(row) == "connector":
-                # Watch for you: its scan failed (not a task of its own, bug E102).
-                self.runtime.connector.failed(message)
-            else:
-                self.runtime.background(self.runtime.tell_router(row, "failed", message, task))
-            self.runtime.background(self.runtime.workers.pump())
+            self.runtime.worker_failed(row, message)
         else:
             self.runtime.update_session(session_id, status="idle", activity="")
             if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
@@ -947,12 +940,7 @@ class Events:
         # Nothing left to fall back to: an error as any other.
         self.runtime.add_message(row["id"], "error", message)
         if row["role"] == WORKER:
-            self.runtime.update_session(row["id"], status="failed", activity="")
-            task = self.runtime.task_actions.fail(row["id"], message)
-            if self.runtime.special(row) == "connector":
-                self.runtime.connector.failed(message)
-            else:
-                await self.runtime.tell_router(row, "failed", message, task)
+            self.runtime.worker_failed(row, message)
 
     def hook_failed(self, row: dict, message: str):
         """Said once a day per plugin, as a note: the work itself goes on. The same hook fails

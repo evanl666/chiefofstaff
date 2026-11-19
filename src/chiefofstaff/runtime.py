@@ -2482,10 +2482,7 @@ class Runtime:
         if row["role"] != WORKER:
             self.update_session(session_id, status="idle", activity="")
             return
-        self.update_session(session_id, status="failed", activity="")
-        task = self.task_actions.fail(session_id, message)
-        self.background(self.tell_router(row, "failed", message, task))
-        self.background(self.workers.pump())
+        self.worker_failed(row, message)
 
     async def add_repo(self, caller: str, repo: str):
         row = self.store.session(caller)
@@ -3366,15 +3363,9 @@ class Runtime:
         if row["role"] != WORKER:
             self.update_session(session_id, status="idle", activity="")
             return
-        self.update_session(session_id, status="failed", activity="")
-        # The task its turn was on, else the one given first: never one given after it that
-        # it has not taken up, nor one queued (bug E84: every open task failed).
-        working = [t for t in self.tasks.for_session(session_id) if t["status"] in OPEN_WORK]
-        turn = self.turn_task(session_id)
-        task = next((t for t in working if t["id"] == turn), working[0] if working else None)
-        if task:
-            self.tasks.move(task["id"], "failed", progress=line[:500])
-            self.background(self.task_actions.record_end(task))
+        task = self.worker_failed(row, line, told=None)
+        if self.special(row) == "connector":
+            return  # Watch for you's scan failed: told as its own (worker_failed).
         mark = self.owner_mark()
         if not self.special(row):
             self.store.set(f"nofit:{row.get('project') or ''}", str(mark))
@@ -3389,7 +3380,6 @@ class Runtime:
                 "until the owner writes to you). Tell the owner in one line.",
                 task,
             )
-        self.background(self.workers.pump())
 
     def owner_mark(self) -> int:
         """The owner's latest message to the Router (its id; 0 for none)."""
@@ -5307,23 +5297,35 @@ class Runtime:
     def fail(self, row: dict, message: str):
         self.states[row["id"]].busy = False
         self.add_message(row["id"], "error", message)
-        self.update_session(row["id"], status="failed", activity="")
         self.delivery.defer_pending(row["id"])  # Not a turn by itself after a restart.
-        # The task it was on; failing to start, the one it was given (still queued).
-        task = self.task_actions.fail(row["id"], message) if row["role"] == WORKER else None
-        if row["role"] == WORKER:
-            self.background(self.workers.pump())  # Its slot is free for a queued worker.
-            if self.special(row) == "connector":
-                self.connector.failed(message)
-            elif not self.special(row):
-                # As when Copilot fails a turn: the Router and the owner hear of it.
-                self.background(self.tell_router(row, "failed", message, task))
-                self.alert(
-                    f"“{self.display_title(row)}” failed: {message[:160]}",
-                    session_id=row["id"],
-                    needs_action=True,
-                    title="Failed",
-                )
+        if row["role"] != WORKER:
+            self.update_session(row["id"], status="failed", activity="")
+            return
+        # As when Copilot fails a turn: the Router and the owner hear of it.
+        self.worker_failed(row, message, told=None if self.special(row) else message)
+        if not self.special(row):
+            self.alert(
+                f"“{self.display_title(row)}” failed: {message[:160]}",
+                session_id=row["id"],
+                needs_action=True,
+                title="Failed",
+            )
+
+    def worker_failed(self, row: dict, message: str, told: str | None = "") -> dict | None:
+        """A worker's turn, or its start, failed: the one path for every way one does (Copilot's
+        error or refusal, a message it never started on, a start that failed, tools that fit
+        no model). It is Failed; the task that turn was on fails, not those queued behind it
+        (TaskActions.fail); its slot is free for a queued worker. Watch for you's scan failed
+        as its own (Connector.failed: no task of its own, bug E102); for any other the Router
+        hears `told` (the message when ""; None: the caller tells it). The task that failed."""
+        self.update_session(row["id"], status="failed", activity="")
+        task = self.task_actions.fail(row["id"], message)
+        if self.special(row) == "connector":
+            self.connector.failed(message)
+        elif told is not None:
+            self.background(self.tell_router(row, "failed", told or message, task))
+        self.background(self.workers.pump())
+        return task
 
     @property
     def attachments_dir(self) -> Path:

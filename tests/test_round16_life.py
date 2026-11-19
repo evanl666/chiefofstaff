@@ -468,6 +468,27 @@ async def test_a_failed_turn_fails_only_the_task_it_was_on(harness):
     assert told and told[-1]["meta"]["task_id"] == coverage["id"]
 
 
+async def test_tools_that_fit_no_model_and_a_message_never_started_fail_as_any_turn(tmp_path):
+    """One path for every way a worker fails (0.1.47's tools that fit no model chose its task
+    apart): the task stops following what it followed, and Watch for you's scan that Copilot
+    never started on fails as its own, not as a task the Router hears of."""
+    harness, runtime = await failing_watch(tmp_path)
+    worker, fix = await spawn(runtime, harness.router_id, "Fix login", follow=[PR])
+    await runtime.tools_dont_fit(harness.store.session(worker))
+    await settle(runtime)
+    assert runtime.tasks.get(fix["id"])["status"] == "failed"
+    assert PR not in harness.store.follows(worker), "as any failed task's"
+    row = runtime.connector.session()
+    runtime.states[row["id"]].awaiting = (time.time(), 0)
+    await runtime.not_started(row["id"])
+    await settle(runtime)
+    assert runtime.connector.view()["failed"]["count"] == 1
+    told = [
+        m for m in harness.store.messages(harness.router_id) if m["meta"].get("from") == row["id"]
+    ]
+    assert not told, "no task of the connector's"
+
+
 # E89: a failed task about to leave Needs you.
 
 
