@@ -1024,8 +1024,8 @@ async def signed_out(route):
 
 async def agents_views(runtime, browser, quality: Quality):
     """Other coding agents (docs/design/more-agents.md 5.10, the agent picker): Settings' Coding
-    agents tab (Codex's and Claude's rows), signed out, found, being turned on, on with Advanced
-    open; a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
+    agents tab (Codex's and Claude's rows), signed out, found, being turned on, on (where new
+    workers start, its Model and Limit); a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
     (browser-shots/agents-m2/quality-*)."""
     from copilot.tools import ToolInvocation
     from ui_edges import agents_saved, codex_off_path, codex_on_path, until
@@ -1067,7 +1067,7 @@ async def agents_views(runtime, browser, quality: Quality):
                     await expect(group.locator("input[name=agent_codex_enabled]")).to_be_checked(
                         timeout=20000
                     )
-                    await group.locator(".agent-row[data-agent=codex] summary").click()
+                    await expect(group.locator("#agents-choice")).to_be_visible()
                 for width in WIDTHS:
                     await page.set_viewport_size({"width": width, "height": 900})
                     await page.wait_for_timeout(100)

@@ -168,7 +168,7 @@ def test_on_windows_codex_is_found_but_not_offered_and_never_run(web, codex_on_p
     refused = save(web, {"codex": {"enabled": True}})
     assert refused.status_code == 400
     assert refused.json()["detail"] == (
-        "Use Codex for workers: Codex workers need macOS or Linux for now."
+        "Codex, Available for workers: Codex workers need macOS or Linux for now."
     )
 
 
@@ -212,11 +212,11 @@ def test_saving_the_group_with_nothing_turned_on_stores_nothing(web, codex_on_pa
         ({"codex": {"enabled": True, "limit": 1.5}}, "Limit per worker: a whole number"),
         ({"codex": {"enabled": True, "limit": True}}, "Limit per worker: a whole number"),
         ({"codex": {"enabled": True, "limit": 10**12 + 1}}, "Limit per worker: at most"),
-        ({"codex": {"enabled": "yes"}}, "Use Codex for workers: on or off."),
+        ({"codex": {"enabled": "yes"}}, "Codex, Available for workers: on or off."),
         ({"codex": {"enabled": True, "model": 5}}, "Model: a model's name"),
         ({"codex": {"enabled": True, "effort": "high"}}, "Coding agents: unknown setting"),
         ({"gemini": {"enabled": True}}, "Coding agents: Chief of Staff does not run 'gemini'."),
-        ({"new_workers": "codex"}, "New workers use: Copilot, or an agent turned on below."),
+        ({"new_workers": "codex"}, "New workers start on: Copilot, or an agent turned on below."),
         ([], "Coding agents: expected each agent's settings."),
     ],
 )
@@ -247,8 +247,8 @@ def test_codex_is_not_turned_on_while_workers_are_sandboxed(web, codex_on_path):
     refused = save(web, {"codex": {"enabled": True}})
     assert refused.status_code == 400
     assert refused.json()["detail"] == (
-        "Use Codex for workers: Codex can't run while workers are sandboxed: its sandbox has not "
-        "passed Chief of Staff's checks yet."
+        "Codex, Available for workers: Codex can't run while workers are sandboxed: its sandbox "
+        "has not passed Chief of Staff's checks yet."
     )
     assert codex["found"]
 
@@ -259,8 +259,8 @@ def test_codex_folder_stays_out_of_what_the_sandbox_may_write(web, codex_on_path
     refused = save(web, {"codex": {"enabled": True}})
     assert refused.status_code == 400
     assert refused.json()["detail"] == (
-        f"Use Codex for workers: first take {folder} out of Also writable in the sandbox: it "
-        "holds Codex's settings and hooks."
+        f"Codex, Available for workers: first take {folder} out of Also writable in the sandbox: "
+        "it holds Codex's settings and hooks."
     )
     assert web.post("/api/settings", json={"sandbox_writable": []}).status_code == 200
     assert save(web, {"codex": {"enabled": True}}).status_code == 200

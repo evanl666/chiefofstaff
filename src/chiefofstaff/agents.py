@@ -131,7 +131,7 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
         fresh = {**configured(store).get(name, {})}
         if "enabled" in entry:
             if not isinstance(entry["enabled"], bool):
-                raise ValueError(f"Use {display(name)} for workers: on or off.")
+                raise ValueError(f"{display(name)}, Available for workers: on or off.")
             fresh["enabled"] = entry["enabled"]
         if "model" in entry:
             model = entry["model"].strip() if isinstance(entry["model"], str) else None
@@ -152,7 +152,7 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
     chosen = change.get(NEW_WORKERS, stored(store).get(NEW_WORKERS, COPILOT))
     if chosen not in (COPILOT, *on):
         if NEW_WORKERS in change:
-            raise ValueError("New workers use: Copilot, or an agent turned on below.")
+            raise ValueError("New workers start on: Copilot, or an agent turned on below.")
         chosen = COPILOT  # The agent they used is off now.
     plan[NEW_WORKERS] = chosen
     return plan

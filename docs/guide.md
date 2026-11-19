@@ -1213,18 +1213,18 @@ limit per worker stops runaway workers.
 
 Your workers can also run on [Codex](https://developers.openai.com/codex/cli), OpenAI's coding
 agent, or on [Claude Code](https://docs.claude.com/en/docs/claude-code), Anthropic's, each with
-your own sign-in. The Router, the Slack session, the Watchdog and Chief of Staff's own helpers
-stay on Copilot. With neither installed, nothing of this shows anywhere.
+your own sign-in. The Router, the Slack session, the Watchdog, *Watch for you* and Chief of
+Staff's own helpers stay on Copilot. With neither installed, nothing of this shows anywhere.
 
 **Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once per
 agent: *Codex is ready. Allow workers to use it?* *Allow* makes it available to workers (new
 workers stay on Copilot); *Not now* leaves it off and is not asked again. Settings → *Coding
 agents* (a tab that shows once one is installed) has a row per agent: its version and how it is
-signed in, how much of its plan's limits is used, and *Available for workers*. Under *Advanced*:
-the *Model* its workers use (empty: the agent's default) and a *Limit per worker* in tokens
-(empty: none). Once one is available, choose which agent *New workers use* (Copilot by default),
-and whether to *Let the Router choose* the agent for each task (off by default: it then says
-which it chose and why).
+signed in ("0.167.2 · signed in with ChatGPT"), how much of its plan's limits is used, and
+*Available for workers*; while it is available, the *Model* its workers use (empty: the agent's
+default) and a *Limit per worker* in tokens (empty: none). Once one is available, the first line
+is *New workers start on* (Copilot by default; it lists each agent that is available and can
+run, and picking one makes it available). A worker keeps the agent it started on.
 
 **Choosing it for one task.** Type `@codex`, `@claude` or `@copilot` in Home's message box: the
 agent becomes a chip above it ("On Codex", × removes it), and the Router starts that work there.
