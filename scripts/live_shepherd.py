@@ -1748,7 +1748,7 @@ async def sy12_ten_prs(ctx: Ctx):
 async def sy13_downgrade(ctx: Ctx):
     """--prepare-downgrade, then the previous release on the same data: it ignores what this
     one keeps, and a comment on a kept PR reaches its worker as news, as before."""
-    previous = os.environ.get("LIVE_SHEPHERD_PREVIOUS", "chiefofstaff==0.1.45")
+    previous = os.environ.get("LIVE_SHEPHERD_PREVIOUS", "chiefofstaff==0.1.46")
     target, number = await ctx.worker_pr(
         "sy13", {"app/timeouts.py": APP.replace("31", "30")}, "Before a downgrade"
     )
