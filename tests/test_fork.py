@@ -136,6 +136,12 @@ async def test_the_router_sees_how_loaded_each_worker_is(tmp_path):
         ).text_result_for_llm
     )
     assert found["matches"][0]["load"]["busy"] == "2 open tasks"
+    other = (await spawn(runtime, harness.router_id, "Docs", project=""))["session_id"]
+    peers = json.loads(
+        (await call_tool(runtime, "find_sessions", other, query="login")).text_result_for_llm
+    )
+    assert peers["matches"][0]["session_id"] == worker
+    assert "load" not in peers["matches"][0], "a worker's view of the others is as before"
     refused = await call_tool(runtime, "spawn_worker", harness.router_id, title="Fix login copy",
                               instructions="Fix the login form's copy.")  # fmt: skip
     said = refused.text_result_for_llm

@@ -3695,9 +3695,10 @@ class Tools:
         matches = self.runtime.workers.find(params.query)
         if row["role"] == ROUTER:
             return {"matches": matches}
-        # A worker sees only sessions it may ask: not itself, same Slack access.
+        # A worker sees only sessions it may ask: not itself, same Slack access. How loaded
+        # each is (forks.py) is the Router's to weigh, not theirs.
         peers = [
-            match
+            {key: value for key, value in match.items() if key != "load"}
             for match in matches
             if match["session_id"] != caller
             and bool(self.store.session(match["session_id"])["slack"]) == bool(row["slack"])
