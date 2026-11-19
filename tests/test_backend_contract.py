@@ -25,6 +25,7 @@ import sys
 import tempfile
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -1020,15 +1021,11 @@ async def test_every_edit_asks_with_each_file_and_a_refused_one_is_not_written(b
     assert {d.tool_name for d in edits} <= {"create", "edit", "bash"}, edits
 
 
-@pytest.mark.codex
-async def test_a_yolo_codex_workers_edit_in_the_owners_checkout_is_refused(tmp_path, monkeypatch):
-    """Live B2's check, on real Codex with the stand-in model (a live model may decline to try):
-    a Codex worker acting on its own, given the owner's checkout to read, edits a file there with
-    apply_patch; Chief of Staff's own answer (Events.on_permission, policy.owners_checkout)
-    refuses it, says why, and nothing is written there. In its own folder, the same edit is
-    written."""
-    if not REAL_CODEX:
-        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+@contextlib.asynccontextmanager
+async def reading_the_owners_checkout(tmp_path, monkeypatch):
+    """A Codex worker acting on its own (yolo), given the owner's checkout to read, on real
+    Codex with the stand-in model: its session, answered by Chief of Staff's own permission
+    check (Events.on_permission); with the checkout, its own folder, and its turn."""
     from conftest import Harness
     from test_round7_split import published, spawn
 
@@ -1061,24 +1058,68 @@ async def test_a_yolo_codex_workers_edit_in_the_owners_checkout_is_refused(tmp_p
                 request, {"session_id": row["id"]}
             ),
         )
-        await session.send(
-            f"Write the file `{app / 'notes.txt'}` and the file `{app / 'more.txt'}` with your "
-            "file editing tool (apply_patch). Then reply with just: written"
-        )
-        await turn.wait()
-        assert not (app / "notes.txt").exists() and not (app / "more.txt").exists()
-        notices = [m["text"] for m in harness.store.messages(row["id"]) if m["kind"] == "notice"]
-        assert any("owner's own checkout" in text for text in notices), notices
-        await session.send(
-            f"Write the file `{own / 'notes.txt'}` and the file `{own / 'more.txt'}` with your "
-            "file editing tool (apply_patch). Then reply with just: written"
-        )
-        await turn.wait()
-        assert (own / "notes.txt").exists() and (own / "more.txt").exists(), "its own: written"
+
+        def notices() -> list[str]:
+            return [m["text"] for m in harness.store.messages(row["id"]) if m["kind"] == "notice"]
+
+        yield SimpleNamespace(app=app, own=own, session=session, turn=turn, notices=notices)
     finally:
         await codex.stop()
         model.close()
         await runtime.stop()
+
+
+@pytest.mark.codex
+async def test_a_yolo_codex_workers_edit_in_the_owners_checkout_is_refused(tmp_path, monkeypatch):
+    """Live B2's check, on real Codex with the stand-in model (a live model may decline to try):
+    a Codex worker acting on its own, given the owner's checkout to read, edits a file there with
+    apply_patch; Chief of Staff's own answer (Events.on_permission, policy.owners_checkout)
+    refuses it, says why, and nothing is written there. In its own folder, the same edit is
+    written."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    async with reading_the_owners_checkout(tmp_path, monkeypatch) as it:
+        app, own = it.app, it.own
+        await it.session.send(
+            f"Write the file `{app / 'notes.txt'}` and the file `{app / 'more.txt'}` with your "
+            "file editing tool (apply_patch). Then reply with just: written"
+        )
+        await it.turn.wait()
+        assert not (app / "notes.txt").exists() and not (app / "more.txt").exists()
+        assert any("owner's own checkout" in text for text in it.notices()), it.notices()
+        await it.session.send(
+            f"Write the file `{own / 'notes.txt'}` and the file `{own / 'more.txt'}` with your "
+            "file editing tool (apply_patch). Then reply with just: written"
+        )
+        await it.turn.wait()
+        assert (own / "notes.txt").exists() and (own / "more.txt").exists(), "its own: written"
+
+
+@pytest.mark.codex
+async def test_a_yolo_codex_workers_command_writing_in_the_owners_checkout_is_refused(
+    tmp_path, monkeypatch
+):
+    """Live B3's check, on real Codex with the stand-in model: the same worker runs `echo y >>
+    README.md` there (Codex asks before a command no rule of the owner's allows, as it runs
+    with no sandbox); Chief of Staff refuses it as it refuses the edit, and nothing is written.
+    A command that reads goes through, and the same write in its own folder is made."""
+    if not REAL_CODEX:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
+    async with reading_the_owners_checkout(tmp_path, monkeypatch) as it:
+        app, own = it.app, it.own
+        readme = (app / "README.md").read_text()
+        await it.session.send(
+            "Run the shell command `echo y >> README.md`. Then reply with just: done"
+        )
+        await it.turn.wait()
+        assert (app / "README.md").read_text() == readme, "not written"
+        assert any("owner's own checkout" in text for text in it.notices()), it.notices()
+        await it.session.send(
+            f"Run the shell command `head -1 README.md > {own / 'first.txt'}`. Then reply with "
+            "just: done"
+        )
+        await it.turn.wait()
+        assert (own / "first.txt").read_text() == readme.splitlines()[0] + "\n", "read, written"
 
 
 async def test_with_ask_first_every_mcp_call_asks_and_githubs_writes_stay_refused(
