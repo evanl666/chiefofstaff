@@ -586,7 +586,22 @@ class Repo:
         nothing of the run ever reaches it."""
         left = cleanup(self.owner, self.name, self.stamp, keep=self.branches_before or None)
         if self.default_head and self.head(self.default) != self.default_head:
-            left.append(f"{self.default} moved during the run (it never should)")
+            # Other live suites share this repository and merge into it: what moved it must be
+            # none of this run's (no PR of its own, no commit of its own branches).
+            ours = [
+                pr["number"]
+                for pr in self.owner.pages(f"repos/{self.name}/pulls?state=closed&per_page=100")
+                if pr.get("merged_at") and pr["base"]["ref"] == self.default and self.ours(pr)
+            ]
+            compared = self.owner.json(
+                "api", f"repos/{self.name}/compare/{self.default_head}...{self.default}"
+            )
+            mine = {self.base_head} | {pr["head"]["sha"] for pr in self.prs() if pr.get("head")}
+            reached = [c["sha"] for c in compared.get("commits") or [] if c["sha"] in mine]
+            if ours or reached:
+                left.append(f"{self.default} got this run's work (it never should)")
+            else:
+                log(f"{self.default} moved during the run: other suites' merges, none of ours")
         return left
 
 
