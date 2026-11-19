@@ -480,3 +480,27 @@ def test_a_task_its_worker_has_not_seen_shows_up_next_not_at_work():
         "return [context.active, phase.section, phase.marker];"
     )
     assert found == ["", "monitoring", "turn"]
+
+
+async def test_a_superseding_task_comes_before_the_note_that_names_it(harness):
+    """E108: earlier="superseded" cancelled the old task at once, and its note said "go on with
+    your other open task(s): <the new one>" before the new task's instruction was sent. The
+    cancel read "Cancelled by router:"."""
+    runtime = await harness.connect()
+    worker, a = await spawn(runtime, harness.router_id, "Fix the login")
+    session = harness.session(worker)
+    await turn(runtime, session)
+    sent = len(session.sent)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    task="new", why_new="test", earlier="superseded", title="Rewrite the login",
+                    text="Rewrite it from scratch.")  # fmt: skip
+    await settle(runtime)
+    b = runtime.tasks.current(worker)
+    given = [i for i, text in enumerate(session.sent) if i >= sent and 'type="task"' in text]
+    named = [i for i, text in enumerate(session.sent) if i >= sent and 'type="cancelled"' in text]
+    assert given, "the new task is given"
+    assert not named or given[0] <= named[0], "its instruction comes first"
+    cancelled = runtime.tasks.get(a["id"])
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["progress"].startswith("Cancelled by the Router")
+    assert b["status"] == "running"
