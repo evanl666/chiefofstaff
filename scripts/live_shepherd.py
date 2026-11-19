@@ -4,7 +4,7 @@ Copilot, in five shards. Each checks GitHub itself, not only what Chief of Staff
 Not run on every change: it spends Actions minutes and model credits, and writes to a shared
 test repository. Run it only when asked to (the owner coordinates live runs).
 
-    uv run --with playwright python scripts/live_shepherd.py U|W|X|Y|Z [SU1 SU3 …]
+    uv run --extra dev --with playwright python scripts/live_shepherd.py U|W|X|Y|Z [SU1 SU3 …]
     uv run python scripts/live_shepherd.py --list
     uv run python scripts/live_shepherd.py --plan        (what it makes on GitHub, and cleanup)
     uv run python scripts/live_shepherd.py --dry-run     (setup, writes, cleanup: stand-ins only)
@@ -118,6 +118,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import importlib.util
 import json
 import os
 import shutil
@@ -2659,6 +2660,10 @@ def main():
         raise SystemExit(1 if left else 0)
     if len(sys.argv) < 2 or sys.argv[1].upper() not in SCENARIOS:
         raise SystemExit(__doc__)
+    if not (shutil.which("ruff") and importlib.util.find_spec("pytest")):
+        # The test project's checks run with the tools its workers find, this environment's:
+        # without them, every fix's own check fails and no fix is offered.
+        raise SystemExit("pytest and ruff are needed here: run it with `uv run --extra dev`.")
     asyncio.run(shard(sys.argv[1].upper(), {item.upper() for item in sys.argv[2:]}))
 
 
