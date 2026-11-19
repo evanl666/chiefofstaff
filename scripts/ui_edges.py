@@ -59,7 +59,7 @@ SETTINGS_FIELDS = {
 SETTINGS_FIELDS |= {
     "skill_folders", "plugins", "mcp_servers", "watches", "watch_hours", "watch_minutes",
     "watch_after_hours_minutes", "away_notify", "away_minutes", "away_how", "other_sessions",
-    "send_to_chief",
+    "send_to_chief", "update_notice",
 }  # fmt: skip
 FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours"} | {
     "slack_token", "profile", "setup_notes", "report_footer", "agent_new_workers",
