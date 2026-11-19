@@ -69,6 +69,8 @@ export const routerId = () => state.snapshot?.router_id;
 export const viewedId = () => (state.selected === HOME ? routerId() : state.selected);
 export const pendingDrafts = () => state.snapshot?.drafts || [];
 export const uncertainDrafts = () => state.snapshot?.uncertain || [];
+// What the owner chose to send (an empty review summary too), else what was drafted.
+export const finalText = (draft) => (draft.has_final ? draft.final_text : draft.text);
 export const tasks = () => state.snapshot?.tasks || [];
 export const ownerQuestions = () => state.snapshot?.questions || [];
 // The Router's notes that need the owner (notify_owner with needs_action or urgent), until seen.

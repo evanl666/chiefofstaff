@@ -697,7 +697,8 @@ async def test_a_worker_used_in_a_terminal_catches_up_and_is_refused_while_open_
     assert harness.store.get(f"refusedopen:{worker}")
 
 
-STORE_SCHEMA = (9771, "83310c3579e35b6f8fcaf2c46fe227727bcfa80071039eaf1ba78fd054a993d5")
+# 0.1.48: drafts.has_final (the owner's own text, an empty one too: bug E105).
+STORE_SCHEMA = (9809, "8a806909b6db8d5d838f19470fc325cca8947451adc33b0312bb0d3354f1d8fd")
 
 
 def stored(path) -> dict[str, list]:

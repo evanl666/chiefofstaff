@@ -274,6 +274,10 @@ class Store:
         if "needs" not in dep_columns:
             # "result": it starts once the task reports done; "accepted": once the owner accepts.
             self.db.execute("ALTER TABLE task_deps ADD COLUMN needs TEXT NOT NULL DEFAULT 'result'")
+        draft_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(drafts)")}
+        if "has_final" not in draft_columns:
+            # Whether final_text is the owner's (an empty one too: a review's summary removed).
+            self.db.execute("ALTER TABLE drafts ADD COLUMN has_final INTEGER NOT NULL DEFAULT 0")
         usage_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(usage)")}
         if "run_id" not in usage_columns:
             self.db.execute("ALTER TABLE usage ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")
@@ -681,6 +685,8 @@ class Store:
     def update_draft(self, draft_id: str, **values) -> dict:
         if not values or not values.keys() <= DRAFT_FIELDS:
             raise ValueError("Invalid draft update.")
+        if "final_text" in values:
+            values["has_final"] = 1  # The owner's text, even empty (see Drafts.final).
         columns = ",".join(f"{key}=?" for key in values)
         self.execute(
             f"UPDATE drafts SET {columns} WHERE id=?",  # noqa: S608  (names checked above)

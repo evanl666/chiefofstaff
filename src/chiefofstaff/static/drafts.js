@@ -4,7 +4,7 @@
 
 import { api, el, moreMenu, once, submits, toast } from "./dom.js";
 import { clock, codeHtml, displayPath, inlineHtml, markdown, slackText } from "./text.js";
-import { applyDraft, pendingDrafts, state } from "./state.js";
+import { applyDraft, finalText, pendingDrafts, state } from "./state.js";
 import { select } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
 import { scheduleHome } from "./inbox.js";
@@ -421,7 +421,7 @@ const VERDICTS = {
 // copies it and sends it there.
 function replyCard(draft) {
   const target = draft.target;
-  const text = fitting(draft.final_text || draft.text, { label: "Reply" });
+  const text = fitting(finalText(draft), { label: "Reply" });
   const error = el("span", { class: "error" });
   // Where it goes opens the conversation, to paste it there.
   const where = target.where || "conversation";
@@ -514,7 +514,7 @@ function messageCard(draft) {
     draft.kind === "slack"
       ? el("span", { title: slackDestination(target), text: `Slack reply · ${SLACK_KIND[target.channel_id?.[0]] || "conversation"}${target.thread_ts ? ", in a thread" : ""}` })
       : [`Reply on `, pr(), target.comment?.author ? ` · to ${target.comment.author}` : ""];
-  const text = fitting(draft.final_text || draft.text, { label: "Draft" });
+  const text = fitting(finalText(draft), { label: "Draft" });
   const error = el("span", { class: "error" });
   const actions = el("div", { class: "actions" });
   // What it answers, then who it is for and why, in one quiet line.
@@ -609,7 +609,7 @@ function reviewCard(draft) {
   const target = draft.target;
   const comments = target.comments || [];
   const review = {
-    summary: draft.final_text || draft.text,
+    summary: finalText(draft),
     verdict: VERDICTS[target.verdict] && !target.own ? target.verdict : "comment",
     comments: comments.map((comment) => ({ ...comment, text: comment.body, removed: false })),
   };
@@ -865,11 +865,11 @@ export function uncertainCard(draft) {
     { class: "card draft uncertain" },
     el("div", { class: "head" }, el("span", { class: "label", text: where }), el("span", { class: "chip waiting", text: "Sent?" })),
     el("div", { class: "note", text: draft.outcome || "Chief of Staff stopped while sending this. Check whether it arrived." }),
-    el("div", { class: "body quoted", text: draft.final_text || draft.text }),
+    el("div", { class: "body quoted", text: finalText(draft) }),
   );
   const decide = decider(draft, node, error);
   node.append(
-    actionRow(error, el("button", { type: "button", text: "Send again", onclick: () => decide({ action: "send", text: draft.final_text || draft.text }, "Sent.") }), [
+    actionRow(error, el("button", { type: "button", text: "Send again", onclick: () => decide({ action: "send", text: finalText(draft) }, "Sent.") }), [
       { text: "It was sent", onclick: () => decide({ action: "mark_sent" }, "Marked as sent.") },
       { text: "Drop it", onclick: () => decide({ action: "reject" }, "Dropped.") },
     ]),

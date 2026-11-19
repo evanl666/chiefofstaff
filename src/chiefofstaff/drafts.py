@@ -433,6 +433,12 @@ class Drafts:
         )
 
     @staticmethod
+    def final(draft: dict) -> str:
+        """What the owner chose to send (an empty review summary too: line comments alone),
+        else the drafted text."""
+        return draft["final_text"] if draft.get("has_final") else draft["text"]
+
+    @staticmethod
     def owner_edited(draft: dict) -> str:
         """The owner's own text on a card still waiting (held, or its sending failed) when they
         changed the drafted one; "" when they did not."""
@@ -921,7 +927,7 @@ class Drafts:
         result is applied under the lock and only to a draft that is still uncertain.
         """
         for draft in self.store.drafts("uncertain"):
-            text = draft["final_text"] or draft["text"]
+            text = self.final(draft)
             created = datetime.fromisoformat(draft["created_at"]).timestamp()
             try:
                 if draft["kind"] == "slack":
@@ -1182,7 +1188,7 @@ class Drafts:
         shown = self.runtime.tasks.find(accept) if accept else None
         if shown and shown["session_id"] == draft["session_id"]:
             task = shown
-        sent = (draft.get("final_text") or draft["text"]).strip()
+        sent = self.final(draft).strip()
         if task and sent != (draft["text"] or "").strip():
             self.store.set(f"draft_edited:{task['id']}", "1")  # Not accepted as it was.
         if task and task["status"] in {"running", "queued"}:
@@ -1372,7 +1378,7 @@ class Drafts:
             if time.time() - created < 60 or time.time() - last < every:
                 continue
             self.store.set(f"postcheck:{draft['id']}", str(time.time()))
-            text = draft["final_text"] or draft["text"]
+            text = self.final(draft)
             if not text.strip():
                 continue
             try:
@@ -1531,7 +1537,7 @@ class Drafts:
         if draft["kind"] == "slack":
             for key in message_keys(outcome):
                 # Our own message must not come back as a follow-up.
-                self.store.add_trigger("slack-sent", key, draft["final_text"] or draft["text"])
+                self.store.add_trigger("slack-sent", key, self.final(draft))
             thread = threads.slack_follow_key(target["channel_id"], target["thread_ts"], outcome)
         else:
             thread = f"github:{target['repo']}#{target['number']}"
