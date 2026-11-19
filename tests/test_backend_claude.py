@@ -1944,7 +1944,9 @@ async def test_a_background_subagent_holds_the_worker_and_its_report_wakes_it_ad
     turn = Turn(session)
     await session.send("Have a background subagent run `sleep 0.5`. Reply with just: ok")
     await turn.ended()
-    assert turn.kinds()[-1] == "assistant.idle", "held while its subagent works"
+    # (Its subagent's own steps may follow the turn's end at once, on a loaded machine.)
+    kinds = turn.kinds()
+    assert "assistant.idle" in kinds and "session.idle" not in kinds, "held while it works"
     assert not session.idle() and session.backend.running_background() == 1
     assert not [e for e in turn.events if e.type.value == "agent.settled"][-1:] or (
         turn.events[-1].type.value != "agent.settled"
