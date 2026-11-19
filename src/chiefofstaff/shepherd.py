@@ -275,7 +275,7 @@ class Shepherd(Keeping, Steps):
         ]
 
     def denial(self, row: dict, request: Any) -> str | None:
-        return step_denial(request, self.folders(row["id"]))
+        return step_denial(request, self.folders(row["id"]), row.get("cwd") or "")
 
     def saw(self, session_id: str, name: str, arguments: Any):
         """A tool call of a step: the frozen runs' evidence is void if anything else ran."""

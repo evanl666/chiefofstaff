@@ -5413,15 +5413,21 @@ STEP_TOOLS = frozenset({"shepherd_result", "draft_github_review"})
 STEP_SECRETS = (".config/gh", ".git-credentials", ".netrc", ".ssh", "Library/Keychains")
 
 
-def step_denial(request: Any, folders: list[str]) -> str | None:
+def step_denial(request: Any, folders: list[str], cwd: str = "") -> str | None:
     """Why a session in a shepherd step may not do this, or None. `folders`: where it may write
-    (the worktree in use, the frozen worktrees, its step folder; temp is added)."""
+    (the worktree in use, the frozen worktrees, its step folder; temp is added). They and `cwd`,
+    its worker's folder, are paths Chief of Staff named (after a task: "…-crash-after-push-…"):
+    in a command line, what they say is no word of it."""
     kind = getattr(request, "kind", "")
     if kind == "shell":
         command = getattr(request, "full_command_text", "") or ""
         if len(command) > MOST_LINE:
             return f"Denied in a shepherd step: {TOO_LONG}."
         words = squashed(command)
+        named = {squashed(path).rstrip("/") for path in (*folders, cwd) if path}
+        for path in sorted(named, key=len, reverse=True):
+            if path.count("/") >= 2:  # A full path, never a word git reads as a command.
+                words = words.replace(path, "/folder")
         if STEP_GH.search(words):
             return "Denied in a shepherd step: gh is not available (Chief of Staff publishes)."
         if STEP_SSH.search(words):
@@ -5429,7 +5435,7 @@ def step_denial(request: Any, folders: list[str]) -> str | None:
         if STEP_GITHUB.search(words):
             return "Denied in a shepherd step: GitHub is not reachable from a step."
         if STEP_GIT.search(words) and (
-            STEP_GIT_WRITES.search(words) or may_push(command) or may_alias(words)
+            STEP_GIT_WRITES.search(words) or may_push(words) or may_alias(words)
         ):
             return (
                 "Denied in a shepherd step: commit only; pushing, remotes and git's credentials "
