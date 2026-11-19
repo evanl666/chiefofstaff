@@ -231,8 +231,10 @@ Chinese included). For work on a subject a worker already knows, the Router eith
 When you ask for a new worker in so many words ("a new worker", "one worker for exactly this",
 新开一个 worker), you get one, however related an earlier worker is; *new because* quotes you.
 
-When the worker that knows the subject is **busy** (at work with two or more tasks open, or at
-work for ten minutes without a break) and a worker slot is free, its new task goes to a
+The Router sees how loaded each worker is: whether it is at work and for how long, its open
+tasks and what it has not taken up yet. When the worker that knows the subject is **busy** (at
+work with two or more tasks open, or at work for ten minutes without a break) and a worker slot
+is free, its new task goes to a
 **second worker** that starts at once with that worker's conversation so far (Copilot's session
 fork, up to its last finished turn) and a note from Chief of Staff on what the first one is
 doing now and where. It works in a folder and branch of its own (from the project's base); the

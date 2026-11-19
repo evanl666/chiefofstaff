@@ -817,7 +817,8 @@ COPILOT_ALONE = [
 # docs/design/worker-fork.md): on by default (the owner asked for it to be automatic), so it is
 # compared switched off. Off: only its switch line in Settings → General. On, with no worker
 # ever given a new task while busy (the script never does): that line checked, the Router's rule
-# for busy workers (the last of its role) and `same_worker` on its message_session.
+# for busy workers (the last of its role), `same_worker` on its message_session and each open
+# worker's load where the Router reads about workers (QA E87).
 FEATURES["worker_fork"] = Feature(
     off={"fork_busy": False},
     on={"fork_busy": True},
@@ -838,7 +839,7 @@ FEATURES["worker_fork"] = Feature(
         Allow(
             "the Router's rule for busy workers' new tasks",
             data=r"\.system_message\.content$",
-            lines=r"^- A related worker that is busy is still the one to give the work to ",
+            lines=r"^- Each open worker's load \(list_sessions, find_sessions, the related workers ",
         ),
         Allow("same_worker on the Router's message_session", data=r"same_worker"),
     ],

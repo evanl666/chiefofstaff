@@ -1089,8 +1089,14 @@ class Workers:
 
     def card(self, row: dict) -> dict:
         """What the Router needs to recognize a worker's task: named as the owner sees it, its
-        task the one it is on (bug E88: its first title, the task given last)."""
+        task the one it is on (bug E88: its first title, the task given last); while busy
+        workers' new tasks go to second workers, how loaded an open one is (forks.py)."""
         on = self.runtime.working_on(row["id"])
+        load = (
+            {"load": self.runtime.forks.load(row)}
+            if not row["closed_at"] and self.store.settings().fork_busy
+            else {}
+        )
         return {
             "session_id": row["id"],
             "title": self.runtime.display_title(row),
@@ -1108,6 +1114,7 @@ class Workers:
             "files": json.loads(row["files"])[-12:],
             "last_report": row["report"][:300],
             "updated_at": row["updated_at"],
+            **load,
         }
 
     def find(self, query: str, limit: int = 6) -> list[dict]:

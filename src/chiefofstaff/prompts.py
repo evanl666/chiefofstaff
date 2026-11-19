@@ -1021,13 +1021,16 @@ SEND_RULE = (
 
 # A busy worker's new task (forks.py): the Router's last rule while the setting is on.
 FORK_RULE = (
-    "- A related worker that is busy is still the one to give the work to with message_session "
-    "(not a reason for spawn_worker): while it is busy with other tasks and a worker slot is "
-    "free, a second worker that has its conversation so far takes the new task at once, in a "
-    "folder and branch of its own (the result gives that worker's session_id: message it about "
-    "that task from then on). Pass same_worker=true only when that worker itself must do it "
-    "after its current work: on its branch or in its pull request, with what it is making now, "
-    "or because the owner wants that worker to do it once it is free."
+    "- Each open worker's load (list_sessions, find_sessions, the related workers spawn_worker "
+    "lists): in_turn and turn_minutes (at work now, for how long), open_tasks, "
+    "messages_waiting (sent to it, not taken up yet) and busy (why, when it is). A related "
+    "worker that is busy is still the one to give the work to with message_session (not a "
+    "reason for spawn_worker): while it is busy and a worker slot is free, a second worker that "
+    "has its conversation so far takes the new task at once, in a folder and branch of its own "
+    "(the result gives that worker's session_id: message it about that task from then on). "
+    "Pass same_worker=true only when that worker itself must do it after its current work: on "
+    "its branch or in its pull request, with what it is making now, or because the owner wants "
+    "that worker to do it once it is free."
 )
 
 
