@@ -1689,8 +1689,11 @@ def test_the_words_say_what_the_shell_takes_them_for(text, kinds):
     assert [type(word).__name__ for word in policy.shell_words(text)] == kinds
 
 
+@pytest.mark.timeout(120, func_only=True)  # (Scaled to the runner: paced.)
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
-def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(shell, tmp_path, capsys):
+def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(
+    shell, tmp_path, capsys, paced
+):
     """Review of 767e08f (C): command lines of a safe vocabulary (tests/policy_oracle.py),
     generated with a fixed seed, and every line of this file, run in real bash with git a
     shim that writes down what it pushes: none the check lets through pushed main or master.
@@ -1700,6 +1703,7 @@ def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(shell, 
 
     if shell == "zsh" and not oracle.ZSH:
         pytest.skip("no zsh here")
+    began = time.monotonic()
     generator = oracle.Generator(0)
     cases = [generator.line() for _ in range(1000)]
     cases += [(line, start) for line in oracle.seeds() for start in ("main", "feat")]
@@ -1711,9 +1715,10 @@ def test_what_the_check_lets_through_pushes_nothing_to_main_in_real_bash(shell, 
                for outcome in outcomes if outcome.unsound]  # fmt: skip
     allowed = sum(outcome.allowed for outcome in outcomes)
     with capsys.disabled():
-        refused = len(outcomes) - allowed
+        refused, took = len(outcomes) - allowed, time.monotonic() - began
         sys.stdout.write(f"\noracle ({shell}): {len(outcomes)} lines, {allowed} allowed, {refused} "
-                         f"refused, {len(unsound)} unsound\n")  # fmt: skip
+                         f"refused, {len(unsound)} unsound ({took:.0f} s; runner pace {paced:.1f}: "
+                         f"{120 * paced:.0f} s allowed)\n")  # fmt: skip
     assert not unsound, unsound[:10]
 
 
@@ -2834,18 +2839,26 @@ def test_a_command_that_writes_in_the_owners_checkout_given_to_read_is_refused(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="real bash")
-def test_what_the_checkout_check_lets_through_writes_nothing_there_in_real_bash(tmp_path, capsys):
+@pytest.mark.timeout(120, func_only=True)  # (Scaled to the runner: paced.)
+def test_what_the_checkout_check_lets_through_writes_nothing_there_in_real_bash(
+    tmp_path, capsys, paced
+):
     """Lines of a safe vocabulary (tests/checkout_oracle.py), generated with a fixed seed, and
     each command of it on its own, run in real bash in a sandbox with the owner's checkout given
     to read: none the check lets through changed it (its files, index, HEAD, branches, stashes,
     config). The rates are printed (pytest -s)."""
     import checkout_oracle as oracle
 
+    began = time.monotonic()
     generator = oracle.Generator(0)
     cases = [generator.line() for _ in range(300)] + oracle.seeds()
     outcomes = oracle.run(policy, cases, tmp_path)
     unsound = [(o.where, o.line) for o in outcomes if o.changed and not o.verdict]
     with capsys.disabled():
-        print(f"\ncheckout oracle: {oracle.rates(outcomes)}")  # noqa: T201
+        took = time.monotonic() - began
+        sys.stdout.write(
+            f"\ncheckout oracle: {oracle.rates(outcomes)} ({took:.0f} s; runner pace "
+            f"{paced:.1f}: {120 * paced:.0f} s allowed)\n"
+        )
     assert not unsound, unsound
     assert sum(o.changed for o in outcomes) > 50, "the vocabulary writes there often enough"

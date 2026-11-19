@@ -19,7 +19,10 @@ os.environ["GIT_CONFIG_GLOBAL"] = os.environ["HOME"] + "/.gitconfig"
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 import atexit
 import shutil
+import statistics
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,6 +50,63 @@ atexit.register(shutil.rmtree, TEST_HOME, True)
 def said(text: str) -> str:
     """What a session receives when the owner writes this: tagged with its language."""
     return env("owner", "message", text, reply_in=language(text))
+
+
+# The real-bash oracles (tests/policy_oracle.py, tests/checkout_oracle.py) run thousands of
+# command lines, SPAWN_THREADS at a time, each in bash (on macOS, in sandbox-exec), and check each
+# in Python: their time is how fast a runner starts processes that many at a time (its cores as
+# much as each start), or runs Python, whichever is slower. On the machine their time limits were
+# set on (a 10-core Mac, under its usual load; the median of 3 rounds): SPAWN_THREADS threads
+# start SPAWNS `bash -c :` between them in SPAWN_REFERENCE seconds, and python_work() takes
+# PYTHON_REFERENCE seconds.
+SPAWN_THREADS = 8
+SPAWNS = 120
+SPAWN_REFERENCE = 0.14
+PYTHON_REFERENCE = 0.07
+# How much slower than that a runner may be given time for (past it: a hang, or a slowdown of
+# the check itself, fails the test as before).
+MOST_PACE = 8.0
+
+
+def python_work() -> None:
+    sum(len(str(number)) for number in range(1_500_000))
+
+
+def runner_pace() -> float:
+    """How many times slower than the reference machine this runner starts processes
+    SPAWN_THREADS at a time, or runs Python, whichever is more (at least 1, at most MOST_PACE)."""
+
+    def timed(work) -> float:
+        rounds = []
+        for _ in range(3):
+            start = time.perf_counter()
+            work()
+            rounds.append(time.perf_counter() - start)
+        return statistics.median(rounds)
+
+    paces = [timed(python_work) / PYTHON_REFERENCE]
+    if bash := shutil.which("bash"):
+        with ThreadPoolExecutor(SPAWN_THREADS) as pool:
+
+            def spawns() -> None:
+                run = [bash, "--norc", "--noprofile", "-c", ":"]
+                list(pool.map(lambda _: subprocess.run(run, check=False), range(SPAWNS)))
+
+            paces.append(timed(spawns) / SPAWN_REFERENCE)
+    return min(MOST_PACE, max(1.0, *paces))
+
+
+@pytest.fixture
+def paced(request) -> float:
+    """A real-bash oracle's time limit (its `timeout` marker, func_only), scaled to how fast
+    this runner is (runner_pace): on CI's macOS runners (3 cores) an oracle took over its 120 s,
+    and the test then passed on a rerun only. Measured as the test starts; the pace is
+    returned."""
+    marker = request.node.get_closest_marker("timeout")
+    base = float(marker.args[0]) if marker and marker.args else 120.0
+    pace = runner_pace()
+    request.node.add_marker(pytest.mark.timeout(base * pace, func_only=True), append=False)
+    return pace
 
 
 @pytest.fixture(autouse=True)
