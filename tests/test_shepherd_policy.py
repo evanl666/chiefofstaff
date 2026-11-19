@@ -67,6 +67,30 @@ def test_a_step_works_and_commits(command):
     assert step_denial(shell(command), FOLDERS) is None
 
 
+@pytest.mark.parametrize(
+    "cwd", ["/work/.chief/open-pr-crash-after-push-7bddd4", "/go/src/github.com/acme/api/.chief/w"]
+)
+def test_its_own_folders_say_nothing_of_git_or_github(cwd):
+    """The folders Chief of Staff named (a worker's, after its task: "Crash after push"; its
+    project's, wherever the owner keeps it) are in most lines a step runs: no word of theirs is
+    a push or GitHub (live SY2: every git command of its step was refused)."""
+    tree = f"{cwd}/repo"
+    folders = [tree, f"{cwd}/.shepherd/s1"]
+    for command in [
+        f"cd {tree} && git commit -qam fix && git rev-parse HEAD",
+        f'git -C "{tree}" status --short',
+        f"cd {cwd}; tail .shepherd/s1/ci.txt; cd repo; python3 -m pytest -q",
+    ]:
+        assert step_denial(shell(command), folders, cwd) is None, command
+    for command in [
+        f"git -C {tree} push",
+        f"cd {tree} && git remote add up https://example.com/x.git",
+        f"cd {tree} && git p",
+        f"cd {tree} && curl https://api.github.com/x",
+    ]:
+        assert step_denial(shell(command), folders, cwd), command
+
+
 def test_writes_only_in_the_steps_folders(tmp_path):
     inside = SimpleNamespace(kind="write", resolved_path=f"{FOLDERS[0]}/src/a.py")
     outside = SimpleNamespace(kind="write", resolved_path="/work/w/repo/src/a.py")
