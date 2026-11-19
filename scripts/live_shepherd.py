@@ -18,7 +18,9 @@ and one approval), and every branch under `shepherd-live/<stamp>/`. The reposito
 branch, other branches, PRs, settings and collaborators are never changed. At its end (also after
 a failure) a run cleans up after itself: its workflow runs, PRs (closed), branches, ruleset and
 hold label; leftovers of a run stopped before that are cleaned up by the next run after a day,
-or by --cleanup. `--plan` lists all of it.
+or by --cleanup. `--plan` lists all of it. Prepared for you keeps a PR moving only when its base
+is its repository's default branch: Chief of Staff's gh reads the run's base as REPOSITORY's
+(GH_SHIM), the one thing it is told that GitHub does not say.
 
 Accounts (both signed in to gh on this computer; nothing in ~/.config/gh or the keychain is
 changed: Chief of Staff runs with a gh configuration of its own, its token in that folder, and
@@ -772,9 +774,56 @@ class Ctx:
         return target, number
 
 
-async def start_app(root: Path, shard: str, owner: GitHub):
+# The gh Chief of Staff runs during a shard: the real gh, with REPOSITORY's default branch read
+# as the run's base wherever a GraphQL answer names it. Prepared for you keeps a PR moving only
+# when its base is its repository's default branch (the design's "not stacked"); a run's PRs
+# go into the run's own base, so that the repository's own default branch (main) is never
+# changed, nor merged into. Everything else gh answers is GitHub's own.
+GH_SHIM = """#!{python}
+import json, subprocess, sys
+done = subprocess.run([{gh!r}, *sys.argv[1:]], capture_output=True)
+out = done.stdout
+try:
+    data = json.loads(out)
+except ValueError:
+    data = None
+said = []
+def walk(node):
+    if isinstance(node, dict):
+        named = str(node.get("nameWithOwner") or "").lower() == {repo!r}
+        if named and isinstance(node.get("defaultBranchRef"), dict):
+            node["defaultBranchRef"]["name"] = {base!r}
+            said.append(1)
+        for value in node.values():
+            walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            walk(value)
+walk(data)
+if said:
+    out = json.dumps(data).encode()
+sys.stdout.buffer.write(out)
+sys.stderr.buffer.write(done.stderr)
+sys.exit(done.returncode)
+"""
+
+
+def gh_shim(root: Path, base: str) -> Path:
+    """The folder of the run's gh (GH_SHIM), to go first on Chief of Staff's PATH."""
+    folder = root / "gh-shim"
+    folder.mkdir(exist_ok=True)
+    real = shutil.which("gh") or "gh"
+    shim = folder / "gh"
+    shim.write_text(
+        GH_SHIM.format(python=sys.executable, gh=real, repo=REPOSITORY.lower(), base=base)
+    )
+    shim.chmod(0o755)
+    return folder
+
+
+async def start_app(root: Path, shard: str, owner: GitHub, base: str):
     """Chief of Staff on its own gh configuration (the owner signed in, no one else) and its
-    own Copilot home."""
+    own Copilot home; its gh reads the run's base as the repository's default branch."""
     import live_e2e
     from live_parity import setup
 
@@ -798,6 +847,7 @@ async def start_app(root: Path, shard: str, owner: GitHub):
         "COPILOT_HOME": str(home),
         "GH_CONFIG_DIR": str(gh_config),
         "CHIEFOFSTAFF_MIN_FREE_MEMORY": "0",
+        "PATH": f"{gh_shim(root, base)}{os.pathsep}{os.environ.get('PATH', '')}",
     }
     app = live_e2e.App(root / "data", root / "log", env)
     await app.start()
@@ -2334,7 +2384,7 @@ async def shard(name: str, wanted: set[str]):
         left: list[str] = []
         try:
             repo.prepare()
-            app, home = await start_app(root, name, owner)
+            app, home = await start_app(root, name, owner, repo.base)
             ctx = Ctx(app, root, repo, owner, peer)
             await ctx.settings(
                 projects=[str(repo.clone)],
