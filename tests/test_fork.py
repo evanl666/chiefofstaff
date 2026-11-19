@@ -14,6 +14,7 @@ from conftest import Harness, call_tool, settle
 from copilot.tools import ToolInvocation
 from test_repos import commit, published
 
+from chiefofstaff import backend as backend_module
 from chiefofstaff import prompts
 from chiefofstaff.backend import fork_point
 from chiefofstaff.models import Settings
@@ -298,6 +299,24 @@ async def test_the_router_has_same_worker_and_its_rule_only_while_it_is_on(harne
     await runtime.settings_changed(old, new)
     field, prompt = router()
     assert not field and prompts.FORK_RULE not in prompt
+
+
+async def test_a_fork_never_reaches_a_copilot_that_could_not_start(tmp_path, monkeypatch):
+    """As every call to Copilot since 0.1.47 (ready_client): not the client the SDK refused."""
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot"))
+    calls = []
+    refused = SimpleNamespace(
+        rpc=SimpleNamespace(sessions=SimpleNamespace(fork=lambda request: calls.append(request))),
+        delete_session=lambda session_id: calls.append(session_id),
+    )
+    backend = backend_module.copilot_backend("git")
+    backend.client = backend.refused = refused
+    session = "0b6f3f8e-1c1d-4d3e-9f6a-2b7c8d9e0f1a"
+    with pytest.raises(backend_module.NotStartedError):
+        await backend.fork_session(session, "Second")
+    with pytest.raises(backend_module.NotStartedError):
+        await backend.delete_session(session)
+    assert calls == []
 
 
 @pytest.mark.parametrize(
