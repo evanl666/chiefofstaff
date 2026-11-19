@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.48 (2026-11-19)
 
 From the QA rounds on 0.1.46, a task's life: a failed task can be dismissed and only the task at
 work fails; cancelling or closing never brings a task back as Failed; what an ended task
