@@ -1653,7 +1653,9 @@ class Runtime:
         for the owner's workers and the other helpers)."""
         if row["role"] in {ROUTER, WATCHDOG, SLACK}:
             return row["role"]
-        return "connector" if row["role"] == WORKER and self.special(row) == "connector" else ""
+        # (One read: what special() finds of a connector.)
+        connector = row["role"] == WORKER and self.store.get(f"connector:{row['id']}")
+        return "connector" if connector else ""
 
     def role_row(self, role: str) -> dict | None:
         """The open session of a role Runtime.place_role places (none yet: made on first use)."""
@@ -1784,7 +1786,7 @@ class Runtime:
                     target = COPILOT_AGENT
         if why:
             self.store.set(f"rolefallback:{role}", why)
-        else:
+        elif self.store.get(f"rolefallback:{role}") is not None:
             self.store.delete(f"rolefallback:{role}")
         return target, why
 
