@@ -4526,6 +4526,12 @@ async def round_qa6(runtime, browser, failures: list[str]):
     ).to_have_count(0)
     log("QA6-3/4: written at task A in its chat, it is A's: one row, under Running, named A")
 
+    # Before its worker is written to below: at work on it then, it is under Running.
+    update = needs.locator(".card.task", has_text="QA6 migrate the exporter")
+    await expect(update.locator(".head .meta .marker")).to_have_text("Update")
+    await expect(update.locator(".head .meta .when")).to_have_text(" · just now")
+    log("QA6-5: an update's time is the news's own, not when its task ended")
+
     # Every worker slot taken (the one at work above has one): a message waits for a slot,
     # says so in a line, and Send now sends it all the same.
     from chiefofstaff import machine
@@ -4544,11 +4550,6 @@ async def round_qa6(runtime, browser, failures: list[str]):
     store.save_settings(store.settings().model_copy(update={"max_workers": 90}))
     machine.short_of_memory = roomy
     log("QA6-1: every slot taken, a message says so in a line; Send now sends it")
-
-    update = needs.locator(".card.task", has_text="QA6 migrate the exporter")
-    await expect(update.locator(".head .meta .marker")).to_have_text("Update")
-    await expect(update.locator(".head .meta .when")).to_have_text(" · just now")
-    log("QA6-5: an update's time is the news's own, not when its task ended")
 
     again = "QA6 tune the retry policy, option 1"
     await expect(page.locator("#tasks-running .card.task", has_text=again)).to_have_count(1)
