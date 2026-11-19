@@ -50,8 +50,11 @@ class Steps:
     async def pump(self: Shepherd):  # type: ignore[misc]
         """Admit queued attempts, oldest first, while a step slot is free: each needs its claim
         unchanged and idle, its signal current, a worker that can run it now, a background slot,
-        and (unless clicked) room in the day's budget."""
+        and (unless clicked) room in the day's budget. None while an update of Chief of Staff
+        waits for no turn running (Runtime.update_when_idle)."""
         if not self.active() or self.runtime.stopping:
+            return
+        if (self.runtime.updating or {}).get("state") in {"waiting", "fetching", "restarting"}:
             return
         async with self.pump_lock:
             for step in self.control.steps("", QUEUED):

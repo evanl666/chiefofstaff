@@ -173,6 +173,7 @@ async def test_the_step_profile_is_the_sessions_options_while_it_runs(world, mon
     assert "tell_session" not in options["available_tools"]
     assert "report" not in options["available_tools"]
     assert [tool.name for tool in options["tools"]] == ["shepherd_result", "draft_github_review"]
+    assert {tool.defer for tool in options["tools"]} == {"never"}  # Never behind tool search.
     # Its permission checks apply, whatever its mode.
     row = runtime.store.session(world.worker)
     assert runtime.yolo_choice(row) and not runtime.yolo(row)
@@ -549,6 +550,21 @@ async def test_your_message_stops_the_step_first(world):
     again = runtime.shepherd.control.open_step(TARGET)
     assert again and again["id"] != step["id"] and again["h0"] == step["h0"], again
     assert again["clicked"] == 1 and again["state"] in {"queued", "running"}
+
+
+async def test_no_attempt_starts_while_an_update_waits_for_no_turn_running(world):
+    """Update and restart waits until no turn runs (Runtime.update_when_idle): an attempt
+    starting meanwhile would hold it off, or be cut short by the restart."""
+    runtime = await claimed(world)
+    runtime.updating = {"to": "9.9.9", "state": "waiting"}
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "queued" and not runtime.shepherd.marked(world.worker)
+    runtime.updating = None  # Cancelled.
+    await runtime.shepherd.pump()
+    await settle(runtime)
+    assert runtime.shepherd.control.step(step["id"])["state"] == "running"
 
 
 async def test_a_worker_left_in_a_step_is_not_continued_after_a_restart(world):
