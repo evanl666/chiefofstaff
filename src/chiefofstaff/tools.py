@@ -1122,6 +1122,7 @@ class Tools:
             params_type=leak_proof(MessageSessionForks),
             handler=self.handler(self.t_message_session),
             skip_permission=True,
+            defer="never",  # As Chief of Staff's own tools are (definitions).
         )
 
     async def t_add_repo(self, params: AddRepo, caller: str):

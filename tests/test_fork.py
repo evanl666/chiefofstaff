@@ -287,6 +287,8 @@ async def test_the_router_has_same_worker_and_its_rule_only_while_it_is_on(harne
     def router():
         options = runtime.options(harness.store.session(harness.router_id))
         tool = next(t for t in options["tools"] if t.name == "message_session")
+        # Never behind Copilot's tool search, as Chief of Staff's own tools are (0.1.47).
+        assert tool.defer == "never"
         return "same_worker" in json.dumps(tool.parameters), options["system_message"]["content"]
 
     field, prompt = router()
