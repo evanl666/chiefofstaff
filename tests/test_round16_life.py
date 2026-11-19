@@ -379,3 +379,64 @@ async def test_a_failed_task_is_dismissed_without_reopening_its_worker(harness):
                              reason="Not needed.")  # fmt: skip
     assert result.result_type == "success", result.text_result_for_llm
     assert runtime.tasks.get(failed["id"])["status"] == "cancelled"
+
+
+# E98: a worker that waits for the owner's word on its folder's settings.
+
+
+async def settings_wait(harness, runtime, worker: str, digest: str = "abc123"):
+    """Its folder's settings changed (a file Chief of Staff hasn't checked yet): it waits."""
+    line = ("Copilot settings Chief of Staff hasn't checked yet (.claude/settings.json); Chief "
+            "of Staff won't start the worker there until you say to use them.")  # fmt: skip
+    refusal = runtime.settings_refusal
+
+    async def refused(row):  # Its folder as it is now: the same change, until the owner's word.
+        if row["id"] != worker:
+            return await refusal(row)
+        runtime.settings_reasons[worker] = "Copilot settings Chief of Staff hasn't checked yet"
+        runtime.settings_said(worker, line, {"digest": digest, "changes": [("added", ".mcp")]})
+        return line
+
+    runtime.settings_refusal = refused
+    await refused(harness.store.session(worker))
+    await runtime.settings_stop(worker)
+    await settle(runtime)
+    return refusal
+
+
+async def test_a_worker_waiting_on_its_folders_settings_is_under_needs_you(harness):
+    runtime = await harness.connect()
+    worker, fix = await spawn(runtime, harness.router_id, "Fix login", follow=[PR])
+    session = harness.session(worker)
+    session.emit("user.message", content=session.sent[-1])
+    await call_tool(runtime, "report", worker, status="progress", summary="PR open, in review.")
+    session.emit("session.idle")  # Between turns, its task running: it waits for the review.
+    await settle(runtime)
+    assert harness.store.session(worker)["status"] == "idle"
+    digest = "abc123"
+    refusal = await settings_wait(harness, runtime, worker, digest)
+    assert runtime.tasks.get(fix["id"])["status"] == "running"
+    shown = view(runtime, fix["id"])
+    assert shown["attention"] == "settings"
+    assert "hasn't checked yet" in shown["attention_why"]
+    assert shown["settings"]["digest"] == digest
+    assert needs(runtime).markers.get(fix["id"]) == "settings"
+    found = board(
+        [task("a", "w1", attention="settings", attention_why="Its settings changed")],
+        [{"id": "w1", "status": "idle", "activity": "waiting for you: x"}],
+    )
+    assert found["phases"] == {"a": "needs/settings"} and found["sidebar"] == {"w1": "needs"}
+    runtime.settings_refusal = refusal
+    runtime.settings_unsaid(worker)
+    assert view(runtime, fix["id"])["attention"] != "settings"
+
+
+async def test_a_worker_stopped_mid_turn_for_its_settings_offers_them_not_go_on(harness):
+    runtime = await harness.connect()
+    worker, _session, fix = await busy_worker(runtime, harness, "Fix login")
+    await settings_wait(harness, runtime, worker)
+    shown = view(runtime, fix["id"])
+    assert shown["status"] == "waiting" and shown["attention"] == "settings", (
+        "Go on would wait for the same word: the card asks for it"
+    )
+    assert needs(runtime).markers.get(fix["id"]) == "settings"

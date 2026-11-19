@@ -25,6 +25,7 @@ export const MARKERS = {
   update: "Update",
   stalled: "No progress",
   "check-failed": "Check-back failed",
+  settings: "Settings changed",
   following: "Following up",
   terminal: "In a terminal",
   background: "Background process",
@@ -231,6 +232,9 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   const watching = task.watching || [];
   const checkBack = task.check_back;
   if (task.blocked) return at("needs", "blocked", "It waits for a task that ended without finishing");
+  // Its worker waits for the owner's word on its folder's settings (bug E98): nothing of it
+  // runs, news for it waits too, until they say to use them.
+  if (task.attention === "settings") return at("needs", "settings", task.attention_why || "Its folder's settings changed: it waits for your word");
   // Its token limit stopped it (another agent's worker): what it spent is unknown, or its limit used.
   if (task.status === "waiting" && task.stopped) return at("needs", "stopped", task.spend_why || `Stopped by ${task.stopped}: tell it to go on, or cancel it`);
   // Its question is about its own draft: decided on that draft's card, which holds it.

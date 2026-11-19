@@ -4330,6 +4330,11 @@ class TaskActions:
             "execution": self.execution(task),
             "attention": attention,
             "attention_why": why,
+            # Waiting for the owner's word on its folder's settings: what Use these settings
+            # sends (as its worker's timeline line does).
+            "settings": self.runtime.settings_card(task["session_id"])
+            if attention == "settings"
+            else None,
             "monitoring": monitoring,
             # What it delivered (its PRs, documents and runs): Artifacts and its card's chips.
             "deliverables": self.deliverables(task, prs, given, unknown),
@@ -4417,7 +4422,8 @@ class TaskActions:
     def attention(
         self, task: dict, prs: list[dict] | None = None, watched: list[dict] | None = None
     ) -> tuple[str, str]:
-        """What the owner has to do about a task now, and why in their words: "blocked",
+        """What the owner has to do about a task now, and why in their words: "settings" (its
+        worker waits for their word on its folder's settings), "blocked",
         "stopped", "question", "failed", "check-failed", "acceptance" (a result to accept),
         "update" (news on finished work), "pr-changes" / "pr-conflicts" / "pr-failing" (its own
         PR to fix, accepted or not), "runs-unknown" (accepted, and all it is monitored for is
@@ -4426,6 +4432,8 @@ class TaskActions:
         (digest.needs) have it; not "No progress", which Home works out as time passes.
         `prs`: its receipts' PRs, `watched`: what it is monitored for, when read already."""
         status, task_id = task["status"], task["id"]
+        if why := self.runtime.settings_waiting(task):
+            return "settings", why
         if status == "queued":
             broken = self.tasks.broken(task)
             return (

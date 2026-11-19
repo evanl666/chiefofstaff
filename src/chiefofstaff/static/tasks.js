@@ -557,6 +557,20 @@ function taskCard(task, phase = phaseOf(task)) {
     place();
     boxes[0].focus();
   }
+  function useSettings() {
+    return once(key, null, async () => {
+      for (const button of actions.querySelectorAll("button")) button.disabled = true;
+      error.textContent = "";
+      try {
+        const { said } = await api(`/api/sessions/${task.session_id}/agent-settings`, { method: "POST", body: { digest: task.settings.digest } });
+        toast(said);
+      } catch (failure) {
+        error.textContent = failure.message;
+        toast(failure.message, "error");
+        for (const button of actions.querySelectorAll("button")) button.disabled = false;
+      }
+    });
+  }
   function retryWithNote() {
     const input = el("textarea", { rows: 2, placeholder: "What should it do differently?" });
     form(input, "Retry", () => act(`/api/tasks/${task.id}/retry`, { text: input.value.trim() }, "Retrying."));
@@ -600,7 +614,13 @@ function taskCard(task, phase = phaseOf(task)) {
     let main = null;
     let shown = [];
     let more = [];
-    if (phase.marker === "check-failed" && task.status !== "running") {
+    if (phase.marker === "settings") {
+      // Its worker waits for the owner's word on its folder's settings (bug E98): the same
+      // word as its timeline's line, here; what changed is said there.
+      main = task.settings ? el("button", { type: "button", text: "Use these settings", "data-tip": task.settings.changes || "", onclick: useSettings }) : null;
+      shown = [quiet("See what changed", () => select(task.session_id), "Its timeline says what changed in its folder")];
+      more = [named, cancel];
+    } else if (phase.marker === "check-failed" && task.status !== "running") {
       // Finished work whose check-back could not wake its worker (bug E109): tried again now,
       // or no longer followed up; its result stays as it is.
       const how = (value, said) => () => act(`/api/tasks/${task.id}/check-back`, { how: value }, said);

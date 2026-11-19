@@ -3898,6 +3898,46 @@ class Runtime:
                 )
             )
 
+    def settings_waiting(self, task: dict) -> str:
+        """Why a task waits for the owner's word on its worker's folder's settings, "" when it
+        does not: the one its worker is on (one card under Needs you, bug E98), or one they
+        stopped mid-work (its Go on would wait for that word too)."""
+        session_id = task["session_id"]
+        if session_id not in self.settings_held:
+            return ""
+        row = self.store.find_session(session_id)
+        if not row or row["closed_at"]:
+            return ""
+        if task["status"] == "waiting":
+            if self.store.get(f"stopped:{task['id']}") != SETTINGS_STOP:
+                return ""
+        elif task["status"] not in {"queued", "running"} or task["id"] != (
+            self.working_on(session_id) or row["task_id"]
+        ):
+            return ""
+        reason = self.settings_reasons.get(session_id) or "Its folder's settings changed"
+        return f"{reason}: it waits for your word"
+
+    def settings_card(self, session_id: str) -> dict | None:
+        """What its card's "Use these settings" sends (as its timeline's line): the newest
+        change it was shown, when it can be used as it is."""
+        found = self.store.one(
+            "SELECT id, meta FROM messages WHERE session_id=? AND kind='notice' AND "
+            "(json_extract(meta, '$.agent_settings') IS NOT NULL "
+            "OR json_extract(meta, '$.agent_servers') IS NOT NULL) ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        )
+        if not found:
+            return None
+        meta = json.loads(found["meta"])
+        return {**(meta.get("agent_settings") or meta["agent_servers"]), "message_id": found["id"]}
+
+    def settings_shown(self, session_id: str):
+        """Its tasks' cards say now whether they wait for the owner's word on its settings."""
+        for task in self.tasks.for_session(session_id):
+            if task["status"] in OPEN:
+                self.task_actions.publish(task)
+
     def settings_unsaid(self, session_id: str):
         """Its folder's settings are as Chief of Staff last saw them again (or as the owner said
         to use them): one that waited for that goes on."""
@@ -3906,6 +3946,7 @@ class Runtime:
         self.settings_reasons.pop(session_id, None)
         if session_id in self.settings_held:
             self.settings_held.discard(session_id)
+            self.settings_shown(session_id)
             row = self.store.find_session(session_id)
             if row and row["activity"] == SETTINGS_WAIT:
                 self.update_session(session_id, activity="")
@@ -4017,6 +4058,7 @@ class Runtime:
                 self.update_session(session_id, status="idle")
         if session_id in self.settings_held:  # (Not released meanwhile.)
             self.update_session(session_id, activity=SETTINGS_WAIT)
+            self.settings_shown(session_id)
 
     # Linux: the files of a repository's .git that would change what git runs or which
     # repository it uses (workspaces.watched_git_paths: a commondir, a config.worktree where
