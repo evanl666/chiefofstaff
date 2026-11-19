@@ -1262,13 +1262,24 @@ async def su13_mcp(ctx: Ctx):
     the profile's (a fix was prepared above, so it passed)."""
     found = await ctx.state()
     assert not found["shepherd"].get("steps_here"), found["shepherd"]
+    # No tool of the probe MCP server was called in a step's turn (a worker's own turns may
+    # have it, as before).
     events = ctx.root / "copilot-home" / "session-state"
-    leaked = [
-        path
-        for path in events.glob("*/events.jsonl")
-        if "probe-user" in path.read_text(errors="replace")
-        and "shepherd" in path.read_text(errors="replace")
-    ]
+    leaked = []
+    for path in events.glob("*/events.jsonl"):
+        stepping = False
+        for line in path.read_text(errors="replace").splitlines():
+            with contextlib.suppress(ValueError):
+                event = json.loads(line)
+                data = event.get("data") or {}
+                if event.get("type") == "user.message":
+                    stepping = "shepherd-step" in str(data.get("content") or "")[:1000]
+                elif (
+                    stepping
+                    and event.get("type") == "tool.execution_start"
+                    and "probe" in str(data.get("toolName") or "")
+                ):
+                    leaked.append(f"{path.parent.name}: {data.get('toolName')}")
     assert not leaked, leaked
 
 
