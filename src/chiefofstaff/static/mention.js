@@ -5,7 +5,7 @@
 // its models and effort); two picked, the task runs on each, side by side (Compare).
 import { $, api, el, toast } from "./dom.js";
 import { byId, HOME, sessions, state, workerTitle } from "./state.js";
-import { agentMark, agentName, agentPopover, closeAgentPopover, fixLine, ready, refreshStatuses, statuses, statusText } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, closeAgentPopover, ready, refreshStatuses, statuses, statusText } from "./agentpick.js";
 
 export const mention = { to: null, agent: null, agents: [], options: [], active: 0, dismissed: -1 };
 // Agents on at once for one task, at most (Compare).
@@ -38,7 +38,6 @@ function render() {
           role: "option",
           class: `${index === mention.active ? "active" : ""}${worker.picks ? " agent" : ""}${worker.dim ? " dim" : ""}`.trim(),
           "aria-selected": String(index === mention.active),
-          "aria-disabled": worker.dim ? "true" : undefined,
           onmousedown: (event) => {
             event.preventDefault();
             choose(worker);
@@ -58,33 +57,47 @@ function render() {
 }
 
 // An agent in the list: its mark, its name and status; one not ready, the command that makes
-// it ready (or, ready but off for workers, Turn on).
+// it ready (picking it copies that command: never a control inside an option), or, ready but
+// off for workers, that picking it turns it on.
 function agentOption(option) {
   const status = option.status;
-  const fix = option.dim && status && !ready(status) ? fixLine(status.fix) : null;
-  const turnOn = option.dim && ready(status) && !status.on
-    ? el("button", { type: "button", class: "link", text: "Turn on", onmousedown: (event) => event.preventDefault(), onclick: (event) => turnOnAgent(event, option) })
-    : null;
+  const fix = option.dim && status && !ready(status) ? status.fix : null;
+  const off = option.dim && ready(status) && !status.on;
   return [
     agentMark(option.agent),
     el("span", { class: "name", text: option.label }),
     el(
       "span",
       { class: "status" },
-      el("span", { text: status ? statusText(status) : option.chosen ? "Chosen" : `Run it on ${option.label}` }),
-      fix || turnOn ? el("span", { class: "fix" }, fix || turnOn) : "",
+      el("span", { text: status ? statusText(status) : `Run it on ${option.label}` }),
+      fix?.command
+        ? el("span", { class: "fix agent-fix" }, "Run ", el("code", { text: fix.command }), fix.then ? ` ${fix.then}` : "", " in a terminal · ", el("span", { class: "hint", text: "pick to copy" }))
+        : off
+          ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: "Pick to turn it on for workers" }))
+          : "",
     ),
   ];
 }
-// Ready, and off for workers: on, as its first-run card's Allow does (new workers stay where
-// they start).
-async function turnOnAgent(event, option) {
-  event.stopPropagation();
+// One not ready picked: its command copied (to run in a terminal; nothing here signs in); one
+// ready and off: on, as its first-run card's Allow does (new workers stay where they start),
+// then chosen.
+async function pickUnready(option) {
+  const status = option.status;
+  if (status?.fix?.command) {
+    try {
+      await navigator.clipboard.writeText(status.fix.command);
+      toast(`Copied: run ${status.fix.command} in a terminal${status.fix.then ? `, ${status.fix.then}` : ""}.`);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+    return;
+  }
+  if (!(ready(status) && !status.on)) return;
   try {
     const fresh = await api(`/api/agents/${option.agent}/offer`, { method: "POST", body: { allow: true } });
     state.snapshot = { ...state.snapshot, ...fresh };
     toast(`${option.label} is available for workers.`);
-    onComposerInput();
+    setAgent(option);
   } catch (error) {
     toast(error.message, "error");
   }
@@ -131,8 +144,13 @@ export function onComposerInput() {
 }
 
 function choose(option) {
-  if (option.dim) return;  // Its fix is in its line.
   const input = $("#composer-input");
+  if (option.dim) {
+    closeMentions();
+    pickUnready(option);
+    input.focus();
+    return;
+  }
   const found = query(input);
   if (found) {
     input.value = input.value.slice(0, found.start) + input.value.slice(input.selectionStart).replace(/^\s*/, "");

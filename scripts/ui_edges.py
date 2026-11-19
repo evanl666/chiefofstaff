@@ -7593,7 +7593,9 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await expect(group).to_be_visible()
     rows = group.locator(".agent-row[data-agent=codex]")
     state = rows.locator("small[role=status]")
-    await expect(state).to_have_text("0.167.2 · signed in with ChatGPT", timeout=20000)
+    # Its status and whose plan it uses; its version and sign-in on hover.
+    await expect(state).to_have_text("Ready · Uses your ChatGPT sign-in", timeout=20000)
+    await expect(state).to_have_attribute("title", "0.167.2 · signed in with ChatGPT")
     assert sum("/api/agents" in r for r in requests) == 1, requests
     await expect(rows.locator(".agent-usage")).to_have_text(
         re.compile(r"^42% of your 5-hour limit")
@@ -7603,8 +7605,9 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     claude = group.locator(".agent-row[data-agent=claude]")
     await expect(claude.locator(".agent-head strong")).to_have_text("Claude")
     await expect(claude.locator("label.check")).to_have_text("Available for workers")
-    await expect(claude.locator("small[role=status]")).to_have_text(
-        "2.1.322 · signed in with your Claude plan"
+    await expect(claude.locator("small[role=status]")).to_have_text("Ready · Uses your Claude plan")
+    await expect(claude.locator("small[role=status]")).to_have_attribute(
+        "title", "2.1.322 · signed in with your Claude plan"
     )
     await expect(claude.locator(".agent-note")).to_have_text(PLAN_NOTE)
     await expect(claude.locator("input[type=checkbox]")).to_be_enabled()
@@ -7638,7 +7641,7 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await expect(limit).to_have_attribute("placeholder", "No limit")
     await expect(group.locator("#agents-choice")).to_be_visible()
     await expect(group.locator("#agents-choice > span")).to_have_text("New workers start on")
-    await expect(choose.locator("option")).to_have_text(["Copilot", "Codex"])
+    await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Last used"])
     await expect(choose).to_have_value("copilot")
     await expect(group.locator("#agents-hint")).to_have_text(
         "For a single task, say \u201cdo this with Codex\u201d or type @codex."
@@ -7684,7 +7687,7 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     # On: the tab shows it so (shown again, it looks again).
     await page.locator("#settings-button").click()
     await page.locator("#settings-tabs [data-tab=agents]").click()
-    await expect(state).to_have_text("0.167.2 · signed in with ChatGPT", timeout=20000)
+    await expect(state).to_have_text("Ready · Uses your ChatGPT sign-in", timeout=20000)
     await expect(box).to_be_checked()
     await expect(fields.locator("input[name=agent_codex_limit]")).to_have_value("200,000")
     # Downgrading is for the guide (its section "What differs" opens), not this tab.
@@ -8002,7 +8005,10 @@ async def agents_differences(runtime, browser, worker: str):
     context, page, errors, _ = await agents_page(browser, "light")
     await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", copilot)
     await expect(page.locator("#session-meta")).not_to_contain_text("Codex")
-    await expect(page.locator("#session-meta span")).to_have_text(["Copilot"])
+    # (Its agent with its mark; before its first step, a chip whose popover can change it.)
+    await expect(page.locator("#session-meta .agent-name, #session-meta .agent-chip")).to_have_text(
+        [re.compile(r"^Copilot▾?$")]
+    )
     await page.locator("#session-more-button").click()
     assert not await page.locator("#session-menu-items select").evaluate(
         "s => s.hasAttribute('aria-describedby') || s.querySelector('option[value=off]').disabled"
@@ -8928,12 +8934,20 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             claude = page.locator("#mention-list li.agent.dim", has_text="Claude")
             await expect(claude.locator(".status")).to_contain_text("Sign-in needed")
             await expect(claude.locator(".agent-fix")).to_have_text(
-                "Run claude then /login in a terminal Copy"
+                "Run claude then /login in a terminal · pick to copy"
             )
-            await expect(claude).to_have_attribute("aria-disabled", "true")
             await ux_shoot(page, "at-statuses", scheme, focus=page.locator("#composer"))
-            await claude.click(force=True)  # Dimmed: nothing chosen.
+            # Picked, it copies its command (to run in a terminal): nothing is chosen.
+            await context.grant_permissions(["clipboard-read", "clipboard-write"])
+            await claude.click()
+            await expect(page.locator(".toast").first).to_contain_text(
+                "Copied: run claude in a terminal, then /login."
+            )
+            copied = await page.evaluate("() => navigator.clipboard.readText()")
+            assert copied == "claude", copied
             await expect(page.locator("#composer-to")).to_be_hidden()
+            await box.fill("@")
+            await box.press("End")
             await page.locator("#mention-list li.agent", has_text="Codex").click()
             chip = page.locator("#composer-to .agent-chip")
             await expect(chip).to_have_text("Codex▾")

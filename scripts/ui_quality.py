@@ -1056,8 +1056,8 @@ async def agents_views(runtime, browser, quality: Quality):
                 if state in {"found", "enabling"}:
                     await expect(group.locator(".agent-row small[role=status]")).to_have_text(
                         [
-                            "0.167.2 · signed in with ChatGPT",
-                            "2.1.322 · signed in with your Claude plan",
+                            "Ready · Uses your ChatGPT sign-in",
+                            "Ready · Uses your Claude plan",
                         ],
                         timeout=20000,
                     )
@@ -1113,12 +1113,36 @@ async def agents_views(runtime, browser, quality: Quality):
                 await quality.contrast(page, f"agents worker {view} {scheme}", "#session-header")
                 await page.set_viewport_size({"width": 1280, "height": 900})
             await page.keyboard.press("Escape")
+            # The agent picker: @'s list (every agent, its status), the chip's popover.
+            await page.evaluate("() => import('/static/session.js').then((m) => m.select('home'))")
+            if await page.locator("#home-tabs").is_visible():
+                await page.locator("#home-tabs [data-tab=chat]").click()
+            box = page.locator("#composer-input")
+            await box.fill("@")
+            await box.press("End")
+            await expect(page.locator("#mention-list li.agent")).to_have_count(3)
+            for view in ("list", "popover"):
+                if view == "popover":
+                    await page.locator("#mention-list li.agent", has_text="Codex").click()
+                    await page.locator("#composer-to .agent-chip").click()
+                    await expect(page.locator(".agent-popover select").first).to_be_visible()
+                scope = "#composer" if view == "list" else ".agent-popover"
+                for width in WIDTHS:
+                    await page.set_viewport_size({"width": width, "height": 900})
+                    await page.wait_for_timeout(100)
+                    name = f"quality-picker-{view}-{width}-{scheme}"
+                    await page.screenshot(path=folder / f"{name}.png")
+                    await quality.check(page, f"agents {name}", scope)
+                await quality.contrast(page, f"agents picker {view} {scheme}", scope)
+                await page.set_viewport_size({"width": 1280, "height": 900})
+            await page.keyboard.press("Escape")
+            await page.locator("#composer-to button.clear").click()
             await agents_saved(runtime, {"codex": {"enabled": False}})
             await context.close()
     finally:
         await agents_saved(runtime, {"codex": {"enabled": False}})
         codex_off_path(codex)
-    log("Coding agents: the tab's states, a Codex worker; browser-shots/agents-m2/")
+    log("Coding agents: the tab's states, a Codex worker, the picker; browser-shots/agents-m2/")
 
 
 async def main():

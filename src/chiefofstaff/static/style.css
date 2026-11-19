@@ -726,7 +726,8 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 /* The @ list: an agent not ready, dimmed, with the command that makes it ready. */
 #mention-list li.agent .status { display: grid; justify-items: end; gap: 2px; max-width: 60%; }
 #mention-list li.dim { cursor: default; }
-#mention-list li.dim .name, #mention-list li.dim .agent-mark { opacity: 0.5; }
+#mention-list li.dim .name { color: var(--muted); }
+#mention-list li.dim .agent-mark { opacity: 0.5; }
 #mention-list li .fix { white-space: normal; }
 .agent-fix { color: var(--muted); font-size: var(--small); }
 .agent-fix code { font-family: var(--mono); font-size: 0.95em; padding: 1px 4px; border-radius: 4px; background: var(--bubble); color: var(--text); }
@@ -743,7 +744,8 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 .agent-pop-agent[aria-checked="true"] { background: var(--bubble); font-weight: 600; }
 .agent-pop-agent.dim { cursor: default; color: var(--muted); }
 .agent-pop-agent.dim .agent-mark { opacity: 0.5; }
-.agent-pop-agent .status { margin-left: auto; color: var(--muted); font-weight: 400; }
+.agent-pop-agent .status { margin-left: auto; color: var(--muted); font-weight: 400; font-size: var(--small); }
+#mention-list .fix .hint { color: var(--accent); }
 .agent-pop-models { display: grid; gap: 8px; align-content: start; }
 .agent-pop-models label { display: grid; gap: 4px; font-size: var(--small); color: var(--muted); }
 .agent-pop-models select { width: 100%; min-height: 32px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: var(--body); padding: 0 8px; }
