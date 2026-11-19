@@ -55,18 +55,64 @@ class Forks:
         capabilities = getattr(backend, "capabilities", None)
         return backend if getattr(capabilities, "fork", False) else None
 
+    def in_turn(self, row: dict) -> bool:
+        """At work on a turn now (it holds a slot), or starting one."""
+        return (
+            row["role"] == WORKER
+            and not row["closed_at"]
+            and self.states[row["id"]].busy
+            and row["status"] in {"working", "starting"}
+        )
+
+    def turn_minutes(self, row: dict) -> int:
+        """How long it has been at work without a break, in whole minutes (0 between turns)."""
+        since = self.states[row["id"]].busy_since
+        return int((time.monotonic() - since) // 60) if since and self.in_turn(row) else 0
+
+    def open_work(self, row: dict) -> int:
+        """Its tasks to do: running (at work, or given to it and waiting for its turn) or
+        queued (not those waiting for the owner, nor finished)."""
+        return sum(t["status"] in {"running", "queued"} for t in self.tasks.for_session(row["id"]))
+
+    def busy(self, row: dict) -> str:
+        """Why the worker is busy ("" when it is not): in a turn with BUSY_TASKS open tasks or
+        more (the owner's "many tasks"), or at work for BUSY_MINUTES without a break (a new task
+        would wait for the rest of it)."""
+        if not self.in_turn(row) or self.runtime.special(row):
+            return ""
+        if (count := self.open_work(row)) >= BUSY_TASKS:
+            return f"{count} open tasks"
+        if (minutes := self.turn_minutes(row)) >= BUSY_MINUTES:
+            return f"at work for {minutes} minutes"
+        return ""
+
+    def load(self, row: dict) -> dict:
+        """How loaded a worker is, for the Router (QA E87): whether it is in a turn and for how
+        long, its open tasks, what was sent to it that it has not taken up yet, and why it is
+        busy when it is (its new task then goes to a second worker, a slot free)."""
+        state = self.states[row["id"]]
+        mark = int(self.store.get(f"sent:{row['id']}") or 0)
+        waiting = sum(
+            not m["meta"].get("deferred") for m in self.store.prompts(row["id"], after=mark)
+        ) + len(state.unread)
+        load: dict[str, Any] = {"in_turn": self.in_turn(row), "open_tasks": self.open_work(row)}
+        if load["in_turn"]:
+            load["turn_minutes"] = self.turn_minutes(row)
+        if waiting:
+            load["messages_waiting"] = waiting
+        if busy := self.busy(row):
+            load["busy"] = busy
+        return load
+
     def reason(self, target: dict, earlier: str = "", same_worker: bool = False) -> str:
         """Why a new task for this worker goes to a second worker with its context ("" when it
         stays with it, as it always did): it is busy, a slot is free and its session can fork.
-        `earlier` (finish, superseded: the new task follows or replaces its running one) and
-        `same_worker` are the Router's: the task is that worker's own."""
+        `same_worker`, and `earlier="superseded"` (the new task replaces its running one), are
+        the Router's: the task is that worker's own."""
         settings = self.store.settings()
-        if not settings.fork_busy or same_worker or earlier not in {"", "keep"}:
+        if not settings.fork_busy or same_worker or earlier == "superseded":
             return ""
-        if target["role"] != WORKER or target["closed_at"] or self.runtime.special(target):
-            return ""
-        state = self.states[target["id"]]
-        if not state.busy or target["status"] not in {"working", "starting"}:
+        if target["role"] != WORKER or not (busy := self.busy(target)):
             return ""
         copilot = self.runtime.copilot_id(target["id"])
         if (
@@ -83,14 +129,7 @@ class Forks:
             return ""  # No free slot: it waits for this worker, as it would for a slot.
         if machine.short_of_memory() is not None or machine.short_of_disk() is not None:
             return ""
-        open_ = [
-            t for t in self.tasks.for_session(target["id"]) if t["status"] in {"running", "queued"}
-        ]
-        if len(open_) >= BUSY_TASKS:
-            return f"{len(open_)} open tasks"
-        if state.busy_since and time.monotonic() - state.busy_since >= BUSY_MINUTES * 60:
-            return f"at work for {int((time.monotonic() - state.busy_since) // 60)} minutes"
-        return ""
+        return busy
 
     async def make(self, source: dict, title: str) -> str:
         """Fork the busy worker's session for the second worker: its id."""

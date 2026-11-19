@@ -319,17 +319,17 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         3183,
         "60428d28aad3cdca34c2a973a8a0127a5179e4491c78c21c199de155615032f3",
     ),
-    # With the rule for busy workers' new tasks (forks.py), on by default.
+    # With the rule for busy workers' new tasks and their load (forks.py), on by default.
     "router with Slack, created": (
-        27727,
-        "ee742ffa61a96c1a519472f0ac645f45ec918cfd6c52ed95df95850e878569dc",
+        27948,
+        "622cc2d4165799d0c01f9a4932c33700d2bdf2581c38749f7d789712d7bb1bb2",
     ),
     "router with Slack, resumed": (
-        27691,
-        "a0070f7628d644d71e039930344b3095a3eaaefdd70879e87e20e92fc03ed121",
+        27912,
+        "5dbf7bf213be5b7886a0cc690eaf1d3d351f8c95edf4bb55a9fe9e6b0bee112e",
     ),
-    "router, created": (27727, "207a64187beb9054201e0a9576a67eabe472a731a97a793cff93216b1fd919da"),
-    "router, resumed": (27691, "9d56c2a1ce107a04212ebc293574c5b8c1ebc6816e12aa1c1e58e11e83eeb1ff"),
+    "router, created": (27948, "69203d48562055db3a5ba8a37fce384f76058fae9bd974197b409e7350eac58a"),
+    "router, resumed": (27912, "73d2831f4c7e3f23bd62d15377d229d66158465f6db3d6862df48cd37506ee0e"),
     "slack, created": (4566, "6a2c958151166b3dbf3d0d6789f7e8e62a9bc6a609ef88e4d25f6338ff3c5894"),
     "slack, resumed": (4531, "0201a125d8919e539c5289acf88a3cb2509f79ba4a136793af02ad83a85535a6"),
     "the Copilot sandbox of a worker asking first": (

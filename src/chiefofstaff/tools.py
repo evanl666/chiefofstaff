@@ -1650,15 +1650,23 @@ class Tools:
                 exclude=[task["session_id"] for task in after] + [row["id"] for row in peers],
             )
             if related:
+                # A busy one is no reason for a new worker either: its new task goes to a second
+                # worker with its context (forks.py).
+                busy = (
+                    " A busy one too (its load says busy): a second worker with its "
+                    "conversation so far takes the task at once."
+                    if any(card.get("load", {}).get("busy") for card in related)
+                    else ""
+                )
                 # Routing to the worker that already knows the subject matters: decide explicitly.
                 raise ValueError(
                     "Related workers exist. If this is about the same subject as one of them, "
                     "send it there with message_session instead (a closed one reopens with its "
                     "context and files; one without a branch takes its own worktree with "
                     "add_repo to change code, so needing a worktree is no reason for a new "
-                    "worker). A code change on another subject (another feature, function or "
-                    "bug, even in the same project) is not theirs: on their branch it would ship "
-                    "in the same PR. Then call spawn_worker again with why_new.\n"
+                    f"worker).{busy} A code change on another subject (another feature, function "
+                    "or bug, even in the same project) is not theirs: on their branch it would "
+                    "ship in the same PR. Then call spawn_worker again with why_new.\n"
                     + json.dumps(related, ensure_ascii=False)
                 )
         session_id = fork[1] if fork else str(uuid4())
@@ -2872,6 +2880,8 @@ class Tools:
         if origin := self.runtime.forks.origin(row["id"]):
             # A second worker, started with that one's conversation (forks.py).
             entry["context_from_worker"] = short(origin["id"])
+        if row["role"] == WORKER and self.store.settings().fork_busy:
+            entry["load"] = self.runtime.forks.load(row)  # How loaded it is (QA E87).
         agent = self.runtime.agent(row["id"]) if self.runtime.agents else agents.COPILOT
         if agent == agents.COPILOT and (model := self.runtime.model_for(row)):
             entry["model"] = model
@@ -3006,6 +3016,7 @@ class Tools:
                     if card["session_id"] in branches
                     else {}
                 ),
+                **({"load": card["load"]} if "load" in card else {}),
             }
             for card in cards
             if card["session_id"] not in exclude

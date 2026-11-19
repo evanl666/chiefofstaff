@@ -100,6 +100,55 @@ async def test_a_busy_workers_new_task_goes_to_a_second_worker_with_its_context(
     assert "fork_of" not in runtime.view(harness.store.session(worker))
 
 
+async def test_a_task_queued_to_finish_after_long_work_goes_to_a_second_worker(harness):
+    """QA E87: the Router queued separate work behind a worker's long task (earlier=finish),
+    and it waited, then failed with it. Busy, its new task goes to a second worker."""
+    runtime = await harness.connect()
+    worker = await busy(runtime, harness)
+    result = await new_task(
+        runtime, harness, worker, "Plan the rollout", "Plan the rollout.", earlier="finish"
+    )
+    assert result["session_id"] != worker and tasks_of(harness, worker) == [
+        "Fix login",
+        "Fix logout",
+    ]
+
+
+async def test_the_router_sees_how_loaded_each_worker_is(tmp_path):
+    """QA E87: nothing showed the Router how loaded a worker was. Its load is in list_sessions,
+    find_sessions and the related workers spawn_worker lists; none of it while the switch is
+    off (as before)."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    worker = await busy(runtime, harness, project="", instructions="Fix the login form.")
+    runtime.states[worker].busy_since = time.monotonic() - 3 * 60
+    listed = json.loads(
+        (await call_tool(runtime, "list_sessions", harness.router_id)).text_result_for_llm
+    )
+    entry = next(item for item in listed["sessions"] if item["session_id"] == worker)
+    assert entry["load"] == {
+        "in_turn": True, "turn_minutes": 3, "open_tasks": 2, "messages_waiting": 1,
+        "busy": "2 open tasks",
+    }, entry["load"]  # fmt: skip
+    found = json.loads(
+        (
+            await call_tool(runtime, "find_sessions", harness.router_id, query="login")
+        ).text_result_for_llm
+    )
+    assert found["matches"][0]["load"]["busy"] == "2 open tasks"
+    refused = await call_tool(runtime, "spawn_worker", harness.router_id, title="Fix login copy",
+                              instructions="Fix the login form's copy.")  # fmt: skip
+    said = refused.text_result_for_llm
+    assert "A busy one too" in said and '"busy": "2 open tasks"' in said, said
+    old, new = harness.store.settings(), Settings(fork_busy=False)
+    harness.store.save_settings(new)
+    await runtime.settings_changed(old, new)
+    listed = json.loads(
+        (await call_tool(runtime, "list_sessions", harness.router_id)).text_result_for_llm
+    )
+    assert all("load" not in item for item in listed["sessions"])
+
+
 async def test_a_worker_long_at_work_on_one_task_is_busy_too(harness):
     runtime = await harness.connect()
     worker = (await spawn(runtime, harness.router_id, "Run the migration"))["session_id"]
@@ -109,7 +158,7 @@ async def test_a_worker_long_at_work_on_one_task_is_busy_too(harness):
     assert result["session_id"] != worker and harness.client.forks
 
 
-@pytest.mark.parametrize("case", ["idle", "one task", "same_worker", "finish", "slots", "off"])
+@pytest.mark.parametrize("case", ["idle", "one task", "same_worker", "superseded", "slots", "off"])
 async def test_otherwise_the_worker_gets_its_new_task_as_before(tmp_path, case):
     settings = Settings(max_workers=2 if case == "slots" else 4, fork_busy=case != "off")
     harness = Harness(tmp_path / "data", settings)
@@ -128,11 +177,12 @@ async def test_otherwise_the_worker_gets_its_new_task_as_before(tmp_path, case):
         other = (await spawn(runtime, harness.router_id, "Other work"))["session_id"]
         await at_work(runtime, harness, other)
     extra = {"same_worker": True} if case == "same_worker" else {}
-    extra["earlier"] = "finish" if case == "finish" else "keep"
+    extra["earlier"] = "superseded" if case == "superseded" else "keep"
     told = await new_task(runtime, harness, worker, "Export CSV", "Add a CSV export.", **extra)
     assert told.startswith("Delivered"), told
     assert "Export CSV" in tasks_of(harness, worker) and not harness.client.forks
-    assert "Add a CSV export." in harness.session(worker).sent[-1]
+    # (Superseded: the task it replaces is cancelled once the worker has the new one.)
+    assert any("Add a CSV export." in text for text in harness.session(worker).sent[-2:])
 
 
 @pytest.mark.parametrize("failing", ["fork", "workspace"])
