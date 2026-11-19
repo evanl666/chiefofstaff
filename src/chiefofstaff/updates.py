@@ -100,3 +100,12 @@ def notice(store: Store) -> dict | None:
     if not newer(latest, installed()):
         return None
     return {"version": latest, "command": upgrade_command()}
+
+
+def start_hint(store: Store) -> str:
+    """Said when Copilot would not start at all: a newer Chief of Staff may run it (as 0.1.46 did
+    a Copilot CLI that had updated itself past 0.1.45)."""
+    command = upgrade_command()
+    if found := notice(store):
+        return f"Chief of Staff {found['version']} is out and may fix this: {command}"
+    return f"A newer Chief of Staff may fix this: {command}"

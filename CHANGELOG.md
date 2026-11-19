@@ -11,7 +11,7 @@
   updates it the way it was installed (`uvx chiefofstaff@latest`: plain `uvx chiefofstaff` runs
   the version uv cached first, however old; `uv tool upgrade chiefofstaff`). Chief of Staff reads
   its own page on PyPI for that, at most once a day, sending nothing about you; Settings → General
-  turns it off.
+  turns it off. When Copilot can't start at all, the error says that command too.
 - A Copilot session deleted while open no longer logs a traceback ("'destroy' is not a valid
   ShutdownType").
 

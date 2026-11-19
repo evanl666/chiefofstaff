@@ -1221,7 +1221,8 @@ the version uv cached the first time, however old (a newer Copilot CLI may need 
 Staff). When a newer release is out, one quiet line at the bottom of the sidebar says so, with
 the command that updates it the way you installed it. Chief of Staff reads its own page on PyPI
 for that, at most once a day, and sends nothing about you or your machine; *Say when a newer
-Chief of Staff is out* (Settings → General) turns it off.
+Chief of Staff is out* (Settings → General) turns it off. When Copilot can't start at all, the
+error says that command too.
 
 ## Data
 

@@ -516,3 +516,22 @@ def test_the_update_command_is_the_way_chief_of_staff_was_installed():
     assert command("/Users/acme/tools/.venv") == "pip install --upgrade chiefofstaff"
     assert newer("0.1.10", "0.1.9") and not newer("0.1.47", "0.1.47")
     assert not newer("0.2.0rc1", "0.1.47"), "never a pre-release"
+
+
+async def test_copilot_that_cannot_start_says_how_to_update_chief_of_staff(harness, monkeypatch):
+    from chiefofstaff import updates
+
+    monkeypatch.setattr(updates, "upgrade_command", lambda: "uvx chiefofstaff@latest")
+
+    async def refused():
+        raise RuntimeError("SDK protocol version mismatch: SDK supports versions 3-3, but server "
+                           "reports version 4.")  # fmt: skip
+
+    harness.client.start = refused
+    runtime = harness.runtime
+    runtime.loop = asyncio.get_running_loop()
+    await runtime.connect()
+    assert runtime.status["state"] == "error"
+    assert runtime.status["error"].endswith(
+        " A newer Chief of Staff may fix this: uvx chiefofstaff@latest"
+    )

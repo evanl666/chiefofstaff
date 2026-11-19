@@ -798,6 +798,7 @@ class Runtime:
             # Copilot starts afresh (at start, or reconnecting): the commands its shells were
             # running ended with the one before.
             self.end_commands(COPILOT_AGENT)
+            starting = False
             self.status = {"state": "starting", "error": ""}
             self.publish_state()
             try:
@@ -816,7 +817,9 @@ class Runtime:
                 if isinstance(self.backend, CopilotBackend):
                     self.backend.note = self.backend_note
                     self.backend.refusals = directory / REFUSED_CLI
+                starting = True
                 await self.backend.start()
+                starting = False
                 auth = await self.backend.get_auth_status()
                 # It answered: its processes run now. Remembered, so they never count as the
                 # owner's terminal (even orphaned) and are stopped when they outlive it: with
@@ -859,7 +862,11 @@ class Runtime:
                 self.recover_later()
             except Exception as exc:
                 logger.exception("Copilot runtime failed to start")
-                self.status = {"state": "error", "error": describe(exc)[:500]}
+                error = describe(exc)[:500]
+                if starting:
+                    # Copilot would not start at all: a newer Chief of Staff may run it.
+                    error += " " + updates.start_hint(self.store)
+                self.status = {"state": "error", "error": error}
                 if self.backend and not self.backend.alive():
                     self.recover_later()  # Copilot stopped while connecting: again, later.
             self.publish_state()
