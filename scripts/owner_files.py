@@ -13,7 +13,10 @@ state file (`.claude.json`, which every session of Claude's rewrites) key by key
 (more-agents.md 5.12.5): new `projects` entries for folders under ROOT, none of them trusted;
 top-level keys that a plain `claude -p` run changes on this machine (`changed-keys`, after one,
 gives them: the run passes them with --allow) or STATE_KEYS; nothing else (no trust, no other
-project, no MCP server, no account field). Only key names are printed, never a value.
+project, no MCP server, no account field). Only key names are printed, never a value. A live run
+also allows SYNC_MARKS: the mark Claude writes in the owner's synced claude.ai skills at each
+sync round (any session of the owner's signed-in Claude makes it; only hiding those skills from
+workers would stop it).
 
 Credentials (Codex's auth.json, Claude's sign-in) are never read: they are not here.
 """
@@ -41,7 +44,14 @@ STATE_KEYS = {
     "promptQueueUseCount", "lastReleaseNotesSeen", "changelogLastFetched", "cachedChangelog",
     "hasResetAutoModeOptInForDefaultOffer", "opusProMigrationComplete",
     "sonnet1m45MigrationComplete",
+    # When Anthropic's server last confirmed the owner's own Consumer Terms answer: a cache of
+    # an hour that any session of a signed-in Claude renews (2.1.322); never a notice marked as
+    # seen (a session started without a terminal only says to run `claude` to review them).
+    "groveChoiceSeenAt",
 }  # fmt: skip
+# Of the owner's synced claude.ai skills (~/.claude/skills/synced/<id>/): the mark Claude
+# (2.1.322) writes at the end of each sync round, about every ten minutes a session runs.
+SYNC_MARKS = (".last-complete-round",)
 NEVER = {"mcpServers", "oauthAccount", "primaryApiKey", "customApiKeyResponses", "projects"}
 
 
@@ -91,6 +101,12 @@ def watched() -> dict[str, Path]:
             if path.is_file():
                 files[f"claude {path.relative_to(claude)}"] = path
     return files
+
+
+def sync_mark(name: str) -> bool:
+    """Whether a watched file is a mark of Claude's skill sync rounds (SYNC_MARKS)."""
+    parts = name.removeprefix("claude ").split("/")
+    return len(parts) == 4 and parts[:2] == ["skills", "synced"] and parts[3] in SYNC_MARKS
 
 
 def digest(path: Path) -> str | None:
@@ -195,7 +211,7 @@ def changes(
         f"{name}: {'made' if was is None else 'removed' if now is None else 'changed'}"
         for name in sorted(set(before["files"]) | set(after["files"]))
         if (was := before["files"].get(name)) != (now := after["files"].get(name))
-        and not (roots is not None and name == "claude ~/.claude.json")
+        and not (roots is not None and (name == "claude ~/.claude.json" or sync_mark(name)))
     ]
     if roots is not None:
         found += state_changes(before, roots, set(allowed))

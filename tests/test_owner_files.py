@@ -73,3 +73,33 @@ def test_a_live_run_may_change_no_trust_project_server_or_account(
     root = tmp_path / "live"
     changed(state, lambda d: change(d, str(root / "w1")))
     assert owner_files.changes(before, [str(root)], {"mcpServers", "oauthAccount"}) == [said]
+
+
+def test_a_live_run_allows_claudes_own_caches_and_sync_marks_only(owner_files, tmp_path):
+    """Claude's own housekeeping in any session of the owner's signed-in Claude (2.1.322): the
+    hourly cache of their Consumer Terms answer and the mark of a skill sync round. A synced
+    skill itself, or a marketplace refreshed (no worker's process updates: DISABLE_AUTOUPDATER),
+    is still a change."""
+    config = tmp_path / "config"
+    state = config / ".claude.json"
+    state.write_text(json.dumps({"groveChoiceSeenAt": {"a": 1}, "projects": {}}))
+    synced = config / "skills" / "synced" / "org_skill"
+    synced.mkdir(parents=True)
+    (synced / ".last-complete-round").write_text("1")
+    (synced / "SKILL.md").write_text("one")
+    (config / "plugins").mkdir()
+    (config / "plugins" / "known_marketplaces.json").write_text('{"m": {"lastUpdated": "1"}}')
+    before = owner_files.record()
+    root = str(tmp_path / "live")
+    changed(state, lambda d: d.update(groveChoiceSeenAt={"a": 2}))
+    (synced / ".last-complete-round").write_text("2")
+    assert owner_files.changes(before, [root]) == []
+    assert owner_files.changes(before) == [
+        "claude skills/synced/org_skill/.last-complete-round: changed"
+    ], "outside a live run, byte for byte"
+    (synced / "SKILL.md").write_text("two")
+    (config / "plugins" / "known_marketplaces.json").write_text('{"m": {"lastUpdated": "2"}}')
+    assert owner_files.changes(before, [root]) == [
+        "claude plugins/known_marketplaces.json: changed",
+        "claude skills/synced/org_skill/SKILL.md: changed",
+    ]
