@@ -500,7 +500,18 @@ class CopilotBackend:
         self.fallback = (theirs, ours)
 
     def cli_process(self) -> subprocess.Popen | None:
-        return getattr(self.client, "_cli_process", None)
+        """The CLI's process, wherever this SDK keeps it: `_cli_process` (SDK 1.0), `_process`
+        (0.x; in 1.0 the same process, or the socket of a TCP connection: not a process), or
+        its JSON-RPC client's `process`."""
+        client = self.client
+        for holder, name in ((client, "_cli_process"), (client, "_process"),
+                             (getattr(client, "_client", None), "process")):  # fmt: skip
+            found = getattr(holder, name, None)
+            if isinstance(getattr(found, "pid", None), int) and callable(
+                getattr(found, "poll", None)
+            ):
+                return found
+        return None
 
     def processes(self) -> dict[int, str]:
         if process := self.cli_process():

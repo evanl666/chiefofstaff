@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -1510,6 +1511,24 @@ async def test_a_refused_copilot_cli_is_remembered_until_it_or_the_sdk_changes(
     assert await start() == (None, ["1.0.116"])
     assert not refusals.exists()
     assert (await start())[1] == ["1.0.116"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shell script")
+async def test_copilots_process_is_found_wherever_the_sdk_keeps_it(tmp_path):
+    """The CLI's process as the SDK keeps it (a real client), `_cli_process` in 1.0; an SDK
+    before 1.0 kept it as `_process` alone: then too it is known to have ended."""
+    backend = backend_module.copilot_backend(fake_copilot(tmp_path / "copilot", "1.0.112", 3))
+    await backend.start()
+    client = backend.client
+    process = client._cli_process
+    assert process and backend.cli_process() is process and backend.alive()
+    assert process.pid in backend.processes()
+    client._cli_process = None  # As an SDK before 1.0 keeps it.
+    assert backend.cli_process() is client._process is process
+    process.send_signal(signal.SIGKILL)
+    process.wait()
+    assert not backend.alive()
+    await backend.stop()
 
 
 def test_a_deleted_sessions_shutdown_event_is_taken_quietly():
