@@ -919,8 +919,10 @@ async def c5_works_with(ctx: Ctx):
         f"Three workers that work together (works_with each other), on {ctx.project}'s "
         "data/sales.csv, no file changes: 'Alpha' (use codex) gives north's total revenue "
         "(units * unit_price); 'Beta' (use codex) first runs `sleep "
-        f"{seconds}`, then gives south's; 'Gamma' (use copilot) waits for the others' results "
-        "and reports what it got from each, and any news about them, word for word.",
+        f"{seconds}` in the foreground and lets it finish (my stand-in for a long computation, "
+        "not a wait for something: it must run), then gives south's; 'Gamma' (use copilot) "
+        "waits for the others' results and reports what it got from each, and any news about "
+        "them, word for word.",
     )
     started = await wait_for(
         "three workers started",
