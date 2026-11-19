@@ -1027,7 +1027,6 @@ function agentsTab() {
       el("label", { class: "check" }, el("input", { name: "agent_router_chooses", type: "checkbox" }), " Let the Router choose the agent for each task"),
       el("small", { text: "It says which it chose and why. Ask for one with @codex or @claude, or in your own words." }),
     ),
-    el("small", { id: "agents-sandboxed", hidden: true, text: "Other agents can't run while workers are sandboxed: their sandboxes have not passed Chief of Staff's checks yet." }),
   );
   $("#settings-form .tab[data-tab=models]").after(section);
 }
@@ -1043,7 +1042,6 @@ function renderAgentsLine() {
   $("#agents-rows").replaceChildren();
   $("#settings-form").agent_new_workers.replaceChildren(el("option", { value: "copilot", text: "Copilot" }));
   $("#agents-choice").hidden = true;
-  $("#agents-sandboxed").hidden = true;
 }
 async function lookForAgents() {
   const looking = Symbol("looking");
@@ -1063,9 +1061,10 @@ async function lookForAgents() {
   }
   if (agentsLooked !== looking) return;
   agentsLooked = found;
-  $("#agents-sandboxed").hidden = !found.sandboxed;
+  // Sandboxed, an agent whose workers can't start then says why on its row (its sandbox not
+  // shown to hold, or your Claude settings widening it).
   $("#agents-rows").replaceChildren(
-    ...(found.agents.length ? found.agents.map((agent) => agentRow(agent, found.sandboxed)) : [el("small", { class: "agents-none", role: "status", text: noAgentWords(found.supported) })]),
+    ...(found.agents.length ? found.agents.map((agent) => agentRow(found.sandboxed && agent.sandbox ? { ...agent, problem: agent.sandbox } : agent, false)) : [el("small", { class: "agents-none", role: "status", text: noAgentWords(found.supported) })]),
   );
   $("#settings-form").agent_router_chooses.checked = Boolean(found.router_chooses);
   newWorkersChoices(found.new_workers);

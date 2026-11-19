@@ -16,7 +16,7 @@ import pytest
 from conftest import SHADOWED, cwd_of, fake_claude, shadowing_repository
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
-from chiefofstaff import backend_claude
+from chiefofstaff import backend_claude, claude_tools
 from chiefofstaff.backend import copilot_orphans, copilot_records
 from chiefofstaff.backend_claude import claude_backend
 
@@ -1012,10 +1012,59 @@ async def test_a_sandboxed_worker_does_not_start_where_claudes_settings_widen_it
     (config / "settings.json").write_text(json.dumps({"sandbox": {"excludedCommands": ["x:*"]}}))
     policy = SimpleNamespace(readwrite=(str(tmp_path),), readonly=(), denied=(),
                              allowed_hosts=(), local_network=True)  # fmt: skip
-    with pytest.raises(Exception, match=r"widen its sandbox past Chief of Staff's"):
+    said = str(config / "settings.json").replace(str(Path.home()), "~", 1)
+    with pytest.raises(Exception, match="sandboxed Claude workers can't start") as refused:
         await agent.create_session(
             session_id="b2" * 16, name="t", **options(tmp_path, sandbox=policy)
         )
+    assert str(refused.value) == (
+        "Your Claude settings let workers run commands outside their sandbox "
+        f"(sandbox.excludedCommands in {said}), so sandboxed Claude workers can't start."
+    )
+
+
+def test_why_claudes_settings_keep_sandboxed_workers_from_starting_is_one_plain_line(
+    tmp_path, monkeypatch
+):
+    """Which setting, in which file, and what it would let workers do (whose settings: the
+    owner's, a project's they trust, the computer's managed ones)."""
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    user = config / "settings.json"
+    said = str(user).replace(str(Path.home()), "~", 1)
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    shared = project / ".claude" / "settings.json"
+    managed = tmp_path / "managed.json"
+    monkeypatch.setattr(backend_claude, "managed_settings", lambda platform: [managed])
+    cases = [
+        (user, {"permissions": {"additionalDirectories": ["/srv"]}},
+         "Your Claude settings let workers write outside their folder "
+         f"(permissions.additionalDirectories in {said}), so sandboxed Claude workers can't "
+         "start."),
+        (user, {"permissions": {"allow": ["Edit(//srv/**)"]}},
+         "Your Claude settings let workers write outside their folder "
+         f"(permissions.allow Edit(//srv/**) in {said}), so sandboxed Claude workers can't "
+         "start."),
+        (shared, {"sandbox": {"network": {"allowedDomains": ["example.com"]}}},
+         "This project's Claude settings let workers reach more of the network than their "
+         "sandbox allows (sandbox.network.allowedDomains in .claude/settings.json), so "
+         "sandboxed Claude workers can't start there."),
+        (managed, {"sandbox": {"enabled": False}},
+         f"Your computer's managed Claude settings turn workers' sandbox off (sandbox.enabled in "
+         f"{managed}), so sandboxed Claude workers can't start."),
+    ]  # fmt: skip
+    for file, data, line in cases:
+        for each in (user, shared, managed):
+            each.unlink(missing_ok=True)
+        file.write_text(json.dumps(data))
+        assert backend_claude.sandbox_widened(str(project), trusted=True) == line
+    monkeypatch.setattr(claude_tools, "MOST_SETTINGS", 10)
+    assert backend_claude.sandbox_widened(str(project), trusted=False) == (
+        f"Your computer's managed Claude settings file {managed} is too large for Chief of Staff "
+        "to check, so sandboxed Claude workers can't start."
+    )
 
 
 async def test_the_addresses_a_command_names_reach_the_policy_as_copilots_do(agent, tmp_path):

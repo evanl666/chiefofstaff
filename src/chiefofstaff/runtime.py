@@ -1623,6 +1623,20 @@ class Runtime:
                 return f"This worker used its {name} token limit ({spent:,} of {limit:,})."
         return ""
 
+    def sandboxed_refusal(self, agent: str) -> str:
+        """Why none of an agent's workers can start while workers are sandboxed, on its row in
+        Settings → Coding agents ("" when they can: Claude's, on a version whose sandbox held, or
+        not checked yet, where your Claude settings would not widen its sandbox)."""
+        refused = self.agent_refused(agent)
+        why = refused.get("sandbox", "" if agent == "claude" else SANDBOX_UNPROVEN)
+        if why:
+            return f"Can't run while workers are sandboxed: {why}."
+        if agent == "claude":
+            from .backend_claude import sandbox_widened
+
+            return sandbox_widened("", trusted=False)
+        return ""
+
     def agent_refused(self, agent: str) -> dict:
         """What the check of an agent's version found it may not do (acting on its own, Ask
         first): from its backend while it runs, else as it was last found (a worker may be
@@ -3921,6 +3935,10 @@ class Runtime:
         usage = agents.plan_usage(self.store, name, facts)
         if usage:
             entry["usage"] = usage
+        settings = self.store.settings()
+        if settings.worker_sandbox and self.sandbox_host:
+            # Why its workers can't start while sandboxed, said on its row (none: they can).
+            entry["sandbox"] = self.sandboxed_refusal(name)
         # Its plan's limit in words where its usage line does not say it already: reached with
         # no percent known, or reached with extra usage carrying its workers on.
         live = agents.live_limit(self.store, name, facts.get("limit"))

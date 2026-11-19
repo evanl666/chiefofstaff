@@ -7418,6 +7418,14 @@ AGENT_SHOTS = SHOTS / "agents-m2"
 AGENT_WIDTHS = (800, 1024, 1440)
 SIGNED_OUT_CODEX = "Codex is not signed in: run codex login in a terminal."
 OLD_CODEX = "Codex 0.160.0 is older than the versions tested (0.167.2): update it."
+SANDBOXED_CODEX = (
+    "Can't run while workers are sandboxed: its sandbox has not passed Chief of Staff's checks yet."
+)
+WIDENED_CLAUDE = (
+    "Your Claude settings let workers write outside their folder "
+    "(permissions.additionalDirectories in ~/.claude/settings.json), so sandboxed Claude workers "
+    "can't start."
+)
 STOPPED_CODEX = "Stopped unexpectedly; starts again with its next worker's message."
 NO_ANSWER = "Codex did not answer in time: try again."
 PLAN_NOTE = (
@@ -7600,7 +7608,6 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await expect(rows.locator(".agent-advanced")).to_be_hidden()
     choose = group.locator("select[name=agent_new_workers]")
     await expect(group.locator("#agents-choice")).to_be_hidden()  # One to choose from: none.
-    await expect(group.locator("#agents-sandboxed")).to_be_hidden()
     for width in AGENT_WIDTHS:
         await shoot(page, "tab-found", scheme, width)
     await page.set_viewport_size({"width": 1280, "height": 900})
@@ -7743,7 +7750,14 @@ async def agents_states(browser, scheme: str):
             "new_workers": "copilot", "sandboxed": False,
         },
         "sandboxed": {
-            "agents": [found | {"state": "0.167.2 · signed in with ChatGPT"}],
+            "agents": [found | {"state": "0.167.2 · signed in with ChatGPT",
+                                "sandbox": SANDBOXED_CODEX}],
+            "new_workers": "copilot", "sandboxed": True,
+        },
+        # Sandboxed, and the owner's own Claude settings would widen its sandbox.
+        "claude-widened": {
+            "agents": [claude | {"state": "2.1.322 · signed in with your Claude plan",
+                                 "sandbox": WIDENED_CLAUDE}],
             "new_workers": "copilot", "sandboxed": True,
         },
         "offline": {
@@ -7811,7 +7825,7 @@ async def agents_states(browser, scheme: str):
                 "() => getComputedStyle(document.body).getPropertyValue('--muted').trim()"
             )
             colour = await label.evaluate("l => getComputedStyle(l).color")
-            if name in ("signed-out", "too-old", "sandboxed", "claude-no-extra"):
+            if name in ("signed-out", "too-old", "sandboxed", "claude-widened", "claude-no-extra"):
                 await expect(box).to_be_disabled()
                 await expect(rows).to_have_class("agent-row disabled")
                 assert colour == await page.evaluate(
@@ -7824,9 +7838,11 @@ async def agents_states(browser, scheme: str):
             else:
                 await expect(box).to_be_enabled()  # On: it can always be turned off.
                 await expect(rows).to_have_class("agent-row")
-            await expect(tab.locator("#agents-sandboxed")).to_be_visible(
-                visible=name == "sandboxed"
-            )
+            if name in ("sandboxed", "claude-widened"):
+                # Why its workers can't start while sandboxed: on its own row.
+                await expect(rows.locator(".agent-problem")).to_have_text(
+                    SANDBOXED_CODEX if name == "sandboxed" else WIDENED_CLAUDE
+                )
             chip = rows.locator(".agent-head .chip")
             if name == "usage-high":
                 await expect(chip).to_have_text("86% used")
@@ -7843,7 +7859,8 @@ async def agents_states(browser, scheme: str):
         await context.close()
     log(
         f"agents ({scheme}): checking, error, none found, signed out, too old, sandboxed, "
-        "offline, Claude's plan limit, Claude without its extra"
+        "Claude's settings widening its sandbox, offline, Claude's plan limit, Claude without "
+        "its extra"
     )
 
 
