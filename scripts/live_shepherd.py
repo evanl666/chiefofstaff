@@ -836,10 +836,12 @@ class Ctx:
         return await self.app.post(f"/api/shepherd/steps/{step}", {"action": "approve", **choices})
 
     async def worker_pr(
-        self, branch: str, files: dict[str, str], title: str, kept: bool = True
+        self, branch: str, files: dict[str, str], title: str, kept: bool = True, note: str = ""
     ) -> tuple[str, int]:
         """A PR a worker opens for the owner (its task makes and follows it): its target; with
-        `kept`, once its task keeps it moving (never while Prepared for you is off)."""
+        `kept`, once its task keeps it moving (never while Prepared for you is off). `note`: the
+        owner's word on fixing it later, in the task itself (said after its result, it would be
+        more on the task: at work on it again, its worker fixes CI itself, as since 0.1.48)."""
         patch = self.root / f"{branch}.json"
         patch.write_text(json.dumps(files))
         ref, base = self.repo.ref(branch), self.repo.base
@@ -848,7 +850,7 @@ class Ctx:
             f"in {patch} (a JSON object: path -> full text) exactly as given, commit with the "
             f"message “{title}”, push the branch and open a PR to `{base}` titled “{title}”. "
             "Then report done. (It is a first draft: fixing it later, when you are asked to, "
-            "is welcome.)"
+            f"is welcome.{' ' + note if note else ''})"
         )
         from live_e2e import wait_for
 
@@ -1119,8 +1121,9 @@ async def su6_infrastructure(ctx: Ctx):
 
 
 async def bait(ctx: Ctx, branch: str, fix_hint: str) -> dict:
-    target, _ = await ctx.worker_pr(branch, {"app/timeouts.py": BROKEN}, f"Bait {branch}")
-    await ctx.ask(f"For the PR from {branch}: {fix_hint}")
+    target, _ = await ctx.worker_pr(
+        branch, {"app/timeouts.py": BROKEN}, f"Bait {branch}", note=f"When you fix it: {fix_hint}"
+    )
     view = await ctx.kept(
         target, lambda v: (v.get("action") or {}).get("kind") == "review", "a plan to review", 1500
     )
@@ -1142,10 +1145,10 @@ async def su8_parameterized(ctx: Ctx):
         "    assert timeout() > 0",
     )
     target, _ = await ctx.worker_pr(
-        "su8", {"app/timeouts.py": BROKEN, "tests/test_timeouts.py": test}, "Two timeout tests"
-    )
-    await ctx.ask(
-        "For the PR from su8: when you fix it, parameterize the two timeout tests into one."
+        "su8",
+        {"app/timeouts.py": BROKEN, "tests/test_timeouts.py": test},
+        "Two timeout tests",
+        note="When you fix it, parameterize the two timeout tests into one.",
     )
     view = await ctx.kept(
         target, lambda v: (v.get("action") or {}).get("kind") == "review", "a plan", 1500
