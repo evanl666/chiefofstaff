@@ -885,6 +885,36 @@ async def test_a_question_only_comment_gets_an_answer_and_no_code(world):
     assert view["action"]["label"] == "Review & post"
 
 
+async def test_a_comment_an_approved_plan_left_to_the_owner_is_not_tried_again(world):
+    """The plan the owner approved left a comment to them: its push moved the head, and that
+    comment (still its thread's last) gets no new attempt; the reviewer's answer there does."""
+    runtime = await world.start()
+    comments(world)
+    await runtime.shepherd.tick()
+    stances = [STANCES[0], {"comment": 502, "stance": "leave", "why": "Only you know why 30."}]
+    step, sha = await addressed(world, runtime, stances)
+    await approve(runtime.shepherd, step["id"], {"disclosure": "no"})
+    await settle(runtime)
+    await settle(runtime)
+    assert runtime.shepherd.control.step(step["id"])["state"] == "published"
+    assert world.github.head() == sha
+    control = runtime.shepherd.control
+
+    def attempts():
+        return [s["id"] for s in control.steps(TARGET) if s["kind"] == "address-review"]
+
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert attempts() == [step["id"]]
+    world.github.threads[1]["comments"]["nodes"].append(
+        {"databaseId": 503, "author": {"login": "maya"}, "body": "Still not convinced.",
+         "createdAt": "2026-11-16T10:00:00Z", "url": "https://x/503"}
+    )  # fmt: skip
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert len(attempts()) == 2
+
+
 async def test_a_check_that_passed_when_run_again_is_known_flaky_and_gets_a_rerun(world):
     """Design 4.7.1: a check that failed at a commit and passed when run again at that same
     commit is known flaky in the repository, for that failure. When it fails that way again

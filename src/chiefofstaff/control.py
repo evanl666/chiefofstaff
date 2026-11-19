@@ -498,11 +498,12 @@ class Control:
 
     def cap_reached(
         self, target: str, kind: str, fingerprint: str, h0: str, threads: Iterable[str] = (),
-        clicked: bool = False,
+        clicked: bool = False, said: Iterable[str | int] = (),
     ) -> str:  # fmt: skip
         """Why another attempt may not start, "" when it may: three a kind and PR a day; one
         fix per check fingerprint and head unless the owner clicks for another (a look at why,
-        at Suggest, is not a fix); two per review thread."""
+        at Suggest, is not a fix); two per review thread; none for review comments (`said`,
+        each thread's last) that a plan the owner decided on had already, unless they click."""
         tried = [step for step in self.steps(target) if step["started_at"] and step["kind"] == kind]
         if sum(1 for step in tried if step["day"] == today()) >= PER_DAY:
             return f"{PER_DAY} attempts today"
@@ -525,6 +526,18 @@ class Control:
                     counts[str(thread)] = counts.get(str(thread), 0) + 1
             if all(counts.get(thread, 0) >= PER_THREAD for thread in wanted):
                 return f"{PER_THREAD} rounds on each of these comments"
+        asked = {str(comment) for comment in said}
+        if asked and not clicked:
+            # Published, partly or dismissed: the owner saw these comments' plan (one that left
+            # a thread to them leaves it to them still, whatever moved the head since).
+            decided = {
+                str(ask.get("last"))
+                for step in tried
+                if step["state"] in {"published", "partly", "dismissed"}
+                for ask in (step["signal"] or {}).get("threads") or []
+            }
+            if asked <= decided:
+                return "you decided on these comments already"
         return ""
 
     # The journal: what Chief of Staff publishes, each operation with a stable id, written
