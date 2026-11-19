@@ -549,6 +549,9 @@ async def test_a_task_set_to_go_on_at_its_reset_does_not_once_told_something_els
             )
         assert harness.store.get(f"goonat:{task}") is None
         assert runtime.task_actions.view(runtime.tasks.get(task))["paused"]["go_on_at"] == 0
+        # Its wait for the reset ended too (not left asleep for an hour among the jobs).
+        await asyncio.sleep(0.05)
+        assert not [job for job in runtime.jobs if "going_on_at" in repr(job)]
         await runtime.task_actions.going_on_at(task, resets - 7200)  # Its time come: nothing.
         said = [m["text"] for m in harness.store.messages(worker)]
         assert "Go on where you stopped." not in said

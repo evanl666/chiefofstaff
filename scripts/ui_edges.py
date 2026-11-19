@@ -8330,6 +8330,11 @@ async def round_picker(runtime, browser, failures: list[str]):
         await picker_composer(runtime, browser)
         await picker_workers(runtime, browser)
     finally:
+        # The paused task set to go on at its reset goes on no more: its wait (hours away)
+        # would hold every later round's settle().
+        for task_id in store.items("goonat:"):
+            store.delete(f"goonat:{task_id}")
+            runtime.task_actions.stop_going_on(task_id)
         await agents_saved(runtime, {"codex": {"enabled": False}, "claude": {"enabled": False}})
         codex_off_path(folder)
 

@@ -3662,6 +3662,7 @@ class Runtime:
         for task in self.tasks.for_session(session_id):
             if self.store.get(f"goonat:{task['id']}"):
                 self.store.delete(f"goonat:{task['id']}")
+                self.task_actions.stop_going_on(task["id"])
                 self.task_actions.publish(task)
 
     def release_schedules(self, session_id: str):
