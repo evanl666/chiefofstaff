@@ -935,7 +935,14 @@ class Shepherd(Keeping, Steps):
         news = {"text": text[:4000], "display": (display or text)[:4000]}
         steps = await self.signals(claim, task, details, news=news)
         if not steps:
-            return False
+            # An attempt at this commit for it is there already (waiting for Fix it, running,
+            # or its plan ready): the news is that attempt's too, not the worker's to act on.
+            kinds = {"fix-ci"} if ci else set()
+            kinds |= {"address-review"} if reviews else set()
+            found = self.control.open_step(thread)
+            if not (found and found["h0"] == details["head"] and found["kind"] in kinds):
+                return False
+            steps = [found]
         held = wrap("github", "thread", text, thread=thread, trust=UNTRUSTED, task=task["id"])
         self.runtime.delivery.hold(
             row["id"], held, kind="inbound", display=(display or text)[:4000],
