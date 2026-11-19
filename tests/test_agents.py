@@ -941,6 +941,27 @@ async def test_an_agent_never_turned_on_is_said_to_be_off(tmp_path, codex_on_pat
         await runtime.stop()
 
 
+async def test_the_router_gives_no_task_to_a_worker_whose_agent_is_off(tmp_path, codex_on_path):
+    harness, runtime, worker, task_id = await codex_worker(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": False}})
+        for how in (
+            {"task": "continue", "task_id": task_id},
+            {"task": "new", "title": "Count the rows · data", "why_new": "Another deliverable."},
+        ):
+            refused = await call_tool(
+                runtime, "message_session", harness.router_id, session_id=worker,
+                text="Also count the rows.", **how,
+            )  # fmt: skip
+            assert refused.error.startswith(
+                "Not sent: Codex is turned off in Settings → Coding agents."
+            ), refused
+        assert [t["id"] for t in runtime.tasks.for_session(worker)] == [task_id]
+        assert runtime.tasks.get(task_id)["status"] == "review", "not reopened"
+    finally:
+        await runtime.stop()
+
+
 async def test_codex_workers_take_a_new_model_from_the_group_with_their_next_turn(
     tmp_path, codex_on_path
 ):

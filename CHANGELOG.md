@@ -49,7 +49,11 @@ Codex and Claude can do what Copilot workers can.
   runs in (no new process, its conversation's prompt cache kept), and each Codex and Claude
   worker's supervisor has less to load as it starts.
 - **Fixes:** a *Go on* refused (an agent off, its limit reached) leaves the task stopped as it
-  was, with its *Go on*; "Copilot failed on this turn" names the worker's own agent.
+  was, with its *Go on*; "Copilot failed on this turn" names the worker's own agent; the Router
+  no longer gives a task to a worker whose agent is turned off (it stayed running, never
+  sent); a Claude worker whose background command ends takes the turn that end wakes (its
+  process could be let go of just as that turn began, and the worker then held its report,
+  told it was declined).
 - **Codex workers' supervisor starts isolated.** It ran with the folder Chief of Staff was
   started in first on Python's import path: started inside a repository, a `typing.py` or a
   `chiefofstaff/` folder there would have run as it. It now runs with `python -I`, in a folder
