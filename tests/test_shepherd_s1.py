@@ -209,6 +209,9 @@ async def test_the_owners_stop_ends_the_attempt_and_its_turn(world):
     assert ended["state"] == "interrupted" and ended["why"] == "Stopped by you."
     assert world.session().aborted and not runtime.shepherd.marked(world.worker)
     assert runtime.store.session(world.worker)["status"] == "idle"
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert runtime.shepherd.control.open_step(TARGET) is None  # Stopped by you: not again.
 
 
 async def test_the_owners_queued_work_preempts_an_attempt(world):
@@ -224,6 +227,11 @@ async def test_the_owners_queued_work_preempts_an_attempt(world):
     ended = runtime.shepherd.control.step(step["id"])
     assert ended["state"] == "interrupted", ended
     assert not runtime.shepherd.stepping
+    # Queued again, behind the owner's task, at the PR's next read.
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    again = runtime.shepherd.control.open_step(TARGET)
+    assert again and again["id"] != step["id"] and again["state"] == "queued", again
 
 
 async def test_work_waiting_for_another_task_does_not_hold_an_attempt_back(world):
