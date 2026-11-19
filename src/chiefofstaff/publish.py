@@ -232,7 +232,11 @@ async def dispatch(shepherd: Shepherd, step_id: str):
     step = control.step(step_id)
     if not step:
         return
-    pushed = True
+    # (Sent before a stop, its push may not have gone out: what depends on it does not either.)
+    pushed = not any(
+        action["kind"] == "push" and action["state"] not in {PLANNED, "sent"}
+        for action in control.actions(step_id)
+    )
     for action in control.actions(step_id, PLANNED):
         operation = action["payload"]
         if not pushed and operation["kind"] in {"reply", "resolve", "request-review"}:
