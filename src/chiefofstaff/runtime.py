@@ -401,6 +401,29 @@ def describe_model(model: Any) -> dict:
     }
 
 
+def connection(
+    connect: Callable[["Runtime"], Awaitable[None]],
+) -> Callable[["Runtime"], Awaitable[None]]:
+    """Runtime.connect: Runtime.connecting is done once it is over (it ran, failed or was
+    cancelled), for what waits for it (Runtime.until_connected)."""
+
+    async def connecting(runtime: "Runtime") -> None:
+        pending = runtime.connecting
+        mine = (
+            pending
+            if pending and not pending.done()
+            else asyncio.get_running_loop().create_future()
+        )
+        runtime.connecting = mine
+        try:
+            await connect(runtime)
+        finally:
+            if not mine.done():
+                mine.set_result(None)
+
+    return connecting
+
+
 def model_price(model: Any) -> tuple[float, float]:
     """What a model's tokens cost (input, output), at its default context; unknown: the most."""
     prices = model.billing.token_prices if getattr(model, "billing", None) else None
@@ -544,6 +567,8 @@ class Runtime:
         self.sandbox_host = sandbox_supported()
         self.sandbox_gh: bool | None = None
         self.connect_lock = asyncio.Lock()
+        # Done once the connection under way (a start, or connecting again) is over.
+        self.connecting: asyncio.Future | None = None
         self.jobs: set[asyncio.Task] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.status = {"state": "starting", "error": ""}
@@ -738,6 +763,15 @@ class Runtime:
                 pool.shutdown(wait=False, cancel_futures=True)
         self.settings_pool = self.guard_pool = None
 
+    async def until_connected(self):
+        """A session used while Copilot connects (a start, or again: its backend is not there
+        yet) waits for the connection, then is refused as require_ready says."""
+        if (pending := self.connecting) and not pending.done() and not self.stopping:
+            await asyncio.shield(pending)
+        if not self.backend:
+            self.require_ready()
+
+    @connection
     async def connect(self):
         async with self.connect_lock:
             # Copilot starts afresh (at start, or reconnecting): the commands its shells were
@@ -854,6 +888,9 @@ class Runtime:
                 await backend.stop()
 
     async def reconnect(self):
+        if not (self.connecting and not self.connecting.done()):
+            # From now: what is sent to a session meanwhile waits for it (until_connected).
+            self.connecting = asyncio.get_running_loop().create_future()
         await self.disconnect()
         await self.connect()
 
@@ -4595,7 +4632,7 @@ class Runtime:
         if (agent := self.agent(session_id)) != COPILOT_AGENT:
             await self.agent_ready(agent, self.store.find_session(session_id))  # On first use.
         elif not self.backend:
-            self.require_ready()
+            await self.until_connected()
         async with self.states[session_id].lifecycle:
             if session := self.states.handle(session_id):
                 return session

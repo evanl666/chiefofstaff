@@ -21,7 +21,13 @@ from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from . import agents
-from .backend import COPILOT_AGENT, running_background, stop_background, take_queued
+from .backend import (
+    COPILOT_AGENT,
+    NotStartedError,
+    running_background,
+    stop_background,
+    take_queued,
+)
 from .envelope import news_tasks, tasks_named
 from .roles import ROUTER, SLACK, WORKER
 from .settings_guard import SettingsChangedError
@@ -59,8 +65,9 @@ HELD_STOPPED = (
     "the messages sent to it until that command ended."
 )
 
-# Errors of a send to a Copilot CLI that stopped (crashed, killed): the connection is gone.
-CONNECTION_LOST = (BrokenPipeError, ConnectionResetError, EOFError)
+# Errors of a send to a Copilot CLI that stopped (crashed, killed): the connection is gone; or
+# that did not start.
+CONNECTION_LOST = (BrokenPipeError, ConnectionResetError, EOFError, NotStartedError)
 
 
 def reason(error: BaseException) -> str:

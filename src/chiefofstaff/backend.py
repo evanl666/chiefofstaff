@@ -275,6 +275,11 @@ def made_by_a_program(item: dict) -> bool:
     return made == SDK_CLIENT and (item.get("lastClientName") or made) == SDK_CLIENT
 
 
+class NotStartedError(ConnectionError):
+    """Copilot did not start (the CLI it was given was refused, and the one that runs instead
+    could not be set up): what was to be sent waits until it runs."""
+
+
 class CopilotBackend:
     """GitHub Copilot through its Python SDK: one CLI process runs every session."""
 
@@ -294,15 +299,34 @@ class CopilotBackend:
         # When the owner's CLI speaks a newer protocol than this SDK: (its version, the version
         # of the SDK's own Copilot runtime used instead).
         self.fallback: tuple[str, str] | None = None
+        # Done once start() is over (it ran, or failed); a client Copilot's SDK refused, which
+        # is never started again (the SDK starts a client on its first use).
+        self.starting: asyncio.Future | None = None
+        self.refused: CopilotClient | None = None
 
     async def start(self) -> None:
-        self.watch_start()
+        self.starting = asyncio.get_running_loop().create_future()
         try:
-            await self.client.start()
-        except RuntimeError as exc:
-            if not newer_protocol(exc):
-                raise
-            await self.start_fallback(exc)
+            self.watch_start()
+            try:
+                await self.client.start()
+            except RuntimeError as exc:
+                if not newer_protocol(exc):
+                    raise
+                self.refused = self.client
+                await self.start_fallback(exc)
+        finally:
+            self.starting.set_result(None)
+
+    async def ready_client(self) -> CopilotClient:
+        """The client, once start() is over: a session opened, or a message sent, while Copilot
+        starts (the owner's CLI refused, the version it works with being set up) waits for it,
+        and never reaches a client that was refused."""
+        if self.starting is not None and not self.starting.done():
+            await asyncio.shield(self.starting)
+        if self.client is self.refused:
+            raise NotStartedError("Copilot is not running: it could not start.")
+        return self.client
 
     def watch_start(self) -> None:
         """The CLI's processes, taken (processes) when the SDK refuses the protocol it speaks:
@@ -393,13 +417,13 @@ class CopilotBackend:
             await asyncio.to_thread(end_processes, tree)
 
     async def version(self) -> str:
-        return (await self.client.get_status()).version
+        return (await (await self.ready_client()).get_status()).version
 
     async def get_auth_status(self) -> Any:
-        return await self.client.get_auth_status()
+        return await (await self.ready_client()).get_auth_status()
 
     async def list_models(self) -> list[Any]:
-        return await self.client.list_models()
+        return await (await self.ready_client()).list_models()
 
     async def list_sessions(self) -> list[Any]:
         """Every session, each marked `made_by_us` (see made_by_us) and `made_by_program` (see
@@ -407,8 +431,9 @@ class CopilotBackend:
         a turn in it (`last_client_name`, "" when none is recorded) and its `name` ("" when it
         has none); `clients_listed` says these were read. The SDK's list leaves out which
         client made a session, the CLI's answer has it. Unmarked when that cannot be read."""
+        client = await self.ready_client()
         try:
-            answer = await self.client._client.request("session.list", {})  # type: ignore[union-attr]
+            answer = await client._client.request("session.list", {})  # type: ignore[union-attr]
             listed = []
             for item in answer.get("sessions", []):
                 meta = SessionMetadata.from_dict(item)
@@ -424,16 +449,17 @@ class CopilotBackend:
                 listed.append(meta)
             return listed
         except Exception:
-            return await self.client.list_sessions()
+            return await client.list_sessions()
 
     async def get_session_metadata(self, session_id: str) -> Any:
-        return await self.client.get_session_metadata(session_id)
+        return await (await self.ready_client()).get_session_metadata(session_id)
 
     async def create_session(self, *, session_id: str, name: str, **options: Any) -> AgentSession:
-        return await self.client.create_session(session_id=session_id, name=name, **options)
+        client = await self.ready_client()
+        return await client.create_session(session_id=session_id, name=name, **options)
 
     async def resume_session(self, session_id: str, **options: Any) -> AgentSession:
-        return await self.client.resume_session(session_id, **options)
+        return await (await self.ready_client()).resume_session(session_id, **options)
 
     async def mcp_sign_in_url(self, session: Any, server: str) -> str:
         login = await session.rpc.mcp.oauth.login(MCPOauthLoginRequest(server_name=server))

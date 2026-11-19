@@ -3,12 +3,13 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from conftest import FakeSession, Harness, call_tool, env, said, settle, task_of
+from conftest import FakeClient, FakeSession, Harness, call_tool, env, said, settle, task_of
 
 from chiefofstaff import backend as backend_module
 from chiefofstaff import delivery as delivery_module
@@ -1293,6 +1294,154 @@ async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_one_it_speaks(tmp_
     with pytest.raises(RuntimeError, match="server reports version 2"):
         await backend_module.copilot_backend("git").start()
     assert len(made) == 1, "an older one is not replaced"
+
+
+NEWER = (
+    "SDK protocol version mismatch: SDK supports versions 3-3, but server reports version 4."
+    " Please update your SDK or server to ensure compatibility."
+)
+FALLBACK_PATH = "/sdk/cli/1.0.112/copilot-runtime"
+
+
+def sdk_clients(monkeypatch, fake, setting_up: threading.Event, fails: bool = False):
+    """Copilot's SDK client as it behaves with the owner's CLI 1.0.114: refused for its newer
+    protocol, and started on its first use (a session opened on it) as the SDK starts a client;
+    the fallback runtime's client works (its sessions are `fake`'s). The fallback's set-up waits
+    for `setting_up` (its download), and fails when `fails`."""
+    made = []
+
+    class Client:
+        def __init__(self, connection, env):
+            self.path, self.starts, self.running = connection.path, 0, False
+            made.append(self)
+
+        async def start(self):
+            self.starts += 1
+            if self.path != FALLBACK_PATH:
+                raise RuntimeError(NEWER)
+            self.running = True
+
+        async def ensure(self):
+            if not self.running:
+                await self.start()  # As the SDK does on a client's first use.
+
+        async def stop(self):
+            self.running = False
+            return []
+
+        async def get_status(self):
+            return SimpleNamespace(version="1.0.112")
+
+        async def get_auth_status(self):
+            await self.ensure()
+            return await fake.get_auth_status()
+
+        async def list_models(self):
+            await self.ensure()
+            return await fake.list_models()
+
+        async def list_sessions(self):
+            await self.ensure()
+            return await fake.list_sessions()
+
+        async def create_session(self, **options):
+            await self.ensure()
+            return await fake.create_session(**options)
+
+        async def resume_session(self, session_id, **options):
+            await self.ensure()
+            return await fake.resume_session(session_id, **options)
+
+    async def cli_version(command):
+        return "1.0.114"
+
+    def fallback_runtime():  # (In a thread, as the SDK's download runs.)
+        assert setting_up.wait(30)
+        if fails:
+            raise RuntimeError("download failed")
+        return FALLBACK_PATH
+
+    monkeypatch.setattr(backend_module, "CopilotClient", Client)
+    monkeypatch.setattr(backend_module, "cli_version", cli_version)
+    monkeypatch.setattr(backend_module, "fallback_runtime", fallback_runtime)
+    return made
+
+
+async def test_nothing_reaches_copilot_while_it_starts_nor_a_refused_cli_again(monkeypatch):
+    """0.1.46: a session opened while Copilot's fallback was being set up went to the client
+    of the owner's CLI the SDK had refused, which the SDK started again on that use: "SDK
+    protocol version mismatch". Now it waits for the start, then opens on the fallback; a
+    refused client is never started again, even when no fallback could be set up."""
+    fake, setting_up = FakeClient(), threading.Event()
+    made = sdk_clients(monkeypatch, fake, setting_up)
+    backend = backend_module.copilot_backend("git")
+    starting = asyncio.ensure_future(backend.start())
+    opening = asyncio.ensure_future(backend.create_session(session_id="s1", name="x"))
+    listing = asyncio.ensure_future(backend.list_models())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not opening.done() and not listing.done(), "they wait while Copilot starts"
+    setting_up.set()
+    await starting
+    assert (await opening).session_id == "s1" and await listing
+    assert backend.client is made[1] and fake.created == ["s1"]
+    assert made[0].starts == 1, "the refused CLI is not started again"
+
+    fake, setting_up = FakeClient(), threading.Event()
+    made = sdk_clients(monkeypatch, fake, setting_up, fails=True)
+    backend = backend_module.copilot_backend("git")
+    starting = asyncio.ensure_future(backend.start())
+    opening = asyncio.ensure_future(backend.create_session(session_id="s2", name="x"))
+    setting_up.set()
+    with pytest.raises(RuntimeError, match="could not be set up: download failed"):
+        await starting
+    with pytest.raises(backend_module.NotStartedError):
+        await opening
+    assert [client.starts for client in made] == [1], "nothing starts the refused one again"
+    assert delivery_module.connection_lost(backend_module.NotStartedError()), (
+        "what was to be sent waits until Copilot runs"
+    )
+
+
+async def test_a_message_sent_while_copilot_reconnects_to_its_fallback_goes_out(
+    tmp_path, monkeypatch
+):
+    """The owner writes while Chief of Staff connects again to a Copilot CLI that updated
+    itself: the message waits for Copilot's fallback to run, then goes; no "Delivery failed"."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    router_id = harness.router_id
+    setting_up = threading.Event()
+    made = sdk_clients(monkeypatch, harness.client, setting_up)
+    runtime.backend_factory = lambda settings: backend_module.copilot_backend("git")
+    reconnecting = asyncio.ensure_future(runtime.reconnect())
+    await asyncio.sleep(0)
+    assert runtime.backend is None, "the connection before is gone, the next not there yet"
+    early = asyncio.ensure_future(runtime.delivery.deliver(router_id, "Anyone?", kind="owner"))
+    for _ in range(500):  # Until the owner's CLI was refused: the fallback is being set up.
+        await asyncio.sleep(0.01)
+        if made and made[0].starts:
+            break
+    assert runtime.status["state"] == "starting" and made[0].starts == 1
+    sending = asyncio.ensure_future(
+        runtime.delivery.deliver(router_id, "Still there?", kind="owner")
+    )
+    await asyncio.sleep(0.2)
+    assert not sending.done(), "it waits while Copilot starts"
+    assert not early.done()
+    setting_up.set()
+    await reconnecting
+    await sending
+    await early
+    await settle(runtime)
+    try:
+        assert runtime.ready()
+        given = "\n".join(harness.session(router_id).sent)
+        assert "Anyone?" in given and "Still there?" in given
+        assert not [m for m in harness.store.messages(router_id) if m["kind"] == "error"]
+        assert made[0].starts == 1, "the refused CLI is not started again"
+    finally:
+        await runtime.stop()
 
 
 async def test_slack_session_only_has_its_own_tools(tmp_path):
