@@ -1018,8 +1018,9 @@ function agentsTab() {
   $("#settings-tabs [data-tab=models]").after(button);
   // Where new workers start and where Chief of Staff's own sessions run (once another agent is
   // on), a row per agent, how to ask for one for a single task, and what stays on Copilot.
-  const select = el("select", { name: "agent_new_workers" });
+  const select = el("select", { name: "agent_new_workers", "aria-describedby": "agents-choice-pays" });
   // Picking an agent there makes it available (as its row's switch says).
+  select.addEventListener("change", () => choicePays(select.value));
   select.addEventListener("change", () => {
     const box = $("#settings-form")[`agent_${select.value}_enabled`];
     if (box && !box.checked) {
@@ -1034,6 +1035,7 @@ function agentsTab() {
       "div",
       { id: "agents-places", class: "agents-places", hidden: true },
       el("label", { id: "agents-choice", class: "agents-choice", hidden: true }, el("span", { text: "New workers start on" }), select),
+      el("small", { id: "agents-choice-pays", class: "agents-role-line agents-choice-pays", hidden: true }),
       // Where Chief of Staff's own sessions run: folded away (Copilot unless chosen).
       el("details", { id: "agents-system", class: "agents-system", hidden: true }, el("summary", { text: "System agents" }), el("div", { id: "agents-roles", class: "agents-roles" })),
     ),
@@ -1056,6 +1058,7 @@ function renderAgentsLine() {
   $("#agents-roles").replaceChildren();
   $("#settings-form").agent_new_workers.replaceChildren(el("option", { value: "copilot", text: "Copilot" }));
   $("#agents-choice").hidden = true;
+  $("#agents-choice-pays").hidden = true;
   $("#agents-places").hidden = true;
   $("#agents-hint").hidden = true;
 }
@@ -1067,6 +1070,7 @@ async function lookForAgents() {
   $("#agents-rows").replaceChildren(...loading);
   $("#agents-roles").replaceChildren();
   $("#agents-choice").hidden = true;
+  $("#agents-choice-pays").hidden = true;
   $("#agents-places").hidden = true;
   $("#agents-hint").hidden = true;
   let found;
@@ -1155,7 +1159,19 @@ function agentRow(agent, disabled) {
   // A plan's limit as its workers last heard it, the one line its sign-in calls for, and what
   // its workers do differently sandboxed.
   const notes = [agent.limit_line, ...(agent.problem ? [] : [agent.note, agent.sandbox_note])].filter(Boolean).map((text) => el("small", { class: "agent-note", text }));
-  const list = el("datalist", { id: `agent-${agent.name}-models` }, ...(agent.models || []).map((model) => el("option", { value: model.id, label: model.name })));
+  // Its models by name, as the popover lists them (a model named that it does not list, kept);
+  // typed where it lists none.
+  const listed = agent.models || [];
+  const modelField = listed.length
+    ? el(
+        "select",
+        { name: `agent_${agent.name}_model` },
+        el("option", { value: "", text: "Agent's default" }),
+        ...listed.map((model) => el("option", { value: model.id, text: model.name || model.id })),
+        ...(agent.model && !listed.some((model) => model.id === agent.model) ? [el("option", { value: agent.model, text: agent.model })] : []),
+      )
+    : el("input", { name: `agent_${agent.name}_model`, placeholder: "Agent's default", value: agent.model || "", autocomplete: "off" });
+  if (listed.length) modelField.value = agent.model || "";
   const errorId = `agent-${agent.name}-limit-error`;
   const limit = el("input", { name: `agent_${agent.name}_limit`, type: "text", inputmode: "numeric", placeholder: "No limit", value: agent.limit ? grouped(agent.limit) : "", autocomplete: "off", "aria-describedby": errorId });
   limit.addEventListener("blur", () => {
@@ -1166,9 +1182,8 @@ function agentRow(agent, disabled) {
   const fields = el(
     "div",
     { class: "agent-fields" },
-    el("label", {}, el("span", { text: "Model" }), el("input", { name: `agent_${agent.name}_model`, list: list.id, placeholder: "Agent's default", value: agent.model || "", autocomplete: "off" })),
+    el("label", {}, el("span", { text: "Model" }), modelField),
     el("div", { class: "agent-limit" }, el("label", {}, el("span", { text: "Limit per worker (tokens)" }), limit), el("small", { id: errorId, class: "field-error", hidden: true })),
-    list,
   );
   fields.hidden = !box.checked;
   box.addEventListener("change", () => {
@@ -1191,6 +1206,7 @@ function newWorkersChoices(chosen) {
   select.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...ready.map((agent) => el("option", { value: agent.name, text: agent.label })), el("option", { value: "last", text: "Last used" }));
   select.value = chosen === "last" || ready.some((agent) => agent.name === chosen) ? chosen : "copilot";
   $("#agents-choice").hidden = !on.length;
+  choicePays(select.value);
   for (const row of document.querySelectorAll("#agents-roles .agents-role")) {
     const runs = on.filter((agent) => row.dataset.agents.split(" ").includes(agent.name));
     const choice = row.querySelector("select");
@@ -1212,6 +1228,18 @@ function newWorkersChoices(chosen) {
   const hint = $("#agents-hint");
   hint.hidden = !on.length;
   if (on.length) hint.textContent = `For a single task, say \u201cdo this with ${on[0].label}\u201d or type ${on.map((agent) => `@${agent.name}`).join(" or ")}.`;
+}
+// Under where new workers start: whose plan or key the chosen agent uses, as its row says (for
+// Last used, the agent it starts them on now).
+function choicePays(chosen) {
+  const line = $("#agents-choice-pays");
+  if (!line) return;
+  const looked = agentsLooked?.agents || [];
+  const agent = chosen === "last" ? agentsLooked?.last_used || "copilot" : chosen;
+  const pays = agent === "copilot" ? "Uses your Copilot plan" : looked.find((found) => found.name === agent)?.pays || "";
+  const named = agent === "copilot" ? "Copilot" : looked.find((found) => found.name === agent)?.label || agent;
+  line.textContent = chosen === "last" ? [`Now ${named}`, pays].filter(Boolean).join(" · ") : pays;
+  line.hidden = !line.textContent || $("#agents-choice").hidden;
 }
 // The tab as the form has it, for Save: only once it was looked at, and only what changed.
 function agentsBody() {

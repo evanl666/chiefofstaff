@@ -303,6 +303,22 @@ async def test_last_used_starts_new_workers_on_the_agent_the_owner_last_chose(
         await runtime.stop()
 
 
+async def test_the_page_names_each_model_as_its_agent_does_and_last_used(tmp_path, codex_installed):
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        assert "model_names" not in runtime.agents_view(), "nothing started to list them"
+        looked = await runtime.look_for_agents()
+        assert looked["last_used"] == "copilot"
+        assert runtime.agents_view()["model_names"] == {
+            "codex": {"gpt-test": "GPT-TEST", "gpt-mini": "GPT-MINI"}
+        }
+        agents.used(harness.store, "codex")
+        assert (await runtime.look_for_agents())["last_used"] == "codex"
+    finally:
+        await runtime.stop()
+
+
 async def test_letting_the_router_choose_changes_its_rule_and_only_then(tmp_path, codex_installed):
     harness, runtime = await started(tmp_path)
     try:

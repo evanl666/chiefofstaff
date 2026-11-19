@@ -582,6 +582,10 @@ FEATURES["codex_on_claude_never"] = Feature(
             data=r"(\.db\.kv\.untouched:<uuid-\d+>|\.untouched)$",
         ),
         Allow(
+            "the agents' view names each model as its agent lists it (once listed)",
+            data=r"\./api/state\.agents\.model_names$",
+        ),
+        Allow(
             "spawn_worker can compare agents (compare_with), when the owner asks",
             data=r"\.options\.tools\[\d+\]\.parameters\.properties\.compare_with$",
         ),

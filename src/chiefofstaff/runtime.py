@@ -4560,6 +4560,8 @@ class Runtime:
             # What it supports, for when none is found ("the Codex CLI").
             "supported": [agents.INSTALL[name] for name in agents.NAMES],
             "new_workers": agents.new_workers_choice(self.store),
+            # The agent Last used starts them on now.
+            "last_used": self.store.get(agents.LAST_USED) or COPILOT_AGENT,
             "router_chooses": bool(agents.stored(self.store).get(agents.ROUTER_CHOOSES)),
             "sandboxed": bool(settings.worker_sandbox and self.sandbox_host),
             # Chief of Staff's own sessions this release runs on another agent: where each was
@@ -4720,7 +4722,18 @@ class Runtime:
             "names": {name: agents.display(name) for name in on},
             "new_workers": agents.new_workers(self.store),
             "router_chooses": agents.router_chooses(self.store),
+            # Each one's models' names as last listed (nothing started for them): the page
+            # names a model as its agent does, wherever it shows one.
+            **({"model_names": names} if (names := self.agent_model_names(on)) else {}),
         }
+
+    def agent_model_names(self, on: list[str]) -> dict[str, dict[str, str]]:
+        names = {
+            name: {model["id"]: model.get("name") or model["id"] for model in listed}
+            for name in on
+            if (listed := self.agent_models_cache.get(name, (0.0, []))[1])
+        }
+        return {name: found for name, found in names.items() if found}
 
     def agent_status(self, name: str) -> dict:
         """An agent as the @ picker and Settings say it: ready (and whose plan or key it
