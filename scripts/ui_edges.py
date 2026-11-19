@@ -8351,6 +8351,11 @@ async def round_roles(runtime, browser, failures: list[str]):
     folder, _ = codex_on_path()
     runtime.found_cache = (float("-inf"), [])
     router = runtime.store.get("router_id")
+    # Codex's plan limit as an earlier round left it reached (round_picker): it would keep the
+    # Router on Copilot until it resets, saying so. And what that round left for the Router, taken
+    # as sent: its first turn on the stand-in Codex would carry that round's cue to refuse a turn
+    # for a limit ("Hit the usage limit", a task's words in its handover).
+    runtime.store.delete("agentlimit:codex")
     try:
         for scheme in ("light", "dark"):
             context, page, errors, _ = await agents_page(browser, scheme)
@@ -8392,27 +8397,39 @@ async def round_roles(runtime, browser, failures: list[str]):
             await expect(places).to_be_hidden()
             await codex.locator("input[type=checkbox]").check()
             await choose.select_option("codex")
-            # (At rest: the stand-in Copilot ends no turn by itself; a turn would be finished
-            # first.)
-            if (handle := runtime.states.handle(router)) is not None:
-                handle.emit("session.idle")
-                await settle(runtime)
             mark = max((m["id"] for m in runtime.store.messages(router)), default=0)
+            runtime.store.set(f"sent:{router}", str(mark))
             await page.locator("#settings-form footer button[type=submit]").click()
             await expect(page.locator("#settings-dialog")).to_be_hidden()
             assert saved[-1]["agents"] == {
                 "codex": {"enabled": True, "model": "", "limit": 0},
                 "roles": {"router": "codex"},
             }, saved[-1].get("agents")
-            await until(lambda: runtime.agent(router) == "codex", 30)
-            # Its chat on Home: one line says it; its ⋯ menu lists Codex's models.
+
             said = "The Router runs on Codex now, with a summary of what it knew."
-            notices = [
-                m["text"]
-                for m in runtime.store.messages(router)
-                if m["kind"] == "notice" and m["id"] > mark
-            ]
-            assert notices == [said], notices
+
+            def said_since(mark: int = mark) -> list[str]:
+                return [
+                    m["text"]
+                    for m in runtime.store.messages(router)
+                    if m["kind"] == "notice" and m["id"] > mark
+                ]
+
+            def switched(said: str = said) -> bool:
+                # Switched at its turn's end: the stand-in Copilot ends none by itself.
+                row = runtime.store.session(router)
+                if (
+                    runtime.on_copilot(router)
+                    and row["status"] == "working"
+                    and (handle := runtime.states.handle(router))
+                ):
+                    handle.emit("session.idle")
+                return said in said_since()
+
+            await until(switched, 30)
+            assert runtime.agent(router) == "codex"
+            assert said_since() == [said], said_since()
+            # Its chat on Home: one line says it; its ⋯ menu lists Codex's models.
             line = page.locator("#timeline").get_by_text(said, exact=True).last
             await expect(line).to_be_visible(timeout=10000)
             await page.locator("#session-more-button").click()
