@@ -248,6 +248,26 @@ FIXES: list[Allow] = [
             "type": "string",
         },
     ),
+    # 0.1.48 (QA round 7, E102): Watch for you's scans that failed since the last one that worked
+    # (null while none did).
+    Allow("Watch scans that failed", data=r"/api/state\.connector\.failed$"),
+    # 0.1.48 (E105): whether a draft's final text is the owner's (an empty one too).
+    Allow("drafts' has_final", data=r"(\.drafts\[\d+\]|\.db\.drafts\.[^.]+)\.has_final$"),
+    Allow(
+        "drafts' has_final column",
+        data=r"\.db\._schema\.drafts$",
+        lines=r"^\s*(\)|, has_final INTEGER NOT NULL DEFAULT 0\))$",
+    ),
+    # 0.1.48 (E98, E89): what a task's Use these settings sends (null unless its worker waits for
+    # that word), and whether a failed one is out of Needs you.
+    Allow("tasks' settings and aged", data=r"\.tasks\[\d+\]\.(settings|aged)$"),
+    # 0.1.48 (E111): follow_thread says what a PR merged or closed already brings.
+    Allow(
+        "follow_thread's description",
+        data=r"\.options\.tools\[\d+\]\.description$",
+        value="Follow a Slack thread, DM or PR: its new messages come straight to you (a PR "
+        "merged or closed already: for 14 days, and a closed one's reopening).",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
