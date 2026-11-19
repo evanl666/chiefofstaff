@@ -37,6 +37,37 @@
   to that task (it was linked to none, so changing the decision reached no worker).
 - **Security:** opentelemetry-api, which FastAPI brings in, is 1.45.2: 1.45.1 and earlier took
   quadratic time to parse a long `traceparent` header (a denial of service; Dependabot alert 1).
+- **Fixed: a question from the Router could change finished work.** When the Router asked a
+  worker about a task it had finished, and the worker answered in its chat, a long answer
+  became that task's new result (in place of the one you had, with a second "finished"), or the
+  worker was told to report another task it was running. With a check-back on the task, the
+  answer went nowhere. Now the answer goes to the Router, as *Answer from …*, and no task
+  changes.
+- **Fixed: a question the Router answered stayed under Needs you.** A worker's question the
+  Router answered for you (from what you said before) still said "It waits for your answer"
+  until the worker's next report. Now the task goes on at once, as when you answer.
+- **Fixed: decision cards went missing.** A decision asked about work you had accepted closed
+  at the worker's next progress report; a decision was filed on the task given last rather than
+  the one the worker was at; and a worker closed and reopened waited for a decision whose card
+  was gone. Now a card closes only when its task ends (its worker is told), it is on the task
+  at work (workers can name it with `task_id`), and a reopened worker's card is back under
+  Needs you.
+- **Fixed: a message without a task reached the wrong one.** The Router's continue or note
+  that named no task went to the task given last, even one done long ago, instead of the open
+  one. Now it goes to the worker's only open task; with none open, a continue asks the Router
+  to name one. The Router sees each worker by the name you see and the task it is on, and a
+  worker is named after what its turn is on, not a task given since or one just cancelled.
+- **Fixed: a report and a message that crossed.** A worker that reported before reading a
+  newer message about the task was held back the first time only; now it is for each message.
+  When the report goes through anyway, the Router hears it came before its message, and the
+  task is back at work when the worker reads it (it stayed *Awaiting acceptance* with work under
+  way). A note about a task the worker has not seen yet comes after that task, which waits as
+  *Up next*, not with another task's step.
+- **Fixed: a superseded task named one its worker did not have yet.** The worker heard "go on
+  with" the new task before it had it; now it gets the new task first, which says the old one is
+  cancelled. Its line reads *Cancelled by the Router*.
+- **Fixed: failing tests held back a done report only once per task.** Now once for each
+  failing test run, and again after a follow-up.
 
 ## 0.1.47 (2026-11-19)
 
