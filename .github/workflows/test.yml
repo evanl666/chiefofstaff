@@ -89,6 +89,27 @@ jobs:
           uv run --locked --extra dev pytest -q --timeout 120
           tests/test_windows.py tests/test_repos.py tests/test_others.py tests/test_web.py
 
+  test-newest-sdk:
+    # Installs (uvx, pip) resolve the newest Copilot SDK pyproject.toml allows, not the locked
+    # one: the tests run on that one too (the newest below the pin's cap). Raising the cap, this
+    # job tests the newer SDK before anyone installs it.
+    name: Tests (newest Copilot SDK allowed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.13"
+      - name: The newest Copilot SDK pyproject.toml allows
+        run: uv lock --upgrade-package github-copilot-sdk
+      - run: uv sync --extra dev
+      - run: uv run --extra dev python -c "from importlib.metadata import version; print(version('github-copilot-sdk'))"
+      - name: Tests
+        run: uv run --extra dev pytest -q --timeout 120
+
   package:
     name: Package
     runs-on: ubuntu-latest
@@ -167,7 +188,7 @@ jobs:
     # for dependency review, did not apply).
     name: CI passed
     if: always()
-    needs: [lint, test, test-windows, package, demo-ui, secrets, dependencies]
+    needs: [lint, test, test-windows, test-newest-sdk, package, demo-ui, secrets, dependencies]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

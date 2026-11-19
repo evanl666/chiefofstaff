@@ -90,6 +90,17 @@ def machine(tmp_path, monkeypatch):
     return SimpleNamespace(root=tmp_path, home=home, copilot=copilot)
 
 
+def fields_set(value) -> dict:
+    """A dataclass's fields, but those left unset (at a default of None or False): a later SDK
+    adds such fields (the newest one installs may get is tested too), which change nothing a
+    session is given."""
+    return {
+        field.name: getattr(value, field.name)
+        for field in dataclasses.fields(value)
+        if not (field.default in (None, False) and getattr(value, field.name) is field.default)
+    }
+
+
 def plain(value):
     """A value as JSON: tools by name (their schemas are pinned on their own), callbacks by
     what they are, dataclasses and SDK objects as their fields."""
@@ -100,7 +111,7 @@ def plain(value):
     if isinstance(value, list | tuple):
         return [plain(item) for item in value]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return plain(dataclasses.asdict(value))
+        return plain(fields_set(value))
     if hasattr(value, "to_dict"):
         return plain(value.to_dict())
     if callable(value):
@@ -321,8 +332,8 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "slack, created": (4566, "6a2c958151166b3dbf3d0d6789f7e8e62a9bc6a609ef88e4d25f6338ff3c5894"),
     "slack, resumed": (4531, "0201a125d8919e539c5289acf88a3cb2509f79ba4a136793af02ad83a85535a6"),
     "the Copilot sandbox of a worker asking first": (
-        1219,
-        "1928982b927cd745e5c879b7667a90a7a3a04b6c868dddb549e03a6ee407edbe",
+        946,
+        "4e17ae9d8664283969ddf98e0c9637579ce9d568ecee2eb460504e64cab83e41",
     ),
     "watchdog, created": (3382, "e3ae732c64bc3796a98d0ee8015e8485f26b7b4695757da463dfea17e52fd1c5"),
     "watchdog, resumed": (3344, "ba4828117ea24e74adedd35a373d08e7375e550c3f143742141d4f822dcd5e24"),
@@ -343,12 +354,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "6a117eb153f651b1166692beb4aa5d072a2ddd3eb3acf0a0477ef439c7f4e4f7",
     ),
     "worker that reads Slack, created": (
-        21357,
-        "0d06246e523a2042058ea3a9fe4ee6157c86bb2c8f4d229e6a6e6515c9dc863b",
+        21331,
+        "1d6f8e9d4d33d2ab19a1f247a81f3e44edfe85964ac8505cbd0d4204a8b8b158",
     ),
     "worker that reads Slack, resumed": (
-        21310,
-        "ea58fb53c26038cf8b5eebd476b5bfa7c9be15e1e11ba230141a544968912450",
+        21284,
+        "b5f9e23914a3b9a777d991cb645e46522ffe08bcb895c726ab6f88caadcec68a",
     ),
     "worker with its model, created": (
         18241,
