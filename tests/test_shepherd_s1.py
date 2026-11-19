@@ -596,6 +596,7 @@ def test_a_fix_reviewed_and_approved_through_its_routes(served, tmp_path):
 
     sign_in(served)
     runtime = served.runtime
+    runtime.sandbox_host = True  # Whatever machine the tests run on (a container has none).
     world = World(None, tmp_path / "world", runtime=runtime)
     (tmp_path / "world").mkdir()
     served.portal.call(world.start)
