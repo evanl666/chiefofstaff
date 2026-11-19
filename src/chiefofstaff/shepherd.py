@@ -78,12 +78,15 @@ logger = logging.getLogger(__name__)
 KINDS = ("fix-ci", "address-review")
 KIND_WORDS = {"fix-ci": "CI failures", "address-review": "Review comments"}
 DEFAULT_LEVEL = "suggest"
-# Credits: defaults, to be tuned from live data (none measured yet). What an attempt may spend
-# until its kind has a measured history (then the 90th percentile of its last 20 attempts, never
-# more than a PR's day); a PR's day; and how far a turn runs past its interrupt (raised when an
-# attempt overshoots it, kv `proactive:margin`).
-PERMITTED = {"fix-ci": 8.0, "address-review": 8.0}
-PR_DAY_CREDITS = 30.0
+# Credits: defaults, tuned from live data as it comes. What an attempt may spend until its kind
+# has a measured history (then the 90th percentile of its last 20 attempts, never more than a
+# PR's day); a PR's day; and how far a turn runs past its interrupt (raised when an attempt
+# overshoots it, kv `proactive:margin`). Measured live (claude-sonnet-5.5, 2026-11): resuming a
+# worker's session in the step profile costs 4 to 6 credits first (a prompt-cache write over its
+# context), then about one a call; a fix (reproduce, fix, commit, the frozen runs, the results)
+# takes 15 to 20 calls. At 8, every attempt was interrupted after three or four calls.
+PERMITTED = {"fix-ci": 25.0, "address-review": 25.0}
+PR_DAY_CREDITS = 75.0
 MARGIN = 2.0
 # How often a claimed PR is read when nothing came about it.
 READ_SECONDS = 300
