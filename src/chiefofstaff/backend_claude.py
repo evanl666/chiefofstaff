@@ -83,9 +83,10 @@ from .claude_tools import (
     peer_message,
     project_docs,
     recipient,
-    sandbox_widening,
     skills_plugin,
     under,
+    widened_words,
+    widening_found,
 )
 from .machine import kill_process_tree
 from .policy import GITHUB_MCP, private_denial, reads_only
@@ -904,7 +905,7 @@ def sandbox_widened(
 ) -> str:
     """Why a sandboxed worker in this folder may not run on Claude: settings Claude loads for it
     (the owner's; the project's, where the owner trusts it; managed settings) that would widen
-    its sandbox past Chief of Staff's (claude_tools.sandbox_widening; `restricted`: it reaches
+    its sandbox past Chief of Staff's (claude_tools.widening_found; `restricted`: it reaches
     only the hosts its sandbox lists). "" when none do."""
     home = str(Path.home())
     user = config_folder()
@@ -914,15 +915,27 @@ def sandbox_widened(
     ]
     if owner_trusts(cwd) if trusted is None else trusted:
         sources += [
-            (Path(cwd) / ".claude" / name, f"this project's .claude/{name}")
+            (Path(cwd) / ".claude" / name, f".claude/{name}")
             for name in ("settings.json", "settings.local.json")
         ]
-    found = sandbox_widening(sources, managed_settings(sys.platform), local, restricted)
-    if not found:
+    found = widening_found(sources, managed_settings(sys.platform), local, restricted)
+    if found is None:
         return ""
+    key, where, index = found
+    whose = (
+        "Your computer's managed Claude settings" if index < 0
+        else "Your Claude settings" if index < 2
+        else "This project's Claude settings"
+    )  # fmt: skip
+    there = " there" if index >= 2 else ""
+    if not key:
+        return (
+            f"{whose} file {where} is too large for Chief of Staff to check, so sandboxed Claude "
+            f"workers can't start{there}."
+        )
     return (
-        f"Claude's settings would widen its sandbox past Chief of Staff's ({found}). Remove "
-        "that, or turn the sandbox off in Settings → Workers, for workers to run on Claude."
+        f"{whose} {widened_words(key)} ({key} in {where}), so sandboxed Claude workers can't "
+        f"start{there}."
     )
 
 

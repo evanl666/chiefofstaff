@@ -125,11 +125,26 @@ def sandbox_widening(
     local: bool = True,
     restricted: bool = False,
 ) -> str:
-    """What would widen a sandboxed worker's sandbox past Chief of Staff's: each settings file
-    Claude loads for it (`sources`: the file, and how to say it) and the managed settings files
-    ("" for nothing; else the first key found and where). `local`: its sandbox lets it bind
-    to loopback anyway (a worker that does not read Slack); `restricted`: its sandbox lists the
-    hosts it reaches (permission_widening)."""
+    """widening_found, said as "<key> in <where>" ("" for nothing)."""
+    found = widening_found(sources, managed, local, restricted)
+    if found is None:
+        return ""
+    key, where, _ = found
+    return f"{key} in {where}" if key else f"{where}: too large for Chief of Staff to check"
+
+
+def widening_found(
+    sources: list[tuple[Path, str]],
+    managed: list[Path],
+    local: bool = True,
+    restricted: bool = False,
+) -> tuple[str, str, int] | None:
+    """What would widen a sandboxed worker's sandbox past Chief of Staff's, in each settings file
+    Claude loads for it (`sources`: the file, and how to say it) and the managed settings files:
+    None for nothing; else (the first key found, where, which source: its index in `sources`,
+    -1 for a managed one), the key "" for a file too large to check. `local`: its sandbox lets
+    it bind to loopback anyway (a worker that does not read Slack); `restricted`: its sandbox
+    lists the hosts it reaches (permission_widening)."""
 
     def read(file: Path) -> dict | None:
         """The file as Claude reads it (2.1.322: whole, a leading BOM taken away; one it cannot
@@ -157,29 +172,66 @@ def sandbox_widening(
             found = found.get(part) if isinstance(found, dict) else None
         return found
 
-    for file, said in sources:
+    for index, (file, said) in enumerate(sources):
         if (data := read(file)) is None:
-            return f"{said}: too large for Chief of Staff to check"
+            return "", said, index
         sandbox = keys(data)
         for key in (*WIDENING_LISTS, *PROXY_PORTS):
             if value(sandbox, key) not in (None, [], {}, ""):
-                return f"sandbox.{key} in {said}"
+                return f"sandbox.{key}", said, index
         if found := permission_widening(data, restricted):
-            return f"{found} in {said}"
+            return found, said, index
     for file in managed:
         if (data := read(file)) is None:
-            return f"{file}: too large for Chief of Staff to check"
+            return "", str(file), -1
         if found := permission_widening(data, restricted):
-            return f"{found} in {file}"
+            return found, str(file), -1
         sandbox = keys(data)
         for key in (*WIDENING_LISTS, *PROXY_PORTS, *WIDENING_SWITCHES):
             if local and key == "network.allowLocalBinding":
                 continue
             if value(sandbox, key) not in (None, [], {}, "", False):
-                return f"sandbox.{key} in {file}"
+                return f"sandbox.{key}", str(file), -1
         if sandbox.get("enabled") is False:
-            return f"sandbox.enabled in {file}"
-    return ""
+            return "sandbox.enabled", str(file), -1
+    return None
+
+
+# What a key that widens a worker's sandbox lets it do, in words (widened_words).
+WRITES = (
+    "permissions.allow Edit(",
+    "permissions.additionalDirectories",
+    "sandbox.filesystem.allowWrite",
+)
+REACHES = (
+    "permissions.allow WebFetch(",
+    "sandbox.network.allowedDomains",
+    "sandbox.network.httpProxyPort",
+    "sandbox.network.socksProxyPort",
+    "sandbox.network.allowLocalBinding",
+)
+CALLS = (
+    "sandbox.network.allowUnixSockets", "sandbox.network.allowAllUnixSockets",
+    "sandbox.network.allowMachLookup", "sandbox.allowMachLookup", "sandbox.allowAppleEvents",
+)  # fmt: skip
+UNSANDBOXED = ("sandbox.excludedCommands", "sandbox.allowUnsandboxedCommands")
+
+
+def widened_words(key: str) -> str:
+    """What a widening key (widening_found) lets workers do, as "let workers …" ends."""
+    if key.startswith(WRITES):
+        return "let workers write outside their folder"
+    if key == "sandbox.filesystem.allowRead":
+        return "let workers read files their sandbox keeps from them"
+    if key.startswith(REACHES):
+        return "let workers reach more of the network than their sandbox allows"
+    if key in CALLS:
+        return "let workers reach other programs on this computer past their sandbox"
+    if key in UNSANDBOXED:
+        return "let workers run commands outside their sandbox"
+    if key == "sandbox.enabled":
+        return "turn workers' sandbox off"
+    return "weaken workers' sandbox"
 
 
 def managed_settings(platform: str) -> list[Path]:

@@ -1212,9 +1212,12 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   ones) add to its sandbox's lists (`excludedCommands`, `allowedDomains`, `allowWrite`, …) or set
   a proxy port, allow edits by an absolute path (`Edit(//…)`, `Edit(~/…)`) or add directories
   (`additionalDirectories`), or, for a worker whose network is limited, allow web domains
-  (`WebFetch(domain:…)`): Claude would merge them with Chief of Staff's. It says which key, and
-  where. Those files are read as Claude reads them (with a byte-order mark, at any size; a
-  sandboxed worker doesn't start where one is over 16 MB).
+  (`WebFetch(domain:…)`): Claude would merge them with Chief of Staff's. One line says which
+  setting, in which file, and what it would let workers do, on Claude's row in Settings → *Coding
+  agents* and where such a worker would have started ("Your Claude settings let workers write
+  outside their folder (permissions.additionalDirectories in ~/.claude/settings.json), so
+  sandboxed Claude workers can't start."). Those files are read as Claude reads them (with a
+  byte-order mark, at any size; a sandboxed worker doesn't start where one is over 16 MB).
   Claude Code itself, at a sandboxed worker's first command in a git repository, adds one line,
   `**/.claude/.cc-writes/`, to your global git ignore file (`core.excludesFile`, else
   `~/.config/git/ignore`), unless git already ignores that folder. It also makes an empty

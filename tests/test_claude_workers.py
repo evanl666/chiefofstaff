@@ -449,12 +449,23 @@ async def test_claude_runs_no_sandboxed_worker_its_own_settings_would_widen(
         row = {"id": "", "role": "worker", "slack": 0, "yolo": "", "closed_at": None,
                "cwd": str(tmp_path)}  # fmt: skip
         assert runtime.blocked_on("claude", row) == ""
-        widening = {"sandbox": {"network": {"allowedDomains": ["elsewhere.example"]}}}
-        (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json").write_text(json.dumps(widening))
-        why = runtime.blocked_on("claude", row)
-        assert "(sandbox.network.allowedDomains in " in why and "Settings → Workers" in why
+        widening = {"permissions": {"additionalDirectories": ["/srv"]}}
+        settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
+        settings.write_text(json.dumps(widening))
+        line = (
+            "Your Claude settings let workers write outside their folder "
+            "(permissions.additionalDirectories in "
+            f"{str(settings).replace(str(Path.home()), '~', 1)}), so sandboxed Claude workers "
+            "can't start."
+        )
+        assert runtime.blocked_on("claude", row) == line, "where it would have started"
+        found = await runtime.look_for_agents()
+        (entry,) = [agent for agent in found["agents"] if agent["name"] == "claude"]
+        assert found["sandboxed"] and entry["sandbox"] == line, "and in Settings → Coding agents"
         harness.store.save_settings(Settings(worker_sandbox=False))
         assert runtime.blocked_on("claude", row) == "", "unsandboxed, its settings are its own"
+        found = await runtime.look_for_agents()
+        assert all("sandbox" not in agent for agent in found["agents"])
     finally:
         await runtime.stop()
 
