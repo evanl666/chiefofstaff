@@ -2063,16 +2063,23 @@ class Runtime:
             and self.backend.capabilities.sandbox
         )
 
-    def sandbox_policy(self, row: dict) -> SandboxPolicy | None:
+    def sandbox_policy(
+        self, row: dict, writes: list[str] | None = None, trees: Sequence[dict] = ()
+    ) -> SandboxPolicy | None:
         """What a worker's shell commands may touch; None when they run unsandboxed, like the
-        owner's own Copilot sessions (whose Copilot sandbox settings then apply, if any)."""
-        if not self.sandboxed(row):
+        owner's own Copilot sessions (whose Copilot sandbox settings then apply, if any).
+        `writes`: a shepherd step's folders instead of the worker's (Shepherd.step_policy, which
+        narrows it further), whatever the worker's own sandbox: its caches, held files and
+        denials as the worker's, with `trees` (the worktrees it made) as the worker's own, and
+        nothing the owner added for workers (folders, their SSH agent)."""
+        step = writes is not None
+        if not step and not self.sandboxed(row):
             return None
-        checkouts = self.workspaces.checkouts(row)
+        checkouts = [*self.workspaces.checkouts(row), *trees]
         repositories = git_dirs(checkouts)
         settings = self.store.settings()
-        writes = self.workspaces.writes(row)
-        writable = [*writes, *repositories, *settings.sandbox_writable]
+        writes = self.workspaces.writes(row) if writes is None else writes
+        writable = [*writes, *repositories, *([] if step else settings.sandbox_writable)]
         # Its tools' caches: workers' own, the owner's read-only beneath (see caches.py).
         cached = self.cache_plan(row)
         writable += cached.readwrite
@@ -2102,7 +2109,7 @@ class Runtime:
         workspace = os.path.realpath(self.workspaces.workspace(row))
         cwd = os.path.realpath(row["cwd"])
         recorded = {os.path.realpath(c.get("path") or ""): c for c in checkouts}
-        for folder in map(os.path.realpath, self.workspaces.writes(row)):
+        for folder in map(os.path.realpath, writes):
             if folder == workspace != cwd:
                 continue
             real = Path(folder)
@@ -2119,8 +2126,9 @@ class Runtime:
             gated |= dict.fromkeys(self.run_files(top))
         readonly += list(gated)
         ssh = Path.home() / ".ssh"
-        readonly += [str(ssh / name) for name in ("known_hosts", "config") if (ssh / name).exists()]
-        if agent := os.environ.get("SSH_AUTH_SOCK"):
+        if not step:
+            readonly += [str(ssh / n) for n in ("known_hosts", "config") if (ssh / n).exists()]
+        if (agent := os.environ.get("SSH_AUTH_SOCK")) and not step:
             writable.append(agent)  # Signing through the agent; key files stay unreadable.
         # Held as Copilot's sandbox can hold them: one that does not exist yet is denied on macOS,
         # not held on Linux (sandbox_paths).
@@ -3693,7 +3701,8 @@ class Runtime:
             if agent == COPILOT_AGENT:
                 raise RuntimeError("Copilot reconnected meanwhile; try again.")
             raise RuntimeError(f"{agents.display(agent)} started again meanwhile; try again.")
-        if agent == COPILOT_AGENT and row["role"] == WORKER and self.sandbox_policy(row):
+        if agent == COPILOT_AGENT and row["role"] == WORKER and "sandbox_config" in options:
+            # (A worker's sandbox, or its shepherd step's.)
             await self.apply_cache_env(row, session)
         session_id = row["id"]
         loop = self.loop or asyncio.get_running_loop()
