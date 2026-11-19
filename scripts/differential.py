@@ -119,7 +119,8 @@ class Allow:
     API's snapshot and in the stored settings) or `data` (a regex searched in the difference's
     path, e.g. `steps.ask.api./api/state.tasks[0].status` or `backend.sessions.router.options.
     system_message.content`), optionally only at `value` (on the side tested), and for changed
-    text only when each line added or removed matches `lines`. An `element` (a CSS selector) is
+    text only when each line added or removed matches `lines` (or when it is the same on both
+    sides once each match of `without` is taken out). An `element` (a CSS selector) is
     left out of the DOM snapshots and hidden in the screenshots, on both sides, in the views
     whose names match `views`: screenshots home-1280, home-needs-800, sidebar-1024,
     sidebar-external-1440, settings-general-p1-1280 (p2... as it scrolls); DOM snapshots
@@ -132,8 +133,13 @@ class Allow:
     lines: str = ""
     element: str = ""
     views: str = ""
+    # A text changed only by what this regex finds: the same on both sides once each match of
+    # it is taken out (a key added inside a tool's JSON answer, say).
+    without: str = ""
 
-    def matches(self, path: str, after: Any, text_lines: list[str] | None) -> bool:
+    def matches(
+        self, path: str, after: Any, text_lines: list[str] | None, before: Any = None
+    ) -> bool:
         if self.element and not (self.setting or self.data):
             return False
         if self.setting:
@@ -146,6 +152,12 @@ class Allow:
             return False
         if self.lines:
             return text_lines is not None and all(re.search(self.lines, x) for x in text_lines)
+        if self.without:
+            return (
+                isinstance(before, str)
+                and isinstance(after, str)
+                and re.sub(self.without, "", before) == re.sub(self.without, "", after)
+            )
         return True
 
 
@@ -437,6 +449,11 @@ FEATURES["worker_fork"] = Feature(
             lines=r"^- Each open worker's load \(list_sessions, find_sessions, the related workers ",
         ),
         Allow("same_worker on the Router's message_session", data=r"same_worker"),
+        Allow(
+            "each open worker's load where the Router reads about workers (list_sessions)",
+            data=r"^backend\.turns\.router:",
+            without=r', "load": \{[^{}]*\}',
+        ),
     ],
 )
 
@@ -1691,7 +1708,7 @@ def allow(differences: list[Difference], allowances: dict[str, Allow]):
         changed = [line[1:] for line in difference.lines] if difference.lines is not None else None
         for name, allowance in allowances.items():
             value = difference.after if difference.kind != "removed" else difference.before
-            if allowance.matches(difference.path, value, changed):
+            if allowance.matches(difference.path, value, changed, difference.before):
                 difference.allowed = name
                 break
 
