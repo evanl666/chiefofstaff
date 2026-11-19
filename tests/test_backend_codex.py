@@ -636,7 +636,9 @@ async def test_a_codex_workers_timeline_says_once_its_folders_settings_are_left_
         digest = settings_lines(harness)[0]["meta"]["agent_settings"]["digest"]
         await until(lambda: harness.store.session("w1")["status"] != "working")
         await runtime.accept_settings("w1", digest)
-        assert not runtime.states.is_live("w1"), "its next thread trusts them"
+        # Its next thread trusts them: let go of now, or once its turn is over (on a slow
+        # machine its turn may still be ending: refresh_session).
+        await until(lambda: not runtime.states.is_live("w1"))
         assert await runtime.codex_settings(harness.store.session("w1")) == []
         (wt / ".codex" / "config.toml").write_text("")
         with pytest.raises(ValueError, match="changed again"):

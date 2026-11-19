@@ -25,6 +25,7 @@ from chiefofstaff import workers as workers_module
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
 from chiefofstaff.policy import REPOSITORY_SETTINGS, RUN_WRITE, settings_write
+from chiefofstaff.processes import running
 from chiefofstaff.runtime import GITHUB_HOSTS, home_shown
 from chiefofstaff.store import Store
 from chiefofstaff.task_actions import MayHoldWorkError, moved
@@ -776,7 +777,8 @@ async def test_committed_agent_settings_still_load(tmp_path, git_repo, monkeypat
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
-        assert (cwd / ".claude" / "agents" / "linked.md").is_symlink()
+        # (Git for Windows checks a committed link out as a file: core.symlinks is off.)
+        assert (cwd / ".claude" / "agents" / "linked.md").is_symlink() or sys.platform == "win32"
         assert harness.session(worker).options["trust_working_directory"] == "user"
         await at_rest(runtime, harness, worker)
         await runtime.owner_send(worker, "Go on")
@@ -864,7 +866,7 @@ async def test_agent_settings_in_the_owners_checkout_are_what_was_there_when_han
         assert threads and all(threads), "said on the event loop's thread, not a reading thread"
         notes = [t for k, t in harness.kinds(worker) if t.startswith("Workers in ")]
         assert len(notes) == 1 and notes[0].endswith(
-            f"/{git_repo.name} use the agent settings there: .claude/settings.local.json."
+            f"{os.sep}{git_repo.name} use the agent settings there: .claude/settings.local.json."
         )
         await at_rest(runtime, harness, worker)
         # The owner's tool rewrites them ("don't ask again"): theirs to say.
@@ -1019,6 +1021,7 @@ async def test_agent_homes_are_never_a_projects_settings(tmp_path, monkeypatch):
         (sessions / f"rollout-{index}.jsonl").write_text("{}")
     plant(home, ".claude/settings.json")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # (Home on Windows: Path.home().)
     trusting(tmp_path, monkeypatch, home)
     harness = Harness(tmp_path / "data")
     runtime = await harness.connect()
@@ -1260,7 +1263,7 @@ async def test_agent_settings_changed_between_the_top_and_its_folder_count(
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, sub)
-        assert str(cwd).endswith("/app")
+        assert cwd.name == "app"
         await at_rest(runtime, harness, worker)
         plant(cwd.parent, ".mcp.json")
         plant(cwd, ".github/hooks/p.json")
@@ -1641,6 +1644,7 @@ async def test_a_link_out_of_the_repository_is_held_by_where_it_leads(
         await runtime.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Git for Windows checks a link out as a file")
 async def test_a_committed_link_out_of_the_repository_is_never_taken(
     tmp_path, git_repo, monkeypatch
 ):
@@ -2047,9 +2051,9 @@ async def test_a_git_folder_a_worker_replaced_waits_for_the_owner(tmp_path, git_
         assert not runtime.states.is_live(worker)
         line = harness.store.messages(worker)[-1]
         assert line["text"].endswith(
-            "/.git was replaced since Chief of Staff first saw it, so git there could run what "
-            "this worker put in its place; Chief of Staff won't start the worker, nor run git "
-            "there, until you say to use it."
+            f"{os.sep}.git was replaced since Chief of Staff first saw it, so git there could run "
+            "what this worker put in its place; Chief of Staff won't start the worker, nor run "
+            "git there, until you say to use it."
         )
         with pytest.raises(ValueError, match="runs no git there"):
             await workspaces_module.git("-C", str(git_repo), "status")
@@ -2112,6 +2116,7 @@ def test_a_link_to_an_agents_own_folder_is_never_a_setting(tmp_path, monkeypatch
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text("{}")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # (Home on Windows: Path.home().)
     top = tmp_path / "project"
     top.mkdir()
     (top / ".claude").symlink_to(home / ".claude")
@@ -2594,7 +2599,7 @@ async def test_a_clone_is_pushed_for_a_pr_only_to_github_at_an_address_made_for_
         bare = workspace / "mirror" / "github.com" / "acme" / "app.git"
         run("git", "init", "-q", "--bare", "-b", "main", str(bare))
         hook = bare / "hooks" / "pre-receive"
-        hook.write_text(f"#!/bin/sh\necho ran >> {marker}\n")
+        hook.write_text(f"#!/bin/sh\necho ran >> '{marker.as_posix()}'\n")
         hook.chmod(0o755)
         clone = workspace / "app"
         run("git", "clone", "-q", str(bare), str(clone))
@@ -2677,10 +2682,12 @@ async def test_a_submodule_in_a_diff_is_the_commit_it_is_at_whatever_the_owner_c
         run("git", "commit", "-qm", "bump vendor", cwd=tree)
         script = tree / "tools" / "run.sh"
         script.parent.mkdir()
-        script.write_text(f"#!/bin/sh\necho ran >> {marker}\n")
+        script.write_text(f"#!/bin/sh\necho ran >> '{marker.as_posix()}'\n")
         script.chmod(0o755)
         run("git", "reset", "-q", "--hard", "HEAD~1", cwd=sub)
-        (sub / ".git" / "objects" / second[:2] / second[2:]).unlink()
+        loose = sub / ".git" / "objects" / second[:2] / second[2:]
+        loose.chmod(0o644)  # (Read-only as git writes it: Windows won't remove it so.)
+        loose.unlink()
         for key, value in (("core.repositoryformatversion", "1"),
                            ("extensions.partialClone", "origin"), ("remote.origin.url", str(tree)),
                            ("remote.origin.promisor", "true"),
@@ -2791,10 +2798,11 @@ async def test_a_git_whose_waiter_stops_waiting_is_stopped_too(tmp_path):
     """Chief of Staff stopping (or a look past its time) cancels what waits for a command: the
     command ends with it, never left running."""
     pid_file = tmp_path / "pid"
-    waiting = asyncio.ensure_future(
-        workspaces_module.command("sh", "-c", f"echo $$ > {pid_file}; exec sleep 30")
+    sleeper = (
+        f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(30)"
     )
-    for _ in range(100):
+    waiting = asyncio.ensure_future(workspaces_module.command(sys.executable, "-c", sleeper))
+    for _ in range(500):
         if pid_file.exists() and pid_file.read_text().strip():
             break
         await asyncio.sleep(0.02)
@@ -2802,10 +2810,8 @@ async def test_a_git_whose_waiter_stops_waiting_is_stopped_too(tmp_path):
     waiting.cancel()
     with suppress(asyncio.CancelledError):
         await waiting
-    for _ in range(100):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+    for _ in range(250):
+        if not running(pid):
             break
         await asyncio.sleep(0.02)
     else:
@@ -3617,7 +3623,7 @@ async def test_a_worktree_made_again_under_its_name_is_no_replaced_git(
         denied = await asked(hook, call, worker)
         assert denied["permissionDecision"] == "deny"
         assert (
-            "/worktrees/cmp was replaced since Chief of Staff first saw it"
+            f"{os.sep}worktrees{os.sep}cmp was replaced since Chief of Staff first saw it"
             in (denied["permissionDecisionReason"])
         )
     finally:
@@ -3829,6 +3835,7 @@ def git_paths(cwd: str) -> tuple[Path, Path]:
     return Path(common), Path(admin)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="macOS's sandbox: Windows has none")
 async def test_absent_protected_paths_are_denied_to_sandboxed_commands_on_macos(
     tmp_path, git_repo, monkeypatch
 ):
@@ -3865,6 +3872,7 @@ async def test_absent_protected_paths_are_denied_to_sandboxed_commands_on_macos(
         await runtime.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Linux's sandbox: Windows has none")
 async def test_on_linux_a_git_file_a_worker_could_have_made_waits_for_the_owner(
     tmp_path, git_repo, monkeypatch
 ):
