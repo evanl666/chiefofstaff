@@ -979,7 +979,10 @@ async def su3_prepare(ctx: Ctx):
     from live_e2e import wait_for
 
     await wait_for("H1 on the branch", lambda: _async(ctx.repo.head("su3") == plan["h1"]), 300)
-    assert ctx.repo.pr(number)["head"]["sha"] == plan["h1"]
+    # (GitHub's PR follows its branch a few seconds later.)
+    await wait_for(
+        "the PR at H1", lambda: _async(ctx.repo.pr(number)["head"]["sha"] == plan["h1"]), 120
+    )
     assert await ctx.repo.ci(plan["h1"]) == "success"
     ctx.notes["su3"] = (target, number, plan["h1"])
 
