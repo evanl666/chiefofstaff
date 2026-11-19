@@ -40,6 +40,10 @@ D4  the worker sandbox turned on while a Codex worker works: it is stopped, and 
 D5  Codex turned off while its worker runs a dev server: no Codex process, nor the server
 
     uv run python scripts/live_agents.py A|B|C|D [A1 A3 …]
+
+Codex workers run on Codex's default model, or LIVE_CODEX_MODEL's (B's probes need one that
+attempts what it is told is refused: gpt-6.2-sol, Codex's default since Nov 17, declines them
+beforehand, so Chief of Staff's checks are not reached; gpt-6.1-sol attempts them).
 """
 
 import asyncio
@@ -69,6 +73,8 @@ from live_parity import setup, write
 
 SHARDS = {"A": (19100, 19150), "B": (19101, 19151), "C": (19102, 19152), "D": (19103, 19153)}
 MODEL = os.environ.get("LIVE_AGENTS_MODEL", "claude-sonnet-5.5")
+# Codex workers' model: "" for Codex's default (see the docstring).
+CODEX_MODEL = os.environ.get("LIVE_CODEX_MODEL", "")
 APPROVE_REPO = "evan666-lgtm/cos-approve-test"
 OTHER_REPO = "evanl666/chiefofstaff"
 FINISHED = {"review", "done"}
@@ -729,8 +735,13 @@ async def b1_ask_first(ctx: Ctx):
     log(f"B1: {task['result'][:900]!r}")
     # Refused by Chief of Staff, each saying why (as for a Copilot worker that asks first).
     assert "push to the default branch" in joined, "the refused command"
-    assert not edit_file.exists() and "Writing outside your working directory" in joined
-    assert not (marks / "review-published").exists() and "draft_github_review" in joined
+    assert not edit_file.exists(), "an edit outside its folders (not a temporary one), refused"
+    assert "Writing outside your working directory" in joined, "refused, saying why"
+    assert not (marks / "review-published").exists(), "no review published as the owner"
+    assert "draft_github_review" in joined, (
+        "inconclusive or refused unsaid: no notice of draft_github_review (the model may have "
+        "declined to call the MCP review tool: see its result above)"
+    )
     assert (marks / "started-github").exists(), "the MCP server was there to call"
     assert reviews_by_owner() == reviewed and "commenting on PRs" in joined
     assert (ctx.project / "AGENTS.md").read_text() == readme, "the owner's checkout unchanged"
@@ -1156,7 +1167,8 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
         await settings(
             ctx,
             agents={
-                "codex": {"enabled": True, "model": "", "limit": 3_000_000 if shard == "D" else 0},
+                "codex": {"enabled": True, "model": CODEX_MODEL,
+                          "limit": 3_000_000 if shard == "D" else 0},
                 "new_workers": "copilot" if shard == "C" else "codex",
             },
             projects=[str(project)], model=MODEL, max_workers=6, mac_notifications=False,
