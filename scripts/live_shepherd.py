@@ -2077,9 +2077,19 @@ async def sz2_not_yet(ctx: Ctx):
     ctx.repo.open_pr("sz2-base", "A base")
     ctx.repo.branch("sz2-child", {"NOTES.md": "child"}, "Child", base="sz2-base")
     child = ctx.repo.open_pr("sz2-child", "Stacked child", base="sz2-base")
-    found = await ctx.app.post("/api/shepherd/scan", {})
-    why = {item["number"]: item.get("why") for item in found["prepared"]["all"]}
-    assert why.get(child) == "stacked: not yet", why
+    from live_e2e import wait_for
+
+    async def listed():
+        # GitHub's search (the scan's) lists a new PR some seconds after it is opened.
+        found = await ctx.app.post("/api/shepherd/scan", {})
+        why = {item["number"]: item.get("why") for item in found["prepared"]["all"]}
+        if child not in why:
+            await asyncio.sleep(20)  # Each scan reads the owner's open PRs: not too often.
+            return None
+        return why
+
+    why = await wait_for("the stacked PR found", listed, 300)
+    assert why[child] == "stacked: not yet", why
 
 
 async def sz3_three_rows(ctx: Ctx):
