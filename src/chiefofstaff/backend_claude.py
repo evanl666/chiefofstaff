@@ -1288,6 +1288,10 @@ class ClaudeWorker:
             "CHIEFOFSTAFF_AGENT_UNSET": " ".join(key for key in own if OWN_NAME.fullmatch(key)),
         }
         environment |= {"CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"}
+        if env_file := self.options.get("env_file"):
+            # Its commands' caches (a sandboxed worker's init script, Runtime.cache_script):
+            # Claude sources it before each command, as Copilot does a worker's.
+            environment["CLAUDE_ENV_FILE"] = str(env_file)
         servers: dict[str, Any] = {"chief": self.chief_server()}
         if slack := self.slack_server():
             servers["slack"] = slack

@@ -137,6 +137,7 @@ class Fake:
                 "servers": sorted(self.servers),
                 "appended": self.appended,
                 "plugins": flags.get("plugin-dir"),
+                "env_file": os.environ.get("CLAUDE_ENV_FILE"),
                 "disabled_servers": (settings if isinstance(settings, dict) else {}).get(
                     "disabledMcpjsonServers"
                 ),
@@ -1349,6 +1350,9 @@ class Fake:
         command = data.get("command") or ""
         if (refused := await self.sandboxed(call, command)) is not None:
             return refused
+        if env_file := os.environ.get("CLAUDE_ENV_FILE"):
+            # Claude sources it before each command (2.1.322).
+            command = f". {shlex.quote(env_file)}\n{command}"
         if parent:  # A subagent's: run where it works, its result its own.
             process = await asyncio.create_subprocess_exec(
                 "/bin/sh", "-c", command, cwd=cwd or self.cwd,

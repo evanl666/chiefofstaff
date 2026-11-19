@@ -1059,6 +1059,34 @@ async def test_a_replaced_git_folder_keeps_a_claude_worker_from_a_terminal(
         await runtime.stop()
 
 
+async def test_a_sandboxed_claude_workers_commands_use_its_own_caches(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Its tools pointed at workers' own caches, as a Copilot worker's are: the same init
+    script, which Claude sources before each of its commands (CLAUDE_ENV_FILE)."""
+    monkeypatch.setitem(PASSED, "sandbox", "")
+    starts = tmp_path / "starts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
+    harness, runtime = await started(tmp_path, Settings(worker_sandbox=True))
+    runtime.sandbox_host = True
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")  # (Its version's check: its sandbox holds.)
+        result = await spawn_on(
+            harness, runtime, title="Cache", agent="claude",
+            instructions="Run the shell command `echo $npm_config_cache > seen`. Report done: x",
+        )  # fmt: skip
+        worker = result["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        (start,) = [json.loads(line) for line in starts.read_text().splitlines()]
+        script = Path(start["env_file"])
+        assert script == runtime.cache_scripts / worker / "init.sh"
+        seen = Path(harness.store.session(worker)["cwd"]) / "seen"
+        assert seen.read_text().strip() == str(runtime.cache_tier / "npm")
+    finally:
+        await runtime.stop()
+
+
 async def test_a_claude_worker_resuming_is_never_another_claude_window(
     tmp_path, claude_on_path, monkeypatch
 ):
