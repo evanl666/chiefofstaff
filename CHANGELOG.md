@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.46 (2026-11-18)
 
 Workers can no longer plant agent settings that load for them (Codex's `.codex/`, Copilot's
 hooks and MCP servers) or git files and configuration that run code for you or for Chief of
