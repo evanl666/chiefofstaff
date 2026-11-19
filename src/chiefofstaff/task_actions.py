@@ -955,6 +955,9 @@ class TaskActions:
         # Results just reported whose checkouts are being read (collect_evidence, ended), from
         # when (monotonic): their receipts say so meanwhile, not that nothing changed.
         self.receipts_due: dict[str, float] = {}
+        # Each task's wait for its limit's reset (go_on_at): ended when something else is said
+        # to its worker (stop_going_on), not left asleep until then.
+        self.going: dict[str, asyncio.Task] = {}
         # An accepted task stays listed while something is followed up for it.
         self.tasks.monitored = lambda task: bool(self.monitoring(task))
         self.tasks.run_check = self.run_check
@@ -3882,11 +3885,19 @@ class TaskActions:
         return task
 
     def arm_go_on(self, task_id: str, at: int):
-        self.runtime.background(self.going_on_at(task_id, at))
+        self.stop_going_on(task_id)
+        self.going[task_id] = self.runtime.background(self.going_on_at(task_id, at))
+
+    def stop_going_on(self, task_id: str):
+        """Its wait for its limit's reset ends now (it is not to go on by itself)."""
+        if (waiting := self.going.pop(task_id, None)) and waiting is not asyncio.current_task():
+            waiting.cancel()
 
     async def going_on_at(self, task_id: str, at: int):
         # A few seconds past its reset: its agent's clock and this one's may differ a little.
         await asyncio.sleep(max(0.0, at - time.time()) + GO_ON_MARGIN)
+        if self.going.get(task_id) is asyncio.current_task():
+            del self.going[task_id]
         if self.store.get(f"goonat:{task_id}") != str(at):
             return  # The owner said something else to it meanwhile (or asked again).
         task = self.tasks.find(task_id)
@@ -3933,6 +3944,7 @@ class TaskActions:
         # its schedules (Claude's) fire again.
         if self.store.get(f"goonat:{task_id}"):
             self.store.delete(f"goonat:{task_id}")
+            self.stop_going_on(task_id)
         self.runtime.release_schedules(task["session_id"])
         if task["status"] == "cancelled" and not resume:
             raise ValueError("That task was cancelled. Ask the Router for new work instead.")
