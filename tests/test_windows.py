@@ -285,8 +285,10 @@ def test_files_written_over_and_copied_in_as_windows_does_it(tmp_path, monkeypat
     (tree / ".git").write_text("gitdir: staged\n")
     (admin / "gitdir").write_text("staged/.git\n")
     workspaces.repoint(tree, workspace, str(admin), repository)
-    assert (tree / ".git").read_text() == f"gitdir: {admin}\n"
-    assert (admin / "gitdir").read_text() == f"{tree / '.git'}\n"
+    # With `/` between folders, as git writes them (Git for Windows finds no worktree whose
+    # gitdir says `\\`).
+    assert (tree / ".git").read_text() == f"gitdir: {admin.as_posix()}\n"
+    assert (admin / "gitdir").read_text() == f"{(tree / '.git').as_posix()}\n"
     (repository / "config").mkdir()
     (repository / "config" / ".env").write_bytes(b"TOKEN=1\r\nNAME=x\n")
     os.utime(repository / "config" / ".env", ns=(1_000_000_000, 2_000_000_000))
