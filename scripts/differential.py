@@ -216,6 +216,29 @@ FIXES: list[Allow] = [
     # 0.1.46 (QA6-3): where the owner's next message in a worker's chat goes (null with one task
     # or none: nothing to choose from).
     Allow("a session's chat_task", data=r"\.chat_task$"),
+    # 0.1.48 (QA7, E95): the Router waits for the next report on a task when one lacks what it
+    # just asked (written before the worker read it), never moving that work into another task.
+    Allow(
+        "the Router's rule for a report that crossed its message",
+        data=r"\.system_message\.content$",
+        lines=r"^  (can make, a conflict with other work, a step the owner must take\.|you just "
+        r"asked of that task was written before its worker read your message: wait for its$"
+        r"|next report on it, or send the message again with that task_id; never move that "
+        r"work into$|another task\. Never give a worker work on$)",
+    ),
+    # 0.1.48 (QA7, E101): ask_decision names the task it is for (by default the one at work).
+    Allow(
+        "ask_decision's task_id",
+        data=r"^backend\.sessions\.worker:.*\.options\.tools\[\d+\]\.parameters\.properties\."
+        r"task_id$",
+        value={
+            "default": "",
+            "description": "The task (t…) the decision is for, when you have several; by "
+            "default the one you are working on",
+            "title": "Task Id",
+            "type": "string",
+        },
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
