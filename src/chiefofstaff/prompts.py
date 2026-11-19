@@ -968,7 +968,9 @@ AGENTS_RULE = (
     "named cannot run it, a card in this chat tells them why and what they can do: do not say "
     "it again, and never start it on another. A model for such a worker "
     "is one from list_sessions().agents.models of its agent. When they ask to move a worker's "
-    "work to another agent, use continue_worker."
+    "work to another agent, use continue_worker. When they ask to compare (the same task on "
+    'two agents: "do this with Codex and Claude"), call spawn_worker once with agent and '
+    "compare_with."
 )
 
 CHOOSES_RULE = (
@@ -980,7 +982,9 @@ CHOOSES_RULE = (
     "card in this chat tells them why and what they can do: do not say it again, and never "
     "start it on another unless they say so; one you chose that cannot run starts on Copilot, "
     "and says why. A model for such a worker is one from list_sessions().agents.models of its "
-    "agent. When they ask to move a worker's work to another agent, use continue_worker."
+    "agent. When they ask to move a worker's work to another agent, use continue_worker. When "
+    'they ask to compare (the same task on two agents: "do this with Codex and Claude"), call '
+    "spawn_worker once with agent and compare_with."
 )
 
 AWAY_DEFAULT = (

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -28,6 +29,10 @@ COPILOT = "copilot"
 # the Router chooses one for each new worker (Settings → Coding agents, off unless chosen).
 NEW_WORKERS = "new_workers"
 ROUTER_CHOOSES = "router_chooses"
+# "New workers start on: Last used": the agent the owner last chose for a worker (kv LAST_USED;
+# Copilot until they chose one), never a default unless picked.
+LAST = "last"
+LAST_USED = "agentlast"
 # Whether the owner answered an agent's first-run card (kv `agentoffer:<agent>`).
 OFFERED = "agentoffer:"
 # Chief of Staff's own sessions that can run on another agent, as Settings names each ("The
@@ -88,9 +93,25 @@ def router_chooses(store: Store) -> bool:
 
 
 def new_workers(store: Store) -> str:
-    """The agent new workers use: Copilot, unless the owner chose one that is on."""
+    """The agent new workers use: Copilot, unless the owner chose one that is on (or Last
+    used, and the one they last chose for a worker is on)."""
+    chosen = new_workers_choice(store)
+    if chosen == LAST:
+        chosen = store.get(LAST_USED) or COPILOT
+    return chosen if chosen in turned_on(store) else COPILOT
+
+
+def new_workers_choice(store: Store) -> str:
+    """ "New workers start on" as chosen: Copilot, an agent, or Last used."""
     chosen = stored(store).get(NEW_WORKERS)
-    return chosen if isinstance(chosen, str) and chosen in turned_on(store) else COPILOT
+    return chosen if isinstance(chosen, str) and chosen in (LAST, *turned_on(store)) else COPILOT
+
+
+def used(store: Store, agent: str):
+    """The owner chose this agent for a worker (named it, picked it, continued on it): what
+    Last used starts new workers on."""
+    if agent in (COPILOT, *NAMES) and store.get(LAST_USED) != agent:
+        store.set(LAST_USED, agent)
 
 
 def role_agents(role: str) -> frozenset[str]:
@@ -204,9 +225,11 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
         name for name in NAMES if isinstance(plan.get(name), dict) and plan[name].get("enabled")
     )
     chosen = change.get(NEW_WORKERS, stored(store).get(NEW_WORKERS, COPILOT))
-    if chosen not in (COPILOT, *on):
+    if chosen not in (COPILOT, LAST, *on):
         if NEW_WORKERS in change:
-            raise ValueError("New workers start on: Copilot, or an agent turned on below.")
+            raise ValueError(
+                "New workers start on: Copilot, Last used, or an agent turned on below."
+            )
         chosen = COPILOT  # The agent they used is off now.
     plan[NEW_WORKERS] = chosen
     # Each role on the agent chosen for it: one turned off puts it back on Copilot.
@@ -275,6 +298,61 @@ PLAN_NOTES = {
     "claudePlan": "On a Claude plan, Claude workers count against your plan's usage limits, "
     "under Anthropic's terms."
 }
+# Who pays for an agent's work, as the @ picker and Settings say it (by how it is signed in:
+# VS Code's users took Claude there for their own plan when it was Copilot's).
+COPILOT_PAYS = "Uses your Copilot plan"
+PAYS = {
+    "chatgpt": "Uses your ChatGPT sign-in",
+    "claudePlan": "Uses your Claude plan",
+    "amazonBedrock": "Uses your Amazon Bedrock account",
+    "gcp": "Uses your Google Cloud account",
+    "foundry": "Uses your Foundry account",
+}
+API_KEY_PAYS = {"codex": "Uses your OpenAI API key", "claude": "Uses your Anthropic API key"}
+# What makes an agent ready, run by the owner in a terminal (Chief of Staff never installs one
+# nor signs in for them): the command, and what to do in it after.
+INSTALL_FIX = {
+    "codex": {"command": "npm install -g @openai/codex", "then": ""},
+    "claude": {"command": "npm install -g @anthropic-ai/claude-code", "then": ""},
+}
+SIGN_IN_FIX = {
+    "codex": {"command": "codex login", "then": ""},
+    "claude": {"command": "claude", "then": "then /login"},
+}
+# An agent as the @ picker and Settings say it: ready, its sign-in needed, not installed.
+READY, SIGN_IN, MISSING, PROBLEM, CHECKING = "ready", "signin", "missing", "problem", "checking"
+STATUS_WORDS = {
+    READY: "Ready",
+    SIGN_IN: "Sign-in needed",
+    MISSING: "Not installed",
+    CHECKING: "Checking…",
+}
+NEEDS_SIGN_IN = re.compile(
+    r"\b401\b|unauthori[sz]ed|not (?:signed|logged) in|not set up|invalid api key"
+    r"|please run /login|oauth token has expired|authentication (?:failed|error)",
+    re.IGNORECASE,
+)
+
+
+def pays(name: str, account: str) -> str:
+    """Whose plan or key an agent's work uses, from how it is signed in ("" when unknown)."""
+    if name == COPILOT:
+        return COPILOT_PAYS
+    if account == "apiKey":
+        return API_KEY_PAYS.get(name, "")
+    return PAYS.get(account, "")
+
+
+def status_of(name: str, why: str) -> dict[str, Any]:
+    """An agent that cannot run, by why (its glance's or its start's words): its sign-in
+    needed (and the command for it), not installed, or another problem, said as it is."""
+    if NEEDS_SIGN_IN.search(why):
+        return {"status": SIGN_IN, "said": STATUS_WORDS[SIGN_IN], "fix": SIGN_IN_FIX[name]}
+    if re.search(r"not found|not installed", why, re.IGNORECASE):
+        return {"status": MISSING, "said": STATUS_WORDS[MISSING], "fix": INSTALL_FIX[name]}
+    return {"status": PROBLEM, "said": why}
+
+
 # What an agent's workers do differently while workers are sandboxed (its row says so).
 SANDBOX_NOTES = {"claude": "Sandboxed Claude workers don't run hooks."}
 # A plan's limits, as Claude's stream names their windows.

@@ -596,6 +596,12 @@ class ContinueOn(StrictModel):
     agent: Literal["copilot", "codex", "claude"]
 
 
+class RestartOn(StrictModel):
+    agent: Literal["copilot", "codex", "claude"]
+    model: str = Field(default="", max_length=200)
+    effort: Literal["", "none", "low", "medium", "high", "xhigh", "max"] = ""
+
+
 class RefusalAnswer(StrictModel):
     action: Literal["copilot", "wait"]
 
@@ -606,6 +612,11 @@ class OwnerMessage(StrictModel):
     to: str = Field(default="", max_length=64)
     # The coding agent the owner chose in the composer (@codex) for what this asks.
     agent: Literal["", "copilot", "codex", "claude"] = ""
+    # With it, the model and effort chosen in its chip's popover.
+    agent_model: str = Field(default="", max_length=200)
+    agent_effort: Literal["", "none", "low", "medium", "high", "xhigh", "max"] = ""
+    # Several agents chosen (@codex @claude): the task runs on each, side by side (Compare).
+    agents: list[Literal["copilot", "codex", "claude"]] = Field(default_factory=list, max_length=3)
     attachments: list[Attachment] = Field(default_factory=list, max_length=5)
     # In a worker's chat: the task of its the owner looks at there (Runtime.chat_task).
     task_id: str = Field(default="", max_length=64)

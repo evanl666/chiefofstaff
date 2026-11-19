@@ -36,6 +36,7 @@ from .models import (
     ProfileText,
     ProjectPath,
     RefusalAnswer,
+    RestartOn,
     RunsEnded,
     SessionModel,
     SessionYolo,
@@ -347,6 +348,9 @@ def create_app(
                 attachments=payload.attachments,
                 agent=payload.agent,
                 task_id=payload.task_id,
+                compare=payload.agents,
+                agent_model=payload.agent_model,
+                agent_effort=payload.agent_effort,
                 typed=True,
                 settings_digest=payload.settings_digest,
             )
@@ -398,6 +402,11 @@ def create_app(
     @app.get("/api/agents")
     async def coding_agents():
         return await runtime.look_for_agents()
+
+    @app.post("/api/agents/status")
+    async def agents_status():
+        """Each agent's status, glanced at again where it was not lately (the @ picker)."""
+        return {"agents_status": await runtime.refresh_agent_status()}
 
     @app.post("/api/agents/{name}/offer")
     async def agent_offer(name: str, payload: AgentOffer):
@@ -733,6 +742,26 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
         return runtime.snapshot()
+
+    @app.post("/api/sessions/{session_id}/restart")
+    async def restart_on(session_id: str, payload: RestartOn):
+        """Restart on <agent>: its task on another agent, before it did anything."""
+        try:
+            return await runtime.restart_on(
+                session_id, payload.agent, payload.model, payload.effort
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.get("/api/sessions/{session_id}/continue")
+    async def continue_preview(session_id: str, agent: str):
+        """What Continue with <agent>… sends, in one line, before the owner says go."""
+        if agent not in {agents.COPILOT, *agents.NAMES}:
+            raise HTTPException(400, f"Chief of Staff does not run {agent!r}.")
+        try:
+            return await runtime.continue_preview(session_id, agent)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
 
     @app.post("/api/sessions/{session_id}/continue")
     async def continue_on(session_id: str, payload: ContinueOn):

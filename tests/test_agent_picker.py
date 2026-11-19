@@ -36,7 +36,13 @@ async def test_with_copilot_alone_nothing_of_agents_is_in_the_page(tmp_path):
     try:
         await runtime.offer_agents()
         state = runtime.snapshot()
-        assert not {"agents", "agents_found", "agent_offers", "agent_refusals"} & set(state)
+        assert not {
+            "agents",
+            "agents_found",
+            "agents_status",
+            "agent_offers",
+            "agent_refusals",
+        } & set(state)
         assert agents.stored(harness.store) == {}
     finally:
         await runtime.stop()
@@ -174,6 +180,62 @@ async def test_a_signed_out_agent_is_not_offered(tmp_path, codex_installed, monk
         await runtime.stop()
 
 
+def statuses(found: list[dict]) -> dict[str, dict]:
+    return {entry["name"]: entry for entry in found}
+
+
+async def test_each_agent_says_if_it_is_ready_who_pays_and_what_makes_it_ready(
+    tmp_path, codex_installed, monkeypatch
+):
+    _, runtime = await started(tmp_path)
+    try:
+        found = statuses(await runtime.refresh_agent_status())
+        assert list(found) == ["copilot", "codex", "claude"], "every agent, none hidden"
+        assert (found["copilot"]["said"], found["copilot"]["pays"]) == (
+            "Ready",
+            "Uses your Copilot plan",
+        )
+        codex = found["codex"]
+        assert (codex["status"], codex["pays"], codex["on"]) == (
+            "ready",
+            "Uses your ChatGPT sign-in",
+            False,
+        )
+        claude = found["claude"]
+        assert (claude["said"], claude["fix"]["command"]) == (
+            "Not installed",
+            "npm install -g @anthropic-ai/claude-code",
+        )
+        assert statuses(runtime.snapshot()["agents_status"])["codex"]["status"] == "ready"
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        found = statuses(await runtime.refresh_agent_status())
+        assert found["codex"]["status"] == "ready", "glanced at lately: not run again at once"
+        runtime.glanced.clear()
+        codex = statuses(await runtime.refresh_agent_status())["codex"]
+        assert (codex["said"], codex["fix"]) == (
+            "Sign-in needed",
+            {"command": "codex login", "then": ""},
+        )
+        assert "pays" not in codex
+    finally:
+        await runtime.stop()
+
+
+async def test_claude_on_an_api_key_says_whose_key_it_uses(tmp_path, claude_on_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_AUTH", json.dumps({"authMethod": "api_key"}))
+    _, runtime = await started(tmp_path)
+    try:
+        claude = statuses(await runtime.refresh_agent_status())["claude"]
+        assert (claude["said"], claude["pays"]) == ("Ready", "Uses your Anthropic API key")
+        monkeypatch.setenv("FAKE_CLAUDE_SIGNED_OUT", "1")
+        runtime.glanced.clear()
+        claude = statuses(await runtime.refresh_agent_status())["claude"]
+        assert claude["fix"] == {"command": "claude", "then": "then /login"}
+        assert (await runtime.look_for_agent("claude"))["said"] == "Sign-in needed"
+    finally:
+        await runtime.stop()
+
+
 async def test_the_agent_chosen_in_the_composer_is_the_routers_to_use(tmp_path, codex_installed):
     harness, runtime = await started(tmp_path)
     try:
@@ -202,6 +264,28 @@ async def test_the_owners_chip_wins_over_the_agent_the_router_gives(
         result = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: x",
                                 agent="codex", owner_named=owner_named)  # fmt: skip
         assert runtime.agent(result["session_id"]) == "copilot"
+    finally:
+        await runtime.stop()
+
+
+async def test_last_used_starts_new_workers_on_the_agent_the_owner_last_chose(
+    tmp_path, codex_installed
+):
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}, "new_workers": "last"})
+        assert (await runtime.look_for_agents())["new_workers"] == "last"
+        first = await spawn_on(harness, runtime, title="One", instructions="Report done: x")
+        assert runtime.agent(first["session_id"]) == "copilot", "none chosen yet: Copilot"
+        await runtime.owner_send(harness.router_id, "Fix the login test", agent="codex")
+        named = await spawn_on(harness, runtime, title="Two", instructions="Report done: x")
+        assert runtime.agent(named["session_id"]) == "codex"
+        last = harness.store.messages(harness.router_id)[-1]["id"]
+        harness.store.set(f"idle:{harness.router_id}", str(last))  # Its turn over: no chip.
+        later = await spawn_on(harness, runtime, title="Three", instructions="Report done: x")
+        assert runtime.agent(later["session_id"]) == "codex", "the one last chosen"
+        await saved(runtime, {"codex": {"enabled": False}})
+        assert agents.new_workers(harness.store) == "copilot", "off: Copilot"
     finally:
         await runtime.stop()
 
@@ -240,11 +324,12 @@ async def test_a_workers_work_continues_on_another_agent_in_its_folders(tmp_path
         made = await runtime.continue_on(worker, "copilot")
         new = harness.store.session(made["session_id"])
         assert runtime.agent(new["id"]) == "copilot"
-        assert (new["cwd"], new["repos"], new["task"]) == (row["cwd"], row["repos"], row["task"])
+        assert (new["repos"], new["task"]) == (row["repos"], row["task"])
+        assert new["cwd"] != row["cwd"], "a folder of its own"
         assert new["yolo"] == "off" and not runtime.yolo(new), "it asks first too"
         old = harness.store.session(worker)
-        assert old["closed_at"] and json.loads(old["repos"] or "[]") == [], "handed over"
-        assert await asyncio.to_thread(Path(row["cwd"]).is_dir), "its folder stays: the new one's"
+        assert not old["closed_at"] and old["repos"] == row["repos"], "left open, as it was"
+        assert await asyncio.to_thread(Path(row["cwd"]).is_dir)
         task = runtime.tasks.get(made["task_id"])
         assert task["goal"].startswith(
             "You continue the work of another worker, “Fix it”, which ran on Claude"
@@ -252,11 +337,11 @@ async def test_a_workers_work_continues_on_another_agent_in_its_folders(tmp_path
         assert "say so in your first reply" in task["goal"]
         given = [m for m in harness.store.messages(new["id"]) if m["kind"] == "router"]
         assert given[0]["meta"]["prompt"].startswith('<message from="router" type="task"')
-        assert ("notice", "Continued on Copilot by a new worker, “Fix it”, in its folders.") in (
-            harness.kinds(worker)
-        )
-        assert runtime.view(old)["continued"] == new["id"]
-        with pytest.raises(ValueError, match="Only an open worker"):
+        assert (
+            "notice",
+            "Continued on Copilot by a new worker, “Fix it”; this one stays open.",
+        ) in harness.kinds(worker)
+        with pytest.raises(ValueError, match="already runs on Claude"):
             await runtime.continue_on(worker, "claude")
     finally:
         await runtime.stop()
@@ -306,12 +391,144 @@ async def test_a_continued_workers_process_ends_before_the_new_one_and_its_folde
             return made(session_id, *arguments, **more)
 
         monkeypatch.setattr(harness.store, "create_session", creating)
+        # (One writing in the owner's folder: handed over, not copied.)
+        monkeypatch.setattr(runtime, "stays_open", lambda checkouts: False)
         workspace = runtime.workspaces.workspace(harness.store.session(worker))
         done = await runtime.continue_on(worker, "copilot")
         assert seen == [False], "its process had ended"
         await runtime.workers.release(worker)  # As closing it does, in the background.
         assert await asyncio.to_thread(workspace.is_dir), "the new worker's now"
         assert runtime.workspaces.workspace(harness.store.session(done["session_id"])) == workspace
+    finally:
+        await runtime.stop()
+
+
+def git(*arguments, cwd):
+    import subprocess
+
+    found = subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *arguments],
+                           cwd=cwd, check=True, capture_output=True, text=True)  # fmt: skip
+    return found.stdout.strip()
+
+
+async def project_worker(tmp_path, *agents_on: str, **arguments):
+    from test_round7_split import published
+
+    from chiefofstaff.models import Settings
+
+    app = published(tmp_path, "app")
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    await saved(runtime, {name: {"enabled": True} for name in agents_on})
+    result = await spawn_on(
+        harness, runtime, title="Feature", project=str(app), isolate=True,
+        instructions="Report done: x", **arguments,
+    )  # fmt: skip
+    return harness, runtime, result
+
+
+async def test_continued_on_another_agent_it_stays_open_and_the_new_one_has_a_copy(
+    tmp_path, codex_installed
+):
+    harness, runtime, result = await project_worker(tmp_path, "codex")
+    worker = result["session_id"]
+    try:
+        runtime.update_session(worker, status="idle")
+        (checkout,) = json.loads(harness.store.session(worker)["repos"])
+        tree = Path(checkout["worktree"])
+        (tree / "a.txt").write_text("one\n")
+        git("add", "a.txt", cwd=tree)
+        git("commit", "-qm", "a", cwd=tree)
+        (tree / "a.txt").write_text("two\n")
+        (tree / "new.txt").write_text("new\n")
+        preview = await runtime.continue_preview(worker, "codex")
+        assert preview["line"] == (
+            f"Sends a summary ({preview['words']} words) and its changes (2 files, +1 −0) to a "
+            "new Codex worker in a copy of its worktree; this one stays open."
+        )
+        made = await runtime.continue_on(worker, "codex")
+        old = harness.store.session(worker)
+        assert not old["closed_at"] and json.loads(old["repos"]) == [checkout], "as it was"
+        new = harness.store.session(made["session_id"])
+        assert runtime.agent(new["id"]) == "codex"
+        (copy,) = json.loads(new["repos"])
+        copied = Path(copy["worktree"])
+        assert copied != tree and copy["branch"] != checkout["branch"]
+        assert git("rev-parse", "HEAD", cwd=copied) == git("rev-parse", "HEAD", cwd=tree)
+        assert (copied / "a.txt").read_text() == "two\n", "its uncommitted change"
+        assert (copied / "new.txt").read_text() == "new\n", "its new file"
+        assert copy["base_ref"] == checkout["base_ref"]
+        assert (tree / "a.txt").read_text() == "two\n", "the first one's untouched"
+        goal = runtime.tasks.get(made["task_id"])["goal"]
+        assert str(copied) in goal and str(tree) not in goal, "told of its own folder"
+    finally:
+        await runtime.stop()
+
+
+async def test_before_its_first_step_a_worker_restarts_on_another_agent_with_its_task(
+    tmp_path, codex_installed
+):
+    harness, runtime, result = await project_worker(tmp_path, "codex")
+    worker, task = result["session_id"], result["task_id"]
+    try:
+        assert runtime.view(harness.store.session(worker))["untouched"]
+        first = next(m for m in harness.store.messages(worker) if m["kind"] == "router")
+        repos = harness.store.session(worker)["repos"]
+        made = await runtime.restart_on(worker, "codex", model="", effort="high")
+        new = harness.store.session(made["session_id"])
+        assert harness.store.session(worker)["closed_at"], "the first one closed"
+        assert runtime.agent(new["id"]) == "codex" and new["repos"] == repos, "its folders"
+        assert made["task_id"] == task and runtime.tasks.get(task)["session_id"] == new["id"]
+        assert runtime.tasks.get(task)["status"] == "queued", "its task goes on, not ended"
+        given = next(m for m in harness.store.messages(new["id"]) if m["kind"] == "router")
+        assert (given["text"], given["meta"]["prompt"]) == (first["text"], first["meta"]["prompt"])
+        assert runtime.agent_choice(new["id"])["effort"] == "high"
+        assert ("notice", "Restarted “Feature” on Codex") in harness.kinds(harness.router_id)
+        assert agents.stored(harness.store) and harness.store.get(agents.LAST_USED) == "codex"
+        # Once it did something, only Continue with….
+        runtime.add_message(new["id"], "tool", "Ran `ls`")
+        assert "untouched" not in runtime.view(harness.store.session(new["id"]))
+        with pytest.raises(ValueError, match="use Continue with"):
+            await runtime.restart_on(new["id"], "copilot")
+    finally:
+        await runtime.stop()
+
+
+async def test_two_agents_chosen_run_the_task_on_each_side_by_side(tmp_path, codex_installed):
+    from test_round7_split import published
+
+    from chiefofstaff.models import Settings
+
+    app = published(tmp_path, "app")
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        message = await runtime.owner_send(
+            harness.router_id, "Fix the login test", compare=["copilot", "codex"]
+        )
+        assert message["meta"]["agents"] == ["copilot", "codex"]
+        found = await spawn_on(harness, runtime, title="Fix the login test",
+                               instructions="Report done: x", project=str(app))  # fmt: skip
+        assert found["compare"] == "Fix the login test" and "side by side" in found["note"]
+        made = [worker["session_id"] for worker in found["workers"]]
+        assert [runtime.agent(made_id) for made_id in made] == ["copilot", "codex"]
+        trees = [json.loads(harness.store.session(i)["repos"])[0]["worktree"] for i in made]
+        assert len(set(trees)) == 2, "each in a worktree of its own"
+        groups = [runtime.view(harness.store.session(i))["compare"] for i in made]
+        assert groups[0] == groups[1] and groups[0]["title"] == "Fix the login test"
+        assert groups[0]["agents"] == ["copilot", "codex"]
+    finally:
+        await runtime.stop()
+
+
+async def test_the_router_compares_when_asked_in_words(tmp_path, codex_installed):
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        assert "compare_with" in schema(router_options(harness, runtime))["properties"]
+        found = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: x",
+                               agent="codex", compare_with=["copilot"])  # fmt: skip
+        assert not hasattr(found, "result_type"), found.text_result_for_llm
+        assert [w["agent"] for w in found["workers"]] == ["codex", "copilot"]
     finally:
         await runtime.stop()
 
@@ -352,6 +569,9 @@ async def test_a_named_agent_that_cannot_run_offers_choices_and_starts_nothing_e
         ]
         key = card["meta"]["agent_refused"]
         assert card["text"].startswith("“Fix the login test” did not start on Codex:")
+        # The command that makes it ready, for the owner to run; Copilot offered instead.
+        assert card["meta"]["fix"] == {"command": "codex login", "then": ""}
+        assert card["meta"]["instead"] == "copilot"
         assert runtime.snapshot()["agent_refusals"] == [key]
         await runtime.answer_refusal(key, "copilot")
         (started_on,) = harness.store.open_sessions(WORKER)

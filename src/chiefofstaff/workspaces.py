@@ -418,6 +418,21 @@ async def index_gitlinks(path: str, env: dict[str, str], index: Path, lazy: bool
     return found
 
 
+def copy_new_files(source: Path, target: Path, names: list[str]):
+    """A worktree's untracked files (not ignored), copied into another: regular files only,
+    each read inside the one and written inside the other (never through a link out)."""
+    root, into = source.resolve(), target.resolve()
+    for name in filter(None, names):
+        found, made = source / name, target / name
+        if found.is_symlink() or not found.is_file() or not found.resolve().is_relative_to(root):
+            continue
+        existing = next(folder for folder in [made.parent, *made.parent.parents] if folder.exists())
+        if not existing.resolve().is_relative_to(into) or made.is_symlink():
+            continue
+        made.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(found, made)
+
+
 async def checkout_git(
     checkout: dict,
     path: str,
@@ -4189,6 +4204,47 @@ class Workspaces:
                 await self.remove_checkout(checkout)
             raise
         return workspace, checkouts
+
+    async def fork_checkouts(
+        self, session_id: str, title: str, checkouts: list[dict], carry: bool = True
+    ) -> tuple[Path, list[dict]]:
+        """Another worker's worktrees for a new one (Continue with…, the first left open): a
+        worktree of its own of each repository, at the same commit, with what the first had
+        not committed (its changes, its new files) brought over; never the first's folders."""
+        trees = [checkout for checkout in checkouts if checkout.get("worktree")]
+        projects = [checkout["project"] for checkout in trees]
+        workspace, made = await self.prepare_directory(
+            session_id, title, projects, bool(projects), carry
+        )
+        try:
+            for new in made:
+                old = next(c for c in trees if c.get("repo") == new.get("repo"))
+                await self.carry_state(old, new)
+        except Exception:
+            for checkout in made:
+                await self.remove_checkout(checkout)
+            raise
+        return workspace, made
+
+    async def carry_state(self, old: dict, new: dict):
+        """A worktree brought to where another stands: its commit, then its uncommitted
+        changes and new files (read with Chief of Staff's own git, applied by it)."""
+        source, target = old["worktree"], new["worktree"]
+        head = (await checkout_git(old, source, "rev-parse", "HEAD")).strip()
+        await checkout_git(new, target, "reset", "--quiet", "--hard", head)
+        new["base"], new["base_ref"] = old.get("base", new["base"]), old.get("base_ref", "")
+        patch = await checkout_git(old, source, "diff", "--binary", "HEAD")
+        if patch.strip():
+            async with self.staging() as staging:
+                file = staging / "changes.patch"
+                await asyncio.to_thread(
+                    file.write_text, patch if patch.endswith("\n") else patch + "\n"
+                )
+                await checkout_git(
+                    new, target, "apply", "--binary", "--whitespace=nowarn", str(file)
+                )
+        listed = await checkout_git(old, source, "ls-files", "--others", "--exclude-standard", "-z")
+        await asyncio.to_thread(copy_new_files, Path(source), Path(target), listed.split("\0"))
 
     @staticmethod
     def check_scratch(settings: Settings):

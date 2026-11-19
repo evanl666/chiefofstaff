@@ -338,6 +338,11 @@ SENT_AGAIN_SECONDS = 600
 USAGE_SETTLES = 60.0
 # How long which other agents are installed here is taken as known (agents_found).
 FOUND_SECONDS = 60.0
+# How long an agent's glance is taken as its status when the page asks again (agent_status).
+STATUS_SECONDS = 30.0
+# What a worker has done once it said any of these: a step, a report, an update (until then,
+# Restart on… starts its task on another agent instead; Runtime.restart_on).
+DOING = frozenset({"tool", "report", "update"})
 # How long a worker's dropped schedules take to be deleted in Claude, at most (its turn included).
 SCHEDULES_DELETE_SECONDS = 120.0
 # How soon an agent's check that could not run is tried again, at the earliest (seconds); and
@@ -667,6 +672,9 @@ class Runtime:
         self.found_cache: tuple[float, list[str]] = (float("-inf"), [])
         self.offers: dict[str, dict] = {}
         self.offering: asyncio.Task | None = None
+        # Each agent's last glance (its version and sign-in, or why it cannot run), and when:
+        # what the @ picker and Settings say of it (agent_status).
+        self.glanced: dict[str, tuple[float, dict | str]] = {}
         # Every turn of another agent's worker begins only once admitted (admit_turn), one at a
         # time; what can make a worker ineligible bumps the generation under this lock first.
         self.admission = asyncio.Lock()
@@ -1956,7 +1964,7 @@ class Runtime:
                     continue
                 self.role_glanced[role] = time.monotonic()
                 try:
-                    await agents.glance(wanted, self.agent_folder(wanted))
+                    await self.glance_agent(wanted)
                 except Exception as exc:
                     logger.debug("%s still can't run the %s: %s", wanted, role, describe(exc))
                     continue
@@ -2048,15 +2056,39 @@ class Runtime:
         row = {"id": "", "role": WORKER, "slack": 0, "yolo": "", "closed_at": None, "cwd": ""}
         return self.blocked_on(name, row)
 
+    def chosen_agents(self) -> list[str]:
+        """The agents the owner chose in the composer for what the Router does now: one
+        (@codex), or several to compare (@codex @claude); those on only."""
+        router = self.router_id()
+        since = int(self.store.get(f"idle:{router}") or 0)
+        on = {COPILOT_AGENT, *self.agents_on()}
+        for message in reversed(self.store.messages(router, after=since, limit=20)):
+            meta = message["meta"] or {}
+            if message["kind"] == "owner" and (meta.get("agents") or meta.get("agent")):
+                chosen = meta.get("agents") or [meta["agent"]]
+                return [name for name in chosen if name in on]
+        return []
+
     def chosen_agent(self) -> str:
         """The agent the owner chose in the composer (@codex) for what the Router does now:
-        on the owner's message since its last turn, if it is on."""
+        on the owner's message since its last turn, if it is on (none for several: Compare)."""
+        chosen = self.chosen_agents()
+        return chosen[0] if len(chosen) == 1 else ""
+
+    def chip_model(self, agent: str) -> dict:
+        """The model and effort the owner chose with that agent in the composer (its chip's
+        popover), for the Router's workers on it now."""
         router = self.router_id()
         since = int(self.store.get(f"idle:{router}") or 0)
         for message in reversed(self.store.messages(router, after=since, limit=20)):
-            if message["kind"] == "owner" and (agent := (message["meta"] or {}).get("agent")):
-                return agent if agent in {COPILOT_AGENT, *self.agents_on()} else ""
-        return ""
+            meta = message["meta"] or {}
+            if message["kind"] == "owner" and meta.get("agent") == agent:
+                return {
+                    key: meta[f"agent_{key}"]
+                    for key in ("model", "effort")
+                    if meta.get(f"agent_{key}")
+                }
+        return {}
 
     async def check_agent_model(self, agent: str, model: str):
         """A model the Router picked for a worker on another agent: one that agent offers."""
@@ -3894,18 +3926,37 @@ class Runtime:
         (sign-in help, run it on Copilot instead, or wait), the Router not saying it again;
         nothing starts elsewhere unasked."""
         key = uuid4().hex[:10]
-        self.store.set(f"agentrefusal:{key}", json.dumps({"agent": agent, "params": params}))
+        instead = self.instead_of(agent)
+        self.store.set(
+            f"agentrefusal:{key}",
+            json.dumps({"agent": agent, "params": params, "instead": instead}),
+        )
+        found = agents.status_of(agent, why)
         self.add_message(
             self.router_id(),
             "notice",
             f"“{params.get('title') or 'The task'}” did not start on {agents.display(agent)}: "
             f"{why}",
-            {"agent_refused": key, "agent": agent},
+            {
+                "agent_refused": key,
+                "agent": agent,
+                "instead": instead,
+                **({"fix": found["fix"]} if found.get("fix") else {}),
+            },
         )
 
+    def instead_of(self, agent: str) -> str:
+        """The agent a task the owner named another for is offered on instead: the one new
+        workers start on, where it can run them now; else Copilot."""
+        default = agents.new_workers(self.store)
+        if default in {agent, COPILOT_AGENT} or self.agent_unavailable(default):
+            return COPILOT_AGENT
+        return default
+
     async def answer_refusal(self, key: str, action: str) -> dict:
-        """The owner's answer on an agent refusal's card: start it on Copilot instead, or wait
-        (nothing starts; they ask again once the agent can run it)."""
+        """The owner's answer on an agent refusal's card: start it on the agent it offers
+        instead (Copilot, or the one new workers start on), or wait (nothing starts; they ask
+        again once the agent can run it)."""
         raw = self.store.get(f"agentrefusal:{key}")
         if not raw:
             raise ValueError("That card was answered already.")
@@ -3920,12 +3971,13 @@ class Runtime:
             return {}
         from .tools import SpawnWorker
 
-        params = {k: v for k, v in found["params"].items() if k != "agent"} | {"model": ""}
+        instead = found.get("instead") or COPILOT_AGENT
+        params = {k: v for k, v in found["params"].items() if k in SpawnWorker.model_fields}
         await self.toolset.t_spawn_worker(
-            SpawnWorker.model_validate(params),
+            SpawnWorker.model_validate(params | {"model": ""}),
             self.router_id(),
-            agent=COPILOT_AGENT,
-            instead=" on Copilot instead",
+            agent=instead,
+            instead=f" on {agents.display(instead)} instead",
         )
         return {}
 
@@ -3935,22 +3987,86 @@ class Runtime:
         extra usage on refuses nothing, and each other worker meets it on its next request."""
         self.store.set(f"agentlimit:{agent}", json.dumps(limit))
 
-    async def continue_on(self, session_id: str, agent: str) -> dict:
-        """Continue with <agent>… (the owner's, from a worker's ⋯ or by asking the Router): a
-        new worker on that agent goes on with this one's work, in its folders (its checkouts
-        handed over: never two writing them), from a summary of where it stands; this one
-        closes, linked to it. Only an idle worker of the owner's; the agent must be able to
-        run it now (else why not, nothing changed)."""
-        row = self.store.session(session_id)
+    def continue_checks(self, row: dict, agent: str):
+        """Why a worker cannot continue on that agent now (raises), as Continue with… asks."""
         if row["role"] != WORKER or row["closed_at"] or self.special(row):
             raise ValueError("Only an open worker of yours can continue on another agent.")
-        if row["status"] in {"working", "starting", "queued"} or self.states[session_id].held:
+        if row["status"] in {"working", "starting", "queued"} or self.states[row["id"]].held:
             raise ValueError("It is at work: stop it first, or wait until it is done.")
         if self.is_elsewhere(row):
             raise ValueError("It is open in a terminal: exit it there first.")
-        current = self.agent(session_id)
-        if agent == current:
+        if agent == self.agent(row["id"]):
             raise ValueError(f"It already runs on {agents.display(agent)}.")
+
+    @staticmethod
+    def stays_open(checkouts: list[dict]) -> bool:
+        """Whether a worker continued elsewhere stays open: its worktrees are copied for the
+        new one, never shared; one that writes in the owner's folder (in place) or in a clone
+        of its own hands that over, and closes (never two writing one folder)."""
+        return not any(
+            not checkout.get("worktree")
+            and (
+                checkout.get("in_place") or (checkout.get("branch") and not checkout.get("shared"))
+            )
+            for checkout in checkouts
+        )
+
+    async def continue_preview(self, session_id: str, agent: str) -> dict:
+        """What Continue with <agent>… sends, in one line: its summary's length, its changes
+        (files, lines added and removed since it began), and whether this one stays open."""
+        row = self.store.session(session_id)
+        self.continue_checks(row, agent)
+        summary = await self.handoff_summary(row, self.agent(session_id))
+        checkouts = self.workspaces.checkouts(row)
+        files, added, removed = 0, 0, 0
+        for checkout in checkouts:
+            tree = checkout.get("worktree") or (checkout["path"] if checkout.get("branch") else "")
+            if not tree:
+                continue
+            with suppress(Exception):
+                base = checkout.get("base_ref") or "HEAD"
+                counted = await checkout_git(checkout, tree, "diff", "--numstat", base)
+                for line in counted.splitlines():
+                    more, fewer, _ = [*line.split("\t", 2), "", ""][:3]
+                    files += 1
+                    added += int(more) if more.isdigit() else 0
+                    removed += int(fewer) if fewer.isdigit() else 0
+                new = await checkout_git(
+                    checkout, tree, "ls-files", "--others", "--exclude-standard"
+                )
+                files += len(new.splitlines())
+        words = len(summary.split())
+        keeps = self.stays_open(checkouts)
+        changes = (
+            f"its changes ({files} file{'s' if files != 1 else ''}, +{added} −{removed})"
+            if files
+            else "no changes"
+        )
+        where = " in a copy of its worktree" if any(c.get("worktree") for c in checkouts) else ""
+        line = (
+            f"Sends a summary ({words} words) and {changes} to a new "
+            f"{agents.display(agent)} worker{where if keeps else ''}; this one "
+            + ("stays open." if keeps else "closes: the new one goes on in its folders.")
+        )
+        return {
+            "line": line,
+            "words": words,
+            "files": files,
+            "added": added,
+            "removed": removed,
+            "stays_open": keeps,
+        }
+
+    async def continue_on(self, session_id: str, agent: str) -> dict:
+        """Continue with <agent>… (the owner's, from a worker's ⋯ or by asking the Router): a
+        new worker on that agent goes on with this one's work, from a summary of where it
+        stands, in a copy of its worktrees: this one stays open. One that writes in the owner's
+        folder or a clone of its own hands its folders over and closes (never two writing
+        one). Only an idle worker of the owner's; the agent must be able to run it now (else
+        why not, nothing changed)."""
+        row = self.store.session(session_id)
+        self.continue_checks(row, agent)
+        current = self.agent(session_id)
         if agent != COPILOT_AGENT:
             await self.new_worker_agent(agent, bool(row["slack"]))  # Raises why it cannot.
         summary = await self.handoff_summary(row, current)
@@ -3958,28 +4074,40 @@ class Runtime:
         row = self.store.session(session_id)
         if row["closed_at"]:
             raise ValueError("It was closed meanwhile.")
-        if row["status"] in {"working", "starting", "queued"} or self.states[session_id].held:
-            raise ValueError("It is at work: stop it first, or wait until it is done.")
-        if self.is_elsewhere(row):
-            raise ValueError("It is open in a terminal: exit it there first.")
+        self.continue_checks(row, agent)
         new_id = str(uuid4())
         title = row["title"]
-        handed = {"repos": row["repos"] or "[]", "project": row["project"] or ""}
-        # Its checkouts are the new worker's: closing this one removes none of them, nor its
-        # workspace (Workspaces.release). It closes first, a turn begun meanwhile with it, and
-        # what it left running: its process gone before another writes in its folders.
-        self.store.update_session(session_id, repos="[]", project="")
-        self.store.set(f"continued:{session_id}", new_id)
-        await self.workers.close(session_id, by="you")
-        await self.worker_gone(session_id, current)
+        checkouts = self.workspaces.checkouts(row)
+        keeps, forked = self.stays_open(checkouts), []
+        if keeps:
+            workspace, forked = await self.workspaces.fork_checkouts(
+                new_id, title, checkouts, carry=not row["slack"]
+            )
+            for old, new in (
+                (o, n) for n in forked for o in checkouts if o.get("repo") == n.get("repo")
+            ):
+                summary = summary.replace(old["path"], new["path"])
+            shared = [c for c in checkouts if not c.get("worktree")]
+            handed = {"repos": json.dumps([*forked, *shared]), "project": row["project"] or ""}
+            cwd = ([*forked, *shared] or [{"path": str(workspace)}])[0]["path"]
+            branch = forked[0]["branch"] if forked else ""
+        else:
+            handed = {"repos": row["repos"] or "[]", "project": row["project"] or ""}
+            workspace, cwd, branch = self.workspaces.workspace(row), row["cwd"], row["branch"]
+            # Its checkouts are the new worker's: closing this one removes none of them, nor
+            # its workspace (Workspaces.release). It closes first, a turn begun meanwhile with
+            # it, and what it left running: its process gone before another writes there.
+            self.store.update_session(session_id, repos="[]", project="")
+            self.store.set(f"continued:{session_id}", new_id)
+            await self.workers.close(session_id, by="you")
+            await self.worker_gone(session_id, current)
         self.store.create_session(
-            new_id, WORKER, title, "queued", cwd=row["cwd"], branch=row["branch"],
-            slack=row["slack"],
-        )  # fmt: skip
+            new_id, WORKER, title, "queued", cwd=cwd, branch=branch, slack=row["slack"]
+        )
         if agent != COPILOT_AGENT:
             self.store.set(f"agent:{new_id}", agent)
             self.store.set(f"created:{new_id}", "1")
-        self.store.set(f"workspace:{new_id}", str(self.workspaces.workspace(row)))
+        self.store.set(f"workspace:{new_id}", str(workspace))
         # Its task, folders and permission checks as this one's (Ask first, if chosen for it).
         self.store.update_session(
             new_id,
@@ -3989,11 +4117,18 @@ class Runtime:
             yolo=row["yolo"] or "",
         )
         self.store.set(f"continues:{new_id}", session_id)
+        if group := self.store.get(f"compare:{session_id}"):
+            self.store.set(f"compare:{new_id}", group)
         task = self.tasks.create(new_id, title, summary[:4000])
+        label = agents.display(agent)
         self.add_message(
             session_id,
             "notice",
-            f"Continued on {agents.display(agent)} by a new worker, “{title}”, in its folders.",
+            f"Continued on {label} by a new worker, “{title}”"
+            + (", in a copy of its worktree" if forked else "")
+            + "; this one stays open."
+            if keeps
+            else f"Continued on {label} by a new worker, “{title}”, in its folders.",
             {"continued": new_id},
         )
         self.add_message(
@@ -4008,7 +4143,87 @@ class Runtime:
         self.add_message(new_id, "router", summary, {"prompt": prompt, "task_id": task["id"]})
         self.publish_session(self.store.session(new_id))
         self.background(self.workers.pump())
-        return {"session_id": new_id, "task_id": task["id"]}
+        agents.used(self.store, agent)
+        return {"session_id": new_id, "task_id": task["id"], "stays_open": keeps}
+
+    async def restart_on(
+        self, session_id: str, agent: str, model: str = "", effort: str = ""
+    ) -> dict:
+        """Restart on <agent> (a worker's start line, its agent before its first step): the
+        same task, its first message as it was, on another agent; the first worker closes, its
+        folders and task handed over. Only a worker of the owner's that has done nothing yet;
+        the agent must be able to run it now (else why not, nothing changed). No step to
+        confirm: nothing was done to lose."""
+        row = self.store.session(session_id)
+        if row["role"] != WORKER or row["closed_at"] or self.special(row):
+            raise ValueError("Only an open worker of yours can start over on another agent.")
+        if not self.store.get(f"untouched:{session_id}"):
+            raise ValueError("It has begun its work: use Continue with… instead.")
+        if self.is_elsewhere(row):
+            raise ValueError("It is open in a terminal: exit it there first.")
+        current = self.agent(session_id)
+        if agent == current:
+            raise ValueError(f"It already runs on {agents.display(agent)}.")
+        if agent != COPILOT_AGENT:
+            await self.new_worker_agent(agent, bool(row["slack"]))  # Raises why it cannot.
+            await self.check_agent_model(agent, model)
+        else:
+            await self.check_model(model)
+        first = next((m for m in self.store.messages(session_id) if m["kind"] == "router"), None)
+        task = self.tasks.current(session_id)
+        row = self.store.session(session_id)
+        if row["closed_at"] or not self.store.get(f"untouched:{session_id}"):
+            raise ValueError("It has begun its work meanwhile: use Continue with… instead.")
+        new_id, title = str(uuid4()), row["title"]
+        handed = {"repos": row["repos"] or "[]", "project": row["project"] or ""}
+        self.store.update_session(session_id, repos="[]", project="")
+        self.store.set(f"continued:{session_id}", new_id)
+        if task:
+            self.tasks.hand_to(task["id"], new_id)  # Its task is the new worker's (not ended).
+        self.store.delete(f"untouched:{session_id}")
+        await self.workers.close(session_id, by="you")
+        await self.worker_gone(session_id, current)
+        self.store.create_session(
+            new_id, WORKER, title, "queued", cwd=row["cwd"], branch=row["branch"],
+            slack=row["slack"],
+        )  # fmt: skip
+        if agent != COPILOT_AGENT:
+            self.store.set(f"agent:{new_id}", agent)
+            self.store.set(f"created:{new_id}", "1")
+            if model or effort:
+                self.store.set(
+                    f"agentmodel:{new_id}", json.dumps({"model": model, "effort": effort})
+                )
+        elif model or effort:
+            self.store.update_session(new_id, model=model, effort=effort)
+        self.store.set(f"workspace:{new_id}", str(self.workspaces.workspace(row)))
+        self.store.update_session(
+            new_id, task=row["task"] or "", project=handed["project"], repos=handed["repos"],
+            yolo=row["yolo"] or "",
+        )  # fmt: skip
+        if task:
+            self.store.execute("UPDATE sessions SET task_id=? WHERE id=?", (task["id"], new_id))
+        self.store.set(f"continues:{new_id}", session_id)
+        self.store.set(f"untouched:{new_id}", "1")
+        if group := self.store.get(f"compare:{session_id}"):
+            self.store.set(f"compare:{new_id}", group)
+        label = agents.display(agent)
+        self.add_message(
+            session_id, "notice", f"Restarted on {label} by a new worker.", {"continued": new_id}
+        )
+        if first:
+            meta = dict(first["meta"] or {})
+            self.add_message(new_id, "router", first["text"], meta)
+        self.add_message(
+            self.router_id(),
+            "notice",
+            f"Restarted “{title}” on {label}",
+            {"session_id": new_id, **({"task_id": task["id"]} if task else {})},
+        )
+        self.publish_session(self.store.session(new_id))
+        self.background(self.workers.pump())
+        agents.used(self.store, agent)
+        return {"session_id": new_id, **({"task_id": task["id"]} if task else {})}
 
     async def worker_gone(self, session_id: str, agent: str):
         """Its own process (another agent's that runs one per worker: Claude's) has ended."""
@@ -4342,7 +4557,7 @@ class Runtime:
             "agents": [entry for entry in found if entry["found"] or entry["enabled"]],
             # What it supports, for when none is found ("the Codex CLI").
             "supported": [agents.INSTALL[name] for name in agents.NAMES],
-            "new_workers": agents.new_workers(self.store),
+            "new_workers": agents.new_workers_choice(self.store),
             "router_chooses": bool(agents.stored(self.store).get(agents.ROUTER_CHOOSES)),
             "sandboxed": bool(settings.worker_sandbox and self.sandbox_host),
             # Chief of Staff's own sessions this release runs on another agent: where each was
@@ -4361,6 +4576,14 @@ class Runtime:
         }
 
     async def look_for_agent(self, name: str) -> dict:
+        """One agent's row (look_for_agents), with its status as the @ picker says it."""
+        entry = await self.looked_at_agent(name)
+        status = self.agent_status(name)
+        return entry | {
+            key: status[key] for key in ("status", "said", "pays", "fix") if key in status
+        }
+
+    async def looked_at_agent(self, name: str) -> dict:
         chosen = agents.configured(self.store).get(name, {})
         entry: dict[str, Any] = {
             "name": name,
@@ -4388,7 +4611,12 @@ class Runtime:
                 facts = await agents.look(name, self.agent_folder(name))
         except Exception as exc:
             entry["problem"] = describe(exc)
+            self.glanced[name] = (time.monotonic(), entry["problem"])
             return entry
+        self.glanced[name] = (
+            time.monotonic(),
+            {"version": facts.get("version", ""), "account": facts.get("account", "")},
+        )
         models = [described(model) for model in facts["models"]]
         if facts.get("models_known", True):
             self.agent_models_cache[name] = (time.monotonic(), models)
@@ -4495,6 +4723,68 @@ class Runtime:
             "router_chooses": agents.router_chooses(self.store),
         }
 
+    def agent_status(self, name: str) -> dict:
+        """An agent as the @ picker and Settings say it: ready (and whose plan or key it
+        uses), its sign-in needed or not installed (and the command that makes it ready, the
+        owner's to run), or why it cannot run; whether it is on for workers. From what is known
+        (its glance, its process, its last start), nothing run for it."""
+        on = name == COPILOT_AGENT or name in agents.turned_on(self.store)
+        entry: dict[str, Any] = {"name": name, "label": agents.display(name), "on": on}
+        if name == COPILOT_AGENT:
+            return entry | {"status": agents.READY, "said": "Ready", "pays": agents.COPILOT_PAYS}
+        if name not in self.agents_found():
+            return entry | agents.status_of(name, "not installed")
+        seen = self.glanced.get(name, (0.0, None))[1]
+        facts = seen if isinstance(seen, dict) else {}
+        backend, _ = self.connection(name)
+        why = "" if backend and backend.alive() else self.agent_failed.get(name, "")
+        if not why and isinstance(seen, str) and not (backend and backend.alive()):
+            why = seen
+        if why:
+            return entry | agents.status_of(name, why)
+        if not facts and not (backend and backend.alive()):
+            return entry | {"status": agents.CHECKING, "said": agents.STATUS_WORDS["checking"]}
+        return entry | {
+            "status": agents.READY,
+            "said": agents.STATUS_WORDS[agents.READY],
+            "pays": agents.pays(name, facts.get("account", "")),
+        }
+
+    def agents_status(self) -> list[dict]:
+        """Every agent's status (agent_status), Copilot first: only where another agent is
+        installed or on (with Copilot alone, nothing of agents is in the page)."""
+        if not (self.agents_found() or agents.turned_on(self.store)):
+            return []
+        return [self.agent_status(name) for name in (COPILOT_AGENT, *agents.NAMES)]
+
+    async def refresh_agent_status(self) -> list[dict]:
+        """The page asks (the @ picker opened, Settings shown): each installed agent not
+        running now glanced at again (its version and sign-in, in its own folder of Chief of
+        Staff's) unless it was within STATUS_SECONDS; its status then."""
+        for name in self.agents_found():
+            backend, _ = self.connection(name)
+            at = self.glanced.get(name, (float("-inf"), None))[0]
+            if (backend and backend.alive()) or time.monotonic() - at < STATUS_SECONDS:
+                continue
+            with suppress(Exception):
+                await self.glance_agent(name)  # (Why it cannot run is its status.)
+        return self.agents_status()
+
+    async def glance_agent(self, name: str) -> dict:
+        """An agent's glance (agents.glance), kept as its status: raises with why it cannot
+        run, kept too."""
+        try:
+            facts = await agents.glance(name, self.agent_folder(name))
+        except Exception as exc:
+            self.glanced[name] = (time.monotonic(), describe(exc))
+            raise
+        self.glanced[name] = (time.monotonic(), dict(facts))
+        if self.agent_failed.get(name) and agents.status_of(name, self.agent_failed[name])[
+            "status"
+        ] in {agents.SIGN_IN, agents.MISSING}:
+            self.agent_failed.pop(name, None)  # Signed in (installed) since its last start.
+        return facts
+
     def agents_found(self) -> list[str]:
         """The other agents installed here (their CLI on the PATH: nothing runs), looked at a
         minute apart at most; none on Windows, nor in the demo (its own world)."""
@@ -4516,7 +4806,7 @@ class Runtime:
             if name in on or self.store.get(f"{agents.OFFERED}{name}") or name in self.offers:
                 continue
             try:
-                facts = await agents.glance(name, self.agent_folder(name))
+                facts = await self.glance_agent(name)
             except Exception as exc:
                 logger.info("No first-run card for %s: %s", name, describe(exc))
                 continue
@@ -7855,6 +8145,10 @@ class Runtime:
         ):
             return same  # The same answer again within a minute (a turn retried, say): once.
         message = self.store.add_message(session_id, kind, text, meta)
+        if kind in DOING and self.store.get(f"untouched:{session_id}"):
+            # Its first step: Restart on… gives way to Continue with….
+            self.store.delete(f"untouched:{session_id}")
+            self.publish_session(self.store.session(session_id))
         # What the UI shows, without the prompt it was sent as (the same text again, or more).
         shown = {k: v for k, v in (message.get("meta") or {}).items() if k != "prompt"}
         self.bus.publish("message", {**message, "meta": shown})
@@ -8016,6 +8310,9 @@ class Runtime:
         from_home: bool = False,
         agent: str = "",
         task_id: str = "",
+        compare: Sequence[str] = (),
+        agent_model: str = "",
+        agent_effort: str = "",
         typed: bool = False,
         settings_digest: str = "",
     ) -> dict:
@@ -8023,10 +8320,11 @@ class Runtime:
         worker is also noted for the Router (`tell_router`), which must know what the owner
         asked for. `from_home`: written on Home (@ a worker), where its answer is shown too.
         `agent`: the coding agent the owner chose for it in the composer (@codex: the Router's
-        new workers for it run there). `task_id`: the task of the worker's they look at in its
-        chat (see chat_task). `typed`: written in that worker's own chat, which showed
-        `settings_digest` as the line on its folder's settings that waits for them
-        (settings_typed)."""
+        new workers for it run there; `agent_model` and `agent_effort`, chosen with it).
+        `compare`: several agents chosen (@codex @claude): the task runs on each. `task_id`:
+        the task of the worker's they look at in its chat (see chat_task). `typed`: written
+        in that worker's own chat, which showed `settings_digest` as the line on its folder's
+        settings that waits for them (settings_typed)."""
         row = self.store.session(session_id)
         if (
             typed
@@ -8036,12 +8334,13 @@ class Runtime:
             and (said := await self.settings_typed(row, text, settings_digest, task_id))
         ):
             return said
-        if agent and row["role"] == ROUTER and agent not in {COPILOT_AGENT, *self.agents_on()}:
-            # Chosen in the composer, then turned off before it was sent: said, not dropped.
-            raise ValueError(
-                f"{agents.display(agent)} is turned off in Settings → Coding agents: turn it "
-                "on, or send this without choosing it."
-            )
+        for chosen in (agent, *compare) if row["role"] == ROUTER else ():
+            if chosen and chosen not in {COPILOT_AGENT, *self.agents_on()}:
+                # Chosen in the composer, then turned off before it was sent: said, not dropped.
+                raise ValueError(
+                    f"{agents.display(chosen)} is turned off in Settings → Coding agents: turn "
+                    "it on, or send this without choosing it."
+                )
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id, restore=True)
         if row["role"] == WORKER:
@@ -8121,9 +8420,24 @@ class Runtime:
             meta["ref"] = "o" + uuid4().hex[:6]
             prompt = wrap("owner", "message", text, ref=meta["ref"], reply_in=spoken)
             notes += [self.projects_note(), self.toolset.related_hint(text)]
-            if agent in {COPILOT_AGENT, *self.agents_on()}:
+            compared = list(dict.fromkeys(compare))
+            if len(compared) > 1:
+                # Several chosen in the composer: the task on each, side by side.
+                meta["agents"] = compared
+                notes.append(
+                    "The owner chose "
+                    + " and ".join(agents.display(name) for name in compared)
+                    + " for this, to compare: call spawn_worker once (its agent and "
+                    "compare_with are set for you), then give both results side by side."
+                )
+            elif agent in {COPILOT_AGENT, *self.agents_on()}:
                 # Chosen in the composer: as if they had named it.
                 meta["agent"] = agent
+                meta |= {
+                    f"agent_{key}": value
+                    for key, value in (("model", agent_model), ("effort", agent_effort))
+                    if value
+                }
                 notes.append(
                     f"The owner chose {agents.display(agent)} for this: spawn_worker's agent "
                     f'is "{agent}" for the workers it needs.'
@@ -9035,6 +9349,18 @@ class Runtime:
                 if self.agents and (new := self.store.get(f"continued:{row['id']}"))
                 else {}
             ),
+            # Nothing done yet (no step, no report): it can start over on another agent.
+            **(
+                {"untouched": True}
+                if self.agents and not row["closed_at"] and self.store.get(f"untouched:{row['id']}")
+                else {}
+            ),
+            # One of the workers doing the same task on several agents (Compare: <title>).
+            **(
+                {"compare": json.loads(group)}
+                if self.agents and (group := self.store.get(f"compare:{row['id']}"))
+                else {}
+            ),
         }
 
     async def read_file(self, raw: str, session_id: str = "") -> dict:
@@ -9546,6 +9872,8 @@ class Runtime:
             **({"agents": self.agents_view()} if self.agents_on() else {}),
             # Only where another agent is installed: its Settings tab, and first-run cards.
             **({"agents_found": found} if (found := self.agents_found()) else {}),
+            # Each agent's status for the @ picker (ready, its sign-in needed, not installed).
+            **({"agents_status": status} if (status := self.agents_status()) else {}),
             **({"agent_offers": offers} if (offers := self.agent_offers()) else {}),
             # Cards for workers their named agent could not start, not answered yet.
             **(

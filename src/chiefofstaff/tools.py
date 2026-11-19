@@ -1471,6 +1471,60 @@ class Tools:
             for name, description, params, handler in definitions
         }
 
+    def compared(self, params: SpawnWorker, caller: str) -> list[str]:
+        """The agents one task runs on side by side (Compare): the two or more the owner chose
+        in the composer (@codex @claude), else spawn_worker's agent and compare_with; none for
+        one agent."""
+        chips = self.runtime.chosen_agents() if caller == self.runtime.router_id() else []
+        if len(chips) > 1:
+            return chips
+        others = list(getattr(params, "compare_with", None) or [])
+        if not others:
+            return []
+        first = getattr(params, "agent", "") or (chips[0] if chips else "")
+        first = first or agents.new_workers(self.store)
+        return list(dict.fromkeys([first, *others]))
+
+    async def spawn_compare(self, params: SpawnWorker, caller: str, names: list[str]) -> dict:
+        """One task on several agents (the owner's "do this with Codex and Claude"): a worker
+        each, each in a worktree of its own, grouped as one Compare row; one an agent cannot
+        run says why on its card, the others start."""
+        if len(names) < 2:
+            raise ValueError("Compare: name two agents or more.")
+        if params.in_place:
+            raise ValueError(
+                "Not started: a compare runs each worker in a worktree of its own, never in the "
+                "owner's folder (in_place): leave in_place out."
+            )
+        title = deliverable_title(params.title)
+        group = {"id": uuid4().hex[:8], "title": title, "agents": names}
+        results: list[dict] = []
+        for name in names:
+            # A worktree of its own of its project (with none, its own folder is its own).
+            isolate = bool(params.project or params.more_projects)
+            part = params.model_copy(
+                update={"isolate": isolate, "model": "", "compare_with": [], "agent": name}
+            )
+            try:
+                found = await self.t_spawn_worker(part, caller, agent=name)
+            except ValueError as exc:
+                results.append({"agent": name, "not_started": str(exc)})
+                continue
+            self.store.set(f"compare:{found['session_id']}", json.dumps(group))
+            self.runtime.publish_session(self.store.session(found["session_id"]))
+            results.append({"agent": name, **found})
+        if not any("session_id" in found for found in results):
+            raise ValueError(
+                "Not started on any: " + " ".join(found["not_started"] for found in results)
+            )
+        return {
+            "compare": title,
+            "workers": results,
+            "note": "The same task on each agent, each in a worktree of its own. Once each has "
+            "reported, give the owner the results side by side (a short table: agent, outcome, "
+            "what it changed) and say which you would keep.",
+        }
+
     def spawn_on(self, names: Sequence[str], chooses: bool = False) -> Any:
         """spawn_worker as the Router has it while other coding agents are on: with `agent`,
         set only when the owner named one (more-agents.md 5.9); `chooses` (the owner lets the
@@ -1496,6 +1550,15 @@ class Tools:
                     ),
                 )
             }
+            fields["compare_with"] = (
+                list[choices],
+                Field(
+                    default_factory=list,
+                    description="Compare, only when the owner asks for the same task on several "
+                    'agents ("do this with Codex and Claude"): the agents beside `agent` it also '
+                    "runs on, a worker each in a worktree of its own",
+                ),
+            )
             if chooses:
                 fields["owner_named"] = (
                     bool,
@@ -1672,6 +1735,8 @@ class Tools:
         chose for it on a card (else its params' or Settings'); `instead`: what its one notice
         adds then (" on Copilot instead")."""
         self.caller(caller, ROUTER)
+        if not special and not agent and (compared := self.compared(params, caller)):
+            return await self.spawn_compare(params, caller, compared)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
         if not special and (asked := risky(params.instructions)):
             raise ValueError(
@@ -1713,8 +1778,10 @@ class Tools:
             and (chip := self.runtime.chosen_agent())
         ):
             # The owner's @agent in this turn's message: always theirs, over the Router's pick
-            # and any agent it names.
+            # and any agent it names; with the model and effort they chose with it.
             named, picked = chip, ""
+            if chosen := self.runtime.chip_model(chip):
+                params = params.model_copy(update=chosen)
         agent, agent_notice = agents.COPILOT, ""
         if not special and (self.runtime.agents or named or picked):
             try:
@@ -1728,12 +1795,15 @@ class Tools:
                     # Never started on another: the owner chooses (their card's actions). The
                     # card says why: the Router does not say it again.
                     self.runtime.agent_refused_card(named, str(exc), params.model_dump())
+                    instead = agents.display(self.runtime.instead_of(named))
                     raise ValueError(
                         f"Not started: {exc} The owner sees this on a card in this chat, with "
-                        "what they can do (run it on Copilot instead, or wait): do not say it "
-                        "again, and start it nowhere else."
+                        f"what they can do (run it on {instead} instead, or wait): do not say "
+                        "it again, and start it nowhere else."
                     ) from exc
                 raise
+            if named and agent == named:
+                agents.used(self.store, agent)  # The owner's choice: Last used's.
         if special == "connector":
             # Watch for you on the agent Settings put it on, once that can run it.
             agent = await self.runtime.helper_agent(special)
@@ -1808,6 +1878,8 @@ class Tools:
         self.store.create_session(
             session_id, WORKER, title, "queued", cwd=cwd, branch=branch, slack=slack
         )
+        if not special:
+            self.store.set(f"untouched:{session_id}", "1")  # Until its first step (restart_on).
         if agent != agents.COPILOT:
             self.store.set(f"agent:{session_id}", agent)  # For its life.
             # Read by an earlier version, which runs every worker on Copilot: one to resume,
