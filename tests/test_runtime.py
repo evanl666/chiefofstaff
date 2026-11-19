@@ -1409,6 +1409,33 @@ async def test_nothing_reaches_copilot_while_it_starts_nor_a_refused_cli_again(m
     )
 
 
+async def test_a_cli_refused_at_an_earlier_start_is_not_started_on_a_first_use(
+    tmp_path, monkeypatch
+):
+    """The owner's CLI kept as refused (REFUSED_CLI): Copilot's fallback is set up at once, and
+    the owner's client is never started, by the start nor on a first use, even when no fallback
+    could be set up."""
+    for fails in (False, True):
+        fake, setting_up = FakeClient(), threading.Event()
+        made = sdk_clients(monkeypatch, fake, setting_up, fails=fails)
+        backend = backend_module.copilot_backend("git")
+        backend.refusals = tmp_path / f"refused-{fails}.json"
+        key = backend_module.refused_key(backend.command, "1.0.114")
+        backend_module.keep_refusal(backend.refusals, key, NEWER)
+        starting = asyncio.ensure_future(backend.start())
+        opening = asyncio.ensure_future(backend.create_session(session_id="s1", name="x"))
+        setting_up.set()
+        if fails:
+            with pytest.raises(RuntimeError, match="could not be set up: download failed"):
+                await starting
+            with pytest.raises(backend_module.NotStartedError):
+                await opening
+        else:
+            await starting
+            assert (await opening).session_id == "s1" and backend.client is made[1]
+        assert made[0].starts == 0, "the owner's, kept as refused, is never started"
+
+
 async def test_a_message_sent_while_copilot_reconnects_to_its_fallback_goes_out(
     tmp_path, monkeypatch
 ):
