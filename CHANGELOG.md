@@ -42,7 +42,7 @@
   became that task's new result (in place of the one you had, with a second "finished"), or the
   worker was told to report another task it was running. With a check-back on the task, the
   answer went nowhere. Now the answer goes to the Router, as *Answer from …*, and no task
-  changes.
+  changes, also when Copilot failed that turn midway and it went on.
 - **Fixed: a question the Router answered stayed under Needs you.** A worker's question the
   Router answered for you (from what you said before) still said "It waits for your answer"
   until the worker's next report. Now the task goes on at once, as when you answer.

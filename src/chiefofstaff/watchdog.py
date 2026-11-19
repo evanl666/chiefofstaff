@@ -50,9 +50,21 @@ def minutes(seconds: float) -> str:
     return f"{max(1, round(seconds / 60))} min"
 
 
+# The note a turn that failed after some steps goes again with (Events.turn_again): to finish
+# what its instruction asked, which stays the turn's (bug E96: after a retry, its answer to the
+# Router's note on finished work was taken for a report owed on another task).
+RETRY_PROMPT = '<message from="system" type="retry"'
+
+
 def instruction(message: dict) -> bool:
-    """A prompt that asks the worker to do something (not a thread follow-up it may ignore)."""
-    return "prompt" in message["meta"] and not message["meta"].get("thread")
+    """A prompt that asks the worker to do something (not a thread follow-up it may ignore, nor
+    the note to finish a turn that failed: the instruction it retries is the turn's)."""
+    meta = message["meta"]
+    return (
+        "prompt" in meta
+        and not meta.get("thread")
+        and not str(meta["prompt"] or "").startswith(RETRY_PROMPT)
+    )
 
 
 def last_instruction(store: Store, session_id: str) -> int:
@@ -60,8 +72,9 @@ def last_instruction(store: Store, session_id: str) -> int:
     return store.value(
         "SELECT coalesce(max(id), 0) FROM messages WHERE session_id=? "
         "AND json_type(meta, '$.prompt') IS NOT NULL "
-        "AND coalesce(json_extract(meta, '$.thread'), '') IN ('', 0)",
-        (session_id,),
+        "AND coalesce(json_extract(meta, '$.thread'), '') IN ('', 0) "
+        "AND substr(json_extract(meta, '$.prompt'), 1, ?) != ?",
+        (session_id, len(RETRY_PROMPT), RETRY_PROMPT),
     )
 
 

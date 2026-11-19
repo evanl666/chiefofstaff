@@ -5,12 +5,13 @@ asks a decision for, and is named after, is the one its turn is on; a decision c
 long as someone waits on it; checks that turn a report back hold for each message and each
 failing run, not once; more on a task it reported reopens it when it reads it."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 from conftest import call_tool, settle
-from test_progress import busy_worker
+from test_progress import busy_worker, step
 from test_round10_lifecycle import spawn
 from test_round12_checkbacks import NIGHTLY, checking, idle, turn, woken
 from test_round13_ui import BOARD
@@ -122,6 +123,30 @@ async def test_an_acknowledgement_of_a_note_is_not_passed_on(harness):
     await turn(runtime, session)
     await idle(runtime, session, "Thanks, noted.")
     assert len(router_inbound(harness)) == before and not nudged(session)
+
+
+async def test_a_retried_turn_answering_a_note_on_finished_work_is_still_no_report(harness):
+    """E96 after a retry: the turn on the Router's note failed on Copilot's side after a step,
+    and the note to finish it became the turn's instruction: its answer was asked of the running
+    task as a report (or filed as one), not passed on."""
+    runtime, worker, b, a, session = await finished_and_running(harness)
+    note = {"task": "note", "task_id": b["id"], "text": "Which file is the fix in?"}
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker, **note)
+    await turn(runtime, session)
+    step(session, "bash", {"command": "git log -1 --stat"})
+    session.emit("session.error", message="Execution failed: 503 Service Unavailable")
+    await settle(runtime)
+    await asyncio.sleep(0.05)
+    await settle(runtime)
+    assert "finish what is left of it" in session.sent[-1], "retried with a note"
+    await turn(runtime, session)
+    await idle(runtime, session, LONG)
+    assert not nudged(session), "no report is owed on A"
+    assert runtime.tasks.get(a["id"])["status"] == "running"
+    shown = runtime.tasks.get(b["id"])
+    assert (shown["status"], shown["result"]) == ("review", b["result"])
+    answer = router_inbound(harness)[-1]
+    assert answer["text"] == LONG and answer["meta"].get("answered_by") == worker
 
 
 async def test_an_answer_to_the_routers_question_on_work_with_a_check_back_reaches_it(harness):
