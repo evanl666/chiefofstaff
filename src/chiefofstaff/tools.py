@@ -1705,6 +1705,11 @@ class Tools:
         )
         if params.review:
             self.store.set(f"reviewreq:{task['id']}", "1")
+        if not special:
+            # Given out in this turn, from now: a decision recorded in it relies on it. And one
+            # recorded meanwhile (the Router's calls run at once) is this task's too.
+            self.states[caller].turn_tasks.append(task["id"])
+            decisions = self.with_turn_decisions(caller, params.decisions)
         self.link_decisions(task["id"], decisions)
         await self.replace(replaced, task)
         if not special:
@@ -1719,8 +1724,6 @@ class Tools:
                 if row["id"] not in known
             ]
         self.runtime.peers.link(session_id, [row["id"] for row in peers])
-        if not special:
-            self.states[caller].turn_tasks.append(task["id"])
         if special:  # Its own tools: see Runtime.tool_names.
             self.store.set(f"{special}:{session_id}", "1")
         # A PR the task is to act on is followed: its reviews, replies and CI come to the worker
@@ -2101,9 +2104,9 @@ class Tools:
             )
             if params.review:
                 self.store.set(f"reviewreq:{task['id']}", "1")
+            self.states[caller].turn_tasks.append(task["id"])  # (Before anything awaits.)
             self.link_decisions(task["id"], decisions)
             await self.replace(replaced, task)
-            self.states[caller].turn_tasks.append(task["id"])
             spoken, note = self.report_language(caller, params.text)
             prompt = wrap(
                 "router",

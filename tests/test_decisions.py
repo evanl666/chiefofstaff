@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from conftest import call_tool, env, settle
@@ -231,3 +232,32 @@ async def test_a_changed_decision_that_changes_nothing_gives_the_result_back(har
     task = runtime.tasks.get(api["task_id"])
     assert task["status"] == "review" and task["result"] == "Email login."
     assert not (runtime.task_actions.receipts(task) or {}).get("stale")
+
+
+async def test_a_decision_recorded_while_the_task_relying_on_it_starts_is_linked(
+    harness, monkeypatch
+):
+    """Live e2e (f1): the Router recorded the owner's decision and started the task relying on
+    it in one step (parallel calls): recorded while the task's folder was being made, the
+    decision was linked to no task, so a change of it reached no worker."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    making, go = asyncio.Event(), asyncio.Event()
+    prepare = runtime.workspaces.prepare_directory
+
+    async def slow(*args, **kwargs):
+        making.set()
+        await go.wait()
+        return await prepare(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.workspaces, "prepare_directory", slow)
+    spawning = asyncio.ensure_future(
+        call_tool(runtime, "spawn_worker", router, title="Write api.md",
+                  instructions="Write api.md with a GET /users example.", why_new="t")
+    )  # fmt: skip
+    await making.wait()
+    said = await call_tool(runtime, "record_decision", router, decision="The API uses snake_case")
+    go.set()
+    task_id = json.loads((await spawning).text_result_for_llm)["task_id"]
+    linked = harness.store.all("SELECT decision_id FROM task_decisions WHERE task_id=?", (task_id,))
+    assert linked, said.text_result_for_llm
