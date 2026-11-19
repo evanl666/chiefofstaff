@@ -555,8 +555,15 @@ class CopilotBackend:
         try:
             answer = await client._client.request("session.list", {})  # type: ignore[union-attr]
             listed = []
+            unread = 0
             for item in answer.get("sessions", []):
-                meta = SessionMetadata.from_dict(item)
+                try:
+                    meta = SessionMetadata.from_dict(item)
+                except (AssertionError, ValueError, TypeError, AttributeError):
+                    # One the SDK can't read (a field missing, a time it doesn't parse) is left
+                    # out, not every session with it: the sidebar showed none of the owner's.
+                    unread += 1
+                    continue
                 meta.made_by_us = made_by_us(item)  # type: ignore[attr-defined]
                 meta.made_by_program = made_by_a_program(item)  # type: ignore[attr-defined]
                 vars(meta).update(
@@ -567,6 +574,8 @@ class CopilotBackend:
                     clients_listed=True,
                 )
                 listed.append(meta)
+            if unread:
+                logger.warning("Left out %d Copilot session(s) the SDK can't read.", unread)
             return listed
         except Exception:
             return await client.list_sessions()

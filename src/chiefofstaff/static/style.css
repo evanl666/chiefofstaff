@@ -1169,6 +1169,8 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 /* Their words, and each one's status with since when: as long as the row has room for. */
 #tasks-artifacts .artifact:is(.runs, .in-runs) .a-status { max-width: 20em; }
 :is(#session-list, #external-list) .idle-workers > summary { cursor: pointer; list-style: none; font-size: var(--small); color: var(--muted); padding: 6px 12px; }
+/* Why Other Copilot sessions has no rows, in one quiet line. */
+#external-list > .empty-note { font-size: var(--small); color: var(--muted); padding: 6px 12px; }
 :is(#session-list, #external-list) .idle-workers > summary::-webkit-details-marker { display: none; }
 :is(#session-list, #external-list) .idle-workers > summary::before { content: "▸ "; }
 :is(#session-list, #external-list) .idle-workers[open] > summary::before { content: "▾ "; }

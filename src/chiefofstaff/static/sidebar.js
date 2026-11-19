@@ -292,7 +292,9 @@ function renderExternal() {
   }
   const open = state.external.filter((item) => item.open).length;
   headingCount(state.external.length, open);
+  const empty = noOthers(state.external.length);
   $("#external-list").replaceChildren(
+    ...(empty ? [empty] : []),
     ...state.external.map((item) =>
       el(
         "button",
@@ -321,13 +323,34 @@ function headingCount(total, open) {
   put(summary, "aria-label", words && `Other Copilot sessions, ${words}`);
 }
 export async function loadExternal(refresh = false) {
+  // Read while Copilot was not connected, the list is empty for no reason of its own: read again
+  // once it is (renderExternal).
+  const ready = state.snapshot?.runtime?.state === "ready";
   try {
     state.external = await api(`/api/external${refresh ? "?refresh=true" : ""}`);
-    state.externalRead = true;
-    renderExternal();
+    state.externalRead = ready ? "ready" : "early";
+    state.externalError = "";
   } catch (error) {
-    toast(error.message, "error");
+    // Said in the group, where the rows would be, not only in a passing toast.
+    state.externalError = error.message;
+    state.externalRead = "failed";
   }
+  renderExternal();
+}
+// Why the group has no rows, in one quiet line (an empty group said nothing): Copilot not
+// connected yet, the list not read, or none of the owner's. Null when there are rows.
+function noOthers(count) {
+  if (count || !state.externalRead || state.externalRead === "again") return null;
+  const connected = state.snapshot?.runtime?.state === "ready";
+  if (connected && state.externalRead === "early") {
+    state.externalRead = "again";
+    loadExternal(true);
+    return null;
+  }
+  const why = !connected
+    ? "Shown once Copilot is connected."
+    : state.externalError || (othersOn() && state.othersWhy) || "No other Copilot sessions yet.";
+  return el("div", { class: "empty-note", text: why });
 }
 // A Copilot session Chief of Staff does not manage: its latest conversation, read from its log.
 // A message continues it here (the Router manages it from then on, in its own folder).
@@ -571,7 +594,10 @@ function renderGroup() {
     if (summary.textContent !== `${more.length} more`) summary.textContent = `${more.length} more`;
     place(fold, [summary, ...more.map(row)]);
   }
-  place(list, [...rest.map(row), ...(more.length ? [fold] : [])]);
+  let empty = list.querySelector(":scope > .empty-note");
+  const why = noOthers(items.length);
+  if (why && empty?.textContent !== why.textContent) empty = why;
+  place(list, [...(why ? [empty] : []), ...rest.map(row), ...(more.length ? [fold] : [])]);
   if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
 }
 // Only what moved is moved (what goes first, so the rest need not move).

@@ -1054,6 +1054,7 @@ class Others:
     def clear(self):
         """Forgets every session, and what they said with them."""
         self.listing: list[Any] | None = None
+        self.list_failed = ""  # Why the latest listing failed ("" when it did not).
         self.listed_at = float("-inf")
         self.listed_open: frozenset[str] = frozenset()
         # Open sessions the last listing did not have, with their log's size then (see grown).
@@ -1210,7 +1211,10 @@ class Others:
             listing = list(await backend.list_sessions())
         except Exception as exc:
             logger.warning("Could not list Copilot's sessions: %s", where_failed(exc))
+            # Said where the rows would be (not an empty group with no word of why).
+            self.list_failed = f"Couldn't list your Copilot sessions ({type(exc).__name__})."
             return
+        self.list_failed = ""
         # Which of them a worker or a script made (provenance.py), as the Router sees them.
         made = await self.runtime.provenance.made(listing, self.listed_open)
         self.listing, self.managed, self.made = listing, managed(self.store), made
@@ -1350,7 +1354,7 @@ class Others:
         return {
             "run": self.run,
             "pass": self.passes,
-            "why": WHY["unlisted"] if unlisted else "",
+            "why": WHY["unlisted"] if unlisted else self.list_failed,
             "rows": [self.row(self.said(key, now), now, lease=True) for key in self.order],
         }
 

@@ -615,3 +615,46 @@ def test_an_actions_reply_is_how_things_are_once_it_is_done(app_client, monkeypa
     assert shown.json()["status"] == "failed", "not the running it was moved to on the way"
     closed = app_client.post(f"/api/sessions/{worker}/close", headers=ORIGIN).json()
     assert closed["ok"] and closed["id"] == worker and closed["closed_at"], "the worker as it is"
+
+
+# The owner's other Copilot sessions: none hidden by one the listing can't read; never silent.
+
+
+async def test_one_session_the_listing_cannot_read_hides_no_other():
+    from chiefofstaff.backend import CopilotBackend
+
+    times = {"startTime": "2026-11-18T00:00:00Z", "modifiedTime": "2026-11-18T00:00:00Z"}
+    good = {"sessionId": "a", **times, "isRemote": False, "clientName": "github/cli",
+            "lastClientName": "github/cli", "isDetached": False, "mcTaskId": "m1"}  # fmt: skip
+    odd = [
+        {"sessionId": "b", "startTime": times["startTime"], "isRemote": False},  # No time.
+        {"sessionId": "c", **times, "isRemote": False, "context": {"branch": "main"}},  # No cwd.
+    ]
+
+    class Rpc:
+        async def request(self, method, payload):
+            return {"sessions": [odd[0], good, odd[1]]}
+
+    class Client:
+        _client = Rpc()
+
+        async def list_sessions(self):
+            from copilot.client import SessionMetadata
+
+            return [SessionMetadata.from_dict(item) for item in (await Rpc().request("", {}))[
+                "sessions"]]  # fmt: skip
+
+    listed = await CopilotBackend(Client()).list_sessions()  # type: ignore[arg-type]
+    assert [meta.session_id for meta in listed] == ["a"]
+    assert listed[0].clients_listed
+
+
+async def test_the_index_says_why_when_copilot_cannot_list_its_sessions(harness):
+    runtime = await harness.connect()
+
+    async def failing():
+        raise RuntimeError("session.list timed out")
+
+    harness.client.list_sessions = failing
+    await runtime.others.list_sessions()
+    assert runtime.others.view()["why"].startswith("Couldn't list your Copilot sessions")
