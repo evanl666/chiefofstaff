@@ -4385,6 +4385,46 @@ async def test_a_closed_workers_changes_are_still_shown(tmp_path):
     assert changed["files"] == 1 and changed["commits"] == 1
 
 
+@pytest.mark.parametrize("fails", [False, True])
+async def test_a_result_just_reported_says_its_changes_are_being_read(tmp_path, monkeypatch, fails):
+    """Live A2: a worker reports done, and its checkouts are read after (in the background: a
+    second or more). Meanwhile its receipts say they are being read, as shown at once and as
+    asked for, not that it changed nothing (an untracked file it made, counted 0); read (or
+    failing to be), no longer."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Receipt", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    task_id = task_of(harness, worker["session_id"])
+    (Path(worker["cwd"]) / "notes").mkdir()
+    (Path(worker["cwd"]) / "notes" / "receipt.txt").write_text("hello\n")
+    shown = []
+    publish = runtime.bus.publish
+
+    def published_task(kind, data=None):
+        if kind == "task" and data["id"] == task_id and data["status"] == "review":
+            shown.append(data["receipts"] or {})
+        publish(kind, data)
+
+    monkeypatch.setattr(runtime.bus, "publish", published_task)
+    if fails:
+
+        async def unreadable(*_):
+            raise RuntimeError("gh broke")
+
+        monkeypatch.setattr(runtime.task_actions, "read_prs", unreadable)
+    await call_tool(runtime, "report", worker["session_id"], status="done", summary="Made it.")
+    meanwhile = runtime.task_actions.view(runtime.tasks.get(task_id))["receipts"] or {}
+    assert meanwhile.get("checking"), meanwhile
+    assert shown and shown[0].get("checking"), "shown at once as being read"
+    await settle(runtime)
+    receipts = runtime.task_actions.view(runtime.tasks.get(task_id))["receipts"] or {}
+    assert not receipts.get("checking") and not shown[-1].get("checking")
+    if not fails:
+        assert receipts["changed"]["files"] == 1 and shown[-1]["changed"]["files"] == 1
+
+
 def slow_reads(monkeypatch) -> dict[str, str]:
     """Reading a worker's worktree (git's snapshot, its changes) takes a while, and lsof sees
     the git doing it run in it. The worktree read now -> by which."""

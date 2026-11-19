@@ -30,6 +30,9 @@
   committed.
 - A Copilot session deleted while open no longer logs a traceback ("'destroy' is not a valid
   ShutdownType").
+- Just after a worker reports, its card says *Checking what it changed…* until its changes are
+  read, instead of "no tests or changes observed" for a second or more (the API's receipts say
+  `checking` meanwhile).
 
 ## 0.1.47 (2026-11-19)
 

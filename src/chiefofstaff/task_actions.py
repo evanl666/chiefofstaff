@@ -950,6 +950,9 @@ class TaskActions:
         # Tasks' starts being recorded (record_base): a result reported meanwhile waits for
         # its start, or it would have no share.
         self.basing: dict[str, asyncio.Future] = {}
+        # Results just reported whose checkouts are being read (collect_evidence, ended), from
+        # when (monotonic): their receipts say so meanwhile, not that nothing changed.
+        self.receipts_due: dict[str, float] = {}
         # An accepted task stays listed while something is followed up for it.
         self.tasks.monitored = lambda task: bool(self.monitoring(task))
         self.tasks.run_check = self.run_check
@@ -988,7 +991,10 @@ class TaskActions:
         criteria = self.tasks.criteria(task)
         # A check learned from a mistake that still fails when the worker said done.
         failing = self.runtime.checks.flags(task["id"])
-        if not commands and not evidence and not criteria and not failing:
+        # Its result was just reported and its checkouts are being read: said so, not that it
+        # changed nothing (nor "Nothing observed").
+        due = task["id"] in self.receipts_due
+        if not (commands or evidence or criteria or failing or due):
             return None
         claims = json.loads(latest["criteria"]) if latest and latest["criteria"] else []
         earlier, since = self.earlier_claims(runs) if criteria else ([], "")
@@ -998,6 +1004,8 @@ class TaskActions:
             earlier=earlier, since=since, said_changed=None if said is None else said == "1",
         )  # fmt: skip
         found["flags"] += failing
+        if due:
+            found["checking"] = True
         if found.get("tests"):
             # Tests of its own work: run where it changed code. A task with no checkout ran
             # someone else's tests (a clone it read): shown as where it ran them, not a pass.
@@ -1155,10 +1163,40 @@ class TaskActions:
         run_id = self.store.value(
             "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (task_id,)
         )
-        return self.collected(task_id, keep_stale, ended, now(), run_id or "")
+        asked = time.monotonic()
+        found = self.collected(task_id, keep_stale, ended, now(), run_id or "", asked)
+        return self.result_read(task_id, found, asked) if ended else found
+
+    async def result_read(self, task_id: str, reading: Coroutine[Any, Any, None], asked: float):
+        """A just-reported result's checkouts read (or not, failing): its receipts no longer
+        say they are being read, shown so (when reading did not show it already)."""
+        try:
+            await reading
+        finally:
+            if self.read_now(task_id, asked):
+                with suppress(Exception):
+                    self.publish(self.tasks.get(task_id))
+
+    def result_due(self, task_id: str):
+        """A result reported now, its checkouts read next (collect_evidence, ended)."""
+        self.receipts_due[task_id] = time.monotonic()
+
+    def read_now(self, task_id: str, asked: float) -> bool:
+        """Whether a result's receipts were due by a reading asked for at `asked` (a result
+        reported again since is due by a later one), no longer due now."""
+        if self.receipts_due.get(task_id, asked + 1) > asked:
+            return False
+        del self.receipts_due[task_id]
+        return True
 
     async def collected(
-        self, task_id: str, keep_stale: bool, ended: bool, started: str, run_id: str = ""
+        self,
+        task_id: str,
+        keep_stale: bool,
+        ended: bool,
+        started: str,
+        run_id: str = "",
+        asked: float = 0.0,
     ):
         task = self.tasks.get(task_id)
         row = self.store.find_session(task["session_id"])
@@ -1215,6 +1253,8 @@ class TaskActions:
             self.store.execute(
                 "UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run["id"])
             )
+            if ended:
+                self.read_now(task_id, asked)  # (Shown read, with what was found.)
             self.publish(self.tasks.get(task_id))
 
     def scope(self, task: dict, checkout: dict) -> Scope | None:

@@ -3288,6 +3288,9 @@ class Tools:
                 self.states[caller].turn_reported.add(task["id"])
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 self.runtime.task_actions.keep_earlier_result(task, clip_report(shown))
+                # Read in the background (below): its receipts say so until then, not that it
+                # changed nothing.
+                self.runtime.task_actions.result_due(task["id"])
                 task = self.tasks.move(task["id"], "review", result=clip_report(shown))
                 # The workers it works with that are still at it get its result.
                 self.runtime.background(self.runtime.peers.finished(caller, task, params.summary))

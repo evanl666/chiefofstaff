@@ -243,12 +243,13 @@ async def latest_task(ctx: Ctx, worker: str) -> dict | None:
 
 
 async def task_ended(ctx: Ctx, worker: str, what: str, timeout=900, statuses=FINISHED) -> dict:
-    """Its latest task, once it is in one of `statuses` (a failed or cancelled one fails it)."""
+    """Its latest task, once it is in one of `statuses` (a failed or cancelled one fails it),
+    its receipts read (just reported, they say they are being read: A2 read them then)."""
 
     async def check():
         task = await latest_task(ctx, worker)
         if task and task["status"] in statuses:
-            return task
+            return None if (task.get("receipts") or {}).get("checking") else task
         if task and task["status"] in {"failed", "cancelled"} - set(statuses):
             report = await ctx.app.get(f"/api/tasks/{task['id']}/report")
             raise AssertionError(f"{what}: the task {task['status']}: {json.dumps(report)[:800]}")

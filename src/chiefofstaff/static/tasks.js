@@ -1248,7 +1248,9 @@ function report(task) {
     more.push(el("span", { class: "receipt none", title: "The code these results are about", text: `at ${item.commit.slice(0, 7)}${item.edited ? " + edits" : ""}` }));
   }
   if (!receipts.verdict && !receipts.tests && !changed.files && !(receipts.prs || []).length) {
-    more.push(el("span", { class: "receipt none", text: receipts.observed ? `${plural(receipts.observed, "command")}, no tests or changes observed` : "Nothing observed" }));
+    // Just reported: its checkouts are being read (not "nothing changed" meanwhile).
+    const none = receipts.observed ? `${plural(receipts.observed, "command")}, no tests or changes observed` : "Nothing observed";
+    more.push(el("span", { class: "receipt none", text: receipts.checking ? "Checking what it changed…" : none }));
   }
   const criteria = (receipts.criteria || []).length
     ? el(
