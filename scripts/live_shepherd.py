@@ -1578,7 +1578,12 @@ async def sw11_audit(ctx: Ctx):
 
 
 async def green_pr(ctx: Ctx, branch: str) -> tuple[str, int, str]:
-    target, number = await ctx.worker_pr(branch, {"app/timeouts.py": GREEN}, f"Green ({branch})")
+    # A note of its own: once one green PR is merged, GREEN alone is no change to the base.
+    target, number = await ctx.worker_pr(
+        branch,
+        {"app/timeouts.py": GREEN, f"notes/{branch}.md": f"# {branch}\n"},
+        f"Green ({branch})",
+    )
     head = ctx.repo.pr(number)["head"]["sha"]
     assert await ctx.repo.ci(head) == "success"
     return target, number, head
