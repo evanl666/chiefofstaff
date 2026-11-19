@@ -91,8 +91,9 @@ SPAWN_WORKER = "Start a new worker session for one task. Returns its session id.
 CONTINUE_WORKER = (
     "Only when the owner asks to move a worker's work to another coding agent (\"hand this to "
     'Claude", "continue it on Codex"): a new worker on that agent goes on with it from a '
-    "summary, in the same folders, and the old worker closes. Only for an idle worker: if it "
-    "is at work, tell the owner to stop it or wait. Never on your own initiative."
+    "summary, in a copy of its worktree, and the old worker stays open (one working in the "
+    "owner's own folder hands it over and closes). Only for an idle worker: if it is at work, "
+    "tell the owner to stop it or wait. Never on your own initiative."
 )
 
 

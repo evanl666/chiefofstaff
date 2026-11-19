@@ -3932,11 +3932,13 @@ class Runtime:
             json.dumps({"agent": agent, "params": params, "instead": instead}),
         )
         found = agents.status_of(agent, why)
+        # One line: its status where a command makes it ready (that command under it), else why.
+        said = f"{found['said'].lower()}." if found.get("fix") else why
         self.add_message(
             self.router_id(),
             "notice",
             f"“{params.get('title') or 'The task'}” did not start on {agents.display(agent)}: "
-            f"{why}",
+            f"{said}",
             {
                 "agent_refused": key,
                 "agent": agent,
@@ -4613,10 +4615,7 @@ class Runtime:
             entry["problem"] = describe(exc)
             self.glanced[name] = (time.monotonic(), entry["problem"])
             return entry
-        self.glanced[name] = (
-            time.monotonic(),
-            {"version": facts.get("version", ""), "account": facts.get("account", "")},
-        )
+        self.seen_ready(name, facts)
         models = [described(model) for model in facts["models"]]
         if facts.get("models_known", True):
             self.agent_models_cache[name] = (time.monotonic(), models)
@@ -4778,12 +4777,19 @@ class Runtime:
         except Exception as exc:
             self.glanced[name] = (time.monotonic(), describe(exc))
             raise
-        self.glanced[name] = (time.monotonic(), dict(facts))
-        if self.agent_failed.get(name) and agents.status_of(name, self.agent_failed[name])[
-            "status"
-        ] in {agents.SIGN_IN, agents.MISSING}:
-            self.agent_failed.pop(name, None)  # Signed in (installed) since its last start.
+        self.seen_ready(name, facts)
         return facts
+
+    def seen_ready(self, name: str, facts: dict):
+        """An agent's glance or look found it signed in: its status, and a start that failed
+        for its sign-in (or as not installed) is past."""
+        self.glanced[name] = (
+            time.monotonic(),
+            {"version": facts.get("version", ""), "account": facts.get("account", "")},
+        )
+        failed = self.agent_failed.get(name)
+        if failed and agents.status_of(name, failed)["status"] in {agents.SIGN_IN, agents.MISSING}:
+            self.agent_failed.pop(name, None)
 
     def agents_found(self) -> list[str]:
         """The other agents installed here (their CLI on the PATH: nothing runs), looked at a

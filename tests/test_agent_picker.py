@@ -221,6 +221,19 @@ async def test_each_agent_says_if_it_is_ready_who_pays_and_what_makes_it_ready(
         await runtime.stop()
 
 
+async def test_signed_in_again_settings_says_ready_and_new_workers_start_there(
+    tmp_path, codex_installed
+):
+    _, runtime = await started(tmp_path)
+    try:
+        runtime.agent_failed["codex"] = "Codex is not signed in: run codex login in a terminal."
+        assert runtime.agent_status("codex")["said"] == "Sign-in needed"
+        assert (await runtime.look_for_agent("codex"))["said"] == "Ready", "looked at again"
+        assert "codex" not in runtime.agent_failed
+    finally:
+        await runtime.stop()
+
+
 async def test_claude_on_an_api_key_says_whose_key_it_uses(tmp_path, claude_on_path, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_AUTH", json.dumps({"authMethod": "api_key"}))
     _, runtime = await started(tmp_path)
@@ -568,7 +581,7 @@ async def test_a_named_agent_that_cannot_run_offers_choices_and_starts_nothing_e
             m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
         ]
         key = card["meta"]["agent_refused"]
-        assert card["text"].startswith("“Fix the login test” did not start on Codex:")
+        assert card["text"] == "“Fix the login test” did not start on Codex: sign-in needed."
         # The command that makes it ready, for the owner to run; Copilot offered instead.
         assert card["meta"]["fix"] == {"command": "codex login", "then": ""}
         assert card["meta"]["instead"] == "copilot"
