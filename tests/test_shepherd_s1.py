@@ -14,7 +14,10 @@ from test_shepherd import claimed, fixed, said, step_result
 
 from chiefofstaff import publish, workspaces
 from chiefofstaff.publish import approve, reconcile_all
-from chiefofstaff.shepherd import PROBE_RETRY_SECONDS
+from chiefofstaff.shepherd import MARGIN, PERMITTED, PROBE_RETRY_SECONDS
+
+# What an unasked attempt reserves of the day's budget: what it may spend, and the margin.
+RESERVE = PERMITTED["fix-ci"] + MARGIN
 
 
 @pytest.fixture
@@ -37,7 +40,7 @@ def teammate_pushes(world) -> str:
 async def test_ci_news_read_by_the_poller_starts_an_attempt_and_rides_along(world):
     """A followed PR's failing CI, read as today: held from the worker for the attempt (no turn
     of its own), carried in the attempt's message, and the Router told in a line."""
-    runtime = await claimed(world, budget=20.0, levels={"fix-ci": "prepare"})
+    runtime = await claimed(world, budget=RESERVE, levels={"fix-ci": "prepare"})
     runtime.shepherd.control.update_claim(TARGET, delivered=1)
     assert await runtime.github.read_followed(TARGET, 0)
     await settle(runtime)
@@ -75,7 +78,7 @@ async def test_off_the_same_news_reaches_the_worker_as_today(harness, tmp_path):
 
 
 async def test_kind_off_and_keep_off_deliver_news_as_today(world):
-    runtime = await claimed(world, budget=20.0, levels={"fix-ci": "off"})
+    runtime = await claimed(world, budget=RESERVE, levels={"fix-ci": "off"})
     runtime.shepherd.control.update_claim(TARGET, delivered=1)
     key = f"github:ci:{REPO}#12@{world.h0}:failed-ci / test"
     assert not await runtime.shepherd.signal(TARGET, [key], "CI failed", None)
@@ -91,16 +94,21 @@ async def test_kind_off_and_keep_off_deliver_news_as_today(world):
 
 
 async def test_an_attempt_is_interrupted_at_its_permitted_spend(world):
+    """As measured live (claude-sonnet-5.5): resuming the worker's session in the step profile
+    costs a prompt-cache write over its context first (4 to 6 credits), then about one credit a
+    call; a fix takes 15 to 20 calls, and runs to its end. Past what it may spend, it stops."""
     runtime = await claimed(world)
     await runtime.shepherd.fix_it(TARGET)
     await settle(runtime)
     step = runtime.shepherd.control.open_step(TARGET)
-    assert step["state"] == "running" and step["permitted"] == 8.0
+    assert step["state"] == "running" and step["permitted"] == PERMITTED["fix-ci"]
     session = world.session()
-    usage = SimpleNamespace(total_nano_aiu=5e9)
-    session.emit("assistant.usage", model="m", copilot_usage=usage)
+    for spent in [6.0, *[1.0] * 18]:
+        usage = SimpleNamespace(total_nano_aiu=spent * 1e9)
+        session.emit("assistant.usage", model="m", copilot_usage=usage)
     await settle(runtime)
     assert runtime.shepherd.control.step(step["id"])["state"] == "running"
+    usage = SimpleNamespace(total_nano_aiu=(PERMITTED["fix-ci"] - 24.0) * 1e9)
     session.emit("assistant.usage", model="m", copilot_usage=usage)
     await settle(runtime)
     ended = runtime.shepherd.control.step(step["id"])
@@ -134,7 +142,7 @@ async def test_spend_past_the_limit_and_margin_raises_the_margin(world):
         "type": "session.usage_record",
         "id": "u1",
         "timestamp": step["started_at"],
-        "data": {"usage": {"copilotUsage": {"totalNanoAiu": 13_000_000_000}}},
+        "data": {"usage": {"copilotUsage": {"totalNanoAiu": (PERMITTED["fix-ci"] + 5) * 1e9}}},
     }
     runtime.backend.logs[runtime.copilot_id(world.worker)] = [record]
     await runtime.shepherd.settle(step["id"])
@@ -142,10 +150,10 @@ async def test_spend_past_the_limit_and_margin_raises_the_margin(world):
     assert runtime.shepherd.margin() == 5.0
 
 
-@pytest.mark.parametrize(("budget", "state"), [(9.0, "queued"), (10.0, "running")])
+@pytest.mark.parametrize(("budget", "state"), [(RESERVE - 1, "queued"), (RESERVE, "running")])
 async def test_an_unclicked_attempt_runs_only_with_room_for_its_reserve(world, budget, state):
-    """Its reserve is what it may spend (8) and the margin (2): a budget of 9 leaves it waiting
-    for a click (its row offers Fix it), 10 runs it."""
+    """Its reserve is what it may spend and the margin: a budget just short of it leaves it
+    waiting for a click (its row offers Fix it), one with room for it runs it."""
     runtime = await claimed(world, budget=budget, levels={"fix-ci": "prepare"})
     control = runtime.shepherd.control
     claim = control.claim(TARGET)
@@ -162,7 +170,7 @@ async def test_an_unclicked_attempt_runs_only_with_room_for_its_reserve(world, b
         assert view["action"]["label"] == "Fix it"
         assert not runtime.shepherd.marked(world.worker)
     else:
-        assert step["reserved"] == 10.0 and control.spent_today()["reserved"] == 10.0
+        assert step["reserved"] == RESERVE and control.spent_today()["reserved"] == RESERVE
 
 
 # What stops an attempt.
@@ -1263,7 +1271,7 @@ async def test_owner_actions_say_why_they_cant_apply(world):
 
 
 async def test_at_suggest_it_looks_at_why_and_offers_fix_it(world):
-    runtime = await claimed(world, budget=20.0, levels={"fix-ci": "suggest"})
+    runtime = await claimed(world, budget=RESERVE, levels={"fix-ci": "suggest"})
     control = runtime.shepherd.control
     claim = control.claim(TARGET)
     control.update_claim(TARGET, delivered=1)
