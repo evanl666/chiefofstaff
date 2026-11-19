@@ -107,7 +107,8 @@ again by itself; Other Copilot sessions never shows an empty group without a wor
 - **A task replacing another takes over what waited for it** (E104). Tasks waiting for the
   replaced one stayed blocked on it; they now wait for the new one, and the Router is told which.
 - **A review summary you removed stays removed** (E105): after a failed send, the card and *Send
-  again* put the drafted summary back.
+  again* put the drafted summary back. A review card with no summary says so in one line under
+  the rest; that line stood centred, a fifth of the window lower.
 - **A check-back no longer reopens a worker you (or the Router) closed** (E107); one closed for
   being idle still comes back when due.
 - **A failed check-back on accepted work counts as needing you everywhere** (E109), not only on

@@ -4703,6 +4703,11 @@ async def round_qa7_life(runtime, browser, failures: list[str]):
     review = needs.locator(f'.card.draft[data-id="{found["review"]}"]')
     await expect(review).to_be_visible()
     await expect(review).not_to_contain_text("QA7 looks good overall.")
+    preview = review.locator(".summary-preview")
+    await expect(preview).to_have_text("No summary: the line comments only.")
+    # One line of its card, not an empty page's words (.empty: a fifth of the window above them).
+    await expect(preview).to_have_css("margin-top", "0px")
+    await expect(preview).to_have_css("text-align", "start")
     log("E105: a review summary removed before a failed send stays removed")
 
     # E98: one card for the worker waiting for the owner's word on its folder's settings.
