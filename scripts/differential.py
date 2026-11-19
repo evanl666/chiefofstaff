@@ -813,6 +813,37 @@ COPILOT_ALONE = [
     ),
 ]
 
+# A busy worker's new task in a second worker with its context (forks.py,
+# docs/design/worker-fork.md): on by default (the owner asked for it to be automatic), so it is
+# compared switched off. Off: only its switch line in Settings → General. On, with no worker
+# ever given a new task while busy (the script never does): that line checked, the Router's rule
+# for busy workers (the last of its role) and `same_worker` on its message_session.
+FEATURES["worker_fork"] = Feature(
+    off={"fork_busy": False},
+    on={"fork_busy": True},
+    allow_off=[
+        Allow("its setting, off", setting="fork_busy", value=False),
+        Allow(
+            "its switch line in Settings → General",
+            element="#settings-dialog label:has(> input[name=fork_busy])",
+            views=r"^settings-general-",
+        ),
+    ],
+    allow_on=[
+        Allow(
+            "its switch line in Settings → General, checked",
+            element="#settings-dialog label:has(> input[name=fork_busy])",
+            views=r"^settings-general-",
+        ),
+        Allow(
+            "the Router's rule for busy workers' new tasks",
+            data=r"\.system_message\.content$",
+            lines=r"^- A related worker that is busy is still the one to give the work to ",
+        ),
+        Allow("same_worker on the Router's message_session", data=r"same_worker"),
+    ],
+)
+
 # What another coding agent would leave if it were used while off: its CLI run, its modules.
 AGENT_MODULES = (
     "chiefofstaff.backend_codex",
