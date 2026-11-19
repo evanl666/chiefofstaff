@@ -133,7 +133,11 @@ OWNER = os.environ.get("LIVE_SHEPHERD_OWNER", "evan666-lgtm")
 REPOSITORY = os.environ.get("LIVE_SHEPHERD_REPO", f"{OWNER}/cos-approve-test")
 PORT_BASE = int(os.environ.get("LIVE_SHEPHERD_PORT_BASE", "19930"))
 SHARDS = {"U": 0, "W": 3, "X": 6, "Y": 9, "Z": 12}  # Port offsets: app, Slack, spare.
-SHARD_CREDITS = 120.0
+# Measured (claude-sonnet-5.5): a worker's PR costs about 20 credits (the Router's and the
+# worker's turns), an attempt up to 27; a shard reaching this stops, failed (a runaway guard).
+SHARD_CREDITS = 1000.0
+# A day's budget with room for every unasked attempt a shard makes (each reserves up to 27).
+ROOM = 400.0
 MODEL = os.environ.get("LIVE_SHEPHERD_MODEL", "claude-sonnet-5.5")
 # Every branch a run makes is under shepherd-live/<stamp>/; its ruleset and its hold label are
 # named after its stamp too: what cleanup looks for.
@@ -892,7 +896,7 @@ async def su2_suggest(ctx: Ctx):
 
 
 async def su3_prepare(ctx: Ctx):
-    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=40)
+    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=ROOM)
     target, number = await ctx.worker_pr("su3", {"app/timeouts.py": BROKEN}, "Faster login")
     h0 = ctx.repo.pr(number)["head"]["sha"]
     assert await ctx.repo.ci(h0) == "failure"
@@ -1184,7 +1188,7 @@ async def reviewed_pr(ctx: Ctx, branch: str) -> tuple[str, int, str, list[int]]:
 
 
 async def sw1_one_plan(ctx: Ctx):
-    await ctx.turn_on(proactive_levels={"address-review": "prepare"}, proactive_budget=40)
+    await ctx.turn_on(proactive_levels={"address-review": "prepare"}, proactive_budget=ROOM)
     target, number, _head, comments = await reviewed_pr(ctx, "sw1")
     view = await ctx.kept(
         target,
@@ -1422,7 +1426,7 @@ async def sx3_not_accepted(ctx: Ctx):
 
 
 async def sx4_chain(ctx: Ctx):
-    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=40)
+    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=ROOM)
     target, number = await ctx.worker_pr("sx4", {"app/timeouts.py": BROKEN}, "Accept then fix")
     task = await ctx.task(target)
     await ctx.app.post(f"/api/tasks/{task['id']}/accept")
@@ -1537,7 +1541,7 @@ async def sx11_after_merge(ctx: Ctx):
 
 
 async def sy1_off_mid_attempt(ctx: Ctx):
-    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=40)
+    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=ROOM)
     target, _ = await ctx.worker_pr("sy1", {"app/timeouts.py": BROKEN}, "Off mid-attempt")
     await ctx.kept(target, lambda v: v.get("line", "").startswith("Preparing"), "an attempt", 900)
     await ctx.settings(proactive=False)
@@ -1564,7 +1568,7 @@ async def sy5_budget_zero(ctx: Ctx):
 
 
 async def sy8_preempt(ctx: Ctx):
-    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=40)
+    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=ROOM)
     await ctx.settings(max_workers=1)
     target, _ = await ctx.worker_pr("sy8", {"app/timeouts.py": BROKEN}, "Preempted")
     await ctx.kept(target, lambda v: v.get("line", "").startswith("Preparing"), "an attempt", 900)
@@ -1623,7 +1627,7 @@ async def crash(ctx: Ctx):
 
 
 async def sy2_crash_after_push(ctx: Ctx):
-    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=60)
+    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=ROOM)
     target, number = await ctx.worker_pr("sy2", {"app/timeouts.py": BROKEN}, "Crash after push")
     view = await ctx.kept(
         target, lambda v: (v.get("action") or {}).get("kind") == "review", "a fix", 1500
@@ -1654,7 +1658,7 @@ async def sy2_crash_after_push(ctx: Ctx):
 
 
 async def sy3_crash_mid_reply(ctx: Ctx):
-    await ctx.turn_on(proactive_levels={"address-review": "prepare"}, proactive_budget=60)
+    await ctx.turn_on(proactive_levels={"address-review": "prepare"}, proactive_budget=ROOM)
     await ctx.settings(proactive_repos={ctx.repo.name.lower(): {"disclosure": "no"}})
     target, number, _head, _comments = await reviewed_pr(ctx, "sy3")
     view = await ctx.kept(
@@ -1685,7 +1689,7 @@ async def sy3_crash_mid_reply(ctx: Ctx):
 
 
 async def sy4_crash_mid_attempt(ctx: Ctx):
-    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=60)
+    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=ROOM)
     target, _ = await ctx.worker_pr("sy4", {"app/timeouts.py": BROKEN}, "Crash mid-attempt")
     await ctx.kept(target, lambda v: v.get("line", "").startswith("Preparing"), "an attempt", 900)
     await crash(ctx)
@@ -1709,7 +1713,12 @@ async def sy4_crash_mid_attempt(ctx: Ctx):
 
 async def sy6_budget_edge(ctx: Ctx):
     """A budget with room for one unasked attempt: two PRs fail at once; one runs, one waits."""
-    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=10)
+    from chiefofstaff.shepherd import MARGIN, PERMITTED
+
+    before = (await ctx.state()).get("shepherd", {}).get("spent") or {}
+    used = float(before.get("settled") or 0) + float(before.get("reserved") or 0)
+    room = used + PERMITTED["fix-ci"] + MARGIN  # The day's so far, and one attempt's reserve.
+    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=room)
     first, _ = await ctx.worker_pr("sy6a", {"app/timeouts.py": BROKEN}, "Budget edge A")
     second, _ = await ctx.worker_pr("sy6b", {"app/timeouts.py": BROKEN}, "Budget edge B")
     await asyncio.sleep(600)
@@ -1718,7 +1727,7 @@ async def sy6_budget_edge(ctx: Ctx):
     assert len(waiting) >= 1, views
     shepherd = (await ctx.state())["shepherd"]
     spent_today = shepherd["spent"]
-    assert spent_today["settled"] + spent_today["reserved"] <= 10 + 1e-6, spent_today
+    assert spent_today["settled"] + spent_today["reserved"] <= room + 1e-6, spent_today
 
 
 async def sy7_interrupted_count(ctx: Ctx):
@@ -1744,7 +1753,7 @@ async def sy7_interrupted_count(ctx: Ctx):
 
 
 async def sy11_signed_out(ctx: Ctx):
-    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=60)
+    await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=ROOM)
     target, _ = await ctx.worker_pr("sy11", {"app/timeouts.py": BROKEN}, "Signed out")
     view = await ctx.kept(
         target, lambda v: (v.get("action") or {}).get("kind") == "review", "a fix", 1500
