@@ -60,6 +60,27 @@ async def test_ci_news_read_by_the_poller_starts_an_attempt_and_rides_along(worl
     assert any("(a fix is being prepared)" in text for text in notices), notices
 
 
+async def test_news_of_a_failure_its_row_offers_fix_it_for_is_held_too(world):
+    """Seen live (SU2): the round's read had queued the failure's attempt (its row offering Fix
+    it); the poller's news of it then went to the worker as a turn of its own, which fixed the
+    PR and pushed, and the PR paused on its commit. That news is the attempt's: held too."""
+    runtime = await claimed(world, levels={"fix-ci": "suggest"})
+    runtime.shepherd.control.update_claim(TARGET, delivered=1)
+    await runtime.shepherd.read(TARGET)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step and step["state"] == "queued", step  # Fix it, on its row.
+    turns = len(world.session().sent)
+    assert await runtime.github.read_followed(TARGET, 0)
+    await settle(runtime)
+    held = [
+        message
+        for message in runtime.store.messages(world.worker)
+        if message["kind"] == "inbound" and message["meta"].get("source") == "github"
+    ]
+    assert len(held) == 1 and held[0]["meta"]["deferred"], held
+    assert len(world.session().sent) == turns, "no turn of the worker's for it"
+
+
 async def test_off_the_same_news_reaches_the_worker_as_today(harness, tmp_path):
     world = World(harness, tmp_path)
     world.build()
