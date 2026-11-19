@@ -442,8 +442,13 @@ async def a4_dev_server(ctx: Ctx):
             asked = time.monotonic()
             await follow_up(ctx, task, "Which port is your server on? Reply with just the number.")
 
-            async def replied(w=worker, m=mark):
-                return await said_since(ctx, w, m) or None
+            async def replied(w=worker, m=mark, p=port):
+                # Its answer, not a line it says first ("I'll verify the server is still
+                # listening"); all it said, once its turn is over without one.
+                said = await said_since(ctx, w, m)
+                if str(p) in said:
+                    return said
+                return said if said and (await session(ctx, w))["status"] != "working" else None
 
             said = await wait_for("the follow-up answered at once", replied, 300, ctx.app)
             log(f"A4: answered in {time.monotonic() - asked:.0f}s: {said[-100:]!r}")
