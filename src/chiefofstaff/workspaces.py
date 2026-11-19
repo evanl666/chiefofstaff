@@ -909,11 +909,13 @@ def place_tree(staged: Path, workspace: Path, under: Path, name: str, exact: boo
 
 def repoint(tree: Path, under: Path, admin: str, repository: Path) -> None:
     """A worktree moved into place (place_tree) and its repository told where it is, as git
-    worktree move does, never through a link: its .git file and its folder's gitdir."""
+    worktree move does, never through a link: its .git file and its folder's gitdir, with `/`
+    between their folders as git writes them (Git for Windows doesn't find a worktree whose
+    gitdir says `\\`: `git worktree remove` of it fails, and it lists it as `…\\.git`)."""
     with safefs.open_folder(tree, under) as folder:
-        folder.write(".git", f"gitdir: {admin}\n")
+        folder.write(".git", f"gitdir: {Path(admin).as_posix()}\n")
     with safefs.open_folder(Path(admin), repository) as folder:
-        folder.write("gitdir", f"{tree / '.git'}\n")
+        folder.write("gitdir", f"{(tree / '.git').as_posix()}\n")
 
 
 def free_child(parent: Path, name: str) -> Path:

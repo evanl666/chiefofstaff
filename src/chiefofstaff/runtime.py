@@ -3819,7 +3819,9 @@ class Runtime:
 
     def git_replaced_said(self, row: dict, replaced: list[str]) -> str:
         outermost = [
-            path for path in replaced if not any(path.startswith(f"{other}/") for other in replaced)
+            path
+            for path in replaced
+            if not any(path.startswith(other.rstrip(os.sep) + os.sep) for other in replaced)
         ]  # (What a .git replaced holds was replaced with it: said once.)
         shown = [home_shown(path) for path in outermost]
         names = ", ".join(shown[:3]) + (f" and {len(shown) - 3} more" if len(shown) > 3 else "")

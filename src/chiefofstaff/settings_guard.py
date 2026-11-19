@@ -592,11 +592,23 @@ def runs(
     return held
 
 
+def absolute(word: str, top: Path) -> Path | None:
+    """The absolute path a word names, None for a relative one. On Windows, one from a drive's
+    root without its letter (`/usr/lib/x.js`, as a shell line says it) is on the project's
+    drive."""
+    path = Path(word)
+    if path.is_absolute():
+        return path
+    if path.root and not path.drive:
+        return Path(top.drive + word)
+    return None
+
+
 def elsewhere(top: Path, word: str, cwd: Path) -> bool:
     """Whether a word names a path out of the project (a system program, one in home)."""
     token = expanded(word.split("=", 1)[-1] if word.startswith("-") else word, top, cwd)
-    path = Path(token)
-    return token.startswith("~") or (path.is_absolute() and not path.is_relative_to(top))
+    path = absolute(token, top)
+    return token.startswith("~") or (path is not None and not path.is_relative_to(top))
 
 
 def run_key(setting: str, serves: str, path: str) -> str:
@@ -679,8 +691,8 @@ def candidates(top: Path, place: Path, ref: Ref, cwd: Path) -> list[Path]:
     if "$" in token or any(char in token for char in "*?["):
         return []
     base = expanded(ref.base, top, cwd)
-    if base and Path(base).is_absolute():
-        bases = [Path(base)] if Path(base).is_relative_to(top) else []
+    if base and (rooted := absolute(base, top)) is not None:
+        bases = [rooted] if rooted.is_relative_to(top) else []
     else:
         bases = [place / base, top / base] if base else [place, top]
     if ref.kind == "module":
@@ -690,8 +702,8 @@ def candidates(top: Path, place: Path, ref: Ref, cwd: Path) -> list[Path]:
         names = [token]
         if ref.kind == "script" and not Path(token).suffix and ref.runner in NODE_LIKE:
             names += [f"{token}{ext}" for ext in (".js", ".mjs", ".cjs", ".ts")]
-    if Path(token).is_absolute():
-        return [Path(token)] if Path(token).is_relative_to(top) else []
+    if (rooted := absolute(token, top)) is not None:
+        return [rooted] if rooted.is_relative_to(top) else []
     return [base / name for base in bases for name in names]
 
 
@@ -963,7 +975,7 @@ def moved(words: list[str], folders: list[str]) -> bool:
     here = folders[-1]
     where = (
         target
-        if Path(target).is_absolute() or target.startswith("$") or not here
+        if Path(target).is_absolute() or Path(target).root or target.startswith("$") or not here
         else (str(Path(here) / target))
     )
     if name == "pushd":

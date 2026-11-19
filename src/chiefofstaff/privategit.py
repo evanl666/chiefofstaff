@@ -256,11 +256,13 @@ def prepare(common: str, admin: str, tree: str, origin: str = "") -> dict[str, s
               if said.get(key) in allowed]  # fmt: skip
     if kind != "sha1":
         lines += ["[extensions]", f"\tobjectformat = {kind}"]
-    if origin and not any(c in origin for c in '\n\r"\\'):
-        lines += ['[remote "origin"]', f"\turl = {origin}"]
+    if origin and not any(c in origin for c in "\n\r\0"):
+        # Quoted, as git reads a value: a path on Windows has `\\` in it.
+        quoted = origin.replace("\\", "\\\\").replace('"', '\\"')
+        lines += ['[remote "origin"]', f'\turl = "{quoted}"']
     written(folder / "config", ("\n".join(lines) + "\n").encode())
     objects = Path(os.path.realpath(source / "objects"))
-    written(folder / "objects" / "info" / "alternates", f"{objects}\n".encode())
+    written(folder / "objects" / "info" / "alternates", f"{objects.as_posix()}\n".encode())
     try:
         head = read_regular(own / "HEAD", 4096).decode(errors="replace").strip()
     except OSError as exc:
