@@ -273,6 +273,13 @@ def test_retries():
 def test_timeout():
     assert timeout() == 30
 """
+# A change that passes CI (the base has `return 30` alone): what a green PR, or one reviewed,
+# changes. Its line 3 differs, so lines 1 to 6 are in its diff (review comments go there);
+# the test file's first line too.
+GREEN = APP.replace("return 31", "return 30  # The gateway's limit.")
+GREEN_TEST = TEST.replace(
+    "from app.timeouts import retries, timeout", "from app.timeouts import timeout, retries"
+)
 # CI runs only for PRs into a run's branches, and for its base: nothing else in the repository.
 WORKFLOW = f"""name: ci
 on:
@@ -1049,7 +1056,7 @@ async def su5_flaky(ctx: Ctx):
     commit is learned as known flaky (design 4.7.1); the next PR failing that way gets a rerun
     plan, no attempt: approved, attempt 2 passes; no second rerun on that commit."""
     await ctx.turn_on(proactive_levels={"fix-ci": "suggest"}, proactive_budget=0)
-    files = {"app/timeouts.py": APP.replace("31", "30"), "tests/test_timeouts.py": FLAKY_TEST}
+    files = {"app/timeouts.py": GREEN, "tests/test_timeouts.py": FLAKY_TEST}
     first, number = await ctx.worker_pr("su5", files, "Flaky on the first run")
     head = ctx.repo.pr(number)["head"]["sha"]
     assert await ctx.repo.ci(head) == "failure"
@@ -1163,7 +1170,7 @@ def test_needs_a_secret():
     )
     target, _ = await ctx.worker_pr(
         "su10",
-        {"app/timeouts.py": APP.replace("31", "30"), "tests/test_timeouts.py": test},
+        {"app/timeouts.py": GREEN, "tests/test_timeouts.py": test},
         "Needs a key",
     )
     await ctx.fix(target)
@@ -1197,7 +1204,7 @@ def test_b():
     )
     target, _ = await ctx.worker_pr(
         "su11",
-        {"tests/test_timeouts.py": tests, "app/timeouts.py": APP.replace("31", "30")},
+        {"tests/test_timeouts.py": tests, "app/timeouts.py": GREEN},
         "Two at odds",
     )
     # Each plan approved, each diagnosis tried again (Fix it), until the shepherd stops (the
@@ -1328,7 +1335,9 @@ ASKS = [
 
 async def reviewed_pr(ctx: Ctx, branch: str) -> tuple[str, int, str, list[int]]:
     target, number = await ctx.worker_pr(
-        branch, {"app/timeouts.py": APP.replace("31", "30")}, f"Review me ({branch})"
+        branch,
+        {"app/timeouts.py": GREEN, "tests/test_timeouts.py": GREEN_TEST},
+        f"Review me ({branch})",
     )
     head = ctx.repo.pr(number)["head"]["sha"]
     comments = [ctx.repo.comment_on_line(number, head, p, line, body) for p, line, body in ASKS]
@@ -1400,9 +1409,7 @@ async def sw3_their_way(ctx: Ctx):
 
 
 async def sw4_question(ctx: Ctx):
-    target, number = await ctx.worker_pr(
-        "sw4", {"app/timeouts.py": APP.replace("31", "30")}, "Answer me"
-    )
+    target, number = await ctx.worker_pr("sw4", {"app/timeouts.py": GREEN}, "Answer me")
     head = ctx.repo.pr(number)["head"]["sha"]
     ctx.repo.comment_on_line(number, head, "app/timeouts.py", 3, "Where does 30 come from?")
     await ctx.fix(target)
@@ -1416,7 +1423,7 @@ async def sw4_question(ctx: Ctx):
 async def sw5_instructions(ctx: Ctx):
     since = datetime.now(UTC).isoformat()
     target, number = await ctx.worker_pr(
-        "sw5", {"app/timeouts.py": APP.replace("31", "30")}, "Instructions in a comment"
+        "sw5", {"app/timeouts.py": GREEN}, "Instructions in a comment"
     )
     head = ctx.repo.pr(number)["head"]["sha"]
     ctx.repo.comment_on_line(
@@ -1534,9 +1541,7 @@ async def sw11_audit(ctx: Ctx):
 
 
 async def green_pr(ctx: Ctx, branch: str) -> tuple[str, int, str]:
-    target, number = await ctx.worker_pr(
-        branch, {"app/timeouts.py": APP.replace("31", "30")}, f"Green ({branch})"
-    )
+    target, number = await ctx.worker_pr(branch, {"app/timeouts.py": GREEN}, f"Green ({branch})")
     head = ctx.repo.pr(number)["head"]["sha"]
     assert await ctx.repo.ci(head) == "success"
     return target, number, head
@@ -1740,7 +1745,7 @@ async def sy9_signed(ctx: Ctx):
 
 async def sy10_worker_pushes(ctx: Ctx):
     target, _number = await ctx.worker_pr(
-        "sy10", {"app/timeouts.py": APP.replace("31", "30")}, "The worker pushes again"
+        "sy10", {"app/timeouts.py": GREEN}, "The worker pushes again"
     )
     task = await ctx.task(target)
     await ctx.app.post(f"/api/tasks/{task['id']}/accept")
@@ -1752,9 +1757,7 @@ async def sy10_worker_pushes(ctx: Ctx):
 
 
 async def sy14_stacked(ctx: Ctx):
-    target, _number = await ctx.worker_pr(
-        "sy14", {"app/timeouts.py": APP.replace("31", "30")}, "Base of a stack"
-    )
+    target, _number = await ctx.worker_pr("sy14", {"app/timeouts.py": GREEN}, "Base of a stack")
     ctx.repo.branch("sy14-child", {"NOTES.md": "child"}, "A child", base="sy14")
     ctx.repo.open_pr("sy14-child", "Child of sy14", base="sy14")
     await ctx.kept(
@@ -1963,9 +1966,7 @@ async def sy13_downgrade(ctx: Ctx):
     """--prepare-downgrade, then the previous release on the same data: it ignores what this
     one keeps, and a comment on a kept PR reaches its worker as news, as before."""
     previous = os.environ.get("LIVE_SHEPHERD_PREVIOUS", "chiefofstaff==0.1.46")
-    target, number = await ctx.worker_pr(
-        "sy13", {"app/timeouts.py": APP.replace("31", "30")}, "Before a downgrade"
-    )
+    target, number = await ctx.worker_pr("sy13", {"app/timeouts.py": GREEN}, "Before a downgrade")
     task = await ctx.task(target)
     await ctx.app.stop()
     data = ctx.root / "data"
