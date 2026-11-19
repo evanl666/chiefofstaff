@@ -6,8 +6,14 @@ shard spent, and the exit code says whether all passed.
 
 Within a budget, one shard at a time (never in parallel, never beside another Claude run):
 - Claude workers use the cheapest model (LIVE_CLAUDE_MODEL, default "haiku");
-- the shard stops once its Claude workers spent LIVE_CLAUDE_BUDGET tokens (default 3,000,000:
-  the budget of a whole run of E, F, G and H; what is left goes to the next shard of the run);
+- one budget for the whole run, whatever the processes its shards run in: LIVE_CLAUDE_BUDGET
+  tokens (default 3,000,000), counted as Claude counts them (cached input included) in a file
+  shared by the run's shards (LIVE_CLAUDE_SPENT, default .cos-live-claude-spent.json in the
+  tree), kept for the run LIVE_CLAUDE_RUN names (default today's date; another name starts at
+  0). It is checked every 15 s: the scenario at work then stops, and no other starts, once it
+  is spent;
+- scenarios already shown on the real Claude Code offline (test_backend_contract, its stand-in
+  model) are left out (OFFLINE): LIVE_CLAUDE_ALL=1 runs them too;
 - it stops at once when Claude refuses a turn for a limit of the owner's plan or a rate limit
   (a task paused for its plan's limit), saying so: the rest is run once that resets;
 - the owner's Claude files are recorded before the shard and checked after it
@@ -33,7 +39,8 @@ E12 steering: a note sent during a long command is used within the turn
 E13 a wakeup after its background command ends, admitted, and the task finished by it
 E14 AskUserQuestion: the card under Needs you; the answer reaches the worker
 E15 a schedule (/loop): its firings run on the task's timeline; Cancel deletes it in Claude
-E16 EnterWorktree: the worktree is the worker's checkout, removed as the worker closes
+E16 EnterWorktree: refused in the owner's checkout (where Claude makes it from a worker's
+    worktree), made in its own folder and entered: its checkout, removed as the worker closes
 E17 plan mode: the plan shows, and the worker goes on with it
 
 Shard F, Ask first (Settings: workers ask first):
@@ -45,8 +52,8 @@ F4  an untrusted repository: its hook, env block, .mcp.json server and apiKeyHel
     and its CLAUDE.md reaches the worker as the repository's text
 F5  the shared push and delete checks: a push to main and an `rm -rf` outside its folders get a
     Copilot worker's answers
-F6  a subagent with isolation "remote" is refused; one with isolation "worktree" runs in a
-    registered worktree; a plan waits for the owner's card
+F6  a subagent with isolation "remote" is refused; one with isolation "worktree" never makes
+    its worktree in the owner's checkout; a plan waits for the owner's card
 
 Shard G, workers on different agents (Copilot for new workers; Codex and Claude on):
 G1  "use claude for …" goes to Claude; with Claude off, the Router says so and nothing starts
@@ -102,6 +109,42 @@ from live_parity import setup, write
 SHARDS = {"E": (18970, 18980), "F": (18971, 18981), "G": (18972, 18982), "H": (18973, 18983)}
 CLAUDE_MODEL = os.environ.get("LIVE_CLAUDE_MODEL", "haiku")
 BUDGET = int(os.environ.get("LIVE_CLAUDE_BUDGET", "3000000"))
+SPENT = Path(
+    os.environ.get("LIVE_CLAUDE_SPENT")
+    or Path(__file__).resolve().parent.parent / ".cos-live-claude-spent.json"
+)
+RUN = os.environ.get("LIVE_CLAUDE_RUN") or time.strftime("%Y-%m-%d")
+BUDGET_EVERY = 15
+# Shown on the real Claude Code offline already (tests/test_backend_contract.py, with
+# CHIEFOFSTAFF_TEST_CLAUDE=1): left out unless LIVE_CLAUDE_ALL=1, for the run's one budget.
+OFFLINE = {
+    "E2": "test_exit_codes_only_where_the_agent_gives_them",
+    "E3": "test_abort_ends_the_turn_and_its_command, test_stop_ends_its_child_agents_too",
+    "E4": "test_a_command_it_leaves_running_holds_its_turns_end_until_it_ends",
+    "E8": "test_a_child_agents_calls_and_usage_are_its_workers",
+    "E10": "test_a_session_resumes_with_its_conversation",
+    "E12": "test_steering_reaches_the_turn_in_progress",
+    "E13": "test_a_command_left_running_holds_the_turns_end_until_its_own_end_message",
+    "E15": "test_schedules_deleted_in_claude_do_not_come_back_with_claude_resume",
+    "F3": "test_a_sandboxed_claude_worker_runs_no_hook_one_acting_unsandboxed_runs_them",
+    "H9": "test_schedules_deleted_in_claude_do_not_come_back_with_claude_resume",
+}
+ALL = os.environ.get("LIVE_CLAUDE_ALL") == "1"
+
+
+def run_spent() -> int:
+    """What this run's shards spent so far (0 for another run's file)."""
+    try:
+        found = json.loads(SPENT.read_text())
+    except (OSError, ValueError):
+        return 0
+    return int(found.get("spent") or 0) if found.get("run") == RUN else 0
+
+
+def save_spent(spent: int):
+    SPENT.write_text(json.dumps({"run": RUN, "spent": spent, "budget": BUDGET}))
+
+
 OWNER_FILES = Path(__file__).parent / "owner_files.py"
 CLAUDE = shutil.which("claude") or "claude"
 PLAN_STOP = "its plan's limit"
@@ -201,9 +244,10 @@ async def e1_task_and_follow_up(ctx: Ctx):
 async def e2_receipts(ctx: Ctx):
     worker = await claude_worker(
         ctx,
-        f"In {ctx.project}, in your own copy: run `sh -c 'exit 3'` (it fails on purpose), then "
-        "run `echo receipts-ok`, then create the file notes/receipt.txt containing the line "
-        "hello (don't commit it). Report what each command did.",
+        f"In {ctx.project}, in your own copy, make three separate Bash calls, one command each "
+        "(never joined into one call): 1. `sh -c 'exit 3'` (it fails on purpose) 2. `echo "
+        "receipts-ok` 3. `mkdir -p notes && echo hello > notes/receipt.txt` (don't commit it). "
+        "Report what each did.",
     )
     task = await la.task_ended(ctx, worker, "the receipts task")
     commands = ctx.rows(
@@ -212,6 +256,9 @@ async def e2_receipts(ctx: Ctx):
     log(f"E2: commands {commands}")
     failing = [row for row in commands if "exit 3" in row[0]]
     echo = [row for row in commands if "echo receipts-ok" in row[0]]
+    assert not any("exit 3" in row[0] and "receipts-ok" in row[0] for row in commands), (
+        "the model joined the commands into one call (the prompt asks for three)"
+    )
     assert failing and failing[-1][2], "the failing command, ended"
     assert failing[-1][1] != 0, "not shown as succeeded"
     assert echo and echo[-1][2] and echo[-1][1] in (0, None), "the echo, ended"
@@ -500,6 +547,15 @@ async def e13_wakeup(ctx: Ctx):
     log("E13 passed")
 
 
+async def card_of(ctx: Ctx, worker: str, word: str = "") -> dict | None:
+    """The owner's card a worker waits on (AskUserQuestion, a plan to approve): a question draft
+    under Needs you, as Copilot's ask_user cards are."""
+    found = [d for d in (await la.state(ctx))["drafts"]
+             if d["kind"] == "question" and d["session_id"] == worker
+             and word in (d.get("text") or "").lower()]  # fmt: skip
+    return found[0] if found else None
+
+
 async def e14_ask_user(ctx: Ctx):
     worker = await claude_worker(
         ctx,
@@ -507,14 +563,10 @@ async def e14_ask_user(ctx: Ctx):
         "red or blue, then report my answer.",
     )
 
-    async def asked():
-        found = [q for q in (await la.state(ctx))["questions"]
-                 if q.get("session_id") == worker or q["id"].startswith(worker)]  # fmt: skip
-        return found[0] if found else None
-
-    question = await wait_for("its question under Needs you", asked, 300, ctx.app)
+    question = await wait_for("its question under Needs you", lambda: card_of(ctx, worker), 300,
+                              ctx.app)  # fmt: skip
     log(f"E14: {question.get('text', '')[:200]!r}")
-    await ctx.app.post(f"/api/questions/{question['id']}/answer", {"text": "blue"})
+    await ctx.app.post(f"/api/drafts/{question['id']}", {"action": "answer", "text": "blue"})
     task = await la.task_ended(ctx, worker, "it reports the answer")
     assert "blue" in task["result"].lower()
     log("E14 passed")
@@ -555,15 +607,16 @@ async def e16_enter_worktree(ctx: Ctx):
     worker = await claude_worker(
         ctx,
         f"In {ctx.project}, in your own copy: use your EnterWorktree tool to make a worktree "
-        "named exp, create the file exp.txt there with the line 'exp', commit it there, then "
-        "report the worktree's path.",
+        "named exp (if it is refused, do what the refusal says), create the file exp.txt there "
+        "with the line 'exp', commit it there, then report the worktree's path.",
     )
     await la.task_ended(ctx, worker, "the worktree experiment")
     view = await la.session(ctx, worker)
     trees = [c.get("worktree") or c.get("path") or "" for c in view.get("checkouts") or []]
     log(f"E16: checkouts {trees}")
+    assert not (ctx.project / ".claude" / "worktrees").exists(), "none in the owner's checkout"
     made = [t for t in trees if t.endswith(str(Path(".claude") / "worktrees" / "exp"))]
-    assert made, "its worktree, one of its checkouts"
+    assert made, "its worktree, in its own folder, one of its checkouts"
     await ctx.app.post(f"/api/sessions/{worker}/close")
     await la.until("removed as it closes", lambda: not Path(made[0]).exists(), 120)
     log("E16 passed")
@@ -597,8 +650,10 @@ async def f1_ask_first(ctx: Ctx):
     command_file, edit_file = ctx.outside / "command.txt", ctx.outside / "edit.txt"
     worker = await claude_worker(
         ctx,
-        f"In your own copy of {ctx.project}, try each of these in turn and report what happened "
-        "to each (some may be refused: say so and go on, don't work around it): (1) run `git "
+        f"In your own copy of {ctx.project}, try all seven of these in turn and report what "
+        "happened to each. Some may be refused: say so and go on to the next. Each is a check "
+        "of its own, so trying the next one after a refusal is not working around it; just "
+        "don't retry a refused one another way. (1) run `git "
         f"push --dry-run origin HEAD:main`; (2) run `touch {command_file}`; (3) create the file "
         f"{edit_file} with your Write tool (not the shell) containing 'x'; (4) call the "
         "create_pull_request_review tool of the github MCP server with body 'cos-live'; (5) run "
@@ -613,7 +668,8 @@ async def f1_ask_first(ctx: Ctx):
     log(f"F1: {task['result'][:600]!r}")
     assert "push to the default branch" in joined, "the refused push"
     assert not (marks / "review-published").exists(), "no review published as the owner"
-    assert la.reviews_by_owner() == reviewed and "commenting on PRs" in joined
+    assert la.reviews_by_owner() == reviewed, "no review published as the owner"
+    assert "commenting on PRs" in joined, "`gh pr review` tried and refused"
     assert (ctx.project / "AGENTS.md").read_text() == readme, "the owner's checkout unchanged"
     assert command_file.exists(), "a write command outside, approved"
     log("F1 passed")
@@ -746,24 +802,18 @@ async def f6_isolation_and_plan(ctx: Ctx):
         "and leave plan mode with ExitPlanMode. Report what happened to each.",
     )
 
-    async def plan_card():
-        questions = (await la.state(ctx))["questions"]
-        found = [
-            q
-            for q in questions
-            if q["id"].startswith(worker) and "plan" in (q.get("text") or "").lower()
-        ]
-        return found[0] if found else None
-
-    card = await wait_for("its plan waits for the owner's card", plan_card, 900, ctx.app)
-    await ctx.app.post(f"/api/questions/{card['id']}/answer", {"text": "Go ahead"})
+    card = await wait_for("its plan waits for the owner's card",
+                          lambda: card_of(ctx, worker, "plan"), 600, ctx.app)  # fmt: skip
+    await ctx.app.post(f"/api/drafts/{card['id']}", {"action": "answer", "text": "Go ahead"})
     task = await la.task_ended(ctx, worker, "isolation and plan", statuses=la.ENDED, timeout=900)
     joined = " ".join(await la.notices(ctx, worker))
     view = await la.session(ctx, worker)
     trees = [c.get("worktree") or "" for c in view.get("checkouts") or []]
     log(f"F6: {task['result'][:300]!r}; checkouts {trees}")
     assert "cloud" in joined.lower() or "remote" in task["result"].lower(), "remote refused"
-    assert any(".claude" in t and "worktrees" in t for t in trees), "a registered worktree"
+    # Its worktree isolation: never in the owner's checkout (where Claude would make it), in a
+    # worktree of its own folder when it makes one as the refusal says.
+    assert not (ctx.project / ".claude" / "worktrees").exists(), "none in the owner's checkout"
     log("F6 passed")
 
 
@@ -1193,6 +1243,24 @@ SCENARIOS: dict[str, list] = {
 }  # fmt: skip
 
 
+class BudgetSpentError(Exception):
+    pass
+
+
+async def within_budget(ctx: Ctx, scenario, spent_before: int) -> Exception | None:
+    """The scenario's outcome (None: passed), stopped as soon as the run's budget is spent."""
+    task = asyncio.ensure_future(scenario(ctx))
+    while not task.done():
+        await asyncio.wait({task}, timeout=BUDGET_EVERY)
+        if not task.done() and spent_before + ctx.claude_tokens() >= BUDGET:
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            return BudgetSpentError(f"the budget ({BUDGET:,} Claude tokens) ran out during it")
+    exception = task.exception()
+    return exception if isinstance(exception, Exception) else None
+
+
 async def run_shard(shard: str, wanted: set[str], spent_before: int) -> tuple[list, int, str]:
     port, slack_port = SHARDS[shard]
     live_e2e.PORT, live_e2e.SLACK_PORT = port, slack_port
@@ -1235,15 +1303,21 @@ async def run_shard(shard: str, wanted: set[str], spent_before: int) -> tuple[li
             name = la.label(scenario)
             if wanted and name not in wanted:
                 continue
+            if name in OFFLINE and not ALL and not wanted:
+                log(f"=== {name} left out: shown offline ({OFFLINE[name]})")
+                continue
             log(f"=== {name} {scenario.__name__}")
-            started = time.monotonic()
-            try:
-                await scenario(ctx)
-                results.append((name, True, time.monotonic() - started, ""))
-            except Exception as exc:
-                log(f"{name} FAILED: {exc!r}")
+            started, before = time.monotonic(), ctx.claude_tokens()
+            outcome = await within_budget(ctx, scenario, spent_before)
+            tokens = ctx.claude_tokens() - before
+            save_spent(spent_before + ctx.claude_tokens())
+            if outcome is None:
+                results.append((name, True, time.monotonic() - started, "", tokens))
+            else:
+                log(f"{name} FAILED: {outcome!r}")
                 await la.dump(ctx)
-                results.append((name, False, time.monotonic() - started, repr(exc)[:300]))
+                results.append((name, False, time.monotonic() - started, repr(outcome)[:300],
+                                tokens))  # fmt: skip
                 if not (ctx.app.process and ctx.app.process.poll() is None):
                     await ctx.app.start()
             if ctx.plan_stopped():
@@ -1266,14 +1340,14 @@ async def run_shard(shard: str, wanted: set[str], spent_before: int) -> tuple[li
         try:
             log(owners_claude_files("check", record, "--live", str(root), "--allow", allowed))
         except AssertionError as exc:
-            results.append(("OWNER", False, 0.0, str(exc)[:300]))
-        if results and all(ok for _, ok, _, _ in results):
+            results.append(("OWNER", False, 0.0, str(exc)[:300], 0))
+        if results and all(ok for _, ok, *_ in results):
             shutil.rmtree(root, ignore_errors=True)
         else:
             log(f"kept for a look: {root}; log {log_copy}")
     print(f"\n================ LIVE CLAUDE, shard {shard} ================")
-    for name, ok, seconds, error in results:
-        print(f"{name:5} {'pass' if ok else 'FAIL'} {seconds:5.0f}s {error}")
+    for name, ok, seconds, error, tokens in results:
+        print(f"{name:5} {'pass' if ok else 'FAIL'} {seconds:5.0f}s {tokens:>9,} tokens {error}")
     if stopped:
         print(f"STOPPED: {stopped}")
     print(f"Claude tokens: {ctx.notes.get('tokens', 0):,}; Copilot credits: "
@@ -1289,15 +1363,21 @@ async def main() -> int:
         return 2
     shards = [sys.argv[1].upper()] if len(sys.argv) > 1 else list(SCENARIOS)
     wanted = {name.upper() for name in sys.argv[2:]}
-    spent, results, stopped = 0, [], ""
+    spent, results, stopped = run_spent(), [], ""
+    log(f"run {RUN!r}: {spent:,} of {BUDGET:,} Claude tokens spent before ({SPENT})")
+    if spent >= BUDGET:
+        print(f"STOPPED: the run's budget ({BUDGET:,} Claude tokens) is spent; a new run: "
+              f"LIVE_CLAUDE_RUN=<another name>")  # fmt: skip
+        return 1
     for shard in shards:
         found, tokens, stopped = await run_shard(shard, wanted, spent)
         results += found
         spent += tokens
+        save_spent(spent)
         if stopped:
             break
-    passed = sum(ok for _, ok, _, _ in results)
-    print(f"{passed}/{len(results)} scenarios passed; {spent:,} Claude tokens"
+    passed = sum(ok for _, ok, *_ in results)
+    print(f"{passed}/{len(results)} scenarios passed; {spent:,} Claude tokens in run {RUN!r}"
           + (f"; STOPPED: {stopped}" if stopped else ""))  # fmt: skip
     return 0 if results and passed == len(results) and not stopped else 1
 
