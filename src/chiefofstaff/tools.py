@@ -1377,7 +1377,7 @@ class Tools:
             (
                 "follow_thread",
                 "Follow a Slack thread, DM or PR: its new messages come straight to you (a PR "
-                "merged or closed already: its reopening, for 14 days).",
+                "merged or closed already: for 14 days, and a closed one's reopening).",
                 FollowThread,
                 self.t_follow_thread,
             ),

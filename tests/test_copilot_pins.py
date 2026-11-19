@@ -399,7 +399,7 @@ TOOL_SCHEMAS: dict[str, tuple[int, str]] = {
     "draft_reply": (1264, "5e09a0260c312cf7d47bd3efa7e465af0b13d315fb5d35896326f21bd6c6ccb9"),
     "draft_slack_reply": (1640, "01a8ed658e37605670a51008134bf6196920b82a37637eed5e5dc7b735f60515"),
     "find_sessions": (700, "7818ee46d8cd971b3b7d05afe1ce7f1c53dd73444c9c421924337ab09406e8f5"),
-    "follow_thread": (607, "0c262e480aaa102df23f2251daeaa20d38e13b54790b97e32ab583765222218d"),
+    "follow_thread": (622, "6ff7fbb6dd8bcea55d7cd7a0b529f9ffc63659a71f2bd64809750072d192778d"),
     "list_sessions": (387, "1a7cd32acbf4370d535391cf0fcc777f7cb70dc682395dc77ff675e1e994e939"),
     "message_session": (4223, "98175d95ebcf1b0ee490df9291af8e0f52dfab70e45a1b9c1a8e28bfda6a9ce7"),
     "notify_owner": (932, "226014f3937727081727ba9cc2e3f7159b4a863bbef8e7133aabfac71e9b4801"),

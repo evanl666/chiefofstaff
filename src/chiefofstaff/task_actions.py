@@ -1160,11 +1160,11 @@ class TaskActions:
         Asked for now (it may run later, in the background): found out of date after this
         call (a decision changed), it stays out of date. What it finds is about the run that
         was its latest then (not one a follow-up started meanwhile)."""
-        run_id = self.store.value(
+        run = self.store.one(
             "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (task_id,)
         )
         asked = time.monotonic()
-        found = self.collected(task_id, keep_stale, ended, now(), run_id or "", asked)
+        found = self.collected(task_id, keep_stale, ended, now(), run["id"] if run else "", asked)
         return self.result_read(task_id, found, asked) if ended else found
 
     async def result_read(self, task_id: str, reading: Coroutine[Any, Any, None], asked: float):
@@ -1198,10 +1198,10 @@ class TaskActions:
         run_id: str = "",
         asked: float = 0.0,
     ):
-        task = self.tasks.get(task_id)
-        row = self.store.find_session(task["session_id"])
-        if not row:
-            return
+        task = self.tasks.find(task_id)
+        row = self.store.find_session(task["session_id"]) if task else None
+        if not task or not row:
+            return  # Gone meanwhile (a split undone, bug E114): nothing to read for it.
         if ended:
             await self.record_end(task)  # Its result: its share ends here.
             row = self.store.find_session(task["session_id"]) or row  # Its own clones too.
@@ -1645,6 +1645,7 @@ class TaskActions:
         if news and news.get("at", "") >= latest["created_at"]:
             # News since the result that moves is about that work: it moves too (the moved
             # report itself, filed as news, is the new task's result now).
+            undo |= {"news": self.store.get(f"news:{task['id']}")}
             self.store.delete(f"news:{task['id']}")
             if news.get("text") != latest["text"].strip()[:2000]:
                 self.store.set(f"news:{made['id']}", json.dumps(news))
@@ -3443,6 +3444,9 @@ class TaskActions:
         kept = json.loads(self.store.get(f"results:{task_id}") or "[]")
         if kept and kept[0].get("text") == earlier["text"]:
             self.store.set(f"results:{task_id}", json.dumps(kept[1:]))
+            found = json.loads(self.store.get(f"splitfrom:{made['id']}") or "{}")
+            found["undo"] = {**found.get("undo", {}), "results": json.dumps(kept)}
+            self.store.set(f"splitfrom:{made['id']}", json.dumps(found))
         self.publish(self.tasks.get(task_id))
         self.runtime.publish_session(self.store.session(task["session_id"]))
         return self.view(self.tasks.get(made["id"]))
@@ -3499,6 +3503,12 @@ class TaskActions:
         undo = found.get("undo") or {}
         if undo.get("ended"):
             self.store.set(f"taskend:{original}", json.dumps(undo["ended"]))
+        # What the split moved or trimmed (bug E114): its news, its earlier results.
+        if undo.get("news"):
+            self.store.set(f"news:{original}", undo["news"])
+        self.store.delete(f"news:{task_id}")
+        if undo.get("results"):
+            self.store.set(f"results:{original}", undo["results"])
         back = self.store.one(
             "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (original,)
         )

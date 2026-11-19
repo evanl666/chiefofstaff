@@ -5948,7 +5948,11 @@ class Runtime:
             if not row:
                 continue
             text = f"Stopped following {thread}: {why}."
-            self.add_message(session_id, "notice", text, {"thread": thread})
+            # Its worker hears it with its next message (bug E111: it took it for followed).
+            prompt = wrap("system", "unfollowed", text)
+            self.add_message(
+                session_id, "notice", text, {"thread": thread, "prompt": prompt, "deferred": True}
+            )
             with suppress(RuntimeError):
                 self.add_message(
                     self.router_id(),

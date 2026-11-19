@@ -1005,12 +1005,23 @@ class GitHubSource:
             when = datetime.fromisoformat(ended).timestamp() if ended else time.time()
             before = bool(ended) and when < since
             asked = float(self.store.get(f"ghkeep:{thread}") or 0)
-            if before and (state == "merged" or not asked):
+            if before and not asked:
                 # Already finished when followed (a PR cited in passing): just stop
                 # following it.
                 self.host.unfollow(thread)
                 return False
-            if state == "merged":
+            if state == "merged" and before:
+                # Merged already when followed on request (follow_thread): what is said there
+                # reaches its follower for a while (bug E111: dropped at once, unsaid).
+                if time.time() - asked > KEEP_CLOSED_DAYS * 86400:
+                    self.host.missing(
+                        thread,
+                        f"it was merged before it was followed, and {KEEP_CLOSED_DAYS} days "
+                        "have passed (what is said there now is not noticed)",
+                    )
+                    return False
+                kept = True
+            elif state == "merged":
                 items.append((f"github:state:{thread}:merged", "The PR was merged."))
             else:
                 # Closed, not merged (while followed, or followed on request once closed): it

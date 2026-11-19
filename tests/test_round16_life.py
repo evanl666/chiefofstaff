@@ -243,6 +243,66 @@ async def test_a_failed_check_back_is_retried_or_dropped_by_the_owner(harness):
     assert not runtime.task_actions.runs_going(b["id"]), "nothing is followed up for it now"
 
 
+# E110: the Router hears that focus ended early.
+
+
+async def test_ending_focus_early_tells_the_router(harness):
+    runtime = await harness.connect()
+    await runtime.focus.start(60)
+    await runtime.focus.end()
+    held = [
+        m for m in harness.store.prompts(harness.router_id)
+        if 'type="focus-ended"' in m["meta"]["prompt"]
+    ]  # fmt: skip
+    assert held and "ended" in held[-1]["meta"]["prompt"]
+    assert held[-1]["meta"].get("deferred"), "with its next message, not a turn of its own"
+    # Over at its time: the Router knew when it would end.
+    await runtime.focus.start(60)
+    await runtime.focus.check(time.time() + 3601)
+    assert len([
+        m for m in harness.store.prompts(harness.router_id)
+        if 'type="focus-ended"' in m["meta"]["prompt"]
+    ]) == 1  # fmt: skip
+
+
+# E111: a merged PR followed on request; a follow dropped is told.
+
+
+async def test_a_dropped_follow_is_told_to_its_worker(harness):
+    runtime = await harness.connect()
+    worker, _ = await spawn(runtime, harness.router_id, "Watch the PR")
+    await call_tool(runtime, "follow_thread", worker, thread=PR)
+    runtime.missing(PR, "it was merged before it was followed, 14 days ago")
+    told = [p for p in prompts(harness, worker) if "Stopped following" in p]
+    assert told and "14 days" in told[-1]
+
+
+async def test_a_merged_pr_followed_on_request_is_followed_for_two_weeks(tmp_path):
+    """E111: follow_thread on a PR merged already said "Following"; its first poll dropped it,
+    unsaid, and what was said there after reached nobody."""
+    from test_github_source import THREAD, Host, fake_gh
+
+    from chiefofstaff.sources.github import GitHubSource
+    from chiefofstaff.store import Store
+
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    store.set(f"ghkeep:{THREAD}", str(time.time()))  # follow_thread.
+    state = {"state": "closed", "merged": True, "comments": [], "line_comments": []}
+    host = Host(store)
+    source = GitHubSource(store, host, gh_command=fake_gh(state))
+    await source.poll_once()
+    assert host.unfollowed == [] and [s["thread"] for s in host.subscriptions] == [THREAD]
+    assert not any("merged" in text for _, _, text in host.deliveries), "its merge is no news"
+    state["comments"] = [{"id": 31, "user": {"login": "carol"}, "body": "Shipped in 2.1?",
+                          "html_url": "u31", "created_at": "2999-01-01T00:00:00Z"}]  # fmt: skip
+    await source.poll_once()
+    assert "Shipped in 2.1?" in host.deliveries[-1][2]
+    store.set(f"ghkeep:{THREAD}", str(time.time() - 15 * 86400))
+    await source.poll_once()
+    assert host.unfollowed[-1][:2] == (THREAD, "missing") and "14 days" in host.unfollowed[-1][2]
+
+
 # E102: Watch for you scans that fail.
 
 
@@ -300,6 +360,31 @@ async def test_a_scan_that_reports_ends_the_failure(tmp_path):
     row = runtime.connector.session()
     await call_tool(runtime, "report_found", row["id"], items=[])
     assert not runtime.connector.view()["failed"]
+
+
+# E114: an undone split puts back the news and the result it moved.
+
+
+async def test_undoing_a_split_puts_back_the_news_and_the_earlier_result(harness, caplog):
+    runtime = await harness.connect()
+    worker, fix = await spawn(runtime, harness.router_id, "Fix login")
+    await call_tool(runtime, "report", worker, status="done", summary="Fixed acme/app#7.")
+    runtime.task_actions.accept(fix["id"])
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    task="continue", task_id=fix["id"], text="Also bump the SDK.")  # fmt: skip
+    await call_tool(runtime, "report", worker, status="done", summary="Bumped acme/sdk#9.")
+    runtime.task_actions.news(fix["id"], "acme/sdk#9 was merged.")
+    results = harness.store.get(f"results:{fix['id']}")
+    news = harness.store.get(f"news:{fix['id']}")
+    split = runtime.task_actions.split(fix["id"], "Bump the SDK")
+    assert not harness.store.get(f"news:{fix['id']}")
+    # Undone at once: what the split started reading for it finds it gone, and lets it be.
+    runtime.task_actions.merge_back(split["id"])
+    await settle(runtime)
+    assert harness.store.get(f"news:{fix['id']}") == news
+    assert harness.store.get(f"results:{fix['id']}") == results
+    assert not harness.store.get(f"news:{split['id']}")
+    assert not [r for r in caplog.records if r.exc_info and "No task" in str(r.exc_info[1])]
 
 
 # E83: a retried task cancelled, or its worker closed, is cancelled (not Failed again).

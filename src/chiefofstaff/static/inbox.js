@@ -42,7 +42,7 @@ export function workerStates() {
   const { phases } = needs.board;
   // Every worker a decision card waits for, not only the first that asked.
   const askers = needs.drafts.flatMap((draft) => (draft.kind === "decision" ? (draft.target.askers || []).map((asker) => asker.session_id) : []));
-  const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...askers, ...needs.questions.map((question) => question.session_id), ...needs.tasks.map((task) => task.session_id)]);
+  const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...needs.uncertain.map((draft) => draft.session_id), ...askers, ...needs.questions.map((question) => question.session_id), ...needs.tasks.map((task) => task.session_id)]);
   const mine = new Map();
   for (const task of ownTasks()) mine.set(task.session_id, [...(mine.get(task.session_id) || []), task]);
   const found = new Map();

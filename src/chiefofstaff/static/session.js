@@ -2,7 +2,7 @@
 
 import { $, api, blobLive, blobUrl, el, foldable, toast, whenNearScreen } from "./dom.js";
 import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, shorten, slackText, threadLabel } from "./text.js";
-import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, routerId, state, STATUS_TEXT, tasks, upsertSession, viewedId, workerTitle } from "./state.js";
+import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, routerId, state, STATUS_TEXT, tasks, uncertainDrafts, upsertSession, viewedId, workerTitle } from "./state.js";
 import { MARKERS } from "./board.js";
 import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
@@ -1122,7 +1122,8 @@ export function updateWorkingLine() {
 }
 // A draft in a timeline: while it waits for the owner, a way to its card under Needs you.
 export function updateDraftRecords() {
-  const pending = new Set(pendingDrafts().map((draft) => draft.id));
+  // Its card under Needs you: waiting for the owner, or sent maybe ("Sent?").
+  const pending = new Set([...pendingDrafts(), ...uncertainDrafts()].map((draft) => draft.id));
   for (const node of document.querySelectorAll(".draft-record")) {
     const waiting = pending.has(node.dataset.draftId);
     node.classList.toggle("pending", waiting);

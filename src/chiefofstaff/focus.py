@@ -63,11 +63,27 @@ class Focus:
         self.runtime.publish_state()
         return self.state()
 
-    async def end(self) -> dict:
+    async def end(self, at_its_time: bool = False) -> dict:
         """Focus is over: one summary of what happened instead of the notifications."""
         started = float(self.store.get("focus_started") or 0)
+        until = float(self.store.get("focus_until") or 0)
         self.store.delete("focus_until")
         self.store.delete("focus_started")
+        if started and until and not at_its_time:
+            # Ended early: the Router held notifications back until the time it was told (bug
+            # E110). It hears so with its next message.
+            clock = datetime.now().astimezone().strftime("%H:%M")
+            with suppress(RuntimeError):
+                self.delivery.hold(
+                    self.runtime.router_id(),
+                    wrap(
+                        "system",
+                        "focus-ended",
+                        f"The owner's focus ended early, at {clock}: notify them as usual again.",
+                    ),
+                    kind="notice",
+                    display=f"Focus ended at {clock}",
+                )
         if started:
             text = self.summary(started)
             with suppress(RuntimeError):
@@ -117,4 +133,4 @@ class Focus:
     async def check(self, moment: float | None = None):
         until = float(self.store.get("focus_until") or 0)
         if until and (time.time() if moment is None else moment) >= until:
-            await self.end()
+            await self.end(at_its_time=True)

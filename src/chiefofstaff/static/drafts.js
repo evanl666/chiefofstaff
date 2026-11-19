@@ -862,7 +862,7 @@ export function uncertainCard(draft) {
   const error = el("span", { class: "error" });
   const node = el(
     "div",
-    { class: "card draft uncertain" },
+    { class: "card draft uncertain", "data-id": draft.id, "data-session": draft.session_id || undefined },
     el("div", { class: "head" }, el("span", { class: "label", text: where }), el("span", { class: "chip waiting", text: "Sent?" })),
     el("div", { class: "note", text: draft.outcome || "Chief of Staff stopped while sending this. Check whether it arrived." }),
     el("div", { class: "body quoted", text: finalText(draft) }),
