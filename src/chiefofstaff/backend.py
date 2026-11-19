@@ -607,10 +607,10 @@ class CopilotBackend:
         request = SessionsForkRequest(
             session_id=session_id, name=name, to_event_id=fork_point(events) or None
         )
-        return (await self.client.rpc.sessions.fork(request)).session_id
+        return (await (await self.ready_client()).rpc.sessions.fork(request)).session_id
 
     async def delete_session(self, session_id: str) -> None:
-        await self.client.delete_session(session_id)
+        await (await self.ready_client()).delete_session(session_id)
 
     async def mcp_sign_in_url(self, session: Any, server: str) -> str:
         login = await session.rpc.mcp.oauth.login(MCPOauthLoginRequest(server_name=server))
