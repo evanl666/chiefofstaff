@@ -4562,6 +4562,231 @@ async def round_qa6(runtime, browser, failures: list[str]):
     await context.close()
 
 
+async def life_seeded(runtime) -> dict:
+    """QA round 7 on 0.1.46, a task's life: a worker waiting for the owner's word on its
+    folder's settings (E98); accepted work whose check-back failed (E109); a reply whose send was
+    cut short, "Sent?" (E113); a task failed just now, one four days ago (E89); a review whose
+    summary the owner removed before a failed send (E105); Watch for you scans failing (E102)."""
+    from chiefofstaff.models import Watch
+
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(
+        store.settings().model_copy(
+            update={
+                "max_workers": 90,
+                "watches": [Watch(what="QA7 Slack DMs and mentions of me", how="Slack search")],
+            }
+        )
+    )
+    ago = lambda **delta: (datetime.now(UTC) - timedelta(**delta)).isoformat()  # noqa: E731
+    found: dict = {}
+
+    async def spawn(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        worker = json.loads(result.text_result_for_llm)["session_id"]
+        await settle(runtime)
+        session = runtime.states.handle(worker)
+        session.emit("user.message", content=session.raw_sent[-1])
+        session.emit("assistant.turn_start")
+        await settle(runtime)
+        return worker, runtime.tasks.current(worker), session
+
+    async def idle(session):
+        session.emit("session.idle")
+        await settle(runtime)
+
+    held, task, session = await spawn("QA7 fix the login timeout")
+    await call_tool(runtime, "report", held, status="progress", summary="PR open, in review.")
+    await idle(session)
+    reason = "Copilot settings Chief of Staff hasn't checked yet (.claude/settings.json)"
+    line = f"{reason}; Chief of Staff won't start the worker there until you say to use them."
+    refusal = runtime.settings_refusal
+
+    async def refused(row):  # Its folder's settings as they are: changed, until the owner's word.
+        if row["id"] != held or found.get("used"):
+            return await refusal(row)
+        runtime.settings_reasons[held] = reason
+        runtime.settings_said(held, line, {"digest": "qa7", "changes": [("added", ".mcp.json")]})
+        return line
+
+    runtime.settings_refusal = refused
+    await refused(store.session(held))
+    await runtime.settings_stop(held)
+    found |= {"held": held, "settings": task, "refusal": refusal, "refused": refused}
+
+    checked, task, session = await spawn("QA7 export the nightly data")
+    await call_tool(runtime, "report", checked, status="done", summary="Exported.",
+                    artifacts=[{"url": FLYTE + "qa7", "name": "QA7 nightly export",
+                                "status": "running"}])  # fmt: skip
+    await call_tool(runtime, "check_back", checked, task_id=task["id"], minutes=60,
+                    what="whether the nightly export finished", url=FLYTE + "qa7")  # fmt: skip
+    await idle(session)
+    runtime.task_actions.accept(task["id"])
+    check = json.loads(store.get(f"checkback:{task['id']}"))
+    check |= {"attempts": 3, "error": "Copilot is not running", "at": ago(minutes=1)}
+    store.set(f"checkback:{task['id']}", json.dumps(check))
+    found["checked"] = task
+
+    ann, task, session = await spawn("QA7 answer Ann about the release date")
+    await idle(session)
+    target = {"channel_id": "D0ANN0001", "thread_ts": "", "task_id": task["id"]}
+    draft = store.create_draft(ann, "slack", target, "Friday works for the release.")
+    store.update_draft(draft["id"], status="uncertain",
+                       outcome="Chief of Staff stopped while sending this.")  # fmt: skip
+    runtime.add_message(ann, "draft", "Friday works for the release.",
+                        {"draft_id": draft["id"], "label": "Slack reply"})  # fmt: skip
+    found |= {"ann": ann, "uncertain": draft["id"]}
+    review = store.create_draft(
+        ann, "github",
+        {"repo": "acme/app", "number": 7, "verdict": "comment", "task_id": task["id"],
+         "comments": [{"path": "app.py", "line": 3, "body": "QA7 off by one?"}]},
+        "QA7 looks good overall.",
+    )  # fmt: skip
+    store.update_draft(review["id"], final_text="", outcome="Sending failed: 502")
+    found["review"] = review["id"]
+
+    for name, hours in (("new", 0), ("aged", 80)):
+        worker, task, session = await spawn(f"QA7 count the rows, {name}")
+        await call_tool(runtime, "report", worker, status="failed",
+                        summary="The warehouse refused the query.")  # fmt: skip
+        await idle(session)
+        if hours:
+            runtime.tasks.update(task["id"], ended_at=ago(hours=hours))
+        found[name] = runtime.tasks.get(task["id"])
+
+    if (row := runtime.connector.session()) and runtime.connector.busy():
+        runtime.update_session(row["id"], status="idle")  # An earlier round's scan, at rest now.
+    store.set("watch_last", json.dumps({"at": ago(hours=1, minutes=20), "found": 0, "seen": 3}))
+    store.set(
+        "watch_failed",
+        json.dumps({"at": ago(minutes=12), "since": ago(minutes=62), "count": 3,
+                    "reason": "Copilot failed on this turn 3 times: static context too large"}),
+    )  # fmt: skip
+    for listed in runtime.tasks.listed(include_ended_since=ago(hours=200)):
+        runtime.task_actions.publish(runtime.tasks.get(listed["id"]))
+    for draft_id in (draft["id"], review["id"]):
+        runtime.bus.publish("draft", store.draft(draft_id))
+    runtime.publish_state()
+    return found
+
+
+async def round_qa7_life(runtime, browser, failures: list[str]):
+    """QA round 7, a task's life: each card that needs the owner has its own word on it (Use
+    these settings, Retry check-back, Dismiss), "Sent?" is found from its timeline and counted
+    on its worker's dot, a failed task out of Needs you is under Recently finished, failing Watch
+    scans say so, Close worker says it closed (with Undo), and an older reply sets nothing back."""
+    found = await life_seeded(runtime)
+    store = runtime.store
+    context = await browser.new_context(viewport={"width": 1500, "height": 1300})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+    needs = page.locator("#needs")
+
+    # E113: "Sent?" is found from its worker's timeline, and its worker's dot waits.
+    dot = page.locator("#session-list .item", has_text="QA7 answer Ann").locator(".dot")
+    await expect(dot).to_have_class(re.compile(r"\bwaiting\b"))
+    card = needs.locator(f'.card.uncertain[data-id="{found["uncertain"]}"]')
+    await expect(card).to_be_visible()
+    await page.locator("#session-list .item", has_text="QA7 answer Ann").click()
+    await page.locator("#timeline .goto").click()
+    await expect(page.locator(".home-item.selected")).to_be_visible()
+    await expect(card).to_be_in_viewport()
+    log("E113: a send cut short is found from its timeline; its worker's dot waits")
+
+    # E105: a summary the owner removed stays removed on its card.
+    review = needs.locator(f'.card.draft[data-id="{found["review"]}"]')
+    await expect(review).to_be_visible()
+    await expect(review).not_to_contain_text("QA7 looks good overall.")
+    log("E105: a review summary removed before a failed send stays removed")
+
+    # E98: one card for the worker waiting for the owner's word on its folder's settings.
+    settings = needs.locator(".card.task", has_text="QA7 fix the login timeout")
+    await expect(settings.locator(".head .meta")).to_contain_text("Settings changed")
+    dot = page.locator("#session-list .item", has_text="QA7 fix the login").locator(".dot")
+    await expect(dot).to_have_class(re.compile(r"\bwaiting\b"))
+    await expect(settings.get_by_role("button", name="See what changed")).to_be_visible()
+    found["used"] = True  # The owner's word: its folder's settings as they are now are used.
+    await settings.get_by_role("button", name="Use these settings").click()
+    await expect(page.locator(".toast").last).to_be_visible()
+    await expect(settings).to_have_count(0, timeout=10000)
+    runtime.settings_refusal = found["refusal"]
+    log("E98: settings to approve are under Needs you; Use these settings sends the worker on")
+
+    # E109: accepted work whose check-back failed: tried again, or dropped, from its card.
+    checked = needs.locator(".card.task", has_text="QA7 export the nightly data")
+    await expect(checked.locator(".head .meta")).to_contain_text("Check-back failed")
+    await expect(checked.get_by_role("button", name="Retry check-back")).to_be_visible()
+    await checked.get_by_role("button", name="Stop following up").click()
+    await expect(page.locator(".toast", has_text="No longer followed up.")).to_be_visible()
+    await expect(checked).to_have_count(0, timeout=10000)
+    assert not store.get(f"checkback:{found['checked']['id']}")
+    log("E109: a failed check-back on accepted work: Retry check-back, or Stop following up")
+
+    # E89: a failed task is dismissed (its worker stays as it is); one failed days ago is under
+    # Recently finished, still with Retry.
+    new = needs.locator(".card.task", has_text="QA7 count the rows, new")
+    await new.get_by_role("button", name="Dismiss").click()
+    await expect(page.locator(".toast", has_text="Dismissed.")).to_be_visible()
+    await expect(new).to_have_count(0, timeout=10000)
+    assert runtime.tasks.get(found["new"]["id"])["status"] == "cancelled"
+    aged = page.locator("#tasks-recent .card.task", has_text="QA7 count the rows, aged")
+    more = page.locator("#tasks-recent .show-more")
+    for _ in range(20):  # The newest first, a page at a time: it failed four days ago.
+        if await aged.count() or not await more.count():
+            break
+        await more.click()
+    await expect(aged.locator(".head .meta")).to_contain_text("Failed")
+    await expect(needs.locator(".card.task", has_text="QA7 count the rows, aged")).to_have_count(0)
+    log("E89: a failed task is dismissed; one failed days ago is under Recently finished")
+
+    # E102: failing Watch scans say so, in the sidebar and in Settings.
+    line = page.locator("#status-line .bad", has_text="Watch scan failed (3 in a row)")
+    await expect(line).to_be_visible()
+    await line.get_by_role("button", name="Settings").click()
+    state = page.locator("#watch-state")
+    await expect(state).to_contain_text("Scan failed")
+    await expect(state).to_contain_text("(3 in a row)")
+    await expect(state).to_have_class(re.compile(r"\berror\b"))
+    await page.keyboard.press("Escape")
+    store.delete("watch_failed")
+    runtime.publish_state()
+    await expect(line).to_have_count(0, timeout=10000)
+    log("E102: failing Watch scans are said in the sidebar and in Settings")
+
+    # E90: an action's reply older than what the page holds sets nothing back.
+    kept = await page.evaluate(
+        """async (id) => {
+          const { upsertTask } = await import('/static/tasks.js');
+          const { tasks } = await import('/static/state.js');
+          const held = tasks().find((t) => t.id === id);
+          upsertTask({ ...held, status: 'running', updated_at: '2000-01-01T00:00:00+00:00' }, true);
+          return tasks().find((t) => t.id === id).status;
+        }""",
+        found["aged"]["id"],
+    )
+    assert kept == "failed", kept
+    log("E90: an older reply does not overwrite a newer state")
+
+    # E91: Close worker says so, with Undo.
+    await page.locator("#session-list .item", has_text="QA7 answer Ann").click()
+    page.once("dialog", lambda dialog: asyncio.ensure_future(dialog.accept()))  # Still working.
+    await page.locator("#session-more-button").click()
+    await page.locator("#session-menu-items").get_by_role("button", name="Close worker").click()
+    toast = page.locator(".toast", has_text="Worker closed.")
+    await expect(toast).to_be_visible()
+    await toast.get_by_role("button", name="Undo").click()
+    await expect(page.locator(".toast", has_text="Worker reopened.")).to_be_visible()
+    assert not store.session(found["ann"])["closed_at"]
+    log("E91: Close worker says so, with Undo")
+    assert not errors, errors
+    await context.close()
+
+
 async def main():
     from chiefofstaff import machine
 
@@ -4903,7 +5128,7 @@ async def main():
                           round_ten, round_scale, round_qa, round_eleven, round_twelve,
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
-                          round_send, round_agents, round_qa6):  # fmt: skip
+                          round_send, round_agents, round_qa6, round_qa7_life):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()

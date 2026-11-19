@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+From the QA rounds on 0.1.46, a task's life: a failed task can be dismissed and only the task at
+work fails; cancelling or closing never brings a task back as Failed; what an ended task
+followed, and the workers that waited for it, hear when it comes back; a worker waiting for your
+word on its folder's settings, a failed check-back and a send cut short are each one card under
+*Needs you*, with the button that settles it; Watch for you says when its scans fail and starts
+again by itself; Other Copilot sessions never shows an empty group without a word.
+
 - **Chief of Staff starts about 5 seconds sooner while your Copilot CLI is newer than it
   supports.** It started your CLI at each start, to be refused, before it ran Copilot 1.0.112.
   Now it keeps that refusal in its data folder and runs Copilot 1.0.112 straight away while your
@@ -68,6 +75,56 @@
   cancelled. Its line reads *Cancelled by the Router*.
 - **Fixed: failing tests held back a done report only once per task.** Now once for each
   failing test run, and again after a follow-up.
+- **Fixed: cancelling a task that was retried, or closing its worker, brought it back as
+  Failed**, with Retry, which then reopened the worker the Router had closed and did the work a
+  second time (E83). A task taken up again goes back only to a finished result (accepted, or to
+  accept); a retried failed task that is cancelled is cancelled. A task another replaced can't be
+  retried (open its replacement), and a Retry that reopens a worker you or the Router closed
+  says so on Home and to the Router.
+- **Fixed: one failed turn failed every open task of its worker**, queued ones too, and their
+  Retry started them out of turn (E84). Only the task that turn was on fails.
+- **A failed task can be dismissed** (E89). *Cancel task* answered "is failed already", and Retry
+  was the only way out. Its card has **Dismiss** beside Retry: it is cancelled, and nothing of
+  its worker is reopened (the Router's `cancel_task` too). One neither retried nor dismissed is
+  told to you once, a day before it leaves *Needs you* after three days; it then stays under
+  *Recently finished* for the rest of the week, with Retry, instead of vanishing.
+- **A worker waiting for your word on its folder's settings is under *Needs you*** (E98). Its
+  task showed in Monitoring, or as Stopped with a *Go on* that waited for the same word. One card
+  now says why, with **Use these settings** (as its timeline's line) and **See what changed**;
+  its sidebar dot waits.
+- **An ended task stops following its PRs and threads** (E99): news there woke its worker for
+  work you had cancelled. It follows them again when it is retried.
+- **Watch for you says when its scans fail** (E102). Settings and the sidebar said "Scanned 1h ago
+  · 0 found" while every scan failed. They now say the scan failed, when, why and how many in a
+  row; the Router hears it without the connector's old task, and you once at two in a row. The
+  next scan runs at once on a fresh conversation, not in the failed one, and covers what the
+  failed ones missed.
+- **Workers told that a task would not come hear when it is back** (E103): after its Retry they
+  were never told. One that had not received the first notice yet gets neither.
+- **A task replacing another takes over what waited for it** (E104). Tasks waiting for the
+  replaced one stayed blocked on it; they now wait for the new one, and the Router is told which.
+- **A review summary you removed stays removed** (E105): after a failed send, the card and *Send
+  again* put the drafted summary back.
+- **A check-back no longer reopens a worker you (or the Router) closed** (E107); one closed for
+  being idle still comes back when due.
+- **A failed check-back on accepted work counts as needing you everywhere** (E109), not only on
+  Home, and its card has **Retry check-back** and **Stop following up**.
+- **Ending focus early tells the Router** (E110), which held notifications back until the time it
+  was told.
+- **A PR merged already and followed on request stays followed for two weeks** (E111), as
+  `follow_thread` says; a follow that is dropped is told to its worker.
+- **"Sent?" cards are found like any other** (E113): from the timeline's *Waiting for you* link,
+  on the worker's sidebar dot, and by jumping to them.
+- **Undoing a split puts back the news and the earlier result it moved** (E114).
+- **Cards show the newest state** (E90): an action's reply that came after newer news of the task
+  set it back (Running for a task that had failed again), and a card's buttons were not redrawn
+  when only what chooses them changed. Coming back to the page after a quiet minute reads it
+  again.
+- **Close worker, Stop, Open in and Reopen say so** (E91), Close with Undo; a card's errors show
+  as a toast too, and the toast after a cancel says what it came to.
+- **Other Copilot sessions is never an empty group without a word.** It says why: Copilot not
+  connected yet, the list not read, or none of yours. One session whose listing the SDK can't
+  read no longer hides every other.
 
 ## 0.1.47 (2026-11-19)
 

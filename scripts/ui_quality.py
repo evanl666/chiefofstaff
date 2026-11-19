@@ -4,7 +4,8 @@ sidebar's Other Copilot sessions with 3, 12 and 40 of them, before and after whe
 is shown (browser-shots/others/: a title keeps its width); Send to Chief's line in Settings and a
 sent item's line on Home (browser-shots/send/); Monitoring's runs and Artifacts' folded runs
 (browser-shots/qa-e41/); the Coding agents group in Settings → Models and a worker on Codex
-(browser-shots/agents-m2/).
+(browser-shots/agents-m2/); a task's life: its cards, a failed task out of Needs you, failing
+Watch scans (browser-shots/qa7-life/).
 
 Fails on: horizontal scrolling; elements overflowing their card or overlapping each other;
 more than one main (filled) button per card or dialog footer; controls under 28 px tall or
@@ -864,6 +865,54 @@ async def runs_views(runtime, browser, quality: Quality):
         await context.close()
 
 
+async def life_views(runtime, browser, quality: Quality):
+    """QA round 7, a task's life: the cards that need the owner for it (settings to approve,
+    a failed check-back on accepted work, a send cut short, a failed task with Dismiss), a
+    failed task under Recently finished, failing Watch scans in the sidebar, and Other Copilot
+    sessions with none; 800 to 1440 px, light and dark (browser-shots/qa7-life/)."""
+    from ui_edges import life_seeded
+
+    folder = SHOTS / "qa7-life"
+    folder.mkdir(exist_ok=True)
+    found = await life_seeded(runtime)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 1400}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        needs = page.locator("#needs")
+        await expect(
+            needs.locator(".card.task", has_text="QA7 fix the login timeout")
+        ).to_be_visible(timeout=15000)
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1400})
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            await page.wait_for_timeout(150)
+            name = f"quality-{width}-{scheme}"
+            await needs.screenshot(path=folder / f"{name}-needs.png")
+            await quality.check(page, f"life needs {width} {scheme}", "#needs", KNOWN_ROW_FINDINGS)
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=tasks]").click()
+                await page.wait_for_timeout(150)
+            recent = page.locator("#tasks-recent")
+            await recent.screenshot(path=folder / f"{name}-recent.png")
+            await quality.check(
+                page, f"life recent {width} {scheme}", "#tasks-recent", KNOWN_ROW_FINDINGS
+            )
+            await page.locator("#sidebar").screenshot(path=folder / f"{name}-sidebar.png")
+            await quality.check(page, f"life sidebar {width} {scheme}", "#sidebar")
+        await quality.contrast(page, f"life needs {scheme}", "#needs")
+        await quality.contrast(page, f"life sidebar {scheme}", "#sidebar")
+        quality.failures += [f"page error {scheme}: {error}" for error in errors]
+        await context.close()
+    runtime.settings_refusal = found["refusal"]
+    runtime.store.delete("watch_failed")
+
+
 async def signed_out(route):
     codex = {
         "name": "codex", "label": "Codex", "enabled": False, "model": "", "limit": 0,
@@ -1017,6 +1066,10 @@ async def main():
             await runs_views(runtime, browser, quality)
             log("runs nothing told of for a day, a task's runs under its PR (qa-e41/)")
             await agents_views(runtime, browser, quality)
+            await life_views(runtime, browser, quality)
+            log(
+                "a task's life: its cards, a failed task out of Needs you, failing scans (qa7-life/)"
+            )
             await browser.close()
         server.should_exit = True
         await serving
