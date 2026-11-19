@@ -4388,7 +4388,6 @@ SCRIPT_RUNNERS = re.compile(
 GLOB = re.compile(r"[*?\[]")
 # A sed script's `w FILE` (or `s///w FILE`): a file it writes.
 SED_WRITES = re.compile(r"(?:^|[;{}\n])\s*[0-9,$/]*\s*[wW]\s*\S|/[gpiIme0-9]*w\s*\S")
-HOME = str(Path("~").expanduser())
 
 
 def checkout_places(kept: tuple[str, ...]) -> tuple[str, ...]:
@@ -4409,9 +4408,10 @@ class CheckoutWrites:
 
     def __init__(self, text: str, kept: tuple[str, ...]):
         self.places = checkout_places(kept)
+        self.home = str(Path("~").expanduser())  # (As HOME says now.)
         text = text.replace("\\\n", "")
         self.mentioned = any(place in text for place in self.places) or any(
-            place.startswith(HOME + "/") and "~" + place[len(HOME) :] in text
+            place.startswith(self.home + "/") and "~" + place[len(self.home) :] in text
             for place in self.places
         )
         self.found = ""
@@ -4445,7 +4445,7 @@ class CheckoutWrites:
         if word.startswith("~"):
             if not word.startswith(("~/", "~")) or (word != "~" and not word.startswith("~/")):
                 return None  # (Another account's home.)
-            word = HOME + word[1:]
+            word = self.home + word[1:]
         if match := GLOB.search(word):
             word = word[: match.start()].rpartition("/")[0] or ("/" if word[0] == "/" else ".")
         if not word.startswith("/"):

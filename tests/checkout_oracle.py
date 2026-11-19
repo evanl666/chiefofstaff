@@ -68,7 +68,8 @@ def made(rng: random.Random, depth: int = 0) -> str:
     elif depth < 1 and roll < 0.18 and "'" not in line:
         line = f"eval '{line}'"
     elif roll < 0.3:
-        line = f"cd {rng.choice(['{K}', '{O}', '{K}/src', '..'])} && {line}"
+        # (Into the sandbox's own folders only: a `cd ..` twice would leave it.)
+        line = f"cd {rng.choice(['{K}', '{O}', '{K}/src', '{K}/src/..'])} && {line}"
     elif roll < 0.36:
         line = f"(cd {rng.choice(['{K}', '{O}'])} && {line})"
     return line
