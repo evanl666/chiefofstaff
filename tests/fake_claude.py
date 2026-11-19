@@ -115,6 +115,14 @@ class Fake:
         self.model = str(flags.get("model") or "claude-fake-1")
         self.effort = str(flags.get("effort") or "")
         self.name = str(flags.get("name") or "")
+        # Claude's own tools (--tools: "" for none, as for Chief of Staff's own sessions).
+        given = flags.get("tools")
+        self.restricted = given is not None
+        self.builtins = (
+            ["Bash", "Write", "Edit", "Read"]
+            if given is None
+            else [name for name in str(given).split(",") if name]
+        )
         # Each --mcp-config (JSON, or a file's path, as Claude reads them), and the system prompt
         # appended (as text, or from a file).
         self.servers: dict = {}
@@ -144,6 +152,8 @@ class Fake:
                     "disabledMcpjsonServers"
                 ),
                 "deny_write": (self.sandbox.get("filesystem") or {}).get("denyWrite"),
+                "tools": flags.get("tools"),
+                "strict_mcp": bool(flags.get("strict-mcp-config")),
             },
         )
         self.state = self.load() if flags.get("resume") else self.fresh()
@@ -516,7 +526,7 @@ class Fake:
             "mcp_servers": [{"name": name, "status": "connected"} for name in names],
             "agents": ["claude", "Explore", "general-purpose", "Plan", "statusline-setup"],
             "plugins": [],
-            "tools": ["Bash", "Write", "Edit", "Read"],
+            "tools": [*self.builtins, *(f"mcp__chief__{name}" for name in self.chief_tools)],
         }
         self.system("init", **(init | json.loads(os.environ.get("FAKE_CLAUDE_SYSTEM") or "{}")))
         if entry.get("uuid") and "replay-user-messages" in self.flags:
@@ -781,6 +791,8 @@ class Fake:
         plan: list[dict] = []
 
         def call(name: str, data: dict):
+            if self.restricted and not name.startswith("mcp__") and name not in self.builtins:
+                return  # Not offered to it (--tools).
             plan.append(
                 {
                     "type": "tool_use",
@@ -796,6 +808,8 @@ class Fake:
             self.state["on_wake"] = [found.group(1), found.group(2)]
         if text.startswith("<task-notification>") and (woke := self.state.pop("on_wake", None)):
             call(f"mcp__chief__{woke[0]}", {"text": woke[1]})
+        for found in re.finditer(r"Call the (\w+) tool with arguments (\{[^\n]*\})", text):
+            call(f"mcp__chief__{found.group(1)}", json.loads(found.group(2)))
         if found := re.search(r"Run the shell command `([^`]+)`", text):
             call("Bash", {"command": found.group(1), "description": "a command"})
         if found := re.search(r"Leave the command `([^`]+)` running for ([\d.]+) s", text):

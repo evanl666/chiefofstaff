@@ -1122,6 +1122,10 @@ class ClaudeWorker:
         self.tools = {tool.name: tool for tool in options.get("tools") or []}
         self.cwd = options.get("working_directory") or str(Path.home())
         self.ask_first = bool(options.get("ask_first"))
+        # Chief of Staff's own session (the Router, the Watchdog): its tools and nothing else,
+        # as its Copilot session has them: none of Claude's (no commands, files, web, subagents,
+        # schedules or questions), and no MCP server but Chief of Staff's.
+        self.role_only = bool(options.get("role_only"))
         self.model = options.get("model") or ""
         self.effort = options.get("reasoning_effort") or ""
         self.process_effort = self.effort
@@ -1344,8 +1348,10 @@ class ClaudeWorker:
             extra_args={
                 "replay-user-messages": None,
                 "name": f"cos-{self.worker[:8]}",
+                **({"strict-mcp-config": None} if self.role_only else {}),
                 **files,
             },
+            tools=[] if self.role_only else None,
             settings=json.dumps(settings),
             env=environment,
             model=self.model or None,
@@ -2108,6 +2114,14 @@ class ClaudeWorker:
         }
         if servers.get("chief") != "connected":
             problems.append("Chief of Staff's tools not connected")
+        if self.role_only and (
+            more := [
+                str(tool)
+                for tool in message.get("tools") or []
+                if not str(tool).startswith("mcp__chief__")
+            ]
+        ):
+            problems.append(f"tools beyond its own ({', '.join(more[:5])})")
         if message.get("session_id") not in {None, self.session_id}:
             problems.append("another session")
         version = message.get("claude_code_version")

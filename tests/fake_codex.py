@@ -273,8 +273,11 @@ class Server:
                 "defaultEnabled": default.get(name, True),
                 "enabled": kept.get(name, config.get(f"features.{name}", default.get(name, True))),
             }
-            for name in ("apps", "multi_agent", "multi_agent_v2", "memories")
-        ]
+            for name in (
+                "apps", "multi_agent", "multi_agent_v2", "memories", "shell_tool", "unified_exec",
+                "view_image", "image_generation", "hooks", "plugins",
+            )
+        ]  # fmt: skip
         return {"data": data, "nextCursor": None}
 
     def answer(self, thread_id: str, params: dict) -> dict:
@@ -709,7 +712,12 @@ class Server:
         for match in re.finditer(r"Call the (\w+) tool with text '([^']*)'", prompt):
             await self.say(thread_id, turn_id, "Calling it.", "commentary")
             await self.dynamic(thread_id, turn_id, match.group(1), {"text": match.group(2)})
+        for match in re.finditer(r"Call the (\w+) tool with arguments (\{[^\n]*\})", prompt):
+            await self.dynamic(thread_id, turn_id, match.group(1), json.loads(match.group(2)))
         for match in re.finditer(r"Run the shell command `([^`]+)`", prompt):
+            if shell_off(thread.get("config") or {}):
+                await self.say(thread_id, turn_id, "No shell here.")  # Not offered (Codex).
+                continue
             await self.shell(thread_id, turn_id, match.group(1))
         if found := re.search(r"Report done: ([^\n<]+)", prompt):
             summary = {"status": "done", "summary": found.group(1).strip()}
@@ -1195,6 +1203,11 @@ def ended(how: str):
     if path := os.environ.get("FAKE_CODEX_ENDS"):
         with Path(path).open("a") as file:
             file.write(how + "\n")
+
+
+def shell_off(config: dict) -> bool:
+    """As Codex: no command tool with `features.shell_tool` false."""
+    return config.get("features.shell_tool") is False
 
 
 def subagents_off(config: dict) -> bool:

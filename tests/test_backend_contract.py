@@ -368,6 +368,52 @@ async def test_send_returns_at_once_and_the_turn_reports_its_progress(backend, t
     assert ("assistant.usage" in kinds) == (not agent_like(backend))
 
 
+# What the real agents' own tools are called in what their model is offered: none of them may
+# reach Chief of Staff's own sessions (agent-roles.md).
+CODEX_OWN_TOOLS = ("exec_command", "write_stdin", "shell", "view_image", "web_search", "image_gen")
+
+
+async def test_chief_of_staffs_own_session_on_an_agent_has_its_tools_and_nothing_else(
+    backend, tmp_path
+):
+    """The Router or the Watchdog on another agent (agent-roles.md, `role_only`): Chief of
+    Staff's tools are offered to its model, and none of the agent's own (commands, files, web,
+    images, subagents, questions); a command it is asked for never runs."""
+    if not isinstance(backend, CodexBackend | ClaudeAgent):
+        pytest.skip("Codex's and Claude's adapters (Copilot's sessions: available_tools).")
+    calls = []
+
+    def echo(params: Echo, invocation):
+        calls.append(params.text)
+        return f"echo: {params.text}"
+
+    tool = define_tool("echo", description="Echo text back", params_type=Echo, handler=echo)
+    session, turn = await open_session(
+        backend, tmp_path, tools=[tool], role_only=True, ask_first=True
+    )
+    await session.send(
+        "Run the shell command `touch ran.marker`. Call the echo tool with text 'hi'. Then "
+        "reply with just: finished"
+    )
+    await turn.wait()
+    assert calls == ["hi"], "its own tool runs"
+    assert not (tmp_path / "ran.marker").exists(), "no command of the agent's runs"
+    if model := getattr(backend, "model", None):
+        offered = [
+            str(tool.get("name") or tool.get("type") or "")
+            for body in model.bodies
+            if body.get("tools")
+            for tool in body["tools"]
+        ]
+        assert offered, "its model was offered its tools"
+        if isinstance(backend, ClaudeAgent):
+            assert all(name.startswith("mcp__chief__") for name in offered), offered
+        else:
+            assert "echo" in offered, offered
+            assert not set(offered) & set(CODEX_OWN_TOOLS), offered
+            assert not any(name.startswith(("multi_agent", "spawn_agent")) for name in offered)
+
+
 async def test_an_mcp_servers_secrets_never_land_in_codexs_files(backend, tmp_path):
     """The owner's MCP servers reach a Codex worker's thread over its own connection: their
     headers and variables are in none of Codex's files (its rollouts, its configuration) nor on

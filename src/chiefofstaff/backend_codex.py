@@ -202,6 +202,19 @@ RETIRE_SECONDS = 15.0
 APPROVAL_POLICY = "untrusted"
 REVIEWER = "user"
 FULL_ACCESS = "dangerFullAccess"
+# Chief of Staff's own sessions on Codex (the Router, the Watchdog: `role_only`) have their tools
+# and nothing else, as their Copilot sessions do: Codex's commands, image viewing and making,
+# web search, hooks and plugins off (codex-rs 0.167.2 spec_plan.rs), the owner's MCP servers off,
+# and, as with Ask first, ChatGPT's apps and subagents. Each feature Codex lists must read back
+# off, or the session does not open.
+ROLE_FEATURES = (
+    "shell_tool",
+    "unified_exec",
+    "view_image",
+    "image_generation",
+    "hooks",
+    "plugins",
+)
 # A shell Codex runs a command line in: `/bin/zsh -lc '<command>'`.
 SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh"})
 # Turns' items a worker's timeline does not show.
@@ -1381,7 +1394,7 @@ class CodexBackend:
             }
             for tool in options.get("tools") or []
         ]
-        if not options.get("checking"):
+        if not options.get("checking") and not options.get("role_only"):
             params["dynamicTools"].append(ASK_USER)
         answer = await self.request("thread/start", params)
         try:
@@ -1458,6 +1471,17 @@ class CodexBackend:
             raise RuntimeError(
                 "Codex did not turn its memories off for this worker (their background agent "
                 f"runs commands nobody is asked about, and Stop does not end it): {kept}"
+            )
+        if options.get("role_only") and (
+            on := [
+                name
+                for name in ROLE_FEATURES
+                if name in features and features[name].get("enabled") is not False
+            ]
+        ):
+            raise RuntimeError(
+                f"Codex did not turn off {', '.join(on)} for Chief of Staff's own session, "
+                f"which has nothing but its tools: {kept}"
             )
         if not options.get("ask_first"):
             return
@@ -1760,7 +1784,11 @@ class CodexBackend:
             if servers:
                 config["mcp_servers"] = servers
             # A plugin's MCP servers have their policy in its own table: each asks too.
-            plugins = {} if options.get("checking") else await self.plugin_servers(cwd)
+            plugins = (
+                {}
+                if options.get("checking") or options.get("role_only")
+                else await self.plugin_servers(cwd)
+            )
             configured = mapping(owner.get("plugins"))
             if plugins:
                 config["plugins"] = {
@@ -1772,6 +1800,12 @@ class CodexBackend:
                     }
                     for plugin, names in plugins.items()
                 }
+        if options.get("role_only"):
+            for name in ROLE_FEATURES:
+                config[f"features.{name}"] = False
+            config["web_search"] = "disabled"
+            # The owner's MCP servers do not start for it (nothing of theirs is its to call).
+            config["mcp_servers"] = {name: {"enabled": False} for name in owner_servers(read)}
         if checking := options.get("checking"):
             # In the same table as the owner's servers' policies (one key per table here).
             config.setdefault("mcp_servers", {})[codex_check.SERVER] = {
