@@ -88,7 +88,8 @@ def git_environment(
     one of the owner's, a partial clone's missing objects fetched as they are read) where that
     may happen. Elsewhere (a repository a worker can write): no transport at all and no object
     fetched as it is read."""
-    environment = {} if lazy else {"GIT_NO_LAZY_FETCH": "1"}
+    # (No replace ref: refs/replace/ would change what a commit reads as.)
+    environment = {"GIT_NO_REPLACE_OBJECTS": "1"} | ({} if lazy else {"GIT_NO_LAZY_FETCH": "1"})
     if lazy or git_command_of(arguments) in NETWORK_GIT:
         transports = TRANSPORTS if local_remotes else REMOTE_TRANSPORTS
         return environment | {"GIT_ALLOW_PROTOCOL": transports}
@@ -387,8 +388,9 @@ def left_out(arguments: tuple[str, ...], paths: list[str], filters: list[str]) -
     return (*arguments, *specs) if "--" in arguments else (*arguments, "--", *specs)
 
 
-# Each index's submodules (by its file: (inode, size, mtime)): {path from the top: commit}.
-GITLINKS: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
+# Each index's submodules (by its file: (inode, size, mtime)): {path from the top: commit}. The
+# same as privategit's, which lists a worker's clone's as it checks its copy.
+GITLINKS = privategit.GITLINKS
 
 
 async def index_gitlinks(path: str, env: dict[str, str], index: Path, lazy: bool) -> dict:
@@ -597,16 +599,18 @@ async def unfiltered(
 ) -> tuple[tuple[str, ...], list[str]]:
     """git's options that turn off every filter a repository a worker can write would otherwise
     run (git-lfs's: defined in the owner's or the system's config, which Chief of Staff's git
-    keeps for how files are kept, autocrlf included), and the names of those and of the ones
-    its own config defines (never read by git): the files they keep are left out of what is
-    read (left_out), their content not being what git would store. Gitattributes in its tree
-    are read for git's own conversions (eol, text, encoding), which run no program."""
+    keeps for how files are kept, autocrlf included), and their names: the files they keep are
+    left out of what is read (left_out), their content not being what git would store. A filter
+    only the repository's own config defines (which git never reads here) is none: the files it
+    names are read as they are, never left out (a worker could name one to hide its changes).
+    Gitattributes in its tree are read for git's own conversions (eol, text, encoding), which
+    run no program."""
     names = await outside_filters(pins, path)
     options: list[str] = []
     for name in sorted(names):
         for setting in ("clean=", "smudge=", "process=", "required=false"):
             options += ["-c", f"filter.{name}.{setting}"]
-    return tuple(options), sorted(names | set(privategit.filters_of(common, admin)))
+    return tuple(options), sorted(names)
 
 
 def filter_names(keys) -> set[str]:

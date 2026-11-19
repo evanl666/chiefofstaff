@@ -7,7 +7,10 @@ worker's reach) made from what the repository holds as data. Its objects are tak
 `objects/info/alternates` (git reads an object by its hash, as from any remote); its HEAD, refs,
 index, shallow commits and excludes are read here as regular files, checked and copied; its
 config is written here: how the files are kept on this disk (as the repository says, checked),
-and the remote Chief of Staff recorded itself. No hooks, no `info/attributes`, no filter."""
+and the remote Chief of Staff recorded itself. No hooks, no `info/attributes`, no filter, no
+replace ref (`refs/replace/`: what an object reads as). A reftable's tables are copied as data
+too. An index that names a path out of its tree (`..`, an absolute one, one in a `.git`) is not
+used: one is made from HEAD's tree instead."""
 
 import asyncio
 import errno
@@ -30,10 +33,26 @@ ROOT: Path | None = None
 # One git at a time in each (refs and index are copied in before each command).
 LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 # Each git folder as last made: what its repository's files were then (their identity, size and
-# time), and the filters that repository's own config names. Made again only when they changed.
-MADE: dict[str, tuple[tuple, list[str]]] = {}
+# time). Made again only when they changed.
+MADE: dict[str, tuple] = {}
 
 HASH = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+# A reftable's table, as git names them (tables.list lists them, oldest first).
+TABLE = re.compile(r"0x[0-9a-f]{12}-0x[0-9a-f]{12}-[0-9a-f]{8}\.ref")
+MOST_TABLES = 4096
+# Refs that change what an object reads as: never copied (and never used: GIT_NO_REPLACE_OBJECTS).
+REPLACE = "refs/replace/"
+# A path in an index that leaves its tree, or is in a .git (as git's own check refuses one):
+# ``..``, ``.``, an empty part (an absolute path), a `.git` part (any case, trailing dots or
+# spaces: as Windows and macOS read one).
+UNSAFE_PATH = re.compile(
+    rb"(?:^|[\x00\t/])(?:\.\.?|(?i:\.git)[. ]*)(?:/|\x00|$)|(?:^|[\x00\t])/|//|/(?:\x00|$)"
+)
+# Each index's submodules as last listed (by its file's identity, size and time): {path from the
+# top: the commit it records}. Listed as its copy is checked (prepare), or by workspaces'
+# index_gitlinks (the same dict).
+GITLINKS: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
+INVALID_HEAD = b"ref: refs/heads/.invalid\n"
 SHARED_INDEX = re.compile(r"sharedindex\.[0-9a-f]{40}(?:[0-9a-f]{24})?")
 MOST_REFS = 200_000
 MOST_PACKED_REFS = 256 * 1024 * 1024
@@ -54,6 +73,15 @@ KEPT = {
 }
 
 
+def quiet(**more: str) -> dict[str, str]:
+    """The environment of git Chief of Staff runs here on what it copied: no config but what it
+    is given (not even the owner's), no transport, nothing fetched, no replace ref."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    return environment | {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                          "GIT_ALLOW_PROTOCOL": "", "GIT_NO_LAZY_FETCH": "1",
+                          "GIT_NO_REPLACE_OBJECTS": "1"} | more  # fmt: skip
+
+
 def config_entries(file: Path) -> list[tuple[str, str]] | None:
     """(key, value) of each setting in a git config file, as git itself reads it (read here as a
     regular file, then given to `git config` to parse: nothing it names is followed or run);
@@ -64,13 +92,10 @@ def config_entries(file: Path) -> list[tuple[str, str]] | None:
         return []
     except OSError:
         return None
-    quiet = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    quiet |= {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-              "GIT_ALLOW_PROTOCOL": "", "GIT_NO_LAZY_FETCH": "1"}  # fmt: skip
     try:
         done = subprocess.run(
             ["git", "config", "--file", "-", "--no-includes", "--list", "-z"],  # noqa: S607
-            input=data, capture_output=True, env=quiet, cwd=os.sep, timeout=20, check=False,
+            input=data, capture_output=True, env=quiet(), cwd=os.sep, timeout=20, check=False,
         )  # fmt: skip
     except (OSError, subprocess.SubprocessError):
         return None
@@ -172,7 +197,7 @@ def refs_of(common: Path) -> tuple[dict[str, str], dict[str, str]]:
         if not line or line[0] in "#^":
             continue
         value, _, name = line.partition(" ")
-        if HASH.fullmatch(value) and ref_name(name):
+        if HASH.fullmatch(value) and ref_name(name) and not name.startswith(REPLACE):
             direct[name] = value
     count = 0
     for folder, _, files in os.walk(common / "refs"):  # (Not into a linked folder.)
@@ -182,7 +207,7 @@ def refs_of(common: Path) -> tuple[dict[str, str], dict[str, str]]:
                 raise ValueError("it has too many refs")
             path = Path(folder) / file
             name = path.relative_to(common).as_posix()
-            if not ref_name(name):
+            if not ref_name(name) or name.startswith(REPLACE):
                 continue
             try:
                 text = read_regular(path, 1024).decode(errors="replace").strip()
@@ -209,8 +234,9 @@ def looked(path: Path) -> tuple | None:
 def state(source: Path, own: Path) -> tuple:
     """What git's folder of a repository holds that Chief of Staff copies, as it is now: each
     file's identity, size and time, and each loose ref's (a ref git writes is a new file)."""
-    files = [source / name for name in ("config", "packed-refs", "shallow", "info/exclude")]
-    files += [own / "HEAD", own / "index"]
+    files = [source / name for name in ("config", "packed-refs", "shallow", "info/exclude",
+                                        "reftable/tables.list")]  # fmt: skip
+    files += [own / "HEAD", own / "index", own / "reftable" / "tables.list"]
     found: list = [looked(path) for path in files]
     count = 0
     for folder, folders, names in os.walk(source / "refs"):
@@ -224,9 +250,81 @@ def state(source: Path, own: Path) -> tuple:
     return tuple(found)
 
 
-def filters_of(common: str, admin: str = "") -> list[str]:
-    """The filters a repository's own config names, as last read (prepare); never used by git."""
-    return MADE.get(str(place(common, admin)), ((), []))[1]
+def copy_reftable(source: Path, target: Path):
+    """A reftable (its tables.list and the tables it names) copied as data: each table by the
+    name git gives it, each a regular file. ValueError when it can't be read so."""
+    try:
+        listed = read_regular(source / "tables.list", MOST_SMALL).decode(errors="replace").split()
+    except OSError as exc:
+        raise ValueError(f"its reftable can't be read ({exc.strerror or exc})") from exc
+    if len(listed) > MOST_TABLES or not all(TABLE.fullmatch(name) for name in listed):
+        raise ValueError("its reftable lists tables git wouldn't name so")
+    target.mkdir(parents=True, exist_ok=True)
+    for name in listed:
+        if not (target / name).is_file() and not copied(source / name, target / name,
+                                                         MOST_PACKED_REFS):  # fmt: skip
+            raise ValueError(f"its reftable's {name} can't be read")
+    for stale in target.iterdir():
+        if stale.name not in listed and stale.name != "tables.list":
+            stale.unlink(missing_ok=True)
+    written(target / "tables.list", "".join(f"{name}\n" for name in listed).encode())
+
+
+def suspect(listed: bytes) -> bool:
+    """Whether `git ls-files --stage -z` lists a path UNSAFE_PATH may find: quick looks for what
+    such a path holds (the regular expression alone takes 60 ms on 40,000 files)."""
+    if b"\t/" in listed or b"//" in listed or b"/\x00" in listed:
+        return True
+    if b"./" in listed or b".\x00" in listed:
+        return True
+    lowered = listed.lower()
+    return any(part in lowered for part in (b".git/", b".git\x00", b".git.", b".git "))
+
+
+def unsafe_index(git_dir: Path, index: Path, source: Path, key: tuple | None) -> bytes:
+    """A path an index names out of its tree or in a .git (UNSAFE_PATH), as git lists them;
+    b"" for none. Its submodules are kept as listed (GITLINKS), for `source`, the repository's
+    own index, as it was (`key`) when copied. ValueError when git can't read it."""
+    try:
+        done = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"],  # noqa: S607
+            capture_output=True, cwd=os.sep, timeout=60, check=False,
+            env=quiet(GIT_DIR=str(git_dir), GIT_INDEX_FILE=str(index)),
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"its index can't be read ({exc})") from exc
+    if done.returncode:
+        raise ValueError("its index can't be read")
+    listed = done.stdout
+    if suspect(listed) and (found := UNSAFE_PATH.search(listed)):
+        start = max(listed.rfind(b"\0", 0, found.start() + 1), listed.rfind(b"\t", 0, found.end()))
+        end = listed.find(b"\0", found.start() + 1)
+        return listed[start + 1 : end if end >= 0 else None] or b"/"
+    links = {}
+    for entry in listed.split(b"\0"):
+        if entry.startswith(b"160000 "):
+            mode, _, name = entry.decode(errors="surrogateescape").partition("\t")
+            links[name] = mode.split()[1]
+    if key:
+        if len(GITLINKS) > 256:
+            GITLINKS.clear()
+        GITLINKS[str(source)] = (key, links)
+    return b""
+
+
+def index_from_head(git_dir: Path, index: Path) -> bool:
+    """An index made from HEAD's tree (git read-tree: no file is read or written); False when
+    there is none to make (no commit yet)."""
+    index.unlink(missing_ok=True)
+    try:
+        done = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "read-tree", "HEAD"],  # noqa: S607
+            capture_output=True, cwd=os.sep, timeout=120, check=False,
+            env=quiet(GIT_DIR=str(git_dir), GIT_INDEX_FILE=str(index)),
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
 
 
 def prepare(common: str, admin: str, tree: str, origin: str = "") -> dict[str, str]:
@@ -234,13 +332,17 @@ def prepare(common: str, admin: str, tree: str, origin: str = "") -> dict[str, s
     linked worktrees') a worker can write, made from what that one holds now (see above), when
     that changed since: the environment git runs with there. `origin`: the remote Chief of
     Staff recorded (a plain address). ValueError when it can't be read so (a HEAD that is no
-    ref, a reftable)."""
+    ref, a reftable that is not one)."""
     source, own = Path(common), Path(admin or common)
     folder = place(common, admin)
     now = (state(source, own), origin)
-    environment = {"GIT_DIR": str(folder), "GIT_WORK_TREE": tree}
-    if (made := MADE.get(str(folder))) and made[0] == now and (folder / "HEAD").is_file():
-        return environment
+    entries = None
+    if (made := MADE.get(str(folder))) and made == now:
+        git_dir = (
+            folder / "worktrees" / "own" if (folder / "worktrees" / "own").is_dir() else folder
+        )
+        if (git_dir / "HEAD").is_file():
+            return {"GIT_DIR": str(git_dir), "GIT_WORK_TREE": tree}
     MADE.pop(str(folder), None)
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     entries = config_entries(source / "config") or []
@@ -248,14 +350,17 @@ def prepare(common: str, admin: str, tree: str, origin: str = "") -> dict[str, s
     kind = said.get("extensions.objectformat", "sha1")
     if kind not in {"sha1", "sha256"}:
         raise ValueError(f"its objects are kept as {kind}, which git here doesn't read")
-    if said.get("extensions.refstorage", "files") != "files":
-        raise ValueError("its refs are kept in a reftable, which Chief of Staff doesn't read")
-    version = 0 if kind == "sha1" else 1
+    refs = said.get("extensions.refstorage", "files")
+    if refs not in {"files", "reftable"}:
+        raise ValueError(f"its refs are kept as {refs}, which git here doesn't read")
+    version = 0 if kind == "sha1" and refs == "files" else 1
     lines = ["[core]", f"\trepositoryformatversion = {version}", "\tbare = false"]
     lines += [f"\t{key.split('.')[1]} = {said[key]}" for key, allowed in KEPT.items()
               if said.get(key) in allowed]  # fmt: skip
-    if kind != "sha1":
-        lines += ["[extensions]", f"\tobjectformat = {kind}"]
+    if version:
+        lines += ["[extensions]"]
+        lines += [f"\tobjectformat = {kind}"] if kind != "sha1" else []
+        lines += ["\trefstorage = reftable"] if refs == "reftable" else []
     if origin and not any(c in origin for c in "\n\r\0"):
         # Quoted, as git reads a value: a path on Windows has `\\` in it.
         quoted = origin.replace("\\", "\\\\").replace('"', '\\"')
@@ -263,30 +368,64 @@ def prepare(common: str, admin: str, tree: str, origin: str = "") -> dict[str, s
     written(folder / "config", ("\n".join(lines) + "\n").encode())
     objects = Path(os.path.realpath(source / "objects"))
     written(folder / "objects" / "info" / "alternates", f"{objects.as_posix()}\n".encode())
-    try:
-        head = read_regular(own / "HEAD", 4096).decode(errors="replace").strip()
-    except OSError as exc:
-        raise ValueError(f"its HEAD can't be read ({exc.strerror or exc})") from exc
-    if not (HASH.fullmatch(head) or (head.startswith("ref:") and ref_name(head[4:].strip()))):
-        raise ValueError("its HEAD names no commit or branch")
-    written(folder / "HEAD", f"{head}\n".encode())
-    direct, symbolic = refs_of(source)
     shutil.rmtree(folder / "refs", ignore_errors=True)
-    for name in ("refs/heads", "refs/tags"):
-        (folder / name).mkdir(parents=True, exist_ok=True)
-    for name, target in symbolic.items():
-        written(folder / name, f"ref: {target}\n".encode())
-    names = sorted(direct, key=lambda name: name.encode())
-    packed = "# pack-refs with: sorted \n" + "".join(f"{direct[n]} {n}\n" for n in names)
-    written(folder / "packed-refs", packed.encode())
-    copied(own / "index", folder / "index", MOST_INDEX)
-    for item in folder.glob("sharedindex.*"):
+    shutil.rmtree(folder / "worktrees", ignore_errors=True)
+    if refs == "reftable":
+        # Its refs, HEAD too, are in its tables (HEAD and refs/ only say so to git); a linked
+        # worktree's own (its HEAD) in its own tables, read here as git reads a worktree's.
+        (folder / "refs").mkdir()
+        written(folder / "HEAD", INVALID_HEAD)
+        copy_reftable(source / "reftable", folder / "reftable")
+        git_dir = folder
+        if admin:
+            git_dir = folder / "worktrees" / "own"
+            (git_dir / "refs").mkdir(parents=True)
+            written(git_dir / "HEAD", INVALID_HEAD)
+            written(git_dir / "commondir", b"../..\n")
+            copy_reftable(own / "reftable", git_dir / "reftable")
+    else:
+        git_dir = folder
+        shutil.rmtree(folder / "reftable", ignore_errors=True)
+        try:
+            head = read_regular(own / "HEAD", 4096).decode(errors="replace").strip()
+        except OSError as exc:
+            raise ValueError(f"its HEAD can't be read ({exc.strerror or exc})") from exc
+        if not (HASH.fullmatch(head) or (head.startswith("ref:") and ref_name(head[4:].strip()))):
+            raise ValueError("its HEAD names no commit or branch")
+        written(folder / "HEAD", f"{head}\n".encode())
+        direct, symbolic = refs_of(source)
+        for name in ("refs/heads", "refs/tags"):
+            (folder / name).mkdir(parents=True, exist_ok=True)
+        for name, target in symbolic.items():
+            written(folder / name, f"ref: {target}\n".encode())
+        names = sorted(direct, key=lambda name: name.encode())
+        packed = "# pack-refs with: sorted \n" + "".join(f"{direct[n]} {n}\n" for n in names)
+        written(folder / "packed-refs", packed.encode())
+    index = git_dir / "index"
+    if git_dir != folder:
+        (folder / "index").unlink(missing_ok=True)
+    try:
+        info = (own / "index").stat()
+        key: tuple | None = (info.st_ino, info.st_size, info.st_mtime_ns)
+    except OSError:
+        key = None
+    copied(own / "index", index, MOST_INDEX)
+    for item in git_dir.glob("sharedindex.*"):
         item.unlink(missing_ok=True)
-    if (folder / "index").exists():
+    if index.exists():
         with os.scandir(own) as listed:  # (A split index's shared part, by its name.)
             for entry in listed:
                 if SHARED_INDEX.fullmatch(entry.name):
-                    copied(own / entry.name, folder / entry.name, MOST_INDEX)
+                    copied(own / entry.name, git_dir / entry.name, MOST_INDEX)
+        if bad := unsafe_index(git_dir, index, own / "index", key):
+            # git would write there, out of the tree or into a .git, as it checks out (a stash,
+            # a restore): what its commit holds instead, as if nothing were staged.
+            made = index_from_head(git_dir, index)
+            logger.warning(
+                "Not using the index of %s: it names %r, out of its folder or in a .git. %s",
+                tree, bad.decode(errors="replace")[:200],
+                "Read from its last commit instead." if made else "Read without one.",
+            )  # fmt: skip
     try:
         shallow = read_regular(source / "shallow", MOST_SMALL).decode(errors="replace").split()
         kept = "".join(f"{commit}\n" for commit in shallow if HASH.fullmatch(commit))
@@ -294,10 +433,5 @@ def prepare(common: str, admin: str, tree: str, origin: str = "") -> dict[str, s
     except OSError:
         (folder / "shallow").unlink(missing_ok=True)
     copied(source / "info" / "exclude", folder / "info" / "exclude", MOST_SMALL)
-    names = set()
-    for key, _ in entries:
-        section, _, rest = key.partition(".")
-        if section.lower() == "filter" and "." in rest:
-            names.add(rest.rpartition(".")[0])
-    MADE[str(folder)] = (now, sorted(names))
-    return environment
+    MADE[str(folder)] = now
+    return {"GIT_DIR": str(git_dir), "GIT_WORK_TREE": tree}

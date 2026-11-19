@@ -12,6 +12,12 @@
   the version uv cached first, however old; `uv tool upgrade chiefofstaff`). Chief of Staff reads
   its own page on PyPI for that, at most once a day, sending nothing about you; Settings → General
   turns it off. When Copilot can't start at all, the error says that command too.
+- **Security: Chief of Staff's own git in workers' clones, hardened further** (from the 0.1.46
+  review). A replace ref (`refs/replace/`) no longer changes what it reads, in any repository; an
+  index naming a path out of its tree or in a `.git` is not used (one is made from the last
+  commit, and the log says so); a filter only the clone's own config defines no longer keeps
+  files out of what it reads; clones whose refs are in a reftable (git's default from 3.0) are
+  read instead of refused.
 - A Copilot session deleted while open no longer logs a traceback ("'destroy' is not a valid
   ShutdownType").
 

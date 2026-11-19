@@ -50,6 +50,17 @@ def said(text: str) -> str:
 
 
 @pytest.fixture(autouse=True)
+def private_git_folders(tmp_path_factory, monkeypatch):
+    """Chief of Staff's own git folders (privategit) in a folder of each test's own, as made by
+    it: never another test's, nor the temporary folder's."""
+    from chiefofstaff import privategit
+
+    monkeypatch.setattr(privategit, "ROOT", tmp_path_factory.mktemp("git"))
+    monkeypatch.setattr(privategit, "MADE", {})
+    monkeypatch.setattr(privategit, "LOCKS", {})
+
+
+@pytest.fixture(autouse=True)
 def no_pypi(monkeypatch):
     """No test reads PyPI for a newer release (updates.py): one that wants one says which."""
     from chiefofstaff import updates

@@ -3463,6 +3463,7 @@ def git_output(arguments: list[str], most: int) -> tuple[int, bytes] | None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return None

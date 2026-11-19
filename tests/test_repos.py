@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import inspect
 import json
 import os
@@ -5757,3 +5758,117 @@ async def test_a_task_built_on_another_tasks_branch_counts_only_its_own_commits(
     await runtime.task_actions.check_fresh(session_id)
     found = await receipts_of(runtime, task, lambda found: bool(found["stale"]))
     assert found["stale"] == "Out of date: its files changed since it was checked (README.md)."
+
+
+async def private(tree: Path, *arguments: str, common: Path | None = None, admin: str = "") -> str:
+    """Chief of Staff's git in a repository a worker can write (privategit), at `tree`."""
+    common = common or tree / ".git"
+    return await workspaces_module.private_git(str(common), admin, str(tree), "", str(tree),
+                                               arguments)  # fmt: skip
+
+
+def two_commits(repo: Path) -> tuple[str, str]:
+    """A repository whose HEAD is "real", and a "fake" commit beside it."""
+    run("git", "init", "-q", "-b", "main", str(repo))
+    commit(repo, "a.txt", "real\n")
+    real = run("git", "rev-parse", "HEAD", cwd=repo).strip()
+    run("git", "checkout", "-q", "-b", "other", cwd=repo)
+    commit(repo, "a.txt", "fake\n")
+    fake = run("git", "rev-parse", "HEAD", cwd=repo).strip()
+    run("git", "checkout", "-q", "main", cwd=repo)
+    return real, fake
+
+
+async def test_a_replace_ref_changes_nothing_chief_of_staffs_git_reads(tmp_path):
+    """A replace ref (`git replace`, refs/replace/) makes git read one commit as another: in a
+    worker's clone, or a repository of the owner's, Chief of Staff's git reads what is there."""
+    clone = tmp_path / "clone"
+    real, fake = two_commits(clone)
+    run("git", "replace", real, fake, cwd=clone)
+    assert run("git", "show", "HEAD:a.txt", cwd=clone) == "fake\n", "git there reads the other"
+    assert (await private(clone, "show", "HEAD:a.txt")) == "real\n"
+    run("git", "pack-refs", "--all", cwd=clone)  # (Packed, as a clone has them.)
+    assert (await private(clone, "show", "HEAD:a.txt")) == "real\n"
+    owners = await workspaces_module.git("-C", str(clone), "show", "HEAD:a.txt")
+    assert owners == "real\n"
+
+
+def forged_index(repo: Path, name: str, forged: str):
+    """The repository's index with the entry `name` renamed `forged` (as long), its checksum
+    made again: an index git itself would never write."""
+    index = repo / ".git" / "index"
+    data = index.read_bytes()[:-20]
+    assert len(name) == len(forged) and data.count(name.encode()) == 1
+    data = data.replace(name.encode(), forged.encode())
+    index.write_bytes(data + hashlib.sha1(data).digest())  # noqa: S324  (git's own checksum)
+
+
+@pytest.mark.parametrize("forged", ["../evil.sh", ".git/hooks", ".GIT/x.txt"])
+async def test_an_index_naming_a_path_out_of_its_tree_is_not_used(tmp_path, forged, caplog):
+    """A worker's clone whose index names a path out of its tree or in a .git (git would write
+    there as Chief of Staff's git checks out, stashes or restores): that index is not used, one
+    is made from its last commit instead, and the log says so."""
+    clone = tmp_path / "clone"
+    run("git", "init", "-q", "-b", "main", str(clone))
+    commit(clone, "a.txt", "a\n")
+    placeholder = "z" * len(forged)
+    (clone / placeholder).write_text("x\n")
+    run("git", "add", placeholder, cwd=clone)
+    forged_index(clone, placeholder, forged)
+    assert forged in run("git", "ls-files", cwd=clone)
+    assert (await private(clone, "ls-files")).split() == ["a.txt"]
+    assert "Not using the index of" in caplog.text and forged in caplog.text
+    (clone / placeholder).unlink()
+    assert (await private(clone, "status", "--porcelain")) == ""
+
+
+async def test_a_filter_only_a_workers_clone_defines_hides_nothing(tmp_path):
+    """A filter the clone's own config defines (git never reads that config here) is none: the
+    files its .gitattributes give it are read as they are, not left out as a filter's (a worker
+    could name one to keep its changes out of what Chief of Staff reads)."""
+    clone = tmp_path / "clone"
+    run("git", "init", "-q", "-b", "main", str(clone))
+    (clone / ".gitattributes").write_text("secret.txt filter=hide\n")
+    commit(clone, "secret.txt", "v1\n")
+    run("git", "config", "filter.hide.clean", "cat", cwd=clone)
+    run("git", "config", "filter.hide.smudge", "cat", cwd=clone)
+    (clone / "secret.txt").write_text("v2: the worker's change\n")
+    assert (await private(clone, "status", "--porcelain")) == " M secret.txt\n"
+    checkout = {"repo": str(clone), "path": str(clone), "remote": str(clone)}
+    assert await workspaces_module.unchecked_files(checkout, str(clone)) == 0
+
+
+def reftable() -> bool:
+    with tempfile.TemporaryDirectory() as folder:
+        done = subprocess.run(["git", "init", "-q", "--ref-format=reftable", folder],
+                              capture_output=True, check=False)  # fmt: skip
+    return done.returncode == 0
+
+
+@pytest.mark.skipif(not reftable(), reason="git before 2.45 keeps no reftable")
+async def test_a_workers_clone_with_a_reftable_is_read(tmp_path):
+    """A clone whose refs are in a reftable (`git init --ref-format=reftable`, git's default
+    from 3.0), and a linked worktree of it: their HEADs, branches and work are read through
+    Chief of Staff's own git folder, the tables copied as data."""
+    clone = tmp_path / "clone"
+    run("git", "init", "-q", "-b", "main", "--ref-format=reftable", str(clone))
+    commit(clone, "a.txt", "a\n")
+    main = run("git", "rev-parse", "HEAD", cwd=clone).strip()
+    run("git", "branch", "feature", cwd=clone)
+    run("git", "worktree", "add", "-q", str(tmp_path / "wt"), "feature", cwd=clone)
+    commit(tmp_path / "wt", "b.txt", "b\n")
+    feature = run("git", "rev-parse", "HEAD", cwd=tmp_path / "wt").strip()
+    (clone / "a.txt").write_text("changed\n")
+    assert (await private(clone, "rev-parse", "HEAD")).strip() == main
+    assert (await private(clone, "symbolic-ref", "HEAD")).strip() == "refs/heads/main"
+    assert (await private(clone, "status", "--porcelain")) == " M a.txt\n"
+    admin = str(clone / ".git" / "worktrees" / "wt")
+    tree = tmp_path / "wt"
+    assert (
+        await private(tree, "rev-parse", "HEAD", common=clone / ".git", admin=admin)
+    ).strip() == feature
+    assert (await private(tree, "status", "--porcelain", common=clone / ".git", admin=admin)) == ""
+    branches = await private(clone, "for-each-ref", "--format=%(refname)", "refs/heads/")
+    assert branches.split() == ["refs/heads/feature", "refs/heads/main"]
+    commit(clone, "c.txt", "c\n")  # A new table: read again.
+    assert (await private(clone, "rev-parse", "HEAD")).strip() != main
