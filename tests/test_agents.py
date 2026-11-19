@@ -348,7 +348,12 @@ async def test_without_an_agent_on_the_routers_tools_and_prompt_are_as_before(
         properties = schema(on)["properties"]
         assert properties["agent"]["enum"] == ["", "copilot", "codex"]
         assert "only when the owner named one" in properties["agent"]["description"]
-        assert {k: v for k, v in properties.items() if k != "agent"} == schema(before)["properties"]
+        # (And compare_with: the same task on several agents, when the owner asks.)
+        assert properties["compare_with"]["items"]["enum"] == ["copilot", "codex"]
+        added_fields = {"agent", "compare_with"}
+        assert {k: v for k, v in properties.items() if k not in added_fields} == schema(before)[
+            "properties"
+        ]
         # And one more, to move a worker's work to another agent when the owner asks.
         assert [t.name for t in on["tools"]] == [
             *(name for name, _, _ in tools_before),

@@ -1551,8 +1551,9 @@ class Tools:
                     ),
                 )
             }
+            others: Any = Literal.__getitem__((agents.COPILOT, *names))  # type: ignore[attr-defined]
             fields["compare_with"] = (
-                list[choices],
+                list[others],
                 Field(
                     default_factory=list,
                     description="Compare, only when the owner asks for the same task on several "
