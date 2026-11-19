@@ -278,7 +278,8 @@ def test_timeout():
 # the test file's first line too.
 GREEN = APP.replace("return 31", "return 30  # The gateway's limit.")
 GREEN_TEST = TEST.replace(
-    "from app.timeouts import retries, timeout", "from app.timeouts import timeout, retries"
+    "from app.timeouts import retries, timeout",
+    "from app.timeouts import retries, timeout  # What these tests are about.",
 )
 # CI runs only for PRs into a run's branches, and for its base: nothing else in the repository.
 WORKFLOW = f"""name: ci
@@ -1366,7 +1367,7 @@ async def sw1_one_plan(ctx: Ctx):
 
 
 async def sw2_edit(ctx: Ctx):
-    target, number, _head, comments = await reviewed_pr(ctx, "sw2")
+    target, number, _head, _comments = await reviewed_pr(ctx, "sw2")
     view = await ctx.kept(
         target,
         lambda v: (v.get("action") or {}).get("label") == "Review & post",
@@ -1374,8 +1375,18 @@ async def sw2_edit(ctx: Ctx):
         1500,
     )
     plan = (await ctx.plan(view["action"]["step"]))["plan"]
+    # The reply the owner edits: the push-back's, else another reply it drafted (a thread left
+    # to the owner has none to edit: the review shows no box for it).
+    order = {"push-back": 0, "answer": 1, "fix": 2}
+    drafted = sorted(
+        (t for t in plan["threads"] if t["stance"] in order and t.get("reply")),
+        key=lambda t: order[t["stance"]],
+    )
+    assert drafted, plan["threads"]
     edited = "Three keeps the gateway's budget; five doubled our p99 last quarter."
-    await ctx.approve(view["action"]["step"], disclosure="no", replies={str(comments[1]): edited})
+    await ctx.approve(
+        view["action"]["step"], disclosure="no", replies={str(drafted[0]["comment"]): edited}
+    )
     from live_e2e import wait_for
 
     async def posted():
