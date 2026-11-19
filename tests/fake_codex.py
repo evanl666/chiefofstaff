@@ -63,8 +63,12 @@ class Server:
             return {}
 
     def save(self):
+        # Whole at any time: a process killed mid-write (as a test kills it) leaves the threads
+        # as they were, as Codex's rollouts are.
         HOME.mkdir(parents=True, exist_ok=True)
-        (HOME / "threads.json").write_text(json.dumps(self.threads))
+        part = HOME / f".threads.json.{os.getpid()}"
+        part.write_text(json.dumps(self.threads))
+        part.replace(HOME / "threads.json")
 
     def write_lock(self, thread_id: str):
         """As Codex: one process writes a thread at a time, from loading it until it ends (a
