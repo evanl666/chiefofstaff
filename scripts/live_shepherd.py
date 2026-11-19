@@ -1038,9 +1038,7 @@ FLAKY_TEST = (
 
 def test_sometimes():
     import os
-    import pathlib
 
-    marker = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "attempt"
     assert os.environ.get("GITHUB_RUN_ATTEMPT", "1") != "1"
 """
 )
