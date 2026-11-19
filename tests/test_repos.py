@@ -3954,6 +3954,39 @@ async def test_on_linux_a_git_file_a_worker_could_have_made_waits_for_the_owner(
         await runtime.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Linux's sandbox: Windows has none")
+async def test_on_linux_a_git_file_found_first_by_chief_of_staffs_own_git_is_said_at_the_turns_end(
+    tmp_path, git_repo, monkeypatch
+):
+    """Chief of Staff's own git (its look at a finished task's changes, say) may look before
+    the turn's end does: what it found is said as the turn ends all the same, and the worker
+    waits."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "linux")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        common, _ = git_paths(str(cwd))
+        assert runtime.sandbox_policy(harness.store.session(worker)) is not None
+        harness.session(worker).emit("session.idle")  # (Its task reported: no report owed.)
+        await settle(runtime)
+        assert runtime.states.is_live(worker)
+        (common / "commondir").write_text("../elsewhere\n")
+        with pytest.raises(ValueError, match="runs no git there"):
+            await workspaces_module.git("-C", str(git_repo), "status", "--porcelain")
+        harness.session(worker).emit("session.idle")
+        await settle(runtime)
+        said = [m for m in harness.store.messages(worker) if m["meta"].get("git_quarantine")]
+        assert [m["text"] for m in said] == [
+            "A git file appeared in .git (commondir). If you made it, use it."
+        ]
+        assert not runtime.states.is_live(worker)
+        (common / "commondir").unlink()
+    finally:
+        await runtime.stop()
+
+
 async def test_on_linux_nothing_is_made_in_the_owners_checkout(tmp_path, git_repo, monkeypatch):
     """A worker in a folder of the owner's checkout: what it must not make there is looked for,
     not held by empty placeholders (left in their checkout)."""
