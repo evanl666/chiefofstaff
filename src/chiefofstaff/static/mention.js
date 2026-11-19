@@ -5,7 +5,7 @@
 // its models and effort); two picked, the task runs on each, side by side (Compare).
 import { $, api, el, toast } from "./dom.js";
 import { byId, HOME, sessions, state, workerTitle } from "./state.js";
-import { agentMark, agentName, agentPopover, closeAgentPopover, ready, refreshStatuses, statuses, statusText } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, closeAgentPopover, EFFORT_WORDS, modelLabel, ready, refreshStatuses, statuses, statusText } from "./agentpick.js";
 
 export const mention = { to: null, agent: null, agents: [], options: [], active: 0, dismissed: -1 };
 // Agents on at once for one task, at most (Compare).
@@ -29,8 +29,13 @@ function render() {
   input.setAttribute("aria-expanded", String(!list.hidden));
   if (list.hidden) input.removeAttribute("aria-activedescendant");
   else input.setAttribute("aria-activedescendant", `mention-${mention.active}`);
+  // Two quiet labels where both kinds are listed: agents to run on, workers to message.
+  const both = mention.options.some((option) => option.picks) && mention.options.some((option) => !option.picks);
+  const label = (text) => el("li", { class: "group-label", role: "presentation", "aria-hidden": "true", text, onmousedown: (event) => event.preventDefault() });
   list.replaceChildren(
-    ...mention.options.map((worker, index) =>
+    ...mention.options.flatMap((worker, index) => [
+      both && index === 0 ? label("Agents") : null,
+      both && !worker.picks && mention.options[index - 1]?.picks ? label("Workers") : null,
       el(
         "li",
         {
@@ -52,7 +57,7 @@ function render() {
               el("span", { class: "status", text: worker.activity || worker.status }),
             ]),
       ),
-    ),
+    ]).filter(Boolean),
   );
 }
 
@@ -219,7 +224,7 @@ function showChip() {
 // The chosen agent as a button: its popover changes the agent, its model and its effort.
 function agentChip() {
   const chosen = mention.agent;
-  const detail = [chosen.model, chosen.effort].filter(Boolean).join(" · ");
+  const detail = [modelLabel(chosen.name, chosen.model), EFFORT_WORDS[chosen.effort] || chosen.effort].filter(Boolean).join(" · ");
   const button = el(
     "button",
     { type: "button", class: "agent-chip", "aria-haspopup": "dialog", title: "Agent, model and effort" },

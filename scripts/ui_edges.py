@@ -7632,10 +7632,11 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     # Available: its Model and Limit show; where new workers start shows first, with the hint.
     await box.check()
     await expect(fields).to_be_visible()
-    model = fields.locator("input[name=agent_codex_model]")
-    await expect(model).to_have_attribute("placeholder", "Agent's default")
-    options = fields.locator("datalist option")
-    assert await options.evaluate_all("o => o.map((x) => x.value)") == ["gpt-test", "gpt-mini"]
+    # Its models by name, as the popover lists them.
+    model = fields.locator("select[name=agent_codex_model]")
+    await expect(model.locator("option")).to_have_text(["Agent's default", "GPT-TEST", "GPT-MINI"])
+    options = model.locator("option")
+    assert await options.evaluate_all("o => o.map((x) => x.value)") == ["", "gpt-test", "gpt-mini"]
     await expect(fields.locator("label span")).to_have_text(["Model", "Limit per worker (tokens)"])
     limit = fields.locator("input[name=agent_codex_limit]")
     await expect(limit).to_have_attribute("placeholder", "No limit")
@@ -7928,7 +7929,7 @@ async def agents_on_and_worker(runtime, browser, runs: Path):
         assert f"on Codex · {tokens:,} tokens" in tip, tip
         await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
         header = page.locator("#session-meta")
-        await expect(header).to_contain_text("Codex · gpt-test", timeout=10000)
+        await expect(header).to_contain_text("Codex · GPT-TEST", timeout=10000)
         meta = await header.inner_text()
         shown = f"{int(tokens / 1000 + 0.5)}k" if tokens >= 1000 else str(tokens)
         assert meta.endswith(f"{shown} tokens") and "credits" not in meta, meta
@@ -8594,7 +8595,7 @@ async def picker_settings(runtime, browser):
         await expect(tab.locator("#agents-choice")).to_be_visible()
         choose = tab.locator("select[name=agent_new_workers]")
         await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Last used"])
-        await expect(codex.locator("input[name=agent_codex_model]")).to_be_visible()
+        await expect(codex.locator("select[name=agent_codex_model]")).to_be_visible()
         await expect(claude.locator(".agent-fields")).to_be_hidden()
         await picker_shoot(page, "settings-rows", scheme, "#settings-dialog")
         # Claude turned on: where new workers start lists it, and the hint names both.
@@ -8714,14 +8715,14 @@ async def picker_workers(runtime, browser):
         pick = page.locator("#timeline .msg", has_text="On Codex: a long refactor")
         await picker_shoot(page, "router-pick", scheme, focus=pick)
         row = page.locator("#session-list .item", has_text="Port the parser")
-        await expect(row.locator(".agent-mark")).to_have_attribute("aria-label", "Codex · gpt-test")
+        await expect(row.locator(".agent-mark")).to_have_attribute("aria-label", "Codex · GPT-TEST")
         other = page.locator("#session-list .item", has_text="Tidy the changelog")
         await expect(other.locator(".agent-mark")).to_have_attribute(
             "aria-label", re.compile(r"^Copilot · .*Started on Copilot: Codex is signed out\.$")
         )
         await sidebar_shoot(page, "sidebar-badges", scheme)
         await page.evaluate("id => import('/static/session.js').then((m) => m.select(id))", worker)
-        await expect(page.locator("#session-meta")).to_contain_text("Codex · gpt-test")
+        await expect(page.locator("#session-meta")).to_contain_text("Codex · GPT-TEST")
         await page.locator("#session-more-button").click()
         moves = page.locator("#session-menu-items button", has_text="Continue with")
         await expect(moves).to_have_text(["Continue with Copilot…"])
@@ -8931,6 +8932,10 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             await box.press("End")
             names = page.locator("#mention-list li.agent .name")
             await expect(names).to_have_text(["Copilot", "Codex", "Claude"])
+            # Agents, then workers: a quiet label over each.
+            await expect(page.locator("#mention-list li.group-label")).to_have_text(
+                ["Agents", "Workers"]
+            )
             claude = page.locator("#mention-list li.agent.dim", has_text="Claude")
             await expect(claude.locator(".status")).to_contain_text("Sign-in needed")
             await expect(claude.locator(".agent-fix")).to_have_text(
@@ -8962,7 +8967,17 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
                 ["Default", "GPT-TEST", "GPT-MINI"], timeout=10000
             )
             await model.select_option("gpt-mini")
-            await expect(chip).to_have_text("Codexgpt-mini▾")
+            # Named as Codex names it, as in the popover.
+            await expect(chip).to_have_text("CodexGPT-MINI▾")
+            # A toast while it is open stays clear of it.
+            await page.evaluate("() => import('/static/dom.js').then((m) => m.toast('Copied.'))")
+            toast = page.locator(".toast").last
+            await expect(toast).to_be_visible()
+            ours, theirs = await pop.bounding_box(), await toast.bounding_box()
+            assert (
+                theirs["y"] + theirs["height"] <= ours["y"]
+                or theirs["y"] >= ours["y"] + ours["height"]
+            ), (ours, theirs)
             await ux_shoot(page, "chip-popover", scheme, focus=pop)
             await pop.locator(".agent-pop-agent", has_text="Copilot").click()
             await expect(pop.locator(".agent-pop-pays")).to_have_text("Uses your Copilot plan")
@@ -9106,6 +9121,14 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             await expect(claude.locator("input[name=agent_claude_enabled]")).to_be_disabled()
             choose = tab.locator("select[name=agent_new_workers]")
             await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Last used"])
+            # Whose plan the agent chosen there uses, as its row says.
+            pays = tab.locator("#agents-choice-pays")
+            await expect(pays).to_have_text("Uses your Copilot plan")
+            await choose.select_option("codex")
+            await expect(pays).to_have_text("Uses your ChatGPT sign-in")
+            await choose.select_option("last")
+            await expect(pays).to_have_text("Now Codex · Uses your ChatGPT sign-in")
+            await choose.select_option("copilot")
             await expect(tab.locator("#agents-system summary")).to_have_text("System agents")
             await expect(tab.locator("#agents-system")).not_to_have_attribute("open", "")
             await ux_shoot(page, "settings-rows", scheme, "#settings-dialog")

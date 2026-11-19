@@ -20,10 +20,17 @@ export function agentMark(agent, detail = "") {
   const label = [agentName(agent), detail].filter(Boolean).join(" · ");
   return el("span", { class: "agent-mark", "data-agent": agent, role: "img", "aria-label": label, title: label });
 }
+// A model as its agent names it (its id until its models were listed), the same everywhere.
+export function modelLabel(agent, id) {
+  if (!id) return "";
+  const listed = agent === "copilot" || !agent ? state.models : state.agentModels?.[agent];
+  return state.snapshot?.agents?.model_names?.[agent]?.[id] || listed?.find?.((model) => model.id === id)?.name || id;
+}
 // A session's mark (its agent, its model on hover; why it fell back to Copilot), where shown.
 export function markOf(session) {
   if (!marksShown() || session?.role !== "worker") return null;
-  return agentMark(session.agent || "copilot", [session.model, session.agent_fallback].filter(Boolean).join(" · "));
+  const agent = session.agent || "copilot";
+  return agentMark(agent, [modelLabel(agent, session.model), session.agent_fallback].filter(Boolean).join(" · "));
 }
 
 // "Ready · Uses your ChatGPT sign-in", "Sign-in needed", "Not installed", or why it can't run.
@@ -90,8 +97,23 @@ export const EFFORT_WORDS = { none: "none", low: "low", medium: "medium", high: 
 // it. `onPick({agent, model, effort})` on each choice; it stays open until a click elsewhere
 // or Escape.
 let openPopover = null;
+// Toasts never under an open popover: above it while it is open (they stack upwards from
+// there), back where they were once it closes.
+function toastsClear(node) {
+  const toasts = document.getElementById("toasts");
+  if (!toasts) return;
+  if (!node) {
+    toasts.style.bottom = "";
+    return;
+  }
+  const box = node.getBoundingClientRect();
+  const spare = window.innerHeight - box.bottom;
+  // Below it where there is room for a toast (a popover high on the page); else above it.
+  toasts.style.bottom = spare >= 160 ? "" : `${Math.max(8, window.innerHeight - box.top + 8)}px`;
+}
 export function closeAgentPopover() {
   if (openPopover?.place) window.removeEventListener("resize", openPopover.place);
+  if (openPopover) toastsClear(null);
   openPopover?.remove();
   openPopover = null;
   document.removeEventListener("mousedown", outside, true);
@@ -140,6 +162,7 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
       el("label", {}, el("span", { text: "Model" }), model),
       efforts.length ? el("label", {}, el("span", { text: "Effort" }), effort) : "",
     );
+    node.place?.();  // (Its height may have changed: toasts kept clear of it.)
   }
   function draw() {
     const names = ["copilot", ...Object.keys(AGENT_NAMES).filter((name) => name !== "copilot")];
@@ -182,6 +205,7 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
     const below = at.bottom + 6;
     const height = node.offsetHeight;
     node.style.top = `${below + height > window.innerHeight - 8 ? Math.max(8, at.top - height - 6) : below}px`;
+    toastsClear(node);
   };
   node.place();
   window.addEventListener("resize", node.place);

@@ -8,7 +8,7 @@ import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
-import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, marksShown, ready, statusOf } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, marksShown, modelLabel, ready, statusOf } from "./agentpick.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
@@ -79,7 +79,7 @@ export function renderHeader() {
   }
   if (session.credits >= 0.05) meta.push(`${session.credits.toFixed(1)} credits`);
   // On another coding agent: its name and model there after its state, and its tokens.
-  if (session.agent) meta.splice(1, 0, AGENT, session.model);
+  if (session.agent) meta.splice(1, 0, AGENT, modelLabel(session.agent, session.model));
   if (session.agent && session.tokens) meta.push(session.token_limit ? `${tokenCount(session.tokens)} of ${tokenCount(session.token_limit)} tokens` : `${tokenCount(session.tokens)} tokens`);
   // While other agents are on, a Copilot worker says so too (why, on hover, when it was to run
   // on another).
@@ -258,7 +258,7 @@ export function agentChip(sessionId) {
     {
       type: "button",
       class: "agent-chip",
-      title: [agentName(agent), first.model].filter(Boolean).join(" · "),
+      title: [agentName(agent), modelLabel(agent, first.model)].filter(Boolean).join(" · "),
       "aria-haspopup": "menu",
       onclick: (event) => {
         event.stopPropagation();
@@ -366,7 +366,7 @@ function agentMeta(session, parts) {
 // step, a button whose popover changes its agent (Restart on…), model and effort.
 function agentBadge(session, text, title) {
   const agent = session.agent || "copilot";
-  const mark = marksShown() ? agentMark(agent, session.model) : "";
+  const mark = marksShown() ? agentMark(agent, modelLabel(agent, session.model)) : "";
   if (!session.untouched || session.closed_at || !marksShown()) return el("span", { class: "agent-name", title: title || undefined }, mark, text);
   const button = el("button", { type: "button", class: "agent-chip", "aria-haspopup": "dialog", title: title || "Agent, model and effort, before it begins" }, mark, el("span", { text }), el("span", { class: "caret", "aria-hidden": "true", text: "▾" }));
   button.onclick = () =>
@@ -1157,7 +1157,7 @@ function ownerMessage(text, meta = {}, time = "", delivery = "", messageId = 0) 
   if (meta.to) node.append(el("button", { type: "button", class: "to", text: `→ ${meta.to_title}`, title: "Open this worker", onclick: () => select(meta.to) }));
   // The agent chosen for it with @ (its work runs there).
   if (meta.agents?.length) node.append(el("span", { class: "to", text: `Compare on ${meta.agents.map(agentName).join(" and ")}` }));
-  else if (meta.agent) node.append(el("span", { class: "to", text: `On ${[agentName(meta.agent), meta.agent_model].filter(Boolean).join(" · ")}` }));
+  else if (meta.agent) node.append(el("span", { class: "to", text: `On ${[agentName(meta.agent), modelLabel(meta.agent, meta.agent_model)].filter(Boolean).join(" · ")}` }));
   const files = meta.attachments || [];
   if (files.length) {
     node.append(

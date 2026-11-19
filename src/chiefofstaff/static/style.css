@@ -726,6 +726,9 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 /* The @ list: an agent not ready, dimmed, with the command that makes it ready. */
 #mention-list li.agent .status { display: grid; justify-items: end; gap: 2px; max-width: 60%; }
 #mention-list li.dim { cursor: default; }
+/* Agents, then workers: a small quiet label over each kind where both are listed. */
+#mention-list li.group-label { display: block; padding: 6px 8px 2px; font-size: var(--small); font-weight: 600; color: var(--muted); cursor: default; }
+#mention-list li.group-label:hover { background: none; }
 #mention-list li.dim .name { color: var(--muted); }
 #mention-list li.dim .agent-mark { opacity: 0.5; }
 #mention-list li .fix { white-space: normal; }
@@ -931,6 +934,7 @@ label.hours input { width: 118px; }
 .agents-roles { display: grid; gap: 10px; }
 .agents-roles:empty { display: none; }
 .agents-places .agents-choice { grid-template-columns: 170px minmax(0, 200px); align-items: center; gap: 12px; max-width: none; }
+.agents-places .agents-choice-pays { color: var(--muted); margin-top: -6px; }
 .agents-role { display: grid; gap: 4px; }
 .agents-role-line { color: var(--soft); padding-left: 182px; }
 .agents-hint, .agents-intro { color: var(--muted); }
