@@ -256,13 +256,14 @@ class TaskBook:
     def hand_to(self, task_id: str, session_id: str) -> dict:
         """A task its worker hands to another before it began (Restart on…): queued again,
         any run it began ended."""
+        was = self.store.value("SELECT status FROM tasks WHERE id=?", (task_id,))
         self.end_runs(task_id, "stopped")
         self.store.execute(
             "UPDATE tasks SET session_id=?, status='queued', updated_at=? WHERE id=?",
             (session_id, now(), task_id),
         )
         task = self.get(task_id)
-        self.on_change(task)
+        self.on_change(task, was)
         return task
 
     def start_run(self, task_id: str, reason: str) -> dict:
