@@ -2898,10 +2898,13 @@ async def test_a_workers_own_clone_is_read_only_through_the_git_it_was_taken_wit
         assert not marker.exists(), "the worker's filter never ran as the owner"
         # The owner's own filter, named by its attributes (in its tree, in its .git): off.
         run("git", "config", "--unset", "filter.x.clean", cwd=clone)
+        # (In a global config of its own: the tests' shared one would keep it for later tests.)
+        own = {"HOME": str(tmp_path), "GIT_CONFIG_GLOBAL": str(tmp_path / ".gitconfig")}
         run("git", "config", "--global", "filter.x.clean", f"sh -c 'touch {marker}; cat'",
-            env={**os.environ, "HOME": str(tmp_path)})  # fmt: skip
+            env={**os.environ, **own})  # fmt: skip
         monkeypatch = pytest.MonkeyPatch()
-        monkeypatch.setenv("HOME", str(tmp_path))
+        for name, value in own.items():
+            monkeypatch.setenv(name, value)
         try:
             assert await workspaces_module.snapshot(taken)
             assert not marker.exists(), "no filter its tree's attributes name runs"
