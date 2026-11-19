@@ -492,8 +492,15 @@ class Repo:
         return found
 
     def checks(self, sha: str) -> dict[str, tuple[str, str]]:
-        runs = self.owner.json("api", f"repos/{self.name}/commits/{sha}/check-runs")
-        return {r["name"]: (r["status"], r["conclusion"] or "") for r in runs["check_runs"]}
+        """A commit's checks by name; none while GitHub has no such commit yet (a push just
+        approved: "No commit found for SHA")."""
+        ok, text = self.owner.call(
+            ("api", f"repos/{self.name}/commits/{sha}/check-runs"), None, check=False
+        )
+        if not ok:
+            return {}
+        runs = json.loads(text or "{}").get("check_runs") or []
+        return {r["name"]: (r["status"], r["conclusion"] or "") for r in runs}
 
     def rerun_failed(self, sha: str):
         """The owner runs a commit's failed jobs again on GitHub (its latest workflow run)."""
