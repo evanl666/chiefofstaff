@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.47 (2026-11-19)
 
 - **Fixed: workers with many MCP tools failed every turn on the Copilot Chief of Staff runs when
   your CLI is newer than it supports.** That Copilot (1.0.112) leaves tool search off unless a
