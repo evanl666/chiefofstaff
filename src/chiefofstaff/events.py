@@ -1030,6 +1030,7 @@ class Events:
             return PermissionDecisionReject(feedback="Unknown session.")
         if (
             (reason := owners_checkout(row, request, self.workspaces.checkouts(row)))
+            or (reason := self.runtime.forks.refused_write(row, request))
             or (reason := settings_write(row, request, self.runtime.held_run_files(row)))
             or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
         ):

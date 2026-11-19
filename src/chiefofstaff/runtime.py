@@ -87,6 +87,7 @@ from .envelope import (
 )
 from .events import EFFORT_REFUSED, MODEL_REFUSED, ROUTER_CONTEXT, Events
 from .focus import Focus
+from .forks import Forks
 from .habits import Habits
 from .learning import Learning
 from .models import AS_SAVED, Attachment, SentItem, Settings
@@ -646,6 +647,8 @@ class Runtime:
         self.asks.migrate_questions()
         self.decisions = Decisions(self)
         self.peers = Peers(self)
+        # A busy worker's new task, given to a second worker with its context (forks.py).
+        self.forks = Forks(self)
         self.learning = Learning(self)
         self.habits = Habits(self)
         self.checks = Checks(self)
@@ -2707,6 +2710,8 @@ class Runtime:
                 notes=self.cache_plan(row).notes if sandbox else [],
                 held=self.held_shown(row) if sandbox else None,
             )
+        if row["role"] == ROUTER and settings.fork_busy:
+            prompt = prompts.with_fork_rule(prompt)
         if row["role"] == ROUTER and settings.send_to_chief:
             prompt = prompts.with_send_rule(prompt)
         if row["role"] == ROUTER and (on := self.agents_on()):
@@ -2732,6 +2737,10 @@ class Runtime:
             # Its spawn_worker names the agents on (as without them otherwise).
             spawn = self.toolset.spawn_on(on)
             tools = [spawn if tool.name == "spawn_worker" else tool for tool in tools]
+        if row["role"] == ROUTER and settings.fork_busy:
+            # Its message_session can keep a new task for a busy worker (forks.py).
+            forks = self.toolset.message_forks
+            tools = [forks if tool.name == "message_session" else tool for tool in tools]
         options: dict[str, Any] = {
             # Copilot's record of past sessions, which the owner's own sessions can search: for
             # workers that do not read Slack. Sessions that read Slack are not recorded in it,
@@ -6326,6 +6335,8 @@ class Runtime:
             "elsewhere": self.copilot_id(row["id"]) in self.elsewhere and not row["closed_at"],
             "terminal": self.terminal.get(row["id"]),
             **(self.progress(row) if row["role"] == WORKER else {}),
+            # A second worker: the one it was started from, with that one's context.
+            **({"fork_of": origin} if (origin := self.forks.origin(row["id"])) else {}),
             # Only for a worker on another agent (none without agents).
             **(
                 self.agent_view(row, agent)
@@ -6882,6 +6893,8 @@ class Runtime:
             # next turn.
             self.send.switch(new.send_to_chief)
             await self.refresh(ROUTER)
+        if old.fork_busy != new.fork_busy:
+            await self.refresh(ROUTER)  # Its rule and same_worker, from its next turn.
         if self.agents and (
             old.worker_sandbox != new.worker_sandbox or old.worker_yolo != new.worker_yolo
         ):

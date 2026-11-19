@@ -3319,6 +3319,7 @@ async def test_a_ready_to_merge_card_comes_back_once_the_pr_is_ready_again(harne
 
 
 async def test_two_cancellations_in_a_minute_both_reach_the_worker(harness):
+    harness.store.save_settings(Settings(fork_busy=False))  # Its third task is its own too.
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "First")
     tasks = [runtime.tasks.current(worker)]

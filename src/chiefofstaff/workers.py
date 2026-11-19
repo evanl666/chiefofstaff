@@ -1352,6 +1352,8 @@ class Workers:
             ):
                 return  # Adopted just now: import_history brings its conversation.
             start = int(mirrored) if mirrored is not None else self.read_to.get(row["id"], 0)
+            # A second worker's log begins with what it copied (forks.py): never shown.
+            start = max(start, self.runtime.forks.log_start(row["id"]))
             try:
                 events, after, _ = await backend.read_history(copilot, start)
             except Exception:
@@ -1457,7 +1459,8 @@ class Workers:
             return
         if self.states.handle(row["id"]):
             return  # Live here still: its events come from its session, not from the log.
-        events, after, changed = await backend.read_history(copilot, int(offset or 0))
+        start = int(offset) if offset is not None else self.runtime.forks.log_start(row["id"])
+        events, after, changed = await backend.read_history(copilot, start)
         await self.sync_usage(row)
         entries = terminal_timeline(events, self.runtime.tools)
         if offset is None:

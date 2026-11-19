@@ -180,6 +180,18 @@ Chinese included). For work on a subject a worker already knows, the Router eith
   change with its own branch and PR, or work that must run in parallel. It gets the earlier
   tasks' results, folders and files, not their whole conversations.
 
+When the worker that knows the subject is **busy** (at work with two or more tasks open, or at
+work for ten minutes without a break) and a worker slot is free, its new task goes to a
+**second worker** that starts at once with that worker's conversation so far (Copilot's session
+fork, up to its last finished turn) and a note from Chief of Staff on what the first one is
+doing now and where. It works in a folder and branch of its own (from the project's base); the
+busy worker goes on undisturbed. The Router chat says *Started a second worker for “…” (context
+from “…”)*; in the sidebar the second worker sits under the first, and its task's row says
+*Worker from “…”*. With every slot taken, or when only that worker can do it (its branch or PR,
+or you asked for it), the task waits for it as before. Turn it off in Settings → General
+(*Give a busy worker's new task to a second worker with its context*). Workers on other agents
+(Codex) are not forked yet: their new tasks wait.
+
 `spawn_worker` refuses once when related workers exist, so the Router decides explicitly; so
 does a new task for a worker given one in the last half hour ("oh wait, one more thing" is
 more of that task), unless the Router says why it is another. The timeline shows *New task …

@@ -67,6 +67,8 @@ OWNER_REF = re.compile(r"\{owner:\s*([A-Za-z0-9]+)\}")  # Not {owner} (GitHub's 
 
 # Thinking efforts, least first.
 EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"]
+# Those spawn_worker takes.
+SPAWN_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 REPLACES = (
     "Ids (t…) of failed tasks (or tasks still open) that this new task does instead: they "
@@ -86,6 +88,7 @@ logger = logging.getLogger(__name__)
 
 
 SPAWN_WORKER = "Start a new worker session for one task. Returns its session id."
+MESSAGE_SESSION = "Send a message to an existing worker or the Slack session."
 
 
 class SpawnWorker(BaseModel):
@@ -299,6 +302,22 @@ class MessageSession(BaseModel):
         description="Thread keys from the event (slack:<channel>:<ts>, slack:<D…>, "
         "github:<owner/repo>#<n>); later messages there go straight to this session",
     )
+
+
+# message_session's field while busy workers' new tasks go to second workers (forks.py).
+SAME_WORKER = (
+    "For task='new' to a worker busy with other tasks: true when that worker itself must do it "
+    "after its current work (it goes on its branch or into its pull request, it needs what the "
+    "worker is making now, or the owner wants that worker to do it once it is free). Otherwise, "
+    "while it is busy and a worker slot is free, a second worker with its conversation so far "
+    "takes the task at once"
+)
+MessageSessionForks = create_model(
+    "MessageSession",
+    __base__=MessageSession,
+    same_worker=(bool, Field(default=False, description=SAME_WORKER)),
+)
+MessageSessionForks.__doc__ = MessageSession.__doc__
 
 
 class ListSessions(BaseModel):
@@ -1096,6 +1115,14 @@ class Tools:
         self.refused_notes: set[str] = set()
         # spawn_worker with `agent`, by the agents on (spawn_on).
         self.spawn_tools: dict[tuple[str, ...], Any] = {}
+        # message_session with same_worker, while busy workers' new tasks go to second workers.
+        self.message_forks = define_tool(
+            "message_session",
+            description=MESSAGE_SESSION,
+            params_type=leak_proof(MessageSessionForks),
+            handler=self.handler(self.t_message_session),
+            skip_permission=True,
+        )
 
     async def t_add_repo(self, params: AddRepo, caller: str):
         self.caller(caller, WORKER)
@@ -1233,12 +1260,7 @@ class Tools:
                 AskWorkspace,
                 self.t_ask_workspace,
             ),
-            (
-                "message_session",
-                "Send a message to an existing worker or the Slack session.",
-                MessageSession,
-                self.t_message_session,
-            ),
+            ("message_session", MESSAGE_SESSION, MessageSession, self.t_message_session),
             (
                 "check_prs",
                 "The state of pull requests on GitHub right now: open, merged or closed, each "
@@ -1554,10 +1576,16 @@ class Tools:
         )
 
     async def t_spawn_worker(
-        self, params: SpawnWorker, caller: str, special: str = "", untrusted: bool = False
+        self,
+        params: SpawnWorker,
+        caller: str,
+        special: str = "",
+        untrusted: bool = False,
+        fork: tuple[dict, str] | None = None,
     ):
         """`untrusted`: a helper that reads untrusted content (the connector) runs as a worker
-        that reads Slack does, whether or not Slack is connected."""
+        that reads Slack does, whether or not Slack is connected. `fork`: the busy worker a
+        second worker is started from, and the fork of its session it runs on (forks.py)."""
         self.caller(caller, ROUTER)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
         if not special and (asked := risky(params.instructions)):
@@ -1577,7 +1605,7 @@ class Tools:
             self.runtime.task_actions.task_for(reference)["id"] for reference in params.context_from
         ]
         peers, wanted = self.runtime.peers.resolve(params.works_with)
-        if not special:
+        if not special and not fork:
             # Parts of one request that work together (named or not), not "related" workers.
             known = {row["id"] for row in peers}
             peers += [
@@ -1589,7 +1617,9 @@ class Tools:
             ]
         decisions = self.with_turn_decisions(caller, params.decisions)
         agent, agent_notice = agents.COPILOT, ""
-        if not special and (self.runtime.agents or getattr(params, "agent", "")):
+        if fork:
+            agent = self.runtime.agent(fork[0]["id"])  # Its session is that agent's.
+        elif not special and (self.runtime.agents or getattr(params, "agent", "")):
             agent, agent_notice = await self.runtime.new_worker_agent(
                 getattr(params, "agent", ""),
                 bool((params.slack and self.runtime.slack.configured()) or untrusted),
@@ -1611,7 +1641,7 @@ class Tools:
             # Another worker would fail as the last one did: never a run of replacements.
             raise ValueError(refusal)
         why_new = " ".join(params.why_new.split())[:200]
-        if not special and not why_new:
+        if not special and not why_new and not fork:
             related = self.related_workers(
                 f"{params.title}\n{params.instructions}",
                 project,
@@ -1631,7 +1661,7 @@ class Tools:
                     "in the same PR. Then call spawn_worker again with why_new.\n"
                     + json.dumps(related, ensure_ascii=False)
                 )
-        session_id = str(uuid4())
+        session_id = fork[1] if fork else str(uuid4())
         slack = (params.slack and self.runtime.slack.configured()) or untrusted
         if params.slack and not slack and any(key.startswith("slack:") for key in follow):
             raise ValueError(
@@ -1659,9 +1689,13 @@ class Tools:
         # It starts in its main checkout; the workspace around it is all its own.
         cwd = checkouts[0]["path"] if checkouts else str(workspace)
         branch = checkouts[0]["branch"] if checkouts else ""
-        self.store.create_session(
+        row = self.store.create_session(
             session_id, WORKER, title, "queued", cwd=cwd, branch=branch, slack=slack
         )
+        if fork:
+            await self.runtime.forks.record(row, fork[0])
+            # As careful as the worker it came from (Ask first), on its context tier.
+            self.store.update_session(session_id, yolo=fork[0]["yolo"], context=fork[0]["context"])
         if agent != agents.COPILOT:
             self.store.set(f"agent:{session_id}", agent)  # For its life.
             # Read by an earlier version, which runs every worker on Copilot: one to resume,
@@ -1712,7 +1746,7 @@ class Tools:
             decisions = self.with_turn_decisions(caller, params.decisions)
         self.link_decisions(task["id"], decisions)
         moved = await self.replace(replaced, task)
-        if not special:
+        if not special and not fork:
             # Again now that it exists: another task started at the same time may exist now.
             self.runtime.peers.want(session_id, wanted)
             known = {row["id"] for row in peers}
@@ -1744,6 +1778,9 @@ class Tools:
             # The owner reads its report as written: in the language of the request it serves.
             reply_in=spoken,
         )
+        if fork:
+            brief = self.runtime.forks.brief(fork[0], self.store.session(session_id))
+            prompt += "\n\n" + wrap("system", "context", brief)
         if context_from:
             prompt += "\n\n" + wrap("system", "context", self.tasks.briefing(context_from))
         if introduction := self.runtime.peers.introduction(session_id):
@@ -1753,6 +1790,14 @@ class Tools:
         meta: dict[str, Any] = {"prompt": prompt, "task_id": task["id"]}
         if images := self.runtime.attachments_in(params.instructions):
             meta["attachments"] = images  # The owner's images it names come with it.
+        origin = self.runtime.display_title(fork[0]) if fork else ""
+        if fork:
+            self.runtime.add_message(
+                session_id,
+                "notice",
+                f"Started with the context of “{origin}”",
+                {"session_id": fork[0]["id"]},
+            )
         self.runtime.add_message(session_id, "router", params.instructions, meta)
         if agent_notice:  # The agent Settings chose could not run it.
             self.runtime.add_message(session_id, "notice", agent_notice)
@@ -1760,7 +1805,14 @@ class Tools:
             # Not "Started" for work that waits: for the tasks it comes after, or for a slot.
             waits = [dep["title"] for dep in self.tasks.unmet(task)]
             limit = self.store.settings().max_workers
-            if waits:
+            if fork and self.runtime.workers.running() >= limit:
+                said = (
+                    f"Queued a second worker for “{title}” (context from “{origin}”) · waits "
+                    f"for a worker slot ({limit} busy)"
+                )
+            elif fork:
+                said = f"Started a second worker for “{title}” (context from “{origin}”)"
+            elif waits:
                 said = f"Queued “{title}” · after " + ", ".join(f"“{t}”" for t in waits[:2])
             elif self.runtime.workers.running() >= limit:
                 said = f"Queued “{title}” · waits for a worker slot ({limit} busy)"
@@ -1770,6 +1822,13 @@ class Tools:
             self.runtime.add_message(
                 caller, "notice", notice, {"session_id": session_id, "task_id": task["id"]}
             )
+            if fork:
+                self.runtime.add_message(
+                    fork[0]["id"],
+                    "notice",
+                    f"Its context went to a second worker for “{title}”",
+                    {"session_id": session_id, "task_id": task["id"]},
+                )
         if peers:
             try:
                 await self.runtime.peers.introduce(self.store.session(session_id), peers)
@@ -1790,7 +1849,12 @@ class Tools:
         elif params.effort and not effort:
             offered = ", ".join(info["efforts"]) if info and info["efforts"] else "none"
             result["warning"] = f"Effort {params.effort} is not offered by this model ({offered})."
-        if params.after:
+        if fork:
+            result["note"] = (
+                f"Worker {short(fork[0]['id'])} was busy, so a second worker with its "
+                "conversation so far took this task: this session. Message it about this task."
+            )
+        elif params.after:
             result["note"] = (
                 "Starts automatically once the owner accepted the tasks it depends on."
                 if params.wait_for == "accepted"
@@ -2050,6 +2114,20 @@ class Tools:
                 "task='new' and why_new saying why (the owner sees it)."
             )
         replaced = self.replaced_tasks(params.replaces)
+        if (
+            params.task == "new"
+            and target["role"] == WORKER
+            and self.runtime.forks.reason(
+                target, params.earlier, bool(getattr(params, "same_worker", False))
+            )
+        ):
+            # Busy with other work: a second worker with its context takes it now (forks.py).
+            title = deliverable_title(params.title)
+            self.check_title_style(title, "Not sent")
+            if (forked := await self.fork_task(caller, target, params, title, why_new)) is not None:
+                return forked
+            # It could not be made: the task waits for this worker, as one beside its others.
+            params = params.model_copy(update={"earlier": params.earlier or "keep"})
         # A running task left behind by a new one would show as waiting its turn though it was
         # delivered or waits on the owner: the Router says what becomes of it.
         earlier = (
@@ -2264,6 +2342,48 @@ class Tools:
             "accepted work, or another subject: task='new' with a title. Only telling it "
             "something: task='note'."
         )
+
+    async def fork_task(
+        self, caller: str, target: dict, params: MessageSession, title: str, why_new: str
+    ) -> dict | None:
+        """A new task for a busy worker, given to a second worker started from its session's
+        fork, in a workspace made as for its own projects; None when that could not be done
+        (nothing of it is left: the task then goes to the busy worker, as before)."""
+        forks = self.runtime.forks
+        checkouts = self.workspaces.checkouts(target)
+        projects = list(dict.fromkeys(c["project"] for c in checkouts if c.get("project")))
+        # The second worker works on the projects the busy one works on, as it does.
+        spawn = SpawnWorker.model_construct(
+            title=title,
+            instructions=params.text,
+            project=projects[0] if projects else "",
+            more_projects=projects[1:],
+            isolate=any(c.get("worktree") for c in checkouts),
+            done_when=params.done_when,
+            review=params.review,
+            decisions=params.decisions,
+            model=target["model"],
+            effort=target["effort"] if target["effort"] in SPAWN_EFFORTS else "",
+            follow=params.follow,
+            why_new=why_new,
+            replaces=params.replaces,
+        )
+        try:
+            forked = await forks.make(target, title)
+        except Exception:
+            logger.warning("Could not fork %s; it gets the new task.", target["id"], exc_info=True)
+            return None
+        try:
+            # One that reads Slack holds Slack's words in its context: so does its fork.
+            return await self.t_spawn_worker(
+                spawn, caller, untrusted=bool(target["slack"]), fork=(target, forked)
+            )
+        except Exception:
+            if self.store.find_session(forked):
+                raise
+            await forks.drop(target, forked)
+            logger.warning("Could not start a second worker of %s.", target["id"], exc_info=True)
+            return None
 
     @staticmethod
     def settle_earlier(earlier: list[dict], how: str) -> list[str]:
@@ -2749,6 +2869,9 @@ class Tools:
             entry["follows"] = follows
         if peers := self.runtime.peers.of(row["id"]):
             entry["works_with"] = [short(peer) for peer in peers]
+        if origin := self.runtime.forks.origin(row["id"]):
+            # A second worker, started with that one's conversation (forks.py).
+            entry["context_from_worker"] = short(origin["id"])
         agent = self.runtime.agent(row["id"]) if self.runtime.agents else agents.COPILOT
         if agent == agents.COPILOT and (model := self.runtime.model_for(row)):
             entry["model"] = model

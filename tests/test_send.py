@@ -112,7 +112,8 @@ def stop(process: subprocess.Popen) -> tuple[float, str]:
 
 
 async def test_the_routers_prompt_is_as_before_while_send_to_chief_is_off(tmp_path):
-    harness = Harness(tmp_path / "data")
+    # As before: without the rule for busy workers' new tasks (forks.py) either.
+    harness = Harness(tmp_path / "data", Settings(fork_busy=False))
     await harness.connect()
     content = harness.runtime.options(harness.store.session(harness.router_id))["system_message"]
     found = content["content"]
@@ -584,7 +585,7 @@ async def test_sent_items_wait_for_the_router_and_come_as_one_turn(harness, monk
 
 
 async def test_the_socket_and_the_routers_rule_come_and_go_with_the_setting(owned):
-    harness = Harness(owned / "data")
+    harness = Harness(owned / "data", Settings(fork_busy=False))  # (As before: see above.)
     runtime = await harness.connect()
     path = owned / "data" / "send" / "socket"
 
