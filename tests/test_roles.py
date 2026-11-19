@@ -342,6 +342,8 @@ async def test_the_router_runs_on_claude_with_nothing_but_its_tools(
         (start,) = [json.loads(line) for line in starts.read_text().splitlines()]
         assert start["tools"] == "" and start["strict_mcp"], "none of Claude's own tools"
         assert start["servers"] == ["chief"], "no MCP server but Chief of Staff's"
+        # Nor does its process refresh the owner's plugin marketplaces, as a worker's does not.
+        assert start["no_updates"] and start["hooks_off"]
         workers = len(harness.store.open_sessions(WORKER))
         await runtime.owner_send(router, spawn("Port the parser", "Port the parser."))
         await until(lambda: len(harness.store.open_sessions(WORKER)) == workers + 1, 30)

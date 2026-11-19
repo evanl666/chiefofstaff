@@ -140,9 +140,9 @@ Settings → *Coding agents*). For such a worker:
   started, ChatGPT's apps and subagents off, each of those features read back off before the
   session is used (its `apply_patch` stays, and every patch it tries is refused); on Claude, no
   built-in tool (`--tools ""`), no MCP server but Chief of Staff's (`--strict-mcp-config`), your
-  hooks off, and a turn that shows any other tool stops. Every other call still asks Chief of
-  Staff, which refuses it to them as to their Copilot sessions. The Slack session and *Watch for
-  you* (which read your messages) stay on Copilot.
+  hooks off, no update (as a worker's process), and a turn that shows any other tool stops.
+  Every other call still asks Chief of Staff, which refuses it to them as to their Copilot
+  sessions. The Slack session and *Watch for you* (which read your messages) stay on Copilot.
 - **What reaches a worker from outside.** A repository's own agent settings (Codex's `.codex/`,
   Claude's `.claude/` and `.mcp.json`) load only where you trust its folder in that agent; a
   worktree is trusted as its repository is. Elsewhere none of them loads, and its `AGENTS.md` or
