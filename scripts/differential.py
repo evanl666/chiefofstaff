@@ -131,7 +131,8 @@ class Allow:
     system_message.content`), optionally only at `value` (on the side tested), and for changed
     text only when each line added or removed matches `lines` (or that of another allowance of the
     same text: a text two features change, each its own lines), or only by `added` (a regex: the
-    text tested is the other side's with one match of it put in). An `element` (a CSS selector) is
+    text tested is the other side's with one match of it put in), or when it is the same on both
+    sides once each match of `without` is taken out. An `element` (a CSS selector) is
     left out of the DOM snapshots and hidden in the screenshots, on both sides, in the views
     whose names match `views`: screenshots home-1280, home-needs-800, sidebar-1024,
     sidebar-external-1440, settings-general-p1-1280 (p2... as it scrolls); DOM snapshots
@@ -147,6 +148,9 @@ class Allow:
     views: str = ""
     # A count only this many more on the side tested (one more event, say), nothing else.
     more: int = 0
+    # A text changed only by what this regex finds: the same on both sides once each match of
+    # it is taken out (a key added inside a tool's JSON answer, say).
+    without: str = ""
 
     def matches(
         self, path: str, after: Any, text_lines: list[str] | None, before: Any = None
@@ -174,6 +178,12 @@ class Allow:
             )
         if self.lines:
             return text_lines is not None and all(re.search(self.lines, x) for x in text_lines)
+        if self.without:
+            return (
+                isinstance(before, str)
+                and isinstance(after, str)
+                and re.sub(self.without, "", before) == re.sub(self.without, "", after)
+            )
         return True
 
 
@@ -842,6 +852,11 @@ FEATURES["worker_fork"] = Feature(
             lines=r"^- Each open worker's load \(list_sessions, find_sessions, the related workers ",
         ),
         Allow("same_worker on the Router's message_session", data=r"same_worker"),
+        Allow(
+            "each open worker's load where the Router reads about workers (list_sessions)",
+            data=r"^backend\.turns\.router:",
+            without=r', "load": \{[^{}]*\}',
+        ),
     ],
 )
 
