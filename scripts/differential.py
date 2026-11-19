@@ -582,6 +582,11 @@ FEATURES["codex_on_claude_never"] = Feature(
             data=r"(\.db\.kv\.untouched:<uuid-\d+>|\.untouched)$",
         ),
         Allow(
+            "Copilot's tool search counts the Router's one more tool (continue_worker)",
+            data=r"^backend\.sessions\.router:Router\[\d+\]\.options\.tool_search\.defer_threshold$",
+            more=1,
+        ),
+        Allow(
             "the agents' view names each model as its agent lists it (once listed)",
             data=r"\./api/state\.agents\.model_names$",
         ),
