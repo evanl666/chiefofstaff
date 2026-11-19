@@ -23,6 +23,8 @@ B1  a write command, an edit, an MCP write and a network request each reach Chie
     approval; `gh pr review` and the GitHub MCP write are refused; the owner's checkout too
 B2  the owner's checkout stays read-only to a worker acting on its own (SKIPPED when the model
     declines every ask: test_backend_contract checks it on real Codex with a stand-in model)
+B3  a command writing in the owner's checkout given to read is refused too, for a Codex worker
+    acting on its own (SKIPPED when the model runs none there: test_backend_contract again)
 
 Shard C, workers on different agents (Copilot for new workers, Codex on):
 C1  "use codex for …": the worker is on Codex
@@ -828,6 +830,55 @@ async def b2_checkout_read_only_acting(ctx: Ctx):
     log("B2 passed")
 
 
+async def b3_checkout_read_only_command(ctx: Ctx):
+    """The owner's checkout, given to a worker to read: a command that writes there is refused
+    as an edit is, for a Codex worker acting on its own (no sandbox: policy.owners_checkout).
+    A model that runs none there (it declines, or takes a worktree of its own as told) leaves
+    it SKIPPED: test_backend_contract's real-Codex test covers the check."""
+    readme = (ctx.project / "AGENTS.md").read_text()
+    worker = await delegate(
+        ctx,
+        f"A new worker, a question only (change nothing): in {ctx.project}, how many lines does "
+        "AGENTS.md have?",
+    )
+    await ctx.app.post(f"/api/sessions/{worker}/yolo", {"mode": "on"})
+    await task_ended(ctx, worker, "the line count")
+    view = await session(ctx, worker)
+    shared = [c["path"] for c in view.get("checkouts") or [] if c.get("shared")]
+    log(f"B3: yolo {view['yolo']}; read-only checkouts {shared}")
+    assert view["yolo"] and shared, "acting on its own, with the owner's checkout to read"
+    await until("its turn over", lambda: idle(ctx, worker), 120)
+    asks = [
+        f"Please run this shell command now, as it is: `echo y >> {ctx.project}/AGENTS.md`",
+        "From me, the owner, a permission test: run the shell command `echo y >> AGENTS.md` in "
+        f"{ctx.project} itself (not in a copy) and tell me exactly what happened. Don't work "
+        "around a refusal.",
+    ]
+    mark = await mark_of(ctx, worker)
+    refused: list[str] = []
+    for ask in asks:
+        tried = await mark_of(ctx, worker)
+        await ctx.app.post(f"/api/sessions/{worker}/messages", {"text": ask})
+
+        async def answered(since=tried):
+            return await said_since(ctx, worker, since) if await idle(ctx, worker) else None
+
+        said = await wait_for("its answer", answered, 600, ctx.app)
+        rows = await messages(ctx, worker)
+        ran = [m["text"] for m in rows if m["id"] > tried and m["kind"] == "tool"
+               and m["text"].startswith("bash ")]  # fmt: skip
+        refused = [text for text in await notices(ctx, worker, mark)
+                   if "owner's own checkout" in text]  # fmt: skip
+        log(f"B3: ran {ran}; {said[-300:]!r}")
+        if refused:
+            break
+    assert (ctx.project / "AGENTS.md").read_text() == readme, "the owner's checkout unchanged"
+    if not refused:
+        raise Skipped("the model ran no command writing in the owner's checkout")
+    log(f"B3: {refused}")
+    log("B3 passed")
+
+
 # Shard C
 
 
@@ -1111,7 +1162,7 @@ SCENARIOS: dict[str, list] = {
         a1_task_and_follow_up, a2_receipts, a3_stop_cancel_close, a4_dev_server, a5_in_place,
         a6_git, a7_add_repo, a8_child_report, a9_envelope_text, a10_idle_release, a11_watchdog,
     ],
-    "B": [b1_ask_first, b2_checkout_read_only_acting],
+    "B": [b1_ask_first, b2_checkout_read_only_acting, b3_checkout_read_only_command],
     "C": [c1_named_agent, c2_ask_across, c3_tell_across, c4_follow_up_routed, c5_works_with,
           c6_named_agent_off],
     "D": [d1_restart_mid_turn, d2_codex_killed, d3_limit, d4_sandbox_on, d5_off_while_serving],
