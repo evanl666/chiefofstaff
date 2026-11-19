@@ -37,6 +37,7 @@ from copilot.generated.rpc import (
     SandboxConfigUserPolicy,
     SandboxConfigUserPolicyFilesystem,
     SandboxConfigUserPolicyNetwork,
+    SessionsForkRequest,
     SessionUpdateOptionsParams,
     ShellInitScript,
     ShellInitScriptShell,
@@ -71,6 +72,10 @@ class Capabilities:
     sandbox: bool
     # A message sent shows as a user.message event once the session takes it up.
     echoes: bool = True
+    # A session can be forked: its backend's fork_session(session_id, name) makes a new session
+    # with its conversation up to its turn in progress, and delete_session(session_id) removes
+    # one (see forks.py).
+    fork: bool = False
 
 
 SendMode = Literal["enqueue", "immediate"]
@@ -205,6 +210,7 @@ COPILOT = Capabilities(
     permission_callbacks=True,
     mcp_sign_in=True,
     sandbox=True,
+    fork=True,
 )
 # The Copilot CLI versions this release was tested with (live end-to-end and contract tests).
 TESTED_CLI = "1.0.107"
@@ -589,6 +595,22 @@ class CopilotBackend:
 
     async def resume_session(self, session_id: str, **options: Any) -> AgentSession:
         return await (await self.ready_client()).resume_session(session_id, **options)
+
+    async def fork_session(self, session_id: str, name: str) -> str:
+        """A new session with this one's conversation up to its turn in progress (not that
+        turn: the new session would take it for its own work, interrupted), named `name`: its
+        id. Copilot's sessions.fork, from the session's log as written."""
+        if not SESSION_ID.fullmatch(session_id):
+            raise ValueError("Not a Copilot session id.")
+        log = copilot_home() / "session-state" / session_id / "events.jsonl"
+        events, _, _ = await asyncio.to_thread(read_log, log, 0)
+        request = SessionsForkRequest(
+            session_id=session_id, name=name, to_event_id=fork_point(events) or None
+        )
+        return (await self.client.rpc.sessions.fork(request)).session_id
+
+    async def delete_session(self, session_id: str) -> None:
+        await self.client.delete_session(session_id)
 
     async def mcp_sign_in_url(self, session: Any, server: str) -> str:
         login = await session.rpc.mcp.oauth.login(MCPOauthLoginRequest(server_name=server))
@@ -1015,6 +1037,29 @@ def scan_log(log: Path, offset: int, marker: bytes) -> tuple[list[dict], int]:
                         if isinstance(event := json.loads(line), dict):
                             found.append(event)
     return found, position
+
+
+# What a session's log shows at the end of a turn (each of its model calls ends with
+# assistant.turn_end; the turn, with the checkpoint of its usage).
+LOGGED_TURN_ENDS = {"session.usage_checkpoint", "abort", "session.shutdown", "session.error"}
+
+
+def fork_point(events: list[dict]) -> str:
+    """The id of the event a fork of a session stops before: the message that began its turn
+    in progress (messages steered into that turn come after it); "" when none is in progress.
+    Its own events only, not its sub-agents'. A log that shows no turn's end at all (another
+    format): its latest message."""
+    cut, ended, latest = "", False, ""
+    for event in events:
+        if event.get("agentId") or (event.get("data") or {}).get("parentToolCallId"):
+            continue
+        kind = event.get("type")
+        if kind in LOGGED_TURN_ENDS:
+            cut, ended = "", True
+        elif kind == "user.message":
+            latest = str(event.get("id") or "")
+            cut = cut or latest
+    return cut if ended or cut == latest else latest
 
 
 def read_log(log: Path, offset: int) -> tuple[list[dict], int, float]:
