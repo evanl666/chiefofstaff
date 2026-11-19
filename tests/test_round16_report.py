@@ -367,3 +367,116 @@ async def test_a_worker_reopened_waits_on_its_decision_card_again(harness):
     await settle(runtime)
     assert runtime.tasks.get(task["id"])["status"] == "running"
     assert "The owner decided: Keep it" in session.sent[-1]
+
+
+async def test_each_unread_message_holds_back_a_report_once(harness):
+    """E92: a note unread held a done report back once; the Router's continue, sent later and
+    unread too, held back nothing (the marker of the first was never cleared): the report went
+    through without the continue's work."""
+    runtime = await harness.connect()
+    worker, session, task = await busy_worker(runtime, harness, "Write the bug report")
+    await router_says(runtime, harness, worker, task, "note", "The owner reads it tonight.")
+    first = await call_tool(runtime, "report", worker, status="done", summary="Written.")
+    assert first.result_type == "failure" and "newer message" in first.text_result_for_llm
+    session.emit("user.message", content=session.sent[-1])  # It sees the note.
+    await settle(runtime)
+    await router_says(runtime, harness, worker, task, "continue", "Add two more entries.")
+    second = await call_tool(runtime, "report", worker, status="done", summary="Written.")
+    assert second.result_type == "failure" and "Add two more entries" in (
+        second.text_result_for_llm
+    )
+    assert runtime.tasks.get(task["id"])["status"] == "running"
+    again = await call_tool(runtime, "report", worker, status="done", summary="Written.")
+    assert again.result_type == "success", "the same message holds it back once"
+
+
+async def crossing(harness):
+    """The Router's continue on a running task, sent within its worker's turn; the worker
+    reports done before it reads it (held back once, then through). Returns runtime, worker,
+    its session, the task, the continue as sent."""
+    runtime = await harness.connect()
+    worker, session, task = await busy_worker(runtime, harness, "Write the bug report")
+    await router_says(runtime, harness, worker, task, "continue", "Add two more entries.")
+    sent = session.sent[-1]
+    held = await call_tool(runtime, "report", worker, status="done", summary="Written: 12 bugs.")
+    assert held.result_type == "failure"
+    through = await call_tool(runtime, "report", worker, status="done", summary="Written: 12 bugs.")
+    assert through.result_type == "success"
+    assert runtime.tasks.get(task["id"])["status"] == "review"
+    return runtime, worker, session, task, sent
+
+
+async def test_a_reported_task_is_at_work_again_when_its_worker_reads_a_continue(harness):
+    """E93: the continue crossed the report; when the worker read it and worked on it, the task
+    stayed "Awaiting acceptance" (Accept would end work under way)."""
+    runtime, _worker, session, task, sent = await crossing(harness)
+    session.emit("user.message", content=sent)
+    await settle(runtime)
+    shown = runtime.tasks.get(task["id"])
+    assert shown["status"] == "running" and shown["result"] == "Written: 12 bugs."
+    await runtime.task_actions.cancel(task["id"])
+    back = runtime.tasks.get(task["id"])
+    assert (back["status"], back["result"]) == ("review", "Written: 12 bugs."), "its result stands"
+
+
+async def test_a_note_read_after_the_report_reopens_nothing(harness):
+    runtime = await harness.connect()
+    worker, session, task = await busy_worker(runtime, harness, "Write the bug report")
+    await router_says(runtime, harness, worker, task, "note", "The owner reads it tonight.")
+    sent = session.sent[-1]
+    await call_tool(runtime, "report", worker, status="done", summary="Written.")
+    await call_tool(runtime, "report", worker, status="done", summary="Written.")
+    session.emit("user.message", content=sent)
+    await settle(runtime)
+    assert runtime.tasks.get(task["id"])["status"] == "review"
+
+
+async def test_a_report_that_crossed_a_message_says_so_to_the_router(harness):
+    """E95: the report came two seconds after the Router's continue, without what it asked;
+    nothing said the worker had not read it yet, and the Router moved that work into a new
+    task."""
+    runtime, worker, _session, task, _sent = await crossing(harness)
+    report = [m for m in router_inbound(harness) if m["meta"].get("status") == "done"][-1]
+    prompt = report["meta"]["prompt"]
+    assert "Add two more entries." in prompt and "before" in prompt
+    assert f"task_id='{task['id']}'" in prompt
+    listed = json.loads(
+        (await call_tool(runtime, "list_sessions", harness.router_id)).text_result_for_llm
+    )
+    entry = next(s for s in listed["sessions"] if s["session_id"] == worker)
+    assert any("Add two more entries." in text for text in entry["unread"])
+
+
+async def test_a_note_on_a_task_its_worker_has_not_seen_yet_comes_after_it(harness):
+    """E94: a note about a new task, given while its worker was in a turn on another, was
+    steered in at once and read before the task itself (queued until the turn's end)."""
+    runtime = await harness.connect()
+    worker, session, a = await busy_worker(runtime, harness, "Fix the login")
+    given = {"task": "new", "why_new": "test", "earlier": "keep", "title": "Write the docs"}
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    text="Then write the docs.", **given)  # fmt: skip
+    b = runtime.tasks.current(worker)
+    assert session.modes[-1] == "enqueue", "a new task waits for the turn's end"
+    await router_says(runtime, harness, worker, b, "note", "Use the new style guide.")
+    assert session.modes[-1] == "enqueue", "after the task it is about, not before"
+    await router_says(runtime, harness, worker, a, "note", "The owner tests it tonight.")
+    assert session.modes[-1] == "immediate", "about the task at work: within its turn"
+    session.emit("user.message", content=session.sent[-3])  # It reads the new task.
+    await settle(runtime)
+    await router_says(runtime, harness, worker, b, "note", "In English.")
+    assert session.modes[-1] == "immediate"
+
+
+def test_a_task_its_worker_has_not_seen_shows_up_next_not_at_work():
+    """E94: the new task showed Running with the worker's current step (another task's) before
+    the worker had seen it."""
+    found = run_js(
+        BOARD + "const worker = { status: 'working', turn_task: 'a', task: { task_id: 'b' } };\n"
+        "const list = [{ id: 'a', title: 'Fix the login', status: 'review', created_at: '1' },"
+        " { id: 'b', title: 'Write the docs', status: 'running', created_at: '2',"
+        " started: false }];\n"
+        "const context = b.workerContext(worker, list);\n"
+        "const phase = b.taskPhase(list[1], worker, context);\n"
+        "return [context.active, phase.section, phase.marker];"
+    )
+    assert found == ["", "monitoring", "turn"]

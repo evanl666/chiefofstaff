@@ -309,15 +309,15 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "1680e63788076c2be159f9dea0e5e7f111de025ee67506c649cbcaf0dd9f32ac",
     ),
     "router with Slack, created": (
-        26835,
-        "e1d4189283d393012f1ab706daa69ce092127bab72bf32f13d34d8993877b198",
+        27063,
+        "95f56a1a560fc47dfb24a1d112686ad9cfcee633a38b608a474fac7b64d595ed",
     ),
     "router with Slack, resumed": (
-        26799,
-        "d4a5ed8dc1c7e1ed1f16fb5f13d3c1356e2e9fb54b1c0ca8234304ff0d7a4ed3",
+        27027,
+        "fc226fd8910fa5d8fa68ce62e1224e84f8a088e283200a46758c448361c6d00c",
     ),
-    "router, created": (26835, "05c66efd5c34a17679a884b16a8fcc6c3f56dd764496101f1de2c6873d593490"),
-    "router, resumed": (26799, "27325b9ea47a345088869414631580cb86073cb7936cf73c33cb7eb3ec5f1d89"),
+    "router, created": (27063, "b55c3e8c11ac3ac7b26d59253da692b48296d5f0b1ba40fd05f73e04d3e4b272"),
+    "router, resumed": (27027, "aea3ecf160a2c92460fa26f0434c288f8cc8354cf56ffbaf54198c52a126ae7a"),
     "slack, created": (4501, "45e96f706f8f884c1ad15e268e2717480a4482bd75697b9db1a83afe2a21275f"),
     "slack, resumed": (4466, "90e994a20c3bcaadb98e628effd8a48499f866cc408d11fc19b63cbcb3fed734"),
     "the Copilot sandbox of a worker asking first": (

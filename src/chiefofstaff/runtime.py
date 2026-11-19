@@ -5290,20 +5290,26 @@ class Runtime:
         listed = "\n".join(f"- {project}" for project in projects[:40]) or "- (none)"
         return f"The configured projects are now:\n{listed}"
 
-    async def tell_router(self, row: dict, status: str, summary: str, task: dict | None = None):
+    async def tell_router(
+        self, row: dict, status: str, summary: str, task: dict | None = None, note: str = ""
+    ):
+        """`note`: what the Router should know of it (it crossed the Router's message)."""
         title = task["title"] if task else row["title"]
+        prompt = wrap(
+            sender(row),
+            "report",
+            summary,
+            status=status,
+            task=task["id"] if task else None,
+            title=title,
+            # What the Router tells the owner about it is in the owner's language.
+            reply_in=self.store.get("owner_language"),
+        )
+        if note:
+            prompt += "\n\n" + wrap("system", "context", note)
         await self.delivery.deliver(
             self.router_id(),
-            wrap(
-                sender(row),
-                "report",
-                summary,
-                status=status,
-                task=task["id"] if task else None,
-                title=title,
-                # What the Router tells the owner about it is in the owner's language.
-                reply_in=self.store.get("owner_language"),
-            ),
+            prompt,
             batch=True,
             kind="inbound",
             display=summary,

@@ -2156,8 +2156,16 @@ class Tools:
         self.runtime.follow(
             target["id"], to_follow, task_id=task["id"] if task else "", asked=params.follow
         )
+        # More on a task it has taken up reaches it within its turn; a new task waits, and so
+        # does more on one it has not seen yet (bug E94: read before the task itself).
+        unseen = bool(
+            task
+            and not (task["progress"] or task["result"])
+            and not self.store.get(f"started:{task['id']}")
+        )
+        steer = params.task in {"continue", "note"} and not unseen
         meta: dict[str, Any] = {"task_id": task["id"]} if task else {}
-        if params.task == "note" and target["status"] == "working":
+        if params.task == "note" and steer and target["status"] == "working":
             # Into its turn on whatever it is at: what it says next is about that (Workers).
             meta["mid_turn"] = True
         if images := self.runtime.attachments_in(params.text):
@@ -2168,8 +2176,7 @@ class Tools:
             kind="router",
             display=params.text,
             meta=meta or None,
-            # More on the task it is working on reaches it within its turn; a new task waits.
-            steer=params.task in {"continue", "note"},
+            steer=steer,
         )
         self.runtime.add_message(
             caller,
@@ -2677,6 +2684,9 @@ class Tools:
                 "title": task["title"],
                 "status": task["status"],
             }
+        if worker and (unread := self.states[row["id"]].unread):
+            # Sent within its turn and not read yet (bug E95): a report now predates them.
+            entry["unread"] = [text for text, _, _ in unread.values()]
         if row["report"]:
             entry["last_report"] = " ".join(row["report"].split())[:200]
             if since := self.drafts_since_report(row):
@@ -3140,26 +3150,29 @@ class Tools:
                     "longer holds, call report again unchanged."
                 )
         unread = (
-            [
-                text
-                for text, about, _ in self.states[caller].unread.values()
+            {
+                key: text
+                for key, (text, about, _) in self.states[caller].unread.items()
                 if task["id"] in about or "" in about
-            ]
+            }
             if task
-            else []
+            else {}
         )
+        # The unread messages a report was held back for already ("1" before 0.1.48: none).
+        marked = (self.store.get(f"unread_report:{task['id']}") or "") if task else ""
+        held = json.loads(marked) if marked.startswith("[") else []
         if (
             task
             and params.status == "done"
             and task["status"] == "running"
-            and unread
-            and not self.store.get(f"unread_report:{task['id']}")
+            and unread.keys() - set(held)
         ):
             # Sent while it was finishing, about this task: a report now would be without it,
-            # and whoever sent it would send it again. Once: it may be lost on the way. A new
-            # task, or more on another, does not hold this one's report back.
-            self.store.set(f"unread_report:{task['id']}", "1")
-            newest = unread[-1]
+            # and whoever sent it would send it again. Once for each such message (bug E92: once
+            # for the task): it may be lost on the way. A new task, or more on another, does not
+            # hold this one's report back.
+            self.store.set(f"unread_report:{task['id']}", json.dumps(sorted(unread)))
+            newest = list(unread.values())[-1]
             first = min(entry[2] for entry in self.states[caller].unread.values())
             owner_chat = self.store.value(
                 "SELECT count(*) FROM messages WHERE session_id=? AND id>=? AND kind='owner' "
@@ -3460,7 +3473,17 @@ class Tools:
         self.states[caller].thread_turn = False  # It told the owner.
         if params.status == "progress" and not news:
             return "Noted in your session. The Router is not interrupted for progress."
-        await self.runtime.tell_router(row, params.status, params.summary, task)
+        crossed = ""
+        if task and params.status == "done" and unread:
+            # Through, a newer message about it still unread (bug E95: the Router took the
+            # missing part for ignored, and gave it out as a new task).
+            crossed = (
+                f"This report was written before its worker read a newer message about task "
+                f"{task['id']} (“{list(unread.values())[-1][:200]}”). It reads that next and "
+                "reports this task again: wait for that report, or send your message again with "
+                f"task_id='{task['id']}'. Never move that work into another task."
+            )
+        await self.runtime.tell_router(row, params.status, params.summary, task, crossed)
         # On Home now (a line in the Router's chat, a card): an answer to the owner's @ there
         # is not shown again.
         self.store.update_message_meta(reported["id"], {**meta, "told": True})
