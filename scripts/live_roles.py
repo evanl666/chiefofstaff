@@ -27,11 +27,24 @@ the owner's own, run with a Codex folder of the shard's own, empty, while a flag
 F1  Codex signed out: the Router stays on Copilot, says why in one line, and answers there
 F2  signed in again (the flag gone): the Router is back on Codex by itself, and answers there
 
+Shard P, the agent picker (Copilot and Codex, real; the same `codex` wrapper, signed in unless
+its flag exists):
+P1  the composer's chip with a model (@codex, its popover's model): the worker runs on Codex
+    with that model, and answers
+P2  Compare (@copilot @codex): one worker each, in a worktree of its own, grouped; both answer,
+    and the Router gives both results side by side
+P3  Restart on Codex, the worker queued for a slot (no step yet): its task runs on Codex, the
+    first one closed
+P4  Continue with Codex from a Copilot worker with an uncommitted file: the preview says so in
+    one line; the new worker reads that file in its copy; the first stays open
+P5  Codex signed out, named for a task: one line with the command (codex login), nothing started
+    elsewhere; Run on Copilot instead starts it there
+
     env LIVE_AGENTS_ROOT=<tree>/.cos-live \
         uv run --extra claude --with playwright python scripts/live_roles.py R|S|W|F [R1 R3 …]
 
-(no shard: R, S, W and F, one after another; once Claude stops one, no Claude shard runs). For
-one budget across suites, give each the same LIVE_CLAUDE_SPENT file. Ports 20500-20513.
+(no shard: R, S, W, F and P, one after another; once Claude stops one, no Claude shard runs).
+For one budget across suites, give each the same LIVE_CLAUDE_SPENT file. Ports 20500-20514.
 """
 
 import asyncio
@@ -51,7 +64,13 @@ from fake_slack_mcp import Workspace, serve_in_thread
 from live_e2e import SLACK_TOKEN, App, cleanup, git, log, wait_for
 from live_parity import setup
 
-SHARDS = {"R": (20500, 20510), "S": (20501, 20511), "W": (20502, 20512), "F": (20503, 20513)}
+SHARDS = {
+    "R": (20500, 20510),
+    "S": (20501, 20511),
+    "W": (20502, 20512),
+    "F": (20503, 20513),
+    "P": (20504, 20514),
+}
 CLAUDE_SHARDS = {"S", "W"}
 CODEX = shutil.which("codex") or "codex"
 NOTICE_ON = "The {label} runs on {agent} now, with a summary of what it knew."
@@ -317,11 +336,165 @@ async def f2_back_by_itself(ctx: Ctx):
     assert ctx.agent_tokens(view["id"]) > 0, "that turn ran on Codex"
 
 
+# Shard P: the agent picker
+
+
+async def send(ctx: Ctx, text: str, **chosen) -> tuple[str, int]:
+    """The owner's message from Home, with what the composer chose (agent, agent_model,
+    agents)."""
+    router = (await la.state(ctx))["router_id"]
+    mark = await la.mark_of(ctx, router)
+    await ctx.app.post(f"/api/sessions/{router}/messages", {"text": text, **chosen})
+    return router, mark
+
+
+SOUTH = "How many data rows of data/sales.csv are for the south region? Don't change any files."
+
+
+async def p1_chip_with_model(ctx: Ctx):
+    models = await ctx.app.get("/api/models?agent=codex")
+    model = next((m["id"] for m in models if not m.get("default")), models[0]["id"])
+    router, mark = await send(ctx, f"In {ctx.project}: {SOUTH}", agent="codex", agent_model=model)
+    worker = await la.assigned(ctx, router, mark)
+    view = await la.worker_on(ctx, worker, "codex")
+    assert view.get("model_choice") == model or view.get("model") == model, (model, view)
+    task = await la.task_ended(ctx, worker, "south's rows on Codex")
+    assert "180" in task["result"], task["result"]
+    log(f"P1 passed on {model}")
+
+
+async def p2_compare(ctx: Ctx):
+    router, mark = await send(ctx, f"In {ctx.project}: {SOUTH}", agents=["copilot", "codex"])
+
+    async def pair():
+        found = [s for s in (await la.state(ctx))["sessions"] if s.get("compare")]
+        return found if len(found) >= 2 else None
+
+    workers = await wait_for("a worker on each agent", pair, 300, ctx.app)
+    assert {w.get("agent") or "copilot" for w in workers} == {"copilot", "codex"}
+    assert len({w["compare"]["id"] for w in workers}) == 1, "one Compare"
+    trees = [c.get("worktree") or c["path"] for w in workers for c in w.get("checkouts") or []]
+    assert len(set(trees)) == len(trees), f"each in a folder of its own: {trees}"
+    assert len({w["cwd"] for w in workers}) == len(workers), "never one folder for both"
+    for worker in workers:
+        task = await la.task_ended(ctx, worker["id"], f"south's rows ({worker.get('agent')})")
+        assert "180" in task["result"], task["result"]
+
+    async def side_by_side():
+        said = await la.router_said(ctx, router, mark, 600)
+        return said if "180" in said and "codex" in said.lower() else None
+
+    said = await wait_for("both results side by side", side_by_side, 900, ctx.app)
+    log(f"P2: {said[:300]!r}")
+
+
+async def p3_restart_on(ctx: Ctx):
+    await la.settings(ctx, max_workers=1)
+    try:
+        holder = await la.delegate(
+            ctx, "Run the shell command `sleep 90` in a terminal, then report done: slept."
+        )
+
+        async def busy():
+            return (await la.session(ctx, holder))["status"] == "working"
+
+        await la.until("it holds the slot", busy, 120)
+        router, mark = await say_text(ctx, f"In {ctx.project}: {SOUTH}")
+        worker = await started_by(ctx, router, mark)
+        view = await la.session(ctx, worker)
+        assert view["status"] == "queued" and view.get("untouched"), view["status"]
+        made = await ctx.app.post(f"/api/sessions/{worker}/restart", {"agent": "codex"})
+        assert (await la.session(ctx, worker))["closed_at"], "the first one closed"
+        await la.worker_on(ctx, made["session_id"], "codex")
+        task = await la.task_ended(ctx, made["session_id"], "south's rows after a restart")
+        assert "180" in task["result"]
+    finally:
+        await la.settings(ctx, max_workers=4)
+    log("P3 passed")
+
+
+async def say_text(ctx: Ctx, text: str) -> tuple[str, int]:
+    return await send(ctx, text)
+
+
+async def started_by(ctx: Ctx, router: str, mark: int) -> str:
+    """The worker the Router's line names since `mark` (started, or queued for a slot)."""
+
+    async def found():
+        rows = await la.messages(ctx, router)
+        return next((m["meta"]["session_id"] for m in rows if m["id"] > mark
+                     and m["kind"] == "notice" and m["meta"].get("session_id")), None)  # fmt: skip
+
+    return await wait_for("the Router starts it", found, 300, ctx.app)
+
+
+async def p4_continue_left_open(ctx: Ctx):
+    router, mark = await say_text(
+        ctx,
+        f"In {ctx.project}, in a worktree of its own: create the file NOTE.txt holding exactly "
+        "the word saffron. Don't commit it. Report done.",
+    )
+    worker = await la.assigned(ctx, router, mark)
+    await la.task_ended(ctx, worker, "NOTE.txt made")
+    await la.until("it is idle", lambda: la.idle(ctx, worker), 120)
+    preview = await ctx.app.get(f"/api/sessions/{worker}/continue?agent=codex")
+    log(f"P4 preview: {preview['line']!r}")
+    assert preview["stays_open"] and preview["files"] >= 1, preview
+    made = await ctx.app.post(f"/api/sessions/{worker}/continue", {"agent": "codex"})
+    first = await la.session(ctx, worker)
+    assert not first["closed_at"], "the first one stays open"
+    await la.worker_on(ctx, made["session_id"], "codex")
+    await la.task_ended(ctx, made["session_id"], "continued on Codex")
+    mark = await la.mark_of(ctx, made["session_id"])
+    await ctx.app.post(
+        f"/api/sessions/{made['session_id']}/messages",
+        {"text": "What word does NOTE.txt in your folder hold? Report it."},
+    )
+
+    async def answered():
+        said = await la.said_since(ctx, made["session_id"], mark)
+        return said if "saffron" in said.lower() else None
+
+    await wait_for("the copy has its file", answered, 600, ctx.app)
+    log("P4 passed")
+
+
+async def p5_named_not_ready(ctx: Ctx):
+    ctx.notes["flag"].touch()
+    await la.settings(ctx, agents={"codex": {"enabled": False}})
+    await la.settings(ctx, agents={"codex": {"enabled": True}})
+    try:
+        before = {s["id"] for s in (await la.state(ctx))["sessions"] if s["role"] == "worker"}
+        router, mark = await say_text(ctx, f"Use codex for this: in {ctx.project}: {SOUTH}")
+
+        async def card():
+            rows = await la.messages(ctx, router)
+            return next((m for m in rows if m["id"] > mark and m["meta"].get("agent_refused")),
+                        None)  # fmt: skip
+
+        found = await wait_for("the card with its fix", card, 300, ctx.app)
+        log(f"P5: {found['text']!r} {found['meta'].get('fix')}")
+        assert found["meta"]["fix"]["command"] == "codex login", found["meta"]
+        now = {s["id"] for s in (await la.state(ctx))["sessions"] if s["role"] == "worker"}
+        assert now <= before, "nothing started elsewhere"
+        await ctx.app.post(
+            f"/api/agent-refusals/{found['meta']['agent_refused']}", {"action": "copilot"}
+        )
+        worker = await la.assigned(ctx, router, found["id"])
+        await la.worker_on(ctx, worker, "copilot")
+        task = await la.task_ended(ctx, worker, "south's rows on Copilot instead")
+        assert "180" in task["result"]
+    finally:
+        ctx.notes["flag"].unlink(missing_ok=True)
+    log("P5 passed")
+
+
 SCENARIOS: dict[str, list] = {
     "R": [r1_told_then_moved, r2_routing, r3_task_and_report, r4_decision, r5_back_to_copilot],
     "S": [s1_told_then_moved, s2_routing, s3_task_and_report, s4_decision, s5_back_to_copilot],
     "W": [w1_watch_for_you],
     "F": [f1_signed_out, f2_back_by_itself],
+    "P": [p1_chip_with_model, p2_compare, p3_restart_on, p4_continue_left_open, p5_named_not_ready],
 }
 
 
@@ -366,14 +539,16 @@ async def run_shard(
         "CHIEFOFSTAFF_ROLE_RETRY": "20",
         "CHIEFOFSTAFF_ROLE_GLANCE": "10",
     }
-    if shard == "F":
+    if shard in {"F", "P"}:
         folder, flag = codex_wrapper(root)
         env["PATH"] = f"{folder}:{os.environ.get('PATH', '')}"
+        if shard == "P":
+            flag.unlink()  # Signed in, until P5.
     app = App(root / "data", root / "log", env, agents=True)
     await app.start()
     ctx = Ctx(shard, app, root, home, project, truth)
     ctx.agent, ctx.base_env = agent, env
-    if shard == "F":
+    if shard in {"F", "P"}:
         ctx.notes["flag"] = flag
     results, stopped = [], ""
     try:
@@ -419,6 +594,9 @@ async def run_shard(
         if agent == "codex":
             with contextlib.suppress(Exception):
                 await archive(ctx)
+            if shard == "P":
+                with contextlib.suppress(Exception):
+                    await la.archive_threads(ctx)
         with contextlib.suppress(Exception):
             await cleanup(root / "data")
         with contextlib.suppress(Exception):
