@@ -255,7 +255,7 @@ def peer_login() -> str:
 # A run's place in the repository.
 
 APP = '''def timeout() -> int:
-    """Seconds a login waits for the gateway."""
+    """Seconds a login waits for the gateway: 30, the most it allows."""
     return 31
 
 
@@ -300,6 +300,9 @@ requires-python = ">=3.11"
 
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
 """
 
 
@@ -797,7 +800,8 @@ class Ctx:
             f"In {self.repo.clone}, on a new branch `{ref}` from origin/{base}, write each file "
             f"in {patch} (a JSON object: path -> full text) exactly as given, commit with the "
             f"message “{title}”, push the branch and open a PR to `{base}` titled “{title}”. "
-            "Then report done."
+            "Then report done. (It is a first draft: if its CI fails, fixing it later is "
+            "welcome.)"
         )
         from live_e2e import wait_for
 
