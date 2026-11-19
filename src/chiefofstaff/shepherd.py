@@ -717,6 +717,7 @@ class Shepherd(Keeping, Steps):
                                       read_at=time.time())  # fmt: skip
             moved = details["head"] != (claim.get("details") or {}).get("head")
             claim = self.control.claim(target) or claim
+            self.learn_flaky(target, details)
             if moved:
                 self.publish_holder(claim)  # Its row offers what it is at now (Accept this head).
             task = self.runtime.tasks.find(claim["holder"]) if claim["holder"] else None
@@ -756,6 +757,27 @@ class Shepherd(Keeping, Steps):
         if task:
             self.runtime.task_actions.publish(task)
         return self.control.claim(target)
+
+    def learn_flaky(self, target: str, details: dict):
+        """A check that failed at a head (an attempt or a rerun was made for it, with the
+        failure's fingerprint) and passes now at that same head is known flaky in its
+        repository, for that failure: the next time it fails so, its plan is a rerun
+        (infrastructure)."""
+        passed = {
+            check["name"]
+            for check in details.get("checks") or []
+            if check.get("status") == "COMPLETED" and check.get("conclusion") == "SUCCESS"
+        }
+        if not passed:
+            return
+        for step in self.control.steps(target):
+            if step["kind"] != "fix-ci" or step["h0"] != details["head"] or not step["fingerprint"]:
+                continue
+            for name in set((step["signal"] or {}).get("checks") or []) & passed:
+                key = f"flaky:{details['repo']}:{name}:{step['fingerprint']}"
+                if not self.store.get(key):
+                    self.store.set(key, now())
+                    logger.info("%s is known flaky on %s now.", name, details["repo"])
 
     async def pause(self, claim: dict, why: str, head: str):
         """Paused where it is: an attempt in flight stopped, plans withdrawn as stale."""

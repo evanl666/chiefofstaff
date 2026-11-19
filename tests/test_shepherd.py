@@ -853,6 +853,28 @@ async def test_a_question_only_comment_gets_an_answer_and_no_code(world):
     assert view["action"]["label"] == "Review & post"
 
 
+async def test_a_check_that_passed_when_run_again_is_known_flaky_and_gets_a_rerun(world):
+    """Design 4.7.1: a check that failed at a commit and passed when run again at that same
+    commit is known flaky in the repository, for that failure. When it fails that way again
+    (here on the fix Chief of Staff pushed), the plan is a rerun, with no attempt; not "the
+    same failure came back after its fix"."""
+    runtime = await claimed(world)
+    step, sha = await fixed(world, runtime)
+    # Run again at the PR's commit before the fix: it passes.
+    world.github.checks[world.h0] = [{**world.github.default_checks[0], "conclusion": "SUCCESS"}]
+    await runtime.shepherd.read(TARGET)
+    await approve(runtime.shepherd, step["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    assert world.github.head() == sha
+    await runtime.shepherd.read(TARGET)  # CI failed on the fix the same way.
+    await settle(runtime)
+    latest = runtime.shepherd.control.steps(TARGET)[-1]
+    assert latest["h0"] == sha and latest["plan"]["kind"] == "rerun", latest
+    assert "known to fail this way" in latest["plan"]["why"]
+    assert not runtime.store.get(f"stopped:{TARGET}")
+
+
 async def test_an_infrastructure_failure_gets_a_rerun_plan_no_attempt(world):
     runtime = await world.start()
     world.github.log = "The runner has received a shutdown signal.\n"
