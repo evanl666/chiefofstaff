@@ -1905,7 +1905,7 @@ class CodexAgent:
         self.reader_lock = asyncio.Lock()
         self.reader_timer: asyncio.TimerHandle | None = None
 
-    def notes_for(self, ask_first: bool) -> list[str]:
+    def notes_for(self, ask_first: bool, sandboxed: bool = False) -> list[str]:
         """What a worker of it does differently from a Copilot worker, a short line each."""
         notes = ["Its Codex memories are off"] if self.owner_memories else []
         return [*notes, "Its subagents are off"] if ask_first else notes

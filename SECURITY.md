@@ -74,9 +74,13 @@ Settings → *Coding agents*). For such a worker:
   path or adds directories (Claude makes those writable in its sandbox), or, for a worker whose
   network is limited, allows web domains, nor where managed settings weaken it at all. Those
   files are read as Claude reads them (a byte-order mark, any size; over 16 MB, the worker does
-  not start). Codex workers never run while the worker sandbox is on (Codex's sandbox is not
-  checked yet); with it off, a Codex worker can do anything your account can
-  (`danger-full-access`), as Copilot workers then can.
+  not start). A sandboxed Claude worker runs no hooks at all (`disableAllHooks`): Claude runs
+  hooks outside its sandbox (yours, a trusted repository's, its skills' and subagents', a
+  plugin's) and can turn off only all of them, not some (checked on 2.1.322: managed-only and
+  plugin-only hooks are read from managed settings only); Chief of Staff's own checks are not
+  hooks of Claude's and still run. Codex workers never run while the worker sandbox is on
+  (Codex's sandbox is not checked yet); with it off, a Codex worker can do anything your
+  account can (`danger-full-access`), as Copilot workers then can.
 - **Your checkouts.** Every edit asks Chief of Staff first (Codex's approval, Claude's
   `PreToolUse` hook), wherever it lands, a file move's destination included, and the same check
   as for Copilot workers keeps your own checkouts read-only to them; one of your own Codex

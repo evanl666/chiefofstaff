@@ -1136,6 +1136,32 @@ async def test_a_sandboxed_workers_commands_stay_in_its_folders_and_reach_only_i
     }
 
 
+@pytest.mark.parametrize(
+    ("sandboxed", "ask_first", "hooks_off"),
+    [(True, False, True), (False, True, True), (False, False, False)],
+)
+async def test_a_sandboxed_claude_worker_runs_no_hooks(
+    agent, tmp_path, sandboxed, ask_first, hooks_off
+):
+    """Claude runs hooks outside its sandbox (a trusted repository's, its skills' and
+    subagents', a plugin's, the owner's own), and turns off all or none: a sandboxed worker
+    runs none, as one that asks first; one acting unsandboxed runs the owner's
+    (test_backend_contract shows it on the real Claude Code)."""
+    from chiefofstaff.backend import SandboxPolicy
+
+    extra = {"sandbox": SandboxPolicy(readwrite=(str(tmp_path),))} if sandboxed else {}
+    session = await agent.create_session(
+        session_id="d2" * 16, name="t", **options(tmp_path, ask_first=ask_first, **extra)
+    )
+    turn = Turn(session)
+    await session.send("Reply with just: ok")
+    await turn.ended()
+    assert session.backend.flag_settings.get("disableAllHooks", False) is hooks_off
+    assert ("Your Claude hooks are off for it" in agent.notes_for(ask_first, sandboxed)) is (
+        hooks_off
+    )
+
+
 async def test_an_mcp_servers_form_is_the_owners_card_and_its_answer_goes_back(agent, tmp_path):
     asked = []
 

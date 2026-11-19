@@ -1218,6 +1218,10 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   outside their folder (permissions.additionalDirectories in ~/.claude/settings.json), so
   sandboxed Claude workers can't start."). Those files are read as Claude reads them (with a
   byte-order mark, at any size; a sandboxed worker doesn't start where one is over 16 MB).
+  A sandboxed Claude worker runs no hooks, yours included: Claude runs them outside its sandbox
+  (a trusted repository's, its skills' and subagents', a plugin's) and can only turn them all
+  off. Claude's row says so in one line ("Sandboxed Claude workers don't run hooks."), and the
+  worker's name's tooltip too.
   Claude Code itself, at a sandboxed worker's first command in a git repository, adds one line,
   `**/.claude/.cc-writes/`, to your global git ignore file (`core.excludesFile`, else
   `~/.config/git/ignore`), unless git already ignores that folder. It also makes an empty

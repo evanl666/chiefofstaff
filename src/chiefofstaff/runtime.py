@@ -3791,8 +3791,11 @@ class Runtime:
             entry["usage"] = usage
         settings = self.store.settings()
         if settings.worker_sandbox and self.sandbox_host:
-            # Why its workers can't start while sandboxed, said on its row (none: they can).
+            # Why its workers can't start while sandboxed, said on its row (none: they can),
+            # and what they do differently then.
             entry["sandbox"] = self.sandboxed_refusal(name)
+            if note := agents.SANDBOX_NOTES.get(name):
+                entry["sandbox_note"] = note
         # Its plan's limit in words where its usage line does not say it already: reached with
         # no percent known, or reached with extra usage carrying its workers on.
         live = agents.live_limit(self.store, name, facts.get("limit"))
@@ -3948,7 +3951,7 @@ class Runtime:
             "credits": 0,
             "tokens": self.store.agent_spent(row["id"]),
             "token_limit": agents.limit(self.store, agent),
-            "agent_notes": notes(not self.yolo(row))
+            "agent_notes": notes(not self.yolo(row), self.sandboxed(row))
             if (notes := getattr(backend, "notes_for", None))
             else [],
             "ask_first_refused": getattr(backend, "ask_first_refused", "") if backend else "",

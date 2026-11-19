@@ -1269,8 +1269,11 @@ class ClaudeWorker:
             if why := sandbox_widened(self.cwd, trusted, local, restricted):
                 raise RuntimeError(why)
             settings["sandbox"] = sandbox_settings(policy)
-        if self.ask_first:
-            settings["disableAllHooks"] = True  # The owner's hooks and mods: off (5.7).
+        if self.ask_first or self.options.get("sandbox"):
+            # The owner's hooks and mods: off (5.7). Sandboxed, every hook is off: Claude runs
+            # them outside its sandbox (a trusted repository's, its skills' and subagents', a
+            # plugin's), and 2.1.322 turns off all or none (contract test).
+            settings["disableAllHooks"] = True
         if disabled := [str(name) for name in self.options.get("disabled_mcp_servers") or []]:
             # Its folder's MCP servers whose files changed since the owner last let it use them
             # (Runtime.servers_off): not started in this process.
@@ -3293,10 +3296,10 @@ class ClaudeAgent:
         self.gate_failure = ""
         self.key = ""
 
-    def notes_for(self, ask_first: bool) -> list[str]:
+    def notes_for(self, ask_first: bool, sandboxed: bool = False) -> list[str]:
         """What a worker of it does differently from a Copilot worker, a short line each."""
         notes = ["Its Claude memory is off"]
-        return [*notes, "Your Claude hooks are off for it"] if ask_first else notes
+        return [*notes, "Your Claude hooks are off for it"] if ask_first or sandboxed else notes
 
     async def admit_turn(self, session: Any, woken: bool = False) -> str:
         """Chief of Staff's admission of a turn ("" when admitted): `woken`, one the worker
