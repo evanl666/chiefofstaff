@@ -17,7 +17,9 @@
   index naming a path out of its tree or in a `.git` is not used (one is made from the last
   commit, and the log says so); a filter only the clone's own config defines no longer keeps
   files out of what it reads; clones whose refs are in a reftable (git's default from 3.0) are
-  read instead of refused.
+  read instead of refused. Where a worker's push naming no branch would go is worked out with no
+  git run in its folder (its HEAD and config read as files): a config there could stall that
+  check for 20 seconds a line.
 - The git folders Chief of Staff keeps to read workers' clones count in each worker's size in
   Storage, go when the worker closes or the clone is deleted, and are packed when big.
 - **A PR waits for work it would leave behind**: files a git filter keeps (git-lfs) that may

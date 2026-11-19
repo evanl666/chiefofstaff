@@ -16,6 +16,7 @@ import itertools
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -3425,33 +3426,153 @@ def fed_line(command: str) -> bool:
     return fed_says(command) and feeds_shell(command)
 
 
+# What of a repository's config says where a push of its current branch goes (`@{push}`).
+PUSH_SETTINGS_READ = re.compile(
+    r"(?i)^(?:push\.default|remote\.pushdefault|branch\.(?P<branch>.+)\.(?:remote|merge|"
+    r"pushremote)|remote\.(?P<remote>.+)\.(?:url|pushurl|push))$"
+)
+
+
+def git_folders(folder: str) -> tuple[Path, Path] | None:
+    """The git folder of the checkout a folder is in, as git finds it (a `.git` folder, or a
+    `gitdir:` file, above or at it), and its common folder (a linked worktree's `commondir`):
+    read as files, no git run there. None when there is none, or it can't be read so."""
+    from .settings_guard import read_regular  # (settings_guard imports this module.)
+
+    here = Path(os.path.realpath(folder))
+    for place in (here, *here.parents):
+        dot = place / ".git"
+        try:
+            if dot.is_dir():
+                own = Path(os.path.realpath(dot))
+            elif dot.is_file():
+                named = read_regular(dot, 4096, follow=True).decode(errors="replace").strip()
+                if not named.startswith("gitdir:"):
+                    return None
+                own = Path(os.path.realpath(place / named.removeprefix("gitdir:").strip()))
+            elif os.path.lexists(dot):
+                return None
+            else:
+                continue
+            try:
+                common = read_regular(own / "commondir", 4096).decode(errors="replace").strip()
+            except FileNotFoundError:
+                return own, own
+            return own, Path(os.path.realpath(own / common))
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def config_read(file: Path, depth: int = 0) -> list[tuple[str, str]] | None:
+    """A git config file's settings, read as a file, with what it includes (`include.path`, as
+    git finds it: relative to the file, or from home), each read so too; None when one can't be
+    read so, or holds a conditional include (`includeIf`: not worked out here)."""
+    from . import privategit
+
+    entries = privategit.config_entries(file)
+    if entries is None or depth > 8:
+        return None
+    found: list[tuple[str, str]] = []
+    for key, value in entries:
+        if key.lower().startswith("includeif."):
+            return None
+        if key.lower() != "include.path":
+            found.append((key, value))
+            continue
+        named = Path(value).expanduser() if value.startswith("~") else file.parent / value
+        if (more := config_read(named, depth + 1)) is None:
+            return None
+        found += more
+    return found
+
+
 def current_branches(folder: str) -> set[str]:
     """The branch a folder's checkout is on and the remote branch a bare push there updates
-    (`@{push}`), asked of git; none when it cannot say."""
-    found = set()
-    # As all of Chief of Staff's git (workspaces.command): the folder may be a worker's
-    # repository, whose config it wrote. No transport, nothing fetched, no file-system monitor
-    # (rev-parse runs no hook).
-    own = {key: value for key, value in os.environ.items() if not key.startswith("CHIEFOFSTAFF_")}
-    quiet = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_CONFIG_NOSYSTEM": "1"}
-    asked = ["git", "-c", "core.fsmonitor=false", "-C", folder, "rev-parse", "--abbrev-ref"]
-    for ref in ("HEAD", "@{push}"):
-        try:
-            done = subprocess.run(  # noqa: S603  (git, with its folder and a ref of its own)
-                [*asked, ref],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-                stdin=subprocess.DEVNULL,
-                env=own | quiet | {"GIT_TERMINAL_PROMPT": "0"},
-            )
-        except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
+    (`@{push}`); none when that can't be told. Never by git in that folder, whose repository a
+    worker may have written: its HEAD and config are read here as files (none at all for a
+    config that includes another), and git works out `@{push}` from what of that config says it
+    (with the owner's own config), in a folder of Chief of Staff's own. A config with a
+    conditional include (`includeIf`) is not worked out: none."""
+    from . import privategit  # (It imports settings_guard, which imports this module.)
+    from .settings_guard import read_regular
+
+    try:
+        found = git_folders(folder)
+    except (OSError, ValueError):  # (A folder with no name the file system takes.)
+        return set()
+    if not found:
+        return set()
+    own, common = found
+    try:
+        head = read_regular(own / "HEAD", 4096).decode(errors="replace").strip()
+    except OSError:
+        return set()
+    if not head.startswith("ref: refs/heads/") or not privategit.ref_name(head[5:].strip()):
+        return set()  # Detached (or a reftable's: HEAD says nothing).
+    branch = head.removeprefix("ref: refs/heads/").strip()
+    entries = config_read(common / "config")
+    if entries is None:
+        return set()
+    if any(
+        key.lower() == "extensions.worktreeconfig" and value.lower() in {"true", "yes", "on", "1"}
+        for key, value in entries
+    ):
+        more = config_read(own / "config.worktree")
+        if more is None:
+            return set()
+        entries = [*entries, *more]
+    kept = []
+    remotes = {"origin"}
+    for key, value in entries:
+        if not (found_key := PUSH_SETTINGS_READ.match(key)):
             continue
-        name = done.stdout.strip() if done.returncode == 0 else ""
-        if name and name != "HEAD":
-            found.add(name.split("/", 1)[1] if ref == "@{push}" and "/" in name else name)
-    return found
+        named = found_key.group("branch")
+        if named is not None and named != branch:
+            continue
+        kept.append((key, value))
+        if key.lower().endswith((".remote", ".pushremote", "remote.pushdefault")):
+            remotes.add(value)
+    if any("/" in remote or not remote for remote in remotes):
+        return set()
+    kept += [(f"remote.{remote}.fetch", f"+refs/heads/*:refs/remotes/{remote}/*")
+             for remote in sorted(remotes)]  # fmt: skip
+    asked = privategit.root()
+    asked.mkdir(parents=True, exist_ok=True, mode=0o700)
+    scratch = Path(tempfile.mkdtemp(prefix="push-", dir=asked))
+    try:
+        (scratch / "objects").mkdir()
+        (scratch / "refs" / "heads").mkdir(parents=True)
+        (scratch / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
+        (scratch / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tbare = true\n")
+        ref = scratch / "refs" / "heads" / branch
+        ref.parent.mkdir(parents=True, exist_ok=True)
+        ref.write_text("1" * 40 + "\n")
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("GIT_", "CHIEFOFSTAFF_"))
+                       or key in {"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"}}  # fmt: skip
+        environment |= {"GIT_DIR": str(scratch), "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_CONFIG_COUNT": str(len(kept)), "GIT_ALLOW_PROTOCOL": "",
+                        "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+                        "GIT_TERMINAL_PROMPT": "0"}  # fmt: skip
+        for at, (key, value) in enumerate(kept):
+            environment[f"GIT_CONFIG_KEY_{at}"] = key
+            environment[f"GIT_CONFIG_VALUE_{at}"] = value
+        done = subprocess.run(  # noqa: S603  (git, in a folder of Chief of Staff's own)
+            ["git", "-c", "core.fsmonitor=false", "for-each-ref",  # noqa: S607
+             "--format=%(push)", f"refs/heads/{branch}"],
+            capture_output=True, text=True, timeout=10, check=False, cwd=scratch,
+            stdin=subprocess.DEVNULL, env=environment,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
+        return {branch}
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    pushed = done.stdout.strip() if done.returncode == 0 else ""
+    for remote in remotes:
+        if pushed.startswith(f"refs/remotes/{remote}/"):
+            return {branch, pushed.removeprefix(f"refs/remotes/{remote}/")}
+    return {branch}
 
 
 def git_output(arguments: list[str], most: int) -> tuple[int, bytes] | None:

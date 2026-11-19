@@ -2718,3 +2718,50 @@ def test_scripts_given_to_shells_deep_in_quotes_are_read_in_linear_time(size, wo
     found, took = timed(command, feature)
     assert found and linear(work, command) and took < SANITY
     assert policy.written(command, str(feature))[0]
+
+
+FORK = "+refs/heads/*:refs/remotes/fork/*"
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        [],
+        [("push.default", "current")],
+        [("push.default", "upstream"), ("branch.wb/x.remote", "origin"),
+         ("branch.wb/x.merge", "refs/heads/main")],
+        [("remote.origin.push", "refs/heads/wb/x:refs/heads/release")],
+        [("remote.fork.url", "../fork.git"), ("remote.fork.fetch", FORK),
+         ("branch.wb/x.pushRemote", "fork"), ("push.default", "current")],
+        [("remote.pushDefault", "fork"), ("remote.fork.url", "../fork.git"),
+         ("remote.fork.fetch", FORK), ("remote.fork.push", "HEAD:refs/heads/staging")],
+    ],
+)  # fmt: skip
+def test_where_a_bare_push_goes_is_what_git_says_without_git_reading_the_repository(
+    settings, tmp_path
+):
+    """The branch a folder is on and where a bare push there goes (`@{push}`), as git there
+    says, read with no git run in the folder: its HEAD and config are read as files, and git
+    works out the rest in a folder of Chief of Staff's own (as git there would, once fetched)."""
+    work = configured(tmp_path / "repo", settings)
+    for remote, branch in itertools.product(("origin", "fork"), ("main", "release", "staging")):
+        subprocess.run(["git", "-C", str(work), "update-ref", f"refs/remotes/{remote}/{branch}",
+                        "HEAD"], check=True)  # fmt: skip
+    git = ["git", "-C", str(work), "rev-parse", "--abbrev-ref"]
+    said = {subprocess.run([*git, "HEAD"], capture_output=True, text=True).stdout.strip()}
+    pushed = subprocess.run([*git, "@{push}"], capture_output=True, text=True).stdout.strip()
+    said |= {pushed.split("/", 1)[1]} if "/" in pushed else set()
+    assert policy.current_branches(str(work)) == said
+    assert policy.current_branches(str(work / "src")) == said
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a FIFO")
+def test_a_repository_config_that_would_stall_git_does_not_stall_the_check(tmp_path):
+    """A config including a FIFO (a worker's): git there would wait on it (ten seconds, twice,
+    for each line checked); read as files, it is not opened, and where a push goes is not known
+    (a push naming no branch is refused)."""
+    work = configured(tmp_path / "repo", [("include.path", "../stall")])
+    os.mkfifo(work / "stall")  # (Next to .git: as git finds what its config includes.)
+    started = time.monotonic()
+    assert policy.current_branches(str(work)) == set()
+    assert time.monotonic() - started < 3
