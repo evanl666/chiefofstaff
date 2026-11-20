@@ -351,6 +351,13 @@ for it. Copilot's extensions (its experimental mode) load for them too, but not 
 Staff runs Copilot's own version because your CLI is newer than it supports: that version can't
 run extensions, so workers there start without them.
 
+Without the worker sandbox (the default), a worker's folder settings are never held for your
+word: the worker already runs commands as you, so a hold would add friction, not protection, and
+Chief of Staff skips those checks entirely (nothing read before turns or tools). A hook or server a
+worker plants stays in that folder and loads in later sessions there, yours too: turn the worker
+sandbox on in Settings → Workers for repositories you don't trust. The rest of this section is
+how it works with the sandbox on.
+
 A repository's own Copilot settings load for a worker only as you last let them: their hooks and
 MCP and language servers (`.github/hooks/`, `.mcp.json`, `.github/mcp.json`, `.github/lsp.json`,
 `.github/copilot/`, `.github/extensions/`, custom agents in `.github/agents/` and
@@ -380,6 +387,22 @@ worker wrote), the worker goes on by itself once it's as it was (or click the bu
 waiting for this shows *waiting for you* and the Router hears it once. Settings too many or too
 large to check ("can't be checked") wait the same way, and the button lets the worker use them
 unchecked as they are; if they change, it asks again.
+
+Most changes never ask. Settings byte for byte as the commit the checkout was made from, or as
+your checkout's trusted copy holds them, are yours (also in checkouts workers had before Chief of
+Staff kept copies). A `settings.json` whose only change is in keys that run nothing (`model`,
+`theme`, `outputStyle`, `spinnerTipsEnabled`, `alwaysThinkingEnabled` in `.claude/`; `model`,
+`effortLevel`, `contextTier`, `respectGitignore` in `.github/copilot/`), or an `enabledPlugins`
+turning on only plugins you have on yourself (same marketplace, not redefined by the repository),
+is taken as it is. When a worker does wait, what you write in its chat shows that line's choices
+right under your message: **Use these settings**, **Start a new worker** (its task goes on in a
+fresh checkout, your message with it) or **Cancel message**. Saying it plainly there ("use these
+settings", "approve", 同意; a bare "ok" right after the line that asks) is the same as the button,
+for the settings that line showed: "Using these settings (added .mcp.json) because you said so ·
+Undo". A worker in its own worktree that waits 15 minutes goes on by itself: its task moves to a
+new worker in a fresh worktree from the same base, and Home says so in one line. If the task it
+waited on is cancelled or replaced, it closes, and what you wrote it goes to the worker that took
+the task over, or is dropped with a line on Home, never sent later.
 
 What a server runs is the worker's to build and edit (a repository that develops its own MCP
 server and runs its build, `node dist/index.js`, say): nothing waits for it. When it changed
@@ -1187,7 +1210,9 @@ new workers use cannot run, they start on Copilot and their chat says why.
   them, and Chief of Staff gives the worker the repository's `AGENTS.md` files as text: a
   message marked as the repository's, with any tag in it escaped, so it can't pass as yours or
   as Chief of Staff's. Trust the repository in Codex to load its `.codex/` settings and skills
-  in Codex workers. They load only as you last let them, as for Copilot's: a `.codex/` folder
+  in Codex workers. Codex workers run without the sandbox, so their threads trust those as
+  your own Codex sessions do. With the sandbox on they would load only as you last let them, as
+  for Copilot's: a `.codex/` folder
   that changed since (or that Chief of Staff sees for the first time, outside a folder it made)
   is not loaded for the worker, and its timeline says "Codex settings in this folder changed
   (changed .codex/config.toml), so Codex won't load them for this worker until you say to use
