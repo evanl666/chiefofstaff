@@ -251,6 +251,13 @@ FIXES: list[Allow] = [
     # 0.1.48 (QA round 7, E102): Watch for you's scans that failed since the last one that worked
     # (null while none did).
     Allow("Watch scans that failed", data=r"/api/state\.connector\.failed$"),
+    # 0.1.49 (E116): an account Watch for you could not use and the owner has not connected yet
+    # (null while there is none).
+    Allow(
+        "Watch for you's account to connect",
+        data=r"/api/state\.connector\.connection_needed$",
+        value=None,
+    ),
     # 0.1.48 (E105): whether a draft's final text is the owner's (an empty one too).
     Allow("drafts' has_final", data=r"(\.drafts\[\d+\]|\.db\.drafts\.[^.]+)\.has_final$"),
     Allow(
