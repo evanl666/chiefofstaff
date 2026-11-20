@@ -1967,11 +1967,14 @@ async def test_every_edit_asks_with_each_file_and_a_refused_one_is_not_written(b
 
 
 @contextlib.asynccontextmanager
-async def reading_the_owners_checkout(tmp_path, monkeypatch, backend=None):
-    """A worker acting on its own (yolo), given the owner's checkout to read, on `backend`, else
-    on real Codex with the stand-in model: its session, answered by Chief of Staff's own
-    permission check (Events.on_permission); with the checkout, its own folder, its turn, and
-    the copies of the checkout made for it (Runtime.own_copy)."""
+async def reading_the_owners_checkout(
+    tmp_path, monkeypatch, backend=None, yolo="on", start_own=False
+):
+    """A worker acting on its own (yolo; `yolo="off"`: asking first), given the owner's checkout
+    to read, on `backend`, else on real Codex with the stand-in model: its session, answered by
+    Chief of Staff's own permission check (Events.on_permission); with the checkout, its own
+    folder, its turn, and the copies of the checkout made for it (Runtime.own_copy).
+    `start_own`: its session starts in its own folder, the checkout one of its folders."""
     from conftest import Harness
     from test_round7_split import published, spawn
 
@@ -1982,11 +1985,17 @@ async def reading_the_owners_checkout(tmp_path, monkeypatch, backend=None):
     runtime = await harness.connect()
     info = await spawn(runtime, harness.router_id, title="Read", instructions="the first line",
                        project=str(app))  # fmt: skip
-    harness.store.execute("UPDATE sessions SET yolo='on' WHERE id=?", (info["session_id"],))
+    harness.store.execute("UPDATE sessions SET yolo=? WHERE id=?", (yolo, info["session_id"]))
     row = harness.store.session(info["session_id"])
-    assert runtime.yolo(row) and row["cwd"] == str(app.resolve()), "the owner's, to read"
+    assert runtime.yolo(row) is (yolo == "on"), yolo
+    assert row["cwd"] == str(app.resolve()), "the owner's, to read"
     own = runtime.workspaces.workspace(row)
     own.mkdir(parents=True, exist_ok=True)  # (Its own folder, where it may write.)
+    folders = {}
+    if start_own:
+        harness.store.execute("UPDATE sessions SET cwd=? WHERE id=?", (str(own), row["id"]))
+        row = harness.store.session(row["id"])
+        folders = {"folders": [str(own), str(app)]}
     model = None
     if backend is None:
         home = tmp_path / "codex-home"
@@ -2005,6 +2014,7 @@ async def reading_the_owners_checkout(tmp_path, monkeypatch, backend=None):
             on_permission_request=lambda request, invocation: runtime.events.on_permission(
                 request, {"session_id": row["id"]}
             ),
+            **folders,
         )
 
         def notices() -> list[str]:
@@ -2106,6 +2116,35 @@ async def test_a_command_refused_in_the_owners_checkout_is_sent_to_a_copy_of_its
         await it.turn.wait()
         assert (tree / "ran.txt").read_text() == "ran\n", "run in its copy"
         assert not (app / "ran.txt").exists() and len(it.copies()) == 1
+
+
+@pytest.mark.parametrize("yolo", ["on", "off"])
+async def test_a_claude_workers_command_writing_where_its_shell_went_in_the_owners_checkout(
+    backend, tmp_path, monkeypatch, yolo
+):
+    """A Claude worker given the owner's checkout to read, starting in its own folder (the
+    checkout one of its folders), acting on its own or asking first: `echo y >> README.md` once
+    its shell cd'd into the checkout is refused as an edit there is, and writes nothing (the
+    command names no folder: PreToolUse says where Claude's shell is). Back in its own folder,
+    the same command writes there."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    async with reading_the_owners_checkout(
+        tmp_path, monkeypatch, backend, yolo=yolo, start_own=True
+    ) as it:
+        app, own = it.app, it.own
+        readme = (app / "README.md").read_text()
+        for folder in (app, own):
+            await it.session.send(
+                f'Use Claude\'s Bash tool with {{"command": "cd {folder}"}}. '
+                'Use Claude\'s Bash tool with {"command": "echo y >> README.md"}. '
+                "Then reply with just: done"
+            )
+            await it.turn.wait()
+        assert (app / "README.md").read_text() == readme, "not written"
+        [copy] = it.copies()
+        assert OWN_COPY.format(path=copy["path"], left_out="") in it.notices(), it.notices()
+        assert (own / "README.md").read_text() == "y\n", "its own folder: written"
 
 
 async def test_with_ask_first_every_mcp_call_asks_and_githubs_writes_stay_refused(
