@@ -77,6 +77,9 @@
   own, as on macOS and Linux. Paths count however Windows spells them: in any case, with `/` or
   `\`, `\\?\`, `..` or a trailing dot. An edit there through its file tool to a `\\?\` path is
   refused too. The check takes about 0.02 ms a command.
+- A worker that says in Chinese that it waits for another worker (在等, 等待) now waits for
+  it, as one saying so in English did, instead of being asked for a report it can't give
+  yet.
 
 ## 0.1.50 (2026-11-20)
 

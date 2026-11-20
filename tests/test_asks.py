@@ -515,6 +515,32 @@ async def test_a_question_card_outlives_its_cancelled_task(harness):
     assert question["task_status"] == "cancelled"
 
 
+@pytest.mark.parametrize(
+    "said",
+    [
+        "我在等 Column Maker(worker:{id})告诉我列名,收到后再写 query.sql。",
+        "正在等待 Column Maker 告知列名,收到后再写入 query.sql。",
+        "还没收到列名:等 Column Maker 发来后我再写 query.sql。",
+    ],
+    ids=["zai-deng", "dengdai", "deng-name"],
+)
+async def test_a_peer_waited_for_in_chinese_is_waited_for(harness, said):
+    """Live E3 (r71, r71b): told to wait for Column Maker's column name, Query Writer said so
+    in Chinese and ended its turn. The words for waiting were English only: it was asked for a
+    report, wrote one saying it had no name yet as the name reached it, and the Router passed
+    the name on itself. Waiting in Chinese is waiting too: no report is asked for meanwhile."""
+    runtime = await harness.connect()
+    maker = await spawn(runtime, harness.router_id, "Column Maker")
+    made = runtime.tasks.current(maker)["id"]
+    writer = await spawn(runtime, harness.router_id, "Query Writer", works_with=[made])
+    session = harness.session(writer)
+    session.emit("assistant.message", content=said.format(id=maker[:8]))
+    session.emit("session.idle")
+    await settle(runtime)
+    assert not any("report-missing" in sent for sent in session.sent), said
+    assert harness.store.session(writer)["activity"] == "waiting for “Column Maker”"
+
+
 async def test_a_peer_waited_for_by_its_name_or_id_under_a_long_title(harness):
     """Titles say what a task delivers ("Token Scout: generate a token into token.txt"); a
     worker waiting for it names it shortly, or by its id: still a peer it waits for, so no

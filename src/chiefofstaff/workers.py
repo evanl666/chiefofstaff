@@ -40,10 +40,13 @@ SETTINGS_STOP = "Chief of Staff, for its folder's settings"
 FILED_ANSWER_CHARS = 80
 # An answer in its chat this long, and twice its "done" report or more, completes that report.
 FULLER_ANSWER_CHARS = 200
-# Words of a worker that stopped to wait, not to deliver.
+# Words of a worker that stopped to wait, not to deliver. In Chinese too, which has no word
+# boundaries (live E3: "我在等 Column Maker 告诉我列名" was not waiting, and asked for a report):
+# 在等, 等待, 等着, 等候, and 等 before a name.
 WAITS = re.compile(
     r"\b(waiting|wait for|once (it|they|the|that|this|ci)\b"
-    r"|when (it|they|ci) (finish|answer|complete)|will (continue|resume|go on|pick (it|this) up))",
+    r"|when (it|they|ci) (finish|answer|complete)|will (continue|resume|go on|pick (it|this) up))"
+    r"|在等|等待|等着|等候|等\s*[A-Za-z“\"「(\uff08]",
     re.IGNORECASE,
 )
 
