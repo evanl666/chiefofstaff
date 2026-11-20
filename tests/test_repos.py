@@ -36,8 +36,8 @@ from chiefofstaff.task_actions import MayHoldWorkError, moved
 AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def run(*command, cwd=None, env=None):
-    done = subprocess.run(command, cwd=cwd, capture_output=True, text=True, env=env)
+def run(*command, cwd=None, env=None, input=None):  # noqa: A002
+    done = subprocess.run(command, cwd=cwd, capture_output=True, text=True, env=env, input=input)
     assert done.returncode == 0, f"{command}: {done.stderr}"
     return done.stdout
 
@@ -867,7 +867,8 @@ async def test_settings_held_chat_follows_only_a_proven_replacement_task(
 async def test_committed_agent_settings_still_load(tmp_path, git_repo, monkeypatch):
     """A repository that ships its own hooks and MCP servers keeps them for its workers: as
     its worktree was made, a link committed as one included. One made before snapshots were
-    kept is the owner's to look at once (no git runs to read its base)."""
+    kept takes what is byte for byte its base commit's (E122); a link is never taken so: it is
+    the owner's to look at once."""
     commit(git_repo, ".mcp.json", PLANTED[".mcp.json"])
     (git_repo / ".github" / "hooks").mkdir(parents=True)
     commit(git_repo, ".github/hooks/team.json", PLANTED[".github/hooks/p.json"])
@@ -889,15 +890,13 @@ async def test_committed_agent_settings_still_load(tmp_path, git_repo, monkeypat
         await runtime.owner_send(worker, "Go on")
         assert runtime.states.is_live(worker)
         assert not settings_notices(harness, worker)
-        # Made before snapshots were kept: the owner looks once.
-        for key in [r["key"] for r in harness.store.all("SELECT key FROM kv")]:
-            if key.startswith("settingssnap:"):
-                harness.store.delete(key)
+        for key in harness.store.keys(settings_guard.KEY):
+            harness.store.delete(key)
         await at_rest(runtime, harness, worker)
         await runtime.owner_send(worker, "Again")
         assert not runtime.states.is_live(worker)
         assert settings_notices(harness, worker)[-1]["text"] == untracked(
-            ".claude/agents/linked.md, .github/hooks/team.json, .mcp.json"
+            ".claude/agents/linked.md"
         )
         await use_them(runtime, harness, worker)
         assert runtime.states.is_live(worker)
@@ -910,6 +909,133 @@ async def test_committed_agent_settings_still_load(tmp_path, git_repo, monkeypat
         )
     finally:
         await runtime.stop()
+
+
+async def test_regular_committed_settings_match_a_pre_snapshot_checkout_base(
+    tmp_path, git_repo, monkeypatch
+):
+    """E122: an old checkout needs no click when every regular settings byte still matches its
+    fixed, privately verified base commit."""
+    commit(git_repo, ".mcp.json", '{"mcpServers":{}}')
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, _ = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, worker)
+        for key in [r["key"] for r in harness.store.all("SELECT key FROM kv")]:
+            if key.startswith("settingssnap:"):
+                harness.store.delete(key)
+        await runtime.owner_send(worker, "Again")
+        assert runtime.states.is_live(worker)
+        assert not settings_notices(harness, worker)
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize(
+    ("name", "before", "after"),
+    [
+        (
+            ".github/hooks/p.json",
+            '{"command":"python hooks/a.py"}',
+            '{"command":"python hooks/b.py"}',
+        ),
+        (
+            ".mcp.json",
+            '{"mcpServers":{"safe":{"command":"node"}}}',
+            '{"mcpServers":{"safe":{"command":"mode"}}}',
+        ),
+        (
+            ".claude/settings.json",
+            '{"permissions":{"allow":["Bash"]}}',
+            '{"permissions":{"allow":["Dash"]}}',
+        ),
+        (".claude/settings.json", '{"env":{"MODE":"a"}}', '{"env":{"MODE":"b"}}'),
+        (
+            ".claude/settings.json",
+            '{"enabledPlugins":{"safe":"a"}}',
+            '{"enabledPlugins":{"safe":"b"}}',
+        ),
+    ],
+)
+async def test_pre_snapshot_checkout_holds_one_byte_agent_setting_changes(
+    tmp_path, git_repo, monkeypatch, name, before, after
+):
+    """A recorded committed base is trusted only byte-for-byte: hooks, MCP, permissions, env
+    and plugins all still wait after even a one-byte declaration change."""
+    commit(git_repo, name, before)
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, worker)
+        for key in [r["key"] for r in harness.store.all("SELECT key FROM kv")]:
+            if key.startswith("settingssnap:"):
+                harness.store.delete(key)
+        (cwd / name).write_text(after)
+        await runtime.owner_send(worker, "Go on")
+        assert not runtime.states.is_live(worker)
+        assert settings_notices(harness, worker)[-1]["meta"]["agent_settings"]["changes"]
+    finally:
+        await runtime.stop()
+
+
+async def test_a_replaced_tree_in_a_repository_workers_write_proves_nothing(
+    tmp_path, git_repo, monkeypatch
+):
+    """E122: what a commit holds is read through a repository a worker's commands can write
+    (they commit there): a replace ref it made, under which git reads the base's tree as one
+    naming the bytes it planted, is not followed: the settings wait."""
+    commit(git_repo, ".mcp.json", '{"mcpServers":{}}')
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, worker)
+        planted = PLANTED[".mcp.json"]
+        (cwd / ".mcp.json").write_text(planted)
+        tree = run("git", "rev-parse", "HEAD^{tree}", cwd=git_repo).strip()
+        blob = run("git", "hash-object", "-w", "--stdin", cwd=git_repo, input=planted).strip()
+        was = run("git", "rev-parse", "HEAD:.mcp.json", cwd=git_repo).strip()
+        listed = run("git", "ls-tree", "HEAD", cwd=git_repo).replace(was, blob)
+        forged = run("git", "mktree", cwd=git_repo, input=listed).strip()
+        run("git", "replace", tree, forged, cwd=git_repo)
+        assert blob in run("git", "ls-tree", tree, cwd=git_repo), "git itself reads the forgery"
+        for key in harness.store.keys(settings_guard.KEY):
+            harness.store.delete(key)
+        await runtime.owner_send(worker, "Again")
+        assert not runtime.states.is_live(worker)
+        assert settings_notices(harness, worker)[-1]["text"] == untracked(".mcp.json")
+    finally:
+        await runtime.stop()
+
+
+async def test_a_commits_files_are_read_hashed_again_from_its_id(git_repo):
+    """workspaces.Committed: whatever git answers for an object (an object or a pack a worker
+    planted can make it answer anything), it is hashed again here against the id asked for:
+    a tree that is not that tree names nothing of the commit."""
+    commit(git_repo, ".mcp.json", "{}")
+    base = run("git", "rev-parse", "HEAD", cwd=git_repo).strip()
+    was = run("git", "rev-parse", "HEAD:.mcp.json", cwd=git_repo).strip()
+    checkout = {"project": str(git_repo), "path": str(git_repo), "shared": True,
+                "git_dir": str(git_repo / ".git")}  # fmt: skip
+    honest = workspaces_module.Committed(checkout, str(git_repo), base)
+    assert await honest.find(".mcp.json") == ("100644", was)
+    assert set(await honest.files(".github")) == set()
+    planted = run("git", "hash-object", "-w", "--stdin", cwd=git_repo, input="planted").strip()
+    lying = workspaces_module.Committed(checkout, str(git_repo), base)
+    read = lying.git
+
+    async def answered(*arguments: str) -> bytes:
+        said = await read(*arguments)
+        return said.replace(was.encode(), planted.encode()) if "ls-tree" in arguments else said
+
+    lying.git = answered  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="not that tree"):
+        await lying.find(".mcp.json")
 
 
 async def test_workers_held_for_their_settings_go_on_once_the_sandbox_is_off(

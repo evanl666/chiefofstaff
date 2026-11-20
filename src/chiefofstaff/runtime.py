@@ -133,7 +133,9 @@ from .workers import SETTINGS_STOP, SETTINGS_WAIT, Workers
 from .workspaces import (
     ABSENT_HELD_CLI,
     BRANCH_PREFIX,
+    Committed,
     Workspaces,
+    blob_id,
     common_git_dir,
     git_dirs,
     holds_alternates,
@@ -592,6 +594,9 @@ class Runtime:
         self.settings_held: set[str] = set()
         self.settings_reasons: dict[str, str] = {}
         self.settings_orphans_closing: set[str] = set()
+        # Settings first seen in an untracked folder found not to be the owner's as they are
+        # (settings_proven): {where: their digest then}.
+        self.settings_tried: dict[str, str] = {}
         # A worker's settings as the file system said them at its last full check (glance),
         # and where those are: (top, cwd, the files their hooks run and its .git folders).
         self.settings_sigs: dict[str, str] = {}
@@ -3743,6 +3748,119 @@ class Runtime:
         except settings_guard.TooLargeError as exc:
             return top, cwd, checkout, {}, str(exc), []
 
+    async def settings_proven(
+        self,
+        top: Path,
+        checkout: dict | None,
+        names: tuple[str, ...],
+        now: dict[str, dict],
+        snapshot: dict,
+        folders: list[str],
+    ) -> bool:
+        """Of the settings first seen in a folder workers had before Chief of Staff kept its
+        snapshot (an "untracked" one: handed out by an earlier version, or while the sandbox was
+        off), those byte for byte the owner's are taken as unchanged (bug E122): as the owner's
+        checkout's snapshot holds them, or as the commit the checkout was made from has them
+        (workspaces.Committed). A setting wholly or not at all; never one with a link, a special
+        file, a program or a folder it runs. Whether any was."""
+        wanted = {
+            folder: [name for name in snapshot["first"].get(folder, []) if name in names]
+            for folder in folders
+        }
+        if not snapshot.get("untracked") or not any(wanted.values()) or not checkout:
+            return False
+        theirs = None
+        owner = checkout.get("repo") if checkout.get("worktree") else None
+        if owner and not checkout.get("remote"):
+            real = await self.settings_thread(os.path.realpath, owner)
+            if real != await self.settings_thread(os.path.realpath, top):
+                theirs = settings_guard.load(self.store, Path(real))
+        base = checkout.get("base_ref") or checkout.get("settings_base") or ""
+        try:
+            committed = Committed(checkout, str(top), base)
+        except ValueError:
+            committed = None
+        proven = False
+        for folder, found in wanted.items():
+            for name in found:
+                entries = settings_guard.restricted({folder: now.get(folder, {})}, (name,))
+                entries = entries.get(folder, {})
+                tried = f"{top}\0{folder}\0{name}"
+                seen = settings_guard.digest({folder: entries})
+                if (
+                    not entries
+                    or self.settings_tried.get(tried) == seen
+                    or not all(
+                        value[0] == "f" or (value[0] == "-" and settings_guard.ran_of(entry)[1])
+                        for entry, value in entries.items()
+                    )
+                ):
+                    continue
+                if (theirs and self.owner_holds(theirs, folder, name, entries)) or (
+                    committed and await self.as_committed(committed, top, folder, name, entries)
+                ):
+                    settings_guard.taken(snapshot, {folder: entries}, [folder], (name,))
+                    self.settings_tried.pop(tried, None)
+                    proven = True
+                else:
+                    self.settings_tried[tried] = seen  # (Not read again while they stay so.)
+        return proven
+
+    @staticmethod
+    def owner_holds(theirs: dict, folder: str, name: str, entries: dict) -> bool:
+        """Whether the owner's checkout's snapshot holds a setting so, as taken there."""
+        if name not in theirs["known"].get(folder, []) or any(
+            name in theirs.get(marks, {}).get(folder, []) for marks in ("first", "carried")
+        ):
+            return False
+        kept = settings_guard.restricted({folder: theirs["folders"].get(folder, {})}, (name,))
+        return kept.get(folder, {}) == entries
+
+    async def as_committed(
+        self, committed: Committed, top: Path, folder: str, name: str, entries: dict
+    ) -> bool:
+        """Whether a setting's files (and those its commands run) are, every byte, what the
+        commit has there, and the commit has no other file under it."""
+        prefix = "" if folder == "." else f"{folder}/"
+        try:
+            there = await committed.files(prefix + name)
+            own: dict[str, list] = {}
+            for entry, value in entries.items():
+                setting, ran, _ = settings_guard.ran_of(entry)
+                if not ran:
+                    if "\0" in setting:
+                        return False
+                    own[prefix + setting] = value
+                elif value[0] == "f":
+                    if Path(ran).is_absolute() or ".." in Path(ran).parts:
+                        return False
+                    found = await committed.find(ran)
+                    if not found or not await self.blob_is(committed, top / ran, value, found):
+                        return False
+            if set(own) != set(there):
+                return False
+            for path, value in own.items():
+                if not await self.blob_is(committed, top / path, value, there[path]):
+                    return False
+        except (ValueError, OSError, settings_guard.SettingsBusyError):
+            return False
+        return True
+
+    async def blob_is(
+        self, committed: Committed, path: Path, value: list, found: tuple[str, str]
+    ) -> bool:
+        """Whether a file, as its snapshot entry says it is now, is that committed file."""
+        if found[0] not in {"100644", "100755"}:
+            return False
+
+        def read() -> str:
+            data = settings_guard.read_regular(path, settings_guard.MOST_BYTES)
+            if hashlib.sha256(data).hexdigest() != value[1]:
+                return ""  # (Changed since it was read.)
+            return blob_id(data, committed.long)
+
+        return await self.settings_thread(read) == found[1]
+
     async def settings_verdict(self, row: dict, names: tuple[str, ...]) -> dict | None:
         """What of these agent settings (one agent's) differs in a worker's folder from what
         Chief of Staff last saw: {"top", "cwd", "changes", "now", "digest", "unreadable",
@@ -3752,7 +3870,7 @@ class Runtime:
         and this one has run nothing there yet) is kept as it is: the owner's. Any other folder
         (or setting) seen for the first time is known from then on with nothing in it taken:
         what is there is the owner's to look at once."""
-        top, cwd, _, now, unreadable, code = await self.settings_thread(
+        top, cwd, checkout, now, unreadable, code = await self.settings_thread(
             self.settings_read, row, names
         )
         stored = settings_guard.load(self.store, top)
@@ -3785,6 +3903,8 @@ class Runtime:
             if stored is None:
                 snapshot["untracked"] = True  # (Workers had it before this kept track.)
             settings_guard.unseen(snapshot, now, missing)
+            settings_guard.save(self.store, top, snapshot)
+        if await self.settings_proven(top, checkout, names, now, snapshot, folders):
             settings_guard.save(self.store, top, snapshot)
         then = settings_guard.restricted(
             {folder: snapshot["folders"].get(folder, {}) for folder in folders}, names
