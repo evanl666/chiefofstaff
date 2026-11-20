@@ -1017,8 +1017,12 @@ class Connector:
         return after_hours(self.store.settings().watch_hours, moment)
 
     def due(self) -> bool:
+        if self.busy():
+            return False
+        if self.store.get("watch_connection_note"):
+            return any(watch.enabled for watch in self.store.settings().watches)
         every = self.interval()
-        if not every or self.busy():
+        if not every:
             return False
         last = float(self.store.get("watch_scanned_at") or 0)
         return time.time() - last >= every * 60
@@ -1077,6 +1081,9 @@ class Connector:
                 ),
             )
             lines = ["Scan now. The owner's watches, each with the time to look from:"]
+            if note := self.store.get("watch_connection_note"):
+                lines.insert(0, note)  # An account the owner just connected (rescan_connection).
+                self.store.delete("watch_connection_note")
             oldest = time.time()
             for number, watch in enumerate(watches, 1):
                 since = self.watch_since(watch.what)
@@ -1110,6 +1117,11 @@ class Connector:
                 "at all). report_found takes 30 items a call: with more, call it again with the "
                 "rest (every call adds to this scan)."
             )
+            lines.append(
+                "Try every watch once in this scan, even after one's source said its account "
+                "must be connected or authorized: that stops only the watches that need it. Do "
+                "not try such a source again in this scan; list its watches in incomplete."
+            )
             if methods := self.store.get("watch_methods"):
                 lines.append(
                     f"How you ran them before (use it again if it still works):\n{methods}"
@@ -1119,6 +1131,14 @@ class Connector:
             await self.send("scan", "\n\n".join(lines), "Scan: " + shown)
             if by_owner:
                 self.runtime.publish_state()
+
+    async def rescan_connection(self, note: str):
+        """The owner connected an account a scan could not use: a scan now, each watch from
+        where it was last covered (as any scan), `note` first; after the scan under way, if one
+        is (see due)."""
+        self.store.set("watch_connection_note", note[:600])
+        if not self.busy() and any(watch.enabled for watch in self.store.settings().watches):
+            await self.scan(by_owner=True)
 
     def failed(self, message: str):
         """Its turn failed (Copilot gave up on it). A scan under way failed: Settings and the
@@ -1300,6 +1320,13 @@ class Connector:
             partial = dict.fromkeys(range(1, len(scanned) + 1), params.problems.strip()[:300])
         reaches = {item.watch: epoch(item.reaches_back_to) for item in params.incomplete}
         before = json.loads(self.store.get("watch_scan_before") or "{}")
+        if not partial and (blocked := self.runtime.accounts.watch_failed_since(float(started))):
+            # It could not use an account this scan and said of no watch it was incomplete:
+            # the watches that name it (else all) are, so their windows stay open.
+            partial = self.blocked_watches(scanned, blocked)
+        # While an account it needs is not connected, no window is given up after GAP_TRIES:
+        # once it is, the scan reads from where each was last covered (up to RECOVER_DAYS).
+        waiting = self.runtime.accounts.watch_record() is not None
         incomplete = []
         for number, key in enumerate(scanned, 1):
             # Partial in an earlier report of this same scan (items come in several reports):
@@ -1319,7 +1346,9 @@ class Connector:
                     tries = counted.get(key, 0) + 1
                 else:
                     tries = earlier.get("tries", 1) if earlier else record.get("tries", 0) + 1
-                tries = self.give_up(key, before, reason, reaches.get(number, 0), tries, started)
+                tries = self.give_up(
+                    key, before, reason, reaches.get(number, 0), tries, started, waiting
+                )
                 self.store.set(
                     f"watchpartial:{key}",
                     json.dumps({"reason": reason, "at": now(), "scan": started, "tries": tries}),
@@ -1383,14 +1412,37 @@ class Connector:
         skipped = f" {answered} the owner already answered were left out." if answered else ""
         return f"{new} new item(s) handed to the Router; the rest were seen before.{skipped}"
 
+    def blocked_watches(self, scanned: list[str], record: dict) -> dict[int, str]:
+        """The scanned watches (by number) that name the account's source or server, else all;
+        each with why."""
+        words = {record["source"].casefold(), record["server"].casefold()} - {""}
+        watches = {
+            watch_key(w.what): f"{w.what} {w.how}".casefold() for w in self.store.settings().watches
+        }
+        named = [
+            number
+            for number, key in enumerate(scanned, 1)
+            if any(word in watches.get(key, "") for word in words)
+        ] or list(range(1, len(scanned) + 1))
+        why = f"{record['server']} needs you to connect {record['source'] or 'an account'}"
+        return dict.fromkeys(named, why)
+
     def give_up(
-        self, key: str, before: dict, reason: str, reach: float, tries: int, started: str
+        self,
+        key: str,
+        before: dict,
+        reason: str,
+        reach: float,
+        tries: int,
+        started: str,
+        waiting: bool = False,
     ) -> int:
         """What of a watch's window a scan covered only in part that no later scan can cover:
         what is older than its source can search (`reach`); all of it once GAP_TRIES scans in
-        a row (`tries`) covered it only in part. That is a coverage gap (see gap), and the
-        watch's watermark moves past it, for this scan's later reports too. The scans in a row
-        that covered what is left only in part."""
+        a row (`tries`) covered it only in part, unless an account is `waiting` to be
+        connected. That is a coverage gap (see gap), and the watch's watermark moves past it,
+        for this scan's later reports too. The scans in a row that covered what is left only
+        in part."""
         what = (before.get("what") or {}).get(key) or next(
             (w.what for w in self.store.settings().watches if watch_key(w.what) == key), "a watch"
         )
@@ -1400,7 +1452,7 @@ class Connector:
         if reach and done < reach:
             moved = min(reach, end)
             self.gap(what, done, moved, f"{reason}; the source searches back only to then")
-        if tries >= GAP_TRIES:
+        if tries >= GAP_TRIES and not waiting:
             self.gap(
                 what,
                 moved or done,
@@ -1475,6 +1527,9 @@ class Connector:
             # Scans that failed since the last that worked: when, why, how many in a row, and
             # since when (the first of them); None when the last one reported.
             "failed": json.loads(self.store.get("watch_failed") or "null"),
+            # An account it could not use and the owner has not connected yet: Settings and the
+            # sidebar say that, not "0 found".
+            "connection_needed": self.runtime.accounts.for_watch(),
             "session_id": row["id"] if row else "",
             # What watches could not check, and no scan will: the newest first, for a week after
             # each was told (or grew), however long before that it was.

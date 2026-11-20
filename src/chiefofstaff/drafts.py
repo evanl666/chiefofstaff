@@ -59,6 +59,7 @@ CARD_WORDS = {
     "form": "form",
     "link": "link to open",
     "signin": "sign-in",
+    "connection": "account to connect",
     "merge": "PR ready to merge",
     "workspace": "folder to choose",
     "lessons": "lessons to review",
@@ -118,6 +119,8 @@ class Drafts:
             return await self.answer_workspace(draft, decision)
         if draft["kind"] in REQUEST_KINDS:
             return self.runtime.asks.answer_request(draft, decision)
+        if draft["kind"] == "connection":
+            return await self.runtime.accounts.answer(draft, decision)
         if draft["kind"] == "decision":
             return await self.runtime.decisions.answer(draft, decision)
         if draft["kind"] == "change":
