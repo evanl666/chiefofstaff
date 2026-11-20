@@ -788,6 +788,80 @@ async def test_send_now_waits_for_the_owners_word_on_a_changed_folder(
         await runtime.stop()
 
 
+async def test_a_settings_held_worker_with_no_open_task_closes_and_drops_owner_chat(
+    tmp_path, git_repo, monkeypatch
+):
+    """E124: cancelling its last task cannot leave held chat to arrive during later work."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        task = task_of(harness, worker)
+        plant(cwd, ".mcp.json")
+        queued = await runtime.owner_send(worker, "Keep the tests running")
+        assert worker in runtime.settings_held
+
+        await runtime.task_actions.cancel(task)
+        await settle(runtime)
+
+        assert harness.store.session(worker)["closed_at"]
+        assert worker not in runtime.settings_held
+        dropped = harness.store.message(queued["id"])
+        assert dropped["meta"]["dropped"]
+        assert runtime.delivery.delivery_for(worker, [dropped]) == [""]
+        router_notices = [
+            text for kind, text in harness.kinds(harness.router_id) if kind == "notice"
+        ]
+        assert any(
+            text.startswith("Your message “Keep the tests running” to “")
+            and text.endswith("was not sent: its task is over. It won't be sent later.")
+            for text in router_notices
+        )
+    finally:
+        await runtime.stop()
+
+
+async def test_settings_held_chat_follows_only_a_proven_replacement_task(
+    tmp_path, git_repo, monkeypatch
+):
+    """E124: a queued owner message follows a task only through its replacedby relation."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        task = task_of(harness, worker)
+        plant(cwd, ".mcp.json")
+        queued = await runtime.owner_send(worker, "Also cover the retry path")
+        assert worker in runtime.settings_held
+
+        replacement = await spawn(
+            runtime,
+            harness.router_id,
+            title="Replace held work",
+            instructions="Finish the original task in a clean checkout.",
+            project=str(git_repo),
+            isolate=True,
+            replaces=[task],
+        )
+        await settle(runtime)
+
+        assert harness.store.session(worker)["closed_at"]
+        original = harness.store.message(queued["id"])
+        assert original["meta"]["dropped"]
+        assert original["meta"]["forwarded_to"] == replacement["session_id"]
+        forwarded = [
+            message
+            for message in harness.store.messages(replacement["session_id"])
+            if message["kind"] == "owner" and message["text"] == "Also cover the retry path"
+        ]
+        assert len(forwarded) == 1
+        assert forwarded[0]["meta"]["task_id"] == replacement["task_id"]
+    finally:
+        await runtime.stop()
+
+
 async def test_committed_agent_settings_still_load(tmp_path, git_repo, monkeypatch):
     """A repository that ships its own hooks and MCP servers keeps them for its workers: as
     its worktree was made, a link committed as one included. One made before snapshots were

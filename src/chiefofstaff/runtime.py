@@ -611,6 +611,7 @@ class Runtime:
         # settings (settings_stop): not started from the queue meanwhile; and why, in words.
         self.settings_held: set[str] = set()
         self.settings_reasons: dict[str, str] = {}
+        self.settings_orphans_closing: set[str] = set()
         # A worker's settings as the file system said them at its last full check (glance),
         # and where those are: (top, cwd, the files their hooks run and its .git folders).
         self.settings_sigs: dict[str, str] = {}
@@ -4896,6 +4897,143 @@ class Runtime:
         await self.release_held(session_id)
         return said
 
+    def drop_held_owner_message(
+        self,
+        message: dict,
+        status: str,
+        text: str,
+        *,
+        forwarded_to: str = "",
+    ) -> dict:
+        """Keep a queued message in history but remove the prompt so it can never arrive."""
+        meta = {
+            key: value
+            for key, value in message["meta"].items()
+            if key not in {"prompt", "settings_hold", "deferred"}
+        }
+        meta |= {
+            "dropped": True,
+            "settings_handled": {
+                "status": status,
+                "text": text,
+                "session_id": message["session_id"],
+            },
+            **({"forwarded_to": forwarded_to} if forwarded_to else {}),
+        }
+        self.store.update_message_meta(message["id"], meta)
+        updated = self.store.message(message["id"])
+        self.delivery.publish_delivery(message["session_id"], [updated])
+        return updated
+
+    def unsent_owner_chat(self, session_id: str) -> list[dict]:
+        """What the owner wrote a worker that has not reached it (nor been dropped)."""
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        return [
+            message
+            for message in self.store.prompts(session_id, after=mark)
+            if message["kind"] == "owner" and not message["meta"].get("dropped")
+        ]
+
+    async def settle_held_chat(self, row: dict, closing: bool) -> list[str]:
+        """What the owner wrote a worker held for its folder's settings, as the hold ends some
+        other way than its going on with all of it (E124): each message still waiting stays
+        unless the task it names is over (cancelled, failed, replaced) or another's, or the
+        worker is `closing`; then it goes to the task that replaced the one it names, when that
+        is another worker's and open (replacedby proves it); else it is dropped, never
+        delivered later. The lines Home says of what moved or was dropped, said there too."""
+        said = []
+        for message in self.unsent_owner_chat(row["id"]):
+            named = self.tasks.find(message["meta"].get("task_id") or "")
+            if not closing and (
+                not named
+                or (
+                    named["session_id"] == row["id"]
+                    and named["status"] not in {"cancelled", "failed"}
+                    and not self.store.get(f"replacedby:{named['id']}")
+                )
+            ):
+                continue  # (Still its: a follow-up on its result reopens that task.)
+            instead = (
+                self.tasks.find(self.store.get(f"replacedby:{named['id']}") or "")
+                if (named and named["session_id"] == row["id"])
+                else None
+            )
+            quoted = clip_words(message["text"], 100)
+            if (
+                named
+                and instead
+                and instead["session_id"] != row["id"]
+                and instead["status"] in OPEN
+            ):
+                await self.forward_held_chat(message, named, instead)
+                there = self.display_title(self.store.session(instead["session_id"]))
+                self.drop_held_owner_message(
+                    message, "forwarded", f"Sent to “{there}”, which took over its task.",
+                    forwarded_to=instead["session_id"],
+                )  # fmt: skip
+                said.append(f"Your message “{quoted}” went to “{there}”, which took over its task.")
+            else:
+                self.drop_held_owner_message(
+                    message, "dropped", "Not sent: its task is over. It won't be sent later."
+                )
+                said.append(
+                    f"Your message “{quoted}” to “{self.display_title(row)}” was not sent: its "
+                    "task is over. It won't be sent later."
+                )
+        with suppress(RuntimeError):
+            router = self.router_id()
+            for line in said:
+                self.add_message(router, "notice", line, {"session_id": row["id"]})
+        return said
+
+    async def forward_held_chat(self, message: dict, old: dict, new: dict):
+        """A held message the owner wrote about a task, to the worker of the task replacing it."""
+        meta = {
+            key: value
+            for key, value in message["meta"].items()
+            if key not in {"prompt", "settings_hold", "deferred", "dropped", "chat_task_new"}
+        }
+        context = wrap(
+            "system",
+            "context",
+            f"The owner wrote this about task {old['id']}, which your task {new['id']} replaces: "
+            "it is about your task now.",
+            task=new["id"],
+        )
+        await self.delivery.deliver(
+            new["session_id"],
+            f"{message['meta']['prompt']}\n\n{context}",
+            kind="owner",
+            display=message["text"],
+            meta={**meta, "task_id": new["id"], "forwarded_from": message["id"]},
+            steer=True,
+        )
+
+    async def release_orphaned_settings_worker(self, session_id: str):
+        """A worker held for its folder's settings with no open task left (cancelled, replaced,
+        moved): it closes, and what the owner wrote it goes where its task went or is dropped
+        (settle_held_chat), never delivered later."""
+        if session_id in self.settings_orphans_closing:
+            return
+        self.settings_orphans_closing.add(session_id)
+        try:
+            await asyncio.sleep(0)  # (Whatever ended its task finishes first.)
+            row = self.store.find_session(session_id)
+            if (
+                session_id not in self.settings_held
+                or not row
+                or row["closed_at"]
+                or any(task["status"] in OPEN for task in self.tasks.for_session(session_id))
+            ):
+                return
+            await self.settle_held_chat(row, closing=True)
+            self.settings_held.discard(session_id)
+            self.settings_reasons.pop(session_id, None)
+            self.store.delete(f"settingssaid:{session_id}")
+            await self.workers.close(session_id)
+        finally:
+            self.settings_orphans_closing.discard(session_id)
+
     def carried_theirs(self, row: dict, top: Path, now: dict[str, dict]):
         """Settings carried into a worker's worktree from the owner's checkout that the owner
         said to use: theirs in that checkout too, as they are now (its snapshot's), so the next
@@ -5493,6 +5631,9 @@ class Runtime:
             and (was not in ENDED or (task["status"] != was and task["status"] != "done"))
         ):
             self.decisions.drop_task(task)
+            if task["status"] == "cancelled" and task["session_id"] in self.settings_held:
+                # (Cancelled, replaced, moved: E124.)
+                self.background(self.release_orphaned_settings_worker(task["session_id"]))
         if task["status"] != "waiting" and self.waits_for_nothing(task["session_id"]):
             # Its question settled some other way (the draft it asked about sent, say): its
             # worker no longer waits for the owner (bug bash 9: its box kept "waits for you").
