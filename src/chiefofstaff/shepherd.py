@@ -630,7 +630,8 @@ class Shepherd(Keeping, Steps):
 
     async def claim_worker_prs(self):
         """A claim for each eligible PR a worker's task made and follows (its own, by the
-        owner's account): to that task, its origin. Read once to tell eligibility; a PR found
+        owner's account): to that task, its origin; one it opened is followed for it then,
+        unless the owner or the Router stopped that. Read once to tell eligibility; a PR found
         not eligible is not read again for a day."""
         actions = self.runtime.task_actions
         found: list[tuple[str, dict, dict]] = []
@@ -655,12 +656,22 @@ class Shepherd(Keeping, Steps):
             ]
             for pr in prs:
                 target = threads.normalize(f"github:{pr['label']}")
+                # One it opened and never named by its URL in a report is not followed yet: it
+                # is followed as it is claimed, unless the owner or the Router stopped that.
+                stopped = self.store.get(f"stopped:{row['id']}:{target}") or self.store.get(
+                    f"stoppedfor:{task['id']}:{target}"
+                )
+                opened = pr.get("opened") or target.removeprefix("github:") in actions.opened_prs(
+                    task["id"]
+                )
                 if (
                     not pr.get("own")
-                    or target not in followed
+                    or (target not in followed and (stopped or not opened))
                     or pr.get("state") not in {"OPEN", ""}
                 ):
                     continue
+                if target not in followed:
+                    pr = {**pr, "follow": True}
                 if self.control.claim(target):
                     continue
                 if float(self.store.get(f"noteligible:{target}") or 0) > time.time() - 86400:
@@ -673,8 +684,10 @@ class Shepherd(Keeping, Steps):
         except Exception:
             return
         for target, task, pr in found:
-            if (pr.get("author") in mine or pr.get("opened")) and not self.control.claim(target):
-                await self.give_task(target, task)
+            if not (pr.get("author") in mine or pr.get("opened")) or self.control.claim(target):
+                continue
+            if await self.give_task(target, task) and pr.get("follow"):
+                self.runtime.follow(task["session_id"], [target], given=False, task_id=task["id"])
 
     async def eligible(self, details: dict, mine: set[str]) -> str:
         """Why a PR is not one the shepherd keeps moving now ("" when it is)."""
