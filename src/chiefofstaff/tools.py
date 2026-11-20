@@ -338,16 +338,23 @@ SHEPHERD_FIELD: Any = (
 
 # message_session's field while busy workers' new tasks go to second workers (forks.py).
 SAME_WORKER = (
-    "For task='new' to a worker busy with other tasks: true when that worker itself must do it "
+    "For task='new' to a worker whose load says busy: true when that worker itself must do it "
     "after its current work (it goes on its branch or into its pull request, it needs what the "
     "worker is making now, or the owner wants that worker to do it once it is free). Otherwise, "
     "while it is busy and a worker slot is free, a second worker with its conversation so far "
     "takes the task at once"
 )
+PARALLEL = (
+    "For task='new' to a worker at work: true when the owner wants it done now, in parallel "
+    "with what that worker is doing (meanwhile, at the same time): a second worker with its "
+    "conversation so far takes it at once. Without it, a worker at work whose load does not say "
+    "busy takes the task only after its current turn"
+)
 MessageSessionForks = create_model(
     "MessageSession",
     __base__=MessageSession,
     same_worker=(bool, Field(default=False, description=SAME_WORKER)),
+    parallel=(bool, Field(default=False, description=PARALLEL)),
 )
 MessageSessionForks.__doc__ = MessageSession.__doc__
 
@@ -2577,20 +2584,32 @@ class Tools:
                 "task='new' and why_new saying why (the owner sees it)."
             )
         replaced = self.replaced_tasks(params.replaces)
+        same_worker = bool(getattr(params, "same_worker", False))
+        # Wanted in parallel with the turn it is in (not for its own work after it).
+        parallel = (
+            params.task == "new"
+            and target["role"] == WORKER
+            and not same_worker
+            and self.runtime.forks.parallel(target, bool(getattr(params, "parallel", False)))
+        )
         if (
             params.task == "new"
             and target["role"] == WORKER
-            and self.runtime.forks.reason(
-                target, params.earlier, bool(getattr(params, "same_worker", False))
-            )
+            and self.runtime.forks.reason(target, params.earlier, same_worker, parallel)
         ):
             # Busy with other work: a second worker with its context takes it now (forks.py).
             title = deliverable_title(params.title)
             self.check_title_style(title, "Not sent")
             if (forked := await self.fork_task(caller, target, params, title, why_new)) is not None:
                 return forked
+            if parallel:
+                raise ValueError(self.not_in_parallel(target, "starting it failed"))
             # It could not be made: the task waits for this worker, as one beside its others.
             params = params.model_copy(update={"earlier": params.earlier or "keep"})
+        elif parallel:
+            # It would wait for that worker's turn: the Router's to start elsewhere instead.
+            why = self.runtime.forks.unforkable(target) or "the task replaces its running one"
+            raise ValueError(self.not_in_parallel(target, why))
         # A running task left behind by a new one would show as waiting its turn though it was
         # delivered or waits on the owner: the Router says what becomes of it.
         earlier = (
@@ -2959,6 +2978,15 @@ class Tools:
             f"task_id, e.g. task_id='{last['id']}' (its latest tasks: {listed}). More work on "
             "accepted work, or another subject: task='new' with a title. Only telling it "
             "something: task='note'."
+        )
+
+    @staticmethod
+    def not_in_parallel(target: dict, why: str) -> str:
+        return (
+            f"Not sent: no second worker can take it from worker {short(target['id'])} now "
+            f"({why}), so it would wait for that worker's current turn. For work in parallel, "
+            "spawn_worker with why_new saying so; to let it wait for that worker, call again "
+            "without parallel."
         )
 
     async def fork_task(

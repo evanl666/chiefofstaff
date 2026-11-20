@@ -319,16 +319,42 @@ async def test_a_fork_never_reaches_a_copilot_that_could_not_start(tmp_path, mon
     assert calls == []
 
 
-def test_parallel_work_for_a_worker_in_a_turn_but_not_busy_gets_a_worker_of_its_own():
-    """Live routing (f3): told that a busy related worker is still the one to message, the
-    Router gave work the owner wanted in parallel to a worker in a turn whose load did not say
-    busy, and it waited behind that turn. Busy is what the load says."""
+@pytest.mark.parametrize("case", ["in a turn", "between turns", "no slot"])
+async def test_work_wanted_in_parallel_with_a_worker_at_work_goes_to_a_second_worker(
+    tmp_path, case
+):
+    """Live routing (f3, f4): the Router gave work the owner wanted "in parallel" to the worker
+    at work on a test run (one task, seconds in: not busy) with message_session, taking it for
+    busy, and it waited behind that turn. Said so (parallel=true), a second worker with its
+    context takes it at once; a worker between turns takes it itself; with no second worker
+    possible, the Router hears so (to start one of its own) and nothing is sent."""
+    harness = Harness(tmp_path / "data", Settings(max_workers=1 if case == "no slot" else 4))
+    runtime = await harness.connect()
+    worker = (await spawn(runtime, harness.router_id, "Run the tests"))["session_id"]
+    await at_work(runtime, harness, worker)
+    if case == "between turns":
+        runtime.states[worker].busy = False
+        runtime.update_session(worker, status="idle")
+    before = list(harness.session(worker).sent)
+    result = await new_task(runtime, harness, worker, "Count the lines", "Count the lines.",
+                            earlier="keep", parallel=True)  # fmt: skip
+    if case == "in a turn":
+        second = result["session_id"]
+        assert second != worker and harness.client.forks == [(worker, second)]
+        assert tasks_of(harness, second) == ["Count the lines"]
+        assert tasks_of(harness, worker) == ["Run the tests"]
+        assert harness.session(worker).sent == before, "the worker at work is not disturbed"
+    elif case == "between turns":
+        assert result.startswith("Delivered"), result
+        assert tasks_of(harness, worker) == ["Run the tests", "Count the lines"]
+        assert not harness.client.forks
+    else:
+        assert result.startswith("Error: Not sent: no second worker can take it"), result
+        assert "every worker slot is taken" in result and "spawn_worker" in result
+        assert tasks_of(harness, worker) == ["Run the tests"] and not harness.client.forks
+        assert harness.session(worker).sent == before
     rule = " ".join(prompts.FORK_RULE.split())
-    assert "A related worker whose load says busy is still the one to give the work to" in rule
-    assert (
-        "One in a turn whose load does not say busy takes a new task after that turn: work that "
-        "must run in parallel with what it is doing now gets its own worker (spawn_worker)"
-    ) in rule
+    assert "is message_session with parallel=true" in rule
 
 
 @pytest.mark.parametrize(
