@@ -3626,22 +3626,29 @@ class Runtime:
 
     async def agent_peer(self, session_id: str, kind: str, data: dict) -> str | None:
         """Claude's messages between sessions, through Chief of Staff (more-agents.md 5.12.5).
-        `send`: the worker's SendMessage; to one of Chief of Staff's workers (`cos-…`), its
-        tell_session (what it was told: Claude does not send it), else None (another session:
-        the owner says whether Claude sends it, each time). `inbound`: another session's message
-        to it, shown in its timeline and to the Router as that session's (by the name it gives
-        itself, never one of Chief of Staff's workers: theirs come as tell_session), within the
-        hourly limit of what a worker is told: "" to deliver it, else why not."""
+        `send`: the worker's SendMessage; to one of Chief of Staff's workers (`cos-…`,
+        `worker:…`, its id), its tell_session (what it was told: Claude does not send it), else
+        None (another session: the owner says whether Claude sends it, each time). `inbound`:
+        another session's message to it, shown in its timeline and to the Router as that
+        session's (by the name it gives itself, never one of Chief of Staff's workers: theirs
+        come as tell_session), within the hourly limit of what a worker is told: "" to deliver
+        it, else why not."""
         from .peers import MAX_TELLS_PER_HOUR, ROUTER_COPY_CHARS, TellSession, clip
 
         row = self.store.session(session_id)
         if kind == "send":
             to = str(data.get("to") or "")
-            found = re.fullmatch(r"cos-([0-9a-f]{8})", to)
+            # Its Claude session's name (cos-…), or as Chief of Staff names its workers to them
+            # (worker:…, its id): live G8's went to the owner's card as another session's.
+            found = re.fullmatch(
+                r"cos-([0-9a-f]{8})|(?:worker:|session:)?([0-9a-f]{8}(?:-?[0-9a-f]){0,24})",
+                to.strip().lower(),
+            )
+            prefix = (found.group(1) or found.group(2)).replace("-", "") if found else ""
             targets = [
                 other
                 for other in self.store.open_sessions(WORKER)
-                if found and other["id"].replace("-", "").startswith(found.group(1))
+                if found and other["id"].replace("-", "").startswith(prefix)
             ]
             if not found:
                 return None

@@ -891,6 +891,32 @@ async def test_a_turn_a_claude_commands_end_wakes_calls_chief_of_staffs_tools(ba
     assert "session.idle" not in kinds[: ended + 1], kinds
 
 
+async def test_claudes_sendmessage_to_a_worker_as_chief_of_staff_names_it_reaches_it(
+    backend, tmp_path
+):
+    """A worker's SendMessage, to another worker as Chief of Staff names its workers to them
+    (worker:<id>): Claude gives Chief of Staff the address as written, and sends nothing itself
+    (live G8: that address went to the owner's card as another session's)."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    told = []
+
+    async def on_peer(kind, data):
+        told.append((kind, data))
+        return "Delivered through Chief of Staff: Told “Receiver”."
+
+    session, turn = await open_session(backend, tmp_path, ask_first=False, on_peer=on_peer)
+    await session.send(
+        'Use Claude\'s ToolSearch tool with {"query": "select:SendMessage"}. '
+        'Use Claude\'s SendMessage tool with {"to": "worker:12345678", "message": "teal"}. '
+        "Then reply with just: ok"
+    )
+    await turn.wait()
+    assert told == [("send", {"to": "worker:12345678", "text": "teal"})], turn.kinds()
+    done = [e.data for e in turn.events if e.type.value == "tool.execution_complete"]
+    assert any("Delivered through Chief of Staff" in str(d.error) for d in done), done
+
+
 async def test_schedules_deleted_in_claude_do_not_come_back_with_claude_resume(backend, tmp_path):
     """Claude Code (2.1.322) brings a session's crons back on `claude --resume`, as the owner's
     terminal runs it, unless a CronDelete named them: what Chief of Staff asks once a worker's

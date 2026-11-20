@@ -1260,14 +1260,18 @@ async def test_schedules_claude_did_not_delete_keep_a_worker_from_a_terminal(
         await runtime.stop()
 
 
+@pytest.mark.parametrize("address", ["cos-{short}", "worker:{short}", "{id}"])
 async def test_a_claude_workers_message_to_another_worker_is_its_tell_session(
-    tmp_path, claude_on_path
+    tmp_path, claude_on_path, address
 ):
+    """SendMessage to one of Chief of Staff's workers, by its Claude session's name or as Chief
+    of Staff names it to workers (worker:<id>, its id: live G8 asked the owner instead)."""
     harness, runtime, first, _ = await claude_worker(tmp_path, "Report done: first")
     try:
+        to = address.format(short=first[:8], id=first)
         result = await spawn_on(
             harness, runtime, title="Second", agent="claude",
-            instructions=f"Message cos-{first[:8]}: 'the API moved'. Report done: told",
+            instructions=f"Message {to}: 'the API moved'. Report done: told",
         )  # fmt: skip
         second = result["session_id"]
         await until(lambda: harness.store.session(second)["status"] == "done", 30)
