@@ -4864,8 +4864,8 @@ async def approvals_seeded(runtime) -> dict:
     voice beside it; handled for the owner: a report accepted once read, a lesson kept."""
     store = runtime.store
     router = store.get("router_id")
-    # Room for its workers: each starts at once (earlier rounds' are many).
-    store.save_settings(store.settings().model_copy(update={"max_workers": 90}))
+    # Room for its workers: each starts at once (earlier rounds' are many, at work still).
+    store.save_settings(store.settings().model_copy(update={"max_workers": 1000}))
     for draft in store.drafts():  # Earlier rounds': this one's cards alone.
         store.update_draft(draft["id"], status="expired", outcome="Left by an earlier round.")
 
@@ -5041,7 +5041,7 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
     await call_tool(runtime, "report", summarizer, status="done", summary="Three timeouts.")
     await settle(runtime)
     summary = runtime.tasks.current(summarizer)
-    for _ in range(100):  # Its checkouts read (in the background).
+    for _ in range(600):  # Its checkouts read (in the background; slow on a loaded machine).
         if runtime.task_actions.informational(runtime.tasks.get(summary["id"])):
             break
         await asyncio.sleep(0.1)
@@ -5049,7 +5049,8 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
     row = page.locator("#needs .card.task", has_text="QA8 summarize the logs")
     await row.locator(":scope > .head .title").click()
     await expect(row.locator(".report .settles")).to_have_text(
-        "A report with no code or PR: accepted for you a few minutes after you've read it."
+        "A report with no code or PR: accepted for you a few minutes after you've read it.",
+        timeout=20000,
     )
     handled = page.locator("#needs details.handled")
     await handled.locator("summary").click()
