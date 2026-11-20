@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import settle
+from conftest import call_tool, settle
 from shepherd_world import BRANCH, TARGET, TEST_COMMAND, World
 
 from chiefofstaff.backend import StepSandboxPolicy
@@ -547,15 +547,21 @@ async def test_a_pr_its_task_opened_is_kept_when_its_receipts_could_not_read_it(
         assert runtime.store.get(f"noteligible:{TARGET}")
 
 
-@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("stopped", ["", "owner", "worker"])
 async def test_a_pr_its_task_opened_and_never_named_by_its_url_is_followed_and_kept(world, stopped):
     """Live SY8 on 0.1.48: its worker reported "Opened #377", with no URL, so it never
     followed the PR it opened, and Prepared for you keeps only followed ones: never kept
-    moving. One it opened is followed as it is claimed; not one the owner stopped following."""
+    moving. One it opened is followed as it is claimed; not one the owner stopped following,
+    nor one its worker stopped following itself (unfollow_thread, told so by the owner)."""
     runtime = await world.start()
     runtime.store.execute("DELETE FROM pr_claims WHERE target=?", (TARGET,))  # (Unclaimed.)
-    runtime.store.unfollow(TARGET, world.worker)
-    if stopped:
+    if stopped == "worker":
+        await call_tool(runtime, "unfollow_thread", world.worker, thread=TARGET)
+    else:
+        runtime.store.unfollow(TARGET, world.worker)
+        # Never followed: its record has none of it.
+        runtime.store.execute("UPDATE sessions SET links='[]' WHERE id=?", (world.worker,))
+    if stopped == "owner":
         runtime.store.set(f"stopped:{world.worker}:{TARGET}", "1")
     await runtime.shepherd.claim_worker_prs()
     claim = runtime.shepherd.control.claim(TARGET)
