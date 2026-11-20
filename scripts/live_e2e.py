@@ -1283,13 +1283,19 @@ async def scenario_decisions(app: App, project: Path):
             if d["status"] == "active" and d["ack"] and "camel" in d["text"].lower()
         ]
         pending = [d for d in state["drafts"] if d["kind"] == "change"]
+        # E123: a change its worker's work changes for keeps its card (all confirmed) for the
+        # owner's Got it; one nothing changes for closes by itself.
+        seen = all(item.get("ack") for card in pending for item in card["target"]["tasks"])
         return (
-            (changed[0], current)
-            if changed and not pending and current["status"] == "review"
+            (changed[0], current, pending)
+            if changed and seen and current["status"] == "review"
             else None
         )
 
-    decision, current = await wait_for("the worker confirmed and redid it", confirmed, 600)
+    decision, current, pending = await wait_for("the worker confirmed and redid it", confirmed, 600)
+    for card in pending:
+        assert any(item.get("changes") is not False for item in card["target"]["tasks"]), card
+        await app.post(f"/api/drafts/{card['id']}", {"action": "answer"})
     assert "camel" in decision["text"].lower(), decision
     assert current["runs"] >= 2, "its finished result was reopened and redone"
     tree = Path((await app.get(f"/api/sessions/{task['session_id']}"))["cwd"])
@@ -1344,25 +1350,40 @@ async def scenario_learning(app: App):
                 (kind, context, proposed, owner, scope, agreed),
             )
     database.close()
+    before = {entry["id"] for entry in (await app.get("/api/state")).get("handled", [])}
     await app.post("/api/lessons/learn", {})
 
     async def proposed():
-        drafts = (await app.get("/api/state"))["drafts"]
-        return next((d for d in drafts if d["kind"] == "lessons"), None)
+        # E123: a lesson the owner's words back three times or more is kept at once (Handled
+        # for you); the rest are on the card. Both come from one propose_lessons.
+        state = await app.get("/api/state")
+        card = next((d for d in state["drafts"] if d["kind"] == "lessons"), None)
+        kept = [
+            entry["ref"]
+            for entry in state.get("handled", [])
+            if entry["kind"] == "lesson" and entry["id"] not in before
+        ]
+        return (card, kept, state) if card or kept else None
 
-    card = await wait_for("lessons proposed from the feedback", proposed, 600)
-    lessons = card["target"]["lessons"]
+    card, kept, state = await wait_for("lessons proposed from the feedback", proposed, 600)
+    lessons = card["target"]["lessons"] if card else []
+    in_use = [lesson for lesson in state["learning"]["lessons"] if lesson["id"] in kept]
     for lesson in lessons:
         log(f"lesson ({lesson['scope'] or 'everywhere'}): {lesson['text']}")
-    assert 2 <= len(lessons) <= 8, lessons
+    for lesson in in_use:
+        log(f"kept at once ({lesson['scope'] or 'everywhere'}): {lesson['text']}")
+    every = lessons + in_use
+    assert 2 <= len(every) <= 8, every
     assert all(lesson["because"] for lesson in lessons), "each rests on feedback"
-    assert any(lesson["scope"] == "slack" for lesson in lessons), "how Slack replies are written"
-    assert any("rollback" in lesson["text"].lower() for lesson in lessons), lessons
-    keep = {lesson["id"]: lesson["text"] for lesson in lessons}
-    await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "content": keep})
+    assert any(lesson["scope"] == "slack" for lesson in every), "how Slack replies are written"
+    assert any("rollback" in lesson["text"].lower() for lesson in every), every
+    if card:
+        keep = {lesson["id"]: lesson["text"] for lesson in lessons}
+        await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "content": keep})
     learned = (await app.get("/api/state"))["learning"]
-    assert len(learned["lessons"]) == len(lessons) and learned["new_feedback"] == 0, learned
-    log(f"the owner kept {len(lessons)} lessons; agreement {learned['agreement']['now']}")
+    assert len(learned["lessons"]) == len(every) and learned["new_feedback"] == 0, learned
+    log(f"the owner kept {len(lessons)} lessons, {len(in_use)} kept at once; agreement "
+        f"{learned['agreement']['now']}")  # fmt: skip
 
 
 async def scenario_code_folder(app: App, root: Path):

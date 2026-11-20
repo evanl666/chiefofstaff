@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **Smooth by default: what is safe is handled for you, the rest of your OKs are one card.**
+  *Needs you* had a card or a button for every kind of approval, and every finished result
+  waited for *Accept*, a report that changed nothing too. Now:
+  - A report with no code, no PR and nothing failing is accepted for you a few minutes after you
+    read it, or a day after it finished unread (results from before too). Code and PRs keep
+    *Accept*.
+  - A changed decision closes by itself once every affected worker said nothing changes for it;
+    one that changes a worker's work stays for you to see.
+  - A habit your own words backed three times or more (not about secrets, money or what goes
+    out) is kept at once; once you drop or undo more than one in five of those, they wait for you
+    again.
+  - When the one folder the Router offers for a task is a configured project, it is picked, with
+    *Change* in its chat.
+  - A server that changed in a worker's folder is kept off for it without a word; its timeline
+    asks you only when the worker calls it.
+  - On Linux, git files that appear in a worktree folder of Chief of Staff's own are moved aside
+    and the worker goes on; your own repository still waits for your word.
+  - The other approvals (habits, checks, a changed decision, a folder, a PR ready to merge, a
+    sign-in) are one card, **Your OK**, a line each with its own button, counted once; **Approve
+    all safe** takes the lines marked safe. Replies and reviews in your voice, decisions, merges,
+    sign-ins and spending are never approved for you.
+  - **Handled for you**, one quiet line under *Needs you*, lists the last week's, with *Undo*
+    (*Change*, *Turn on*, *Put back*) where it still means something.
+  - The Watchdog leaves alone a worker waiting for your word on its folder's settings.
+
 - **Security: a worker given your checkout only to read can't write there with a command
   either.** Its edits there were refused, but a command such as `echo y >> AGENTS.md` went
   through for a worker with no system sandbox (on Codex always; on Copilot with the sandbox off),
