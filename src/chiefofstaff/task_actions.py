@@ -66,6 +66,10 @@ class MayHoldWorkError(ValueError):
 
 
 CHECK_BACK_RETRY_MINUTES = 5
+# A report only (TaskActions.informational, E123) is accepted for the owner this long after they
+# opened it, or this long after it finished when they never did.
+READ_SETTLE_MINUTES = float(os.environ.get("CHIEFOFSTAFF_READ_SETTLE_MINUTES", "10"))
+REPORT_SETTLE_HOURS = 24
 # Reads of a followed thread failed in a row before it shows as failing.
 FAILING_READS = 3
 
@@ -3802,47 +3806,111 @@ class TaskActions:
             self.runtime.learning.record("accept", context=task["title"], scope=scope, agreed=True)
         return task
 
-    def settle_old_reports(self, shown_hours: float):
-        """Once, on the first start of a version where every result waits for Accept: a
-        result an earlier version counted as finished once read (a report that changed no code,
-        opened no PR still open, had no criteria or flag to check) is accepted when the owner
-        read it, its worker is closed, or it is older than Home showed: the owner settled those
-        already. A recent one they never opened waits for Accept like any result now."""
-        if self.store.get("migrated:accept_all"):
-            return
-        cutoff = hours_ago(shown_hours)
+    def settle_reports(self, moment: datetime | None = None) -> list[str]:
+        """A report only (informational: no code, no PR, nothing failing) is accepted for the
+        owner once they read it (READ_SETTLE_MINUTES after they opened it: not under their eyes),
+        or a day after it finished unread (E123); each is under Handled for you, with Undo. A
+        result with code or a PR keeps its Accept. Every minute and at each start, for results
+        of before too. The ids accepted."""
+        moment = moment or datetime.now(UTC)
+        read_by = (moment - timedelta(minutes=READ_SETTLE_MINUTES)).isoformat()
+        old_by = (moment - timedelta(hours=REPORT_SETTLE_HOURS)).isoformat()
+        helpers = self.runtime.helper_ids()
+        accepted = []
         for task in self.store.all("SELECT * FROM tasks WHERE status='review'"):
-            row = self.store.find_session(task["session_id"])
-            ended = task.get("ended_at") or task["updated_at"]
-            if not (
-                self.store.get(f"read:{task['id']}")
-                or not row
-                or row["closed_at"]
-                or ended < cutoff
-            ) or not self.informed_only(task):
+            ended = self.finished_at(task)
+            read = self.store.get(f"read:{task['id']}") or ""
+            if read and read <= read_by:
+                why = "after you read it"
+            elif ended <= old_by:
+                why = "a day after it finished"
+            else:
                 continue
-            self.tasks.move(task["id"], "done")
+            if task["session_id"] in helpers or self.store.get(f"keepreview:{task['id']}") == ended:
+                continue  # Chief of Staff's own; or the owner undid this one's: theirs to accept.
+            if not self.informational(task):
+                continue
+            self.accept(task["id"], as_is=False)  # (Not the owner's word: nothing learned.)
             self.tasks.update(task["id"], ended_at=ended)  # Finished when it finished, not now.
-        self.store.set("migrated:accept_all", now())
-
-    def informed_only(self, task: dict) -> bool:
-        """A result an earlier version did not ask the owner to accept (see
-        settle_old_reports)."""
-        shown = self.view(task)
-        receipts = shown.get("receipts") or {}
-        changed = receipts.get("changed") or {}
-        return not (
-            shown.get("review_required")
-            or changed.get("files")
-            or changed.get("commits")
-            or changed.get("uncommitted")
-            or any(
-                pr.get("own") and pr.get("state") not in {"MERGED", "CLOSED"}
-                for pr in receipts.get("prs") or []
+            self.publish(self.tasks.get(task["id"]))
+            self.runtime.handled.record(
+                "accepted",
+                f"Accepted “{task['title']}” {why}: a report, with no code or PR to check",
+                session_id=task["session_id"],
+                ref=task["id"],
+                undo="Undo",
             )
-            or (receipts.get("criteria") and receipts.get("verdict") != "verified")
-            or receipts.get("flags")
+            accepted.append(task["id"])
+        if not self.store.get("migrated:accept_all"):
+            # An older version run on this database again: its one-time pass is this one's.
+            self.store.set("migrated:accept_all", now())
+        return accepted
+
+    async def settle_reports_now(self):
+        """settle_reports, from the periodic round."""
+        self.settle_reports()
+
+    async def unaccept(self, entry: dict) -> str:
+        """Undo of an acceptance settle_reports made: the result waits for the owner's Accept
+        again, never accepted for them again (until a newer result)."""
+        task = self.tasks.find(entry["ref"])
+        if not task or task["status"] != "done" or self.store.get(f"setaside:{task['id']}"):
+            raise ValueError("It moved on since: there's nothing to undo.")
+        self.tasks.move(task["id"], "review")
+        task = self.tasks.get(task["id"])
+        self.store.set(f"keepreview:{task['id']}", self.finished_at(task))
+        self.publish(task)
+        return f"“{task['title']}” waits for your Accept again."
+
+    def finished_at(self, task: dict) -> str:
+        """When its latest result came: its latest run's end (else its last change)."""
+        return (
+            self.store.value(
+                "SELECT max(ended_at) FROM runs WHERE task_id=? AND status='succeeded'",
+                (task["id"],),
+            )
+            or task.get("ended_at")
+            or task["updated_at"]
         )
+
+    def informational(self, task: dict, found: dict | None = None) -> bool:
+        """A result that is a report only (E123): its checkouts read, it changed no code there
+        (no files, uncommitted changes or commits), opened or updated no PR, nothing it checked
+        or claimed fails (no flag, criteria not failed), no one asked to see it, no card of its
+        worker's waits (a reply or review it drafted is settled there), and its worker is not at
+        it again. `found`: its receipts, read already."""
+        if (
+            task["status"] != "review"
+            or self.store.get(f"reviewreq:{task['id']}")
+            or self.store.get(f"followup:{task['id']}")
+            or task["id"] in self.receipts_due
+        ):
+            return False
+        if not self.store.value(
+            "SELECT coalesce((SELECT evidence FROM runs WHERE task_id=? "
+            "ORDER BY started_at DESC LIMIT 1), '')",
+            (task["id"],),
+        ):
+            return False  # Its checkouts were not read: what it changed is not known.
+        found = self.receipts(task) if found is None else found
+        found = found or {}
+        changed = found.get("changed") or {}
+        if (
+            found.get("checking")
+            or found.get("stale")
+            or found.get("flags")
+            or found.get("verdict") == "failed"
+            or any(changed.get(key) for key in ("files", "commits", "uncommitted", "large"))
+            or any(pr.get("own") or pr_role(pr) in OWN_ROLES for pr in found.get("prs") or [])
+        ):
+            return False
+        if self.store.value(
+            "SELECT count(*) FROM drafts WHERE status IN ('pending', 'uncertain') AND session_id=?",
+            (task["session_id"],),
+        ):
+            return False
+        row = self.store.find_session(task["session_id"])
+        return not (row and self.runtime.working_on(row["id"]) == task["id"])
 
     async def request_changes(self, task_id: str, text: str, by: str = "you") -> dict:
         """The owner does not accept a finished result (to accept, or accepted already): it
@@ -4465,6 +4533,8 @@ class TaskActions:
             "files": self.made_files(task, row),
             "read": bool(self.store.get(f"read:{task['id']}")),
             "review_required": bool(self.store.get(f"reviewreq:{task['id']}")),
+            # A report only: accepted for the owner once they read it (E123, settle_reports).
+            "report_only": self.informational(task, shown_receipts),
             # Its latest result looks like other work (offered to split off), and, split off
             # from another task, until when that can be undone.
             "splittable": task["status"] in {"review", "done"} and self.splittable(task),

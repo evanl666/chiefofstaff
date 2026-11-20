@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from . import agents
-from .drafts import CARD_WORDS
+from .drafts import CARD_WORDS, YOUR_OK
 from .store import Store, hours_ago
 from .tasks import HELPERS
 
@@ -84,6 +84,11 @@ class Needs:
     def sessions(self) -> set[str]:
         return {item["session_id"] for item in self.items}
 
+    def count(self) -> int:
+        """Home's count: the cards on Your OK are one (E123)."""
+        batched = sum(1 for item in self.items if item.get("batched"))
+        return len(self.items) - batched + (1 if batched else 0)
+
 
 def stalled(runtime: Runtime, task: dict, moment: datetime) -> bool:
     """Home's "No progress" (board.js taskPhase): a running task quiet for stall_hours with
@@ -148,8 +153,10 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
     }
     for draft in drafts:
         item = {"kind": "card", "draft": draft, "session_id": draft["session_id"]}
+        if draft["kind"] in YOUR_OK:
+            item["batched"] = True  # A line on Your OK: one card for all of them.
         if (
-            draft["kind"] not in {"decision", "merge"}
+            draft["kind"] not in {"decision"} | YOUR_OK
             and (task := runtime.drafts.task_of(draft))
             # A result to review, or finished work with news (what it drafted is the news).
             and (
@@ -234,7 +241,7 @@ def task_words(task: dict, found: Needs) -> str:
 
 def needs_you(runtime: Runtime) -> int:
     """How many things wait for the owner, as Home's Needs you counts them."""
-    return len(needs(runtime).items)
+    return needs(runtime).count()
 
 
 def plural(count: int, word: str, many: str = "") -> str:
@@ -249,7 +256,11 @@ def waiting_parts(found: Needs) -> list[str]:
     ]
     cards: list[str] = [item["draft"]["kind"] for item in found.of("card")]
     approvals = sum(kind in APPROVALS for kind in cards)
-    others = Counter(CARD_WORDS.get(kind) or kind for kind in cards if kind not in APPROVALS)
+    batched = [kind for kind in cards if kind in YOUR_OK]
+    others = Counter(
+        CARD_WORDS.get(kind) or kind for kind in cards if kind not in APPROVALS | YOUR_OK
+    )
+    ok_words = sorted({CARD_WORDS.get(kind) or kind for kind in batched}, key=str.casefold)
     review, update = found.tasks("review"), found.tasks("update")
     stopped, blocked = found.tasks("stopped"), found.tasks("blocked")
     stalled_, unchecked = found.tasks("stalled"), found.tasks("check-failed")
@@ -266,6 +277,7 @@ def waiting_parts(found: Needs) -> list[str]:
         (unknown, f"{names(unknown)}: run status unknown (ended, or stop tracking?)"),
         (approvals, plural(approvals, "draft") + " to approve"),
         (others, plural(others.total(), "card") + f" to answer ({', '.join(sorted(others))})"),
+        (batched, f"Your OK on {plural(len(batched), 'thing')} ({', '.join(ok_words)})"),
         (sends, plural(len(sends), "send") + " to check"),
         (notes, plural(len(notes), "note") + " of mine to act on"),
     ]

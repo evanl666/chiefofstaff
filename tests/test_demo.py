@@ -86,7 +86,9 @@ async def test_the_demo_scenario_plays_through(tmp_path):
             )
         )
         assert runtime.tasks.runs(redone["id"])[-1]["reason"] == "decision changed"
-        [impact] = store.all("SELECT status FROM drafts WHERE kind='change'")
-        assert impact["status"] == "answered", "its worker confirmed"
+        [impact] = store.all("SELECT status, target FROM drafts WHERE kind='change'")
+        # Its worker confirmed, and its work changed (E123): the card stays for the owner.
+        assert impact["status"] == "pending"
+        assert all(item["ack"] for item in json.loads(impact["target"])["tasks"])
     finally:
         await runtime.stop()

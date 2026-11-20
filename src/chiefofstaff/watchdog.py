@@ -207,6 +207,8 @@ class Watchdog:
                 continue  # Chief of Staff's own: a run ends without a report.
             if self.states[row["id"]].close_after_turn:
                 continue  # It is done and closes after this turn.
+            if row["id"] in self.runtime.settings_held:
+                continue  # Its hold has its card under Needs you: nothing to review (E119).
             # A task it said when to look at again (check_back) is not owed until then.
             running = any(
                 task["status"] == "running" and not self.store.get(f"checkback:{task['id']}")

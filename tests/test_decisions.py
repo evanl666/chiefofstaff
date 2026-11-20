@@ -84,7 +84,8 @@ async def test_workers_ask_one_decision_and_the_owner_changes_it_later(harness):
     await call_tool(
         runtime, "ack_decision", form["session_id"], decision=new["id"], plan="Add a phone field"
     )
-    assert harness.store.draft(impact["id"])["status"] == "answered", "all confirmed"
+    # All confirmed, and their work changes (E123): the card stays for the owner to see.
+    assert harness.store.draft(impact["id"])["status"] == "pending", "work changes"
 
 
 async def test_a_closed_worker_stops_waiting_for_a_decision(harness):

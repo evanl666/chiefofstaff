@@ -1120,6 +1120,8 @@ class Tools:
             if str(path) not in {option["path"] for option in options}:
                 options.append({"path": str(path), "configured": configured})
         title = clean_title(params.title)
+        if len(options) == 1 and options[0]["configured"]:
+            return await self.pick_workspace(caller, title, options, params)
         draft = self.store.create_draft(
             caller,
             "workspace",
@@ -1142,6 +1144,42 @@ class Tools:
         return (
             f"Asked the owner ({draft['id']}). Their choice arrives as a [draft outcome] message; "
             "start the worker then."
+        )
+
+    async def pick_workspace(
+        self, caller: str, title: str, options: list[dict], params: AskWorkspace
+    ) -> str:
+        """The one folder offered is a configured project (E123): it is the owner's choice
+        already, said in their chat with Change (Handled for you) instead of asked."""
+        path = options[0]["path"]
+        draft = self.store.create_draft(
+            caller,
+            "workspace",
+            {"title": title, "options": options, "why": params.why[:300], "picked": path},
+            params.request[:500],
+        )
+        draft = self.store.update_draft(
+            draft["id"], status="chosen", outcome=path, resolved_at=now()
+        )
+        self.bus.publish("draft", draft)
+        name = Path(path).name or path
+        entry = self.runtime.handled.record(
+            "workspace",
+            f"Picked {name} for “{title}”: the only project that fits",
+            session_id=caller,
+            ref=draft["id"],
+            undo="Change",
+        )
+        self.runtime.add_message(
+            caller,
+            "notice",
+            f"“{title}” works in {name}: the only project that fits.",
+            {"handled": {"id": entry["id"], "undo": "Change"}},
+        )
+        return (
+            f"Only one configured project fits: {path}. That is the owner's choice: start the "
+            'worker there now, without asking. If they change it, a type="draft-outcome" '
+            "message tells you."
         )
 
     def definitions(self) -> dict:
@@ -2719,7 +2757,7 @@ class Tools:
         failed = found.tasks("failed")
         summary = waiting_parts(found) + ([f"{len(failed)} failed"] if failed else [])
         return {
-            "count": len(found.items),
+            "count": found.count(),
             "summary": " · ".join(summary) or "nothing",
             "cards": cards,
             "sends_to_check": [

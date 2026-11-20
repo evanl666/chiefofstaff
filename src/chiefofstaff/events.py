@@ -566,6 +566,8 @@ class Events:
             self.runtime.settings_glance(row["id"])
         data = event.data
         name = getattr(data, "tool_name", "") or "tool"
+        if row["role"] == WORKER and row["id"] in self.runtime.servers_off:
+            self.runtime.servers_called(row, name)
         self.states[row["id"]].turn_tools += 1
         arguments = getattr(data, "arguments", None)
         call = getattr(data, "tool_call_id", "") or f"step-{time.monotonic()}"

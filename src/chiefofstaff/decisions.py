@@ -650,11 +650,28 @@ class Decisions:
             for item in target["tasks"]:
                 if item["task_id"] in mine:
                     item["ack"] = plan
+                    item["changes"] = params.changes
             card = self.store.update_draft_target(card["id"], target)
             told = [item for item in target["tasks"] if item.get("told", True)]
-            if told and all(item["ack"] for item in told) and len(told) == len(target["tasks"]):
-                card = self.close(card["id"], "answered", "Every affected worker confirmed.")
+            every = len(told) == len(target["tasks"])
+            if not (told and all(item["ack"] for item in told) and every):
+                self.bus.publish("draft", card)
+            elif all(item.get("changes") is False for item in told):
+                # Nothing changes for anyone (E123): it closes by itself, handled for the owner.
+                card = self.close(
+                    card["id"], "answered", "Every affected worker said nothing changes."
+                )
+                count = len(told)
+                self.runtime.handled.record(
+                    "change",
+                    f"Closed “Decision changed: {target['decision']['text']}”: "
+                    f"{count} worker{'s' if count > 1 else ''} said nothing changes for "
+                    f"{'them' if count > 1 else 'it'}",
+                    ref=card["id"],
+                )
             else:
+                # Work changes because of it (or a confirmation from before says not whether):
+                # the card stays for the owner to see who redoes what.
                 self.bus.publish("draft", card)
         with suppress(RuntimeError):
             self.runtime.add_message(
