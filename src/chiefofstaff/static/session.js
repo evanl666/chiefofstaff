@@ -871,7 +871,9 @@ function renderMessage(original) {
               : null;
       // A stop its task's card says more of (another agent's spend): that, in full, on hover.
       const title = meta.full ? `${meta.full}\n${clock(time)}` : clock(time);
-      return el("div", { class: `line notice${open ? " link" : ""}${settings ? " wide" : ""}`, title, onclick: open }, el("span", { text: message.text }), settings);
+      // Handled for the owner (E123, a folder picked): Change, while it can still be.
+      const handled = meta.handled && (state.snapshot?.handled || []).some((entry) => entry.id === meta.handled.id && entry.status === "done") ? handledButton(meta.handled) : null;
+      return el("div", { class: `line notice${open ? " link" : ""}${settings || handled ? " wide" : ""}`, title, onclick: open }, el("span", { text: message.text }), settings, handled);
     }
     case "error":
       // Sent after all (on a retry, or once Copilot was back): no longer an error.
@@ -918,6 +920,22 @@ function useGitButton(sessionId, digest) {
     try {
       const { said } = await api(`/api/sessions/${sessionId}/git-identity`, { method: "POST", body: { digest } });
       toast(said);
+    } catch (error) {
+      toast(error.message, "error");
+      button.disabled = false;
+    }
+  } });
+  return button;
+}
+// Undo (Change, for a folder picked) of what was handled for the owner: as under Needs you.
+function handledButton({ id, undo }) {
+  const button = el("button", { type: "button", class: "link", text: undo || "Undo", onclick: async (event) => {
+    event.stopPropagation();
+    button.disabled = true;
+    try {
+      const { said } = await api(`/api/handled/${id}/undo`, { method: "POST" });
+      toast(said);
+      button.remove();
     } catch (error) {
       toast(error.message, "error");
       button.disabled = false;

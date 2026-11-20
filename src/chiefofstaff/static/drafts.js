@@ -144,7 +144,14 @@ function workspaceCard(draft) {
   const target = draft.target;
   const error = el("span", { class: "error" });
   const other = el("input", { placeholder: "Another folder, e.g. ~/code/app" });
-  const node = card(draft, "workspace", `Where should “${target.title}” work?`, el("div", { class: "note", text: [draft.text, target.why].filter(Boolean).join(" — ") }));
+  const node = card(
+    draft,
+    "workspace",
+    `Where should “${target.title}” work?`,
+    el("div", { class: "note", text: [draft.text, target.why].filter(Boolean).join(" — ") }),
+    // Picked for the owner (the only project that fits), and Changed: what it is in now.
+    target.picked ? el("div", { class: "note", text: `Picked ${displayPath(target.picked)} for you: choose it again to keep it.` }) : null,
+  );
   const decide = decider(draft, node, error);
   const choose = (choice) => decide({ action: "choose", choice }, "Starting it there.");
   const choices = el("div", { class: "choices" });
@@ -498,6 +505,125 @@ function replyCard(draft) {
   node.append(actions);
   show();
   return node;
+}
+// Your OK (E123; drafts.py YOUR_OK): the approvals on one card under Needs you, a line each with
+// its own button, the rest of it behind "⋯" (Details shows its whole card). What speaks as the
+// owner, their decisions and workers' questions keep cards of their own. Safe (local, undone in
+// Settings): a changed decision seen, a check used, a lesson kept that is not about secrets,
+// money or what goes out: Approve all safe takes those, never a merge, a sign-in, a link, a
+// folder, a profile or a session to take over.
+export const YOUR_OK = new Set(["change", "lessons", "check", "profile", "adopt", "workspace", "merge", "signin", "link"]);
+// Whose whole card is open on Your OK, by draft id: kept as the card is drawn again.
+const okOpen = new Set();
+const lessonWhere = (lesson) => (!lesson.scope ? "" : lesson.scope === "slack" ? " · Slack replies" : ` · in ${lesson.scope.replace("project:", "").split("/").pop()}`);
+// A card's lines on Your OK: { kind, text, safe, main, more }; `main` and each of `more` is
+// { text, body, done } (what the card's own button sends), { text, details } (its whole card)
+// or { text, href } (a link to open).
+function okLines(draft) {
+  const target = draft.target || {};
+  const details = (text) => ({ text, details: true });
+  if (draft.kind === "change") {
+    const told = target.tasks.filter((item) => item.told !== false);
+    const confirmed = told.filter((item) => item.ack).length;
+    const changing = told.filter((item) => item.ack && item.changes !== false).length;
+    const counts = `${confirmed} of ${target.tasks.length} confirmed${changing ? `, ${changing} changing` : ""}`;
+    return [{ kind: "Decision changed", text: `${target.decision.text} · ${counts}`, safe: true, main: { text: "Got it", body: { action: "answer" }, done: "Seen." } }];
+  }
+  if (draft.kind === "lessons") {
+    return target.lessons.map((lesson) => ({
+      lesson,
+      kind: "Lesson",
+      text: `${lesson.text}${lessonWhere(lesson)}`,
+      safe: lesson.sensitive === false,
+      main: { text: "Keep", body: { action: "answer", content: { [lesson.id]: lesson.text } }, done: "Kept." },
+      more: [{ text: "Drop", body: { action: "answer", content: { [lesson.id]: "" } }, done: "Dropped." }],
+    }));
+  }
+  if (draft.kind === "check") return [{ kind: "Check", text: `${target.name} · ${target.repo}`, safe: true, main: { text: "Use", body: { action: "answer" }, done: "Check in use." }, more: [{ text: "Drop", body: { action: "reject" }, done: "Dropped." }] }];
+  if (draft.kind === "profile") return [{ kind: "Profile", text: "Your profile, distilled from your work", main: details("Review") }];
+  if (draft.kind === "adopt") return [{ kind: "Continue here?", text: `“${target.title}”: ${target.text || draft.text}`, main: { text: "Continue it here", body: { action: "answer" }, done: "Continuing it here." }, more: [{ text: "Not now", body: { action: "reject" }, done: "Left as it is." }] }];
+  if (draft.kind === "workspace") return [{ kind: "Folder", text: target.picked ? `Where should “${target.title}” work? Picked ${target.picked.split("/").pop()} for you` : `Where should “${target.title}” work?`, main: details("Choose…"), more: [{ text: "Don't start it", body: { action: "reject" }, done: "Not started." }] }];
+  if (draft.kind === "merge") {
+    return [{ kind: "Ready to merge", text: `${target.label.replace(/^[^/]+\//, "")}${target.title ? ` “${target.title}”` : ""} · ${target.checks === "none" ? "no checks" : "checks pass"}`, main: { text: "Merge", body: { action: "send" }, done: `Merging ${target.label}…` }, more: [{ text: "Open PR", href: target.url }, { text: "Not now", body: { action: "reject" }, done: "Not merged." }] }];
+  }
+  if (draft.kind === "signin") return [{ kind: "Sign-in", text: draft.text || `Sign in to ${target.server}`, main: target.url ? { text: "Sign in", href: target.url } : details("Details"), more: [{ text: "I signed in", body: { action: "answer" }, done: "Done." }, { text: "Not now", body: { action: "reject" }, done: "Declined." }] }];
+  return [{ kind: "Link to open", text: draft.text, main: target.url ? { text: "Open link", href: target.url } : details("Details"), more: [{ text: "Done", body: { action: "answer" }, done: "Done." }, { text: "Decline", body: { action: "reject" }, done: "Declined." }] }];
+}
+// What Your OK shows: drawn again when any of its cards changes or one is opened or closed.
+export const yourOkKey = (drafts) => `ok:${drafts.map(draftKey).join("|")}:${drafts.filter((draft) => okOpen.has(draft.id)).map((draft) => draft.id).join(",")}`;
+// Your OK, as one card: a line per approval, then Approve all safe when two or more are.
+export function yourOkCard(drafts) {
+  const error = el("span", { class: "error" });
+  const rows = [];
+  const list = el("ul", { class: "ok-list" });
+  for (const draft of drafts) {
+    const lines = okLines(draft);
+    lines.forEach((line, index) => {
+      const row = okRow(draft, line);
+      rows.push({ ...line, draft, node: row });
+      list.append(row);
+      // Its whole card, under its last line, while open.
+      if (index === lines.length - 1 && okOpen.has(draft.id)) list.append(el("li", { class: "ok-details" }, draftCard(draft)));
+    });
+  }
+  const safe = rows.filter((row) => row.safe);
+  const node = el("div", { class: "card draft your-ok", "data-id": "your-ok" }, el("div", { class: "head" }, el("span", { class: "label", text: "Your OK" }), el("span", { class: "spacer" }), el("span", { class: "ok-count", text: String(rows.length) })), list);
+  if (safe.length > 1) {
+    const all = async () => {
+      for (const row of safe) row.node.classList.add("leaving");
+      error.textContent = "";
+      try {
+        const done = await api("/api/your-ok/approve-safe", { method: "POST", body: { items: safe.map((row) => ({ draft: row.draft.id, lesson: row.lesson?.id || "" })) } });
+        toast(done.left ? `Approved ${done.approved}; ${done.left} changed meanwhile and still wait${done.left === 1 ? "s" : ""} here.` : `Approved ${done.approved}.`);
+      } catch (failure) {
+        for (const row of safe) row.node.classList.remove("leaving");
+        error.textContent = failure.message;
+      }
+    };
+    node.append(el("div", { class: "actions" }, error, el("button", { type: "button", text: `Approve all safe (${safe.length})`, title: "Only the lines marked safe: local, and undone in Settings", onclick: () => once("your-ok", node, all) })));
+  }
+  return node;
+}
+function okRow(draft, line) {
+  const error = el("span", { class: "error" });
+  const row = el("li", { class: "ok-row", "data-id": draft.id, "data-lesson": line.lesson?.id });
+  const act = (action) => {
+    if (action.href) return () => window.open(action.href, "_blank", "noreferrer");
+    if (action.details) {
+      return () => {
+        if (!okOpen.delete(draft.id)) okOpen.add(draft.id);
+        scheduleHome();
+      };
+    }
+    return () =>
+      once(`draft:${draft.id}`, row, async () => {
+        error.textContent = "";
+        row.classList.add("leaving");
+        try {
+          const result = await api(`/api/drafts/${draft.id}`, { method: "POST", body: action.body });
+          applyDraft(result?.id === draft.id && result.status ? result : { ...draft, status: "answered" });
+          if (action.done) toast(action.done);
+        } catch (failure) {
+          row.classList.remove("leaving");
+          error.textContent = failure.message;
+          toast(failure.message, "error");
+        }
+      });
+  };
+  const main = line.main.href
+    ? el("a", { class: "button secondary", href: line.main.href, target: "_blank", rel: "noreferrer", text: line.main.text })
+    : el("button", { type: "button", class: "secondary", text: line.main.text, onclick: act(line.main) });
+  const more = [...(line.more || []), ...(line.main.details ? [] : [{ text: okOpen.has(draft.id) ? "Hide details" : "Details", details: true }])];
+  row.append(
+    el(
+      "div",
+      { class: "ok-main" },
+      el("div", { class: "ok-kind" }, line.kind, line.safe ? el("span", { class: "ok-safe", text: " · safe", title: "Local, and undone in Settings: Approve all safe includes it" }) : null),
+      el("div", { class: "ok-text", text: line.text, title: line.text }),
+    ),
+    el("span", { class: "ok-actions" }, error, moreMenu(more.map((item) => ({ text: item.text, onclick: act(item) }))), main),
+  );
+  return row;
 }
 export function draftCard(draft) {
   if (draft.kind === "lessons") return lessonsCard(draft);
