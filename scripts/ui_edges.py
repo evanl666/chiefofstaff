@@ -8811,6 +8811,40 @@ async def picker_workers(runtime, browser):
     )
     assert not errors, errors
     await context.close()
+    # Work for a worker of theirs on an agent signed out now: the same card, in one click its
+    # work goes on on Copilot (from its summary, with what it was given); it stays open.
+    runtime.agent_refused_card(
+        "codex",
+        "Codex is not signed in: run codex login in a terminal.",
+        {"title": "Port the parser"},
+        worker=worker,
+        text="Also port the tokenizer.",
+    )
+    for scheme in ("light", "dark"):
+        context, page, errors, _ = await agents_page(browser, scheme)
+        await at_home(page)
+        card = page.locator("#timeline .card.agent-refused", has_text="Port the parser")
+        await expect(card.locator("p")).to_have_text(
+            "“Port the parser” did not get this on Codex: sign-in needed."
+        )
+        await expect(card.locator(".agent-fix")).to_have_text("Run codex login in a terminal Copy")
+        await expect(card.locator(".actions > button")).to_have_text(
+            ["Wait", "Continue with Copilot"]
+        )
+        await picker_shoot(page, "recovery-card-worker", scheme, focus=card)
+        if scheme == "dark":
+            before = {r["id"] for r in store.open_sessions("worker")}
+            await card.get_by_role("button", name="Continue with Copilot").click()
+            await expect(card.locator(".actions")).to_have_count(0)
+            await expect(
+                page.locator("#timeline .event.started .what", has_text="Continued “Port the")
+            ).to_have_text(["Continued “Port the parser” on Copilot"])
+            (again,) = [r for r in store.open_sessions("worker") if r["id"] not in before]
+            assert runtime.agent(again["id"]) == "copilot", again
+            assert store.get(f"continues:{again['id']}") == worker
+            assert not store.session(worker)["closed_at"], "the first one stays open"
+        assert not errors, errors
+        await context.close()
     # A task its plan's limit paused (its request refused): its reset first, on its row; Go on
     # at that time (by itself then), or continue on another agent now. (The Copilot workers
     # above, closed: room for it to start now.)
