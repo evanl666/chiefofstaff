@@ -750,9 +750,14 @@ class Events:
             # was taken already, what waited for its session to be free is due now: a
             # reconnect, or a report it owes.
             state.held = False
+            owed = row["role"] == WORKER and not state.after_abort
             if state.stale:
-                self.runtime.background(self.runtime.reattach(session_id))
-            elif row["role"] == WORKER and not state.after_abort:
+                # Opened again first; what it owes is asked of it there (unless the refresh
+                # brings its own message: it goes on).
+                self.runtime.background(
+                    self.reattached(row, state, owed=owed and not state.after_refresh)
+                )
+            elif owed:
                 self.owes_report(row, state)
             return
         state.held = held
@@ -792,14 +797,24 @@ class Events:
             # Its PR is merged or closed, but it still has work open (a question it just
             # asked, another task): it stays, and nothing of it is cancelled.
             state.close_after_turn = False
-        # Decided now: closing or reattaching (which brings its own message) clears these.
-        settled = not (state.close_after_turn or state.stale or state.after_refresh)
+        # Decided now: closing, or a refresh that brings its own message (it goes on), clears
+        # these. Held: it waits for a command it left running, whose end wakes it to go on (a
+        # report now would be asked of work in the middle); asked once it is free.
+        owed = (
+            row["role"] == WORKER
+            and not (state.close_after_turn or state.after_refresh)
+            and not state.retrying
+            and not aborted
+            and not held
+        )
         if state.close_after_turn:
             self.runtime.background(self.runtime.workers.close(session_id))
         elif state.stale and not held:
             # Reconnected once its session is free: a held one's command would end with none
-            # to wake (see the start of idle, for its session.idle).
-            self.runtime.background(self.runtime.reattach(session_id))
+            # to wake (see the start of idle, for its session.idle). What it owes is asked of
+            # it then, on its new session (live G3: never asked).
+            self.runtime.background(self.reattached(row, state, owed=owed))
+            owed = False
         if row["role"] in {ROUTER, SLACK} and self.delivery.has_unsent(session_id):
             self.delivery.schedule_flush(session_id)  # Events that arrived during the turn.
         context = int(self.store.get(f"context:{session_id}") or 0)
@@ -807,18 +822,23 @@ class Events:
             self.runtime.background(self.runtime.rotate_router())
         if row["role"] == WORKER:
             self.runtime.background(self.runtime.workers.pump())
-            # Held: it waits for a command it left running, whose end wakes it to go on (a
-            # report now would be asked of work in the middle); asked once it is free.
-            if settled and not state.retrying and not aborted and not held:
+            if owed:
                 self.owes_report(row, state)
             # A turn may have changed code whose evidence was already collected.
             self.runtime.background(self.runtime.task_actions.check_fresh(session_id))
 
-    def owes_report(self, row: dict, state):
-        """Its turn is over: what it said is its report, or it is asked for one."""
-        self.runtime.workers.complete_report(row["id"])
-        self.runtime.background(self.runtime.workers.ask_for_report(row["id"]))
+    def owes_report(self, row: dict, state, reopened: bool = False):
+        """Its turn is over: what it said is its report, or it is asked for one. `reopened`:
+        its session was let go of to be opened again with what changed (Runtime.reattach)."""
+        self.runtime.workers.complete_report(row["id"], reopened)
+        self.runtime.background(self.runtime.workers.ask_for_report(row["id"], reopened))
         self.news_unreported(row, state)
+
+    async def reattached(self, row: dict, state, owed: bool):
+        """Opened again with what changed since it began its turn; then asked for what it owes."""
+        await self.runtime.reattach(row["id"])
+        if owed and (now := self.store.find_session(row["id"])) and not now["closed_at"]:
+            self.owes_report(now, state, reopened=True)
 
     def news_unreported(self, row: dict, state):
         """A followed PR or thread changed and the worker, its work finished, said nothing to

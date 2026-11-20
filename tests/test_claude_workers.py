@@ -266,6 +266,36 @@ async def test_the_check_is_kept_by_the_binary_it_checked(tmp_path, claude_on_pa
         await runtime.stop()
 
 
+async def test_a_claude_worker_refreshed_while_its_command_runs_is_asked_for_its_report(
+    tmp_path, claude_on_path
+):
+    """Its prompt changed while a command it left running went on (a style learned, live G3):
+    the turn that command's end wakes answers without report(); it is asked for one on its next
+    process, not left to the Watchdog."""
+    from chiefofstaff.roles import WORKER
+
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}, "new_workers": "claude"})
+        worker = (
+            await spawn_on(
+                harness,
+                runtime,
+                title="Wait it out",
+                instructions="Leave the command `echo up` running for 4 s, then reply with just: "
+                "started",
+            )
+        )["session_id"]
+        await until(lambda: runtime.held(worker), 30)
+        await runtime.refresh(WORKER)
+        assert runtime.states[worker].stale, "opened again once its turn is over"
+        await until(lambda: ("assistant", "noted") in harness.kinds(worker), 30)
+        line = "It stopped without a report: asked for one."
+        await until(lambda: ("notice", line) in harness.kinds(worker), 30)
+    finally:
+        await runtime.stop()
+
+
 async def test_turning_claude_off_drains_its_workers_and_processes(tmp_path, claude_on_path):
     harness, runtime = await started(tmp_path)
     try:
