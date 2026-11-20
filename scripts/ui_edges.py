@@ -5415,8 +5415,8 @@ async def main():
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
                           round_send, round_agents, round_qa6, round_qa7_life, round_qa8_report,
-                          round_layout, round_fresh_start, round_qa8_auth, round_qa8_approvals,
-                          ):  # fmt: skip
+                          round_layout, round_fresh_start, round_qa8_auth,
+                          round_qa8_approvals):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()

@@ -19,40 +19,6 @@
   *connection needed*, not *0 found*. The tool's text is untrusted: a card only for a failed
   call of an MCP tool whose server the backend names, a link only as a plain http(s) address,
   labelled when it is not the server's own, and opened only when you click it.
-
-## 0.1.50 (2026-11-20)
-
-- **Workers start and resume again with your Copilot in experimental mode** (Copilot CLI 1.0.114
-  and later, with `/experimental on`): a worker's message failed with "Could not deliver the
-  message: … extensionSdkPath is required when standalone extensions are requested", and a new
-  worker failed to start. Experimental mode turns on Copilot's extensions, which every worker asks
-  for (it loads what your own sessions load), and the Copilot version Chief of Staff runs when
-  your CLI is newer than it supports (1.0.112) cannot run them on its own. Its sessions now open
-  without extensions; on your own CLI, workers load them as before. Should Copilot still refuse
-  to resume one for its extensions, a fresh Copilot session goes on for it at once, told its task,
-  last report and folders from Chief of Staff's records; what you sent it goes there, once, and
-  its timeline stays. Its chat says *Reconnecting this worker…* meanwhile; and should no fresh
-  session start either, one plain line says so (no Copilot error text) with *Start a fresh worker
-  with its context*, your message kept for it.
-- **A Copilot CLI that updated itself no longer stops Chief of Staff, whatever version it
-  became.** Chief of Staff now tells which protocol your Copilot CLI speaks before starting it,
-  and speaks protocol 4 (Copilot 1.0.113 and later; its SDK speaks 3) itself: your own Copilot
-  CLI runs again, rather than Copilot 1.0.112 in its place. For a CLI newer still, Copilot
-  1.0.112 runs instead as before, now set up ahead, in the background, at a start on your own CLI
-  (a download of about 100 MB, once): a CLI update never costs a wait or a failed start. Offline,
-  or when that download does not match its checksum, the newest Copilot already on your machine
-  that Chief of Staff speaks runs; with none, one line says why and what to do, with no traceback.
-  Each time Copilot connects again, it is chosen again, so a CLI that updated itself meanwhile is
-  probed afresh. Events of a newer Copilot this SDK can't read no longer fail: a session's whole
-  history failed to load for one. And a session Copilot can't resume for a version mismatch of
-  any kind (a method or parameter it doesn't know, a session format it no longer reads) goes on
-  in a fresh Copilot session as for experimental mode's extensions above, never with Copilot's
-  error text.
-- For maintainers: a daily workflow (*Copilot compatibility*) starts the newest Copilot CLI with
-  the SDK Chief of Staff ships, as Chief of Staff does (a handshake, a session created and
-  resumed; no model call, no secret), and opens one `copilot-compat` issue when that SDK can't
-  drive it (added to only when what it says changes, closed once it can again). Dependabot no
-  longer proposes the Copilot SDK: its package is frozen at a last release the pin keeps out.
 - **Without the sandbox, nothing waits for your word on a folder's settings.** A worker without
   the sandbox (the default) already runs commands as you, so holding it for a hook or an MCP
   server in its folder added friction, not protection. Chief of Staff no longer reads, keeps or
@@ -109,6 +75,40 @@
   own, as on macOS and Linux. Paths count however Windows spells them: in any case, with `/` or
   `\`, `\\?\`, `..` or a trailing dot. An edit there through its file tool to a `\\?\` path is
   refused too. The check takes about 0.02 ms a command.
+
+## 0.1.50 (2026-11-20)
+
+- **Workers start and resume again with your Copilot in experimental mode** (Copilot CLI 1.0.114
+  and later, with `/experimental on`): a worker's message failed with "Could not deliver the
+  message: … extensionSdkPath is required when standalone extensions are requested", and a new
+  worker failed to start. Experimental mode turns on Copilot's extensions, which every worker asks
+  for (it loads what your own sessions load), and the Copilot version Chief of Staff runs when
+  your CLI is newer than it supports (1.0.112) cannot run them on its own. Its sessions now open
+  without extensions; on your own CLI, workers load them as before. Should Copilot still refuse
+  to resume one for its extensions, a fresh Copilot session goes on for it at once, told its task,
+  last report and folders from Chief of Staff's records; what you sent it goes there, once, and
+  its timeline stays. Its chat says *Reconnecting this worker…* meanwhile; and should no fresh
+  session start either, one plain line says so (no Copilot error text) with *Start a fresh worker
+  with its context*, your message kept for it.
+- **A Copilot CLI that updated itself no longer stops Chief of Staff, whatever version it
+  became.** Chief of Staff now tells which protocol your Copilot CLI speaks before starting it,
+  and speaks protocol 4 (Copilot 1.0.113 and later; its SDK speaks 3) itself: your own Copilot
+  CLI runs again, rather than Copilot 1.0.112 in its place. For a CLI newer still, Copilot
+  1.0.112 runs instead as before, now set up ahead, in the background, at a start on your own CLI
+  (a download of about 100 MB, once): a CLI update never costs a wait or a failed start. Offline,
+  or when that download does not match its checksum, the newest Copilot already on your machine
+  that Chief of Staff speaks runs; with none, one line says why and what to do, with no traceback.
+  Each time Copilot connects again, it is chosen again, so a CLI that updated itself meanwhile is
+  probed afresh. Events of a newer Copilot this SDK can't read no longer fail: a session's whole
+  history failed to load for one. And a session Copilot can't resume for a version mismatch of
+  any kind (a method or parameter it doesn't know, a session format it no longer reads) goes on
+  in a fresh Copilot session as for experimental mode's extensions above, never with Copilot's
+  error text.
+- For maintainers: a daily workflow (*Copilot compatibility*) starts the newest Copilot CLI with
+  the SDK Chief of Staff ships, as Chief of Staff does (a handshake, a session created and
+  resumed; no model call, no secret), and opens one `copilot-compat` issue when that SDK can't
+  drive it (added to only when what it says changes, closed once it can again). Dependabot no
+  longer proposes the Copilot SDK: its package is frozen at a last release the pin keeps out.
 
 ## 0.1.49 (2026-11-20)
 
