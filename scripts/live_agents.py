@@ -894,8 +894,11 @@ async def b3_checkout_read_only_command(ctx: Ctx):
         rows = await messages(ctx, worker)
         ran = [m["text"] for m in rows if m["id"] > tried and m["kind"] == "tool"
                and m["text"].startswith("bash ")]  # fmt: skip
+        # Refused, and sent to a copy of its own (Runtime.own_copy; the line it had before when
+        # none could be made).
         refused = [text for text in await notices(ctx, worker, mark)
-                   if "owner's own checkout" in text]  # fmt: skip
+                   if "owner's own checkout" in text
+                   or "not run in the owner's checkout" in text]  # fmt: skip
         log(f"B3: ran {ran}; {said[-300:]!r}")
         if refused:
             break

@@ -613,6 +613,22 @@ async def scenario_watchdog(app: App, project: Path):
         router_messages = await app.get(f"/api/sessions/{router}/messages")
         assert any(m["meta"].get("status", "").startswith("watchdog") for m in router_messages)
     log(f"watchdog acted: {action}")
+    # Given the project to read, its test run there is refused and it gets a copy of its own to
+    # run it in (r66d: refused with no copy, it asked the owner which way to go, and no
+    # Watchdog review came). One already in a worktree of its own runs it there.
+    rows = await app.get(f"/api/sessions/{worker_id}/messages")
+    copied = next((m for m in rows if m["kind"] == "notice"
+                   and "your own copy of it" in m["text"]), None)  # fmt: skip
+    if copied:
+        found = re.search(r"is ready at (.+?); run it there", copied["text"])
+        assert found, copied["text"]
+        slug = Path(found.group(1)).parent.name
+        ran = [m["text"] for m in rows if m["id"] > copied["id"] and m["kind"] == "tool"
+               and slug in m["text"]]  # fmt: skip
+        log(f"watchdog's worker: in its own copy ({found.group(1)}): {ran[:2]}")
+        assert ran, "the tests run in its copy"
+    else:
+        log("watchdog's worker: no copy made (it ran them in a worktree of its own)")
     await app.post(f"/api/sessions/{worker_id}/close")
 
 
