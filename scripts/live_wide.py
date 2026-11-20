@@ -170,7 +170,7 @@ SHARDS = {
     "P": (18806, 18936), "Q": (18807, 18937), "R": (18808, 18938),
     "S": (18809, 18939), "T": (18810, 18940),
 }  # fmt: skip
-MODEL = "claude-sonnet-5.5"
+MODEL = os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5")
 CJK = re.compile(r"[\u4e00-\u9fff]")
 NOT_PROSE = re.compile(r"`[^`]*`|https?://\S+|/\S+")
 FINISHED = {"review", "done"}

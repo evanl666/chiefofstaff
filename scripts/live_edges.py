@@ -37,7 +37,7 @@ from live_e2e import (  # noqa: E402
 )
 from live_parity import setup  # noqa: E402
 
-MODEL = os.environ.get("EDGES_MODEL", "claude-sonnet-5.5")
+MODEL = os.environ.get("EDGES_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5"))
 
 
 async def say(app: App, text: str) -> int:

@@ -42,7 +42,9 @@ from live_e2e import App, cleanup, log, transcript, wait_for  # noqa: E402
 from chiefofstaff.backend import copilot_home  # noqa: E402
 from chiefofstaff.events import tools_left_out  # noqa: E402
 
-MODEL = os.environ.get("LIVE_HOTFIX_MODEL", "claude-haiku-5.5")
+MODEL = os.environ.get(
+    "LIVE_HOTFIX_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-haiku-5.5")
+)
 SERVER = str(Path(__file__).resolve().parent / "many_tools_mcp.py")
 # What says a worker did not report with its tool (Workers.ask_for_report).
 UNREPORTED = ("without a report", "filed as one")

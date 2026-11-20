@@ -30,6 +30,7 @@ S24 "which tasks wait for my review?": the Router names them
 
 import asyncio
 import json
+import os
 import re
 import subprocess
 import sys
@@ -48,7 +49,7 @@ from fake_slack_mcp import Workspace, serve_in_thread  # noqa: E402
 from live_e2e import SLACK_PORT, SLACK_TOKEN, App, cleanup, git, log, transcript, wait_for  # noqa: E402
 from live_parity import setup  # noqa: E402
 
-MODEL = "claude-sonnet-5.5"
+MODEL = os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5")
 CJK = re.compile(r"[\u4e00-\u9fff]")
 NOT_PROSE = re.compile(r"`[^`]*`|https?://\S+|/\S+")
 DASHBOARD = "https://deploy.acme.dev/dashboard"

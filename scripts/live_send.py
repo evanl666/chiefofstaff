@@ -69,7 +69,7 @@ from live_e2e import App, git, log, transcript, wait_for
 PORT, SLACK_PORT = 18960, 18961
 BASE = f"http://127.0.0.1:{PORT}"
 SLACK_TOKEN = "xoxp-live-send"
-MODEL = os.environ.get("LIVE_SEND_MODEL", "claude-sonnet-5.5")
+MODEL = os.environ.get("LIVE_SEND_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5"))
 REPO = "evan666-lgtm/cos-approve-test"
 PR_URL = f"https://github.com/{REPO}/pull/1"
 PR_KEY = f"github:{REPO}#1"

@@ -102,7 +102,9 @@ from chiefofstaff.others import SHOWN
 
 BASE_PORT = int(os.environ.get("LIVE_OTHERS_PORT", "18950"))
 PORT, OTHER_PORT = BASE_PORT, BASE_PORT + 1
-MODEL = os.environ.get("LIVE_OTHERS_MODEL", "claude-haiku-5.5")
+MODEL = os.environ.get(
+    "LIVE_OTHERS_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-haiku-5.5")
+)
 COPILOT = shutil.which("copilot") or "copilot"
 # As the owner starts it in a terminal: the version they run (auto-update off would start the
 # one the CLI keeps for that, which may be older).

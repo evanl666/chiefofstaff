@@ -41,7 +41,7 @@ live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
 AGENT = sys.argv[sys.argv.index("--agent") + 1] if "--agent" in sys.argv else "copilot"
 CODEX = shutil.which("codex") or "codex"
 
-MODEL = os.environ.get("PARITY_MODEL", "claude-sonnet-5.5")
+MODEL = os.environ.get("PARITY_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5"))
 COPILOT = shutil.which("copilot") or "copilot"
 
 PROBE_MCP = '''from mcp.server.fastmcp import FastMCP

@@ -33,7 +33,7 @@ from fake_slack_mcp import OWNER, Workspace, serve_in_thread  # noqa: E402
 from live_e2e import SLACK_PORT, SLACK_TOKEN, App, cleanup, git, log, transcript, wait_for  # noqa: E402
 
 COPILOT = shutil.which("copilot") or "copilot"
-MODEL = os.environ.get("MEMORY_MODEL", "claude-sonnet-5.5")
+MODEL = os.environ.get("MEMORY_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5"))
 HELPER_NOTICE = re.compile(r"“(Learn how you work|Learn checks from mistakes)”")
 DMS = [
     "yep can do, give me 10 min 🙏",

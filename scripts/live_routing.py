@@ -31,7 +31,7 @@ from live_e2e import App, cleanup, git, log, transcript, wait_for  # noqa: E402
 from live_parity import setup, write  # noqa: E402
 
 HELPER = re.compile(r"“(Learn how you work|Learn checks from mistakes|Distill owner profile)”")
-MODEL = os.environ.get("ROUTING_MODEL", "claude-sonnet-5.5")
+MODEL = os.environ.get("ROUTING_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5"))
 ORDERS = '''"""Orders."""
 
 

@@ -30,7 +30,7 @@ live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
 from live_e2e import App, cleanup, git, log, transcript, wait_for  # noqa: E402
 from live_parity import setup  # noqa: E402
 
-MODEL = os.environ.get("USECASES_MODEL", "claude-sonnet-5.5")
+MODEL = os.environ.get("USECASES_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5"))
 PR_REPO = os.environ.get("CHIEFOFSTAFF_E2E_PR_REPO", "evanl666/cos-pr-e2e-1793727958")
 
 HELPER_NOTICE = re.compile(r"“(Learn how you work|Learn checks from mistakes)”")

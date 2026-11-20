@@ -78,7 +78,9 @@ from live_e2e import SLACK_TOKEN, App, cleanup, git, log, transcript, wait_for
 from live_parity import setup, write
 
 SHARDS = {"A": (19100, 19150), "B": (19101, 19151), "C": (19102, 19152), "D": (19103, 19153)}
-MODEL = os.environ.get("LIVE_AGENTS_MODEL", "claude-sonnet-5.5")
+MODEL = os.environ.get(
+    "LIVE_AGENTS_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5")
+)
 # Codex workers' model: "" for Codex's default (see the docstring).
 CODEX_MODEL = os.environ.get("LIVE_CODEX_MODEL", "")
 APPROVE_REPO = "evan666-lgtm/cos-approve-test"

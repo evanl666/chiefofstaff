@@ -24,7 +24,7 @@ live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
 from live_e2e import App, cleanup, log, transcript, wait_for  # noqa: E402
 from live_parity import setup  # noqa: E402
 
-MODEL = os.environ.get("LIFE_MODEL", "claude-sonnet-5.5")
+MODEL = os.environ.get("LIFE_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5"))
 
 
 async def say(app: App, text: str) -> int:
