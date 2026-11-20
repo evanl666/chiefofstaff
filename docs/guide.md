@@ -1244,6 +1244,14 @@ most once a day, and sends nothing about you or your machine; *Say when a newer 
 out* (Settings → General) turns it off. When Copilot can't start at all, the error says the
 command that updates Chief of Staff.
 
+Your Copilot CLI updates itself, and the Copilot SDK Chief of Staff is built on can lag behind it.
+Chief of Staff tells which protocol your CLI speaks before starting it, and runs it when it speaks
+that protocol (protocol 4, Copilot 1.0.113 and later, through a small adapter of its own). For a
+CLI newer still it runs Copilot 1.0.112 instead, with the same sign-in, settings and sessions:
+set up ahead, in the background (about 100 MB, once), so an update of your CLI costs no wait.
+Offline, it runs the newest Copilot already on your machine that it speaks. One line under the
+status says so while your own CLI is not the one running.
+
 ## Data
 
 Everything stays on your machine, in the data directory (`--data-dir`, default per

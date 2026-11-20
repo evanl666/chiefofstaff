@@ -132,6 +132,20 @@ def no_pypi(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_copilot_downloads(monkeypatch):
+    """No test sets up a Copilot runtime ahead (backend.prefetch) or finds one of this machine's
+    (compat.installed_runtimes, compat.cli_protocol), nor shares one set up by another test:
+    tests of those say what they find. The real contract tests see the machine's."""
+    from chiefofstaff import backend, compat
+
+    monkeypatch.setattr(backend, "PREFETCH", False, raising=False)
+    monkeypatch.setattr(backend, "PROVISIONED", {}, raising=False)
+    if os.environ.get("CHIEFOFSTAFF_TEST_COPILOT") != "1":
+        monkeypatch.setattr(compat, "package_roots", list)
+        monkeypatch.setattr(compat, "sdk_cache_root", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def terse_titles(request, monkeypatch):
     """Tests name tasks tersely ("Lint", "A"): a new task's title is checked as a rename's is
     (it says what it delivers, see deliverable_title) only in tests marked `titles`."""

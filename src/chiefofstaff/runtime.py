@@ -54,6 +54,7 @@ from .backend import (
     AgentBackend,
     CopilotBackend,
     SandboxPolicy,
+    UnavailableError,
     copilot_backend,
     copilot_home,
     copilot_orphans,
@@ -973,7 +974,10 @@ class Runtime:
                 self.status = {"state": "error", "error": str(exc)}
                 self.recover_later()
             except Exception as exc:
-                logger.exception("Copilot runtime failed to start")
+                if isinstance(exc, UnavailableError):
+                    logger.error("Copilot did not start: %s", exc)  # (Said: no traceback.)
+                else:
+                    logger.exception("Copilot runtime failed to start")
                 error = describe(exc)[:500]
                 if starting:
                     # Copilot would not start at all: a newer Chief of Staff may run it.

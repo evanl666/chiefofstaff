@@ -1239,12 +1239,12 @@ async def test_copilot_runs_without_chiefofstaff_secrets(monkeypatch):
 
 
 async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_one_it_speaks(tmp_path, monkeypatch):
-    """The owner's Copilot CLI updated itself to a protocol this SDK doesn't speak: Copilot
-    FALLBACK_CLI runs instead (as the SDK provisions its own runtime), the owner told as it
-    starts and once it runs; a CLI refused for anything else is not."""
+    """The owner's Copilot CLI updated itself to a protocol this SDK doesn't speak (nor its
+    adapter: 5): Copilot FALLBACK_CLI runs instead (as the SDK provisions its own runtime), the
+    owner told as it is set up and once it runs; a CLI refused for anything else is not."""
     made = []
     newer = (
-        "SDK protocol version mismatch: SDK supports versions 3-3, but server reports version 4."
+        "SDK protocol version mismatch: SDK supports versions 3-3, but server reports version 5."
         " Please update your SDK or server to ensure compatibility."
     )
 
@@ -1266,23 +1266,27 @@ async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_one_it_speaks(tmp_
             return []
 
     async def cli_version(command):
-        return "1.0.114"
+        return "1.0.120"
+
+    told = threading.Event()
+
+    def fallback_runtime():  # (Set up while the owner is told so.)
+        told.wait(5)
+        return "/sdk/cli/1.0.112/copilot-runtime"
 
     monkeypatch.setattr(backend_module, "CopilotClient", Client)
     monkeypatch.setattr(backend_module, "cli_version", cli_version)
-    monkeypatch.setattr(
-        backend_module, "fallback_runtime", lambda: "/sdk/cli/1.0.112/copilot-runtime"
-    )
+    monkeypatch.setattr(backend_module, "fallback_runtime", fallback_runtime)
     monkeypatch.setenv("COPILOT_CLI_PATH", "/elsewhere/copilot")
     backend = backend_module.copilot_backend("git")
     notes = []
-    backend.note = notes.append
+    backend.note = lambda text: (notes.append(text), told.set())
     await backend.start()
-    assert backend.fallback == ("1.0.114", "1.0.112") and backend.client is made[1]
+    assert backend.fallback == ("1.0.120", "1.0.112") and backend.client is made[1]
     assert "COPILOT_CLI_PATH" not in made[1].env
     assert made[0].env["COPILOT_CLI_PATH"] == "/elsewhere/copilot", "the owner's as before"
     assert notes == [
-        "Your Copilot CLI (1.0.114) is newer than Chief of Staff supports: setting up the "
+        "Your Copilot CLI (1.0.120) is newer than Chief of Staff supports: setting up the "
         "Copilot version it works with (a download of about 100 MB, the first time)…"
     ]
     harness = Harness(tmp_path / "data", Settings())
@@ -1290,12 +1294,12 @@ async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_one_it_speaks(tmp_
     try:
         runtime.backend.fallback = backend.fallback  # type: ignore[attr-defined]
         assert await runtime.version_warning() == (
-            "Your Copilot CLI (1.0.114) is newer than Chief of Staff supports; using Copilot "
+            "Your Copilot CLI (1.0.120) is newer than Chief of Staff supports; using Copilot "
             "1.0.112 for now."
         )
     finally:
         await runtime.stop()
-    Client.refusal = newer.replace("version 4", "version 2").replace("3-3", "3-4")
+    Client.refusal = newer.replace("version 5", "version 2").replace("3-3", "3-4")
     made.clear()
     with pytest.raises(RuntimeError, match="server reports version 2"):
         await backend_module.copilot_backend("git").start()
@@ -1303,16 +1307,16 @@ async def test_a_copilot_cli_newer_than_the_sdk_falls_back_to_one_it_speaks(tmp_
 
 
 NEWER = (
-    "SDK protocol version mismatch: SDK supports versions 3-3, but server reports version 4."
+    "SDK protocol version mismatch: SDK supports versions 3-3, but server reports version 5."
     " Please update your SDK or server to ensure compatibility."
 )
 FALLBACK_PATH = "/sdk/cli/1.0.112/copilot-runtime"
 
 
 def sdk_clients(monkeypatch, fake, setting_up: threading.Event, fails: bool = False):
-    """Copilot's SDK client as it behaves with the owner's CLI 1.0.114: refused for its newer
-    protocol, and started on its first use (a session opened on it) as the SDK starts a client;
-    the fallback runtime's client works (its sessions are `fake`'s). The fallback's set-up waits
+    """Copilot's SDK client as it behaves with an owner's CLI of protocol 5: refused for it, and
+    started on its first use (a session opened on it) as the SDK starts a client; the fallback
+    runtime's client works (its sessions are `fake`'s). The fallback's set-up waits
     for `setting_up` (its download), and fails when `fails`."""
     made = []
 
@@ -1359,7 +1363,7 @@ def sdk_clients(monkeypatch, fake, setting_up: threading.Event, fails: bool = Fa
             return await fake.resume_session(session_id, **options)
 
     async def cli_version(command):
-        return "1.0.114"
+        return "1.0.120"
 
     def fallback_runtime():  # (In a thread, as the SDK's download runs.)
         assert setting_up.wait(30)
@@ -1420,7 +1424,7 @@ async def test_a_cli_refused_at_an_earlier_start_is_not_started_on_a_first_use(
         made = sdk_clients(monkeypatch, fake, setting_up, fails=fails)
         backend = backend_module.copilot_backend("git")
         backend.refusals = tmp_path / f"refused-{fails}.json"
-        key = backend_module.refused_key(backend.command, "1.0.114")
+        key = backend_module.refused_key(backend.command, "1.0.120")
         backend_module.keep_refusal(backend.refusals, key, NEWER)
         starting = asyncio.ensure_future(backend.start())
         opening = asyncio.ensure_future(backend.create_session(session_id="s1", name="x"))
@@ -1496,11 +1500,12 @@ async def test_a_refused_copilot_cli_is_remembered_until_it_or_the_sdk_changes(
     """With the real SDK: the owner's Copilot CLI refused for its newer protocol is said in one
     line (no traceback), and kept in the data folder, so that the next start goes straight to
     Copilot FALLBACK_CLI (the refused start took 2.5-4 s), until that CLI (updated behind the
-    same path) or the SDK changes. Copilot's processes are those of the one that runs."""
+    same path), the SDK or the protocols spoken over it change. Copilot's processes are those of
+    the one that runs."""
     starts = tmp_path / "starts"
     monkeypatch.setenv("FAKE_COPILOT_STARTS", str(starts))
     owner = tmp_path / "bin" / "copilot"
-    fake_copilot(owner, "1.0.114", 4)
+    fake_copilot(owner, "1.0.120", 5)
     ours = fake_copilot(tmp_path / "sdk" / "copilot-runtime", "1.0.112", 3)
     monkeypatch.setattr(backend_module, "fallback_runtime", lambda: ours)
     refusals = tmp_path / "data" / backend_module.REFUSED_CLI
@@ -1521,23 +1526,30 @@ async def test_a_refused_copilot_cli_is_remembered_until_it_or_the_sdk_changes(
         return backend.fallback, ran
 
     caplog.set_level(logging.INFO)
-    assert await start() == (("1.0.114", "1.0.112"), ["1.0.114", "1.0.112"])
+    assert await start() == (("1.0.120", "1.0.112"), ["1.0.120", "1.0.112"])
     assert not [record for record in caplog.records if record.exc_info], "no traceback"
     assert [r.getMessage() for r in caplog.records if r.name == "chiefofstaff.backend"] == [
-        "Copilot CLI 1.0.114 speaks a newer protocol than this SDK (SDK supports versions 3-3, "
-        "but server reports version 4): Copilot 1.0.112 runs instead."
+        "Copilot CLI 1.0.120 speaks a newer protocol than this SDK (SDK supports versions 3-3, "
+        "but server reports version 5): Copilot 1.0.112 runs instead."
     ]
-    assert await start() == (("1.0.114", "1.0.112"), ["1.0.112"]), "the owner's not tried"
-    fake_copilot(owner, "1.0.115", 4)  # It updated itself.
-    assert await start() == (("1.0.115", "1.0.112"), ["1.0.115", "1.0.112"])
+    assert await start() == (("1.0.120", "1.0.112"), ["1.0.112"]), "the owner's not tried"
+    fake_copilot(owner, "1.0.121", 5)  # It updated itself.
+    assert await start() == (("1.0.121", "1.0.112"), ["1.0.121", "1.0.112"])
     assert (await start())[1] == ["1.0.112"]
     monkeypatch.setattr(backend_module, "sdk_version", lambda: "1.0.99")  # Another SDK.
-    assert (await start())[1] == ["1.0.115", "1.0.112"]
+    assert (await start())[1] == ["1.0.121", "1.0.112"]
     assert (await start())[1] == ["1.0.112"]
     fake_copilot(owner, "1.0.116", 3)  # One this SDK speaks: tried, and it runs.
     assert await start() == (None, ["1.0.116"])
     assert not refusals.exists()
     assert (await start())[1] == ["1.0.116"]
+    # 0.1.48 kept 1.0.114 as refused (protocol 4, before the adapter spoke it): tried again.
+    fake_copilot(owner, "1.0.114", 4)
+    kept = backend_module.refused_key(str(owner), "1.0.114")
+    del kept["speaks"]
+    backend_module.keep_refusal(refusals, kept, NEWER.replace("version 5", "version 4"))
+    assert await start() == (None, ["1.0.114"])
+    assert not refusals.exists()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shell script")

@@ -4,7 +4,8 @@ JSON-RPC on stdio. Like the npm loader, it runs a program of its own (a child th
 as it does). `copilot --version` says its version.
 
 FAKE_COPILOT_* variables shape it: VERSION, PROTOCOL (the one `connect` reports), STARTS (a file
-each start with --stdio appends a line to).
+each start with --stdio appends a line to), REQUESTS (a file each request is appended to, as a
+JSON line: method and params), REFUSE (JSON: method -> the error message it answers with).
 """
 
 import json
@@ -15,6 +16,7 @@ from pathlib import Path
 
 VERSION = os.environ.get("FAKE_COPILOT_VERSION", "1.0.112")
 PROTOCOL = int(os.environ.get("FAKE_COPILOT_PROTOCOL", "3"))
+REFUSE = json.loads(os.environ.get("FAKE_COPILOT_REFUSE") or "{}")
 
 
 def read() -> dict | None:
@@ -51,10 +53,23 @@ def main():
     program = subprocess.Popen(
         [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE
     )
+    requests = os.environ.get("FAKE_COPILOT_REQUESTS")
     while (message := read()) is not None:
         if "id" not in message:
             continue
-        if (answer := ANSWERS.get(message.get("method", ""))) is not None:
+        method, params = message.get("method", ""), message.get("params") or {}
+        if requests:
+            with Path(requests).open("a") as file:
+                file.write(json.dumps({"method": method, "params": params}) + "\n")
+        if method in REFUSE:
+            error = {"code": -32603, "message": REFUSE[method]}
+            send({"jsonrpc": "2.0", "id": message["id"], "error": error})
+        elif method in ("session.create", "session.resume"):
+            answer = {"sessionId": params.get("sessionId"), "workspacePath": None}
+            send({"jsonrpc": "2.0", "id": message["id"], "result": answer})
+        elif method in ("session.options.update", "session.detach"):
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"success": True}})
+        elif (answer := ANSWERS.get(method)) is not None:
             send({"jsonrpc": "2.0", "id": message["id"], "result": answer})
         else:
             error = {"code": -32601, "message": f"Unhandled method {message.get('method')}"}

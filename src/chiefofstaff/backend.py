@@ -10,6 +10,7 @@ all behave the way the runtime relies on.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import functools
 import importlib.metadata
 import json
@@ -20,10 +21,10 @@ import secrets
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -43,9 +44,9 @@ from copilot.generated.rpc import (
     ShellOptions,
     TasksCancelRequest,
 )
-from copilot.generated.session_events import ShutdownType
 
-from . import machine
+from . import compat, machine
+from .compat import open_enum as open_enum
 
 # The machine's processes (moved to their own module, which agentrun imports without the SDK).
 from .processes import descendants as descendants
@@ -231,6 +232,51 @@ def fallback_runtime() -> str:
     return ensure_runtime_wrapper(FALLBACK_CLI)
 
 
+# FALLBACK_CLI set up ahead (provision), in a thread of its own: at each start, before it is
+# needed, so that a Copilot CLI updating itself past this SDK never costs a 100 MB wait or a
+# failed start. Once a process, again after a failure. Off in tests (conftest), but for theirs.
+PREFETCH = True
+PROVISIONED: dict[str, concurrent.futures.Future] = {}
+PROVISIONING = threading.Lock()
+
+
+def provision() -> concurrent.futures.Future:
+    """FALLBACK_CLI's path once set up (fallback_runtime), from the one set-up running or done
+    in this process; another starts when none ran, the last one failed, or what it set up is
+    gone (a cache cleaned)."""
+    with PROVISIONING:
+        future = PROVISIONED.get(FALLBACK_CLI)
+        if future is None or (
+            future.done()
+            and (future.exception() is not None or not Path(future.result() or ".").exists())
+        ):
+            future = PROVISIONED[FALLBACK_CLI] = concurrent.futures.Future()
+            # A thread of its own, never waited for at exit (the SDK downloads into a staging
+            # folder it renames once complete): not the loop's executor, which is.
+            threading.Thread(
+                target=provide, args=(future,), name="copilot-runtime", daemon=True
+            ).start()
+    return future
+
+
+def provide(future: concurrent.futures.Future) -> None:
+    try:
+        future.set_result(fallback_runtime())
+    except BaseException as exc:  # (Said where it is awaited.)
+        future.set_exception(exc)
+
+
+def prefetch() -> None:
+    """FALLBACK_CLI set up in the background, said nowhere unless it is used."""
+    if PREFETCH:
+        provision().add_done_callback(prefetched)
+
+
+def prefetched(future: concurrent.futures.Future) -> None:
+    if (error := future.exception()) is not None:
+        logger.debug("Copilot %s could not be set up ahead: %s", FALLBACK_CLI, error)
+
+
 def newer_protocol(error: BaseException | str) -> bool:
     """Whether the SDK refused the CLI for speaking a newer protocol than it supports."""
     found = NEWER_PROTOCOL.search(str(error))
@@ -254,6 +300,38 @@ def extensions_refused(error: BaseException | str) -> bool:
     return bool(EXTENSIONS_REFUSED.search(str(error)))
 
 
+def adapted_protocol(error: BaseException | str) -> int | None:
+    """The protocol of a CLI the SDK refused that it speaks through compat.adapt, else None."""
+    found = NEWER_PROTOCOL.search(str(error))
+    return int(found.group(3)) if found and int(found.group(3)) in compat.ADAPTED else None
+
+
+def unavailable(theirs: str, error: BaseException) -> str:
+    """One line for the owner when no Copilot this SDK speaks could be set up: why, and the
+    fix."""
+    said = str(error).strip().splitlines()[0] if str(error).strip() else type(error).__name__
+    if "Checksum mismatch" in said:
+        why, fix = "its download did not match its checksum", "Restart Chief of Staff to try again."
+    elif "downloads are disabled" in said:
+        why = "downloads are turned off (COPILOT_SKIP_CLI_DOWNLOAD)"
+        fix = "Unset COPILOT_SKIP_CLI_DOWNLOAD, then restart Chief of Staff."
+    elif "Failed to download" in said or "urlopen error" in said:
+        why = "it could not be downloaded"
+        fix = "Connect to the internet, then restart Chief of Staff (a download of about 100 MB)."
+    else:
+        why, fix = said[:200], ""
+    return (
+        f"Your Copilot CLI{f' ({theirs})' if theirs else ''} is newer than Chief of Staff "
+        f"supports, and Copilot {FALLBACK_CLI}, which it works with, could not be set up: {why}."
+        + (f" {fix}" if fix else "")
+    )
+
+
+class UnavailableError(RuntimeError):
+    """No Copilot this SDK speaks could be started: said in one line (unavailable), no
+    traceback."""
+
+
 class ExpectedRefusal(logging.Filter):
     """The SDK's warning, with its traceback, when it refuses a CLI that speaks a newer protocol:
     expected (FALLBACK_CLI runs then), and said in one line instead (CopilotBackend.start)."""
@@ -266,26 +344,10 @@ class ExpectedRefusal(logging.Filter):
 logging.getLogger("copilot.client").addFilter(ExpectedRefusal())
 
 
-def open_enum(kind: type[Enum]) -> None:
-    """An SDK enum that takes a value a later Copilot sends as a member of that value (as the
-    SDK's own open enums do), rather than failing the event: a session.shutdown's "destroy",
-    which Copilot 1.0.112 sends when a session is deleted, failed with a traceback in the log
-    and the event was dropped."""
-    if "_missing_" in vars(kind):
-        return
-
-    def missing(cls: type[Enum], value: object) -> Enum | None:
-        if not isinstance(value, str):
-            return None
-        member = object.__new__(cls)
-        member._name_ = "UNKNOWN"
-        member._value_ = value
-        return cls._value2member_map_.setdefault(value, member)
-
-    kind._missing_ = classmethod(missing)  # type: ignore[method-assign, assignment]
-
-
-open_enum(ShutdownType)
+# A newer Copilot's events this SDK can't read are taken as unknown ones (compat.open_enum: a
+# session.shutdown's "destroy", which Copilot 1.0.112 sends when a session is deleted, failed with
+# a traceback in the log and the event was dropped).
+compat.tolerate_newer_events()
 
 # Kept in Chief of Staff's data folder (CopilotBackend.refusals): the Copilot CLI this SDK
 # refused for speaking a newer protocol, by its program's real path, the version it says it is
@@ -310,8 +372,10 @@ def sdk_version() -> str:
 
 def refused_key(command: str, version: str) -> dict[str, str]:
     """What a refusal is kept for: the CLI (its real path and the version it says it is, which
-    changes when it updates itself behind the same path) and this SDK."""
-    return {"cli": os.path.realpath(command), "version": version, "sdk": sdk_version()}
+    changes when it updates itself behind the same path), this SDK and the protocols spoken over
+    it (compat.SPOKEN: one refused before the adapter spoke it is tried again)."""
+    return {"cli": os.path.realpath(command), "version": version, "sdk": sdk_version(),
+            "speaks": ",".join(map(str, sorted(compat.SPOKEN)))}  # fmt: skip
 
 
 def read_refusal(file: Path) -> dict:
@@ -415,39 +479,53 @@ class CopilotBackend:
             await self.start_one()
         finally:
             self.starting.set_result(None)
+        prefetch()  # (After the start: never in its way.)
 
     async def start_one(self) -> None:
-        """The owner's CLI; or, refused for its newer protocol (now, or at an earlier start of
-        the same CLI and SDK, kept in `refusals`), Copilot FALLBACK_CLI."""
-        theirs = ""
+        """The owner's CLI, when this SDK speaks its protocol (itself, or through compat.adapt);
+        or, when it speaks a newer one (its package says so, its handshake did now, or at an
+        earlier start of the same CLI and SDK, kept in `refusals`), Copilot FALLBACK_CLI."""
+        theirs = await cli_version(self.command)
+        protocol = await asyncio.to_thread(compat.cli_protocol, self.command, theirs)
         known = await asyncio.to_thread(read_refusal, self.refusals) if self.refusals else {}
-        if known:
-            theirs = await cli_version(self.command)
-            if theirs and known["key"] == refused_key(self.command, theirs):
-                logger.info("Copilot CLI %s speaks a newer protocol than this SDK (%s, at an "
-                            "earlier start): Copilot %s runs instead.",
-                            theirs, refusal_of(known.get("refusal")), FALLBACK_CLI)  # fmt: skip
-                self.refused = self.client  # (Never started: nor on a first use.)
-                await self.start_fallback(str(known.get("refusal") or ""), theirs, tried=False)
-                return
-        self.watch_start()
+        if known and theirs and known["key"] == refused_key(self.command, theirs):
+            logger.info("Copilot CLI %s speaks a newer protocol than this SDK (%s, at an "
+                        "earlier start): Copilot %s runs instead.",
+                        theirs, refusal_of(known.get("refusal")), FALLBACK_CLI)  # fmt: skip
+            self.refused = self.client  # (Never started: nor on a first use.)
+            await self.start_fallback(str(known.get("refusal") or ""), theirs, tried=False)
+            return
+        if protocol is not None and protocol > max(compat.SPOKEN):
+            # Its package says so: not started only to be refused (2.5-4 s).
+            refusal = (f"SDK supports versions {compat.NATIVE}-{max(compat.SPOKEN)}, but "
+                       f"server reports version {protocol}")  # fmt: skip
+            logger.info("Copilot CLI %s speaks a newer protocol than this SDK (%s): Copilot %s "
+                        "runs instead.", theirs, refusal, FALLBACK_CLI)  # fmt: skip
+            await self.refuse(theirs, refusal)
+            self.refused = self.client
+            await self.start_fallback(refusal, theirs, tried=False)
+            return
+        self.watch_start(self.client)
         try:
             await self.client.start()
         except RuntimeError as exc:
             if not newer_protocol(exc):
                 raise
             self.refused = self.client
-            theirs = theirs or await cli_version(self.command)
             logger.info("Copilot CLI %s speaks a newer protocol than this SDK (%s): Copilot %s "
                         "runs instead.", theirs or self.command, refusal_of(exc),
                         FALLBACK_CLI)  # fmt: skip
-            if self.refusals and theirs:
-                key = refused_key(self.command, theirs)
-                await asyncio.to_thread(keep_refusal, self.refusals, key, str(exc))
+            await self.refuse(theirs, str(exc))
             await self.start_fallback(str(exc), theirs)
             return
         if known and self.refusals:
             self.refusals.unlink(missing_ok=True)  # (It changed, and this SDK speaks it now.)
+
+    async def refuse(self, theirs: str, refusal: str) -> None:
+        """The owner's CLI kept as refused (`refusals`), for the next start to skip."""
+        if self.refusals and theirs:
+            key = refused_key(self.command, theirs)
+            await asyncio.to_thread(keep_refusal, self.refusals, key, refusal)
 
     async def ready_client(self) -> CopilotClient:
         """The client, once start() is over: a session opened, or a message sent, while Copilot
@@ -459,10 +537,11 @@ class CopilotBackend:
             raise NotStartedError("Copilot is not running: it could not start.")
         return self.client
 
-    def watch_start(self) -> None:
-        """The CLI's processes, taken (processes) when the SDK refuses the protocol it speaks:
-        the SDK then stops the npm loader only, and Copilot's own program would run on."""
-        verify = getattr(self.client, "_verify_protocol_version", None)
+    def watch_start(self, client: CopilotClient) -> None:
+        """A client's handshake: a CLI of a protocol this SDK speaks through compat.adapt is
+        spoken to through it; one it refuses has its processes taken (processes): the SDK then
+        stops the npm loader only, and Copilot's own program would run on."""
+        verify = getattr(client, "_verify_protocol_version", None)
         if verify is None:
             return
 
@@ -475,25 +554,31 @@ class CopilotBackend:
         async def verifying() -> Any:
             try:
                 return await verify()
-            except Exception:
+            except Exception as exc:
+                if (protocol := adapted_protocol(exc)) is not None:
+                    compat.adapt(client, protocol)
+                    return None
                 # (It answered: its program runs now, the loader not stopped yet.)
                 with suppress(Exception):
                     await asyncio.to_thread(taken)
                 raise
 
-        self.client._verify_protocol_version = verifying  # type: ignore[method-assign]
+        client._verify_protocol_version = verifying  # type: ignore[method-assign]
 
     async def start_fallback(self, refused: str, theirs: str = "", tried: bool = True) -> None:
         """The owner's Copilot CLI updated itself past what this SDK speaks: Copilot
-        FALLBACK_CLI runs instead (downloaded once, into the SDK's own cache; the same sign-in,
-        settings and sessions, in ~/.copilot), until a release supports the new one. `tried`:
-        the owner's was started (and refused) first."""
+        FALLBACK_CLI runs instead (set up once, ahead, into the SDK's own cache: prefetch; the
+        same sign-in, settings and sessions, in ~/.copilot), until a release supports the new
+        one. When it can't be set up (offline, a checksum that does not match), the newest
+        Copilot already on this machine that this SDK speaks; else UnavailableError, in one
+        line. `tried`: the owner's was started (and refused) first."""
         if tried:
             with suppress(Exception):
                 await self.stop()  # (What the refused CLI left running.)
         self.started = {}
         theirs = theirs or await cli_version(self.command)
-        if self.note:
+        setting_up = provision()
+        if self.note and not setting_up.done():
             self.note(
                 f"Your Copilot CLI{f' ({theirs})' if theirs else ''} is newer than Chief of "
                 "Staff supports: setting up the Copilot version it works with (a download of "
@@ -503,22 +588,51 @@ class CopilotBackend:
         # runs, as when Chief of Staff was started from one).
         env = {key: value for key, value in (self.env or os.environ).items()
                if key != "COPILOT_CLI_PATH"}  # fmt: skip
+        failed: BaseException | None = None
         try:
-            # (Downloaded once, as the SDK finds or downloads its runtime: not on this loop.)
-            path = await asyncio.to_thread(fallback_runtime) or None
-            self.client = await asyncio.to_thread(
-                CopilotClient, connection=RuntimeConnection.for_stdio(path=path), env=env
-            )
-            await self.client.start()
-            ours = (await self.client.get_status()).version
+            paths: list[str | None] = [await asyncio.wrap_future(setting_up) or None]
         except Exception as exc:
-            raise RuntimeError(
-                f"Your Copilot CLI{f' ({theirs})' if theirs else ''} is newer than Chief of Staff "
-                f"supports ({refused}), and the Copilot version it works with could not be set "
-                f"up: {exc}"
-            ) from exc
-        self.fallback = (theirs, ours)
-        self.no_extensions = True
+            failed, paths = exc, []
+            logger.info("Copilot %s could not be set up (%s): trying those on this machine.",
+                        FALLBACK_CLI, exc)  # fmt: skip
+        if paths:
+            if (error := await self.run_first(paths, env, theirs)) is None:
+                return
+            failed = error
+        found = await asyncio.to_thread(compat.installed_runtimes)
+        others = [each.path for each in found if each.version != theirs and each.path not in paths]
+        if others and await self.run_first(others, env, theirs) is None:
+            return
+        if self.refused is not None:
+            self.client = self.refused  # (Nothing reaches a client that did not start.)
+        error = failed or RuntimeError("no Copilot runtime")
+        raise UnavailableError(unavailable(theirs, error)) from error
+
+    async def run_first(
+        self, paths: Sequence[str | None], env: dict[str, str], theirs: str
+    ) -> BaseException | None:
+        """The first of these Copilot runtimes (None: the SDK's own) that starts runs instead of
+        the owner's (`fallback`); the last one's error when none does."""
+        failed: BaseException | None = None
+        for path in paths:
+            try:
+                self.client = await asyncio.to_thread(
+                    CopilotClient, connection=RuntimeConnection.for_stdio(path=path), env=env
+                )
+                self.watch_start(self.client)
+                await self.client.start()
+                ours = (await self.client.get_status()).version
+            except Exception as exc:
+                failed = exc
+                logger.info("Copilot at %s did not start: %s", path or "the SDK's own", exc)
+                with suppress(Exception):
+                    await self.stop()
+                self.started = {}
+                continue
+            self.fallback = (theirs, ours)
+            self.no_extensions = True
+            return None
+        return failed
 
     def cli_process(self) -> subprocess.Popen | None:
         """The CLI's process, wherever this SDK keeps it: `_cli_process` (SDK 1.0), `_process`

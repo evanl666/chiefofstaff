@@ -14,6 +14,17 @@
   its timeline stays. Its chat says *Reconnecting this worker…* meanwhile; and should no fresh
   session start either, one plain line says so (no Copilot error text) with *Start a fresh worker
   with its context*, your message kept for it.
+- **A Copilot CLI that updated itself no longer stops Chief of Staff, whatever version it
+  became.** Chief of Staff now tells which protocol your Copilot CLI speaks before starting it,
+  and speaks protocol 4 (Copilot 1.0.113 and later; its SDK speaks 3) itself: your own Copilot
+  CLI runs again, rather than Copilot 1.0.112 in its place. For a CLI newer still, Copilot
+  1.0.112 runs instead as before, now set up ahead, in the background, at a start on your own CLI
+  (a download of about 100 MB, once): a CLI update never costs a wait or a failed start. Offline,
+  or when that download does not match its checksum, the newest Copilot already on your machine
+  that Chief of Staff speaks runs; with none, one line says why and what to do, with no traceback.
+  Each time Copilot connects again, it is chosen again, so a CLI that updated itself meanwhile is
+  probed afresh. Events of a newer Copilot this SDK can't read no longer fail: a session's whole
+  history failed to load for one.
 
 ## 0.1.49 (2026-11-20)
 
