@@ -15,6 +15,9 @@ updates:
       # Frozen at its last release (1.0.35, deprecated), which changes the tools' schemas: the
       # pin stays (the daily Copilot compatibility workflow watches the CLI, which moves).
       - dependency-name: github-copilot-sdk
+      # 2.x breaks our Slack client and fake MCP servers (FastMCP, httpx2); 1.x still gets fixes.
+      - dependency-name: mcp
+        update-types: ["version-update:semver-major"]
     groups:
       # Minor and patch updates together; a major update comes on its own, to review by itself.
       python:
