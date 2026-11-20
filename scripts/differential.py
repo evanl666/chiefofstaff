@@ -261,6 +261,12 @@ FIXES: list[Allow] = [
     # 0.1.48 (E98, E89): what a task's Use these settings sends (null unless its worker waits for
     # that word), and whether a failed one is out of Needs you.
     Allow("tasks' settings and aged", data=r"\.tasks\[\d+\]\.(settings|aged)$"),
+    # E123 (smooth by default): what was handled for the owner, the last week's (none here), in
+    # its own table; whether a result is a report only (accepted for the owner once read: its
+    # opened report says so, a row at rest does not).
+    Allow("Handled for you", data=r"/api/state\.handled$"),
+    Allow("the handled table", data=r"\.db\.(_schema\.)?handled$"),
+    Allow("tasks' report_only", data=r"\.tasks\[\d+\]\.report_only$"),
     # 0.1.48 (E111): follow_thread says what a PR merged or closed already brings.
     Allow(
         "follow_thread's description",

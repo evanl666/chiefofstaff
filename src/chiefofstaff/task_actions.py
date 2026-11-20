@@ -3799,10 +3799,8 @@ class TaskActions:
                 why = "a day after it finished"
             else:
                 continue
-            if task["session_id"] in helpers or self.store.get(f"keepreview:{task['id']}") == ended:
-                continue  # Chief of Staff's own; or the owner undid this one's: theirs to accept.
-            if not self.informational(task):
-                continue
+            if task["session_id"] in helpers or not self.informational(task):
+                continue  # (Chief of Staff's own helpers settle theirs.)
             self.accept(task["id"], as_is=False)  # (Not the owner's word: nothing learned.)
             self.tasks.update(task["id"], ended_at=ended)  # Finished when it finished, not now.
             self.publish(self.tasks.get(task["id"]))
@@ -3850,8 +3848,8 @@ class TaskActions:
         """A result that is a report only (E123): its checkouts read, it changed no code there
         (no files, uncommitted changes or commits), opened or updated no PR, nothing it checked
         or claimed fails (no flag, criteria not failed), no one asked to see it, no card of its
-        worker's waits (a reply or review it drafted is settled there), and its worker is not at
-        it again. `found`: its receipts, read already."""
+        worker's waits (a reply or review it drafted is settled there), its worker is not at it
+        again, and the owner did not undo its acceptance. `found`: its receipts, read already."""
         if (
             task["status"] != "review"
             or self.store.get(f"reviewreq:{task['id']}")
@@ -3859,6 +3857,10 @@ class TaskActions:
             or task["id"] in self.receipts_due
         ):
             return False
+        if (undone := self.store.get(f"keepreview:{task['id']}")) and undone == self.finished_at(
+            task
+        ):
+            return False  # Theirs to accept, this result.
         if not self.store.value(
             "SELECT coalesce((SELECT evidence FROM runs WHERE task_id=? "
             "ORDER BY started_at DESC LIMIT 1), '')",

@@ -4819,6 +4819,8 @@ async def approvals_seeded(runtime) -> dict:
     voice beside it; handled for the owner: a report accepted once read, a lesson kept."""
     store = runtime.store
     router = store.get("router_id")
+    # Room for its workers: each starts at once (earlier rounds' are many).
+    store.save_settings(store.settings().model_copy(update={"max_workers": 90}))
     for draft in store.drafts():  # Earlier rounds': this one's cards alone.
         store.update_draft(draft["id"], status="expired", outcome="Left by an earlier round.")
 
@@ -4958,6 +4960,25 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
     assert store.draft(merge["id"])["status"] == "pending", "a merge: never with others"
     log("Approve all safe: the three safe ones; the merge, the sign-in, the risky lesson stay")
 
+    # A report only, opened: it says it is accepted for the owner once read.
+    said = await call_tool(runtime, "spawn_worker", store.get("router_id"),
+                           title="QA8 summarize the logs", instructions="Summarize the logs",
+                           why_new="test")  # fmt: skip
+    summarizer = json.loads(said.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    await call_tool(runtime, "report", summarizer, status="done", summary="Three timeouts.")
+    await settle(runtime)
+    summary = runtime.tasks.current(summarizer)
+    for _ in range(100):  # Its checkouts read (in the background).
+        if runtime.task_actions.informational(runtime.tasks.get(summary["id"])):
+            break
+        await asyncio.sleep(0.1)
+
+    row = page.locator("#needs .card.task", has_text="QA8 summarize the logs")
+    await row.locator(":scope > .head .title").click()
+    await expect(row.locator(".report .settles")).to_have_text(
+        "A report with no code or PR: accepted for you a few minutes after you've read it."
+    )
     handled = page.locator("#needs details.handled")
     await handled.locator("summary").click()
     line = handled.locator("li", has_text="QA8 compare queues")
@@ -4966,7 +4987,12 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
     await expect(line).to_contain_text("(undone)", timeout=10000)
     await expect(line.get_by_role("button", name="Undo")).to_have_count(0)
     assert runtime.tasks.get(report["id"])["status"] == "review"
-    await expect(page.locator("#needs .card.task", has_text="QA8 compare queues")).to_be_visible()
+    back = page.locator("#needs .card.task", has_text="QA8 compare queues")
+    await expect(back).to_be_visible()
+    # Undone: its opened report no longer says it is accepted for the owner.
+    await back.locator(":scope > .head .title").click()
+    await expect(back.locator(".report")).to_have_count(1)
+    await expect(back.locator(".report .settles")).to_have_count(0)
     log("Handled for you: one quiet line; Undo puts a result back to accept")
     await context.close()
     for draft in store.drafts():

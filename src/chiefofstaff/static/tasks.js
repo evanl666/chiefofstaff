@@ -1126,8 +1126,7 @@ function rowWhy(task, worker, phase) {
     // status says it waits for Accept), and why it needs a look when something does: its PR's
     // changes requested or failing CI, news on it since.
     const words = phase.marker === "question" ? "" : phase.why;
-    // A report only says it is accepted once read (E123): nothing to look at, no warning.
-    const flagged = phase.marker === "review" && Boolean(phase.why) && !phase.why.startsWith("News: ") && !task.report_only;
+    const flagged = phase.marker === "review" && Boolean(phase.why) && !phase.why.startsWith("News: ");
     return { text: words, help: "", warn: flagged || ["failed", "blocked", "stalled", "check-failed", ...PR_TO_FIX].includes(phase.marker) };
   }
   return { text: phase.marker === "background" ? "" : phase.why, help: "" };
@@ -1308,7 +1307,9 @@ function report(task) {
         }),
       )
     : null;
-  return el("div", { class: "report" }, text ? el("div", { class: "body markdown", html: markdown(text) }) : null, criteria, more.length ? el("div", { class: "receipts" }, ...more) : null, earlierBlock(task));
+  // A report only (no code, no PR, nothing failing): read, it is accepted for the owner (E123).
+  const settles = task.report_only ? el("div", { class: "settles", text: "A report with no code or PR: accepted for you a few minutes after you've read it." }) : null;
+  return el("div", { class: "report" }, text ? el("div", { class: "body markdown", html: markdown(text) }) : null, criteria, more.length ? el("div", { class: "receipts" }, ...more) : null, settles, earlierBlock(task));
 }
 // What it reported before its result (a newer report on the same task took their place), as
 // the server keeps them (`earlier_results`): newest first, each when it was said and what.
