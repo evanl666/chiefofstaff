@@ -1840,7 +1840,9 @@ async def test_an_mcp_tools_error_result_is_a_failed_call_naming_its_server_and_
         "tools": ["*"],
     }
     session, turn = await open_session(backend, tmp_path, mcp_servers={"acme": server})
-    tool = "locked_search" if not real_codex(backend) and agent_like(backend) else "search_acme"
+    # (The stand-in Codex makes up locked_search; the others call the server's own tool.)
+    made_up = isinstance(backend, CodexBackend) and not real_codex(backend)
+    tool = "locked_search" if made_up else "search_acme"
     await session.send(
         f"Call the MCP tool {tool} of acme with the query 'notes', once. Then reply with just: ok"
     )

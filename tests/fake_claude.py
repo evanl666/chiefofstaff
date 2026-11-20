@@ -835,8 +835,11 @@ class Fake:
             call(found.group(1), {})
         if found := re.search(r"Fill the form of (\w+)", text):
             call(f"mcp__{found.group(1)}__form", {})
-        if found := re.search(r"Call the MCP tool (\w+) of (\w+)", text):
-            call(f"mcp__{found.group(2)}__{found.group(1)}", {})
+        if found := re.search(
+            r"Call the MCP tool (\w+) of (\w+)(?: with the query '([^']*)')?", text
+        ):
+            query = {"query": found.group(3)} if found.group(3) is not None else {}
+            call(f"mcp__{found.group(2)}__{found.group(1)}", query)
         if re.search(r"Ask the owner which color", text):
             call(
                 "AskUserQuestion",
@@ -1036,8 +1039,8 @@ class Fake:
             return self.tool_result(call, f"Form: {json.dumps(answered)}", False, answered)
         if name.startswith("mcp__"):
             server, _, tool = name[5:].partition("__")
-            text = await self.stdio_call(server, tool, data)
-            return self.tool_result(call, text, False, {"ok": True})
+            text, failed = await self.stdio_call(server, tool, data)
+            return self.tool_result(call, text, failed, {"ok": not failed})
         if name == "AskUserQuestion":
             answers = data.get("answers") or {}
             said = ", ".join(f'"{q}"="{a}"' for q, a in answers.items())
@@ -1294,28 +1297,34 @@ class Fake:
         structured = {"status": "async_launched", "agentId": agent_id}
         return self.tool_result(call, f"Async agent launched: {agent_id}", False, structured)
 
-    async def stdio_call(self, server: str, tool: str, data: dict) -> str:
-        """A tool of a stdio MCP server it was given (started on first use)."""
+    async def stdio_call(self, server: str, tool: str, data: dict) -> tuple[str, bool]:
+        """A tool of a stdio MCP server it was given (started on first use): its text, and
+        whether it is an error (isError: Claude's tool_result says so)."""
         config = self.servers.get(server) or {}
         if not config.get("command"):
-            return "ok"
+            return "ok", False
         if server not in self.stdio:
             self.stdio[server] = await asyncio.create_subprocess_exec(
                 config["command"],
                 *(config.get("args") or []),
                 cwd=self.cwd,
+                env={**os.environ, **{k: str(v) for k, v in (config.get("env") or {}).items()}},
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
             )
             with contextlib.suppress(OSError, ValueError):
                 await self.stdio_request(server, "initialize", {"protocolVersion": "2025-06-18"})
+                # (As a client says it is ready: a server may answer nothing before it.)
+                ready = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+                self.stdio[server].stdin.write((json.dumps(ready) + "\n").encode())
         try:
             found = await self.stdio_request(
                 server, "tools/call", {"name": tool, "arguments": data}
             )
         except (OSError, ValueError):
-            return "ok"  # Not a server that answers (a test's `true`).
-        return "\n".join(str(part.get("text") or "") for part in found.get("content") or [])
+            return "ok", False  # Not a server that answers (a test's `true`).
+        text = "\n".join(str(part.get("text") or "") for part in found.get("content") or [])
+        return text, bool(found.get("isError"))
 
     async def stdio_request(self, server: str, method: str, params: dict) -> dict:
         process = self.stdio[server]

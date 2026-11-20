@@ -2214,11 +2214,15 @@ class ClaudeWorker:
         self.calls[call_id] = (name, parent)
         if not parent:
             self.running_calls.add(call_id)
+        server, _, tool = name[5:].partition("__") if name.startswith("mcp__") else ("", "", "")
         self.emit(
             "tool.execution_start",
             tool_call_id=call_id,
             tool_name=shown,
             arguments=arguments,
+            # An MCP server's tool, named as Copilot's start names it (E116: Events reads which
+            # server and tool a failed call was, never its result's text).
+            **({"mcp_server_name": server, "mcp_tool_name": tool} if server else {}),
             **({"parent_tool_call_id": parent} if parent else {}),
         )
 

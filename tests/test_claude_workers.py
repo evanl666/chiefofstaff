@@ -1272,6 +1272,38 @@ async def test_a_sandboxed_claude_worker_given_the_owners_checkout_to_read_canno
         await runtime.stop()
 
 
+async def test_a_claude_workers_mcp_tool_that_needs_an_account_connected_has_one_card(
+    tmp_path, claude_on_path
+):
+    """E116 on Claude: its MCP call's server and tool are named as Copilot's are, so a failure
+    saying the account must be connected is the same shared card."""
+    acme = Path(__file__).parent.parent / "scripts" / "acme_auth_result_mcp.py"
+    server = {
+        "type": "local",
+        "command": sys.executable,
+        "args": [str(acme)],
+        "env": {
+            "ACME_AUTH_MARKER": str(tmp_path / "never"),
+            "ACME_AUTH_URL": "https://auth.acme.test/connect",
+        },
+        "tools": ["*"],
+    }
+    harness, runtime = await started(tmp_path, Settings(mcp_servers={"acme": server}))
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        await spawn_on(
+            harness, runtime, title="Search", agent="claude",
+            instructions="Call the MCP tool search_acme of acme with the query 'notes'. Report "
+            "done: x",
+        )  # fmt: skip
+        await until(lambda: [d for d in harness.store.drafts() if d["kind"] == "connection"], 30)
+        (card,) = [d for d in harness.store.drafts() if d["kind"] == "connection"]
+        assert card["text"] == "acme needs you to connect Acme Search"
+        assert card["target"]["url"] == "https://auth.acme.test/connect"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_sandboxed_claude_workers_commands_use_its_own_caches(
     tmp_path, claude_on_path, monkeypatch
 ):
