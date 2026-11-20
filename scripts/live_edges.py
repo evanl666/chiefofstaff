@@ -47,19 +47,46 @@ async def say(app: App, text: str) -> int:
     return mark
 
 
-async def assigned(app: App, mark: int) -> str:
+async def assigned(app: App, mark: int) -> tuple[str, str]:
+    """The worker the Router gave it to, and the task its line names."""
     router = (await app.get("/api/state"))["router_id"]
 
     async def found():
         messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
         return next(
-            (m["meta"]["session_id"] for m in messages
+            ((m["meta"]["session_id"], m["meta"].get("task_id") or "") for m in messages
              if m["kind"] == "notice"
              and m["text"].startswith(("Started", "New task", "Continued in"))),
             None,
         )  # fmt: skip
 
     return await wait_for("the Router assigns it", found, 300)
+
+
+async def tasks_now(app: App) -> dict[str, str]:
+    """Every task, and when it last changed: taken before a request."""
+    return {t["id"]: t["updated_at"] for t in (await app.get("/api/state"))["tasks"]}
+
+
+async def request_task(app: App, worker: str, task_id: str, before: dict) -> dict | None:
+    """What a request became: the task the Router's line names, or a task of the worker new
+    since `before`; never an older task of a worker it had (r72: E's probes went to D's worker
+    as a new task, and E took D's sleep task for theirs)."""
+    tasks = [
+        t for t in (await app.get("/api/state"))["tasks"]
+        if t["session_id"] == worker and (t["id"] == task_id or t["id"] not in before)
+    ]  # fmt: skip
+    return tasks[-1] if tasks else None
+
+
+async def finished(
+    app: App, worker: str, task_id: str, before: dict, statuses=frozenset({"review", "done"})
+) -> dict | None:
+    """That task once in one of `statuses`, changed since `before`."""
+    task = await request_task(app, worker, task_id, before)
+    if task and task["status"] in statuses and task["updated_at"] != before.get(task["id"]):
+        return task
+    return None
 
 
 async def new_draft(app: App, before: set[str], kind: str = "github") -> dict:
@@ -137,7 +164,7 @@ async def scenario_b_pr_moves(app: App):
     before = {d["id"] for d in (await app.get("/api/state"))["drafts"]}
     name = COMPANY_REPO.split("/")[1]
     mark = await say(app, f"Review {name} PR #1 again and draft a short review.")
-    worker = await assigned(app, mark)
+    worker, _ = await assigned(app, mark)
     await new_draft(app, before)
     draft = await settled_draft(app, worker, before)
     push_unrelated_commit()
@@ -162,14 +189,14 @@ async def scenario_b_pr_moves(app: App):
 
 
 async def scenario_c_no_access(app: App):
+    before = await tasks_now(app)
     mark = await say(app, "Review evanl666/this-repo-does-not-exist-7f3a PR #3 and draft a review.")
-    worker = await assigned(app, mark)
+    worker, task_id = await assigned(app, mark)
 
     async def settled():
-        tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker]
         # A task it cannot do is failed, under Needs you with why (or it asks, or reports).
         settled = {"waiting", "review", "done", "failed"}
-        return next((t for t in tasks if t["status"] in settled), None)
+        return await finished(app, worker, task_id, before, settled)
 
     task = await wait_for("the worker says it cannot", settled, 600, app)
     text = (task.get("progress") or "") + (task.get("result") or "")
@@ -182,12 +209,13 @@ async def scenario_c_no_access(app: App):
 
 
 async def scenario_d_stop_and_go_on(app: App, project: Path):
+    before = await tasks_now(app)
     mark = await say(
         app,
         f"In {project}: run `sleep 45 && echo slept > slept.txt` in the shell (do not shorten "
         "it), then tell me what slept.txt contains.",
     )
-    worker = await assigned(app, mark)
+    worker, task_id = await assigned(app, mark)
 
     async def sleeping():
         row = await app.get(f"/api/sessions/{worker}")
@@ -199,16 +227,15 @@ async def scenario_d_stop_and_go_on(app: App, project: Path):
     messages = await app.get(f"/api/sessions/{worker}/messages")
     assert not [m for m in messages if m["kind"] == "report"], "nothing filed"
     assert not [m for m in messages if "report-missing" in json.dumps(m["meta"])], "not asked"
-    task = next(t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker)
-    assert task["status"] == "waiting", task["status"]
+    task = await request_task(app, worker, task_id, before)
+    assert task and task["status"] == "waiting", task
     log("D: stopped mid-command: waiting, nothing filed, nothing asked")
     await app.post(f"/api/sessions/{worker}/messages", {"text": "Go on."})
 
-    async def finished():
-        tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker]
-        return next((t for t in tasks if t["status"] in {"review", "done"}), None)
+    async def done():
+        return await finished(app, worker, task_id, before)
 
-    task = await wait_for("it finishes after go on", finished, 600, app)
+    task = await wait_for("it finishes after go on", done, 600, app)
     assert "slept" in (task.get("result") or ""), task.get("result")
     log("D: after 'go on' it finished and reported what the file contains")
 
@@ -218,13 +245,12 @@ async def scenario_e_restart_keeps_mcp(app: App, project: Path) -> App:
         "Call the probe_ping tool of every MCP server whose name starts with 'probe' and report "
         "each server's answer."
     )
+    before = await tasks_now(app)
     mark = await say(app, f"In {project}, in an isolated worktree: {ask}")
-    worker = await assigned(app, mark)
+    worker, task_id = await assigned(app, mark)
 
-    async def answered(after: str = ""):
-        tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker]
-        done = [t for t in tasks if t["status"] in {"review", "done"} and t["updated_at"] > after]
-        return done[-1] if done else None
+    async def answered():
+        return await finished(app, worker, task_id, before)
 
     first = await wait_for("the probes answer", answered, 600, app)
     for server in ("probe-user", "probe-plugin", "probe-repo"):
@@ -232,13 +258,14 @@ async def scenario_e_restart_keeps_mcp(app: App, project: Path) -> App:
     await app.stop()
     await app.start()
     log("E: Chief of Staff restarted")
+    before = await tasks_now(app)
     await app.post(f"/api/sessions/{worker}/messages", {"text": f"Again: {ask}"})
-    later = await wait_for(
-        "the probes answer after the restart",
-        lambda: answered(first["updated_at"]),
-        600,
-        app,
-    )
+
+    async def again():
+        # The probes' task again, or a new one: not another task of that worker.
+        return await finished(app, worker, first["id"], before)
+
+    later = await wait_for("the probes answer after the restart", again, 600, app)
     for server in ("probe-user", "probe-plugin", "probe-repo"):
         assert f"pong from {server}" in later["result"], later["result"]
     log("E: after a restart the worker still has the owner's, the plugin's and the repo's MCP")

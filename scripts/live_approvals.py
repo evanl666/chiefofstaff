@@ -54,29 +54,30 @@ async def said_to_router(app: App, text: str) -> tuple[str, int]:
     return router, mark
 
 
-async def started_worker(app: App, router: str, mark: int) -> str:
-    """The worker the Router gave the task to: one it started, or one it had, as a new task
-    (r70: A3's went to A2's worker, in the same project, rightly)."""
+async def started_worker(app: App, router: str, mark: int) -> tuple[str, str]:
+    """The worker the Router gave the task to, and the task its line names: a worker it started,
+    or one it had, as a new task (r70: A3's went to A2's worker, in the same project, rightly).
+    """
 
     async def started():
         messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
-        found = [m["meta"]["session_id"] for m in messages
+        found = [(m["meta"]["session_id"], m["meta"]["task_id"]) for m in messages
                  if m["kind"] == "notice" and m["meta"].get("session_id")
+                 and m["meta"].get("task_id")
                  and m["text"].startswith(("Started", "New task"))]  # fmt: skip
         return found[0] if found else None
 
     return await wait_for("the Router gives a worker the task", started, 300, app)
 
 
-async def result_of(app: App, worker: str) -> dict:
+async def result_of(app: App, task_id: str) -> dict:
+    """Its result, its checkouts read: that task's, not an older one of a worker the Router had
+    (r72: live_edges E took another task's)."""
+
     async def finished():
-        tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker]
-        done = [
-            t
-            for t in tasks
-            if t["status"] == "review" and not (t["receipts"] or {}).get("checking")
-        ]
-        return done[0] if done else None
+        found = await task(app, task_id)
+        checking = (found["receipts"] or {}).get("checking")
+        return found if found["status"] == "review" and not checking else None
 
     return await wait_for("its result, its checkouts read", finished, 600, app)
 
@@ -96,8 +97,8 @@ async def scenario_report(app: App):
         "Start a worker, with no project, for this question: in two sentences, what does the "
         "HTTP status 418 mean? It answers in its report and changes no files.",
     )
-    worker = await started_worker(app, router, mark)
-    result = await result_of(app, worker)
+    _, task_id = await started_worker(app, router, mark)
+    result = await result_of(app, task_id)
     assert result["report_only"], f"a report only: {result['receipts']}"
     assert (await task(app, result["id"]))["status"] == "review", "unread: it waits"
     await app.post(f"/api/tasks/{result['id']}/read", {})
@@ -123,8 +124,8 @@ async def scenario_code(app: App, project: Path):
         f"In the project {project} (an isolated worktree), add a file hello.txt with the line "
         "`hi` and commit it with the message 'Add hello'.",
     )
-    worker = await started_worker(app, router, mark)
-    result = await result_of(app, worker)
+    _, task_id = await started_worker(app, router, mark)
+    result = await result_of(app, task_id)
     assert not result["report_only"], result["receipts"]
     assert ((result["receipts"] or {}).get("changed") or {}).get("commits"), result["receipts"]
     await app.post(f"/api/tasks/{result['id']}/read", {})
@@ -153,7 +154,7 @@ async def scenario_folder(app: App, project: Path):
     assert entry["undo"] == "Change" and project.name in entry["text"], entry
     drafts = (await app.get("/api/state"))["drafts"]
     assert not [d for d in drafts if d["kind"] == "workspace"], "no card"
-    worker = await started_worker(app, router, mark)
+    worker, _ = await started_worker(app, router, mark)
     row = await app.get(f"/api/sessions/{worker}")
     folders = [row["cwd"], *(c["path"] for c in row.get("checkouts") or [])]
     assert row.get("project") == str(project) or any(
