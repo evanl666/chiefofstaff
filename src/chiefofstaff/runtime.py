@@ -5368,10 +5368,10 @@ class Runtime:
     async def settle_held_chat(self, row: dict, closing: bool) -> list[str]:
         """What the owner wrote a worker held for its folder's settings, as the hold ends some
         other way than its going on with all of it (E124): each message still waiting stays
-        unless the task it names is over (cancelled, failed, replaced) or another's, or the
-        worker is `closing`; then it goes to the task that replaced the one it names, when that
-        is another worker's and open (replacedby proves it); else it is dropped, never
-        delivered later. The lines Home says of what moved or was dropped, said there too."""
+        unless the task it names is over (cancelled, failed, replaced, set aside) or another's,
+        or the worker is `closing`; then it goes to the task that replaced the one it names,
+        when that is another worker's and open (replacedby proves it); else it is dropped,
+        never delivered later. The lines Home says of what moved or was dropped, said there too."""
         said = []
         for message in self.unsent_owner_chat(row["id"]):
             named = self.tasks.find(message["meta"].get("task_id") or "")
@@ -5381,6 +5381,7 @@ class Runtime:
                     named["session_id"] == row["id"]
                     and named["status"] not in {"cancelled", "failed"}
                     and not self.store.get(f"replacedby:{named['id']}")
+                    and not self.store.get(f"setaside:{named['id']}")
                 )
             ):
                 continue  # (Still its: a follow-up on its result reopens that task.)
@@ -5440,18 +5441,21 @@ class Runtime:
             steer=True,
         )
 
-    async def release_orphaned_settings_worker(self, session_id: str):
+    async def release_orphaned_settings_worker(self, session_id: str, ended: str = ""):
         """A worker held for its folder's settings with no open task left (cancelled, replaced,
-        moved): it closes, and what the owner wrote it goes where its task went or is dropped
-        (settle_held_chat), never delivered later."""
+        moved, its result set aside: `ended`, not one the owner accepted): it closes, and what
+        the owner wrote it goes where its task went or is dropped (settle_held_chat), never
+        delivered later."""
         if session_id in self.settings_orphans_closing:
             return
         self.settings_orphans_closing.add(session_id)
         try:
             await asyncio.sleep(0)  # (Whatever ended its task finishes first.)
             row = self.store.find_session(session_id)
+            task = self.tasks.find(ended) if ended else None
             if (
-                session_id not in self.settings_held
+                (task and task["status"] == "done" and not self.store.get(f"setaside:{ended}"))
+                or session_id not in self.settings_held
                 or not row
                 or row["closed_at"]
                 or any(task["status"] in OPEN for task in self.tasks.for_session(session_id))
@@ -6090,9 +6094,11 @@ class Runtime:
             and (was not in ENDED or (task["status"] != was and task["status"] != "done"))
         ):
             self.decisions.drop_task(task)
-            if task["status"] == "cancelled" and task["session_id"] in self.settings_held:
-                # (Cancelled, replaced, moved: E124.)
-                self.background(self.release_orphaned_settings_worker(task["session_id"]))
+            if task["status"] in {"cancelled", "done"} and task["session_id"] in self.settings_held:
+                # (Cancelled, replaced, moved, set aside: E124.)
+                self.background(
+                    self.release_orphaned_settings_worker(task["session_id"], ended=task["id"])
+                )
         if task["status"] != "waiting" and self.waits_for_nothing(task["session_id"]):
             # Its question settled some other way (the draft it asked about sent, say): its
             # worker no longer waits for the owner (bug bash 9: its box kept "waits for you").
