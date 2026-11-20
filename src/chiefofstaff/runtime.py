@@ -225,6 +225,9 @@ USE_THE_BUTTON = "Use the button so the approval is tied to the settings shown."
 CHANGED_SINCE = "They changed after you wrote that: look at them again, then use the button."
 # How long "Undo" on the owner's word on a folder's settings stays offered.
 SETTINGS_UNDO_SECONDS = 24 * 3600
+# How long a worker in a worktree Chief of Staff made waits for that word before its task goes
+# on in a new worker instead (Runtime.move_long_held).
+SETTINGS_MOVE_SECONDS = 15 * 60
 
 PROMPTS = {
     ROUTER: prompts.ROUTER,
@@ -4459,9 +4462,11 @@ class Runtime:
         to use them): one that waited for that goes on."""
         if self.store.get(f"settingssaid:{session_id}"):
             self.store.delete(f"settingssaid:{session_id}")
+            self.store.delete(f"settingsheldat:{session_id}")
         self.settings_reasons.pop(session_id, None)
         if session_id in self.settings_held:
             self.settings_held.discard(session_id)
+            self.store.delete(f"settingsheldat:{session_id}")
             self.settings_shown(session_id)
             self.settle_settings_messages(session_id, "released", "Nothing holds it now.")
             row = self.store.find_session(session_id)
@@ -4561,6 +4566,8 @@ class Runtime:
         to use them (or they are as they were). One at work is stopped (their word goes on with
         it); one that is not is let go of, and what it was sent and never saw waits for it."""
         self.settings_held.add(session_id)
+        if not self.store.get(f"settingsheldat:{session_id}"):
+            self.store.set(f"settingsheldat:{session_id}", str(time.time()))
         row = self.store.session(session_id)
         if not self.states.is_live(session_id):
             if row["status"] == "working":
@@ -5439,6 +5446,14 @@ class Runtime:
         await self.release_orphaned_settings_worker(row["id"])
         return new
 
+    def held_task(self, row: dict) -> dict | None:
+        """The open task a worker held for its folder's settings is on: the one the hold
+        stopped, else the one it was given last, else any open one."""
+        open_ = [task for task in self.tasks.for_session(row["id"]) if task["status"] in OPEN]
+        stopped = [t for t in open_ if self.store.get(f"stopped:{t['id']}") == SETTINGS_STOP]
+        current = [t for t in open_ if t["id"] == row["task_id"]]
+        return next(iter(stopped or current or open_), None)
+
     async def move_held_task(self, row: dict, task: dict, why: str) -> dict:
         """A task of a worker held for its folder's settings, done instead by a new worker in a
         fresh checkout of the same projects (a worktree from their base: nothing of the held
@@ -5482,6 +5497,63 @@ class Runtime:
             ),
             self.router_id(),
         )
+
+    def in_made_worktree(self, row: dict) -> bool:
+        """Whether a worker's folder is a worktree Chief of Staff made for it from a project
+        (never the owner's own checkout, nor a folder they named), as all its checkouts are."""
+        checkouts = self.workspaces.checkouts(row)
+        place = self.settings_place(row)[2]
+        return bool(
+            checkouts
+            and place in checkouts
+            and all(
+                c.get("worktree") and c.get("project") and not c.get("shared") for c in checkouts
+            )
+        )
+
+    async def move_long_held(self, moment: float | None = None):
+        """Nothing waits hours for the owner's word on a folder's settings: a worker held for
+        them SETTINGS_MOVE_SECONDS, in a worktree Chief of Staff made (in_made_worktree), has
+        its task (or what the owner wrote it about finished work) done by a new worker in a
+        fresh one instead (move_held_task, move_held_chat); one line on Home says so. In the
+        owner's own checkout it waits for their word."""
+        moment = time.time() if moment is None else moment
+        for session_id in list(self.settings_held):
+            since = float(self.store.get(f"settingsheldat:{session_id}") or moment)
+            row = self.store.find_session(session_id)
+            if (
+                moment - since < SETTINGS_MOVE_SECONDS
+                or not row
+                or row["closed_at"]
+                or not self.settings_guarded(row)
+                or not self.in_made_worktree(row)
+            ):
+                continue
+            task, chat = self.held_task(row), self.unsent_owner_chat(session_id)
+            if not task and not chat:
+                continue  # (Nothing waits on it.)
+            self.store.set(f"settingsheldat:{session_id}", str(moment))  # (Once a while.)
+            why = "the earlier one waited for its folder's settings"
+            try:
+                if task:
+                    new = await self.move_held_task(row, task, why)
+                else:
+                    new = await self.move_held_chat(row, chat, why)
+            except Exception:
+                logger.warning(
+                    "Could not move %s's task to a new worker.", session_id, exc_info=True
+                )
+                continue
+            with suppress(RuntimeError, LookupError):
+                there = self.display_title(self.store.session(new["session_id"]))
+                self.add_message(
+                    self.router_id(),
+                    "notice",
+                    f"“{self.display_title(row)}” waited {SETTINGS_MOVE_SECONDS // 60} minutes for "
+                    f"its folder's settings: its task goes on in a new worker, “{there}”, in a "
+                    "fresh checkout.",
+                    {"session_id": new["session_id"]},
+                )
 
     def unsent_owner_chat(self, session_id: str) -> list[dict]:
         """What the owner wrote a worker that has not reached it (nor been dropped)."""
@@ -5587,7 +5659,8 @@ class Runtime:
             await self.settle_held_chat(row, closing=True)
             self.settings_held.discard(session_id)
             self.settings_reasons.pop(session_id, None)
-            self.store.delete(f"settingssaid:{session_id}")
+            for key in (f"settingssaid:{session_id}", f"settingsheldat:{session_id}"):
+                self.store.delete(key)
             await self.workers.close(session_id)
         finally:
             self.settings_orphans_closing.discard(session_id)
@@ -7226,6 +7299,7 @@ class Runtime:
                 self.task_actions.remind_failed,
                 # Queued work starts once memory frees up, not only when a turn ends.
                 self.workers.pump,
+                self.move_long_held,
                 self.digest_once,
                 self.asks.expire_questions,
                 self.focus.check,
