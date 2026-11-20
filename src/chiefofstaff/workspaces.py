@@ -467,6 +467,95 @@ async def clone_git(
                              limit=limit, env=env, every=every, filtered=filtered)  # fmt: skip
 
 
+def blob_id(data: bytes, long: bool = False) -> str:
+    """The id git gives a file's bytes (SHA-256 in a repository that uses it: `long`)."""
+    found = hashlib.sha256() if long else hashlib.sha1(usedforsecurity=False)
+    found.update(b"blob %d\0" % len(data) + data)
+    return found.hexdigest()
+
+
+class Committed:
+    """The files of a commit fixed before any worker had a checkout (its base_ref), as Chief of
+    Staff reads them in that checkout's repository: each object on the way hashed again here,
+    from the commit's own id down, so a .git a worker can write (an object replaced in place, a
+    pack planted, refs/replace) cannot make it say other bytes; nothing fetched. ValueError for
+    what can't be read so."""
+
+    def __init__(self, checkout: dict, path: str, commit: str):
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+            raise ValueError("Not a commit's id.")
+        self.checkout, self.path, self.commit = checkout, path, commit
+        self.long = len(commit) == 64
+        self.trees: dict[str, dict[str, tuple[str, str]]] = {}
+        self.top = ""
+
+    async def git(self, *arguments: str) -> bytes:
+        said = await checkout_git(
+            self.checkout, self.path, *arguments, env={"GIT_NO_LAZY_FETCH": "1"}, every=True
+        )
+        return said.encode()
+
+    def hashed(self, kind: bytes, data: bytes) -> str:
+        found = hashlib.sha256() if self.long else hashlib.sha1(usedforsecurity=False)
+        found.update(kind + b" %d\0" % len(data) + data)
+        return found.hexdigest()
+
+    async def root(self) -> str:
+        if not self.top:
+            data = await self.git("cat-file", "commit", self.commit)
+            if self.hashed(b"commit", data) != self.commit:
+                raise ValueError("The commit read is not that commit.")
+            first = data.split(b"\n", 1)[0].decode()
+            if not first.startswith("tree "):
+                raise ValueError("No tree in that commit.")
+            self.top = first.removeprefix("tree ")
+        return self.top
+
+    async def tree(self, tree: str) -> dict[str, tuple[str, str]]:
+        """{name: (mode, id)} of a tree, rebuilt as git stores it and hashed against its id."""
+        if tree in self.trees:
+            return self.trees[tree]
+        listed = await self.git("ls-tree", "-z", "--full-tree", tree)
+        raw, found = b"", {}
+        for item in listed.split(b"\0")[:-1]:
+            head, _, name = item.partition(b"\t")
+            mode, kind, oid = head.split(b" ")
+            stored = mode.lstrip(b"0") if kind == b"tree" else mode
+            raw += stored + b" " + name + b"\0" + bytes.fromhex(oid.decode())
+            found[name.decode()] = (mode.decode(), oid.decode())
+        if self.hashed(b"tree", raw) != tree:
+            raise ValueError("A tree read is not that tree.")
+        self.trees[tree] = found
+        return found
+
+    async def find(self, path: str) -> tuple[str, str] | None:
+        """(mode, id) of what is at a path from the top; None for nothing there."""
+        mode, oid = "040000", await self.root()
+        for part in [part for part in path.split("/") if part]:
+            if mode != "040000":
+                return None
+            entry = (await self.tree(oid)).get(part)
+            if entry is None:
+                return None
+            mode, oid = entry
+        return mode, oid
+
+    async def files(self, path: str) -> dict[str, tuple[str, str]]:
+        """Every entry but a folder at or under a path, by its path from the top."""
+        found = await self.find(path)
+        if found is None:
+            return {}
+        if found[0] != "040000":
+            return {path: found}
+        out: dict[str, tuple[str, str]] = {}
+        for name, (mode, oid) in (await self.tree(found[1])).items():
+            if mode == "040000":
+                out |= await self.files(f"{path}/{name}")
+            else:
+                out[f"{path}/{name}"] = (mode, oid)
+        return out
+
+
 class UnreadableError(ValueError):
     """Chief of Staff's own git folder for a repository a worker can write could not be made
     (privategit.prepare): "Not reading <path>: <why>." (`why` alone too)."""
@@ -3832,9 +3921,12 @@ class Workspaces:
                 # Where its agent settings are read up to (settings_guard.checkout_top), as
                 # git says now, before any worker had it.
                 with suppress(ValueError):
-                    checkout["top"] = (
+                    checkout["top"] = top = (
                         await git("-C", str(path), "rev-parse", "--show-toplevel")
                     ).strip()
+                    # The commit there before any worker had it: agent settings there as
+                    # it has them are the owner's (Runtime.settings_proven).
+                    checkout["settings_base"] = (await git("-C", top, "rev-parse", "HEAD")).strip()
             return checkout
         toplevel = await git("-C", str(path), "rev-parse", "--show-toplevel")
         top = await asyncio.to_thread(Path(toplevel.strip()).resolve)
