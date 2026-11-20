@@ -510,8 +510,11 @@ def marked(prefix: str) -> dict[int, str]:
                         if item.decode(errors="replace").startswith(needle):
                             found[int(entry.name)] = item.decode(errors="replace")[len(MARK) + 1 :]
         return found
+    # Every process on the machine, whose command line and environment can say anything (not
+    # UTF-8: another run's test made one), read past what is not.
     listed = subprocess.run(["ps", "-ww", "-E", "-A", "-o", "pid=,command="],
-                            capture_output=True, text=True, check=False).stdout  # fmt: skip
+                            capture_output=True, text=True, errors="replace",
+                            check=False).stdout  # fmt: skip
     for row in listed.splitlines():
         if needle in row and (mark := re.search(rf"\b{MARK}=(\S+)", row)):
             with contextlib.suppress(ValueError):

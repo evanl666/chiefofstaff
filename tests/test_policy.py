@@ -1822,6 +1822,30 @@ def test_a_line_that_leaves_a_loop_running_leaves_nothing(line, shell, grouped, 
     assert not oracle.marked(box.last_mark)
 
 
+def test_the_oracle_finds_its_marks_past_a_command_line_that_is_not_utf8():
+    """The oracle's tests failed now and then in full runs (UnicodeDecodeError, byte 0xe9):
+    what a line left running was looked for in every process's command line and environment
+    on the machine (ps -E), read as UTF-8, and a process of another run's tests had one that
+    is not (test_reliability's `caf\\xe9` sleeper; test_send's `caf\\udce9` note). Any
+    program's command line can say anything: read past it, the mark is found."""
+    import policy_oracle as oracle
+
+    mark = f"latin-{os.getpid()}-{time.monotonic_ns()}"
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", b"caf\xe9"],
+        env={**os.environ, oracle.MARK: mark},
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (found := oracle.marked(mark)) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert found == {sleeper.pid: mark}
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    assert not oracle.marked(mark)
+
+
 def commands_of(text: str) -> list[tuple[str, list[str]]]:
     parsed = policy.shell_commands(text)
     assert parsed is not None

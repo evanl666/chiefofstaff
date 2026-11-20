@@ -2698,7 +2698,9 @@ async def e15_browser(ctx: Ctx):
 
 def probe_servers(ctx: Ctx) -> int:
     """The MCP server processes this shard's Copilot sessions started (one per session)."""
-    out = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True).stdout
+    out = subprocess.run(  # (Any program's command line, which need not be UTF-8.)
+        ["ps", "-axo", "command="], capture_output=True, text=True, errors="replace"
+    ).stdout
     return sum(str(ctx.root / "probe_mcp.py") in line for line in out.splitlines())
 
 

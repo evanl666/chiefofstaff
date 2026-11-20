@@ -121,8 +121,8 @@ def answers(port: int) -> bool:
 
 def table() -> dict[int, tuple[int, str]]:
     """pid -> (parent, command line) of every process."""
-    out = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True
+    out = subprocess.run(  # (Any program's command line, which need not be UTF-8.)
+        ["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, errors="replace"
     ).stdout
     found = {}
     for line in out.splitlines():
