@@ -394,6 +394,26 @@ def sandboxed(app_client) -> Runtime:
     return runtime
 
 
+def held_worker(app_client, runtime) -> tuple[str, Path, dict]:
+    """A sandboxed worker at rest whose folder gained a .mcp.json, and the owner's message that
+    found it: it waits, saying why on its line."""
+    router = app_client.get("/api/state").json()["router_id"]
+    result = app_client.portal.call(
+        lambda: call_tool(runtime, "spawn_worker", router, title="Docs", instructions="Write docs")
+    )
+    spawned = json.loads(result.text_result_for_llm)
+    worker, cwd = spawned["session_id"], Path(spawned["cwd"])
+    app_client.portal.call(
+        lambda: call_tool(runtime, "report", worker, status="done", summary="Docs written")
+    )
+    (cwd / ".mcp.json").write_text('{"mcpServers": {}}')
+    posted = app_client.post(
+        f"/api/sessions/{worker}/messages", json={"text": "And a FAQ"}, headers=ORIGIN
+    )
+    assert posted.status_code == 200 and worker in runtime.settings_held
+    return worker, cwd, posted.json()
+
+
 def until(app_client, done, seconds: float = 5.0):
     """Waits (the app's loop running) until `done()` holds."""
     for _ in range(int(seconds / 0.02)):
@@ -401,6 +421,10 @@ def until(app_client, done, seconds: float = 5.0):
             return
         app_client.portal.call(lambda: asyncio.sleep(0.02))
     assert done()
+
+
+def worker_state(app_client, worker: str) -> dict:
+    return next(s for s in app_client.get("/api/state").json()["sessions"] if s["id"] == worker)
 
 
 def test_the_owner_lets_a_worker_use_the_settings_in_its_folder(app_client):
@@ -441,6 +465,106 @@ def test_the_owner_lets_a_worker_use_the_settings_in_its_folder(app_client):
         "said": "You let this worker use these settings (added .mcp.json).",
     }
     until(app_client, lambda: "And a FAQ" in app_client.fake.sessions[worker].sent[-1])
+
+
+def test_a_message_queued_for_changed_settings_has_its_own_actions(app_client):
+    """E121: what the owner writes a worker held for its folder's settings shows at once, under
+    it, that line's choices for the settings shown. "ok" there is not their word on them: it
+    says to use the button. Cancel sends it nowhere; a new worker takes its task, and it."""
+    sign_in(app_client)
+    runtime = sandboxed(app_client)
+    worker, _, first = held_worker(app_client, runtime)
+    hold = first["meta"]["settings_hold"]
+    assert hold["digest"] and hold["changes"] == "added .mcp.json" and "guidance" not in hold
+    asked = app_client.post(
+        f"/api/sessions/{worker}/messages",
+        json={"text": "approved, thanks", "settings_digest": hold["digest"]},
+        headers=ORIGIN,
+    ).json()
+    assert asked["delivery"] == "queued" and worker in runtime.settings_held
+    assert asked["meta"]["settings_hold"]["guidance"] == (
+        "Use the button so the approval is tied to the settings shown."
+    )
+
+    cancelled = app_client.post(
+        f"/api/messages/{asked['id']}/settings-hold/cancel",
+        json={"digest": hold["digest"]},
+        headers=ORIGIN,
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["meta"]["settings_handled"]["status"] == "cancelled"
+    assert worker in runtime.settings_held, "cancelling a message is not a word on settings"
+
+    replacement = app_client.post(
+        f"/api/messages/{first['id']}/settings-hold/new-worker",
+        json={"digest": hold["digest"]},
+        headers=ORIGIN,
+    )
+    assert replacement.status_code == 200
+    new = replacement.json()["session_id"]
+    assert new != worker
+    until(app_client, lambda: runtime.store.session(worker)["closed_at"])
+    given = [m["text"] for m in runtime.store.messages(new)]
+    assert "And a FAQ" in given and "approved, thanks" not in given, "the cancelled one stays"
+    assert runtime.store.message(first["id"])["meta"]["forwarded_to"] == new
+    assert not (Path(runtime.store.session(new)["cwd"]) / ".mcp.json").exists()
+
+
+def test_the_owners_words_in_a_held_workers_chat_use_the_settings_shown(app_client):
+    """E121: "use these settings" (and a bare "ok" right after the line that asks) in a held
+    worker's own chat is its Use these settings, for the line the page showed: one line says
+    so, with Undo. Settings changed since are not used: their new line's choices are shown."""
+    sign_in(app_client)
+    runtime = sandboxed(app_client)
+    worker, cwd, _ = held_worker(app_client, runtime)
+    shown = worker_state(app_client, worker)["settings_hold"]["digest"]
+    said = app_client.post(
+        f"/api/sessions/{worker}/messages",
+        json={"text": "ok", "settings_digest": shown},
+        headers=ORIGIN,
+    ).json()
+    assert said["meta"]["settings_typed"] == shown and "prompt" not in said["meta"]
+    assert worker not in runtime.settings_held
+    sent = app_client.fake.sessions[worker].sent
+    until(app_client, lambda: "And a FAQ" in sent[-1])
+    assert not any("\nok\n" in text for text in sent), "their word, not the worker's"
+    (line,) = [m for m in runtime.store.messages(worker) if m["meta"].get("settings_undo")]
+    assert line["text"] == "Using these settings (added .mcp.json) because you said so."
+
+    undone = app_client.post(
+        f"/api/sessions/{worker}/agent-settings/undo", json={"digest": shown}, headers=ORIGIN
+    )
+    assert undone.status_code == 200 and worker in runtime.settings_held
+    shown = worker_state(app_client, worker)["settings_hold"]["digest"]
+    (cwd / ".mcp.json").write_text('{"mcpServers": {"x": {"command": "sh"}}}')
+    stale = app_client.post(
+        f"/api/sessions/{worker}/messages",
+        json={"text": "Use these settings", "settings_digest": shown},
+        headers=ORIGIN,
+    ).json()
+    assert "settings_typed" not in stale["meta"] and worker in runtime.settings_held
+    hold = stale["meta"]["settings_hold"]
+    assert hold["digest"] != shown and hold["guidance"].startswith("They changed after you wrote")
+
+
+def test_only_clear_words_in_the_workers_own_chat_use_its_settings(app_client):
+    """Never from Home (nor Slack, Send to Chief or a worker); a bare "ok" not right after the
+    line that asks, or words that are not plainly that, are messages: the line's buttons say."""
+    sign_in(app_client)
+    runtime = sandboxed(app_client)
+    worker, _, _ = held_worker(app_client, runtime)
+    router = app_client.get("/api/state").json()["router_id"]
+    shown = worker_state(app_client, worker)["settings_hold"]["digest"]
+    for path, body in [
+        (f"/api/sessions/{router}/messages", {"text": "use these settings", "to": worker}),
+        (f"/api/sessions/{worker}/messages", {"text": "use these settings"}),
+        (f"/api/sessions/{worker}/messages", {"text": "sure, whatever", "settings_digest": shown}),
+        (f"/api/sessions/{worker}/messages", {"text": "ok", "settings_digest": shown}),
+    ]:
+        posted = app_client.post(path, json=body, headers=ORIGIN)
+        assert posted.status_code == 200 and "settings_typed" not in posted.json()["meta"]
+        assert worker in runtime.settings_held, body
+    assert not [m for m in runtime.store.messages(worker) if m["meta"].get("settings_undo")]
 
 
 async def test_closing_the_bus_ends_every_event_stream():

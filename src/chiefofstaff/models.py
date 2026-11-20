@@ -595,6 +595,8 @@ class OwnerMessage(StrictModel):
     attachments: list[Attachment] = Field(default_factory=list, max_length=5)
     # In a worker's chat: the task of its the owner looks at there (Runtime.chat_task).
     task_id: str = Field(default="", max_length=64)
+    # In a worker's chat: the line on its folder's settings it showed (Runtime.settings_typed).
+    settings_digest: str = Field(default="", max_length=64)
 
     @model_validator(mode="after")
     def something(self) -> "OwnerMessage":

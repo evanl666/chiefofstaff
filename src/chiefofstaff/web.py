@@ -338,7 +338,12 @@ def create_app(
             )
         return shown(
             await runtime.owner_send(
-                session_id, payload.text, attachments=payload.attachments, task_id=payload.task_id
+                session_id,
+                payload.text,
+                attachments=payload.attachments,
+                task_id=payload.task_id,
+                typed=True,
+                settings_digest=payload.settings_digest,
             )
         )
 
@@ -361,6 +366,14 @@ def create_app(
     async def message_seen(message_id: int):
         runtime.update_seen(message_id)
         return {"ok": True}
+
+    @app.post("/api/messages/{message_id}/settings-hold/cancel")
+    async def cancel_settings_held_message(message_id: int, payload: AgentSettings):
+        return shown(await runtime.cancel_held_owner_message(message_id, payload.digest))
+
+    @app.post("/api/messages/{message_id}/settings-hold/new-worker")
+    async def new_worker_for_settings_held_message(message_id: int, payload: AgentSettings):
+        return await runtime.start_new_worker_for_held_message(message_id, payload.digest)
 
     @app.post("/api/sessions/{session_id}/model")
     async def session_model(session_id: str, payload: SessionModel):
@@ -670,6 +683,10 @@ def create_app(
     async def use_agent_settings(session_id: str, payload: AgentSettings):
         """The owner's word only: no tool, Slack or Send to Chief reaches this."""
         return {"ok": True, "said": await runtime.accept_settings(session_id, payload.digest)}
+
+    @app.post("/api/sessions/{session_id}/agent-settings/undo")
+    async def undo_agent_settings(session_id: str, payload: AgentSettings):
+        return {"ok": True, "said": await runtime.undo_settings(session_id, payload.digest)}
 
     @app.post("/api/sessions/{session_id}/git-identity")
     async def use_git_identity(session_id: str, payload: GitIdentity):
