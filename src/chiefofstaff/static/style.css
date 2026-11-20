@@ -468,7 +468,7 @@ summary { min-height: 28px; }
   color: var(--soft);
 }
 .chip.done { background: var(--green-soft); color: var(--green); }
-.chip.progress { background: var(--accent-soft); color: var(--accent); }
+.chip.progress, .chip.answer { background: var(--accent-soft); color: var(--accent); }
 .chip.question, .chip.waiting { background: var(--amber-soft); color: var(--amber); }
 .chip.blocked, .chip.failed { background: var(--red-soft); color: var(--red); }
 

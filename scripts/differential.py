@@ -268,6 +268,25 @@ FIXES: list[Allow] = [
         value="Follow a Slack thread, DM or PR: its new messages come straight to you (a PR "
         "merged or closed already: for 14 days, and a closed one's reopening).",
     ),
+    # E115: answers have their own report status, routine progress stays quiet, and task views
+    # expose the five recent progress reports already kept in messages.
+    Allow("tasks' recent progress updates", data=r"\.tasks\[\d+\]\.progress_updates$"),
+    Allow(
+        "report's answer status",
+        data=r"\.options\.tools\[\d+\]\.parameters\.properties\.status\.enum\[\d+\]$",
+        value="answer",
+    ),
+    Allow(
+        "report's answer-aware description",
+        data=r"\.options\.tools\[\d+\]\.description$",
+        value="Report to the Router: answer, progress (rare), question, blocked, failed or "
+        "done. Answers always reach the Router; routine progress stays on the task.",
+    ),
+    Allow(
+        "report summary's answer guidance",
+        data=r"\.options\.tools\[\d+\]\.parameters\.properties\.summary\.description$",
+    ),
+    Allow("Router and worker answer/report rules", data=r"\.system_message\.content$"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

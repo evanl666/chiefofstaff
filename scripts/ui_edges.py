@@ -43,6 +43,7 @@ PORT = int(os.environ.get("UI_EDGES_PORT", "8798"))
 TOKEN = "ui-edges-token"
 BASE = f"http://127.0.0.1:{PORT}"
 SHOTS = ROOT / "browser-shots"
+QA8_REPORT_SHOTS = Path(os.environ.get("QA8_REPORT_SHOTS", SHOTS / "qa8-report"))
 # A 1x1 PNG, for images sent with a message.
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -5137,7 +5138,7 @@ async def main():
                           round_ten, round_scale, round_qa, round_eleven, round_twelve,
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
-                          round_send, round_agents, round_qa6, round_qa7_life,
+                          round_send, round_agents, round_qa6, round_qa7_life, round_qa8_report,
                           round_layout):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
@@ -5147,6 +5148,68 @@ async def main():
         if failures:
             raise AssertionError(f"browser errors: {failures}")
     print("UI EDGE CASES PASSED")
+
+
+async def round_qa8_report(runtime, browser, failures: list[str]):
+    """E115: a running task shows its latest update and folds the four before it."""
+    router = runtime.store.get("router_id")
+    spawned = await call_tool(
+        runtime,
+        "spawn_worker",
+        router,
+        title="QA8 summarize the import",
+        instructions="Summarize the import",
+        why_new="test",
+    )
+    worker = json.loads(spawned.text_result_for_llm)["session_id"]
+    task = runtime.tasks.current(worker)
+    for number in range(1, 7):
+        await call_tool(
+            runtime,
+            "report",
+            worker,
+            status="progress",
+            summary=f"Import update {number}: checked {number * 200} rows.",
+        )
+    await call_tool(
+        runtime,
+        "report",
+        worker,
+        status="answer",
+        task_id=task["id"],
+        summary="Answer for the owner: 1,240 rows are ready.",
+    )
+    await settle(runtime)
+    QA8_REPORT_SHOTS.mkdir(parents=True, exist_ok=True)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        for width in (800, 1280):
+            await page.set_viewport_size({"width": width, "height": 900})
+            if await page.locator("#home-tabs").is_visible():
+                await page.locator("#home-tabs [data-tab=tasks]").click()
+            card = page.locator("#tasks-running .card.task", has_text="QA8 summarize the import")
+            await expect(card).to_be_visible()
+            if "unfolded" not in (await card.get_attribute("class") or "").split():
+                await card.locator(".head .title").click()
+            await expect(card.locator(".progress-line .words")).to_have_text(
+                "Import update 6: checked 1200 rows."
+            )
+            earlier = card.locator(".earlier-updates")
+            await expect(earlier.locator("summary")).to_have_text("Earlier updates (4)")
+            if not await earlier.evaluate("node => node.open"):
+                await earlier.locator("summary").click()
+            await expect(earlier).to_contain_text("Import update 2")
+            await expect(earlier).not_to_contain_text("Import update 1")
+            assert not await card.evaluate(OVERFLOWS), (width, scheme)
+            await page.screenshot(path=QA8_REPORT_SHOTS / f"ui-edges-progress-{width}-{scheme}.png")
+        await context.close()
+    log("E115: latest progress is visible; four earlier updates are folded with their times")
 
 
 async def round_layout(runtime, browser, failures: list[str]):

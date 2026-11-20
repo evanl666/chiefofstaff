@@ -52,6 +52,7 @@ from .task_actions import (
     style_note,
 )
 from .tasks import ADOPTED, OPEN
+from .watchdog import instruction, last_instruction
 from .workspaces import resolve_project
 
 if TYPE_CHECKING:
@@ -370,12 +371,13 @@ class ArtifactState(BaseModel):
 
 
 class Report(NestedArguments):
-    status: Literal["progress", "question", "blocked", "done", "failed"]
+    status: Literal["answer", "progress", "question", "blocked", "done", "failed"]
     summary: str = Field(
-        description="What happened, or the one concrete question. With status done: the whole "
-        "answer the owner reads (tables, lists, every row asked for), up to 30,000 characters; "
-        "never only a pointer to a file. With status failed: why it cannot be done, and what "
-        "you tried"
+        description="What happened, the answer, or the one concrete question. With status "
+        "answer: the whole answer to the Router's or owner's message; it changes no task state. "
+        "With status done: the whole result the owner reads (tables, lists, every row asked "
+        "for), up to 30,000 characters; never only a pointer to a file. With status failed: "
+        "why it cannot be done, and what you tried"
     )
     task_id: str = Field(
         default="",
@@ -1333,7 +1335,8 @@ class Tools:
             ),
             (
                 "report",
-                "Report to the Router: progress (rare), question, blocked, failed or done.",
+                "Report to the Router: answer, progress (rare), question, blocked, failed or "
+                "done. Answers always reach the Router; routine progress stays on the task.",
                 Report,
                 self.t_report,
             ),
@@ -3071,8 +3074,32 @@ class Tools:
             )
         )
 
+    def answers_instruction(self, caller: str) -> bool:
+        """Whether this turn began with a question or note from the Router or owner.
+
+        A retry's system note is not an instruction (watchdog.instruction/last_instruction
+        deliberately skip it), so the message the failed turn was answering stays the source.
+        Thread activity and check-back wakes are updates of their own, not answers.
+        """
+        if self.states[caller].thread_turn:
+            return False
+        found = last_instruction(self.store, caller)
+        if not found:
+            return False
+        asked = self.store.message(found)
+        if not instruction(asked) or asked["meta"].get("check_back"):
+            return False
+        prompt = str(asked["meta"].get("prompt") or "")
+        if asked["kind"] == "router":
+            return prompt.startswith(
+                ('<message from="router" type="note"', '<message from="router" type="message"')
+            )
+        return asked["kind"] == "owner" and bool(asked["meta"].get("chat"))
+
     async def t_report(self, params: Report, caller: str):
         row = self.caller(caller, WORKER, SLACK)
+        progress_answer = params.status == "progress" and self.answers_instruction(caller)
+        answer = params.status == "answer" or progress_answer
         task = (
             self.runtime.task_actions.report_task(caller, params.task_id)
             if row["role"] == WORKER
@@ -3189,6 +3216,7 @@ class Tools:
         # question about it too: once answered, its next report is that new result).
         changed = bool(
             task
+            and not answer
             and finished
             and params.status in {"progress", "done", "question", "blocked"}
             and (chat or (self.runtime.turn_task(caller) == task["id"] and not landed))
@@ -3335,10 +3363,18 @@ class Tools:
         settled = chat_news = False
         if task:
             # It reports on it: whatever it says next (a question, say), it is not "stopped".
-            self.store.delete(f"stopped:{task['id']}")
-            self.store.delete(f"goingon:{task['id']}")
+            if not answer:
+                self.store.delete(f"stopped:{task['id']}")
+                self.store.delete(f"goingon:{task['id']}")
             asked = bool(self.store.get(f"followup:{task['id']}"))
-            if task["status"] == "cancelled" and not asked:
+            if params.status == "answer":
+                pass
+            elif progress_answer:
+                # Older workers use progress for a direct answer. Keep its latest words on the
+                # task without moving the task, replacing its result or creating a second
+                # finished/update notification.
+                task = self.tasks.update(task["id"], progress=params.summary[:6000])
+            elif task["status"] == "cancelled" and not asked:
                 # Cancelled (a report already on its way, say): it stays cancelled.
                 settled = True
             elif task["status"] == "cancelled" and params.status != "done":
@@ -3505,7 +3541,7 @@ class Tools:
                 next_step=params.next,
                 kind=params.status,
             )
-        else:
+        elif not answer:
             # It went on with this task: its question is behind it (another task's stays).
             self.runtime.asks.answered(caller, task["id"] if task else "", by="worker")
         if row["role"] == WORKER and params.status in {"progress", "done"}:
@@ -3557,8 +3593,13 @@ class Tools:
             )  # Tasks waiting for this one may start now (or are blocked).
         news = self.states[caller].thread_turn and (not task or task["status"] != "running")
         self.states[caller].thread_turn = False  # It told the owner.
-        if params.status == "progress" and not news:
-            return "Noted in your session. The Router is not interrupted for progress."
+        if params.status == "progress" and not news and not progress_answer:
+            where = " and on the task card" if task else ""
+            return (
+                f"Noted in your session{where}. The Router is not interrupted for routine "
+                'progress. If this answers the Router or owner, use status="answer"; this call '
+                "is forwarded automatically only when its instruction can be identified."
+            )
         crossed = ""
         if task and params.status == "done" and unread:
             # Through, a newer message about it still unread (bug E95: the Router took the
@@ -3569,11 +3610,12 @@ class Tools:
                 "reports this task again: wait for that report, or send your message again with "
                 f"task_id='{task['id']}'. Never move that work into another task."
             )
-        await self.runtime.tell_router(row, params.status, params.summary, task, crossed)
+        told_status = "answer" if answer else params.status
+        await self.runtime.tell_router(row, told_status, params.summary, task, crossed)
         # On Home now (a line in the Router's chat, a card): an answer to the owner's @ there
         # is not shown again.
         self.store.update_message_meta(reported["id"], {**meta, "told": True})
-        if news and params.status == "progress":
+        if news and params.status == "progress" and not progress_answer:
             # News on a PR it follows, for work already finished: the owner reads it.
             self.runtime.alert(
                 f"Update on “{task['title'] if task else self.runtime.display_title(row)}”",
@@ -3581,6 +3623,8 @@ class Tools:
                 needs_action=False,
                 title="PR update",
             )  # fmt: skip
+        if answer:
+            return "Answer/Update reported to the Router." + split_note
         return "Reported to the Router." + split_note + self.run_note(row, task, params.status)
 
     def run_note(self, row: dict, task: dict | None, status: str) -> str:

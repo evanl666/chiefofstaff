@@ -520,7 +520,11 @@ class Workers:
         status = report["meta"].get("status")
         about = report["meta"].get("task_id") or task["id"]
         task = self.tasks.find(about) or task
-        if status != "progress" or task["status"] != "running" or asked["meta"].get("wait_nudge"):
+        if (
+            status not in {"answer", "progress"}
+            or task["status"] != "running"
+            or asked["meta"].get("wait_nudge")
+        ):
             return
         if self.states[session_id].busy or not self.states.handle(session_id):
             return

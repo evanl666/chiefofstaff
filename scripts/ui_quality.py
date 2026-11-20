@@ -45,6 +45,7 @@ PORT = int(os.environ.get("UI_QUALITY_PORT", "8796"))
 TOKEN = "ui-quality-token"
 BASE = f"http://127.0.0.1:{PORT}"
 SHOTS = ROOT / "browser-shots"
+QA8_REPORT_SHOTS = Path(os.environ.get("QA8_REPORT_SHOTS", SHOTS / "qa8-report"))
 AXE = "https://cdn.jsdelivr.net/npm/axe-core@4.10.2/axe.min.js"
 WIDTHS = (800, 1024, 1280, 1440)
 ASK = (
@@ -222,6 +223,23 @@ async def seed(runtime, client, code: Path) -> dict:
                    "evidence": "`uv run pytest -q`: 8 passed"}],
     )  # fmt: skip
     compare = session(COMPARE)
+    compare_task = workers[COMPARE]["task_id"]
+    for number in range(1, 7):
+        await call_tool(
+            runtime,
+            "report",
+            workers[COMPARE]["session_id"],
+            status="progress",
+            summary=f"Comparison update {number}: checked service {number}.",
+        )
+    await call_tool(
+        runtime,
+        "report",
+        workers[COMPARE]["session_id"],
+        status="answer",
+        task_id=compare_task,
+        summary="The current comparison covers six services.",
+    )
     compare.emit("assistant.message", content="Reading the pricing pages of three services.",
                  tool_requests=None)  # fmt: skip
     compare.emit("tool.execution_start", tool_name="bash", tool_call_id="p1",
@@ -482,6 +500,42 @@ async def run(runtime, seeded, browser, quality: Quality, phase: str):
         await page.keyboard.press("Escape")
         quality.failures += [f"page error {scheme}: {error}" for error in errors]
         await context.close()
+
+
+async def report_views(runtime, browser, quality: Quality):
+    """E115's Answer/Update line and folded progress history at both compact widths."""
+    QA8_REPORT_SHOTS.mkdir(parents=True, exist_ok=True)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        await expect(
+            page.locator("#timeline .event", has_text="Answer/Update from")
+        ).to_contain_text("six services")
+        for width in (800, 1280):
+            await page.set_viewport_size({"width": width, "height": 900})
+            if await page.locator("#home-tabs").is_visible():
+                await page.locator("#home-tabs [data-tab=tasks]").click()
+            card = page.locator("#tasks-running .card.task", has_text=COMPARE)
+            await expect(card).to_be_visible()
+            if "unfolded" not in (await card.get_attribute("class") or "").split():
+                await card.locator(".head .title").click()
+            await expect(card.locator(".progress-line .words")).to_have_text(
+                "Comparison update 6: checked service 6."
+            )
+            await expect(card.locator(".earlier-updates summary")).to_have_text(
+                "Earlier updates (4)"
+            )
+            await quality.check(page, f"report progress {width} {scheme}", "#tasks-running")
+            await card.scroll_into_view_if_needed()
+            await page.screenshot(
+                path=QA8_REPORT_SHOTS / f"ui-quality-progress-{width}-{scheme}.png"
+            )
+        await context.close()
+    log("Answer/Update and five recent progress reports: 800/1280, light/dark")
 
 
 async def cards(runtime, seeded, browser, quality: Quality, phase: str):
@@ -1059,6 +1113,7 @@ async def main():
         quality = Quality()
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
+            await report_views(runtime, browser, quality)
             await run(runtime, seeded, browser, quality, phase)
             log("Home, a worker, Settings and Usage: 800 to 1440 px, light and dark")
             await cards(runtime, seeded, browser, quality, phase)

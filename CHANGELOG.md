@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Answers and progress updates no longer disappear.** A worker can report an Answer/Update
+  without completing or changing its task; answers to a Router or owner message still reach
+  Home when an older worker calls them progress. Routine progress remains quiet, and a task's
+  card keeps its latest update plus the four before it, folded with their times.
 - **Security: a worker given your checkout only to read can't write there with a command
   either.** Its edits there were refused, but a command such as `echo y >> AGENTS.md` went
   through for a worker with no system sandbox (on Codex always; on Copilot with the sandbox off),
