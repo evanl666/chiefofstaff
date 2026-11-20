@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Without the sandbox, nothing waits for your word on a folder's settings.** A worker without
+  the sandbox (the default) already runs commands as you, so holding it for a hook or an MCP
+  server in its folder added friction, not protection. Chief of Staff no longer reads, keeps or
+  checks those settings for it (Copilot's, Claude's, Codex's), nor a `.git` it replaced: no look
+  before each turn, as each tool starts or as each model round starts. Workers held when you
+  update go on at the next start; what you wrote them about a task that ended meanwhile is
+  dropped, with a line on Home. Turn the sandbox on for repositories you don't trust: their
+  settings are protected as before.
+- **With the sandbox on, settings rarely wait** (bugs E121, E122, E124). Settings byte for byte
+  as the commit a checkout was made from (each git object hashed again, nothing fetched), or as
+  your checkout's trusted copy holds them, wait for nothing, also in checkouts made before 0.1.46;
+  so does a `settings.json` change only in keys that run nothing (`model`, `theme`,
+  `outputStyle`…), or an `enabledPlugins` turning on only plugins you have on yourself. A message
+  to a waiting worker shows that line's choices right under it (*Use these settings*, *Start a
+  new worker*, *Cancel message*); saying so plainly in its chat ("use these settings", 同意; a
+  bare "ok" right after the line) counts for the settings shown, with *Undo*; "ok" anywhere else
+  says to use the button. A worker in its own worktree that waits 15 minutes goes on in a fresh
+  one, and one whose task was cancelled or replaced closes: what you wrote it follows its task,
+  or is dropped with a line on Home, never sent later.
 - **Security: a worker given your checkout only to read can't write there with a command
   either.** Its edits there were refused, but a command such as `echo y >> AGENTS.md` went
   through for a worker with no system sandbox (on Codex always; on Copilot with the sandbox off),
