@@ -1655,6 +1655,31 @@ class TaskActions:
         self.runtime.background(self.collect_evidence(task["id"]))
         return undo
 
+    async def copied_in(self, session_id: str, checkout: dict):
+        """A copy of the owner's checkout made for a worker at work (Runtime.own_copy): what was
+        copied in (their uncommitted work) is where each open task's share of it starts, not
+        that task's work (see Scope)."""
+        tasks = [task for task in self.tasks.for_session(session_id) if task["status"] in OPEN]
+        if not tasks:
+            return
+        for task in tasks:
+            if job := self.basing.get(task["id"]):
+                with suppress(Exception):
+                    await asyncio.shield(job)
+        found = await snapshot(checkout)
+        if not found or not found["tree"]:
+            return
+        path = checkout["path"]
+        for task in tasks:
+            key = f"taskbase:{task['id']}"
+            if not (base := json.loads(self.store.get(key) or "{}")):
+                continue
+            for name in ("trees", "heads", "commits"):
+                base.setdefault(name, {})[path] = found["tree" if name == "trees" else "commit"]
+            if found.get("large"):
+                base.setdefault("large", {})[path] = found["large"]
+            self.store.set(key, json.dumps(base))
+
     async def record_base(self, session_id: str, task_ids: list[str], at: float):
         """Where its checkouts are when a worker takes a task up: that task's changes are what
         comes after (an earlier task's commits on the same branch are not its own)."""

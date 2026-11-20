@@ -97,8 +97,11 @@ from .policy import (
     AGENT_SETTINGS,
     CODEX_SETTINGS,
     GITHUB_MCP,
+    OWN_COPY,
+    OWN_WORKTREE,
     REPOSITORY_SETTINGS,
     SANDBOX_HELD,
+    checkout_of,
     within,
 )
 from .provenance import ALIVE_EVERY, RUNS_KEPT, Provenance, log_of, runs_of
@@ -135,10 +138,13 @@ from .workspaces import (
     BRANCH_PREFIX,
     Workspaces,
     common_git_dir,
+    git,
     git_dirs,
     holds_alternates,
     identity_of,
     own_code,
+    own_tree,
+    place_in,
     protected_git_paths,
     registry_secrets,
     replaceable_git_paths,
@@ -2484,11 +2490,83 @@ class Runtime:
             return
         self.worker_failed(row, message)
 
-    async def add_repo(self, caller: str, repo: str):
-        row = self.store.session(caller)
+    async def checkout_place(self, row: dict) -> tuple[Path, str]:
+        """Where a worker's new checkout goes (its folder, made now) and its branch's name."""
         workspace = self.workspaces.workspace(row)
         await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
         slug = row["branch"].removeprefix(BRANCH_PREFIX) if row["branch"] else workspace.name
+        return workspace, slug
+
+    def taken(self, row: dict, checkouts: list[dict], checkout: dict) -> bool:
+        """A checkout made for a worker, among its own from now on; whether its sandbox takes
+        it in from its next turn (a worktree's history is in its repository's .git, outside what
+        the sandbox let this session write when it started: reattached after this turn)."""
+        self.update_session(row["id"], repos=json.dumps([*checkouts, checkout]))
+        if not (checkout.get("worktree") and self.sandboxed(row)):
+            return False
+        self.states[row["id"]].stale = True
+        return True
+
+    async def own_copy(self, row: dict, request: Any) -> str | None:
+        """A worker's shell command refused in a checkout of the owner's it was given only to
+        read (policy.owners_checkout: it writes there, or runs what can't be read there): its
+        own copy of that checkout, made as add_repo makes a worktree, from the owner's commit
+        with their uncommitted work copied in (Workspaces.make_checkout `copy`), or a worktree
+        of that repository it has. What it hears then (policy.OWN_COPY); None when it has none
+        (one is tried once a repository: one that could not be made is not tried again)."""
+        command = getattr(request, "full_command_text", "") or ""
+        folder = str(
+            getattr(request, "resolved_working_directory", None)
+            or getattr(request, "cwd", None)
+            or row["cwd"]
+            or ""
+        )
+        try:
+            async with self.states[row["id"]].checkouts:
+                return await self.copy_for(self.store.session(row["id"]), command, folder)
+        except Exception:
+            logger.warning("Could not make %s a copy of a checkout.", row["id"], exc_info=True)
+            return None
+
+    async def copy_for(self, row: dict, command: str, folder: str) -> str | None:
+        """own_copy's work, its checkouts held (no add_repo meanwhile)."""
+        checkouts = self.workspaces.checkouts(row)
+        kept = await asyncio.to_thread(checkout_of, command, folder, [
+            c for c in checkouts if c.get("shared") and c.get("git_dir") and not c.get("in_place")
+        ])  # fmt: skip
+        if not kept:
+            return None
+        top = kept.get("top") or await git("-C", kept["path"], "rev-parse", "--show-toplevel")
+        top = await asyncio.to_thread(os.path.realpath, top.strip())
+        there = await asyncio.to_thread(os.path.realpath, kept["path"])
+        if own := await asyncio.to_thread(own_tree, checkouts, top, there):
+            line = OWN_COPY if own.get("copy") else OWN_WORKTREE
+            at = await asyncio.to_thread(place_in, own["at"], there, folder)
+            return line.format(path=at, left_out="")
+        state = self.states[row["id"]]
+        if top in state.copies_tried or own is not None:
+            return None
+        state.copies_tried.add(top)
+        workspace, slug = await self.checkout_place(row)
+        have = {c.get("repo", c["path"]) for c in checkouts if c.get("branch") or c.get("worktree")}
+        checkout = await self.workspaces.make_checkout(
+            workspace, slug, kept["path"], True, have, carry=not row["slack"], copy=True
+        )
+        if not checkout:
+            return None
+        left = checkout.pop("left_out", [])
+        self.taken(row, checkouts, checkout)
+        try:
+            await self.task_actions.copied_in(row["id"], checkout)
+        except Exception:  # (Its receipts may count what was copied in: it has its copy.)
+            logger.warning("Could not record where %s's copy starts.", row["id"], exc_info=True)
+        at = await asyncio.to_thread(place_in, checkout["path"], there, folder)
+        shown = ", ".join(left[:5]) + (f", and {len(left) - 5} more" if len(left) > 5 else "")
+        return OWN_COPY.format(path=at, left_out=f" Not copied in: {shown}." if left else "")
+
+    async def add_repo(self, caller: str, repo: str):
+        row = self.store.session(caller)
+        workspace, slug = await self.checkout_place(row)
         checkouts = self.workspaces.checkouts(row)
         if repo.startswith("~") or Path(repo).is_absolute():
             local: Path | None = Path(repo)
@@ -2518,14 +2596,11 @@ class Runtime:
             checkout = found
         else:
             checkout = await self.workspaces.clone_checkout(workspace, slug, repo)
-        self.update_session(caller, repos=json.dumps([*checkouts, checkout]))
+        stale = self.taken(row, checkouts, checkout)
         self.add_message(caller, "notice", f"Added {checkout['path']} ({checkout['branch']})")
         result = {key: checkout[key] for key in ("path", "branch", "base")}
-        if checkout.get("worktree") and self.sandbox_policy(row):
-            # A worktree's history is in its repository's .git, outside what the sandbox let
-            # this session write when it started: it is reattached with it after this turn.
+        if stale:
             state = self.states[caller]
-            state.stale = True
             state.after_refresh = (
                 f"Your shell may now run git in {checkout['path']} (its history is "
                 f"{checkout.get('git_dir', '')}). Go on with the task."

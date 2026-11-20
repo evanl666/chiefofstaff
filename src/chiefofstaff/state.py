@@ -114,6 +114,9 @@ class SessionState:
     sending: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Serializes add_repo for one worker.
     checkouts: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The repositories (their checkouts' real paths) whose copy Chief of Staff tried to make for
+    # it once (Runtime.own_copy): never again, made or not.
+    copies_tried: set[str] = field(default_factory=set)
 
     def step(self) -> tuple[float, str]:
         """The longest-running step it is in now: when it started and what it is for; (0, "")

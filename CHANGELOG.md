@@ -8,9 +8,20 @@
   acting on its own or not. Now a command that writes there is refused the same way, with the
   same line (a redirection, `tee`, `sed -i`, `cp`, `mv`, `rm`, `touch`, git that changes files,
   the index or branches, an install, a build or a test run there), read through `cd`,
-  subshells, `sh -c` and `eval`; a program Chief of Staff can't read, run there on files there,
-  asks you first. Reads go through as before. The check takes 0.02 to 0.06 ms a command (the
-  median; under 0.3 ms for 99 in 100), and nothing for a worker with no checkout of yours.
+  subshells, `sh -c` and `eval`, and so is a program Chief of Staff can't read, run there on
+  files there: the worker runs those in a copy of its own (below). Reads go through as before.
+  The check takes 0.02 to 0.06 ms a command (the median; under 0.3 ms for 99 in 100), and
+  nothing for a worker with no checkout of yours.
+- **A worker given your checkout to read runs its tests in a copy of its own, without asking
+  you.** Its test run there (`./run_tests.sh`, `pytest`, a build) was refused, and a worker
+  told to change no files could stop and ask you which way to go. Now Chief of Staff gives it,
+  then and once, its own copy of that checkout: a worktree of your checkout's commit with your
+  uncommitted changes (edits, new files, deletions) copied in, never through a link (a file
+  over 20 MB, a link leading out of it or a repository in it is left out, and it is told
+  which). The refusal says where the copy is and to run the command there, which changes
+  nothing of yours. What was copied in is not counted as its work, and a copy holding nothing
+  else is removed when the worker closes. One that has a worktree of that repository already
+  is sent there.
 - Home's *Where is your code?* card (and a focus summary) has room of its own above the
   Router's chat: the chat's first lines no longer run on under its edge, cut as if hidden by it;
   lines scrolled up fade out there.

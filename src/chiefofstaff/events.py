@@ -22,7 +22,14 @@ from . import prompts, receipts, settings_guard, threads
 from .backend import COPILOT_AGENT, running_background, stop_background
 from .delivery import digest
 from .envelope import from_owner, news_tasks, tasks_named, wrap
-from .policy import owners_checkout, permission_denial, settings_write, written_file
+from .policy import (
+    OWNERS_CHECKOUT,
+    OWNERS_CHECKOUT_ASK,
+    owners_checkout,
+    permission_denial,
+    settings_write,
+    written_file,
+)
 from .roles import ROUTER, SLACK, WORKER
 from .store import now
 
@@ -139,6 +146,10 @@ PRE_TOOL_BUSY = (
 )
 # A pre-tool answer slower than this is logged (Copilot waits for it).
 PRE_TOOL_SLOW = 0.5
+# What policy.owners_checkout says of a command writing (or running what can't be read) in a
+# checkout of the owner's given only to read: then the worker gets a copy of its own
+# (Runtime.own_copy).
+OWNERS_CHECKOUTS = (OWNERS_CHECKOUT, OWNERS_CHECKOUT_ASK)
 # Seconds after its loop went idle (assistant.idle) or a turn ended (assistant.turn_end, for a
 # Copilot that does not say assistant.idle) with no session.idle: a command left running in the
 # background holds it (see Events.held_idle).
@@ -1033,6 +1044,9 @@ class Events:
             or (reason := settings_write(row, request, self.runtime.held_run_files(row)))
             or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
         ):
+            if reason in OWNERS_CHECKOUTS and getattr(request, "kind", "") == "shell":
+                # Run in a copy of its own instead, made now (once): never stuck on it.
+                reason = await self.runtime.own_copy(row, request) or reason
             self.runtime.add_message(row["id"], "notice", reason)
             return PermissionDecisionReject(feedback=reason)
         if row["role"] == WORKER and getattr(request, "kind", "") == "write":

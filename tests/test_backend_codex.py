@@ -1135,6 +1135,59 @@ async def test_a_refusal_reaches_the_model_and_is_no_message_of_chief_of_staff(c
     assert len(history) == 1 and not history[0].startswith(REFUSED_NOTE)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the checkout check reads POSIX paths only")
+async def test_a_codex_workers_command_refused_in_the_owners_checkout_runs_in_its_copy(
+    codex, tmp_path
+):
+    """Chief of Staff's own answer to Codex's approval (Events.on_permission, as Copilot's): a
+    test run in the owner's checkout given to read is refused, and the model hears where its
+    own copy is (made then: the owner's commit with their edits); run there, it runs."""
+    from test_repos import copies, to_read
+    from test_round7_split import spawn
+
+    from chiefofstaff.policy import OWN_COPY
+
+    app = to_read(tmp_path)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    try:
+        info = await spawn(runtime, harness.router_id, title="Run the tests",
+                           instructions="run them", project=str(app))  # fmt: skip
+        worker = info["session_id"]
+        harness.store.set(f"agent:{worker}", "codex")
+        session, turn = await opened(
+            codex,
+            app,
+            on_permission_request=lambda request, invocation: runtime.events.on_permission(
+                request, {"session_id": worker}
+            ),
+        )
+        steered = []
+        request = codex.request
+
+        async def spying(method, params):
+            if method == "turn/steer":
+                steered.append(params["input"][0]["text"])
+            return await request(method, params)
+
+        codex.request = spying  # type: ignore[method-assign]
+        await session.send("Run the shell command `./run_tests.sh`. Then reply with just: ok")
+        await turn.wait()
+        assert not (app / "ran.txt").exists(), "not run in the owner's checkout"
+        [copy] = copies(harness, worker)
+        said = OWN_COPY.format(path=copy["path"], left_out="")
+        assert steered == [wrap("system", "refused", f"Chief of Staff refused that: {said}")]
+        assert (Path(copy["path"]) / "README.md").read_text() == "# app, edited\n"
+        await session.send(
+            f"Run the shell command `cd {copy['path']} && ./run_tests.sh`. Then reply with just: ok"
+        )
+        await turn.wait()
+        assert (Path(copy["path"]) / "ran.txt").read_text() == "ran\n", "run in its copy"
+        assert len(steered) == 1 and len(copies(harness, worker)) == 1
+    finally:
+        await runtime.stop()
+
+
 async def test_every_kind_of_request_is_answered(codex, tmp_path):
     asked, answered = [], []
 

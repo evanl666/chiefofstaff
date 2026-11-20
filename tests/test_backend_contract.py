@@ -48,6 +48,7 @@ from chiefofstaff.backend import (
 from chiefofstaff.backend_codex import CodexAgent, CodexBackend
 from chiefofstaff.codex_check import subagent_tools
 from chiefofstaff.delivery import queue_holds
+from chiefofstaff.policy import OWN_COPY
 from chiefofstaff.scripted import (
     CLAUDE_LIKE,
     CODEX_LIKE,
@@ -1022,10 +1023,11 @@ async def test_every_edit_asks_with_each_file_and_a_refused_one_is_not_written(b
 
 
 @contextlib.asynccontextmanager
-async def reading_the_owners_checkout(tmp_path, monkeypatch):
-    """A Codex worker acting on its own (yolo), given the owner's checkout to read, on real
-    Codex with the stand-in model: its session, answered by Chief of Staff's own permission
-    check (Events.on_permission); with the checkout, its own folder, and its turn."""
+async def reading_the_owners_checkout(tmp_path, monkeypatch, backend=None):
+    """A worker acting on its own (yolo), given the owner's checkout to read, on `backend`, else
+    on real Codex with the stand-in model: its session, answered by Chief of Staff's own
+    permission check (Events.on_permission); with the checkout, its own folder, its turn, and
+    the copies of the checkout made for it (Runtime.own_copy)."""
     from conftest import Harness
     from test_round7_split import published, spawn
 
@@ -1041,18 +1043,20 @@ async def reading_the_owners_checkout(tmp_path, monkeypatch):
     assert runtime.yolo(row) and row["cwd"] == str(app.resolve()), "the owner's, to read"
     own = runtime.workspaces.workspace(row)
     own.mkdir(parents=True, exist_ok=True)  # (Its own folder, where it may write.)
-    home = tmp_path / "codex-home"
-    home.mkdir()
-    monkeypatch.setenv("CODEX_HOME", str(home))
-    model = scripted_model.Model()
-    codex = CodexBackend(shutil.which("codex") or "codex")
-    codex.arguments += model.arguments(tmp_path)
-    codex.needs_sign_in = False
-    codex.created = []
-    await codex.start()
+    model = None
+    if backend is None:
+        home = tmp_path / "codex-home"
+        home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        model = scripted_model.Model()
+        backend = CodexBackend(shutil.which("codex") or "codex")
+        backend.arguments += model.arguments(tmp_path)
+        backend.needs_sign_in = False
+        backend.created = []
+        await backend.start()
     try:
         session, turn = await open_session(
-            codex,
+            backend,
             Path(row["cwd"]),
             on_permission_request=lambda request, invocation: runtime.events.on_permission(
                 request, {"session_id": row["id"]}
@@ -1062,10 +1066,17 @@ async def reading_the_owners_checkout(tmp_path, monkeypatch):
         def notices() -> list[str]:
             return [m["text"] for m in harness.store.messages(row["id"]) if m["kind"] == "notice"]
 
-        yield SimpleNamespace(app=app, own=own, session=session, turn=turn, notices=notices)
+        def copies() -> list[dict]:
+            checkouts = runtime.workspaces.checkouts(harness.store.session(row["id"]))
+            return [checkout for checkout in checkouts if checkout.get("copy")]
+
+        yield SimpleNamespace(
+            app=app, own=own, session=session, turn=turn, notices=notices, copies=copies
+        )
     finally:
-        await codex.stop()
-        model.close()
+        if model:
+            await backend.stop()
+            model.close()
         await runtime.stop()
 
 
@@ -1113,13 +1124,44 @@ async def test_a_yolo_codex_workers_command_writing_in_the_owners_checkout_is_re
         )
         await it.turn.wait()
         assert (app / "README.md").read_text() == readme, "not written"
-        assert any("owner's own checkout" in text for text in it.notices()), it.notices()
+        [copy] = it.copies()
+        assert OWN_COPY.format(path=copy["path"], left_out="") in it.notices(), it.notices()
         await it.session.send(
             f"Run the shell command `head -1 README.md > {own / 'first.txt'}`. Then reply with "
             "just: done"
         )
         await it.turn.wait()
         assert (own / "first.txt").read_text() == readme.splitlines()[0] + "\n", "read, written"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the checkout check reads POSIX paths only")
+async def test_a_command_refused_in_the_owners_checkout_is_sent_to_a_copy_of_its_own(
+    backend, tmp_path, monkeypatch
+):
+    """What Chief of Staff relies on to send a worker's test run in the owner's checkout it
+    was given to read to a copy of its own (Events.on_permission, Runtime.own_copy): the
+    command's request reaches it with where it runs, and its refusal (where the copy is)
+    reaches the turn; the copy has the owner's new script; run there, it runs. Live e2e r66d's
+    worker, refused with no copy, asked the owner which way to go."""
+    async with reading_the_owners_checkout(tmp_path, monkeypatch, backend) as it:
+        app = it.app
+        (app / "run_tests.sh").write_text("#!/bin/sh\necho ran > ran.txt\n")
+        (app / "run_tests.sh").chmod(0o755)
+        await it.session.send("Run the shell command `./run_tests.sh`. Then reply with just: done")
+        await it.turn.wait()
+        assert not (app / "ran.txt").exists(), "not run in the owner's checkout"
+        [copy] = it.copies()
+        tree = Path(copy["path"])
+        assert OWN_COPY.format(path=copy["path"], left_out="") in it.notices(), it.notices()
+        assert (tree / "run_tests.sh").read_text() == (app / "run_tests.sh").read_text()
+        if isinstance(backend, ScriptedBackend):
+            return  # (A scripted agent runs no command.)
+        await it.session.send(
+            f"Run the shell command `cd {tree} && ./run_tests.sh`. Then reply with just: done"
+        )
+        await it.turn.wait()
+        assert (tree / "ran.txt").read_text() == "ran\n", "run in its copy"
+        assert not (app / "ran.txt").exists() and len(it.copies()) == 1
 
 
 async def test_with_ask_first_every_mcp_call_asks_and_githubs_writes_stay_refused(

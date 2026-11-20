@@ -313,13 +313,17 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   code may read your own checkout, but nothing it does writes there: its edits are refused, and
   so are its commands that write there (a redirection, `tee`, `sed -i`, `cp`, `mv`, `rm`,
   `touch`, git that changes files, the index or branches, an install, a build or a test run),
-  with or without the sandbox, acting on its own or not; a program Chief of Staff can't read,
-  run there on files there, asks you first. To run tests or install, it takes a worktree of its
-  own.
+  with or without the sandbox, acting on its own or not, and so is a program Chief of Staff
+  can't read, run there on files there. Such a command (a test run, say) gets the worker a copy
+  of its own, made then and once: a worktree of your checkout's commit with your uncommitted
+  changes copied in (never through a link; files over 20 MB, links that lead out of it and
+  repositories in it are left out, and it is told which). It runs the command there, without
+  asking you.
   Ask in so many words for the work to be done directly in your folder (no worktree), and that
   worker may change it.
 - Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
-  are removed if they hold nothing uncommitted (the branches stay); reopening it brings them
+  are removed if they hold nothing uncommitted (in such a copy, your changes copied in are
+  yours, not its work; the branches stay); reopening it brings them
   back (whole, also one whose removal Chief of Staff stopping cut short). A worktree with ignored files you may want (an edited `.env`, a report) is kept, with
   its dependencies and build output deleted; those alone do not keep it (see
   [Disk space](#disk-space)).

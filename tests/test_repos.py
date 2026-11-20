@@ -4687,6 +4687,8 @@ async def test_a_worker_in_the_owners_folder_gets_a_worktree_to_change_it(tmp_pa
     assert info["cwd"] == str(git_repo) and not info.get("branch")
     prompt = harness.session(info["session_id"]).options["system_message"]["content"]
     assert "change nothing there" in prompt and "first add_repo this folder" in prompt
+    assert "Chief of Staff makes you your own copy of this folder" in prompt
+    assert "run them there, without asking" in prompt
     added = await call_tool(runtime, "add_repo", info["session_id"], repo=str(git_repo))
     result = json.loads(added.text_result_for_llm)
     assert result["branch"].startswith("chief/") and result["path"] != str(git_repo)
@@ -4696,6 +4698,221 @@ async def test_a_worker_in_the_owners_folder_gets_a_worktree_to_change_it(tmp_pa
         capture_output=True, text=True,
     )  # fmt: skip
     assert head.stdout.strip() == "main", "the owner's checkout stays on its branch"
+
+
+# The check of a command in the owner's checkout (policy.checkout_write) reads POSIX paths: on
+# Windows it refuses none yet, so no copy is made there.
+POSIX_PATHS = pytest.mark.skipif(
+    sys.platform == "win32", reason="the checkout check reads POSIX paths only"
+)
+
+
+def owner_bytes(repo: Path) -> dict[str, bytes]:
+    """A checkout's files as they are (a link: where it leads), with its index and HEAD."""
+    found = {}
+    for path in sorted(repo.rglob("*")):
+        name = path.relative_to(repo).as_posix()
+        if name.startswith(".git/") and name not in {".git/index", ".git/HEAD"}:
+            continue
+        if path.is_symlink():
+            found[name] = str(path.readlink()).encode()
+        elif path.is_file():
+            found[name] = path.read_bytes()
+    return found
+
+
+def to_read(tmp_path) -> Path:
+    """The owner's checkout, one commit behind its origin, with a test script and their own
+    work not committed: an edit, a new file, a file deleted."""
+    _, app = published(tmp_path, "app")
+    (app / "run_tests.sh").write_text("#!/bin/sh\necho ran > ran.txt\n")
+    (app / "run_tests.sh").chmod(0o755)
+    (app / "gone.txt").write_text("to delete\n")
+    (app / "sub").mkdir()
+    (app / "sub" / "keep.txt").write_text("kept\n")
+    run("git", "add", ".", cwd=app)
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "tests", cwd=app)
+    (app / "README.md").write_text("# app, edited\n")
+    (app / "notes").mkdir()
+    (app / "notes" / "new.txt").write_text("new\n")
+    (app / "gone.txt").unlink()
+    return app
+
+
+def shell_line(line: str, cwd: str) -> SimpleNamespace:
+    return SimpleNamespace(kind="shell", full_command_text=line, cwd=cwd, commands=[],
+                           possible_paths=[], possible_urls=[], intention="",
+                           has_write_file_redirection=">" in line,
+                           can_offer_session_approval=False)  # fmt: skip
+
+
+async def decided(runtime, worker: str, line: str, cwd: str) -> str:
+    decision = await runtime.events.on_permission(shell_line(line, cwd), {"session_id": worker})
+    return getattr(decision, "feedback", "") or type(decision).__name__
+
+
+def copies(harness, worker: str) -> list[dict]:
+    return [c for c in harness.runtime.workspaces.checkouts(harness.store.session(worker))
+            if c.get("copy")]  # fmt: skip
+
+
+@POSIX_PATHS
+@pytest.mark.parametrize(
+    ("first", "sandbox"), [("./run_tests.sh", False), ("echo y >> README.md", True)]
+)
+async def test_a_command_refused_in_the_owners_checkout_runs_in_a_copy_of_its_own(
+    tmp_path, first, sandbox
+):
+    """Live e2e r66d: told to run a project's tests and change no files, a worker given the
+    project to read ran `./run_tests.sh` there; refused (a program Chief of Staff can't read,
+    run on files there), it asked the owner which way to go. Now that command (or one writing
+    there) is not run there, and the worker gets a copy of its own, made then, once: of the
+    owner's commit (not origin's newer one), with their uncommitted edits, new files and
+    deletions, and is told to run it there. The owner's checkout stays as it was, byte for
+    byte."""
+    app = to_read(tmp_path)
+    before = owner_bytes(app)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)], worker_sandbox=sandbox))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Run the tests", instructions="run",
+                       project=str(app))  # fmt: skip
+    worker = info["session_id"]
+    said = await decided(runtime, worker, first, str(app))
+    [copy] = copies(harness, worker)
+    tree = Path(copy["path"])
+    assert said == policy_module.OWN_COPY.format(path=copy["path"], left_out="")
+    assert "ask the owner" not in said and "Do not" not in said
+    assert copy["branch"].startswith("chief/") and copy["worktree"] == copy["path"]
+    assert run("git", "rev-parse", "HEAD", cwd=tree) == run("git", "rev-parse", "HEAD", cwd=app)
+    assert not (tree / "LATEST.md").exists(), "the owner's commit, not origin's newer one"
+    assert (tree / "README.md").read_text() == "# app, edited\n"
+    assert (tree / "notes" / "new.txt").read_text() == "new\n"
+    assert not (tree / "gone.txt").exists() and (tree / "sub" / "keep.txt").exists()
+    assert os.access(tree / "run_tests.sh", os.X_OK)
+    notices = [m["text"] for m in harness.store.messages(worker) if m["kind"] == "notice"]
+    assert notices[-1] == said
+    other = "echo y >> README.md" if first.startswith("./") else "./run_tests.sh"
+    assert await decided(runtime, worker, other, str(app / "sub")) == (
+        policy_module.OWN_COPY.format(path=str(tree / "sub"), left_out="")
+    ), "the same copy, in the folder it ran in"
+    assert len(copies(harness, worker)) == 1
+    assert run("git", "worktree", "list", "--porcelain", cwd=app).count("worktree ") == 2
+    assert owner_bytes(app) == before, "the owner's checkout, byte for byte"
+    state = runtime.states[worker]
+    assert (state.stale, state.after_refresh) == (sandbox, ""), "sandboxed: from its next turn"
+
+
+@POSIX_PATHS
+async def test_a_copy_that_cannot_be_made_leaves_the_refusal_as_it_was_once(tmp_path):
+    """Its worktree can't be made (here its branch's name is taken): the refusal says what it
+    said before, and no copy is tried again for that worker and repository (never a loop);
+    nothing is left half made."""
+    app = to_read(tmp_path)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Run the tests", instructions="run",
+                       project=str(app))  # fmt: skip
+    worker = info["session_id"]
+    slug = runtime.workspaces.workspace(harness.store.session(worker)).name
+    run("git", "branch", f"chief/{slug}", cwd=app)
+    made = []
+    make = runtime.workspaces.make_checkout
+
+    async def counted(*arguments, **options):
+        made.append(arguments)
+        return await make(*arguments, **options)
+
+    runtime.workspaces.make_checkout = counted
+    ask = policy_module.OWNERS_CHECKOUT_ASK
+    assert await decided(runtime, worker, "./run_tests.sh", str(app)) == ask
+    assert await decided(runtime, worker, "./run_tests.sh", str(app)) == ask
+    assert await decided(runtime, worker, "touch x", str(app)) == policy_module.OWNERS_CHECKOUT
+    assert len(made) == 1 and not copies(harness, worker)
+    assert run("git", "worktree", "list", "--porcelain", cwd=app).count("worktree ") == 1
+
+
+@POSIX_PATHS
+async def test_a_worker_with_a_worktree_of_that_repository_is_sent_there(tmp_path):
+    """One that took a worktree of the project with add_repo already: sent there, no copy."""
+    app = to_read(tmp_path)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Run the tests", instructions="run",
+                       project=str(app))  # fmt: skip
+    worker = info["session_id"]
+    added = await call_tool(runtime, "add_repo", worker, repo=str(app))
+    path = Path(json.loads(added.text_result_for_llm)["path"])
+    said = await decided(runtime, worker, "./run_tests.sh", str(app / "sub"))
+    # (Its worktree is of origin's newer commit, without sub/: its top, then.)
+    assert said == policy_module.OWN_WORKTREE.format(path=str(path))
+    assert not copies(harness, worker)
+    assert run("git", "worktree", "list", "--porcelain", cwd=app).count("worktree ") == 2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="links need privileges on Windows")
+async def test_what_cannot_be_copied_in_is_named_and_no_link_leads_out(tmp_path, monkeypatch):
+    """What the copy can't have is said in one clause: a file too large, a link that leads out
+    of the folder (never followed: copied as a link only when it leads to a place in it), a
+    repository of its own in it (never its .git)."""
+    monkeypatch.setattr(workspaces_module, "MAX_SNAPSHOT_FILE", 1_000_000)
+    app = to_read(tmp_path)
+    (tmp_path / "secret.txt").write_text("not the owner's checkout's\n")
+    (app / "big.bin").write_bytes(b"x" * 1_500_000)
+    (app / "out.txt").symlink_to(tmp_path / "secret.txt")
+    (app / "linked").symlink_to(tmp_path)
+    (app / "in.txt").symlink_to("README.md")
+    (app / "vendor" / "lib").mkdir(parents=True)
+    run("git", "init", "-q", cwd=app / "vendor" / "lib")
+    (app / "vendor" / "lib" / "lib.py").write_text("x = 1\n")
+    before = owner_bytes(app)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Run the tests", instructions="run",
+                       project=str(app))  # fmt: skip
+    said = await decided(runtime, info["session_id"], "./run_tests.sh", str(app))
+    [copy] = copies(harness, info["session_id"])
+    tree = Path(copy["path"])
+    assert said == policy_module.OWN_COPY.format(
+        path=copy["path"],
+        left_out=" Not copied in: big.bin (over 1 MB), linked (a link out of the folder), "
+        "out.txt (a link out of the folder), vendor/lib (a repository of its own).",
+    )
+    assert str((tree / "in.txt").readlink()) == "README.md"
+    assert not (tree / "out.txt").is_symlink() and not (tree / "linked").is_symlink()
+    assert not (tree / "out.txt").exists() and not (tree / "linked").exists()
+    assert not (tree / "big.bin").exists() and not (tree / "vendor").exists()
+    assert (tree / "README.md").read_text() == "# app, edited\n", "the rest is copied"
+    assert owner_bytes(app) == before
+
+
+@POSIX_PATHS
+async def test_what_was_copied_in_is_the_owners_not_the_workers_work(tmp_path):
+    """The owner's uncommitted work in a copy is where the task's share of it starts: its
+    receipts count only what it changed there itself; closed, a copy that holds nothing else
+    goes (one with its own work stays)."""
+    from test_round7_split import based
+
+    app = to_read(tmp_path)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    idle, busy = [
+        await spawn(runtime, harness.router_id, title=title, instructions="run", project=str(app))
+        for title in ("Only ran", "Wrote")
+    ]
+    for info in (idle, busy):
+        await based(runtime, info["task_id"])
+        await decided(runtime, info["session_id"], "./run_tests.sh", str(app))
+    [ran] = copies(harness, idle["session_id"])
+    [wrote] = copies(harness, busy["session_id"])
+    (Path(wrote["path"]) / "fix.py").write_text("fixed = True\n")
+    await call_tool(runtime, "report", busy["session_id"], status="done", summary="Wrote it.")
+    found = await receipts_of(runtime, busy["task_id"])
+    assert (found["changed"]["files"], found["changed"]["uncommitted"]) == (1, 1), found
+    for info in (idle, busy):
+        await runtime.workers.close(info["session_id"])
+    await settle(runtime)
+    assert exists(Path(wrote["path"]) / "fix.py"), "its own work stays"
+    assert not exists(ran["path"]), "nothing of its own: removed"
 
 
 async def test_receipts_name_the_branch_a_worker_is_on_now(git_repo):

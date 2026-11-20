@@ -25,6 +25,7 @@ import sys
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
+from typing import BinaryIO
 from uuid import uuid4
 
 SAFE = os.name != "nt" and {
@@ -163,12 +164,34 @@ class Folder:
         makes a file."""
         check_name(name)
         found = os.stat(source)
+        with open(source, "rb") as origin:
+            self.copy_file(origin, found, name)
+
+    def copy_from(self, origin: Folder, name: str, limit: int) -> int:
+        """A copy of the file `name` in the folder `origin`, opened without following a link
+        (its mode and times), at the same name here, made as write() makes a file: its size.
+        An OSError for anything but a regular file there, or one over `limit` bytes (EFBIG)."""
+        check_name(name)
+        flags = os.O_RDONLY | NOFOLLOW | CLOEXEC | BINARY | NONBLOCK
+        fd = os.open(origin.where(name), flags, **origin.at(name))
+        with os.fdopen(fd, "rb") as file:
+            found = os.fstat(file.fileno())
+            if not stat.S_ISREG(found.st_mode):
+                raise UnsafePathError(errno.EINVAL, f"not a file: {origin.path / name}")
+            if found.st_size > limit:
+                raise OSError(errno.EFBIG, "too large", str(origin.path / name))
+            self.copy_file(file, found, name)
+        return found.st_size
+
+    def copy_file(self, origin: BinaryIO, found: os.stat_result, name: str) -> None:
+        """What an open file holds (its mode and times as `found`) at `name`, made as write()
+        makes a file."""
         temporary = self.temporary_name(name)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW | CLOEXEC | BINARY
         fd = os.open(self.where(temporary), flags, 0o600, **self.at(temporary))
         times = (found.st_atime_ns, found.st_mtime_ns)
         try:
-            with open(source, "rb") as origin, os.fdopen(fd, "wb") as copy:
+            with os.fdopen(fd, "wb") as copy:
                 shutil.copyfileobj(origin, copy, 1 << 20)
                 copy.flush()
                 if hasattr(os, "fchmod"):

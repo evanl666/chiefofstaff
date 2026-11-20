@@ -4282,6 +4282,20 @@ OWNERS_CHECKOUT_ASK = (
     "To change them or run what writes files (installs, builds, tests), add_repo it: you get "
     "your own worktree and branch, and work there."
 )
+# What a worker hears instead of those, for a shell command, once it has its own copy of that
+# checkout (Runtime.own_copy): one made then (OWN_COPY: `left_out`, what could not be copied
+# in, as a sentence), or a worktree of that repository it had (OWN_WORKTREE).
+OWN_COPY = (
+    "The same command was not run in the owner's checkout; your own copy of it (same commit, "
+    "with the owner's uncommitted changes) is ready at {path}; run it there.{left_out} That "
+    "changes nothing of the owner's, so it is fine even for a task that says not to change any "
+    "files."
+)
+OWN_WORKTREE = (
+    "The same command was not run in the owner's checkout; your own worktree of it is at "
+    "{path}; run it there. That changes nothing of the owner's, so it is fine even for a task "
+    "that says not to change any files."
+)
 # What a shell command line does in a checkout of the owner's given only to read: see
 # checkout_write.
 CHECKOUT_WRITES, CHECKOUT_ASKS = "writes", "asks"
@@ -5035,6 +5049,19 @@ def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | Non
     if not any(within(target, folder) for folder in kept):
         return None
     return OWNERS_CHECKOUT
+
+
+def checkout_of(command: str, folder: str, kept: list[dict]) -> dict | None:
+    """Which of the owner's checkouts given only to read (`kept`) a command line run in `folder`,
+    refused by owners_checkout, is about: the one it names, when it names one only; else the one
+    it runs in; else the first."""
+    named = [c for c in kept if CheckoutWrites(command, (c["path"],)).mentioned]
+    if len(named) == 1:
+        return named[0]
+    for checkout in named or kept:
+        if folder and CheckoutWrites("", (checkout["path"],)).inside(folder, real=True):
+            return checkout
+    return (named or kept or [None])[0]
 
 
 def permission_denial(row: dict, request: Any, writable: list[str] | None = None) -> str | None:

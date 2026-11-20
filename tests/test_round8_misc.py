@@ -196,4 +196,4 @@ def test_a_worker_in_the_owners_folder_runs_nothing_there_that_writes_files(tmp_
     .pytest_cache and uv.lock in the owner's checkout."""
     checkout = {"path": str(tmp_path), "branch": "", "shared": True, "git_dir": str(tmp_path)}
     text = worker_context(str(tmp_path), str(tmp_path / "ws"), [checkout], yolo=False)
-    assert "run nothing there that writes files" in text and "uv.lock" in text, text
+    assert "Nothing that writes files runs there" in text and "uv.lock" in text, text

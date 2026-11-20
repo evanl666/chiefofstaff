@@ -887,6 +887,123 @@ def copy_files(
     return copied
 
 
+async def carry_changes(top: Path, tree: Path, under: Path) -> tuple[list[str], list[str]]:
+    """The owner's uncommitted work in their checkout `top`, copied as it is there into `tree`,
+    a worktree of its commit (made in `under`, see place_tree): each file git says changed or is
+    new (not an ignored one), and one deleted there deleted. What was copied, and what was left
+    out ("name (why)")."""
+    listed = await git(
+        "--no-optional-locks", "-C", str(top), "status", "--porcelain", "-z",
+        "--untracked-files=all", limit=60,
+    )  # fmt: skip
+    return await asyncio.to_thread(copy_changes, top, tree, status_paths(listed), under)
+
+
+def status_paths(listed: str) -> list[str]:
+    """The paths `git status --porcelain -z` names: a rename's old one too."""
+    words, found, at = listed.split("\0"), [], 0
+    while at < len(words):
+        word, at = words[at], at + 1
+        if len(word) > 3:
+            found.append(word[3:])
+            if "R" in word[:2] or "C" in word[:2]:
+                found += [words[at]] if at < len(words) and words[at] else []
+                at += 1
+    return list(dict.fromkeys(found))
+
+
+def copy_changes(
+    source: Path, target: Path, paths: list[str], under: Path
+) -> tuple[list[str], list[str]]:
+    """These files of the owner's checkout `source` made in `target` as they are there (see
+    carry_changes): one gone there (or a folder now) is deleted, first, then the others are
+    copied: a regular file, or a link that leads to a place in the folder. Never through a link
+    on either side, nor in a `.git`; at most MAX_SNAPSHOT_FILES, each up to MAX_SNAPSHOT_FILE and
+    MAX_CARRIED_BYTES in all."""
+    copied: list[str] = []
+    left: list[str] = []
+    present: list[tuple[str, tuple[str, ...]]] = []
+    for path in paths:
+        parts = Path(path.rstrip("/")).parts
+        if not parts or ".." in parts or any(part.casefold() == ".git" for part in parts):
+            continue
+        if path.endswith("/"):
+            left.append(f"{path.rstrip('/')} (a repository of its own)")
+            continue
+        try:
+            with safefs.open_folder(source.joinpath(*parts[:-1]), source) as there:
+                found = there.lstat(parts[-1])
+        except FileNotFoundError:
+            found = None
+        except OSError:  # (A link, or a file, where a folder was.)
+            left.append(f"{path} (could not be read)")
+            continue
+        if found is not None and not stat.S_ISDIR(found.st_mode):
+            present.append((path, parts))
+        elif dropped(target, parts, under):
+            copied.append(path)  # (A folder where a file was: its files are named on their own.)
+        elif found is not None:
+            left.append(f"{path} (a repository of its own)")  # A submodule.
+    size, more = 0, []
+    for index, (path, parts) in enumerate(present):
+        if len(copied) >= MAX_SNAPSHOT_FILES:
+            more = [f"{len(present) - index} more files (over {MAX_SNAPSHOT_FILES})"]
+            break
+        try:
+            with (
+                safefs.open_folder(source.joinpath(*parts[:-1]), source) as there,
+                safefs.open_folder(target.joinpath(*parts[:-1]), under, create=True) as folder,
+            ):
+                why, made = copy_one(there, folder, parts, size)
+        except OSError:
+            why, made = "could not be read", 0
+        if why:
+            left.append(f"{path} ({why})")
+            continue
+        size += made
+        copied.append(path)
+    return copied, [*sorted(left), *more]
+
+
+def dropped(target: Path, parts: tuple[str, ...], under: Path) -> bool:
+    """Whether a file (or link) at these names in `target` was deleted (not a folder)."""
+    with suppress(OSError), safefs.open_folder(target.joinpath(*parts[:-1]), under) as folder:
+        found = folder.lstat(parts[-1])
+        if found is not None and not stat.S_ISDIR(found.st_mode):
+            folder.delete(parts[-1])
+            return True
+    return False
+
+
+def copy_one(
+    there: safefs.Folder, folder: safefs.Folder, parts: tuple[str, ...], size: int
+) -> tuple[str, int]:
+    """One file of the owner's (or a link) copied from its folder `there` into `folder`, by its
+    name, with `size` bytes copied before it: ("", its size), or (why not, 0)."""
+    name = parts[-1]
+    found = there.lstat(name)
+    if found is None:
+        return "gone meanwhile", 0
+    if stat.S_ISLNK(found.st_mode):
+        leads = there.readlink(name)
+        inside = Path(os.path.normpath(Path(*parts[:-1], leads))).parts
+        if (
+            Path(leads).is_absolute()
+            or inside[:1] == ("..",)
+            or any(part.casefold() == ".git" for part in inside)
+        ):
+            return "a link out of the folder", 0
+        folder.symlink(name, leads, replace=True)
+        return "", 0
+    if not stat.S_ISREG(found.st_mode):
+        return "not a file", 0
+    if found.st_size > MAX_SNAPSHOT_FILE:
+        return f"over {MAX_SNAPSHOT_FILE // 1_000_000} MB", 0
+    if size + found.st_size > MAX_CARRIED_BYTES:
+        return f"past {MAX_CARRIED_BYTES // 1_000_000} MB in all", 0
+    return "", folder.copy_from(there, name, MAX_SNAPSHOT_FILE)
+
+
 def place_tree(staged: Path, workspace: Path, under: Path, name: str, exact: bool = False) -> Path:
     """Move a checkout made in Chief of Staff's own staging folder (no worker writes there:
     git, the copies and carried files are made out of every worker's reach) into a worker's
@@ -920,6 +1037,32 @@ def repoint(tree: Path, under: Path, admin: str, repository: Path) -> None:
         folder.write(".git", f"gitdir: {Path(admin).as_posix()}\n")
     with safefs.open_folder(Path(admin), repository) as folder:
         folder.write("gitdir", f"{(tree / '.git').as_posix()}\n")
+
+
+def own_tree(checkouts: list[dict], top: str, kept: str) -> dict | None:
+    """A worker's own worktree of the repository whose checkout is at `top` (real paths), with
+    "at": where the owner's checkout `kept` (a folder in it) is in it; {} when that folder is
+    not there (removed); None when it has none."""
+    for checkout in checkouts:
+        repo = checkout.get("repo") or ""
+        if checkout.get("shared") or checkout.get("remote") or not repo:
+            continue
+        if os.path.realpath(repo) == top:
+            place = Path(checkout.get("worktree") or checkout["path"]) / os.path.relpath(kept, top)
+            return {**checkout, "at": str(place)} if place.is_dir() else {}
+    return None
+
+
+def place_in(copy: str, kept: str, folder: str) -> str:
+    """Where a command run in `folder` runs in a copy (at `copy`) of the owner's checkout `kept`
+    (its real path): the same folder there, when it ran in one of that checkout's and the copy
+    has it; else the copy itself."""
+    real = os.path.realpath(folder) if folder else ""
+    if real and real != kept and within(real, kept):
+        place = Path(copy) / os.path.relpath(real, kept)
+        if place.is_dir():
+            return str(place)
+    return copy
 
 
 def free_child(parent: Path, name: str) -> Path:
@@ -2594,9 +2737,58 @@ async def submodules_ignored(checkout: dict, tree: str) -> dict[str, str]:
 
 async def uncommitted(checkout: dict, tree: str) -> list[str] | None:
     """The files git would refuse to lose with a worktree: changed ones, and new ones it does not
-    ignore. None when git cannot tell (then nothing may be taken for clean)."""
+    ignore; in a copy of the owner's checkout (make_checkout `copy`), not those the owner's
+    checkout holds the same (theirs, copied in). None when git cannot tell (then nothing may be
+    taken for clean)."""
     lines = await status_lines(checkout, tree)
-    return None if lines is None else [status_name(line) for line in lines]
+    return None if lines is None else await its_work(checkout, tree, lines)
+
+
+async def its_work(checkout: dict, tree: str, lines: list[str]) -> list[str]:
+    """The files a worktree's status lines name; in a copy of the owner's checkout (make_checkout
+    `copy`), not those the owner's checkout holds the same (theirs, copied in)."""
+    names = [status_name(line) for line in lines]
+    if checkout.get("copy") and names:
+        return await asyncio.to_thread(not_owners, Path(tree), Path(checkout["repo"]), names)
+    return names
+
+
+def not_owners(tree: Path, repo: Path, names: list[str]) -> list[str]:
+    """Of these files changed in a copy of the owner's checkout `repo` (or new folders: each
+    file in them), those the owner's checkout does not hold the same, never read through a
+    link."""
+
+    def same(name: str) -> bool:
+        mine, theirs = tree / name, repo / name
+        try:
+            one = os.lstat(mine) if os.path.lexists(mine) else None
+            other = os.lstat(theirs) if os.path.lexists(theirs) else None
+            if one is None or other is None:
+                return one is None and other is None
+            if stat.S_ISLNK(one.st_mode) and stat.S_ISLNK(other.st_mode):
+                return mine.readlink() == theirs.readlink()
+            if not (stat.S_ISREG(one.st_mode) and stat.S_ISREG(other.st_mode)):
+                return False
+            return one.st_size == other.st_size and read_regular(
+                mine, MAX_SNAPSHOT_FILE
+            ) == read_regular(theirs, MAX_SNAPSHOT_FILE)
+        except OSError:
+            return False
+
+    kept = []
+    for name in names:
+        if not name.endswith("/"):
+            if not same(name):
+                kept.append(name)
+            continue
+        files = [
+            str(Path(folder, file).relative_to(tree))
+            for folder, _, found in itertools.islice(os.walk(tree / name), 200)
+            for file in found
+        ]
+        if not files or len(files) > MAX_CARRIED or not all(map(same, files)):
+            kept.append(name)
+    return kept
 
 
 def trash_of(folder: Path | None, roots: list[Path]) -> Path | None:
@@ -3371,7 +3563,7 @@ class Workspaces:
         if not moved:
             return False
         lines = await status_lines({**checkout, "worktree": str(moved)}, str(moved))
-        if lines != []:
+        if lines is None or await its_work(checkout, str(moved), lines):
             logger.warning("Not removing %s: files changed meanwhile.", tree)
             await asyncio.to_thread(untrash, moved, Path(tree))
             return False
@@ -3622,10 +3814,13 @@ class Workspaces:
         isolate: bool,
         repos: set[str],
         carry: bool = True,
+        copy: bool = False,
     ) -> dict | None:
         """A checkout of a configured project for a worker; None if it has that repo already.
         `carry`: copy the gitignored files the worktree needs (not for workers that read Slack:
-        those files are often secrets)."""
+        those files are often secrets). `copy`: a copy of the owner's checkout as it is now
+        (Runtime.own_copy): from its commit, with its uncommitted work copied in
+        (carry_changes); what could not be is in "left_out"."""
         path = resolve_project(project, self.projects())
         if not isolate:
             checkout = {"project": str(path), "path": str(path), "branch": "", "shared": True}
@@ -3642,11 +3837,18 @@ class Workspaces:
         top = await asyncio.to_thread(Path(toplevel.strip()).resolve)
         if str(top) in repos:
             return None
-        ref, base = await base_ref(top)
+        ref, base = ("HEAD", "") if copy else await base_ref(top)
         branch = f"{BRANCH_PREFIX}{slug}"
         # --no-track: the branch must never push to the default branch it started from.
         start = (await git("-C", str(top), "rev-parse", ref)).strip()  # Fixed, unlike ref.
+        if copy:
+            base = (
+                f"the owner's checkout as it was (commit {start[:12]}, with its uncommitted "
+                "changes)"
+            )
         common = await common_git_dir(top) or str(top / ".git")
+        copied: list[str] = []
+        left: list[str] = []
         async with self.staging() as staging:
             staged = staging / top.name
             await git(
@@ -3657,6 +3859,8 @@ class Workspaces:
                 # where its .git points.
                 admin = (await git("-C", str(staged), "rev-parse", "--absolute-git-dir")).strip()
                 self.store.delete(f"gitid:{await asyncio.to_thread(os.path.realpath, admin)}")
+                if copy:
+                    copied, left = await carry_changes(top, staged, staging)
                 carried = await carry_ignored_files(top, staged, staging) if carry else []
                 tree = await asyncio.to_thread(
                     place_tree, staged, workspace, workspace.parent, top.name
@@ -3684,7 +3888,9 @@ class Workspaces:
         # The agent settings it is given, as Chief of Staff made it (settings_guard), what it
         # carried from the owner's checkout only as the owner's checkout holds it.
         await asyncio.to_thread(self.keep_settings, tree, Path(checkout["path"]))
-        await asyncio.to_thread(self.vet_carried, tree, top, checkout["carried"])
+        await asyncio.to_thread(self.vet_carried, tree, top, [*carried, *copied])
+        if copy:
+            checkout |= {"copy": start, "left_out": left}
         return checkout
 
     def staging(self) -> contextlib.AbstractAsyncContextManager[Path]:

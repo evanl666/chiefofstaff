@@ -268,6 +268,19 @@ FIXES: list[Allow] = [
         value="Follow a Slack thread, DM or PR: its new messages come straight to you (a PR "
         "merged or closed already: for 14 days, and a closed one's reopening).",
     ),
+    # 0.1.49: a worker given the owner's checkout to read gets a copy of its own for a command
+    # refused there (Runtime.own_copy): its prompt's line for that checkout says so, and the
+    # refusal (a notice in its chat) says where the copy is.
+    Allow(
+        "a read-only checkout's line in a worker's prompt",
+        data=r"\.system_message\.content$",
+        lines=r"^- .+: the project folder itself, which the owner works in: change nothing there",
+    ),
+    Allow(
+        "a refusal in the owner's checkout that names the worker's own copy",
+        data=r"(/messages\[\d+\]|\.db\.messages\.[^.]+)\.text$",
+        lines=r"^The same command was not run in the owner's checkout; your own (copy|worktree) ",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

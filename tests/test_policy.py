@@ -2838,6 +2838,22 @@ def test_a_command_that_writes_in_the_owners_checkout_given_to_read_is_refused(
     assert said != "W" or "owner's own checkout" in found
 
 
+def test_a_refused_line_is_about_the_checkout_it_names_else_the_one_it_runs_in(tmp_path):
+    """A worker with two checkouts of the owner's to read: the copy it gets for a line refused
+    there (Runtime.own_copy) is of the one the line names, else of the one it runs in."""
+    one, two, own = tmp_path / "one", tmp_path / "two", tmp_path / "own"
+    for folder in (one / "src", two, own):
+        folder.mkdir(parents=True)
+    kept = [{"path": str(one)}, {"path": str(two)}]
+    assert policy.checkout_of(f"echo y >> {two}/a", str(own), kept) == kept[1]
+    assert policy.checkout_of(f"cp {one}/a {two}/b", str(two), kept) == kept[1]
+    assert policy.checkout_of("make", str(one / "src"), kept) == kept[0]
+    assert policy.checkout_of("make", str(two), kept) == kept[1]
+    assert policy.checkout_of("make", str(own), kept) == kept[0]
+    assert policy.checkout_of("make", "", kept[1:]) == kept[1]
+    assert policy.checkout_of("make", str(own), []) is None
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="real bash")
 @pytest.mark.timeout(120, func_only=True)  # (Scaled to the runner: paced.)
 def test_what_the_checkout_check_lets_through_writes_nothing_there_in_real_bash(

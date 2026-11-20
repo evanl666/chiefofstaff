@@ -698,10 +698,12 @@ def worker_context(
             elif checkout.get("git_dir"):
                 where += (
                     ": the project folder itself, which the owner works in: change nothing "
-                    "there, and run nothing there that writes files (installs, builds, test "
-                    "runs: `uv run`, `npm install` and `pytest` leave .venv, uv.lock, "
-                    "node_modules and caches behind). For a code change, or to run its tests or "
-                    "build, first add_repo this folder: you get your own worktree and branch, "
+                    "there. Nothing that writes files runs there (installs, builds, test runs: "
+                    "`uv run`, `npm install` and `pytest` leave .venv, uv.lock, node_modules and "
+                    "caches behind): when you run its tests or a build, Chief of Staff makes you "
+                    "your own copy of this folder (same commit, with the owner's uncommitted "
+                    "changes) and says where; run them there, without asking. For a code "
+                    "change, first add_repo this folder: you get your own worktree and branch, "
                     "and work there"
                 )
             else:
