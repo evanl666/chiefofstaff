@@ -838,10 +838,11 @@ class Ctx:
     async def worker_pr(
         self, branch: str, files: dict[str, str], title: str, kept: bool = True, note: str = ""
     ) -> tuple[str, int]:
-        """A PR a worker opens for the owner (its task makes and follows it): its target; with
-        `kept`, once its task keeps it moving (never while Prepared for you is off). `note`: the
-        owner's word on fixing it later, in the task itself (said after its result, it would be
-        more on the task: at work on it again, its worker fixes CI itself, as since 0.1.48)."""
+        """A PR a worker opens or prepares for Create PR (its task makes and follows it): its
+        target; with `kept`, once its task keeps it moving (never while Prepared for you is off).
+        `note`: the owner's word on fixing it later, in the task itself (said after its result,
+        it would be more on the task: at work on it again, its worker fixes CI itself, as since
+        0.1.48)."""
         patch = self.root / f"{branch}.json"
         patch.write_text(json.dumps(files))
         ref, base = self.repo.ref(branch), self.repo.base
@@ -854,10 +855,23 @@ class Ctx:
         )
         from live_e2e import wait_for
 
+        opened_for: set[str] = set()
+
         async def opened():
             for pr in self.repo.prs("open"):
                 if pr["head"]["ref"] == ref:
                     return int(pr["number"])
+            # Some models leave a pushed branch for the task card's Create PR rather than
+            # opening it directly. Exercise that product path too: the task still opens and
+            # follows the PR, and these scenarios need no particular way of opening it.
+            for task in (await self.state())["tasks"]:
+                if (
+                    task["id"] not in opened_for
+                    and task["status"] == "review"
+                    and ref in (task.get("result") or "")
+                ):
+                    opened_for.add(task["id"])
+                    await self.app.post(f"/api/tasks/{task['id']}/pr", {})
             return None
 
         number = await wait_for(f"the worker's PR from {branch}", opened, 900)
