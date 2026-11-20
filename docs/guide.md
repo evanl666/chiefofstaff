@@ -1256,7 +1256,9 @@ picks that agent's model and effort. Once it has begun, *Continue with…* is wh
 - An agent you named that cannot run (signed out, too old, turned off): one line in your chat
   says why, with the command that makes it ready (and *Copy*), and nothing starts elsewhere; its
   card offers *Wait*, or *Run on Copilot instead* (on the agent new workers start on, where that
-  is another that can run it).
+  is another that can run it). Work for a worker you have on that agent gets the same card, with
+  *Continue with Copilot*: a new worker there goes on from a summary of its work, with what it
+  was given.
 - The agent new workers use cannot run: they start on Copilot, and their name says why.
 - A plan's usage limit, or a rate limit the agent gave up on, reached in the middle of a task:
   the worker pauses under *Needs you*, saying when the limit resets when the agent says it. *Go

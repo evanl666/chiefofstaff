@@ -2301,6 +2301,19 @@ class Tools:
                 "results; for more work, tell them, or give it to a new worker on an agent that "
                 "is on."
             )
+        if agent != agents.COPILOT and (why := await self.runtime.worker_agent_down(agent)):
+            # Its agent does not run now (signed out, say): nothing is given that it could not
+            # take up; the owner's card says why, with the fix, and continues it elsewhere.
+            name = self.runtime.display_title(target)
+            self.runtime.agent_refused_card(
+                agent, why, {"title": name}, worker=target["id"], text=params.text
+            )
+            instead = agents.display(self.runtime.instead_of(agent))
+            raise ValueError(
+                f"Not sent: {why} The owner sees this on a card in this chat, with what they can "
+                f"do (continue this worker's work on {instead}, with this, or wait): do not say "
+                "it again, and give it to no other worker."
+            )
         # Checked before anything changes: a closed worker is not reopened for a refused title.
         title = deliverable_title(params.title) if params.task == "new" else ""
         if title:

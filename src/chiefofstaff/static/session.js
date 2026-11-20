@@ -1051,8 +1051,15 @@ function refusalCard(text, meta, time) {
       toast(error.message, "error");
     }
   };
-  // The agent it is offered on instead: the one new workers start on, else Copilot.
-  const copilot = el("button", { type: "button", class: "secondary", text: `Run on ${agentName(meta.instead || "copilot")} instead` });
+  // The agent it is offered on instead: the one new workers start on, else Copilot. For a worker
+  // of theirs whose agent could not run, its work goes on there, with what it was given.
+  const instead = agentName(meta.instead || "copilot");
+  const copilot = el("button", {
+    type: "button",
+    class: "secondary",
+    text: meta.worker ? `Continue with ${instead}` : `Run on ${instead} instead`,
+    title: meta.worker ? `A new worker on ${instead} goes on from a summary of this one's work, with what it was given; this one stays open` : undefined,
+  });
   const wait = el("button", { type: "button", class: "text", text: "Wait" });
   copilot.onclick = () => answer("copilot", copilot);
   wait.onclick = () => answer("wait", wait);

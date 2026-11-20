@@ -3920,32 +3920,54 @@ class Runtime:
     def agent_notice(self, row: dict, text: str):
         self.add_message(row["id"], "notice", text)
 
-    def agent_refused_card(self, agent: str, why: str, params: dict):
+    def agent_refused_card(
+        self, agent: str, why: str, params: dict, worker: str = "", text: str = ""
+    ):
         """A worker the owner named an agent for could not start on it (more-agents.md 5.12.8,
-        recovery): the owner's card in the Router's chat says why and offers what to do
-        (sign-in help, run it on Copilot instead, or wait), the Router not saying it again;
-        nothing starts elsewhere unasked."""
+        recovery), or (`worker`) what the Router gave a worker of theirs on an agent that
+        cannot run now (signed out, say), `text`, did not reach it: the owner's card in the
+        Router's chat says why in one line, with the command that fixes it, and offers one
+        click: run it on Copilot instead (continue that worker's work there, with what it was
+        given), or wait; the Router not saying it again; nothing starts elsewhere unasked."""
         key = uuid4().hex[:10]
         instead = self.instead_of(agent)
-        self.store.set(
-            f"agentrefusal:{key}",
-            json.dumps({"agent": agent, "params": params, "instead": instead}),
-        )
+        record = {"agent": agent, "params": params, "instead": instead}
+        if worker:
+            record |= {"worker": worker, "text": text}
+        self.store.set(f"agentrefusal:{key}", json.dumps(record))
         found = agents.status_of(agent, why)
         # One line: its status where a command makes it ready (that command under it), else why.
         said = f"{found['said'].lower()}." if found.get("fix") else why
+        title = params.get("title") or "The task"
+        line = (
+            f"“{title}” did not get this on {agents.display(agent)}: {said}"
+            if worker
+            else f"“{title}” did not start on {agents.display(agent)}: {said}"
+        )
         self.add_message(
             self.router_id(),
             "notice",
-            f"“{params.get('title') or 'The task'}” did not start on {agents.display(agent)}: "
-            f"{said}",
+            line,
             {
                 "agent_refused": key,
                 "agent": agent,
                 "instead": instead,
+                **({"worker": worker} if worker else {}),
                 **({"fix": found["fix"]} if found.get("fix") else {}),
             },
         )
+
+    async def worker_agent_down(self, agent: str) -> str:
+        """Why a worker on another agent cannot be given anything now: its agent does not
+        start (signed out, not installed, …), tried now as its next message would; "" when
+        it runs."""
+        try:
+            await self.connect_agent(agent)
+        except Exception as exc:
+            self.agent_start_failed(agent, exc)
+            return describe(exc)
+        self.agent_failed.pop(agent, None)
+        return ""
 
     def instead_of(self, agent: str) -> str:
         """The agent a task the owner named another for is offered on instead: the one new
@@ -3963,6 +3985,20 @@ class Runtime:
         if not raw:
             raise ValueError("That card was answered already.")
         found = json.loads(raw)
+        if found.get("worker") and action == "copilot":
+            # One of the owner's workers on an agent that could not run: its work goes on, with
+            # what the Router gave it, on the agent offered (as Continue with… does).
+            instead = found.get("instead") or COPILOT_AGENT
+            made = await self.continue_on(found["worker"], instead, also=found.get("text", ""))
+            self.store.delete(f"agentrefusal:{key}")
+            title = (found.get("params") or {}).get("title") or "the work"
+            self.add_message(
+                self.router_id(),
+                "notice",
+                f"Continued “{title}” on {agents.display(instead)}",
+                {"session_id": made["session_id"], "task_id": made["task_id"]},
+            )
+            return made
         self.store.delete(f"agentrefusal:{key}")
         if action != "copilot":
             self.add_message(
@@ -4059,19 +4095,25 @@ class Runtime:
             "stays_open": keeps,
         }
 
-    async def continue_on(self, session_id: str, agent: str) -> dict:
+    async def continue_on(self, session_id: str, agent: str, also: str = "") -> dict:
         """Continue with <agent>… (the owner's, from a worker's ⋯ or by asking the Router): a
         new worker on that agent goes on with this one's work, from a summary of where it
         stands, in a copy of its worktrees: this one stays open. One that writes in the owner's
         folder or a clone of its own hands its folders over and closes (never two writing
         one). Only an idle worker of the owner's; the agent must be able to run it now (else
-        why not, nothing changed)."""
+        why not, nothing changed). `also`: what the Router gave it that did not reach it (its
+        agent could not run), which the new one does too."""
         row = self.store.session(session_id)
         self.continue_checks(row, agent)
         current = self.agent(session_id)
         if agent != COPILOT_AGENT:
             await self.new_worker_agent(agent, bool(row["slack"]))  # Raises why it cannot.
         summary = await self.handoff_summary(row, current)
+        if also.strip():
+            summary += (
+                "\n\nThen this, which the Router gave it and which did not reach it (its agent "
+                f"could not run): do it too.\n{also.strip()[:3000]}"
+            )
         # As it is now (a turn may have begun while the summary was written).
         row = self.store.session(session_id)
         if row["closed_at"]:

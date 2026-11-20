@@ -619,6 +619,50 @@ async def test_a_named_agent_that_cannot_run_offers_choices_and_starts_nothing_e
         await runtime.stop()
 
 
+async def test_work_for_a_worker_whose_agent_is_signed_out_continues_on_copilot_in_one_click(
+    tmp_path, codex_installed, monkeypatch
+):
+    """The owner names Codex and the Router gives the work to a Codex worker they have, but
+    Codex is signed out now: one line with the fix and Continue with Copilot (a new worker
+    there, from that worker's summary, with what it was given), as for a new worker."""
+    from conftest import call_tool
+
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        made = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: Fixed.",
+                              agent="codex")  # fmt: skip
+        worker = made["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        tasks = [task["id"] for task in runtime.tasks.for_session(worker)]
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        await runtime.disconnect_agent("codex")
+        refused = await call_tool(
+            runtime, "message_session", harness.router_id, session_id=worker,
+            text="Also count the rows.", task="new", title="Count the rows · data",
+            why_new="Another deliverable.",
+        )  # fmt: skip
+        assert refused.error.startswith("Not sent: Codex is not signed in"), refused
+        assert "on a card in this chat" in refused.error and "do not say it again" in refused.error
+        assert [task["id"] for task in runtime.tasks.for_session(worker)] == tasks, "none given"
+        (card,) = [
+            m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
+        ]
+        assert card["text"] == "“Fix it” did not get this on Codex: sign-in needed."
+        assert card["meta"]["worker"] == worker and card["meta"]["instead"] == "copilot"
+        assert card["meta"]["fix"] == {"command": "codex login", "then": ""}
+        moved = await runtime.answer_refusal(card["meta"]["agent_refused"], "copilot")
+        new = harness.store.session(moved["session_id"])
+        assert runtime.agent(new["id"]) == "copilot"
+        goal = runtime.tasks.get(moved["task_id"])["goal"]
+        assert "Also count the rows." in goal and "did not reach it" in goal, goal
+        assert not harness.store.session(worker)["closed_at"], "the first one stays open"
+        assert ("notice", "Continued “Fix it” on Copilot") in harness.kinds(harness.router_id)
+        assert "agent_refusals" not in runtime.snapshot()
+    finally:
+        await runtime.stop()
+
+
 async def test_the_routers_own_pick_that_cannot_run_starts_on_copilot_an_owners_does_not(
     tmp_path, codex_installed, monkeypatch
 ):

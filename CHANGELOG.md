@@ -58,7 +58,8 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   itself once it can. The Slack session and *Watch for you* stay on Copilot. See
   [Workers on other coding agents](docs/guide.md#workers-on-other-coding-agents).
 - **When an agent can't run:** a task you put on it is not moved elsewhere: the Router's card
-  offers sign-in help, waiting, or running it on Copilot. A worker whose plan's usage limit (or
+  offers sign-in help, waiting, or running it on Copilot (for work given to a worker you have
+  on it, *Continue with Copilot*, with that work). A worker whose plan's usage limit (or
   a rate limit) is reached mid-task pauses under *Needs you* with when it resets (*Go on at*
   that time, unless you've told it something since, or now), instead of failing or retrying. *Continue with* another agent (a worker's **⋯**, a paused task's, or "hand
   this to Claude") goes on from a summary in the same folders.
