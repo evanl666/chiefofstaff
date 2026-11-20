@@ -3149,13 +3149,23 @@ class Tools:
 
     async def t_report(self, params: Report, caller: str):
         row = self.caller(caller, WORKER, SLACK)
-        progress_answer = params.status == "progress" and self.answers_instruction(caller)
-        answer = params.status == "answer" or progress_answer
         task = (
             self.runtime.task_actions.report_task(caller, params.task_id)
             if row["role"] == WORKER
             else None
         )
+        # News a followed thread or a check-back brought is news on the task it is for, also
+        # said as an answer (live G2: a PR's CI failed after its task was accepted, told with
+        # status="answer", and the news never came under Needs you).
+        as_news = bool(
+            params.status == "answer"
+            and task
+            and (self.states[caller].thread_turn or self.checking_back(caller, task))
+        )
+        if as_news:
+            params = params.model_copy(update={"status": "progress"})
+        progress_answer = params.status == "progress" and self.answers_instruction(caller)
+        answer = params.status == "answer" or progress_answer
         split_note = ""
         if task and params.status == "done" and task["status"] != "cancelled":
             # Never the result of a task it is not: work apart from it (the worker says so, or
@@ -3650,6 +3660,11 @@ class Tools:
         self.states[caller].thread_turn = False  # It told the owner.
         if params.status == "progress" and not news and not progress_answer:
             where = "on the task's card and in your session" if task else "in your session"
+            if as_news and task:
+                return (
+                    f"Noted as news on task {task['id']}'s card: what a thread or check-back "
+                    "brings is news on its task, not an answer."
+                )
             return (
                 f"Noted {where}; the Router is not told of routine progress. To answer the "
                 'Router or the owner, use report(status="answer").'

@@ -4,11 +4,12 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from conftest import Harness, call_tool, settle
 from test_progress import step
 from test_round5_results import RESULT, commit, ended, published
 from test_round10_lifecycle import spawn, view
-from test_round12_checkbacks import idle, turn
+from test_round12_checkbacks import checking, idle, turn, woken
 
 from chiefofstaff.envelope import wrap
 from chiefofstaff.models import Settings
@@ -368,3 +369,101 @@ async def test_changed_code_after_a_result_is_not_taken_for_an_answer(tmp_path):
     assert answered.result_type == "success"
     await idle(runtime, session)
     assert "You changed files for task" in session.sent[-1]
+
+
+PR = "github:acme/app#7"
+
+
+async def accepted_with_news(runtime, harness, title: str):
+    """A worker that follows a PR for a task it reported and the owner accepted; the PR's CI
+    has just failed (live G2), and its turn on that news has begun."""
+    worker, task = await spawn(runtime, harness.router_id, title, follow=[PR])
+    session = harness.session(worker)
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="done", summary="Validate passes on #7.")
+    await idle(runtime, session)
+    runtime.task_actions.accept(task["id"])
+    await runtime.on_thread("github", PR, ["github:check:1"], "- CI on 03b9393: failed: validate")
+    await settle(runtime)
+    assert "failed: validate" in session.sent[-1]
+    await turn(runtime, session)
+    return worker, task, session
+
+
+@pytest.mark.parametrize("status", ["answer", "progress"])
+async def test_news_a_thread_brought_stays_in_sight_whatever_status_says_it(harness, status):
+    """Live G2 (r70): a followed PR's CI failed after its task was accepted; its worker said
+    so with status="answer" (the owner had asked to be told), which changed nothing on the
+    task: the news never came under Needs you. What a thread's news brings is news on the
+    task it is for, an answer or not."""
+    runtime = await harness.connect()
+    worker, task, _ = await accepted_with_news(runtime, harness, "Follow the CI of #7")
+    alerts = len(harness.notifications)
+
+    await call_tool(runtime, "report", worker, status=status, task_id=task["id"],
+                    summary="CI changed on #7: validate now fails on 03b9393.")  # fmt: skip
+    await settle(runtime)
+
+    shown = view(runtime, task["id"])
+    assert shown["status"] == "done"
+    assert shown["news"] and "validate now fails" in shown["news"]["text"]
+    assert shown["attention"] == "update"
+    told = [m for m in router_reports(harness) if "validate now fails" in m["text"]]
+    assert len(told) == 1 and told[0]["meta"]["task_id"] == task["id"]
+    assert len(harness.notifications) == alerts + 1, "one PR update"
+
+
+async def test_an_answer_on_a_thread_turn_is_news_on_a_result_to_review(harness):
+    runtime = await harness.connect()
+    worker, task = await spawn(runtime, harness.router_id, "Open the fix PR", follow=[PR])
+    session = harness.session(worker)
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="done", summary="Opened #7.")
+    await idle(runtime, session)
+    await runtime.on_thread("github", PR, ["github:review:1"], "bob approved #7")
+    await settle(runtime)
+    await turn(runtime, session)
+
+    await call_tool(runtime, "report", worker, status="answer", task_id=task["id"],
+                    summary="Bob approved #7.")  # fmt: skip
+
+    shown = view(runtime, task["id"])
+    assert (shown["status"], shown["result"]) == ("review", "Opened #7.")
+    assert shown["news"] and "Bob approved" in shown["news"]["text"]
+    assert len([m for m in router_reports(harness) if m["text"] == "Bob approved #7."]) == 1
+
+
+async def test_an_answer_on_a_thread_turn_is_progress_on_work_still_running(harness):
+    """At work still, a thread's news is its progress, on its card (its result comes with its
+    done report), as a progress report there is."""
+    runtime = await harness.connect()
+    worker, task = await spawn(runtime, harness.router_id, "Fix the CI of #7", follow=[PR])
+    session = harness.session(worker)
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="progress", summary="Pushed a fix.")
+    await idle(runtime, session)
+    await runtime.on_thread("github", PR, ["github:check:2"], "- CI on 1a2b3c4: failed: lint")
+    await settle(runtime)
+    await turn(runtime, session)
+    before = len(router_reports(harness))
+
+    reply = await call_tool(runtime, "report", worker, status="answer", task_id=task["id"],
+                            summary="Lint fails on 1a2b3c4.")  # fmt: skip
+
+    shown = view(runtime, task["id"])
+    assert (shown["status"], shown["progress"]) == ("running", "Lint fails on 1a2b3c4.")
+    assert shown["progress_updates"][0]["text"] == "Lint fails on 1a2b3c4."
+    assert len(router_reports(harness)) == before
+    assert "news on its task" in reply.text_result_for_llm
+
+
+async def test_an_answer_on_a_check_back_is_news_on_the_accepted_task(harness):
+    runtime, worker, a, _, session = await checking(harness, with_b=False)
+    await woken(runtime, session)
+
+    await call_tool(runtime, "report", worker, status="answer", task_id=a["id"],
+                    summary="The nightly export failed: the bucket is gone.")  # fmt: skip
+
+    shown = view(runtime, a["id"])
+    assert shown["status"] == "done"
+    assert shown["news"] and "bucket is gone" in shown["news"]["text"]
