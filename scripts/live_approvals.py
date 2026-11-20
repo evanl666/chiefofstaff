@@ -6,8 +6,8 @@
       you; Undo puts it back to accept, and it is not accepted again.
   A2  A worker commits a file in the configured project: read or not, its result keeps Accept.
   A3  The Router asks which folder a task works in, offering only the one configured project:
-      picked for the owner, no card; the Router starts the worker there. Change brings the card
-      back; choosing the same folder keeps it.
+      picked for the owner, no card; the Router starts the worker there (or gives it to the
+      worker it has there). Change brings the card back; choosing the same folder keeps it.
   A4  Your OK in the page: a lesson that is safe, one that is not, a learned check and a PR ready
       to merge are one card, a line each, counted once by the badge; Approve all safe keeps the
       safe lesson and uses the check, never the other lesson nor the merge.
@@ -55,13 +55,17 @@ async def said_to_router(app: App, text: str) -> tuple[str, int]:
 
 
 async def started_worker(app: App, router: str, mark: int) -> str:
+    """The worker the Router gave the task to: one it started, or one it had, as a new task
+    (r70: A3's went to A2's worker, in the same project, rightly)."""
+
     async def started():
         messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
         found = [m["meta"]["session_id"] for m in messages
-                 if m["kind"] == "notice" and m["text"].startswith("Started")]  # fmt: skip
+                 if m["kind"] == "notice" and m["meta"].get("session_id")
+                 and m["text"].startswith(("Started", "New task"))]  # fmt: skip
         return found[0] if found else None
 
-    return await wait_for("the Router starts a worker", started, 300, app)
+    return await wait_for("the Router gives a worker the task", started, 300, app)
 
 
 async def result_of(app: App, worker: str) -> dict:
@@ -151,7 +155,10 @@ async def scenario_folder(app: App, project: Path):
     assert not [d for d in drafts if d["kind"] == "workspace"], "no card"
     worker = await started_worker(app, router, mark)
     row = await app.get(f"/api/sessions/{worker}")
-    assert project.name in row["cwd"] or row.get("project") == str(project), row
+    folders = [row["cwd"], *(c["path"] for c in row.get("checkouts") or [])]
+    assert row.get("project") == str(project) or any(
+        project.name in folder for folder in filter(None, folders)
+    ), row
     messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
     lines = [m for m in messages if m["kind"] == "notice" and "the only project" in m["text"]]
     assert lines and lines[0]["meta"]["handled"]["undo"] == "Change", transcript(messages)
