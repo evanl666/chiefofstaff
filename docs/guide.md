@@ -344,7 +344,9 @@ servers (yours, your company's, and a repository's own `.mcp.json`), skills and 
 and their commands can use what yours can (your tools, keychain, Docker, other repositories). A
 worker in a worktree of a repository you trust in Copilot is trusted too, so that repository's
 MCP servers load there as well. If you use Copilot's own sandbox, workers follow your settings
-for it.
+for it. Copilot's extensions (its experimental mode) load for them too, but not while Chief of
+Staff runs Copilot's own version because your CLI is newer than it supports: that version can't
+run extensions, so workers there start without them.
 
 A repository's own Copilot settings load for a worker only as you last let them: their hooks and
 MCP and language servers (`.github/hooks/`, `.mcp.json`, `.github/mcp.json`, `.github/lsp.json`,
