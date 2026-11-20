@@ -8,6 +8,8 @@ F2  the same kind of task once that worker is free: it takes the task itself (no
 F3  every worker slot taken: the task waits for the busy worker, as before (no second worker)
 F4  the second worker answers what only the busy worker's conversation held (a codename it read
     from a file deleted since, and never told anyone)
+F5  a worker at work on its only task (not busy): related work the owner wants done in parallel
+    goes to a second worker with its context at once, not behind that turn
 
 Uses your signed-in Copilot CLI and consumes premium requests; the Copilot sessions it creates
 are deleted at the end.
@@ -104,9 +106,9 @@ class Run:
 
         await wait_for(f"it runs {command}", sleeping, timeout, self.app)
 
-    async def busy_worker(self, title: str, seconds: int) -> str:
+    async def at_work_alone(self, title: str, seconds: int) -> str:
         """A worker that read the secret file (and said nothing of it), now at work on a long
-        command with a second task waiting behind it: busy."""
+        command, its only task."""
         secret = self.root / f"secret-{title.split()[0].lower()}.txt"
         secret.write_text(f"The codename is {CODENAME}.\n")
         mark = await self.say(
@@ -124,6 +126,11 @@ class Run:
         )
         await self.notice(mark, "New task", "Started")
         await self.at_work(worker, f"sleep {seconds}")
+        return worker
+
+    async def busy_worker(self, title: str, seconds: int) -> str:
+        """at_work_alone, with a second task waiting behind its long command: busy."""
+        worker = await self.at_work_alone(title, seconds)
         mark = await self.say(
             f"Give the '{title}' worker one more task, for once it is free (that same worker): "
             "write 'two' into two.txt in its folder."
@@ -177,6 +184,31 @@ async def f2_a_free_worker_takes_its_related_task_itself(run: Run, worker: str):
     await run.finished(line["meta"]["task_id"])
 
 
+async def f5_work_wanted_in_parallel_goes_to_a_second_worker(run: Run):
+    worker = await run.at_work_alone("Night Owl", 150)
+    own = [t["id"] for t in await run.tasks(worker)]
+    mark = await run.say(
+        "Meanwhile, in parallel with what the Night Owl worker is doing: write the codename from "
+        "the file it read earlier into codename.txt."
+    )
+    line = await run.notice(mark, SECOND, "New task", "Started")
+    second = line["meta"]["session_id"]
+    run.check("F5 wanted in parallel: a second worker took it", line["text"].startswith(SECOND),
+              line["text"])  # fmt: skip
+    if second == worker:
+        for task_id in [*own, line["meta"]["task_id"]]:
+            await run.finished(task_id, 1200)
+        return
+    row = await run.session(second)
+    task = await run.finished(line["meta"]["task_id"])
+    written = Path(row["cwd"]) / "codename.txt"
+    said = written.read_text().strip() if written.exists() else ""
+    run.check("F5 with its context", CODENAME in said, said[:80])
+    run.check("F5 its task is done", task["status"] in FINISHED, task["status"])
+    for task_id in own:  # Its own work goes on, and ends before F3 takes every slot but one.
+        await run.finished(task_id)
+
+
 async def f3_no_free_slot_the_task_waits_for_the_busy_worker(run: Run):
     await run.app.post("/api/settings", {"max_workers": 1})
     worker = await run.busy_worker("Slot Keeper", 120)
@@ -200,6 +232,7 @@ async def main():
                 "fork_busy": True, "mac_notifications": False, "digest_time": ""})  # fmt: skip
             worker = await f1_f4_a_busy_worker_hands_a_related_task_to_a_second_worker(run)
             await f2_a_free_worker_takes_its_related_task_itself(run, worker)
+            await f5_work_wanted_in_parallel_goes_to_a_second_worker(run)
             await f3_no_free_slot_the_task_waits_for_the_busy_worker(run)
         except BaseException:
             router = (await app.get("/api/state"))["router_id"]
