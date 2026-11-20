@@ -4626,7 +4626,10 @@ async def life_seeded(runtime) -> dict:
     await idle(session)
     runtime.task_actions.accept(task["id"])
     check = json.loads(store.get(f"checkback:{task['id']}"))
-    check |= {"attempts": 3, "error": "Copilot is not running", "at": ago(minutes=1)}
+    # Its next try a few minutes ahead, as wake_check_backs sets it after a failure: one due now
+    # was tried again by the watch loop (each minute) when it ticked before the card was read,
+    # and, delivered, left no card.
+    check |= {"attempts": 3, "error": "Copilot is not running", "at": ago(minutes=-4)}
     store.set(f"checkback:{task['id']}", json.dumps(check))
     found["checked"] = task
 
