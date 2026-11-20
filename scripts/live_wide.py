@@ -2707,11 +2707,23 @@ async def e13_ci_passes_after_a_local_failure(ctx: Ctx):
         f"https://github.com/{APPROVE_REPO}/pull/1 as the PR this check is about.",
     )
     task = await titled(ctx, since, "")
-    done = await task_status(ctx, task["id"], FINISHED, "its report", 600)
-    log(f"E13: before {done['receipts']['tests']} {done['receipts']['flags']}")
-    assert done["receipts"]["tests"]["passed"] is False
-    set_check("success")
     label = f"{APPROVE_REPO}#1"
+    # Done as asked; or, when the PR's failing CI (set above) reached it before its report, it
+    # waits for CI or asks about it (f3): either way its local run failed.
+    reported = await task_status(ctx, task["id"], FINISHED | {"waiting"}, "its report", 600)
+    log(f"E13: {reported['status']}, before {reported['receipts']['tests']} "
+        f"{reported['receipts']['flags']}")  # fmt: skip
+    assert reported["receipts"]["tests"]["passed"] is False
+    set_check("success")
+    if reported["status"] == "waiting":
+        try:  # CI passing reaches it on the PR it follows.
+            await task_status(ctx, task["id"], FINISHED, "done once CI passes", 300)
+        except TimeoutError:  # Still asking: the owner answers its card, as they would.
+            log("E13: still waiting once CI passed: the owner answers it")
+            await ctx.app.post(f"/api/tasks/{task['id']}/follow-up", {
+                "text": f"The checks on {label} pass now. Report the task done."
+            })  # fmt: skip
+            await task_status(ctx, task["id"], FINISHED, "done once told CI passes", 600)
     receipts = await receipts_seen(ctx, task["id"], "CI's newer word", lambda r: any(
         "pass now" in flag for flag in r.get("flags", [])
     ), 480)  # fmt: skip
