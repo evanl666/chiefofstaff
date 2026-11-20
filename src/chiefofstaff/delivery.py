@@ -20,11 +20,10 @@ import os
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
-from . import agents
+from . import agents, compat
 from .backend import (
     COPILOT_AGENT,
     NotStartedError,
-    extensions_refused,
     running_background,
     stop_background,
     take_queued,
@@ -77,22 +76,22 @@ def reason(error: BaseException) -> str:
     return lines[0].strip().rstrip(".")[:300]
 
 
-def refused_for_extensions(error: BaseException | None) -> bool:
-    """Whether an error (or one it came from) is Copilot refusing to open a session for its
-    extensions (backend.EXTENSIONS_REFUSED)."""
+def refused_for_version(error: BaseException | None) -> bool:
+    """Whether an error (or one it came from) is Copilot refusing to open a session for a
+    version mismatch (compat.MISMATCHES: the extensions it asks for among them)."""
     for _ in range(10):  # A chain of causes, not a loop.
         if error is None:
             return False
-        if extensions_refused(error):
+        if compat.mismatch(error):
             return True
         error = error.__cause__ or error.__context__
     return False
 
 
 class FreshStartError(RuntimeError):
-    """A session Copilot refused to reopen for its extensions, which no fresh Copilot session
-    could go on for either (Runtime.continue_fresh): what it was sent waits for the owner's
-    Start fresh (Runtime.start_fresh). `fresh`: the session."""
+    """A session Copilot refused to reopen for a version mismatch (its extensions, say), which no
+    fresh Copilot session could go on for either (Runtime.continue_fresh): what it was sent
+    waits for the owner's Start fresh (Runtime.start_fresh). `fresh`: the session."""
 
     def __init__(self, text: str, session_id: str):
         super().__init__(text)
@@ -207,7 +206,7 @@ class Delivery:
                 # Kept to send: it goes out once Copilot runs again (Runtime.resume_working).
                 self.copilot_down(session_id)
                 return message
-            if agent == COPILOT_AGENT and refused_for_extensions(exc):
+            if agent == COPILOT_AGENT and refused_for_version(exc):
                 raise self.fresh_needed(row) from exc  # Kept for it, unlike any other.
             # Not replayed later: the caller sees the error (a watcher re-polls the event).
             self.store.update_message_meta(message["id"], meta or {})
@@ -244,7 +243,7 @@ class Delivery:
                 logger.warning("Could not deliver held messages to %s.", session_id, exc_info=True)
                 if self.copilot_gone(exc, backend, connection, agent):
                     self.copilot_down(session_id)  # Not Copilot's own output: it reconnects.
-                elif agent == COPILOT_AGENT and refused_for_extensions(exc):
+                elif agent == COPILOT_AGENT and refused_for_version(exc):
                     self.fresh_needed(row)
                     return  # Kept until the owner starts it fresh: tried again, it would fail.
                 elif attempt == 0:

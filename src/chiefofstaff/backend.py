@@ -290,9 +290,7 @@ def newer_protocol(error: BaseException | str) -> bool:
 # `/experimental on` leaves it): then each create and resume failed ("Failed to initialize
 # standalone session extensions: extensionSdkPath is required when standalone extensions are
 # requested"). The owner's own CLI brings both, and runs them.
-EXTENSIONS_REFUSED = re.compile(
-    r"Failed to initialize standalone session extensions?:", re.IGNORECASE
-)
+EXTENSIONS_REFUSED = compat.EXTENSIONS_REFUSED
 
 
 def extensions_refused(error: BaseException | str) -> bool:

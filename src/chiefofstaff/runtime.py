@@ -43,7 +43,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from . import agents, caches, prompts, settings_guard, threads, updates
+from . import agents, caches, compat, prompts, settings_guard, threads, updates
 from . import workspaces as workspaces_module
 from .abilities import Abilities
 from .asks import Asks
@@ -63,7 +63,6 @@ from .backend import (
     copilot_tree,
     copilot_trusts,
     end_processes,
-    extensions_refused,
     older,
     owner_tool_search,
     sandbox_supported,
@@ -193,12 +192,16 @@ def needs_trust(top: Path, cwd: Path) -> bool:
 # Copilot's own threshold for deferring MCP tools behind tool search (its SDK's default).
 COPILOT_DEFER_THRESHOLD = 30
 
-# A Copilot session that could not be resumed for the extensions it asks for (Runtime.
-# continue_fresh): what its worker shows meanwhile, and the line its timeline keeps.
+# A Copilot session that could not be resumed for a version mismatch (Runtime.continue_fresh):
+# what its worker shows meanwhile, and the line its timeline keeps (for the extensions it asks
+# for; for anything else of the old one this Copilot can't read).
 RECONNECTING = "Reconnecting this worker…"
 CONTINUED_FRESH = (
     "Continued in a fresh Copilot session: the old one used an extension setup this Copilot "
     "can't resume."
+)
+CONTINUED_AFRESH = (
+    "Continued in a fresh Copilot session: this Copilot version can't resume the old one."
 )
 
 PROMPTS = {
@@ -3740,7 +3743,7 @@ class Runtime:
                         "there, then try again.",
                         0,
                     ) from None
-                if agent == COPILOT_AGENT and extensions_refused(exc):
+                if agent == COPILOT_AGENT and compat.mismatch(exc):
                     return await self.continue_fresh(row, copilot_id, exc)
                 if not self.store.get(f"fresh:{copilot_id}"):
                     raise
@@ -3791,8 +3794,9 @@ class Runtime:
         return session
 
     async def continue_fresh(self, row: dict, old: str, error: BaseException):
-        """Its Copilot session could not be resumed for the extensions it asks for, even
-        declined (backend.EXTENSIONS_REFUSED): a fresh one goes on as the same Chief of Staff
+        """Its Copilot session could not be resumed for a version mismatch (compat.MISMATCHES:
+        the extensions it asks for, even declined; a method, a parameter or a session format
+        this Copilot doesn't know): a fresh one goes on as the same Chief of Staff
         session (its timeline, tasks and folders stay), told what it needs from Chief of Staff's
         records; what it was not given yet goes with that. Once: a fresh one failing so too is
         said as it is. The caller holds its lifecycle lock."""
@@ -3824,7 +3828,8 @@ class Runtime:
         else:
             preamble = self.continuation(row)
         self.store.set(f"preamble:{session_id}", preamble)
-        self.add_message(session_id, "notice", CONTINUED_FRESH)
+        other = compat.mismatch(error) not in ("", "extensions")
+        self.add_message(session_id, "notice", CONTINUED_AFRESH if other else CONTINUED_FRESH)
         return session
 
     async def start_fresh(self, session_id: str) -> str:

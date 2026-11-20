@@ -23,7 +23,9 @@ from test_runtime import FALLBACK_PATH, fake_copilot
 
 from chiefofstaff import backend as backend_module
 from chiefofstaff import compat
+from chiefofstaff.delivery import FreshStartError
 from chiefofstaff.models import Settings
+from chiefofstaff.runtime import CONTINUED_AFRESH, CONTINUED_FRESH
 
 needs_sh = pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shell script")
 
@@ -368,7 +370,8 @@ MISMATCHED = [
     ("missing parameter", "extensionSdkPath is required when standalone extensions are requested"),
     ("missing parameter", "Invalid params: missing field `workspaceRoot`"),
     ("extensions", "session.resume failed: Failed to initialize standalone session extensions: x"),
-    ("extensions", "No extension launch provider is registered for standalone extensions"),
+    ("extensions", "Failed to initialize standalone session extensions: No extension launch "
+                   "provider is registered for standalone extensions"),
     ("session format", "Legacy session import events are no longer supported; this session cannot "
                        "be resumed without losing imported legacy state"),
     ("session format", "unsupported checkpoint schema version"),
@@ -393,6 +396,68 @@ def test_a_newer_copilots_mismatch_errors_are_known_by_kind(kind, said):
 )
 def test_other_errors_are_the_sessions_own(said):
     assert compat.mismatch(said) == ""
+
+
+def refused_with(harness, said: str, *, ids: tuple[str, ...] = (), creating: bool = False):
+    """Copilot refusing to resume these sessions (and, `creating`, to create any) with `said`."""
+    resume, create = harness.client.resume_session, harness.client.create_session
+
+    async def resuming(session_id, **options):
+        if session_id in ids:
+            raise RuntimeError(f"JSON-RPC Error -32603: Request session.resume failed: {said}")
+        return await resume(session_id, **options)
+
+    async def refusing(**options):
+        raise RuntimeError(f"JSON-RPC Error -32603: Request session.create failed: {said}")
+
+    harness.client.resume_session = resuming
+    if creating:
+        harness.client.create_session = refusing
+    return create
+
+
+@pytest.mark.parametrize(("kind", "said"), [m for m in MISMATCHED if m[0] != "extensions"])
+async def test_a_session_a_newer_copilot_cant_resume_goes_on_fresh(tmp_path, kind, said):
+    """Any version mismatch resuming a session (not only its extensions: resume-compat's) is
+    met as one: a fresh Copilot session goes on for it, its timeline saying so in one line."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    router = harness.router_id
+    await runtime.detach(router)
+    old = runtime.copilot_id(router)
+    harness.store.delete(f"fresh:{old}")
+    refused_with(harness, said, ids=(old,))
+    try:
+        fresh = await runtime.session_for(router)
+        assert fresh.session_id != old and runtime.copilot_id(router) == fresh.session_id
+        notices = [m["text"] for m in harness.store.messages(router) if m["kind"] == "notice"]
+        assert CONTINUED_AFRESH in notices and CONTINUED_FRESH not in notices
+        assert not [m for m in harness.store.messages(router) if m["kind"] == "error"]
+    finally:
+        await runtime.stop()
+
+
+async def test_a_worker_no_session_of_this_copilot_opens_for_is_said_plainly(tmp_path):
+    """Resumed and created alike refused for a version mismatch: the owner's message is kept,
+    one plain line (no JSON-RPC) offers Start fresh, as for the extensions resume-compat met."""
+    from test_progress import spawn
+
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Retry the probe access")
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    await runtime.detach(worker)
+    old = runtime.copilot_id(worker)
+    refused_with(harness, "Unhandled method session.resume", ids=(old,), creating=True)
+    try:
+        with pytest.raises(FreshStartError) as raised:
+            await runtime.delivery.deliver(worker, "Yes, retry it", kind="owner", steer=True)
+        said = str(raised.value)
+        assert raised.value.fresh == worker and "JSON-RPC" not in said
+        assert "Unhandled" not in said and "kept" in said
+    finally:
+        await runtime.stop()
 
 
 def test_a_newer_copilots_events_are_taken_and_said_once(caplog):

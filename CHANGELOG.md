@@ -24,7 +24,10 @@
   that Chief of Staff speaks runs; with none, one line says why and what to do, with no traceback.
   Each time Copilot connects again, it is chosen again, so a CLI that updated itself meanwhile is
   probed afresh. Events of a newer Copilot this SDK can't read no longer fail: a session's whole
-  history failed to load for one.
+  history failed to load for one. And a session Copilot can't resume for a version mismatch of
+  any kind (a method or parameter it doesn't know, a session format it no longer reads) goes on
+  in a fresh Copilot session as for experimental mode's extensions above, never with Copilot's
+  error text.
 - For maintainers: a daily workflow (*Copilot compatibility*) starts the newest Copilot CLI with
   the SDK Chief of Staff ships, as Chief of Staff does (a handshake, a session created and
   resumed; no model call, no secret), and opens one `copilot-compat` issue when that SDK can't

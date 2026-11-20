@@ -334,20 +334,27 @@ def adapt(client: Any, protocol: int) -> None:
     client._negotiated_protocol_version = protocol
 
 
+# Copilot refusing a session the extensions it asks for: its own runtime (FALLBACK_CLI) runs
+# none (backend.CopilotBackend.opening declines them; with a path to an SDK but no launcher it
+# says "No extension launch provider is registered for standalone extensions" after the same).
+EXTENSIONS_REFUSED = re.compile(
+    r"Failed to initialize standalone session extensions?:", re.IGNORECASE
+)
+
 # Errors a newer (or older) Copilot gives a session it opens or resumes for something of the
 # SDK's or the session's it does not speak: a version mismatch, not the session's fault, met by
-# opening it afresh (Runtime.continue_fresh). Kind -> what Copilot says, each as it said it;
-# narrow on purpose: any other error is the session's own and said as it is.
+# opening it afresh (Runtime.continue_fresh; a create refused so is said in one plain line with
+# Start fresh: Delivery.fresh_needed). Kind -> what Copilot says, each as it said it; narrow on
+# purpose: any other error is the session's own and said as it is.
 MISMATCHES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("protocol", re.compile(
         r"SDK protocol version mismatch|SDK supports versions \d+-\d+, but server")),
     ("unknown method", re.compile(
         r"\bUnhandled method [\w.$/-]+|\bunknown method: [\w.$/-]+|\bMethod not found\b")),
+    # (Before "missing parameter": its refusal names one, extensionSdkPath.)
+    ("extensions", EXTENSIONS_REFUSED),
     ("missing parameter", re.compile(
         r"\bextensionSdkPath is required\b|\bInvalid params: missing field `\w+`")),
-    ("extensions", re.compile(
-        r"Failed to initialize standalone session extensions?:|No extension launch provider is "
-        r"registered for standalone extensions", re.IGNORECASE)),
     ("session format", re.compile(
         r"Legacy session import events are no longer supported|unsupported checkpoint schema "
         r"version")),
