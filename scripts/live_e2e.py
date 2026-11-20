@@ -1380,7 +1380,10 @@ async def scenario_learning(app: App):
                 (kind, context, proposed, owner, scope, agreed),
             )
     database.close()
-    before = {entry["id"] for entry in (await app.get("/api/state")).get("handled", [])}
+    state = await app.get("/api/state")
+    before = {entry["id"] for entry in state.get("handled", [])}
+    # Learning at start may have kept lessons at once already (E123, r70): count only new ones.
+    known = {lesson["id"] for lesson in state["learning"]["lessons"]}
     await app.post("/api/lessons/learn", {})
 
     async def proposed():
@@ -1411,7 +1414,8 @@ async def scenario_learning(app: App):
         keep = {lesson["id"]: lesson["text"] for lesson in lessons}
         await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "content": keep})
     learned = (await app.get("/api/state"))["learning"]
-    assert len(learned["lessons"]) == len(every) and learned["new_feedback"] == 0, learned
+    new = [lesson for lesson in learned["lessons"] if lesson["id"] not in known]
+    assert len(new) == len(every) and learned["new_feedback"] == 0, learned
     log(f"the owner kept {len(lessons)} lessons, {len(in_use)} kept at once; agreement "
         f"{learned['agreement']['now']}")  # fmt: skip
 
