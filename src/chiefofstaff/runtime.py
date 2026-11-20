@@ -5396,8 +5396,8 @@ class Runtime:
                 and instead
                 and instead["session_id"] != row["id"]
                 and instead["status"] in OPEN
+                and await self.forwarded_held_chat(message, named, instead)
             ):
-                await self.forward_held_chat(message, named, instead)
                 there = self.display_title(self.store.session(instead["session_id"]))
                 self.drop_held_owner_message(
                     message, "forwarded", f"Sent to “{there}”, which took over its task.",
@@ -5418,8 +5418,9 @@ class Runtime:
                 self.add_message(router, "notice", line, {"session_id": row["id"]})
         return said
 
-    async def forward_held_chat(self, message: dict, old: dict, new: dict):
-        """A held message the owner wrote about a task, to the worker of the task replacing it."""
+    async def forwarded_held_chat(self, message: dict, old: dict, new: dict) -> bool:
+        """A held message the owner wrote about a task, to the worker of the task replacing it;
+        False when it could not be (then it is dropped)."""
         meta = {
             key: value
             for key, value in message["meta"].items()
@@ -5432,14 +5433,19 @@ class Runtime:
             "it is about your task now.",
             task=new["id"],
         )
-        await self.delivery.deliver(
-            new["session_id"],
-            f"{message['meta']['prompt']}\n\n{context}",
-            kind="owner",
-            display=message["text"],
-            meta={**meta, "task_id": new["id"], "forwarded_from": message["id"]},
-            steer=True,
-        )
+        try:
+            await self.delivery.deliver(
+                new["session_id"],
+                f"{message['meta']['prompt']}\n\n{context}",
+                kind="owner",
+                display=message["text"],
+                meta={**meta, "task_id": new["id"], "forwarded_from": message["id"]},
+                steer=True,
+            )
+        except Exception:
+            logger.warning("Could not send %s on to %s.", message["id"], new["id"], exc_info=True)
+            return False
+        return True
 
     async def release_orphaned_settings_worker(self, session_id: str, ended: str = ""):
         """A worker held for its folder's settings with no open task left (cancelled, replaced,
@@ -5493,11 +5499,17 @@ class Runtime:
             self.settings_sigs.pop(row["id"], None)
             for key in (f"gitappeared:{row['id']}", f"gitwatch:{row['id']}"):
                 self.store.delete(key)
-            # A .git it replaced is what Chief of Staff's own git compares with from now on.
-            for path in await self.settings_thread(self.git_replaced, row):
-                self.git_record(path, identity_of(path) + self.git_served(path, identity_of(path)))
             self.settings_held.add(row["id"])
-            await self.settle_held_chat(row, closing=False)
+            try:
+                # A .git it replaced is what Chief of Staff's own git compares with from now on.
+                for path in await self.settings_thread(self.git_replaced, row):
+                    identity = identity_of(path)
+                    self.git_record(path, identity + self.git_served(path, identity))
+                await self.settle_held_chat(row, closing=False)
+            except Exception:
+                # (It stays held: tried again at the next start or sandbox change.)
+                logger.warning("Could not let %s go on.", row["id"], exc_info=True)
+                continue
             self.settings_unsaid(row["id"])  # (It goes on: settings_go_on.)
 
     def carried_theirs(self, row: dict, top: Path, now: dict[str, dict]):
