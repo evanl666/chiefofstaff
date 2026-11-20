@@ -96,6 +96,19 @@
   - **Handled for you**, one quiet line under *Needs you*, lists the last week's, with *Undo*
     (*Change*, *Turn on*, *Put back*) where it still means something.
   - The Watchdog leaves alone a worker waiting for your word on its folder's settings.
+- **Security: Windows is now covered too: a worker given your checkout only to read can't write
+  there with a command.** In 0.1.49 this check was on macOS and Linux only: on Windows (where
+  Copilot's shell is PowerShell, and Codex runs its commands in PowerShell or cmd) a command
+  line was not read for it, so `echo y >> README.md` or a test run there went through. Now such
+  lines are read as PowerShell and cmd read them. Reads go through (`Get-Content`, `dir`,
+  `Select-String`, `findstr`, `git status`…). A command that writes there (a redirection,
+  `Set-Content`, `Out-File`, `New-Item`, `Remove-Item`, `Move-Item`, `Copy-Item` to it, `del`,
+  `copy`, `robocopy`, git that changes files, an install, a build or a test run), and anything
+  else run there or naming it (a program or script it can't read, a method call such as
+  `.Delete()`, a path held in a variable), is refused, and the worker runs it in a copy of its
+  own, as on macOS and Linux. Paths count however Windows spells them: in any case, with `/` or
+  `\`, `\\?\`, `..` or a trailing dot. An edit there through its file tool to a `\\?\` path is
+  refused too. The check takes about 0.02 ms a command.
 
 ## 0.1.49 (2026-11-20)
 
