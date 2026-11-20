@@ -606,6 +606,83 @@ async def test_many_mcp_tools_are_searched_and_chief_of_staffs_own_stay_loaded(t
 
 TOOL_FACTS = {"tool_count", "tool_tokens", "tools_truncated", "prompt_tokens"}
 MANY_TOOLS = str(Path(__file__).resolve().parent.parent / "scripts" / "many_tools_mcp.py")
+EXTENSION = 'import { joinSession } from "@github/copilot-sdk/extension";\nawait joinSession({});\n'
+
+
+async def test_workers_open_and_resume_on_copilots_own_runtime_in_experimental_mode(
+    tmp_path, monkeypatch
+):
+    """The owner's Copilot in experimental mode ("experimental": true in its settings.json) has
+    extensions on, and a worker (config discovery) asks for them. Copilot 1.0.112, which runs
+    when the owner's CLI is newer than the SDK, runs none itself: it refused each create and
+    resume of 0.1.48 ("extensionSdkPath is required when standalone extensions are
+    requested"). A worker as it opens now is created and resumed on it, and so is a session the
+    owner's own (newer) CLI made and ran an extension in. A Copilot home of the test's own."""
+    if not REAL:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 to check the real Copilot backend.")
+    from conftest import Harness
+    from test_progress import spawn
+
+    from chiefofstaff.backend import FALLBACK_CLI, cli_version
+
+    home = tmp_path / "copilot-home"
+    (home / "extensions" / "probe").mkdir(parents=True)
+    (home / "extensions" / "probe" / "extension.mjs").write_text(EXTENSION)
+    (home / "settings.json").write_text('{"experimental": true}\n')
+    monkeypatch.setenv("COPILOT_HOME", str(home))
+    project = tmp_path / "project"
+    project.mkdir()
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Say ok")
+    options = runtime.options(harness.store.session(worker))
+    options |= {"model": MODEL, "working_directory": str(project)}
+    options.pop("sandbox_config", None)  # (The stand-in backend's: not Copilot's.)
+    assert options["enable_config_discovery"]
+    await runtime.stop()
+
+    async def on_fallback():
+        backend = copilot_backend("copilot")
+        backend.refused = backend.client  # As when the owner's CLI speaks a newer protocol.
+        await backend.start_fallback("a newer protocol", tried=False)
+        return backend
+
+    made, opened = str(uuid4()), []
+    copilot = shutil.which("copilot") or "copilot"
+    theirs = await cli_version(copilot)
+    if theirs and tuple(map(int, theirs.split("-")[0].split("."))) > (1, 0, 112):
+        # The owner's own CLI makes one (and runs the extension in it).
+        ran = await asyncio.to_thread(
+            subprocess.run,
+            [copilot, "-p", "Reply with just: ok", "--model", MODEL],
+            cwd=project, capture_output=True, text=True, timeout=300,
+        )  # fmt: skip
+        assert ran.returncode == 0, ran.stderr[-2000:]
+        opened = [path.name for path in (home / "session-state").glob("*-*-*-*-*")]
+        assert len(opened) == 1
+        logs = "".join(path.read_text() for path in (home / "logs").glob("*.log"))
+        assert "Installed 1 native extension(s)" in logs
+    backend = await on_fallback()
+    try:
+        assert backend.fallback and backend.fallback[1] == FALLBACK_CLI
+        session = await backend.create_session(session_id=made, name="contract test", **options)
+        turn = Turn(session)
+        await session.send("Reply with just: ok")
+        await turn.wait()
+        await session.disconnect()
+    finally:
+        await backend.stop()
+    backend = await on_fallback()  # Chief of Staff started again: its workers resume.
+    try:
+        for session_id in [made, *opened]:
+            resumed = await backend.resume_session(session_id, **options)
+            assert resumed.session_id == session_id
+            await resumed.disconnect()
+    finally:
+        for session_id in [made, *opened]:
+            with contextlib.suppress(Exception):
+                await backend.client.delete_session(session_id)
+        await backend.stop()
 
 
 async def test_copilots_base_profile_reads_what_chief_of_staff_leaves_out(tmp_path):
