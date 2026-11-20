@@ -3078,11 +3078,11 @@ class Tools:
     def answers_instruction(self, caller: str) -> bool:
         """Whether its turn answers the Router or the owner (bug E115: an older worker reports
         that answer as progress): the last instruction it has seen is the Router's note or
-        continue, or the owner's chat about a task. Not one still on its way, or sent into its
-        turn and not shown to it yet: what it reports is about the work before that. A retry's
-        note (last_instruction skips it) or a restart's resumes the turn it interrupted: that
-        turn's instruction still counts. A check-back, a thread's news or another wake brings
-        news of its own, not an answer."""
+        continue, or the owner's chat about a task, and it has not reported done (or failed)
+        since. Not one still on its way, or sent into its turn and not shown to it yet: what it
+        reports is about the work before that. A retry's note (last_instruction skips it) or a
+        restart's resumes the turn it interrupted: that turn's instruction still counts. A
+        check-back, a thread's news or another wake brings news of its own, not an answer."""
         state = self.states[caller]
         if state.thread_turn:
             return False
@@ -3098,6 +3098,12 @@ class Tools:
                 continue
             if asked["meta"].get("check_back"):
                 return False
+            if self.store.value(
+                "SELECT count(*) FROM messages WHERE session_id=? AND id>? AND kind='report' "
+                "AND json_extract(meta, '$.status') IN ('done', 'failed')",
+                (caller, found),
+            ):
+                return False  # It reported done (or failed) on it since: that is its answer.
             if asked["kind"] == "router":
                 return router_note(asked) or router_message(asked)
             return asked["kind"] == "owner" and bool(asked["meta"].get("chat"))
