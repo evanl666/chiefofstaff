@@ -526,6 +526,27 @@ async def test_budget_zero_runs_nothing_unasked_and_fix_it_is_charged(world):
     assert step["state"] == "running" and step["clicked"] == 1 and step["level"] == "prepare"
 
 
+@pytest.mark.parametrize("state", ["OPEN", "CLOSED"])
+async def test_a_pr_its_task_opened_is_kept_when_its_receipts_could_not_read_it(world, state):
+    """Live SY3 on 0.1.48: GitHub did not answer for a PR just opened as its task's result was
+    read, so its receipts had no PR, and nothing read it for them again: never kept moving.
+    The PR its task opened is claimed all the same, read for its author and state then."""
+    runtime = await world.start()
+    run_id = runtime.store.value("SELECT id FROM runs WHERE task_id=?", (world.task,))
+    runtime.store.execute(
+        "UPDATE runs SET evidence=? WHERE id=?", (json.dumps({"checkouts": [], "prs": []}), run_id)
+    )
+    runtime.store.execute("DELETE FROM pr_claims WHERE target=?", (TARGET,))  # (Unclaimed.)
+    world.github.state = state
+    await runtime.shepherd.claim_worker_prs()
+    claim = runtime.shepherd.control.claim(TARGET)
+    if state == "OPEN":
+        assert claim and claim["holder"] == world.task, claim
+    else:
+        assert not claim or claim["state"] == "ended"
+        assert runtime.store.get(f"noteligible:{TARGET}")
+
+
 async def test_your_message_stops_the_step_first(world):
     runtime = await claimed(world)
     await runtime.shepherd.fix_it(TARGET)
