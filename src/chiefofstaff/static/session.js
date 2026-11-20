@@ -654,7 +654,6 @@ function eventLine({ mark = "·", kind = "", text, time, view = null, viewText =
 // What a worker's report says, in a word: the report itself is on the task's card. Blocked, it
 // could not go on (not "Slack is blocked", which reads as if the connection broke).
 const REPORTED = {
-  answer: ["↩", "", "has an answer/update"],
   done: ["✓", "done", "finished"],
   question: ["?", "waiting", "has a question"],
   blocked: ["!", "waiting", "couldn't go on"],

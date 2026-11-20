@@ -194,6 +194,8 @@ async def elsewhere_now(checkout: dict, top: Path, ended: str, head: str, branch
 
 # A result this recent may have landed while the owner was cancelling the work.
 JUST_FINISHED_SECONDS = 60
+# The progress reports a task's card keeps: its latest, and those before it folded.
+PROGRESS_KEPT = 5
 
 
 def just_now(when: str | None) -> bool:
@@ -4326,25 +4328,21 @@ class TaskActions:
         }
 
     def progress_updates(self, task: dict) -> list[dict[str, str]]:
-        """The task's five newest progress reports, newest first.
-
-        Reports already live in messages, including reports from older databases, so the
-        history needs no second store. A task imported without those messages still exposes
-        its compatible `progress` value as its latest update.
-        """
+        """What its worker reported as progress on it lately, newest first, each with when (bug
+        E115: only the latest was kept): the five latest, one said again in the same words
+        once. Read from its reports, so a task from before this has its own too."""
         rows = self.store.all(
-            """SELECT text, created_at FROM messages
-            WHERE session_id=? AND kind='report'
-            AND json_extract(meta, '$.task_id')=?
-            AND json_extract(meta, '$.status')='progress'
-            AND length(trim(text)) > 0
-            ORDER BY id DESC LIMIT 5""",
+            """SELECT substr(text, 1, 6000) AS text, created_at FROM messages
+            WHERE session_id=? AND kind='report' AND json_extract(meta, '$.task_id')=?
+            AND json_extract(meta, '$.status')='progress' ORDER BY id DESC LIMIT 20""",
             (task["session_id"], task["id"]),
         )
-        updates = [{"text": row["text"], "at": row["created_at"]} for row in rows]
-        if not updates and task["status"] == "running" and task["progress"].strip():
-            updates.append({"text": task["progress"], "at": task["updated_at"]})
-        return updates
+        updates: list[dict[str, str]] = []
+        for row in rows:
+            text = row["text"].strip()
+            if text and not (updates and updates[-1]["text"] == text):
+                updates.append({"text": text, "at": row["created_at"]})
+        return updates[:PROGRESS_KEPT]
 
     def view(self, task: dict) -> dict:
         row = self.store.find_session(task["session_id"]) or {}
