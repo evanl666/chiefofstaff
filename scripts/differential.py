@@ -273,6 +273,12 @@ FIXES: list[Allow] = [
         r"first and check|A command the task itself asks you)|to run, a sleep included, is not "
         r"waiting: run it as asked\. Do everything else first and check)$",
     ),
+    # E123 (smooth by default): what was handled for the owner, the last week's (none here), in
+    # its own table; whether a result is a report only (accepted for the owner once read: its
+    # opened report says so, a row at rest does not).
+    Allow("Handled for you", data=r"/api/state\.handled$"),
+    Allow("the handled table", data=r"\.db\.(_schema\.)?handled$"),
+    Allow("tasks' report_only", data=r"\.tasks\[\d+\]\.report_only$"),
     # 0.1.48 (E111): follow_thread says what a PR merged or closed already brings.
     Allow(
         "follow_thread's description",

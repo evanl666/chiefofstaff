@@ -1641,6 +1641,8 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 /* Your OK's own Approve all safe is its one main action: a card opened in it acts quietly. */
 .ok-details .card :is(.actions, .choices) > :is(button, a.button):not(.more-button, .text, .link) { background: var(--hover); color: var(--text); }
 .ok-details .card :is(.actions, .choices) > :is(button, a.button):not(.more-button, .text, .link, :disabled):hover { background: var(--active); opacity: 1; }
+/* A report only, opened: when it is accepted for the owner (E123). */
+.report .settles { margin-top: 6px; font-size: var(--small); color: var(--muted); }
 /* Handled for you (E123): one quiet line under Needs you; open, what was settled for the owner. */
 details.handled { margin-top: 6px; font-size: var(--small); color: var(--muted); }
 details.handled > summary { cursor: pointer; list-style: none; display: flex; gap: 6px; align-items: center; min-height: 28px; width: fit-content; }
