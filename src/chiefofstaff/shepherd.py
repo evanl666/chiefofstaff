@@ -214,7 +214,8 @@ class Shepherd(Keeping, Steps):
         self.stepping: dict[str, str] = {
             key.removeprefix("step:"): value for key, value in self.store.items("step:").items()
         }
-        # What each running attempt spent so far, as its usage events came (the interrupt).
+        # What each running attempt spent so far, as its usage events came (the interrupt);
+        # none for one whose first model call is not reported yet.
         self.spent: dict[str, float] = {}
         # Each running attempt's tool calls since its frozen runs were asked for.
         self.seen: dict[str, list[integrity.Ran]] = {}

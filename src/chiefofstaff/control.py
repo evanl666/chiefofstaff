@@ -505,9 +505,9 @@ class Control:
         at Suggest, is not a fix); two per review thread; none for review comments (`said`,
         each thread's last) that a plan the owner decided on had already, unless they click. An
         attempt stopped for the owner's work (`again` in its evidence) counts for the day only,
-        and not at all if it had spent nothing yet ("unstarted")."""
+        and not at all if no model call of it was reported yet ("unstarted")."""
         tried = [step for step in self.steps(target) if step["started_at"] and step["kind"] == kind]
-        # One stopped for the owner's work before it spent anything never ran: no attempt.
+        # One stopped for the owner's work before its first model call never ran: no attempt.
         tried = [step for step in tried if (step["evidence"] or {}).get("again") != "unstarted"]
         if sum(1 for step in tried if step["day"] == today()) >= PER_DAY:
             return f"{PER_DAY} attempts today"
