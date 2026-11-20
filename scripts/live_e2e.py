@@ -519,12 +519,17 @@ async def scenario_delegate(app: App, workspace: Workspace):
     log(f"the owner reacted :robot_face: to Bob's request in #deploys (ts {request['ts']})")
 
     async def answered():
+        # Done by whichever worker the Router gave it: a new one, or the one already working in
+        # that project (r65, r66c: the Router gave it to the hello.txt worker, rightly).
         messages = await app.get(f"/api/sessions/{router}/messages?after={mark}")
-        for message in messages:
-            if message["kind"] == "notice" and message["text"].startswith("Started"):
-                worker = await app.get(f"/api/sessions/{message['meta']['session_id']}")
-                if (Path(worker["cwd"]) / "answer.txt").exists():
-                    return messages, worker
+        for session in (await app.get("/api/state"))["sessions"]:
+            if session["role"] != "worker":
+                continue
+            worker = await app.get(f"/api/sessions/{session['id']}")
+            folders = [worker["cwd"], *(c["path"] for c in worker.get("checkouts") or [])]
+            for folder in filter(None, folders):
+                if (Path(folder) / "answer.txt").exists():
+                    return messages, {**worker, "cwd": folder}
         return None
 
     messages, worker = await wait_for("a worker handles the delegated request", answered, 600, app)
