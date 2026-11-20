@@ -1210,6 +1210,8 @@ button.receipt.needs { background: var(--amber-soft); color: var(--amber); }
 .card.task .earlier-reports > summary:hover { color: var(--text); }
 .card.task .earlier-report { min-width: 0; margin: 4px 0 8px 5px; padding-left: 10px; border-left: 2px solid var(--line); }
 .card.task .earlier-report .body { font-size: var(--body); color: var(--soft); overflow-wrap: anywhere; }
+/* Earlier progress reads as quietly as the latest line above it. */
+.card.task .earlier-updates .earlier-report .body { font-size: var(--small); }
 .card.task .earlier-report .folded { max-height: 7.4em; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent); mask-image: linear-gradient(to bottom, #000 55%, transparent); }
 #panel .card.task:is(.done, .cancelled) { padding-top: 4px; padding-bottom: 4px; }
 .card.task:is(.done, .cancelled) .head { margin-bottom: 0; }

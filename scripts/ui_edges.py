@@ -5205,6 +5205,7 @@ async def round_qa8_report(runtime, browser, failures: list[str]):
             await expect(earlier).to_contain_text("Import update 2")
             await expect(earlier).not_to_contain_text("Import update 1")
             assert not await card.evaluate(OVERFLOWS), (width, scheme)
+            await card.scroll_into_view_if_needed()
             await page.screenshot(path=SHOTS / f"ui-edges-progress-{width}-{scheme}.png")
         await context.close()
     log("E115: latest progress is visible; four earlier updates are folded with their times")
