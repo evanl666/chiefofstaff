@@ -214,13 +214,14 @@ async def test_the_owners_stop_ends_the_attempt_and_its_turn(world):
     assert runtime.shepherd.control.open_step(TARGET) is None  # Stopped by you: not again.
 
 
-async def test_the_owners_queued_work_preempts_an_attempt(world):
+@pytest.mark.parametrize("spent", [2.5, 0.0])
+async def test_the_owners_queued_work_preempts_an_attempt(world, spent):
     runtime = await claimed(world, max_workers=1)
     await runtime.shepherd.fix_it(TARGET)
     await settle(runtime)
     step = runtime.shepherd.control.open_step(TARGET)
     assert step["state"] == "running"
-    runtime.shepherd.usage(world.worker, 2.5)  # It ran a model call.
+    runtime.shepherd.usage(world.worker, spent)  # It ran a model call (one may cost nothing).
     await call_tool(
         runtime, "spawn_worker", runtime.router_id(), title="Another", instructions="Do it."
     )
