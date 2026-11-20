@@ -13,6 +13,7 @@ from test_runtime import sdk_clients
 
 from chiefofstaff import backend as backend_module
 from chiefofstaff.backend import CopilotBackend, extensions_refused
+from chiefofstaff.delivery import FreshStartError
 from chiefofstaff.roles import ROUTER, WATCHDOG, WORKER
 from chiefofstaff.runtime import CONTINUED_FRESH, RECONNECTING
 
@@ -230,3 +231,51 @@ async def test_the_owners_answer_reaches_the_fresh_worker_once_and_its_question_
     assert not runtime.asks.session_questions(worker)
     errors = [m for m in harness.store.messages(worker) if m["kind"] == "error"]
     assert not errors
+
+
+@pytest.mark.parametrize("asked", [True, False])
+async def test_with_no_fresh_session_either_the_message_waits_for_the_owners_start_fresh(
+    tmp_path, asked
+):
+    """Copilot refusing the fresh session too: one plain sentence (no JSON-RPC), said once,
+    with Start a fresh worker; what the owner sent is kept, and goes once it is started (a
+    worker waiting on the owner's answer, or one at work)."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Retry the probe access")
+    if asked:
+        await call_tool(runtime, "report", worker, status="question", summary="Retry it now?")
+    harness.session(worker).emit("session.idle")
+    await settle(runtime)
+    await runtime.detach(worker)
+    old = runtime.copilot_id(worker)
+    refuse(harness, old)
+    create = harness.client.create_session
+
+    async def refusing(**options):
+        raise RuntimeError(REFUSED.replace("session.resume", "session.create"))
+
+    harness.client.create_session = refusing
+    with pytest.raises(FreshStartError) as raised:
+        await runtime.delivery.deliver(worker, "Yes, retry it", kind="owner", steer=True)
+    said = str(raised.value)
+    assert raised.value.fresh == worker and "JSON-RPC" not in said and "extension" not in said
+    with pytest.raises(FreshStartError):
+        await runtime.delivery.deliver(worker, "And report", kind="owner", steer=True)
+    errors = [m for m in harness.store.messages(worker) if m["kind"] == "error"]
+    assert [(m["text"], m["meta"].get("fresh")) for m in errors] == [(said, True)], "once"
+    assert runtime.copilot_id(worker) == old
+
+    harness.client.create_session = create
+    assert await runtime.start_fresh(worker) == "Started a fresh worker with its context."
+    await settle(runtime)
+
+    new = runtime.copilot_id(worker)
+    assert new != old
+    sent = harness.client.sessions[new].sent
+    for text in ("Yes, retry it", "And report"):
+        assert sum(item.count(text) for item in sent) == 1, text
+    [line] = [m for m in harness.store.messages(worker) if m["kind"] == "error"]
+    assert line["meta"]["resolved"]
+    notices = [m["text"] for m in harness.store.messages(worker) if m["kind"] == "notice"]
+    assert notices.count(CONTINUED_FRESH) == 1

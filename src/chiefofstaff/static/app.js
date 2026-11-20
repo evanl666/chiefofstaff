@@ -1,6 +1,6 @@
 // Chief of Staff's web UI: starts the page and wires its controls.
 
-import { $, api, closeMenus, closeOnBackdrop, rememberKey, submits, toast } from "./dom.js";
+import { $, api, closeMenus, closeOnBackdrop, FRESH_START, rememberKey, startFresh, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, othersOn, routerId, state, viewedId } from "./state.js";
 import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
 import { appendMessages, chatAnchor, followAnchor, renderHeader, scrolledByOwner, scrollToBottom, select } from "./session.js";
@@ -81,6 +81,11 @@ function bindUi() {
       appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body(task ? { task_id: task } : {}) })]);
     } catch (error) {
       if (other) input.disabled = false;
+      if (error.fresh) {
+        // Kept for its worker (its Copilot session can't be reopened): not to be sent twice.
+        toast(error.message, "error", null, { text: FRESH_START, onclick: () => startFresh(error.fresh) });
+        return;
+      }
       input.value = text;
       restoreAttachments(files);
       autosize();

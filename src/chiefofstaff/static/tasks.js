@@ -1,6 +1,6 @@
 // Task cards on Home: what runs and what it does now, what waits, what is finished.
 
-import { api, el, foldable, moreMenu, once, submits, toast } from "./dom.js";
+import { api, el, foldable, FRESH_START, freshButton, moreMenu, once, startFresh, submits, toast } from "./dom.js";
 import { monitorParts, obligationsOf, PR_TO_FIX, SECTION_DOT, statusWord, taskPhase, workerContext } from "./board.js";
 import { ago, changesText, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel, uncheckedText } from "./text.js";
 import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, toneOf } from "./artifacts.js";
@@ -449,8 +449,9 @@ function taskCard(task, phase = phaseOf(task)) {
       error.textContent = failure.message;
       // What the owner may do all the same, having read why not: one button after it.
       if (failure.anyway) error.append(" ", el("button", { type: "button", class: "link", text: failure.anyway, onclick: () => act(path, { ...payload, anyway: true }, done, moves, sends) }));
+      if (failure.fresh) error.append(" ", freshButton(failure.fresh, loadState));
       // In a toast too (bug E91: inline only, easily missed at the end of a long card).
-      toast(failure.message, "error");
+      toast(failure.message, "error", null, failure.fresh ? { text: FRESH_START, onclick: () => startFresh(failure.fresh, loadState) } : null);
       for (const button of actions.querySelectorAll("button")) button.disabled = false;
       renderSidebar();
       scheduleHome();

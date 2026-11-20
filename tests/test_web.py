@@ -320,6 +320,40 @@ def test_a_pr_that_may_miss_work_says_so_and_opens_on_the_owners_word(app_client
     assert asked == [False, True]
 
 
+def test_the_page_hears_which_session_to_start_fresh_and_the_owner_starts_it(
+    app_client, monkeypatch
+):
+    """A session Copilot can't reopen: the page hears which, for its Start fresh button, and
+    the owner's click starts it."""
+    from chiefofstaff import delivery
+
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    started = []
+
+    async def answer_question(question_id, text):
+        raise delivery.FreshStartError("This worker's Copilot session can't be reopened.", "w1")
+
+    async def start_fresh(session_id):
+        started.append(session_id)
+        return "Started a fresh worker with its context."
+
+    monkeypatch.setattr(runtime.task_actions, "answer_question", answer_question)
+    monkeypatch.setattr(runtime, "start_fresh", start_fresh)
+    router = app_client.get("/api/state").json()["router_id"]
+    refused = app_client.post(
+        f"/api/questions/{router}:q/answer", json={"text": "Yes"}, headers=ORIGIN
+    )
+    assert refused.status_code == 409
+    assert refused.json() == {
+        "detail": "This worker's Copilot session can't be reopened.",
+        "fresh": "w1",
+    }
+    done = app_client.post("/api/sessions/w1/fresh", headers=ORIGIN)
+    assert done.json() == {"ok": True, "said": "Started a fresh worker with its context."}
+    assert started == ["w1"]
+
+
 def test_the_owner_requests_changes_and_sees_where_a_message_stands(app_client):
     sign_in(app_client)
     runtime = app_client.app.state.runtime

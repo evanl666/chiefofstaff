@@ -1,8 +1,8 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
-import { $, api, blobLive, blobUrl, el, foldable, toast, whenNearScreen } from "./dom.js";
+import { $, api, blobLive, blobUrl, el, foldable, freshButton, toast, whenNearScreen } from "./dom.js";
 import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, shorten, slackText, threadLabel } from "./text.js";
-import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, routerId, state, STATUS_TEXT, tasks, uncertainDrafts, upsertSession, viewedId, workerTitle } from "./state.js";
+import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, RECONNECTING, routerId, state, STATUS_TEXT, tasks, uncertainDrafts, upsertSession, viewedId, workerTitle } from "./state.js";
 import { MARKERS } from "./board.js";
 import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
@@ -69,7 +69,7 @@ export function renderHeader() {
     const where = (found?.dot || "idle").split(" ")[0];
     // Its turn over while a command it left running goes on: said, not "Running" alone.
     const background = session.background && session.status !== "working" ? "waiting for background process" : "";
-    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], found?.sub || background, session.status === "queued" ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
+    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], found?.sub || background, session.status === "queued" || session.activity === RECONNECTING ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
     if (session.elsewhere) {
       // What it does in the terminal, read from its log; Chief of Staff does not drive it now.
       const terminal = session.terminal || {};
@@ -870,6 +870,7 @@ function renderMessage(original) {
     }
     case "error":
       // Sent after all (on a retry, or once Copilot was back): no longer an error.
+      if (meta.fresh && !meta.resolved) return el("div", { class: "line error", title: clock(time) }, el("span", { text: message.text }), " ", freshButton(message.session_id));
       return el("div", { class: meta.resolved ? "line note" : "line error", text: message.text, title: clock(time) });
     default:
       return el("div", { class: "line", text: message.text, title: clock(time) });
@@ -1114,6 +1115,11 @@ export function updateWorkingLine() {
   const session = byId(viewedId());
   // Its turn is over, but a command it left running (a dev server) goes on: not thinking.
   const background = session?.background && session.status !== "working";
+  if (session?.activity === RECONNECTING) {
+    timeline.append(el("div", { class: "working-line" }, duck("working"), el("span", { text: RECONNECTING })));
+    scrollToBottom();
+    return;
+  }
   if (session?.status !== "working" && !background) return;
   timeline.append(
     el(

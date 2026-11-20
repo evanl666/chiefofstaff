@@ -1,6 +1,6 @@
 // Home: the conversation with the Router, and beside it what needs the owner and every task.
 
-import { $, api, checkTip, el, keepingFocus, moreMenu, once, reconcile, submits, toast, watchPanel } from "./dom.js";
+import { $, api, checkTip, el, freshButton, keepingFocus, moreMenu, once, reconcile, submits, toast, watchPanel } from "./dom.js";
 import { clock, markdown, shortPath, slackText } from "./text.js";
 import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, ownerUpdates, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
 import { boardOf, followingUp, workerSection } from "./board.js";
@@ -455,6 +455,8 @@ function questionCard(question) {
       state.leaving.delete(key);
       node.classList.remove("leaving");
       error.textContent = failure.message;
+      // Its worker's Copilot session can't be reopened: the answer is kept for a fresh one.
+      if (failure.fresh) error.append(" ", freshButton(failure.fresh, loadState));
       for (const button of actions.querySelectorAll("button")) button.disabled = false;
       scheduleHome();
     }

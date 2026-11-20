@@ -133,8 +133,9 @@ export async function api(path, { method = "GET", body } = {}) {
   if (!response.ok) {
     // With the fields it is about, for a form to show them.
     const fields = Array.isArray(data.detail) ? data.detail.map(fieldName).filter(Boolean) : [];
-    // `anyway`: the words of what the owner may do anyway (open the PR all the same).
-    throw Object.assign(new Error(errorText(data, response.status)), { fields, anyway: data.anyway || "" });
+    // `anyway`: the words of what the owner may do anyway (open the PR all the same). `fresh`:
+    // a session Copilot can't reopen, which a fresh one can go on for (freshButton).
+    throw Object.assign(new Error(errorText(data, response.status)), { fields, anyway: data.anyway || "", fresh: data.fresh || "" });
   }
   return data;
 }
@@ -342,6 +343,27 @@ export function keepingFocus(change) {
 export const submits = (event) => event.key === "Enter" && !event.isComposing && event.keyCode !== 229;
 export function escapeHtml(text) {
   return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+export const FRESH_START = "Start a fresh worker with its context";
+// A session Copilot can't reopen (its extensions): a fresh one goes on for it, with what it was
+// kept; `done` once it has.
+export function freshButton(sessionId, done = () => {}) {
+  const button = el("button", { type: "button", class: "link", text: FRESH_START, onclick: (event) => {
+    event.stopPropagation();
+    startFresh(sessionId, done, button);
+  } });
+  return button;
+}
+export async function startFresh(sessionId, done = () => {}, button = null) {
+  if (button) button.disabled = true;
+  try {
+    const { said } = await api(`/api/sessions/${encodeURIComponent(sessionId)}/fresh`, { method: "POST" });
+    toast(said);
+    await done();
+  } catch (error) {
+    if (button) button.disabled = false;
+    toast(error.message, "error");
+  }
 }
 // `action`: { text, onclick }, a button in it (Undo), and a little longer to reach it.
 export function toast(text, kind = "", sessionId = null, action = null) {
