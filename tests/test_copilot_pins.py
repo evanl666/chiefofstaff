@@ -67,6 +67,9 @@ def machine(tmp_path, monkeypatch):
         "CHIEFOFSTAFF_WORKER_MCP",
         "CHIEFOFSTAFF_WORKER_HOOKS",
         "CHIEFOFSTAFF_ROUTER_CONTEXT",
+        # Where uv keeps its Pythons and tools (setup-uv 10 sets the first on CI runners).
+        "UV_PYTHON_INSTALL_DIR",
+        "UV_TOOL_DIR",
         *workspaces_module.MOVED_CACHES,
         *workspaces_module.MOVED_SECRETS,
         *caches_module.TOOL_HOMES,

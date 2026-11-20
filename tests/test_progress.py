@@ -1214,6 +1214,8 @@ async def test_a_slack_reader_reads_no_cache_where_a_tool_folder_on_path_holds_o
 MOVED = (
     *("UV_CACHE_DIR", "XDG_CACHE_HOME", "GRADLE_USER_HOME", "CARGO_HOME", "GOPATH"),
     *("NPM_CONFIG_USERCONFIG", "npm_config_userconfig", "npm_config_cache", "PIP_CONFIG_FILE"),
+    # Where uv keeps its Pythons and tools (setup-uv 10 sets the first on CI runners).
+    *("UV_PYTHON_INSTALL_DIR", "UV_TOOL_DIR"),
 )
 
 
