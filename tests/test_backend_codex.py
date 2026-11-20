@@ -555,6 +555,39 @@ async def test_codex_settings_a_worker_changed_are_not_loaded(tmp_path, monkeypa
         await runtime.stop()
 
 
+@pytest.mark.parametrize("sandboxed", [True, False])
+async def test_a_codex_worker_whose_codex_settings_changed_is_not_handed_to_a_terminal(
+    tmp_path, monkeypatch, sandboxed
+):
+    """`codex resume` in the owner's terminal would load its folder's `.codex/` as it is, with
+    no check of Chief of Staff's: not, for a sandboxed worker, while it differs from what the
+    owner last let workers use; the line, with Use these settings, is in its timeline. Without
+    the sandbox (the default) its commands ran as the owner: handed over as it is."""
+    main, wt, base = trusted_worktree(tmp_path, monkeypatch)
+    harness, runtime = await brief(tmp_path, monkeypatch, SANDBOXED if sandboxed else None)
+    try:
+        handed(harness, runtime, main, wt, base)
+        harness.store.set("agent:w1", "codex")
+        harness.store.set("copilot:w1", "thread-1")
+        (wt / ".codex" / "config.toml").write_text('model = "planted-model"\n')
+        if not sandboxed:
+            assert (await runtime.terminal_command("w1"))["agent"] == "codex"
+            assert settings_lines(harness) == []
+            return
+        refused = (
+            "Codex settings in this folder changed (changed .codex/config.toml): Codex would load "
+            "them in your terminal. Look at them, then Use these settings here first."
+        )
+        with pytest.raises(ValueError, match=re.escape(refused)):
+            await runtime.terminal_command("w1")
+        (said,) = settings_lines(harness)
+        assert said["text"] == refused
+        await runtime.accept_settings("w1", said["meta"]["agent_settings"]["digest"])
+        assert (await runtime.terminal_command("w1"))["agent"] == "codex"
+    finally:
+        await runtime.stop()
+
+
 async def test_codex_settings_without_the_sandbox_are_trusted_as_the_owners_own(
     tmp_path, monkeypatch
 ):

@@ -17,8 +17,10 @@ Codex and Claude can do what Copilot workers can.
   other Claude sessions are tied into Chief of Staff's checks, receipts and timeline (*Stop*
   holds what a worker scheduled, and *Cancel* deletes it in Claude too; in plan mode it writes
   only its plan until that is approved; another session's message is marked unverified); Claude's
-  own settings in a worker's folder (`.claude/settings.json`, `.mcp.json`, subagents, the
-  scripts their hooks run) are held as Copilot's are, with *Use these settings* when they change,
+  own settings in a sandboxed worker's folder (`.claude/settings.json`, `.mcp.json`, subagents,
+  the scripts their hooks run, which Claude runs outside its sandbox) are held as Copilot's are,
+  with *Use these settings* when they change (with the sandbox off, the default, its commands
+  run as you: they neither hold a worker nor are checked, at no cost per turn),
   and a sandboxed worker's commands use workers' own caches and runs no hooks (Claude runs them
   outside its sandbox, and turns off all or none); a worktree Claude would make in your own
   checkout is made in the worker's folder instead; a worker's process updates nothing of

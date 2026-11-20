@@ -563,7 +563,7 @@ class Events:
         ):
             # A turn Copilot started from its own queue, one Claude started itself (a schedule,
             # a command's end), any other: stopped at once if its folder's agent settings
-            # changed meanwhile (Runtime.settings_refusal).
+            # changed meanwhile (Runtime.settings_refusal; Claude's: sandboxed only).
             self.runtime.background(self.runtime.settings_backstop(row["id"]))
 
     def subagent_started(self, row: dict, event: Any):

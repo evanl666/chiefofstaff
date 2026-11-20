@@ -136,16 +136,19 @@ Settings → *Coding agents*). For such a worker:
   Claude's `.claude/` and `.mcp.json`) load only where you trust its folder in that agent; a
   worktree is trusted as its repository is. Elsewhere none of them loads, and its `AGENTS.md` or
   `CLAUDE.md` reaches the worker as text only: a message marked as the repository's, never in
-  Chief of Staff's instructions, with any tag in it escaped. Claude's own settings in a worker's
-  folder (`.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, `.claude/agents/`,
-  with the scripts their hooks run: hooks, `apiKeyHelper`, MCP servers and subagents Claude would
-  load as its process starts there) are held as Copilot's are: kept by Chief of Staff as it hands
-  the folder out, and read again before each start, each turn (one Claude starts itself too) and
-  each subagent. One that differs keeps the worker from starting, and from going to a terminal,
-  until you click *Use these settings* on the line its timeline shows; what an MCP server there
-  runs changed turns that server off for the worker instead (Claude's `disabledMcpjsonServers`).
-  Workers' edits to them are refused; with the sandbox on, its commands can't change them in
-  your checkout, nor the scripts their hooks run anywhere. A message from another Claude
+  Chief of Staff's instructions, with any tag in it escaped. For a sandboxed Claude worker,
+  Claude's own settings in its folder (`.claude/settings.json`, `.claude/settings.local.json`,
+  `.mcp.json`, `.claude/agents/`, with the scripts their hooks run: hooks, `apiKeyHelper`, MCP
+  servers and subagents Claude would load as its process starts there, and whose hooks and
+  servers it runs outside its sandbox) are held as Copilot's are: kept by Chief of Staff as it
+  hands the folder out, and read again before each start, each turn (one Claude starts itself
+  too) and each subagent. One that differs keeps the worker from starting, and from going to a
+  terminal, until you click *Use these settings* on the line its timeline shows; what an MCP
+  server there runs changed turns that server off for the worker instead (Claude's
+  `disabledMcpjsonServers`). With the sandbox off (the default) a worker's commands run as you
+  and could do what those settings do: they neither hold it nor are looked at (no wait, no
+  cost per turn). Workers' edits to them are refused; with the sandbox on, its commands can't
+  change them in your checkout, nor the scripts their hooks run anywhere. A message from another Claude
   session is shown with the name it gives itself, marked unverified (Claude does not pass on who
   sent it, and any process of yours can give any name), never as yours or a worker's, can approve
   nothing, and starts a turn only if Chief of Staff admits it; messages between Chief of Staff's own workers go through it, with

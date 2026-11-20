@@ -969,15 +969,21 @@ async def test_a_claude_worker_with_schedules_is_not_handed_to_a_terminal_and_no
         await runtime.stop()
 
 
-async def claude_in_worktree(tmp_path, settings=None, instructions="Report done: made"):
-    """A Claude worker in a worktree Chief of Staff made of a project, done with its task."""
+async def claude_in_worktree(
+    tmp_path, settings=None, instructions="Report done: made", sandboxed=False
+):
+    """A Claude worker in a worktree Chief of Staff made of a project, done with its task
+    (`sandboxed`: its commands in the worker sandbox, its version's check having shown it
+    holding)."""
     from test_round7_split import published
 
     app = published(tmp_path, "app")
-    harness, runtime = await started(
-        tmp_path, (settings or Settings()).model_copy(update={"projects": [str(app)]})
-    )
+    update = {"projects": [str(app)], **({"worker_sandbox": True} if sandboxed else {})}
+    harness, runtime = await started(tmp_path, (settings or Settings()).model_copy(update=update))
     await saved(runtime, {"claude": {"enabled": True}})
+    if sandboxed:
+        runtime.sandbox_host = True
+        await runtime.connect_agent("claude")  # (Its version's check: its sandbox holds.)
     result = await spawn_on(
         harness, runtime, title="Feature", agent="claude", project=str(app), isolate=True,
         instructions=instructions,
@@ -987,16 +993,25 @@ async def claude_in_worktree(tmp_path, settings=None, instructions="Report done:
     return harness, runtime, worker, Path(harness.store.session(worker)["cwd"])
 
 
+@pytest.fixture
+def sandbox_holds(monkeypatch):
+    """Claude's version's check shows its sandbox holding: its workers may run sandboxed."""
+    monkeypatch.setitem(PASSED, "sandbox", "")
+
+
+@pytest.mark.usefixtures("sandbox_holds")
 async def test_claude_settings_changed_in_a_workers_folder_wait_for_the_owner_to_use_them(
     tmp_path, claude_on_path
 ):
     """Claude loads a folder's own settings (hooks, apiKeyHelper, MCP servers, subagents) as
-    its process starts there, a worker's resumed or the owner's own in a terminal: one a
-    command wrote (its own folder's are not held by its sandbox) waits, as a Copilot worker's
-    does, until the owner clicks Use these settings on the line its timeline shows; nor is it
-    handed to a terminal meanwhile."""
-    harness, runtime, worker, cwd = await claude_in_worktree(tmp_path)
+    its process starts there, a worker's resumed or the owner's own in a terminal, and runs
+    their hooks and servers outside its sandbox: for a sandboxed worker, one a command wrote
+    (its own folder's are not held by its sandbox) waits, as a Copilot worker's does, until
+    the owner clicks Use these settings on the line its timeline shows; nor is it handed to a
+    terminal meanwhile."""
+    harness, runtime, worker, cwd = await claude_in_worktree(tmp_path, sandboxed=True)
     try:
+        assert runtime.sandboxed(harness.store.session(worker))
         (cwd / ".mcp.json").write_text('{"mcpServers": {"x": {"command": "true"}}}')
         reason = "Claude settings in this folder changed (added .mcp.json)"
         handover = (
@@ -1030,12 +1045,14 @@ async def test_claude_settings_changed_in_a_workers_folder_wait_for_the_owner_to
         await runtime.stop()
 
 
+@pytest.mark.usefixtures("sandbox_holds")
 async def test_a_claude_worker_whose_subagent_settings_changed_mid_turn_is_stopped_first(
     tmp_path, claude_on_path
 ):
-    """A subagent's definition (.claude/agents) loads as the subagent starts: its folder's
-    settings are looked at before Claude runs one, and a change stops the worker there."""
-    harness, runtime, worker, cwd = await claude_in_worktree(tmp_path)
+    """A subagent's definition (.claude/agents) loads as the subagent starts: a sandboxed
+    worker's folder's settings are looked at before Claude runs one, and a change stops the
+    worker there."""
+    harness, runtime, worker, cwd = await claude_in_worktree(tmp_path, sandboxed=True)
     try:
         (cwd / ".claude" / "agents").mkdir(parents=True)
         (cwd / ".claude" / "agents" / "helper.md").write_text("---\nname: helper\n---\nHi\n")
@@ -1048,12 +1065,14 @@ async def test_a_claude_worker_whose_subagent_settings_changed_mid_turn_is_stopp
         await runtime.stop()
 
 
+@pytest.mark.usefixtures("sandbox_holds")
 async def test_a_claude_workers_changed_mcp_server_is_off_for_it_not_a_wait(
     tmp_path, claude_on_path, monkeypatch
 ):
-    """As for a Copilot worker: what its folder's MCP server runs (a repository developing its
-    own server) stays the worker's to build and edit; changed, that server is off for it from
-    its next process (Claude's disabledMcpjsonServers), said once, never a wait."""
+    """As for a Copilot worker: what a sandboxed worker's folder's MCP server runs (a
+    repository developing its own server) stays the worker's to build and edit; changed, that
+    server is off for it from its next process (Claude's disabledMcpjsonServers), said once,
+    never a wait."""
     from test_round7_split import published
 
     starts = tmp_path / "starts.jsonl"
@@ -1070,15 +1089,18 @@ async def test_a_claude_workers_changed_mcp_server_is_off_for_it_not_a_wait(
         ["push", "-q", "origin", "main"],
     ):
         await asyncio.to_thread(subprocess.run, ["git", *arguments], cwd=app, check=True)
-    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)], worker_sandbox=True))
+    runtime.sandbox_host = True
     try:
         await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")  # (Its version's check: its sandbox holds.)
         result = await spawn_on(
             harness, runtime, title="Server", agent="claude", project=str(app), isolate=True,
             instructions="Report done: made",
         )  # fmt: skip
         worker = result["session_id"]
         await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        assert runtime.sandboxed(harness.store.session(worker))
         cwd = Path(harness.store.session(worker)["cwd"])
         (cwd / "tools" / "serve.py").write_text("print('serving better')\n")
         await runtime.owner_send(worker, "Report done: again")
@@ -1088,6 +1110,105 @@ async def test_a_claude_workers_changed_mcp_server_is_off_for_it_not_a_wait(
         line = "Its MCP server x changed in this worker's folder, so it runs without it."
         assert ("notice", line) in harness.kinds(worker)
         assert worker not in runtime.settings_held, "never a wait"
+    finally:
+        await runtime.stop()
+
+
+async def test_an_unsandboxed_claude_worker_is_never_held_for_its_folders_settings(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """The worker sandbox off (the default), its commands run as the owner and could do what
+    its folder's Claude settings would: Chief of Staff neither holds it for them nor looks at
+    them (as its turns and subagents start, before its turns), and hands it to a terminal (the
+    owner's choice: no wait for their word, no cost per turn)."""
+    harness, runtime, worker, cwd = await claude_in_worktree(tmp_path)
+    looked = []
+
+    def counting(name: str):
+        real = getattr(runtime, name)
+
+        async def counted(row, *args):
+            looked.append(name)
+            return await real(row, *args)
+
+        monkeypatch.setattr(runtime, name, counted)
+
+    counting("settings_verdict")
+    counting("settings_look")
+    try:
+        assert not runtime.sandboxed(harness.store.session(worker))
+        (cwd / ".mcp.json").write_text('{"mcpServers": {"x": {"command": "true"}}}')
+        (cwd / ".claude" / "agents").mkdir(parents=True)
+        (cwd / ".claude" / "agents" / "helper.md").write_text("---\nname: helper\n---\nHi\n")
+        assert await runtime.agent_subagent(worker, "Agent", {"subagent_type": "helper"}) == ""
+        await runtime.owner_send(worker, "Report done: next")
+        await until(lambda: ("report", "next") in harness.kinds(worker), 30)
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        assert worker not in runtime.settings_held
+        assert not [m for m in harness.store.messages(worker) if m["meta"].get("agent_settings")]
+        assert not runtime.disabled_servers(harness.store.session(worker))
+        assert (await runtime.terminal_command(worker))["agent"] == "claude"
+        assert looked == [], "nothing of them looked at"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.usefixtures("sandbox_holds")
+async def test_a_folder_handed_to_an_unsandboxed_claude_worker_is_kept_as_handed_out(
+    tmp_path, claude_on_path
+):
+    """Its folder's settings as handed out are kept all the same (once, before it runs anything
+    there; nothing at its turns): the sandbox turned on later, it goes on with them as they
+    were, not held as settings Chief of Staff never saw."""
+    from test_round7_split import commit, published, run
+
+    app = published(tmp_path, "app")
+    (app / ".claude").mkdir()
+    commit(app, ".claude/settings.json", '{"permissions": {"allow": []}}\n')
+    run("git", "push", "-q", "origin", "main", cwd=app)
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)]))
+    runtime.sandbox_host = True
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")
+        result = await spawn_on(
+            harness, runtime, title="Feature", agent="claude", project=str(app), in_place=True,
+            instructions="Report done: made",
+        )  # fmt: skip
+        worker = result["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        assert not runtime.sandboxed(harness.store.session(worker))
+        old = harness.store.settings()
+        new = old.model_copy(update={"worker_sandbox": True})
+        harness.store.save_settings(new)
+        await runtime.settings_changed(old, new)
+        assert runtime.sandboxed(harness.store.session(worker))
+        await runtime.owner_send(worker, "Report done: again")
+        await until(lambda: ("report", "again") in harness.kinds(worker), 30)
+        assert worker not in runtime.settings_held
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.usefixtures("sandbox_holds")
+async def test_turning_the_sandbox_off_lets_a_claude_worker_held_for_its_settings_go_on(
+    tmp_path, claude_on_path
+):
+    """Held for its folder's changed settings while sandboxed: the sandbox turned off, nothing
+    holds it, and what waited for it goes on (no Use these settings needed)."""
+    harness, runtime, worker, cwd = await claude_in_worktree(tmp_path, sandboxed=True)
+    try:
+        (cwd / ".mcp.json").write_text('{"mcpServers": {"x": {"command": "true"}}}')
+        (task,) = runtime.tasks.for_session(worker)
+        await runtime.task_actions.follow_up(task["id"], "Report done: next")
+        await until(lambda: worker in runtime.settings_held, 10)
+        old = harness.store.settings()
+        new = old.model_copy(update={"worker_sandbox": False})
+        harness.store.save_settings(new)
+        await runtime.settings_changed(old, new)
+        await until(lambda: ("report", "next") in harness.kinds(worker), 30)
+        assert worker not in runtime.settings_held
+        assert harness.store.session(worker)["activity"] != SETTINGS_WAIT
     finally:
         await runtime.stop()
 

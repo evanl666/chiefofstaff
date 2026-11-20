@@ -1356,13 +1356,15 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   a reminder) runs as a turn of its own, admitted, shown and stopped as any: *Stop* holds it
   until you say *Go on*; *Cancel*, *Set aside* and closing the worker end it, and delete it in
   Claude too, with one short turn of the worker's (Claude would bring it back when the session
-  is resumed); one meant to outlive the worker (`durable`) is refused. Claude's own settings in
-  a worker's folder (`.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`,
-  `.claude/agents/`), which Claude loads as its process starts, are held as Copilot's are (see
-  [Where workers work](#where-workers-work)): one that changed keeps the worker waiting, with
-  "Claude settings in this folder changed (added .mcp.json); Chief of Staff won't start the
+  is resumed); one meant to outlive the worker (`durable`) is refused. With the worker sandbox
+  on, Claude's own settings in a worker's folder (`.claude/settings.json`,
+  `.claude/settings.local.json`, `.mcp.json`, `.claude/agents/`), which Claude loads as its
+  process starts and whose hooks and servers it runs outside its sandbox, are held as Copilot's
+  are (see [Where workers work](#where-workers-work)): one that changed keeps the worker waiting,
+  with "Claude settings in this folder changed (added .mcp.json); Chief of Staff won't start the
   worker there until you say to use them." and **Use these settings**; an MCP server whose files
-  changed is off for it instead. A sandboxed worker's commands use
+  changed is off for it instead. With the sandbox off (the default) its commands run as you, so
+  they neither hold it nor are checked. A sandboxed worker's commands use
   workers' own caches, as a Copilot worker's do. Another Claude session's message is shown
   labelled with the name it gives itself, unverified (any program of yours could send it), never
   as yours, and can approve nothing; a message to a session that isn't one of your workers asks
@@ -1375,8 +1377,8 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   `cd <folder> && claude --resume <id>`); while it is open there, Chief of Staff writes nothing
   to it, and it shows what you did there before its next message. A Claude worker with turns
   scheduled is not handed over until they are deleted in Claude: they would go on in your
-  terminal. Nor is one whose folder's settings of its agent changed (they would load there):
-  its timeline then has the line with **Use these settings**.
+  terminal. Nor, with the worker sandbox on, is one whose folder's settings of its agent changed
+  (they would load there): its timeline then has the line with **Use these settings**.
 - **Your own sessions:** *Other Copilot sessions* lists your own Codex and Claude sessions too.
   Adopting a Claude session goes on in that session (not while it is open elsewhere); a Codex
   thread goes on in a new thread of Chief of Staff's with its conversation, and yours stays as it
