@@ -3744,9 +3744,88 @@ class Runtime:
         code: list[str] = []
         try:
             now = settings_guard.scan(top, cwd, names, code, self.writable_roots)
+            settings_guard.keep_shapes(self.store, top, now)
             return top, cwd, checkout, now, "", code
         except settings_guard.TooLargeError as exc:
             return top, cwd, checkout, {}, str(exc), []
+
+    def settings_inert(
+        self, top: Path, snapshot: dict, now: dict[str, dict], then: dict[str, dict]
+    ) -> bool:
+        """Of the keyed settings files (settings.json) that differ from what was taken, those
+        whose only change is in keys that run nothing (settings_guard.inert_change) are taken
+        as they are now. Whether any was. Blocking (it reads them)."""
+        changed = [
+            (folder, entry)
+            for folder in now.keys() | then.keys()
+            for entry in (now.get(folder, {}).keys() | then.get(folder, {}).keys())
+            if settings_guard.keyed(entry)
+            and now.get(folder, {}).get(entry) != then.get(folder, {}).get(entry)
+        ]
+        if not changed:
+            return False
+        objects: dict[tuple[str, str], dict | None] = {}
+        for folder, entries in now.items():
+            place = top if folder == "." else top / folder
+            for entry, value in entries.items():
+                if settings_guard.keyed(entry):
+                    objects[(folder, entry)] = (
+                        settings_guard.read_keyed(place / entry, value[1])
+                        if value[0] == "f"
+                        else None
+                    )
+        marketplaces: dict = {}
+        for found in objects.values():
+            theirs = (found or {}).get(settings_guard.MARKETPLACES)
+            if isinstance(theirs, dict):
+                for name, definition in theirs.items():
+                    # (Defined twice, differently: as no definition of the owner's.)
+                    marketplaces[name] = (
+                        definition if marketplaces.get(name, definition) == definition else None
+                    )
+        owner = self.owner_agent_settings()
+        taken = False
+        for folder, entry in changed:
+            value, was = now.get(folder, {}).get(entry), then.get(folder, {}).get(entry)
+            if (value and value[0] != "f") or (was and was[0] != "f"):
+                continue
+            found = objects.get((folder, entry)) if value else {}
+            before = self.settings_shape(was[1]) if was else {}
+            if found is None or not settings_guard.inert_change(
+                settings_guard.keyed(entry),
+                before,
+                found,
+                lambda found: settings_guard.plugins_inert(found, owner, marketplaces),
+            ):
+                continue
+            kept = snapshot["folders"].setdefault(folder, {})
+            if value:
+                kept[entry] = value
+            else:
+                kept.pop(entry, None)
+            taken = True
+        return taken
+
+    def settings_shape(self, digest: str) -> dict[str, str] | None:
+        raw = self.store.get(settings_guard.SHAPE + digest)
+        try:
+            found = json.loads(raw) if raw else None
+        except ValueError:
+            return None
+        return found if isinstance(found, dict) else None
+
+    @staticmethod
+    def owner_agent_settings() -> dict:
+        """The owner's own Copilot user settings (settings.json, its whole-line comments left
+        out), as its workers' Copilot reads them; {} when there are none to read."""
+        try:
+            text = read_regular(copilot_home() / "settings.json", 1 << 20).decode()
+            found = json.loads(
+                "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+            )
+        except (OSError, ValueError):
+            return {}
+        return found if isinstance(found, dict) else {}
 
     async def settings_proven(
         self,
@@ -3917,6 +3996,15 @@ class Runtime:
         if names == REPOSITORY_SETTINGS:
             self.servers_seen(row, settings_guard.servers_changed(now_named, then))
         found = settings_guard.changes(now_named, then, servers)
+        if found and await self.settings_thread(
+            self.settings_inert, top, snapshot, now_named, then
+        ):
+            # Only keys that run nothing changed (E122): as the owner's.
+            settings_guard.save(self.store, top, snapshot)
+            then = settings_guard.restricted(
+                {folder: snapshot["folders"].get(folder, {}) for folder in folders}, names
+            )
+            found = settings_guard.changes(now_named, then, servers)
         if not found:
             return None
         shown = now_named if servers else settings_guard.without_servers(now_named)

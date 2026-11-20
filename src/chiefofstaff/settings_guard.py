@@ -1624,6 +1624,7 @@ def keep(store: Any, top: Path, cwd: Path, names_by_agent: tuple[tuple[str, ...]
         except TooLargeError:
             continue
         taken(snapshot, now, folders, names)
+        keep_shapes(store, top, now)
     save(store, top, snapshot)
 
 
@@ -1715,3 +1716,129 @@ def split_setting(path: str) -> tuple[str, str]:
             if len(here) == len(wanted) and all(map(same_name, here, wanted)):
                 return "/".join(parts[:index]) or ".", "/".join(here)
     return ".", path
+
+
+# The settings files whose keys an agent reads one by one (settings.json), and of their keys
+# those that run nothing, load nothing and reach nothing (bug E122): a change to them alone is
+# no change to wait for. Checked against each agent's own reference (Claude Code 2.1.322's
+# settings reference and the CLI itself; Copilot CLI's repository settings, the only keys it
+# reads from a repository's settings.json). Not there, so held as any other change: whatever
+# runs a command (hooks, statusLine, subagentStatusLine, apiKeyHelper, awsAuthRefresh,
+# awsCredentialExport, gcpAuthRefresh, otelHeadersHelper, proxyAuthHelper, fileSuggestion,
+# processWrapper), what servers, permissions, environment or folders it gets (mcpServers,
+# enableAllProjectMcpServers, permissions, env, additionalDirectories, sandbox), plugins'
+# marketplaces (extraKnownMarketplaces), what changes commits or pushes (includeCoAuthoredBy,
+# attribution, mergeStrategy), turns off the owner's own hooks (disableAllHooks), deletes the
+# owner's transcripts (cleanupPeriodDays: every project's, not this one's), and any key not
+# named here. enabledPlugins only as plugins_inert says.
+CLAUDE_FILES = (".claude/settings.json", ".claude/settings.local.json")
+COPILOT_FILES = (".github/copilot/settings.json", ".github/copilot/settings.local.json")
+INERT_KEYS = {
+    "claude": frozenset(
+        {"$schema", "model", "theme", "outputStyle", "spinnerTipsEnabled", "alwaysThinkingEnabled"}
+    ),
+    "copilot": frozenset({"$schema", "model", "effortLevel", "contextTier", "respectGitignore"}),
+}
+PLUGINS = "enabledPlugins"
+MARKETPLACES = "extraKnownMarketplaces"
+SHAPE = "settingsshape:"
+MOST_SHAPED = 1 << 20
+
+
+def keyed(entry: str) -> str:
+    """Which agent's keyed settings file an entry (relative to its folder) is: "claude",
+    "copilot", or "" for any other."""
+    if RUN in entry or SERVES in entry or "\0" in entry:
+        return ""
+    parts = entry.split("/")
+    for kind, files in (("claude", CLAUDE_FILES), ("copilot", COPILOT_FILES)):
+        for name in files:
+            wanted = name.split("/")
+            if len(parts) == len(wanted) and all(map(same_name, parts, wanted)):
+                return kind
+    return ""
+
+
+def parsed(data: bytes) -> dict | None:
+    """A settings file's JSON object as an agent reads it; None for anything else (comments,
+    a key twice: the reading could differ)."""
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict:
+        found = dict(pairs)
+        if len(found) != len(pairs):
+            raise ValueError("a key twice")
+        return found
+
+    try:
+        found = json.loads(data.decode("utf-8"), object_pairs_hook=unique)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def shape(found: dict) -> dict[str, str]:
+    """{key: a digest of its value}: what tells which keys of a settings file changed."""
+    return {
+        key: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:16]
+        for key, value in found.items()
+    }
+
+
+def read_keyed(path: Path, digest: str) -> dict | None:
+    """A keyed settings file's object, when its bytes are still those of `digest`."""
+    try:
+        data = read_regular(path, MOST_SHAPED)
+    except OSError:
+        return None
+    if hashlib.sha256(data).hexdigest() != digest:
+        return None
+    return parsed(data)
+
+
+def keep_shapes(store: Any, top: Path, now: dict[str, dict]):
+    """The shape of each keyed settings file of a scan, by its content's digest (what a later
+    change is compared with, once its snapshot holds that digest). Blocking."""
+    for folder, entries in now.items():
+        place = top if folder == "." else top / folder
+        for entry, value in entries.items():
+            if value[0] != "f" or not keyed(entry) or store.get(SHAPE + value[1]) is not None:
+                continue
+            found = read_keyed(place / entry, value[1])
+            store.set(SHAPE + value[1], json.dumps(None if found is None else shape(found)))
+
+
+def plugins_inert(found: dict, owner: dict, marketplaces: dict[str, Any]) -> bool:
+    """Whether a file's enabledPlugins enables nothing the owner's own user settings don't:
+    each one on there is on for the owner too, from the marketplace of that name, which no
+    repository settings file (`marketplaces`: theirs, merged) defines otherwise than the owner's
+    do. Turning one off is never more."""
+    plugins, theirs = found.get(PLUGINS, {}), owner.get(PLUGINS)
+    if not isinstance(plugins, dict):
+        return False
+    theirs = theirs if isinstance(theirs, dict) else {}
+    known = owner.get(MARKETPLACES)
+    known = known if isinstance(known, dict) else {}
+    for spec, on in plugins.items():
+        if on is False:
+            continue
+        name, at, market = spec.rpartition("@")
+        if on is not True or not (name and at and market) or theirs.get(spec) is not True:
+            return False
+        if market in marketplaces and marketplaces[market] != known.get(market):
+            return False
+    return True
+
+
+def inert_change(
+    kind: str, before: dict[str, str] | None, found: dict, plugins: Callable[[dict], bool]
+) -> bool:
+    """Whether a keyed settings file (`found`, as it is now) differs from what was taken
+    (`before`: its shape; {} for no file) only in keys that run nothing (INERT_KEYS), or in an
+    enabledPlugins that `plugins` finds inert."""
+    if before is None:
+        return False
+    now = shape(found)
+    differ = {key for key in now.keys() | before.keys() if now.get(key) != before.get(key)}
+    if not differ:
+        return False  # (Bytes alone: spacing, order. Still the owner's to look at.)
+    return all(key == PLUGINS and plugins(found) for key in differ - INERT_KEYS[kind])

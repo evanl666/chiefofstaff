@@ -1038,6 +1038,121 @@ async def test_a_commits_files_are_read_hashed_again_from_its_id(git_repo):
         await lying.find(".mcp.json")
 
 
+@pytest.mark.parametrize(
+    ("name", "before", "after", "waits"),
+    [
+        # Keys that run nothing (each agent's own reference): taken as they are.
+        (".claude/settings.json", '{"hooks":{}}', '{"hooks":{},"model":"opus"}', False),
+        (
+            ".claude/settings.local.json",
+            "{}",
+            '{"outputStyle":"Explanatory","theme":"light"}',
+            False,
+        ),
+        (
+            ".claude/settings.json",
+            "{}",
+            '{"spinnerTipsEnabled":false,"alwaysThinkingEnabled":true}',
+            False,
+        ),
+        (
+            ".github/copilot/settings.json",
+            '{"model":"a"}',
+            '{"model":"b","effortLevel":"high"}',
+            False,
+        ),
+        (".github/copilot/settings.local.json", "{}", '{"contextTier":"default"}', False),
+        # A file of them alone, new: no file before is no key before.
+        (".claude/settings.local.json", None, '{"model":"opus"}', False),
+        # Anything that runs or reaches something, deletes the owner's data, or isn't known.
+        (".claude/settings.json", "{}", '{"statusLine":{"type":"command","command":"x"}}', True),
+        (".claude/settings.json", "{}", '{"apiKeyHelper":"./key.sh"}', True),
+        (".claude/settings.json", "{}", '{"cleanupPeriodDays":1}', True),
+        (".claude/settings.json", "{}", '{"includeCoAuthoredBy":false}', True),
+        (".claude/settings.json", "{}", '{"model":"opus","env":{"A":"1"}}', True),
+        (".claude/settings.json", "{}", '{"someNewKey":true}', True),
+        (".github/copilot/settings.json", "{}", '{"disableAllHooks":true}', True),
+        (".github/copilot/settings.json", "{}", '{"mergeStrategy":"rebase"}', True),
+        # Read as an agent may not: a key twice, a comment.
+        (".claude/settings.json", "{}", '{"model":"a","model":"b"}', True),
+        (".github/copilot/settings.json", "{}", '{"model":"a"} // b', True),
+        # Same keys, other bytes: the owner's to look at still.
+        (".claude/settings.json", '{"model":"a"}', '{ "model": "a" }', True),
+    ],
+)
+async def test_settings_files_whose_only_change_runs_nothing_hold_nothing(
+    tmp_path, git_repo, monkeypatch, name, before, after, waits
+):
+    """E122: a settings.json whose only change from what was taken is in keys that run nothing
+    (INERT_KEYS) is taken as it is; any other key, one not known, or a file read otherwise
+    than an agent may, waits for the owner as before."""
+    if before is not None:
+        commit(git_repo, name, before)
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, worker)
+        plant(cwd, name, after)
+        await runtime.owner_send(worker, "Go on")
+        assert runtime.states.is_live(worker) is not waits
+        assert bool(settings_notices(harness, worker)) is waits
+        if not waits:
+            await at_rest(runtime, harness, worker)
+            plant(cwd, name, '{"hooks":{"x":[]}}')
+            await runtime.owner_send(worker, "Again")
+            assert not runtime.states.is_live(worker), "taken as it was then, not from then on"
+    finally:
+        await runtime.stop()
+
+
+def owner_copilot(home: Path, settings: dict):
+    (home / "settings.json").write_text("// the owner's\n" + json.dumps(settings))
+
+
+@pytest.mark.parametrize(
+    ("owner", "committed", "after", "waits"),
+    [
+        # On for the owner already, from that marketplace: nothing new runs.
+        ({"enabledPlugins": {"fmt@acme": True}}, "{}", {"fmt@acme": True}, False),
+        # Turned off: never more.
+        ({}, '{"enabledPlugins":{"fmt@acme":true}}', {"fmt@acme": False}, False),
+        # Not on for the owner, or on from another marketplace.
+        ({"enabledPlugins": {"fmt@acme": True}}, "{}", {"lint@acme": True}, True),
+        ({"enabledPlugins": {"fmt@acme": True}}, "{}", {"fmt@other": True}, True),
+        ({"enabledPlugins": {"fmt@acme": False}}, "{}", {"fmt@acme": True}, True),
+        # The repository says otherwise where that marketplace is.
+        (
+            {"enabledPlugins": {"fmt@acme": True}},
+            '{"extraKnownMarketplaces":{"acme":{"source":{"source":"github","repo":"x/y"}}}}',
+            {"fmt@acme": True},
+            True,
+        ),
+    ],
+)
+async def test_plugins_a_folder_turns_on_hold_nothing_only_when_on_for_the_owner(
+    tmp_path, git_repo, monkeypatch, owner, committed, after, waits
+):
+    """E122: enabledPlugins runs nothing new only when each plugin it turns on is on in the
+    owner's own user settings, from the marketplace of that name, which the repository does
+    not define otherwise."""
+    commit(git_repo, ".github/copilot/settings.json", committed)
+    home = trusting(tmp_path, monkeypatch, git_repo)
+    owner_copilot(home, owner)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, worker)
+        now = json.loads(committed) | {"enabledPlugins": after}
+        plant(cwd, ".github/copilot/settings.json", json.dumps(now))
+        await runtime.owner_send(worker, "Go on")
+        assert runtime.states.is_live(worker) is not waits
+    finally:
+        await runtime.stop()
+
+
 async def test_workers_held_for_their_settings_go_on_once_the_sandbox_is_off(
     tmp_path, git_repo, monkeypatch
 ):
