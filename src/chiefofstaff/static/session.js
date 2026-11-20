@@ -795,7 +795,7 @@ function renderMessage(original) {
   }
   switch (message.kind) {
     case "owner":
-      return ownerMessage(message.text, meta, time, message.delivery);
+      return ownerMessage(message.text, meta, time, message.delivery, message.id);
     case "assistant":
       if (meta.internal) return el("div", { class: "line note", text: message.text, title: clock(time) });
       return el("div", { class: "msg agent markdown", html: markdown(message.text), title: clock(time) });
@@ -859,6 +859,8 @@ function renderMessage(original) {
         ? el("button", { type: "button", class: "link", text: "Open Settings", onclick: (event) => { event.stopPropagation(); openSettings(meta.settings); } })
         : meta.agent_settings || meta.agent_servers
           ? useSettingsButton(message.session_id, meta.agent_settings || meta.agent_servers)
+          : meta.settings_undo
+            ? undoSettingsButton(message.session_id, meta.settings_undo.digest)
           : meta.git_quarantine
             ? quarantineButtons(message.session_id, meta.git_quarantine.removable)
             : meta.git_replaced
@@ -876,12 +878,26 @@ function renderMessage(original) {
   }
 }
 // "Use these settings": what changed is in its line; the worker goes on with them.
-function useSettingsButton(sessionId, { digest, changes }) {
-  const button = el("button", { type: "button", class: "link", text: "Use these settings", title: changes, onclick: async (event) => {
+function useSettingsButton(sessionId, { digest, changes }, className = "link") {
+  const button = el("button", { type: "button", class: className, text: "Use these settings", title: changes, onclick: async (event) => {
     event.stopPropagation();
     button.disabled = true;
     try {
       const { said } = await api(`/api/sessions/${sessionId}/agent-settings`, { method: "POST", body: { digest } });
+      toast(said);
+    } catch (error) {
+      toast(error.message, "error");
+      button.disabled = false;
+    }
+  } });
+  return button;
+}
+function undoSettingsButton(sessionId, digest, className = "link") {
+  const button = el("button", { type: "button", class: className, text: "Undo", title: "Trust the earlier settings again only if these bytes have not changed", onclick: async (event) => {
+    event.stopPropagation();
+    button.disabled = true;
+    try {
+      const { said } = await api(`/api/sessions/${sessionId}/agent-settings/undo`, { method: "POST", body: { digest } });
       toast(said);
     } catch (error) {
       toast(error.message, "error");
@@ -925,7 +941,7 @@ function quarantineButtons(sessionId, removable) {
 }
 // The owner's message: long ones fold, images show small and open full size; under it, whether
 // it reached its session (`delivery`), in a word.
-function ownerMessage(text, meta = {}, time = "", delivery = "") {
+function ownerMessage(text, meta = {}, time = "", delivery = "", messageId = 0) {
   const node = el("div", { class: "msg owner", title: time ? clock(time) : undefined });
   // The worker it went to (Home's copy says which): why it waits, if it does, is that worker's.
   const worker = meta.to || (state.selected !== HOME ? viewedId() : "");
@@ -943,12 +959,51 @@ function ownerMessage(text, meta = {}, time = "", delivery = "") {
     );
   }
   if (text) foldable(node, el("div", { class: "text", text }), text);
+  if (meta.settings_hold && messageId && WAITING.has(delivery)) node.append(settingsHoldCard(messageId, meta.settings_hold));
+  else if (meta.settings_handled && meta.settings_handled.status !== "released") node.append(settingsHandledCard(meta.settings_handled));
   const [said, tone] = DELIVERY_WORDS[delivery] || [];
   if (said) {
     node.dataset.delivery = delivery;
     node.append(el("div", { class: `delivery ${tone || ""}`.trim(), text: said }));
   }
   return node;
+}
+// Under a message waiting with its worker for the owner's word on its folder's settings: what
+// changed and the three ways on, each for the settings shown (their digest). Words such as "ok"
+// never use them: a line says to use the button (bug E121).
+function settingsHoldCard(messageId, hold) {
+  const actions = el("div", { class: "hold-actions" });
+  const run = (path, done) => async (event) => {
+    event.stopPropagation();
+    for (const button of actions.querySelectorAll("button")) button.disabled = true;
+    try {
+      const result = await api(path, { method: "POST", body: { digest: hold.digest } });
+      toast(done);
+      if (result.session_id && result.session_id !== hold.session_id) select(result.session_id);
+    } catch (error) {
+      toast(error.message, "error");
+      for (const button of actions.querySelectorAll("button")) button.disabled = false;
+    }
+  };
+  const sep = () => el("span", { class: "sep", text: " · " });
+  actions.append(
+    useSettingsButton(hold.session_id, hold),
+    sep(),
+    el("button", { type: "button", class: "link", text: "Start a new worker", title: "Its task goes on in a new worker, in a fresh checkout without these settings", onclick: run(`/api/messages/${messageId}/settings-hold/new-worker`, "Started a new worker for it.") }),
+    sep(),
+    el("button", { type: "button", class: "link", text: "Cancel message", title: "Don't send this message", onclick: run(`/api/messages/${messageId}/settings-hold/cancel`, "Not sent.") }),
+  );
+  return el(
+    "div",
+    { class: "settings-hold" },
+    el("div", { class: "hold-change", text: `Not sent yet: its folder's settings changed${hold.changes ? ` (${hold.changes})` : ""}`, title: hold.reason }),
+    actions,
+    hold.guidance ? el("div", { class: "hold-guidance", text: hold.guidance }) : "",
+  );
+}
+// What became of it, in a word, once that wait is over.
+function settingsHandledCard(handled) {
+  return handled.text ? el("div", { class: `settings-hold handled ${handled.status || ""}`, text: handled.text }) : "";
 }
 // Where the owner's messages stand, under each: what is not there yet (or never got there)
 // under every one; that one got there or was handled, only under the latest. The latest one that
@@ -974,7 +1029,7 @@ function waitWhy(node) {
   const session = byId(node.dataset.worker);
   if (!session || session.role !== "worker" || session.closed_at) return null;
   // Waiting for your word (its folder's settings changed): its timeline says what to do.
-  if (WAITING.has(node.dataset.delivery) && /^waiting for you\b/i.test(session.activity || "")) return { text: session.activity, help: session.activity };
+  if (WAITING.has(node.dataset.delivery) && /^waiting for you\b/i.test(session.activity || "")) return { text: session.activity, help: session.activity, settings: session.settings_hold };
   if (node.dataset.delivery === "held") return { text: "you stopped this worker", help: "It gets this with your next message, or now with Send now", now: true };
   if (node.dataset.delivery !== "queued" || session.status !== "queued") return null;
   const activity = session.activity || "";
@@ -986,6 +1041,11 @@ function waitWhy(node) {
 }
 function waitNote(node, latest) {
   const line = node.querySelector(":scope > .delivery");
+  // Its own line on the settings it waits for says it all (settingsHoldCard).
+  if (node.querySelector(":scope > .settings-hold:not(.handled)")) {
+    line.hidden = true;
+    return;
+  }
   const why = latest ? waitWhy(node) : null;
   const key = why ? `${why.text}:${why.now}` : "";
   if ((line.dataset.why || "") === key) return;
@@ -1007,6 +1067,7 @@ function waitNote(node, latest) {
   // One short line: "Not sent yet: you stopped this worker · Send now".
   line.replaceChildren(
     el("span", { class: "why", text: `Not sent yet: ${why.text}`, title: why.help || undefined }),
+    ...(why.settings ? [el("span", { class: "sep", text: " · " }), useSettingsButton(node.dataset.worker, why.settings)] : []),
     ...(why.now ? [el("span", { class: "sep", text: " · " }), el("button", { type: "button", class: "link", text: "Send now", title: "Send it to the worker now", onclick: sendNow })] : []),
   );
 }

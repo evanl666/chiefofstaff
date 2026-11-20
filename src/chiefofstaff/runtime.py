@@ -127,7 +127,7 @@ from .tasks import (
     settle_followups,
 )
 from .tasks import migrate as migrate_tasks
-from .tools import Tools
+from .tools import SpawnWorker, Tools
 from .watchdog import WatchConfig, Watchdog
 from .workers import SETTINGS_STOP, SETTINGS_WAIT, Workers
 from .workspaces import (
@@ -186,7 +186,25 @@ def needs_trust(top: Path, cwd: Path) -> bool:
 
 # Copilot's own threshold for deferring MCP tools behind tool search (its SDK's default).
 COPILOT_DEFER_THRESHOLD = 30
-
+# What the owner writes a worker held for its folder's settings, in its own chat, that says to
+# use them (E121): only these, the whole message. A bare "ok" or "yes" only right after the line
+# that asks (settings_typed). Anything else, however close, gets the line's buttons.
+SAID_USE = re.compile(
+    r"(?:use (?:these|the) settings|use them|approved?(?: (?:them|it|these|these settings|the "
+    r"settings))?|i(?:'ve| have)? approved(?: (?:them|it|these|these settings|the settings))?|go "
+    r"ahead with (?:the|these) settings|同意|批准|可以用|用这些设置)[.!。\uff01]?",
+    re.IGNORECASE,
+)
+SAID_YES = re.compile(r"(?:ok(?:ay)?|yes)[.!。\uff01]?", re.IGNORECASE)
+APPROVAL_LIKE = re.compile(
+    r".{0,12}\b(?:ok(?:ay)?|yes|approved?|use (?:it|them)|go ahead|lgtm)\b.{0,24}"
+    r"|.{0,6}(?:同意|批准|可以|好的?).{0,12}",
+    re.IGNORECASE,
+)
+USE_THE_BUTTON = "Use the button so the approval is tied to the settings shown."
+CHANGED_SINCE = "They changed after you wrote that: look at them again, then use the button."
+# How long "Undo" on the owner's word on a folder's settings stays offered.
+SETTINGS_UNDO_SECONDS = 24 * 3600
 PROMPTS = {
     ROUTER: prompts.ROUTER,
     SLACK: prompts.SLACK,
@@ -4141,6 +4159,95 @@ class Runtime:
         meta = json.loads(found["meta"])
         return {**(meta.get("agent_settings") or meta["agent_servers"]), "message_id": found["id"]}
 
+    def settings_hold_message(self, message: dict, text: str, changed: bool = False) -> dict:
+        """What the owner wrote a worker held for its folder's settings, waiting: under it at
+        once, that line's choices (E121): its "Use these settings" (for what it shows: its
+        digest), a new worker instead, or not sending it. Approval-like words, which never use
+        them, say to use the button (`changed`: they changed after the owner wrote them)."""
+        session_id = message["session_id"]
+        card = self.settings_card(session_id)
+        if session_id not in self.settings_held or not card or not card.get("digest"):
+            return message
+        hold = {
+            "digest": card["digest"],
+            "changes": card.get("changes", ""),
+            "session_id": session_id,
+            "reason": self.settings_reasons.get(session_id) or "Its folder's settings changed",
+        }
+        if changed:
+            hold["guidance"] = CHANGED_SINCE
+        elif APPROVAL_LIKE.fullmatch(" ".join(text.split())):
+            hold["guidance"] = USE_THE_BUTTON
+        meta = {**message["meta"], "settings_hold": hold}
+        self.store.update_message_meta(message["id"], meta)
+        updated = self.store.message(message["id"])
+        self.delivery.publish_delivery(session_id, [updated])
+        return {**updated, "delivery": self.delivery.delivery_for(session_id, [updated])[0]}
+
+    def settle_settings_messages(self, session_id: str, status: str, text: str):
+        """Its hold over, the choices under what the owner wrote it give way to what became of
+        it, in a word."""
+        for found in self.store.all(
+            "SELECT id FROM messages WHERE session_id=? AND kind='owner' "
+            "AND json_extract(meta, '$.settings_hold') IS NOT NULL",
+            (session_id,),
+        ):
+            message = self.store.message(found["id"])
+            meta = {key: value for key, value in message["meta"].items() if key != "settings_hold"}
+            meta["settings_handled"] = {"status": status, "text": text, "session_id": session_id}
+            self.store.update_message_meta(message["id"], meta)
+            self.delivery.publish_delivery(session_id, [self.store.message(message["id"])])
+
+    async def settings_typed(
+        self, row: dict, text: str, shown: str, task_id: str = ""
+    ) -> dict | None:
+        """The owner, in the chat of a worker held for its folder's settings (never Home, Slack,
+        Send to Chief or a worker's words), saying to use them in so many words (SAID_USE; a
+        bare "ok" or "yes" only when the line that asks is the last thing there): taken as its
+        "Use these settings" for the line they saw (`shown`: its digest, as their page had it),
+        and only that one. Their message stays in the chat, not sent to the worker. None when it
+        is not that: it goes as any other (with the line's buttons under it)."""
+        session_id = row["id"]
+        words = " ".join(text.split())
+        if (
+            session_id not in self.settings_held
+            or not shown
+            or not self.settings_guarded(row)
+            or not (card := self.settings_card(session_id))
+            or card.get("digest") != shown
+            or not (
+                SAID_USE.fullmatch(words)
+                or (SAID_YES.fullmatch(words) and self.asked_last(session_id, card["message_id"]))
+            )
+        ):
+            return None
+        meta = {"settings_typed": shown, **({"task_id": task_id} if task_id else {})}
+        message = self.add_message(session_id, "owner", text, meta)
+        try:
+            await self.accept_settings(session_id, shown, typed=True)
+        except ValueError:
+            # Changed since the line they saw: not used; the new line, and its choices under
+            # their message.
+            await self.settings_refusal(self.store.session(session_id))
+            plain = {key: value for key, value in meta.items() if key != "settings_typed"}
+            self.store.update_message_meta(message["id"], plain)
+            return self.settings_hold_message(self.store.message(message["id"]), text, True)
+        return self.store.message(message["id"])
+
+    def asked_last(self, session_id: str, notice_id: int) -> bool:
+        """Whether the line asking about its folder's settings is the last thing in its chat
+        (the stop it made, said after it, aside)."""
+        for found in self.store.all(
+            "SELECT id, kind, text, meta FROM messages WHERE session_id=? AND id>=? ORDER BY id",
+            (session_id, notice_id),
+        ):
+            if found["id"] == notice_id:
+                continue
+            meta = json.loads(found["meta"] or "{}")
+            if not (found["kind"] == "notice" and meta.get("stopped")):
+                return False
+        return True
+
     def settings_shown(self, session_id: str):
         """Its tasks' cards say now whether they wait for the owner's word on its settings."""
         for task in self.tasks.for_session(session_id):
@@ -4156,6 +4263,7 @@ class Runtime:
         if session_id in self.settings_held:
             self.settings_held.discard(session_id)
             self.settings_shown(session_id)
+            self.settle_settings_messages(session_id, "released", "Nothing holds it now.")
             row = self.store.find_session(session_id)
             if row and row["activity"] == SETTINGS_WAIT:
                 self.update_session(session_id, activity="")
@@ -4888,11 +4996,13 @@ class Runtime:
         self.settings_said(row["id"], line, verdict, alert=False)  # It goes on without them.
         return folders
 
-    async def accept_settings(self, session_id: str, digest: str) -> str:
+    async def accept_settings(self, session_id: str, digest: str, typed: bool = False) -> str:
         """The owner says to use the settings now in a worker's folder (its timeline's "Use
-        these settings"): they become what Chief of Staff compares with, and the worker goes on
-        with what waited for it. Only when they are still what the owner was shown; ones too
-        many to check are used unchecked from then on (until they can be checked again)."""
+        these settings", or their own words in its chat: `typed`, settings_typed): they become
+        what Chief of Staff compares with, and the worker goes on with what waited for it. Only
+        when they are still what the owner was shown; ones too many to check are used unchecked
+        from then on (until they can be checked again). Undo is offered on its line while
+        nothing of them changed since (undo_settings)."""
         row = self.store.session(session_id)
         if not self.settings_guarded(row):
             # (A line from before the sandbox was turned off.)
@@ -4911,25 +5021,43 @@ class Runtime:
         else:
             top, cwd = verdict["top"], verdict["cwd"]
             snapshot = settings_guard.load(self.store, top) or settings_guard.fresh()
+            folders = [settings_guard.folder_key(top, f) for f in settings_guard.chain(top, cwd)]
+            undo: dict = {}
             if verdict["unreadable"]:
-                folders = [
-                    settings_guard.folder_key(top, f) for f in settings_guard.chain(top, cwd)
-                ]
                 snapshot["unchecked"][settings_guard.unchecked_key(names, folders)] = digest
                 said = f"You let this worker use them unchecked ({verdict['unreadable']})."
             else:
                 # As the owner was shown them (a change since is a change again).
-                folders = [
-                    settings_guard.folder_key(top, f) for f in settings_guard.chain(top, cwd)
-                ]
+                before = self.settings_part(snapshot, folders, names)
                 settings_guard.taken(snapshot, verdict["now"], folders, names)
                 if verdict.get("carried"):
+                    # (Theirs in the owner's checkout too from now on: not undone here.)
                     self.carried_theirs(row, top, verdict["now"])
+                else:
+                    undo = {
+                        "digest": digest, "top": str(top), "folders": folders,
+                        "names": list(names), "before": before, "at": time.time(),
+                        "after": self.settings_part(snapshot, folders, names),
+                    }  # fmt: skip
                 changed = settings_guard.described(verdict["changes"])
-                said = f"You let this worker use these settings ({changed})."
+                said = (
+                    f"Using these settings ({changed}) because you said so."
+                    if typed
+                    else f"You let this worker use these settings ({changed})."
+                )
             settings_guard.save(self.store, top, snapshot)
-            self.add_message(session_id, "notice", said)
+            if undo:
+                self.store.set(f"settingsundo:{session_id}", json.dumps(undo, sort_keys=True))
+            self.add_message(
+                session_id,
+                "notice",
+                said,
+                {"settings_undo": {"digest": digest}} if undo else None,
+            )
             self.store.delete(f"settingssaid:{session_id}")
+            self.settle_settings_messages(session_id, "approved", said)
+        if verdict is None:
+            self.settle_settings_messages(session_id, "unchanged", said)
         if names == CODEX_SETTINGS:
             if verdict is not None and self.states.is_live(session_id):
                 # Its thread trusts them once opened again: now, or once its turn is over.
@@ -4938,6 +5066,100 @@ class Runtime:
         # This worker goes on, and every other that waited for them (in the same folder).
         await self.release_held(session_id)
         return said
+
+    @staticmethod
+    def settings_part(snapshot: dict, folders: list[str], names: tuple[str, ...]) -> dict:
+        """What a snapshot holds of these settings in these folders, and how it marks them."""
+        return {
+            folder: {
+                "entries": settings_guard.restricted(
+                    {folder: snapshot["folders"].get(folder, {})}, names
+                ).get(folder, {}),
+                **{
+                    marks: sorted(n for n in snapshot.get(marks, {}).get(folder, []) if n in names)
+                    for marks in ("known", "first", "carried")
+                },
+            }
+            for folder in folders
+        }
+
+    async def undo_settings(self, session_id: str, digest: str) -> str:
+        """The owner takes back their word on a folder's settings (Undo on its line): what was
+        taken before comes back, and every worker there waits again. Only while nothing has
+        changed since, neither the files nor what Chief of Staff holds of them (a later word,
+        another worker's), within SETTINGS_UNDO_SECONDS: never trust it no longer had."""
+        raw = self.store.get(f"settingsundo:{session_id}")
+        try:
+            undo = json.loads(raw) if raw else {}
+        except ValueError:
+            undo = {}
+        if (
+            not isinstance(undo, dict)
+            or undo.get("digest") != digest
+            or time.time() - float(undo.get("at") or 0) > SETTINGS_UNDO_SECONDS
+        ):
+            raise ValueError("That can no longer be undone.")
+        row = self.store.session(session_id)
+        names, folders = tuple(undo["names"]), list(undo["folders"])
+        top, _, _, now, unreadable, _ = await self.settings_thread(self.settings_read, row, names)
+        if unreadable or str(top) != undo["top"]:
+            raise ValueError("That can no longer be undone: its folder can't be checked as it was.")
+        shown = settings_guard.without_servers(settings_guard.restricted(now, names))
+        snapshot = settings_guard.load(self.store, top) or settings_guard.fresh()
+        if (
+            settings_guard.digest(shown) != digest
+            or self.settings_part(snapshot, folders, names) != undo["after"]
+        ):
+            raise ValueError("They changed since, so your word on them stays.")
+        for folder in folders:
+            was = undo["before"].get(folder, {})
+            kept = {
+                entry: value
+                for entry, value in snapshot["folders"].get(folder, {}).items()
+                if not any(settings_guard.under(entry, name) for name in names)
+            }
+            snapshot["folders"][folder] = {**kept, **was.get("entries", {})}
+            for marks in ("known", "first", "carried"):
+                held = snapshot.setdefault(marks, {})
+                others = [n for n in held.get(folder, []) if n not in names]
+                if both := sorted({*others, *was.get(marks, [])}):
+                    held[folder] = both
+                else:
+                    held.pop(folder, None)
+        settings_guard.save(self.store, top, snapshot)
+        self.store.delete(f"settingsundo:{session_id}")
+        for found in self.store.all(
+            "SELECT id FROM messages WHERE session_id=? AND kind='notice' "
+            "AND json_extract(meta, '$.settings_undo.digest')=?",
+            (session_id, digest),
+        ):
+            message = self.store.message(found["id"])
+            meta = {k: v for k, v in message["meta"].items() if k != "settings_undo"}
+            self.store.update_message_meta(message["id"], {**meta, "settings_undone": True})
+            self.bus.publish("message", {**self.store.message(message["id"]), "amended": True})
+        said = "Undone: this worker waits for your word on its folder's settings again."
+        self.add_message(session_id, "notice", said)
+        # Every worker there: looked at again now, as at its next turn.
+        for other in self.store.open_sessions(WORKER):
+            if other["id"] == session_id or self.settings_place(other)[0] == top:
+                self.settings_sigs.pop(other["id"], None)
+                if self.settings_guarded(other) and await self.settings_refusal(other):
+                    await self.settings_stop(other["id"])
+        return said
+
+    def held_owner_message(self, message_id: int, digest: str) -> tuple[dict, dict]:
+        """A still-unsent owner message and the settings card it was shown with."""
+        message = self.store.message(message_id)
+        if message["kind"] != "owner":
+            raise ValueError("That is not your queued message.")
+        session_id = message["session_id"]
+        hold = message["meta"].get("settings_hold") or {}
+        if hold.get("digest") != digest or session_id not in self.settings_held:
+            raise ValueError("That settings hold changed: use the latest card.")
+        delivery = self.delivery.delivery_for(session_id, [message])[0]
+        if delivery not in {"queued", "held"}:
+            raise ValueError("That message is no longer waiting.")
+        return message, hold
 
     def drop_held_owner_message(
         self,
@@ -4966,6 +5188,100 @@ class Runtime:
         updated = self.store.message(message["id"])
         self.delivery.publish_delivery(message["session_id"], [updated])
         return updated
+
+    async def cancel_held_owner_message(self, message_id: int, digest: str) -> dict:
+        """Cancel one message, not the settings hold or unrelated queued work."""
+        message, _ = self.held_owner_message(message_id, digest)
+        updated = self.drop_held_owner_message(
+            message, "cancelled", "Message cancelled; it will not be delivered."
+        )
+        task = self.tasks.find(message["meta"].get("task_id") or "")
+        if (
+            message["meta"].get("chat_task_new")
+            and task
+            and task["session_id"] == message["session_id"]
+            and task["status"] in OPEN
+        ):
+            with suppress(ValueError):
+                await self.task_actions.cancel(task["id"])
+        return updated
+
+    async def start_new_worker_for_held_message(self, message_id: int, digest: str) -> dict:
+        """ "Start a new worker" under a message held with its worker: the task it is about goes
+        on in a new worker in a fresh checkout (move_held_task), the message with it."""
+        message, _ = self.held_owner_message(message_id, digest)
+        row = self.store.session(message["session_id"])
+        task = self.tasks.find(message["meta"].get("task_id") or "")
+        why = "this one waits for its folder's settings"
+        if task and task["session_id"] == row["id"] and task["status"] in OPEN:
+            return await self.move_held_task(row, task, why)
+        return await self.move_held_chat(row, [message], why)
+
+    async def move_held_chat(self, row: dict, messages: list[dict], why: str) -> dict:
+        """What the owner wrote a held worker about finished work (or none), as a new worker's
+        task, told of that work (context_from): sent there, not to the held one, which closes
+        once nothing of it is open."""
+        task = self.tasks.find(messages[-1]["meta"].get("task_id") or "")
+        new = await self.spawn_instead(
+            row,
+            title=task["title"] if task else clip_words(messages[-1]["text"], 60),
+            goal="\n\n".join(message["text"] for message in messages),
+            why=why,
+            context_from=[task["id"]] if task else [],
+        )
+        for message in messages:
+            self.drop_held_owner_message(
+                message,
+                "forwarded",
+                "Sent to a new worker instead.",
+                forwarded_to=new["session_id"],
+            )
+        await self.release_orphaned_settings_worker(row["id"])
+        return new
+
+    async def move_held_task(self, row: dict, task: dict, why: str) -> dict:
+        """A task of a worker held for its folder's settings, done instead by a new worker in a
+        fresh checkout of the same projects (a worktree from their base: nothing of the held
+        folder's is carried), told what was done so far (context_from). The task it replaces
+        is over; the held worker, with no open task left, closes, what the owner wrote it
+        following its task (release_orphaned_settings_worker)."""
+        criteria = json.loads(task.get("acceptance") or "[]")
+        replacement = await self.spawn_instead(
+            row,
+            title=task["title"],
+            goal=task["goal"],
+            why=why,
+            context_from=[task["id"]],
+            replaces=[task["id"]],
+            done_when=criteria if isinstance(criteria, list) else [],
+            review=bool(self.store.get(f"reviewreq:{task['id']}")),
+        )
+        await self.release_orphaned_settings_worker(row["id"])
+        return replacement
+
+    async def spawn_instead(self, row: dict, title: str, goal: str, why: str, **more) -> dict:
+        """A new worker on the projects a held worker has, each in a fresh checkout of its own
+        (a worktree from its base where it is a repository): nothing of the held folder's."""
+        checkouts = self.workspaces.checkouts(row)
+        projects = list(
+            dict.fromkeys(
+                path for c in checkouts if (path := c.get("project") or c.get("repo") or "")
+            )
+        )
+        project = row["project"] or (projects[0] if projects else "")
+        return await self.toolset.t_spawn_worker(
+            SpawnWorker(
+                title=title,
+                instructions=goal,
+                project=project,
+                more_projects=[path for path in projects if path != project],
+                isolate=bool(project and any(c.get("git_dir") or c.get("repo") for c in checkouts)),
+                slack=bool(row["slack"]),
+                why_new=why,
+                **more,
+            ),
+            self.router_id(),
+        )
 
     def unsent_owner_chat(self, session_id: str) -> list[dict]:
         """What the owner wrote a worker that has not reached it (nor been dropped)."""
@@ -5810,12 +6126,24 @@ class Runtime:
         clear_questions: bool = True,
         from_home: bool = False,
         task_id: str = "",
+        typed: bool = False,
+        settings_digest: str = "",
     ) -> dict:
         """`learn`: the owner typed it (not a message the app sends for them). A message to a
         worker is also noted for the Router (`tell_router`), which must know what the owner
         asked for. `from_home`: written on Home (@ a worker), where its answer is shown too.
-        `task_id`: the task of the worker's they look at in its chat (see chat_task)."""
+        `task_id`: the task of the worker's they look at in its chat (see chat_task). `typed`:
+        written in that worker's own chat, which showed `settings_digest` as the line on its
+        folder's settings that waits for them (settings_typed)."""
         row = self.store.session(session_id)
+        if (
+            typed
+            and row["role"] == WORKER
+            and not attachments
+            and not row["closed_at"]
+            and (said := await self.settings_typed(row, text, settings_digest, task_id))
+        ):
+            return said
         if row["closed_at"] and row["role"] == WORKER:
             await self.workers.reopen(session_id, restore=True)
         # The task this is about: the one whose question it answers, the one the owner looks
@@ -5905,7 +6233,10 @@ class Runtime:
         prompt = "\n\n".join([prompt, *context])
         task = about
         if made:
-            meta |= {"task_id": made["id"]}  # Its instruction, as a task's first one is.
+            meta |= {
+                "task_id": made["id"],
+                "chat_task_new": True,
+            }  # Its instruction, as a task's first one is.
         elif task:
             # What its turn is about now; a chat with it, not a task card's follow-up.
             meta |= {"task_id": task["id"], "chat": True}
@@ -5935,6 +6266,16 @@ class Runtime:
             if made:
                 self.drop_chat_task(made, was)
             raise
+        if row["role"] == WORKER and session_id in self.settings_held:
+            words = " ".join(text.split())
+            message = self.settings_hold_message(
+                message,
+                text,
+                # (Their word on a line that changed since: the new line's, under it.)
+                changed=bool(typed and settings_digest)
+                and settings_digest != (self.settings_card(session_id) or {}).get("digest")
+                and bool(SAID_USE.fullmatch(words) or SAID_YES.fullmatch(words)),
+            )
         if task and (made or self.store.get(f"followup:{task['id']}")):
             # Home shows it at work on that task (bug QA6-4: its row stayed under Monitoring,
             # and a row of its worker's beside it under Running said the same work).
@@ -6734,6 +7075,11 @@ class Runtime:
             "context": row["context"],
             "yolo": self.yolo(row),
             "yolo_choice": row["yolo"],
+            **(
+                {"settings_hold": self.settings_card(row["id"])}
+                if row["id"] in self.settings_held
+                else {}
+            ),
             # Chief of Staff's own helper (learning, checks, profile): not one of the owner's.
             "helper": self.special(row) if row["role"] == WORKER else "",
             # It holds one of the owner's worker slots (in a turn, or finishing one).

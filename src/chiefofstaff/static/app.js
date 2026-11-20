@@ -76,9 +76,13 @@ function bindUi() {
         await select(sessionId);
         return;
       }
-      // About the task of the worker's the owner looks at in its chat (several to choose from).
+      // About the task of the worker's the owner looks at in its chat (several to choose from);
+      // and the line on its folder's settings it shows, when it waits for one (their word on
+      // it is for that line alone).
       const task = chatAnchor();
-      appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body(task ? { task_id: task } : {}) })]);
+      const held = byId(viewedId())?.settings_hold?.digest;
+      const extra = { ...(task ? { task_id: task } : {}), ...(held ? { settings_digest: held } : {}) };
+      appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body(extra) })]);
     } catch (error) {
       if (other) input.disabled = false;
       input.value = text;

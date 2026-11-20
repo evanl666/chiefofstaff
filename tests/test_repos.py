@@ -790,6 +790,40 @@ async def test_send_now_waits_for_the_owners_word_on_a_changed_folder(
         await runtime.stop()
 
 
+async def test_settings_approval_undo_revalidates_the_approved_digest(
+    tmp_path, git_repo, monkeypatch
+):
+    """Undo restores the earlier snapshot only while no byte changed after approval."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, worker)
+        plant(cwd, ".mcp.json")
+        await runtime.owner_send(worker, "Use this server")
+        digest = settings_notices(harness, worker)[-1]["meta"]["agent_settings"]["digest"]
+        await runtime.accept_settings(worker, digest)
+        await settle(runtime)
+        approval = [
+            message
+            for message in harness.store.messages(worker)
+            if message["meta"].get("settings_undo")
+        ][-1]
+        assert approval["meta"]["settings_undo"]["digest"] == digest
+
+        await runtime.undo_settings(worker, digest)
+        assert worker in runtime.settings_held
+        await runtime.accept_settings(worker, digest)
+        await settle(runtime)
+        (cwd / ".mcp.json").write_text('{"mcpServers":{"x":{"command":"node"}}}')
+        with pytest.raises(ValueError, match="changed since"):
+            await runtime.undo_settings(worker, digest)
+        assert worker not in runtime.settings_held
+    finally:
+        await runtime.stop()
+
+
 async def test_a_settings_held_worker_with_no_open_task_closes_and_drops_owner_chat(
     tmp_path, git_repo, monkeypatch
 ):

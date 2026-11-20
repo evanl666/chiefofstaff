@@ -4615,7 +4615,14 @@ async def life_seeded(runtime) -> dict:
     runtime.settings_refusal = refused
     await refused(store.session(held))
     await runtime.settings_stop(held)
-    found |= {"held": held, "settings": task, "refusal": refusal, "refused": refused}
+    queued = await runtime.owner_send(held, "ok")
+    found |= {
+        "held": held,
+        "held_message": queued["id"],
+        "settings": task,
+        "refusal": refusal,
+        "refused": refused,
+    }
 
     checked, task, session = await spawn("QA7 export the nightly data")
     await call_tool(runtime, "report", checked, status="done", summary="Exported.",
@@ -4712,6 +4719,41 @@ async def round_qa7_life(runtime, browser, failures: list[str]):
     await expect(preview).to_have_css("margin-top", "0px")
     await expect(preview).to_have_css("text-align", "start")
     log("E105: a review summary removed before a failed send stays removed")
+
+    # E121: under what the owner wrote a worker held for its folder's settings, at once, one
+    # line saying why, with that line's three ways on (for the settings shown); "ok" there is
+    # not their word on them. What they write there next carries the line it showed.
+    await page.locator("#session-list .item", has_text="QA7 fix the login").click()
+    message = page.locator(f'#timeline .msg.owner[data-id="{found["held_message"]}"]')
+    hold = message.locator(".settings-hold")
+    await expect(hold).to_contain_text("Not sent yet: its folder's settings changed")
+    await expect(hold).to_contain_text(
+        "Use the button so the approval is tied to the settings shown."
+    )
+    for name in ("Use these settings", "Start a new worker", "Cancel message"):
+        await expect(hold.get_by_role("button", name=name)).to_be_visible()
+    await expect(message.locator(".delivery")).to_be_hidden()
+    shots = Path(os.environ.get("QA8_SMOOTH_SHOTS", SHOTS / "qa8-smooth"))
+    shots.mkdir(parents=True, exist_ok=True)
+    for width in (800, 1280):
+        await page.set_viewport_size({"width": width, "height": 900})
+        for scheme in ("light", "dark"):
+            await page.emulate_media(color_scheme=scheme)
+            await page.screenshot(path=shots / f"held-chat-{width}-{scheme}.png")
+    await page.set_viewport_size({"width": 1500, "height": 1300})
+    await page.emulate_media(color_scheme="light")
+    async with page.expect_request(
+        lambda request: request.method == "POST" and request.url.endswith("/messages")
+    ) as posted:
+        await page.locator("#composer-input").fill("Also check the retry path")
+        await page.locator("#composer-input").press("Enter")
+    assert (await posted.value).post_data_json.get("settings_digest") == "qa7"
+    newest = page.locator("#timeline .msg.owner").last
+    await expect(newest.locator(".settings-hold")).to_contain_text("Not sent yet")
+    await expect(newest.locator(".hold-guidance")).to_have_count(0)
+    await page.locator(".home-item").click()
+    await expect(page.locator(".home-item.selected")).to_be_visible()
+    log("E121: a held worker's queued message shows its line's choices; ok is not consent")
 
     # E98: one card for the worker waiting for the owner's word on its folder's settings.
     settings = needs.locator(".card.task", has_text="QA7 fix the login timeout")
