@@ -62,8 +62,9 @@ def clean(messages: list[dict]):
     assert not troubles, troubles
 
 
-async def scenario_ask(app: App) -> tuple[str, str]:
-    """X1: a worker starts in experimental mode, asks the owner, and waits."""
+async def scenario_ask(app: App) -> tuple[str, dict]:
+    """X1: a worker starts in experimental mode, asks the owner, and waits (or, the model
+    skipping the question, reports: it ran all the same)."""
     router = (await app.get("/api/state"))["router_id"]
     mark = max((m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0)
     await app.post(
@@ -86,25 +87,33 @@ async def scenario_ask(app: App) -> tuple[str, str]:
 
     async def asked():
         tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker]
-        return next((t for t in tasks if t["status"] == "waiting"), None)
+        return next((t for t in tasks if t["status"] in {"waiting", "review", "done"}), None)
 
     task = await wait_for("it asks the owner and waits", asked, 600, app)
     clean(await app.get(f"/api/sessions/{worker}/messages"))
-    log(f"X1: the worker started and asks: {task['title']!r}")
-    return worker, task["id"]
+    log(f"X1: the worker started: {task['title']!r} ({task['status']})")
+    return worker, task
 
 
-async def scenario_answer(app: App, worker: str, task_id: str):
+async def scenario_answer(app: App, worker: str, task: dict):
     """X2: after a restart, the owner's answer reaches the worker's own session once."""
     await app.stop()
     await app.start()
     state = await app.get("/api/state")
     assert state["runtime"]["state"] == "ready", state["runtime"]
-    await app.post(f"/api/questions/{worker}/answer", {"text": "Yes, retry it."})
+    before = len([m for m in await app.get(f"/api/sessions/{worker}/messages")
+                  if m["kind"] == "report"])  # fmt: skip
+    if task["status"] == "waiting":  # Its question's card.
+        await app.post(f"/api/questions/{worker}/answer", {"text": "Yes, retry it."})
+    else:  # A follow-up on its card: the same resume.
+        await app.post(f"/api/tasks/{task['id']}/follow-up", {"text": "Yes, retry it."})
 
     async def reported():
-        tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["id"] == task_id]
-        return tasks[0] if tasks and tasks[0]["status"] in {"review", "done"} else None
+        tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["id"] == task["id"]]
+        reports = [m for m in await app.get(f"/api/sessions/{worker}/messages")
+                   if m["kind"] == "report"]  # fmt: skip
+        done = tasks and tasks[0]["status"] in {"review", "done"}
+        return tasks[0] if done and len(reports) > before else None
 
     await wait_for("it gets the answer and reports done", reported, 600, app)
     messages = await app.get(f"/api/sessions/{worker}/messages")
@@ -148,8 +157,8 @@ async def main():
                 state = await app.get("/api/state")
                 assert state["runtime"]["state"] == "ready", state["runtime"]
                 log(f"connected to {CLI}: {state['runtime'].get('warning') or 'as given'}")
-            worker, task_id = await scenario_ask(app)
-            await scenario_answer(app, worker, task_id)
+            worker, task = await scenario_ask(app)
+            await scenario_answer(app, worker, task)
             log("RESUME SCENARIOS PASSED")
         except Exception:
             failed = True
