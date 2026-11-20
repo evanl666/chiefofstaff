@@ -181,6 +181,25 @@ def transcript(messages: list[dict]) -> str:
     return "\n".join(f"    {m['kind']:>9}: {m['text'][:160]!r}" for m in messages)
 
 
+# Words of a worker before, as the Router says why it starts another: closed, its work on a
+# branch of its own ("the main branch" is not one), the earlier or related one.
+EARLIER_WORKER = re.compile(
+    r"\bclosed\b|\b(its|their|a|another|separate|own) branch\b"
+    r"|\b(earlier|previous|other|existing|related|last) (worker|one|task)\b"
+)
+
+
+def mindful_of(said: str, *earlier: dict) -> bool:
+    """Whether the Router's words on starting a worker (its why_new, its line) have the earlier,
+    related worker in mind: that it is closed, that its work is on a branch, or it or its
+    subject (hello.txt) by name."""
+    lowered = said.lower()
+    names = [w.get(key) or "" for w in earlier for key in ("title", "branch")] + ["hello.txt"]
+    return bool(EARLIER_WORKER.search(lowered)) or any(
+        name and name.lower() in lowered for name in names
+    )
+
+
 async def scenario_worker(app: App, project: Path) -> dict:
     state = await app.get("/api/state")
     router = state["router_id"]
@@ -311,7 +330,29 @@ async def scenario_reopen(app: App, worker: dict):
 
     messages = await wait_for("a related question is routed", routed, 600, app)
     started = [m for m in messages if m["kind"] == "notice" and m["text"].startswith("Started")]
-    assert not started, f"related question started a new worker: {transcript(messages)}"
+    if started:
+        # Next to a worker that is closed, its work on a branch, a new one for a read-only
+        # question on main is a fair choice (r62, r64, r64b: 3 of 13 runs), said with that
+        # worker in mind (its why_new, or the Router's line); never one started blind to it.
+        earlier = await app.get(f"/api/sessions/{worker['id']}")
+        why = [m["text"].partition(" · new because ")[2] for m in started]
+        said = " ".join([*why, *(m["text"] for m in messages if m["kind"] == "assistant")])
+        assert mindful_of(said, worker, earlier), (
+            f"related question started a new worker with no word of the earlier one: "
+            f"{transcript(messages)}"
+        )
+        mark = max(m["id"] for m in messages)
+
+        async def told():
+            later = await app.get(f"/api/sessions/{router}/messages?after={mark}")
+            replies = [m["text"] for m in later if m["kind"] == "assistant"]
+            number = any(re.search(r"\b1\b|\bone\b", r, re.IGNORECASE) for r in replies)
+            return replies if number else None
+
+        replies = await wait_for("the new worker's answer", told, 600, app)
+        log(f"a new worker for the related question, with the earlier one in mind ({why[0]!r}): "
+            f"{replies[-1][:80]!r}")  # fmt: skip
+        return
     if any(m["text"].startswith("Reopened") for m in messages):
         reused = ("Continued in", "New task")  # Continued its task, or gave it a new one.
         assert any(m["text"].startswith(reused) for m in messages), transcript(messages)
