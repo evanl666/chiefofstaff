@@ -18,6 +18,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unicodedata
@@ -4991,7 +4992,21 @@ def checkout_git(guard: CheckoutWrites, rest: list[str], positional: list[str], 
         guard.ask()  # (An alias, or a command of its own: what it does is not read here.)
 
 
-def checkout_write(command: str, cwd: str, kept: tuple[str, ...]) -> str:
+# On Windows a worker's shell is PowerShell (Copilot's; Codex wraps its commands in it): its lines
+# are read as PowerShell and cmd read them (winshell.py).
+WINDOWS_SHELLS = sys.platform == "win32"
+
+
+def checkout_guard(text: str, kept: tuple[str, ...]) -> CheckoutWrites:
+    """The reading of a line in the read-only checkouts `kept`: this system's shell's."""
+    if WINDOWS_SHELLS:
+        from .winshell import WindowsCheckout
+
+        return WindowsCheckout(text, kept)
+    return CheckoutWrites(text, kept)
+
+
+def checkout_write(command: str, cwd: str, kept: tuple[str, ...], shell: str = "") -> str:
     """Whether a shell command line, run in `cwd`, writes in one of the owner's checkouts a
     worker was given only to read (`kept`): CHECKOUT_WRITES when it does, as far as can be
     read (a redirection or a program writing a file there; git changing its work tree, index
@@ -4999,9 +5014,14 @@ def checkout_write(command: str, cwd: str, kept: tuple[str, ...]) -> str:
     known run there on files there, or a write where it can't be read in a line that runs in
     one or names one; "" otherwise. Read as the shell reads it: `cd` in the line, subshells,
     `sh -c`, `eval`, substitutions, a shell's script on its input (MOST_NESTED deep). A line
-    past what is read here, run in one or naming one: CHECKOUT_ASKS."""
+    past what is read here, run in one or naming one: CHECKOUT_ASKS. On Windows, as PowerShell
+    reads it (cmd, for one `shell` says cmd runs): winshell.py."""
     if not kept:
         return ""
+    if WINDOWS_SHELLS:
+        from .winshell import windows_checkout_write
+
+        return windows_checkout_write(command, cwd, kept, shell)
     guard = CheckoutWrites(command, kept)
     pending: list[tuple[str, str | None, int]] = [(command, cwd or None, 0)]
     try:
@@ -5039,13 +5059,18 @@ def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | Non
             or getattr(request, "cwd", None)
             or row["cwd"]
         )
-        found = checkout_write(command, str(folder or ""), tuple(kept))
+        shell = str(getattr(request, "shell", "") or "")
+        found = checkout_write(command, str(folder or ""), tuple(kept), shell)
         if found == CHECKOUT_WRITES:
             return OWNERS_CHECKOUT
         return OWNERS_CHECKOUT_ASK if found == CHECKOUT_ASKS else None
     target = getattr(request, "resolved_path", None) or getattr(request, "file_name", "")
     if not Path(target).is_absolute():
         target = str(Path(row["cwd"]) / target)
+    if sys.platform == "win32":
+        from .winshell import plain_path
+
+        target = plain_path(target)  # (`\\?\C:\…` is C:\…; `app.` is `app`.)
     if not any(within(target, folder) for folder in kept):
         return None
     return OWNERS_CHECKOUT
@@ -5055,11 +5080,11 @@ def checkout_of(command: str, folder: str, kept: list[dict]) -> dict | None:
     """Which of the owner's checkouts given only to read (`kept`) a command line run in `folder`,
     refused by owners_checkout, is about: the one it names, when it names one only; else the one
     it runs in; else the first."""
-    named = [c for c in kept if CheckoutWrites(command, (c["path"],)).mentioned]
+    named = [c for c in kept if checkout_guard(command, (c["path"],)).mentioned]
     if len(named) == 1:
         return named[0]
     for checkout in named or kept:
-        if folder and CheckoutWrites("", (checkout["path"],)).inside(folder, real=True):
+        if folder and checkout_guard("", (checkout["path"],)).inside(folder, real=True):
             return checkout
     return (named or kept or [None])[0]
 

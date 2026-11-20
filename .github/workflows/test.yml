@@ -87,7 +87,8 @@ jobs:
       - name: Tests
         run: >-
           uv run --locked --extra dev pytest -q --timeout 120
-          tests/test_windows.py tests/test_repos.py tests/test_others.py tests/test_web.py
+          tests/test_windows.py tests/test_windows_checkout.py tests/test_repos.py
+          tests/test_others.py tests/test_web.py
 
   test-newest-sdk:
     # Installs (uvx, pip) resolve the newest Copilot SDK pyproject.toml allows, not the locked

@@ -1165,7 +1165,7 @@ async def test_a_refusal_reaches_the_model_and_is_no_message_of_chief_of_staff(c
     assert len(history) == 1 and not history[0].startswith(REFUSED_NOTE)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the checkout check reads POSIX paths only")
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in Codex runs commands in zsh")
 async def test_a_codex_workers_command_refused_in_the_owners_checkout_runs_in_its_copy(
     codex, tmp_path
 ):
