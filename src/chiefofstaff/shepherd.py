@@ -641,6 +641,10 @@ class Shepherd(Keeping, Steps):
                 f"setaside:{task['id']}"
             ):
                 continue
+            if task["id"] in actions.receipts_due:
+                # Its result's PRs and commits are being read: what an Accept records as the
+                # head the owner reviewed. Claimed once they are, not before.
+                continue
             row = self.store.find_session(task["session_id"])
             if not row or row["closed_at"] or row["role"] != WORKER:
                 continue
