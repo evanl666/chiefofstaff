@@ -4,6 +4,7 @@ frozen commits, the owner's approval, a leased push, durable acceptance and a he
 merge."""
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -545,6 +546,27 @@ async def test_a_pr_its_task_opened_is_kept_when_its_receipts_could_not_read_it(
     else:
         assert not claim or claim["state"] == "ended"
         assert runtime.store.get(f"noteligible:{TARGET}")
+
+
+async def test_a_pr_its_task_opened_is_claimed_once_its_result_is_read(world):
+    """Live SX4: a PR its task opened was claimed while its just-reported result was still
+    being read, so an Accept at once recorded no head the owner reviewed, and Merge when ready
+    said "Accept it first". It is claimed once its receipts are read."""
+    runtime = await world.start()
+    actions = runtime.task_actions
+    run_id = runtime.store.value("SELECT id FROM runs WHERE task_id=?", (world.task,))
+    evidence = runtime.store.value("SELECT evidence FROM runs WHERE id=?", (run_id,))
+    runtime.store.execute("UPDATE runs SET evidence='' WHERE id=?", (run_id,))
+    runtime.store.execute("DELETE FROM pr_claims WHERE target=?", (TARGET,))  # (Unclaimed.)
+    actions.result_due(world.task)
+    await runtime.shepherd.claim_worker_prs()
+    assert runtime.shepherd.control.claim(TARGET) is None
+    runtime.store.execute("UPDATE runs SET evidence=? WHERE id=?", (evidence, run_id))
+    assert actions.read_now(world.task, time.monotonic())
+    await runtime.shepherd.claim_worker_prs()
+    assert runtime.shepherd.control.claim(TARGET)["holder"] == world.task
+    actions.accept(world.task)
+    assert runtime.shepherd.control.claim(TARGET)["accepted"]["sha"] == world.h0
 
 
 @pytest.mark.parametrize("stopped", ["", "owner", "worker"])
