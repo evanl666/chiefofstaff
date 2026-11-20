@@ -78,6 +78,11 @@ function decider(draft, node, error, failed = null) {
     scheduleHome();
     try {
       const result = await api(`/api/drafts/${draft.id}`, { method: "POST", body });
+      if (draft.kind === "connection" && result?.status === "pending") {
+        // Still needed until a retry works: the card stays, saying its sessions retry.
+        state.leaving.delete(key);
+        node.classList.remove("leaving");
+      }
       applyDraft(result?.id === draft.id && result.status ? result : { ...draft, status: "answered" });
       if (done) toast(done);
       return true;
@@ -232,8 +237,39 @@ function requestCard(draft) {
   }
   return node;
 }
+// An account an MCP tool needs connected (accounts.py): one card for every session it stops.
+// The tool's error and link are untrusted: plain text, and the link opens only on a click.
+function connectionCard(draft) {
+  const target = draft.target;
+  const error = el("span", { class: "error" });
+  const count = target.affected_sessions;
+  const lastError = target.last_error.length > 400 ? `${target.last_error.slice(0, 400)}…` : target.last_error;
+  const node = card(
+    draft,
+    "request connection",
+    "Connection needed",
+    el("div", { class: "body", text: `${target.server} needs you to connect ${target.source || "your account"}` }),
+    el("div", { class: "note", text: `${count} ${count === 1 ? "session" : "sessions"} waiting${target.last_failed_at ? ` · last failed ${clock(target.last_failed_at)}` : ""}` }),
+    lastError ? el("div", { class: "connection-error", text: lastError, title: target.last_error }) : null,
+    target.url ? el("div", { class: "connection-link" }, el("code", { text: target.url }), el("small", { text: target.known_origin ? `${target.server}'s own address` : `${target.url_note}: check it before opening` })) : null,
+    target.retrying ? el("div", { class: "note", text: "Each session retries once; this closes when one works." }) : null,
+  );
+  const decide = decider(draft, node, error);
+  const open = /^https?:\/\//i.test(target.url) ? el("a", { class: "button secondary", href: target.url, target: "_blank", rel: "noreferrer", text: "Open link" }) : null;
+  node.append(
+    el(
+      "div",
+      { class: "actions" },
+      error,
+      el("button", { type: "button", class: "text", text: "Not now", onclick: () => decide({ action: "reject" }, "Not now.") }),
+      open,
+      el("button", { type: "button", text: "I've done it", onclick: () => decide({ action: "answer" }, "Each session retries once.") }),
+    ),
+  );
+  return node;
+}
 // Cards change as workers join a decision or confirm a changed one.
-export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? draft.target.askers.length : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : draft.kind === "lessons" ? draft.target.lessons.map((lesson) => lesson.id).join(",") : ""}:${draft.outcome || ""}`;
+export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? draft.target.askers.length : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : draft.kind === "lessons" ? draft.target.lessons.map((lesson) => lesson.id).join(",") : draft.kind === "connection" ? `${draft.target.affected_sessions}:${draft.target.last_failed_at}:${draft.target.retrying}:${draft.target.source}:${draft.target.url}` : ""}:${draft.outcome || ""}`;
 // What the owner typed on a card, by card and field: a card drawn again (another worker joins
 // a decision, a lesson is added) keeps it.
 const typed = new Map();
@@ -473,6 +509,7 @@ export function draftCard(draft) {
   if (draft.kind === "workspace") return workspaceCard(draft);
   if (draft.kind === "reply") return replyCard(draft);
   if (draft.kind === "merge") return mergeCard(draft);
+  if (draft.kind === "connection") return connectionCard(draft);
   if (REQUEST_LABELS[draft.kind]) return requestCard(draft);
   if (draft.kind === "github" && !draft.target.in_reply_to && !draft.target.reply_to_comment) return reviewCard(draft);
   return messageCard(draft);

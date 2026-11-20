@@ -597,9 +597,16 @@ export function renderConnections() {
   const uncovered = coverageGaps(connector).join(" · ");
   // Scans that failed since the last that worked (bug E102): that, not what the last one found.
   const failed = connector.failed;
+  // An account it could not use, not connected yet (E116): that, not "0 found".
+  const connection = connector.connection_needed;
+  const connectionText = connection
+    ? `Connection needed: ${connection.source ? `${connection.source} (${connection.server})` : connection.server}${connection.retrying ? " · retrying" : ""}`
+    : "";
   const scanned = connector.scanning
     ? "Scanning now…"
-    : failed
+    : connectionText
+      ? `${connectionText}${connector.scanned_at ? ` · last scanned ${since(connector.scanned_at)}` : ""}`
+      : failed
       ? `Scan failed ${since(failed.at)}${failed.count > 1 ? ` (${failed.count} in a row)` : ""}: ${failed.reason}${connector.scanned_at ? ` · last scanned ${since(connector.scanned_at)}` : ""}`
       : connector.scanned_at
         ? `Scanned ${since(connector.scanned_at)}${last.found !== undefined ? ` · ${last.found} found` : ""}${problems ? ` · ${problems}` : ""}`
@@ -614,7 +621,7 @@ export function renderConnections() {
   const restingText = !resting || connector.scanning || !watching ? "" : pace > 0 ? `${resting}: every ${pace} min (after-hours setting)` : `Not scanning now: ${resting.toLowerCase()}, and after hours is 0`;
   $("#watch-resting").textContent = restingText;
   $("#watch-resting").hidden = !restingText;
-  $("#watch-state").classList.toggle("error", Boolean(problems || uncovered || (failed && !connector.scanning)));
+  $("#watch-state").classList.toggle("error", Boolean(connection || problems || uncovered || (failed && !connector.scanning)));
   $("#watch-scan").disabled = Boolean(connector.scanning);
   $("#watch-activity").hidden = !connector.session_id;
   const away = connector.away || {};

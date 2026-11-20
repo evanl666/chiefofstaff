@@ -207,6 +207,18 @@ export function renderStatusLine() {
     );
   }
   if (snap.settings.github_enabled && snap.github.error) nodes.push(el("div", { class: "bad", text: `GitHub: ${snap.github.error}` }));
+  // An account Watch for you could not use, not connected yet (E116): its card is on Home.
+  const connection = snap.connector?.connection_needed;
+  if (connection) {
+    nodes.push(
+      el(
+        "div",
+        { class: "bad", title: connection.last_error || "" },
+        `Watch for you: connection needed for ${connection.source || connection.server} `,
+        el("button", { type: "button", class: "link", text: "Open card", onclick: () => select(HOME) }),
+      ),
+    );
+  }
   // Watch scans that failed since the last that worked: nothing was read meanwhile (bug E102).
   const failed = snap.connector?.failed;
   if (failed && !snap.connector.scanning) {
@@ -221,7 +233,7 @@ export function renderStatusLine() {
   }
   // A watch the last scan could not search, or saw only part of: "0 found" means nothing there.
   const { missed, partial } = watchGaps(snap.connector?.last);
-  if (!failed && (missed.length || partial.length)) {
+  if (!failed && !connection && (missed.length || partial.length)) {
     const many = (list, words) => (list.length ? `${list.length === 1 ? "one" : list.length} ${words}` : "");
     nodes.push(
       el(
