@@ -591,7 +591,16 @@ async def scenario_watchdog(app: App, project: Path):
         if m["kind"] == "inbound" and m["meta"].get("review") == worker_id
     ]
     assert reviews, "the verdict follows a review packet"
-    action = verdict["text"].split(", ")[1].split(".")[0]
+    # As the Watchdog's notice says it: "“title”: verdict: <action words>. reason".
+    words = r": (no action|stop and nudge it|nudge it|tell the Router)\."
+    decided = re.search(words, verdict["text"])
+    assert decided, f"the verdict names its action: {verdict['text']!r}"
+    action = {
+        "no action": "none",
+        "nudge it": "nudge",
+        "stop and nudge it": "interrupt",
+        "tell the Router": "escalate",
+    }[decided.group(1)]
     if action in {"nudge", "interrupt"}:
         worker_messages = await app.get(f"/api/sessions/{worker_id}/messages")
         assert any(m["kind"] == "watchdog" for m in worker_messages), "nudge delivered"

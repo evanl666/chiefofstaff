@@ -301,7 +301,11 @@ async def m1_how_the_owner_writes(
     draft = await wait_for("a reply to Alice is drafted", drafted_for_alice, 600, app)
     log(f"drafted for Alice: {draft['text']!r}")
     assert DASHBOARD in draft["text"], draft["text"]
-    assert CJK.search(prose(draft["text"])), "a message in Chinese gets a reply in Chinese"
+    # Chinese, or no words at all: the link and the owner's 🙏 alone answer it (r66: twice).
+    said = prose(draft["text"])
+    assert CJK.search(said) or not re.search(r"[A-Za-z]{2,}", said), (
+        "a message in Chinese gets no reply in English"
+    )
     await app.post(f"/api/drafts/{draft['id']}", {"action": "reject", "reason": "test"})
 
     version = styles["slack_dm"]["version"]
