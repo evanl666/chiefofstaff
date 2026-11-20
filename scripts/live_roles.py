@@ -349,6 +349,10 @@ async def send(ctx: Ctx, text: str, **chosen) -> tuple[str, int]:
 
 
 SOUTH = "How many data rows of data/sales.csv are for the south region? Don't change any files."
+# Questions on other files of the project: never the south count again, which the Router rightly
+# sends to the worker that answered it (a follow-up, not a new worker: live run ca, P3 and P5).
+VERSION = "What version does pyproject.toml give the project? Just the version. Don't change files."
+MONEY = "Which function does textkit/money.py define? Just its name. Don't change any files."
 
 
 async def p1_chip_with_model(ctx: Ctx):
@@ -381,8 +385,11 @@ async def p2_compare(ctx: Ctx):
         assert "180" in task["result"], task["result"]
 
     async def side_by_side():
+        # Its comparison, a table with a row per agent: not its line saying it waits for one
+        # (live run ca: "Waiting on the Codex worker's report…" has 180 and Codex in it too).
         said = await la.router_said(ctx, router, mark, 600)
-        return said if "180" in said and "codex" in said.lower() else None
+        rows = [line for line in said.splitlines() if line.startswith("|") and "180" in line]
+        return said if len(rows) >= 2 or (rows and "copilot" in said.lower()) else None
 
     said = await wait_for("both results side by side", side_by_side, 900, ctx.app)
     log(f"P2: {said[:300]!r}")
@@ -399,15 +406,15 @@ async def p3_restart_on(ctx: Ctx):
             return (await la.session(ctx, holder))["status"] == "working"
 
         await la.until("it holds the slot", busy, 120)
-        router, mark = await say_text(ctx, f"In {ctx.project}: {SOUTH}")
+        router, mark = await say_text(ctx, f"In {ctx.project}: {VERSION}")
         worker = await started_by(ctx, router, mark)
         view = await la.session(ctx, worker)
-        assert view["status"] == "queued" and view.get("untouched"), view["status"]
+        assert view["status"] == "queued" and view.get("untouched"), (view["status"], view)
         made = await ctx.app.post(f"/api/sessions/{worker}/restart", {"agent": "codex"})
         assert (await la.session(ctx, worker))["closed_at"], "the first one closed"
         await la.worker_on(ctx, made["session_id"], "codex")
-        task = await la.task_ended(ctx, made["session_id"], "south's rows after a restart")
-        assert "180" in task["result"]
+        task = await la.task_ended(ctx, made["session_id"], "the version after a restart")
+        assert "0.1.0" in task["result"], task["result"]
     finally:
         await la.settings(ctx, max_workers=4)
     log("P3 passed")
@@ -418,14 +425,18 @@ async def say_text(ctx: Ctx, text: str) -> tuple[str, int]:
 
 
 async def started_by(ctx: Ctx, router: str, mark: int) -> str:
-    """The worker the Router's line names since `mark` (started, or queued for a slot)."""
+    """The new worker the Router's line names since `mark` (started, or queued for a slot);
+    one it gave the work to that it had already fails it, saying so."""
 
     async def found():
         rows = await la.messages(ctx, router)
-        return next((m["meta"]["session_id"] for m in rows if m["id"] > mark
-                     and m["kind"] == "notice" and m["meta"].get("session_id")), None)  # fmt: skip
+        line = next((m for m in rows if m["id"] > mark and m["kind"] == "notice"
+                     and m["meta"].get("session_id")), None)  # fmt: skip
+        if line and not line["text"].startswith(("Started", "Queued")):
+            raise AssertionError(f"not a new worker: {line['text'][:160]!r}")
+        return line["meta"]["session_id"] if line else None
 
-    return await wait_for("the Router starts it", found, 300, ctx.app)
+    return await wait_for("the Router starts a new worker", found, 300, ctx.app)
 
 
 async def p4_continue_left_open(ctx: Ctx):
@@ -465,12 +476,16 @@ async def p5_named_not_ready(ctx: Ctx):
     await la.settings(ctx, agents={"codex": {"enabled": True}})
     try:
         before = {s["id"] for s in (await la.state(ctx))["sessions"] if s["role"] == "worker"}
-        router, mark = await say_text(ctx, f"Use codex for this: in {ctx.project}: {SOUTH}")
+        router, mark = await say_text(ctx, f"Use codex for this: in {ctx.project}: {MONEY}")
 
         async def card():
-            rows = await la.messages(ctx, router)
-            return next((m for m in rows if m["id"] > mark and m["meta"].get("agent_refused")),
-                        None)  # fmt: skip
+            rows = [m for m in await la.messages(ctx, router) if m["id"] > mark]
+            # Given to a worker it already had instead (live run ca): not this check's case.
+            given = [m["text"] for m in rows if m["kind"] == "notice"
+                     and m["text"].startswith(("New task", "Sent to", "Continued in"))]  # fmt: skip
+            if given:
+                raise AssertionError(f"given to a worker it had: {given[0][:160]!r}")
+            return next((m for m in rows if m["meta"].get("agent_refused")), None)
 
         found = await wait_for("the card with its fix", card, 300, ctx.app)
         log(f"P5: {found['text']!r} {found['meta'].get('fix')}")
@@ -482,8 +497,8 @@ async def p5_named_not_ready(ctx: Ctx):
         )
         worker = await la.assigned(ctx, router, found["id"])
         await la.worker_on(ctx, worker, "copilot")
-        task = await la.task_ended(ctx, worker, "south's rows on Copilot instead")
-        assert "180" in task["result"]
+        task = await la.task_ended(ctx, worker, "money.py's function on Copilot instead")
+        assert "format_money" in task["result"], task["result"]
     finally:
         ctx.notes["flag"].unlink(missing_ok=True)
     log("P5 passed")
