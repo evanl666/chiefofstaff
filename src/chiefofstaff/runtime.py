@@ -4189,6 +4189,11 @@ class Runtime:
                 self.store.delete(f"gitid:{path}")
             return False
         if now == (known[:-1] if tree else known):
+            if tree and (served := self.git_served(path, now)) and served[0] != tree:
+                # Its worktree made again while the private folder kept its identity (ext4 can
+                # give both their inode numbers back): kept as it is now, so that a swap of the
+                # private folder later is never taken for this remake (git_remade).
+                self.git_record(path, now + served)
             return False
         if tree and self.git_remade(path, tree):
             self.git_record(path, now + self.git_served(path, now))
@@ -4197,9 +4202,9 @@ class Runtime:
 
     def git_served(self, path: str, now: list) -> list:
         """Of a worktree's private folder in a repository (`.git/worktrees/x`): that
-        worktree's folder (where its `gitdir` leads), as it is, for telling a worktree made
-        again (git worktree remove, add) from a swap of the private folder under one that
-        stays."""
+        worktree's folder (where its `gitdir` leads), as it is, and its `.git` file with when
+        it was written, for telling a worktree made again (git worktree remove, add) from a
+        swap of the private folder under one that stays."""
         parent = Path(path).parent
         if not now or now[0] != "d" or parent.name != "worktrees":
             return []
@@ -4208,16 +4213,28 @@ class Runtime:
         except OSError:
             return []
         tree = os.path.realpath(Path(named).parent)
-        return [{"tree": tree, "id": identity_of(tree)}]
+        pointer = str(Path(tree) / ".git")
+        file = identity_of(pointer)
+        with suppress(OSError):
+            file = file and [*file, os.lstat(pointer).st_mtime_ns]
+        return [{"tree": tree, "id": identity_of(tree), "pointer": file}]
 
     def git_remade(self, path: str, tree: dict) -> bool:
         """Whether a worktree's private folder was made again with its worktree (`git worktree
         add` under the same name, the one before removed): its worktree is another folder too,
         and the private folder still serves it. Never for a worktree a worker could make again
         itself that Chief of Staff or the owner run git in (git_tree_guarded): there, only the
-        private folder as it was counts."""
+        private folder as it was counts.
+
+        Another folder: another identity, or (ext4 gives a removed folder's inode number to the
+        next one made, often at once) a `.git` file written since. Out of every worker's reach,
+        only the owner's git writes it again."""
         served = self.git_served(path, identity_of(path))
-        if not served or served[0]["tree"] != tree["tree"] or served[0]["id"] == tree["id"]:
+        if not served or served[0]["tree"] != tree["tree"]:
+            return False
+        pointer = served[0].get("pointer")
+        rewritten = bool(pointer and tree.get("pointer") and pointer != tree["pointer"])
+        if served[0]["id"] == tree["id"] and not rewritten:
             return False
         return not self.git_tree_guarded(tree)
 

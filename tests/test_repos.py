@@ -22,6 +22,7 @@ from conftest import FakeSession, Harness, call_tool, env, said, settle, task_of
 from chiefofstaff import events as events_module
 from chiefofstaff import policy as policy_module
 from chiefofstaff import privategit, settings_guard
+from chiefofstaff import runtime as runtime_module
 from chiefofstaff import workers as workers_module
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
@@ -523,6 +524,33 @@ async def at_rest(runtime, harness, worker: str):
     harness.session(worker).emit("session.idle")
     await settle(runtime)
     await runtime.detach(worker)
+
+
+class InodesGivenBack:
+    """As ext4 does, often at once: a folder or file made where one was just removed gets the
+    removed one's inode number, as Chief of Staff reads it. (CI's Linux runners now and then
+    made the owner's worktree made again read as a swap of its private folder.)"""
+
+    def __init__(self, monkeypatch):
+        self.real = runtime_module.identity_of
+        self.numbers: dict[tuple[str, int], int] = {}
+        monkeypatch.setattr(runtime_module, "identity_of", self.identity)
+
+    def identity(self, path) -> list:
+        found = self.real(path)
+        if found and (key := (os.path.realpath(path), found[2])) in self.numbers:
+            return [*found[:2], self.numbers[key], *found[3:]]
+        return found
+
+    def remade(self, paths: list[Path], *commands: tuple[str, ...], cwd: Path):
+        """The commands (that remove these and make them again) run; each one made again has
+        the number of the one it replaced."""
+        before = {path: self.identity(str(path)) for path in paths}
+        for command in commands:
+            run(*command, cwd=cwd)
+        for path, was in before.items():
+            if was and (now := self.real(str(path))):
+                self.numbers[(os.path.realpath(path), now[2])] = was[2]
 
 
 async def isolated(runtime, harness, project: Path, **more) -> tuple[str, Path]:
@@ -3198,12 +3226,16 @@ async def test_a_read_only_worker_never_makes_the_owners_local_settings_ask(
         await runtime.stop()
 
 
+@pytest.mark.parametrize("given_back", ["none", "worktree", "private", "all"])
 async def test_the_owner_making_their_worktree_again_is_no_replaced_git(
-    tmp_path, git_repo, monkeypatch
+    tmp_path, git_repo, monkeypatch, given_back
 ):
     """The owner removes a worktree of theirs and makes one again under that name (`git
     worktree remove`, `add`): its private folder in the .git is another, made with a new
-    worktree out of every worker's reach: theirs, nothing waits."""
+    worktree out of every worker's reach: theirs, nothing waits. Also where the worktree's
+    folder and `.git` file have the old ones' inode numbers (ext4: CI's Linux runners failed
+    it now and then), its private folder's, or all of them."""
+    numbers = InodesGivenBack(monkeypatch)
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
     runtime = await harness.connect()
@@ -3218,8 +3250,17 @@ async def test_the_owner_making_their_worktree_again_is_no_replaced_git(
         await settle(runtime)
         assert runtime.states.is_live(worker)
         await at_rest(runtime, harness, worker)
-        run("git", "worktree", "remove", str(tmp_path / "hotfix"), cwd=git_repo)
-        run("git", "worktree", "add", "-q", str(tmp_path / "hotfix"), "-b", "hotfix2", cwd=git_repo)
+        hotfix = tmp_path / "hotfix"
+        admin = git_repo / ".git" / "worktrees" / "hotfix"
+        worktree = [hotfix, hotfix / ".git"]
+        numbers.remade(
+            {"none": [], "worktree": worktree, "private": [admin], "all": [*worktree, admin]}[
+                given_back
+            ],
+            ("git", "worktree", "remove", str(hotfix)),
+            ("git", "worktree", "add", "-q", str(hotfix), "-b", "hotfix2"),
+            cwd=git_repo,
+        )
         await runtime.owner_send(worker, "Next")
         await settle(runtime)
         assert runtime.states.is_live(worker)
@@ -3589,13 +3630,18 @@ async def test_a_servers_file_changed_mid_turn_is_denied_at_the_tool_that_would_
         await runtime.stop()
 
 
+@pytest.mark.parametrize("given_back", ["none", "worktree", "private", "all"])
 async def test_a_worktree_made_again_under_its_name_is_no_replaced_git(
-    tmp_path, git_repo, monkeypatch
+    tmp_path, git_repo, monkeypatch, given_back
 ):
     """A worker makes a scratch worktree to compare with main, removes it and makes it again
     (looked at in between, or in one go): its private folder in the .git is another each time,
-    made with its worktree: nothing waits. One swapped under a worktree that stays still is."""
+    made with its worktree: nothing waits. One swapped under a worktree that stays still is.
+    Also where what is made again in one go has the old ones' inode numbers (as on ext4): the
+    worktree's folder and `.git` file, its private folder (a swap of it later is still one,
+    not taken for that remake), or all of them."""
     monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "darwin")
+    numbers = InodesGivenBack(monkeypatch)
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
     runtime = await harness.connect()
@@ -3618,12 +3664,19 @@ async def test_a_worktree_made_again_under_its_name_is_no_replaced_git(
         await looked()
         run(*add, cwd=cwd)
         await looked()
-        run("git", "worktree", "remove", str(scratch), cwd=cwd)
-        run(*add, cwd=cwd)
-        await looked()
-        assert runtime.states.is_live(worker)
         common = Path(run("git", "rev-parse", "--git-common-dir", cwd=cwd).strip())
         admin = (cwd / common).resolve() / "worktrees" / "cmp"
+        worktree = [scratch, scratch / ".git"]
+        numbers.remade(
+            {"none": [], "worktree": worktree, "private": [admin], "all": [*worktree, admin]}[
+                given_back
+            ],
+            ("git", "worktree", "remove", str(scratch)),
+            add,
+            cwd=cwd,
+        )
+        await looked()
+        assert runtime.states.is_live(worker)
         shutil.copytree(admin, tmp_path / "swapped")
         shutil.rmtree(admin)
         (tmp_path / "swapped").rename(admin)

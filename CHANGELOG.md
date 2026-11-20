@@ -21,6 +21,15 @@
   edit showed in the worker's changes and receipts. A program that only reads what it names
   (`cat`, `grep`, `head`, `less`, `git diff`, `sed -n 1,80p`) claims none of it; what it writes
   (a redirection, `tee`, `sed -i`, `git checkout`) and any other program still count.
+- **On Linux, a worktree of yours removed and made again under its name no longer stops a
+  worker** (`git worktree remove`, then `add`): a worker with that repository could wait with
+  "…/worktrees/<name> was replaced since Chief of Staff first saw it" until you clicked *Use this
+  .git*. ext4 can give a removed folder's number to the next one made, and Chief of Staff told
+  the worktree's folder from a new one by that number; it now also reads when the worktree's
+  `.git` file was written. Where the private folder in `.git` got its number back too, Chief of
+  Staff now keeps the worktree as it is, so that private folder swapped later is still found
+  (before, it could be taken for that worktree made again). A test failed on CI's Linux runners
+  now and then for it.
 
 ## 0.1.48 (2026-11-19)
 
