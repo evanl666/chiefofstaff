@@ -211,12 +211,13 @@ async def m1_how_the_owner_writes(
     assert "ALL CAPS" not in every, "someone else's message is not the owner's style"
     log(f"slack_dm: {styles['slack_dm']['text'][:300]}")
     log(f"chat: {styles.get('chat', {}).get('text', '(none)')[:300]}")
+    state = await app.get("/api/state")
     lessons = [
         lesson["text"]
-        for card in (await app.get("/api/state"))["drafts"]
+        for card in state["drafts"]
         if card["kind"] == "lessons"
         for lesson in card["target"]["lessons"]
-    ]
+    ] + [lesson["text"] for lesson in state["learning"]["lessons"]]  # (E123: kept at once.)
     log(f"habits proposed: {lessons}")
     style_text = " ".join(style["text"] for style in styles.values())
     unquoted = re.sub(r"[\"“”][^\"“”]*[\"“”]", " ", style_text)
