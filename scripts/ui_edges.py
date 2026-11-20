@@ -5448,6 +5448,9 @@ async def round_qa8_report(runtime, browser, failures: list[str]):
             status="progress",
             summary=f"Import update {number}: checked {number * 200} rows.",
         )
+    # Asked by the Router how far it is: its answer is an Answer/Update, its task goes on.
+    await call_tool(runtime, "message_session", router, session_id=worker, task="note",
+                    task_id=task["id"], text="How many rows are ready?")  # fmt: skip
     await call_tool(
         runtime,
         "report",
@@ -5457,6 +5460,7 @@ async def round_qa8_report(runtime, browser, failures: list[str]):
         summary="Answer for the owner: 1,240 rows are ready.",
     )
     await settle(runtime)
+    assert runtime.tasks.get(task["id"])["status"] == "running"
     for scheme in ("light", "dark"):
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900}, color_scheme=scheme

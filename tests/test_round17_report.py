@@ -178,9 +178,13 @@ async def test_a_router_note_not_seen_yet_is_not_what_progress_answers(harness):
 async def test_answer_never_changes_the_task_and_is_told_once(harness):
     runtime = await harness.connect()
     worker, task = await spawn(runtime, harness.router_id, "Measure the import")
+    session = harness.session(worker)
+    await turn(runtime, session)
     await call_tool(
         runtime, "report", worker, status="progress", summary="Measured the first shard."
     )
+    await continued(runtime, harness, worker, task, "How long did it take?", how="note")
+    await turn(runtime, session)
     before = runtime.tasks.get(task["id"])
     notifications = len(harness.notifications)
 
@@ -474,9 +478,9 @@ async def test_an_answer_on_a_check_back_is_news_on_the_accepted_task(harness):
 async def test_a_peer_waits_and_hands_over_with_the_router_told_no_more(harness, status):
     """Live E3 (r71): the G2 rule (a check-back's or thread's news is news on its task) tells
     the Router nothing more in a hand-over between peers: the maker's answer after its tell
-    reaches it as before; the writer, waiting with a check-back and woken without the name,
-    says so on its card only (an answer there reached the Router before), and neither turn is
-    a thread's."""
+    reaches it once (its result, C3); the writer, waiting with a check-back and woken without
+    the name, says so on its card only (an answer there reached the Router before), and
+    neither turn is a thread's."""
     runtime = await harness.connect()
     maker, made = await spawn(runtime, harness.router_id, "Column Maker")
     writer, wanted = await spawn(runtime, harness.router_id, "Query Writer",
@@ -505,6 +509,114 @@ async def test_a_peer_waits_and_hands_over_with_the_router_told_no_more(harness,
     assert not runtime.states[writer].thread_turn, "a peer's note is no thread's news"
     await call_tool(runtime, "report", maker, status="answer", task_id=made["id"],
                     summary="列名 col_377a85 已直接告知 Query Writer。")  # fmt: skip
-    told = router_reports(harness)[-1]
-    assert (told["meta"]["status"], told["meta"]["task_id"]) == ("answer", made["id"])
-    assert runtime.tasks.get(made["id"])["status"] == "running", "an answer changes nothing"
+    told = [m for m in router_reports(harness) if m["meta"]["from"] == maker]
+    assert [(m["meta"]["status"], m["meta"]["task_id"]) for m in told] == [("done", made["id"])]
+    assert runtime.tasks.get(made["id"])["status"] == "review", "its answer is its result (C3)"
+
+
+# Live C3 (r72): an answer to the task a worker was given is that task's result.
+
+
+async def test_an_answer_to_its_own_task_is_its_result(harness):
+    """Asked in its task's own instructions to report with status="answer" (as the Router's
+    prompt had it ask for an update), a Codex worker did, and its task never finished: the
+    Router waited for a result that had come. Nothing else was asked of it since its task (a
+    peer's message is no question of the Router's or the owner's): it is its result."""
+    runtime = await harness.connect()
+    waiter, waiting = await spawn(
+        runtime, harness.router_id, "Waiter",
+        instructions="Run `sleep 90` and let it finish. Then report, word for word, any "
+        'messages other workers sent you while you waited, with report(status="answer").',
+    )  # fmt: skip
+    teller, _ = await spawn(runtime, harness.router_id, "Tell Waiter the number")
+    session = harness.session(waiter)
+    await turn(runtime, session)
+    await call_tool(runtime, "tell_session", teller, session_id=f"worker:{waiter[:8]}",
+                    text="the number is 777")  # fmt: skip
+    await turn(runtime, session)
+    finished = len(harness.notifications)
+
+    reply = await call_tool(runtime, "report", waiter, status="answer",
+                            summary="the number is 777")  # fmt: skip
+    await settle(runtime)
+
+    shown = view(runtime, waiting["id"])
+    assert (shown["status"], shown["result"]) == ("review", "the number is 777")
+    told = [m for m in router_reports(harness) if m["meta"]["from"] == waiter]
+    assert [m["meta"]["status"] for m in told] == ["done"]
+    assert worker_reports(harness, waiter)[-1]["meta"]["status"] == "done"
+    assert len(harness.notifications) == finished + 1, "its one “finished”"
+    assert 'report(status="done")' in reply.text_result_for_llm
+    assert f"result of task {waiting['id']}" in reply.text_result_for_llm
+
+
+async def test_an_answer_to_a_task_made_in_its_chat_is_its_result(harness):
+    """The owner's message to a worker about none of its tasks is a task of its own: its
+    answer is that task's result too."""
+    runtime = await harness.connect()
+    worker, first = await spawn(runtime, harness.router_id, "Tidy the README")
+    session = harness.session(worker)
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="done", summary="Tidied the README.")
+    await idle(runtime, session)
+    second, _ = await spawn(runtime, harness.router_id, "Bump the version")
+    await turn(runtime, harness.session(second))
+    await call_tool(runtime, "report", second, status="done", summary="Bumped to 2.1.")
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    task="new", why_new="test", earlier="keep", title="Lint the docs",
+                    text="Lint the docs.")  # fmt: skip
+    linting = runtime.tasks.current(worker)
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="done", task_id=linting["id"],
+                    summary="Docs lint clean.")  # fmt: skip
+    await idle(runtime, session)
+    await runtime.owner_send(worker, "Which Python version does CI use?")
+    made = runtime.tasks.current(worker)
+    assert made["id"] not in {first["id"], linting["id"]} and made["status"] == "running"
+    await turn(runtime, session)
+
+    await call_tool(runtime, "report", worker, status="answer", task_id=made["id"],
+                    summary="CI uses Python 3.12.")  # fmt: skip
+
+    assert runtime.tasks.get(made["id"])["status"] == "review"
+
+
+async def test_an_answer_after_the_results_it_waited_for_is_its_result(harness):
+    """The results of the tasks it waited for come after its task: they ask nothing of it."""
+    runtime = await harness.connect()
+    first, schema = await spawn(runtime, harness.router_id, "Write the schema")
+    backfill, later = await spawn(runtime, harness.router_id, "Count the rows to backfill",
+                                  after=[schema["id"]])  # fmt: skip
+    await call_tool(runtime, "report", first, status="done", summary="Schema written.")
+    await settle(runtime)
+    await runtime.workers.pump()
+    await settle(runtime)
+    session = harness.session(backfill)
+    assert 'type="results"' in session.sent[-1] or 'type="results"' in "".join(session.sent)
+    await turn(runtime, session)
+
+    await call_tool(runtime, "report", backfill, status="answer", task_id=later["id"],
+                    summary="1,204 rows need a backfill.")  # fmt: skip
+
+    assert runtime.tasks.get(later["id"])["status"] == "review"
+
+
+async def test_an_answer_to_a_question_about_its_task_stays_an_answer(harness):
+    """Asked something about its task since (the Router's note or more of it, the owner's
+    chat), its answer is that answer (E115), not its result."""
+    runtime = await harness.connect()
+    for asking in ("note", "continue", "chat"):
+        worker, task = await spawn(runtime, harness.router_id, f"Profile the import {asking}")
+        session = harness.session(worker)
+        await turn(runtime, session)
+        if asking == "chat":
+            await runtime.owner_send_to(harness.router_id, worker, "Which stage is slowest?")
+        else:
+            await continued(runtime, harness, worker, task, "Which stage is slowest?", asking)
+        await turn(runtime, session)
+
+        await call_tool(runtime, "report", worker, status="answer", task_id=task["id"],
+                        summary="Parsing is slowest.")  # fmt: skip
+
+        assert runtime.tasks.get(task["id"])["status"] == "running", asking
+        assert router_reports(harness)[-1]["meta"]["status"] == "answer", asking

@@ -3126,13 +3126,9 @@ class Tools:
         reports is about the work before that. A retry's note (last_instruction skips it) or a
         restart's resumes the turn it interrupted: that turn's instruction still counts. A
         check-back, a thread's news or another wake brings news of its own, not an answer."""
-        state = self.states[caller]
-        if state.thread_turn:
+        if self.states[caller].thread_turn:
             return False
-        upto = int(sent) if (sent := self.store.get(f"sent:{caller}")) else None
-        if state.unread:
-            unseen = min(entry[2] for entry in state.unread.values()) - 1
-            upto = unseen if upto is None else min(upto, unseen)
+        upto = self.seen_upto(caller)
         while found := last_instruction(self.store, caller, upto):
             asked = self.store.message(found)
             prompt = str(asked["meta"].get("prompt") or "")
@@ -3152,6 +3148,50 @@ class Tools:
             return asked["kind"] == "owner" and bool(asked["meta"].get("chat"))
         return False
 
+    def seen_upto(self, caller: str) -> int | None:
+        """The newest message it has seen (None: no mark): not one still on its way, nor one
+        sent into its turn and not shown to it yet."""
+        state = self.states[caller]
+        upto = int(sent) if (sent := self.store.get(f"sent:{caller}")) else None
+        if state.unread:
+            unseen = min(entry[2] for entry in state.unread.values()) - 1
+            upto = unseen if upto is None else min(upto, unseen)
+        return upto
+
+    def answers_assignment(self, caller: str, task: dict) -> bool:
+        """Whether an answer on a task at work is its result (live C3: told in its task's own
+        instructions to report with status="answer", a worker did so, and its task never
+        finished): the last the Router or the owner said to it is the instruction that gave it
+        this task, with nothing asked of it since (a note, more of it, a chat about it)."""
+        if task["status"] != "running":
+            return False
+        upto = self.seen_upto(caller)
+        given = self.store.value(
+            "SELECT coalesce(min(id), 0) FROM messages WHERE session_id=? "
+            "AND kind IN ('router', 'owner') AND json_type(meta, '$.prompt') IS NOT NULL "
+            "AND json_extract(meta, '$.task_id')=?",
+            (caller, task["id"]),
+        )
+        said = self.store.all(
+            "SELECT id, json_extract(meta, '$.prompt') AS prompt FROM messages "
+            "WHERE session_id=? AND id<=? AND kind IN ('router', 'owner') "
+            "AND json_type(meta, '$.prompt') IS NOT NULL ORDER BY id DESC LIMIT 20",
+            (caller, (1 << 63) - 1 if upto is None else upto),
+        )
+        last = next(
+            (
+                row["id"]
+                for row in said
+                # Not the results of tasks it waited for: they ask nothing of it.
+                if str(row["prompt"]).startswith(
+                    ('<message from="router"', '<message from="owner"')
+                )
+                and not str(row["prompt"]).startswith('<message from="router" type="results"')
+            ),
+            0,
+        )
+        return bool(given) and last == given
+
     async def t_report(self, params: Report, caller: str):
         row = self.caller(caller, WORKER, SLACK)
         task = (
@@ -3169,6 +3209,15 @@ class Tools:
         )
         if as_news:
             params = params.model_copy(update={"status": "progress"})
+        # An answer to the task it was given is that task's result (live C3).
+        as_result = bool(
+            params.status == "answer"
+            and task
+            and row["role"] == WORKER
+            and self.answers_assignment(caller, task)
+        )
+        if as_result:
+            params = params.model_copy(update={"status": "done"})
         progress_answer = params.status == "progress" and self.answers_instruction(caller)
         answer = params.status == "answer" or progress_answer
         split_note = ""
@@ -3704,6 +3753,12 @@ class Tools:
             )
         if answer:
             return "Reported to the Router as your answer; the owner sees it as an Answer/Update."
+        if as_result and task:
+            return (
+                f"Reported to the Router as the result of task {task['id']} (done): the task you "
+                'were given ends with report(status="done"), never "answer", even when its result '
+                "is only an answer or a message to pass on." + self.run_note(row, task, "done")
+            )
         return "Reported to the Router." + split_note + self.run_note(row, task, params.status)
 
     def run_note(self, row: dict, task: dict | None, status: str) -> str:

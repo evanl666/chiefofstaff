@@ -231,6 +231,9 @@ async def seed(runtime, client, code: Path) -> dict:
             status="progress",
             summary=f"Comparison update {number}: checked service {number}.",
         )
+    # Asked by the Router how far it is: its answer is an Answer/Update, its task goes on.
+    await call_tool(runtime, "message_session", router, session_id=workers[COMPARE]["session_id"],
+                    task="note", task_id=compare_task, text="How many services so far?")  # fmt: skip
     await call_tool(
         runtime,
         "report",
