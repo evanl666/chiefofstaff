@@ -1715,6 +1715,28 @@ async def test_a_worker_whose_answer_is_only_in_its_chat_reports_it(harness):
     ] in {"review", "done"}
 
 
+async def test_a_worker_refreshed_during_its_turn_is_still_asked_for_its_report(harness):
+    """Its prompt changed during its turn (a style learned, a worker added beside it): it is
+    opened again once that turn is over, and a turn that ended without report() is still asked
+    for one, there (live G3: never asked; the Watchdog found it ten minutes later)."""
+    from chiefofstaff.roles import WORKER
+
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Analyze sales")
+    session = harness.session(worker)
+    await settle(runtime)
+    await runtime.refresh(WORKER)
+    assert runtime.states[worker].stale, "refreshed once its turn is over"
+    session.emit("assistant.message", content="Looked at it.")
+    session.emit("session.idle")
+    await settle(runtime)
+    opened = harness.session(worker)
+    assert opened is not session, "opened again with its new prompt"
+    assert "report-missing" in opened.sent[-1]
+    notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+    assert notices.count("It stopped without a report: asked for one.") == 1
+
+
 async def test_a_worker_that_stops_without_reporting_is_asked_once(harness):
     """It stopped without an answer: it is asked once to report."""
     runtime = await harness.connect()

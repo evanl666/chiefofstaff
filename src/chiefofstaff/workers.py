@@ -212,12 +212,12 @@ class Workers:
             self.states[session_id].now = False
             return True
 
-    def complete_report(self, session_id: str):
+    def complete_report(self, session_id: str, reopened: bool = False):
         """A worker that reported done in a line ("Analysis complete") and wrote the answer
         itself in its chat: the owner reads reports, so the report gets that answer."""
         recent = since_last_instruction(recent_messages(self.store, session_id))
         reports = [m for m in recent if m["kind"] == "report" and m["meta"].get("status") == "done"]
-        if not reports or not self.states.handle(session_id):
+        if not reports or not (reopened or self.states.handle(session_id)):
             return
         if len({m["meta"].get("task_id") for m in reports}) > 1:
             return  # Several tasks reported in one turn: its answer is about them all.
@@ -364,12 +364,13 @@ class Workers:
                 meta={"answered_by": session_id, "title": f"“{title}”", "task_id": task["id"]},
             )
 
-    async def ask_for_report(self, session_id: str):
+    async def ask_for_report(self, session_id: str, reopened: bool = False):
         """A turn that ended on its task without report(): the owner sees only reports. Its
         final answer, when it wrote one, becomes the report as written (at once, and nothing is
         lost in a retelling); otherwise it is asked once to report. Not after the owner's own
         chat with it (they read its answer there), nor after that request (the Watchdog
-        follows it up)."""
+        follows it up). `reopened`: its session was just let go of, to be opened again with
+        what changed during its turn (Runtime.reattach): asked all the same."""
         row = self.store.session(session_id)
         if row["status"] not in {"working", "starting", "queued"} and not row["closed_at"]:
             self.answer_on_home(session_id)  # Its turn is over: what it answered is all.
@@ -424,8 +425,8 @@ class Workers:
             return
         if asked["meta"].get("wait_nudge"):
             return  # Asked what it waits for and silent: the stall check follows it up.
-        if self.states[session_id].busy or not self.states.handle(session_id):
-            return  # Working again, or being closed or reattached.
+        if self.states[session_id].busy or not (reopened or self.states.handle(session_id)):
+            return  # Working again, or being closed or reattached (asked once it is: reopened).
         answers = [m for m in recent if m["kind"] == "assistant" and not m["meta"].get("narration")]
         answer = answers[-1]["text"].strip() if answers else ""
         # Waiting for something (an answer it asked for, a card, a thread or PR it follows):
