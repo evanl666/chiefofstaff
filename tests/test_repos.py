@@ -4700,13 +4700,6 @@ async def test_a_worker_in_the_owners_folder_gets_a_worktree_to_change_it(tmp_pa
     assert head.stdout.strip() == "main", "the owner's checkout stays on its branch"
 
 
-# The check of a command in the owner's checkout (policy.checkout_write) reads POSIX paths: on
-# Windows it refuses none yet, so no copy is made there.
-POSIX_PATHS = pytest.mark.skipif(
-    sys.platform == "win32", reason="the checkout check reads POSIX paths only"
-)
-
-
 def owner_bytes(repo: Path) -> dict[str, bytes]:
     """A checkout's files as they are (a link: where it leads), with its index and HEAD."""
     found = {}
@@ -4756,7 +4749,6 @@ def copies(harness, worker: str) -> list[dict]:
             if c.get("copy")]  # fmt: skip
 
 
-@POSIX_PATHS
 @pytest.mark.parametrize(
     ("first", "sandbox"), [("./run_tests.sh", False), ("echo y >> README.md", True)]
 )
@@ -4802,7 +4794,6 @@ async def test_a_command_refused_in_the_owners_checkout_runs_in_a_copy_of_its_ow
     assert (state.stale, state.after_refresh) == (sandbox, ""), "sandboxed: from its next turn"
 
 
-@POSIX_PATHS
 async def test_a_copy_that_cannot_be_made_leaves_the_refusal_as_it_was_once(tmp_path):
     """Its worktree can't be made (here its branch's name is taken): the refusal says what it
     said before, and no copy is tried again for that worker and repository (never a loop);
@@ -4831,7 +4822,6 @@ async def test_a_copy_that_cannot_be_made_leaves_the_refusal_as_it_was_once(tmp_
     assert run("git", "worktree", "list", "--porcelain", cwd=app).count("worktree ") == 1
 
 
-@POSIX_PATHS
 async def test_a_worker_with_a_worktree_of_that_repository_is_sent_there(tmp_path):
     """One that took a worktree of the project with add_repo already: sent there, no copy."""
     app = to_read(tmp_path)
@@ -4885,7 +4875,6 @@ async def test_what_cannot_be_copied_in_is_named_and_no_link_leads_out(tmp_path,
     assert owner_bytes(app) == before
 
 
-@POSIX_PATHS
 async def test_what_was_copied_in_is_the_owners_not_the_workers_work(tmp_path):
     """The owner's uncommitted work in a copy is where the task's share of it starts: its
     receipts count only what it changed there itself; closed, a copy that holds nothing else

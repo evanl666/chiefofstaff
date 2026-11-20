@@ -1134,7 +1134,7 @@ async def test_a_yolo_codex_workers_command_writing_in_the_owners_checkout_is_re
         assert (own / "first.txt").read_text() == readme.splitlines()[0] + "\n", "read, written"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the checkout check reads POSIX paths only")
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in Codex runs commands in zsh")
 async def test_a_command_refused_in_the_owners_checkout_is_sent_to_a_copy_of_its_own(
     backend, tmp_path, monkeypatch
 ):
