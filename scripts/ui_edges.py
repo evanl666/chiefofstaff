@@ -5232,6 +5232,7 @@ async def round_qa8_auth(runtime, browser, failures: list[str]):
         await expect(page.locator("#status-line")).to_contain_text(
             "Watch for you: connection needed for Acme Search"
         )
+        await card.scroll_into_view_if_needed()  # Other rounds' cards may come first.
         await page.screenshot(path=shots / f"connection-{width}-{scheme}.png")
         await context.close()
     page = await browser.new_page()
