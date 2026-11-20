@@ -630,9 +630,9 @@ class Shepherd(Keeping, Steps):
 
     async def claim_worker_prs(self):
         """A claim for each eligible PR a worker's task made and follows (its own, by the
-        owner's account): to that task, its origin; one it opened is followed for it then,
-        unless the owner or the Router stopped that. Read once to tell eligibility; a PR found
-        not eligible is not read again for a day."""
+        owner's account): to that task, its origin; one it opened and never followed is followed
+        for it then. Read once to tell eligibility; a PR found not eligible is not read again
+        for a day."""
         actions = self.runtime.task_actions
         found: list[tuple[str, dict, dict]] = []
         for task in self.runtime.tasks.listed(include_ended_since=_hours_ago(72)):
@@ -644,6 +644,7 @@ class Shepherd(Keeping, Steps):
             if not row or row["closed_at"] or row["role"] != WORKER:
                 continue
             followed = set(actions.followed_for(task, self.store.follows(row["id"])))
+            opened = actions.opened_prs(task["id"])
             prs = list((actions.receipts(task) or {}).get("prs") or [])
             # One it opened that its receipts could not read (GitHub did not answer for it as
             # its result was read, and they keep it out until it does): its own all the same,
@@ -651,26 +652,24 @@ class Shepherd(Keeping, Steps):
             read = {threads.normalize(f"github:{pr['label']}") for pr in prs}
             prs += [
                 {"label": label, "own": True, "state": "", "opened": True}
-                for label in sorted(actions.opened_prs(task["id"]))
+                for label in sorted(opened)
                 if threads.normalize(f"github:{label}") not in read
             ]
             for pr in prs:
                 target = threads.normalize(f"github:{pr['label']}")
-                # One it opened and never named by its URL in a report is not followed yet: it
-                # is followed as it is claimed, unless the owner or the Router stopped that.
-                stopped = self.store.get(f"stopped:{row['id']}:{target}") or self.store.get(
-                    f"stoppedfor:{task['id']}:{target}"
-                )
-                opened = pr.get("opened") or target.removeprefix("github:") in actions.opened_prs(
-                    task["id"]
-                )
-                if (
-                    not pr.get("own")
-                    or (target not in followed and (stopped or not opened))
-                    or pr.get("state") not in {"OPEN", ""}
-                ):
+                if not pr.get("own") or pr.get("state") not in {"OPEN", ""}:
                     continue
                 if target not in followed:
+                    # One it opened and never named by its URL in a report was never followed:
+                    # it is followed as it is claimed. Not one it followed before (its record
+                    # keeps it) and no longer does: it, the owner or the Router stopped that.
+                    if (
+                        target.removeprefix("github:") not in opened
+                        or target in json.loads(row["links"] or "[]")
+                        or self.store.get(f"stopped:{row['id']}:{target}")
+                        or self.store.get(f"stoppedfor:{task['id']}:{target}")
+                    ):
+                        continue
                     pr = {**pr, "follow": True}
                 if self.control.claim(target):
                     continue
