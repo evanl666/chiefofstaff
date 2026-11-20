@@ -11,7 +11,8 @@
   subshells, `sh -c` and `eval`, and so is a program Chief of Staff can't read, run there on
   files there: the worker runs those in a copy of its own (below). Reads go through as before.
   The check takes 0.02 to 0.06 ms a command (the median; under 0.3 ms for 99 in 100), and
-  nothing for a worker with no checkout of yours.
+  nothing for a worker with no checkout of yours. This is on macOS and Linux: on Windows a
+  command line is not read for it yet, so such a command still goes through there.
 - **A worker given your checkout to read runs its tests in a copy of its own, without asking
   you.** Its test run there (`./run_tests.sh`, `pytest`, a build) was refused, and a worker
   told to change no files could stop and ask you which way to go. Now Chief of Staff gives it,
