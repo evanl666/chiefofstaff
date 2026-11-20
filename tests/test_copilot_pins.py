@@ -307,8 +307,8 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         3264,
         "4df73869b2dae13f0c13102ea0964554acb846342671e08bbb3f9c85ab3ed1a4",
     ),
-    "distill, created": (18236, "abd054f4fd030e19f4d38da23a033e3864c915f0d7a5ad8cd35f55a306bf8a09"),
-    "distill, resumed": (18199, "1d7f7bae0bb2e215c6183e89d77f46080d2d47a4abaed13558f452fea524a309"),
+    "distill, created": (18825, "dc03c5a08ec715cc0b8abf0d55f49e3d7fd026ff9a349a60b42b5f3d3150f712"),
+    "distill, resumed": (18788, "dc3f926be7f2782dbba554b72b33705fa4294668a62517715cbf47b4dd623e7a"),
     "learner, created": (731, "91982fd00db66c9f3230d5c596dd31a401298730e43d30595f7d819572d6f061"),
     "learner, resumed": (696, "469981aa96e8edf4f853edc4c8599332cc702b9ce2a0f1b2fd2cbfe6caa640c1"),
     "messenger, created": (
@@ -320,15 +320,15 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "60428d28aad3cdca34c2a973a8a0127a5179e4491c78c21c199de155615032f3",
     ),
     "router with Slack, created": (
-        27128,
-        "734d5e43f6560ecbebe48a2e5c90b70738daa61cd17679725e6f66af3dfb3851",
+        27759,
+        "755778a60d97e7dbad3fff141cdc94b004772304dd4f304737b32a0f8098c8b3",
     ),
     "router with Slack, resumed": (
-        27092,
-        "4f884f102665e15143fbaf3c5fa705b641421cd6541bda1161e96b27dcc5bb3d",
+        27723,
+        "d3e8f48f6ef1afd6da56ae55c7d80b38a26020d237c091999dccb8e8bcd69868",
     ),
-    "router, created": (27128, "f12e71bfa24f07d6482a21b6084126bb7dd98cbac336b8a39daa8c4fab5ad027"),
-    "router, resumed": (27092, "6ffb9f965d42f53a4eb7ea70dc8d46b0bbad2da8ac112aca2d56e12e7ce40b11"),
+    "router, created": (27759, "28864073bc5d41a510e6560c74e4977661169773a2f18c9b9ba59fdf3ee3d879"),
+    "router, resumed": (27723, "0267094292897cb564650ebf161845d959d427f28ee86b8f691f0509a419e3ef"),
     "slack, created": (4566, "6a2c958151166b3dbf3d0d6789f7e8e62a9bc6a609ef88e4d25f6338ff3c5894"),
     "slack, resumed": (4531, "0201a125d8919e539c5289acf88a3cb2509f79ba4a136793af02ad83a85535a6"),
     "the Copilot sandbox of a worker asking first": (
@@ -338,39 +338,39 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "watchdog, created": (3382, "e3ae732c64bc3796a98d0ee8015e8485f26b7b4695757da463dfea17e52fd1c5"),
     "watchdog, resumed": (3344, "ba4828117ea24e74adedd35a373d08e7375e550c3f143742141d4f822dcd5e24"),
     "worker asking first, sandboxed, created": (
-        21189,
-        "b81af9473da9fdd0df5f70ab0832a78849b2c99ad072873c767f71e2914fc1b5",
+        21778,
+        "a7e89751bd7ab05bfecfa1bb0f3d832de2c1b2e6efb95fd8d6448302f5be96d4",
     ),
     "worker asking first, sandboxed, resumed": (
-        21144,
-        "9c3cb015f4c812e6ad327a87c43b0118931a0a6fe4afc78e7135e55e8567887b",
+        21733,
+        "b45ff096c144dca0fec2aecb1c90dee4e21f7c0832e4ad2a906f3c34c4bd0a0d",
     ),
     "worker in a trusted worktree, created": (
-        18804,
-        "dafa6d8faf56d1e37bbfac4b2f98a98130127c6ce20e9cac2b0ca6085da65c86",
+        19393,
+        "75b23f4c8c92a9c7e1084cd2407fb9eae7729351bcb44d56cc4daa59a5c59199",
     ),
     "worker in a trusted worktree, resumed": (
-        18728,
-        "a114798e4a27abf1b42a810d03824be2b296432a49d9a975c85bff24f9de20a4",
+        19317,
+        "e3469ac89371c22f6e2671c05a46be06e662e76811edf5a4f66ed4f710866936",
     ),
     "worker that reads Slack, created": (
-        21428,
-        "c3da60a24e3a9bac080165713e48a18d071f950217b19249b8919272048a271e",
+        22017,
+        "89718c70f9b61b5baaeca4538d9f835d1b46328c4a39f0126ae94fad26fb0184",
     ),
     "worker that reads Slack, resumed": (
-        21381,
-        "00c2dbe2063d0a44577adb067d7fc3b386a4264c103f0463f320ed5c3b11af08",
+        21970,
+        "0d46ab09a57c8c9dca05ecd461f8ccc1cbc8e5baa67a5d9422bab3e87877109a",
     ),
     "worker with its model, created": (
-        18338,
-        "ac7dc7494cfae25ab0e39d4101a7f34d78600cc08d7d0454df01d63079d488b6",
+        18927,
+        "f7e7cb1c58cd6c7489d5da28ba14b8851d2d3eac00cf84a8a19cbfca3a1740a0",
     ),
     "worker with its model, resumed": (
-        18291,
-        "61f1bbc8d0b2ece981e01ecacfd556da67a7db73f00778d19c7da8c4fc4a7023",
+        18880,
+        "bc523f4084fd3c2a540470c69eca2d4d99160b39b5bc78a0b7e85a52cc5fd3e4",
     ),
-    "worker, created": (18288, "15e592804ee2ffe9766bd6a1d99e61511373269e22029c10aa13bc4a5e7e028c"),
-    "worker, resumed": (18240, "58fc35c67f2b5d60a719d05f09410381bcfdd5447c568be0643248ebe61d7013"),
+    "worker, created": (18877, "a52627a5d5814da1e4af326e8a2a0eefe33227c5d533aacc1468d519f5b0e94f"),
+    "worker, resumed": (18829, "278d80be84ff3b995ffdbec5a306cd6643fb20e5225f208ba4e59d915d4dcd24"),
 }
 
 
@@ -414,7 +414,7 @@ TOOL_SCHEMAS: dict[str, tuple[int, str]] = {
     "record_decision": (1245, "730679b1cd74e5ebc59b7b6c42a1f541a1df7a25cc50a623f9d2f5e64803bdd5"),
     "record_setup": (822, "54b61514390daf8546f36c21eb89328e9db18d4b6bafe9b06f2f82e74fc815c5"),
     "rename_task": (677, "f53f147f83bb8cf3c1f82e207ffe1a90db2ba074f7db62c069caf2e006fc7feb"),
-    "report": (5633, "6a646395b1205a17c0e3f7a6497c9fb6b8b232a260b258066a5a36352a13f557"),
+    "report": (5836, "04aecf02c2d03647f8716a80f675c7de25c1fe23987f209fe743f7af7ebe9010"),
     "report_found": (4054, "d7fa352a708e5d3607db879845609ca4126d2808a41eae4d82bb130b64453d43"),
     "report_notified": (1317, "fd87bcf8fd0eab4cbe3061bf0f2d8db958471602bf960f083873e7655d001e85"),
     "report_owner_replies": (
@@ -697,8 +697,8 @@ async def test_a_worker_used_in_a_terminal_catches_up_and_is_refused_while_open_
     assert harness.store.get(f"refusedopen:{worker}")
 
 
-# 0.1.48: drafts.has_final (the owner's own text, an empty one too: bug E105).
-STORE_SCHEMA = (9809, "8a806909b6db8d5d838f19470fc325cca8947451adc33b0312bb0d3354f1d8fd")
+# After 0.1.49 (E115): messages' reports_by_session index (a task's progress reports).
+STORE_SCHEMA = (9997, "c134af2d084b187db71d9b45ce5c9b6205d6280969694add4e7bc7b510f1a1b0")
 
 
 def stored(path) -> dict[str, list]:
