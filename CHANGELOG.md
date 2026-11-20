@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.50 (2026-11-20)
 
 - **Workers start and resume again with your Copilot in experimental mode** (Copilot CLI 1.0.114
   and later, with `/experimental on`): a worker's message failed with "Could not deliver the
