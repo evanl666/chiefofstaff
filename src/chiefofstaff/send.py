@@ -213,9 +213,9 @@ def shell_command(prefix: str = sys.prefix) -> tuple[str, str]:
 
 def default_data_dir() -> Path:
     """Where Chief of Staff keeps its data unless told (__main__.default_data_dir, which asks
-    platformdirs: its rule, without loading it): $XDG_DATA_HOME when it is an absolute path,
-    else ~/Library/Application Support on macOS and ~/.local/share elsewhere."""
-    named = os.environ.get("XDG_DATA_HOME", "").strip()
+    platformdirs: its rule, without loading it): $XDG_DATA_HOME as it is, when that is an
+    absolute path, else ~/Library/Application Support on macOS and ~/.local/share elsewhere."""
+    named = os.environ.get("XDG_DATA_HOME", "")
     if Path(named).is_absolute():
         base = Path(named)
     elif sys.platform == "darwin":

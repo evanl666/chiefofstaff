@@ -85,6 +85,15 @@
 - A worker that says in Chinese that it waits for another worker (在等, 等待) now waits for
   it, as one saying so in English did, instead of being asked for a report it can't give
   yet.
+- **`chiefofstaff send` finds the data folder Chief uses also with platformdirs 4.14.3 and
+  later**, which take `XDG_DATA_HOME` as it is: with spaces around it (`" /data "`), Chief keeps
+  its data in the usual folder, and the command looked in `/data`. It now reads it as
+  platformdirs does, and platformdirs 4.14.3 is the least Chief installs with.
+- Dependencies: FastAPI 0.163, Pydantic 2.14.3, pytest 9.2, pytest-asyncio 1.5 and ruff 0.17.5;
+  CI's actions move to their Node 24 releases (checkout 7, setup-uv 10, setup-node 7,
+  upload-artifact 7, download-artifact 8, action-gh-release 3, gitleaks-action 3,
+  dependency-review-action 5). The MCP library stays on 1.x: 2.x is a rewrite that Chief's Slack
+  client and its test servers aren't ported to yet.
 
 ## 0.1.50 (2026-11-20)
 

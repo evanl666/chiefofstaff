@@ -1036,20 +1036,22 @@ def test_the_command_starts_at_once_without_chiefs_own_modules():
 
 def test_the_command_finds_the_data_directory_chief_uses(tmp_path, monkeypatch):
     """The command asks no platformdirs (it would load it): it follows platformdirs' rule, which
-    is this one from 4.12 (pyproject's floor) on, checked for 4.0 to 4.13. Before 4.6, macOS
-    ignored $XDG_DATA_HOME; before 4.12, a relative one was taken (the XDG spec says ignore it):
-    with those, Chief would serve one folder and the command look in another."""
+    is this one from 4.14.3 (pyproject's floor) on, checked for 4.0 to 4.14. Before 4.6, macOS
+    ignored $XDG_DATA_HOME; before 4.12, a relative one was taken (the XDG spec says ignore it);
+    before 4.14.3, spaces around it were dropped (now it is taken as it is: " /x " is no absolute
+    path): with those, Chief would serve one folder and the command look in another."""
     import tomllib
 
     project = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
     floor = next(d for d in project["project"]["dependencies"] if d.startswith("platformdirs"))
-    assert floor.startswith("platformdirs>=4.12,"), floor
+    assert floor.startswith("platformdirs>=4.14.3,"), floor
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     usual = home / ("Library/Application Support" if sys.platform == "darwin" else ".local/share")
     for xdg, base in (
         (None, usual), ("", usual), ("  ", usual), ("relative/data", usual),
-        (str(tmp_path / "xdg"), tmp_path / "xdg"), (f" {tmp_path}/xdg2 ", tmp_path / "xdg2"),
+        (str(tmp_path / "xdg"), tmp_path / "xdg"), (f" {tmp_path}/xdg2 ", usual),
+        (f"{tmp_path}/xdg3 ", tmp_path / "xdg3 "),
     ):  # fmt: skip
         if xdg is None:
             monkeypatch.delenv("XDG_DATA_HOME", raising=False)

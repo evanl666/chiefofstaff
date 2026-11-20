@@ -1797,9 +1797,8 @@ def subshells(
                 return None
             cases.append(depth)
             expecting, worded, opened = True, len(rest) > 3, False
-        elif rest[:1] == ["esac"]:
-            if not cases or cases.pop() != depth:
-                return None
+        elif rest[:1] == ["esac"] and (not cases or cases.pop() != depth):
+            return None  # (An `esac` closing no `case` of this depth.)
         events.append(done)
         depths.append(depth)
         joiners.append(kept)
