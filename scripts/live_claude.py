@@ -42,6 +42,8 @@ E15 a schedule (/loop): its firings run on the task's timeline; Cancel deletes i
 E16 EnterWorktree: refused in the owner's checkout (where Claude makes it from a worker's
     worktree), made in its own folder and entered: its checkout, removed as the worker closes
 E17 plan mode: the plan shows, and the worker goes on with it
+E18 its folder's Claude settings changed (the sandbox off, the default): no wait for the
+    owner's word, its follow-up answered
 
 Shard F, Ask first (Settings: workers ask first):
 F1  a write command, an edit, an MCP write and a network request each reach Chief of Staff; `gh
@@ -649,6 +651,38 @@ async def e17_plan_mode(ctx: Ctx):
     log("E17 passed")
 
 
+async def e18_settings_not_held(ctx: Ctx):
+    worker = await claude_worker(
+        ctx,
+        f"In your own copy of {ctx.project}: what is the first line of AGENTS.md? Don't change "
+        "any files.",
+    )
+    task = await la.task_ended(ctx, worker, "the first line")
+    folder = Path((await la.session(ctx, worker))["cwd"])
+    # As a command of its own could (the sandbox off, the default): Claude settings in its
+    # folder, which it loads as its process starts.
+    (folder / ".claude").mkdir(exist_ok=True)
+    (folder / ".claude" / "settings.json").write_text('{"permissions": {"allow": []}}\n')
+    mark = await la.mark_of(ctx, worker)
+    await la.follow_up(ctx, task, "And how many lines does it have? Report just the number; "
+                       "don't change any files.")  # fmt: skip
+
+    async def answered():
+        held = [n for n in await la.notices(ctx, worker, mark) if "settings in this" in n]
+        assert not held, f"held for its folder's settings: {held}"
+        rows = await la.messages(ctx, worker)
+        reports = [m["text"] for m in rows if m["id"] > mark and m["kind"] == "report"]
+        now = await la.latest_task(ctx, worker)
+        return reports[-1] if reports and now["status"] in la.FINISHED else None
+
+    said = await wait_for("the follow-up's report, with no wait for its settings", answered, 600,
+                          ctx.app)  # fmt: skip
+    log(f"E18: {said[:160]!r}")
+    assert re.search(r"\d", said), "its answer to the follow-up"
+    assert "settings" not in ((await la.session(ctx, worker)).get("activity") or "")
+    log("E18 passed")
+
+
 # Shard F
 
 
@@ -944,10 +978,10 @@ async def g6_three_agents(ctx: Ctx):
         ctx,
         f"Three workers that work together (works_with each other), on {ctx.project}'s "
         "data/sales.csv, no file changes: 'Alpha' (use claude) gives north's total revenue "
-        "(units * unit_price); 'Beta' (use codex) first runs the command `sleep "
-        f"{seconds}` and waits for it to end (south's data is ready only then; never skip it), "
-        "then gives south's; 'Gamma' (use copilot) waits for the others' results "
-        "and reports what it got from each, and any news about them, word for word.",
+        "(units * unit_price); 'Beta' (use codex) runs `sleep "
+        f"{seconds}` (let it finish), then gives south's; 'Gamma' (use copilot) waits for the "
+        "others' results and reports what it got from each, and any news about them, word for "
+        "word.",
     )
     started = await wait_for(
         "three workers started", lambda: la.three_started(ctx, router, mark), 400, ctx.app
@@ -960,7 +994,16 @@ async def g6_three_agents(ctx: Ctx):
     beta = next(w for t, w in started.items() if "beta" in t.lower())
     gamma = next(w for t, w in started.items() if "gamma" in t.lower())
     await la.task_ended(ctx, alpha, "Alpha's result")
-    await la.wait_command(ctx, f"sleep {seconds}")
+    try:
+        await la.wait_command(ctx, f"sleep {seconds}", timeout=120)
+    except TimeoutError:
+        # Codex may put the wait off to a check-back of its own instead (cf1): Beta is still
+        # at its task, which is what its cancel needs.
+        task = await la.latest_task(ctx, beta)
+        log(f"G6: no sleep; Beta's task is {task and task['status']}")
+        assert task and task["status"] not in {*la.FINISHED, "failed", "cancelled"}, (
+            "Beta still at its task"
+        )
     beta_task = await la.latest_task(ctx, beta)
     await ctx.app.post(f"/api/tasks/{beta_task['id']}/cancel", {"text": ""})
     task = await la.task_ended(ctx, gamma, "Gamma's report", timeout=900)
@@ -1295,7 +1338,7 @@ SCENARIOS: dict[str, list] = {
         e1_task_and_follow_up, e2_receipts, e3_stop_cancel_close, e4_dev_server, e5_in_place,
         e6_git, e7_add_repo, e8_subagent_report, e9_envelope_text, e10_idle_release,
         e11_watchdog, e12_steering, e13_wakeup, e14_ask_user, e15_schedule, e16_enter_worktree,
-        e17_plan_mode,
+        e17_plan_mode, e18_settings_not_held,
     ],
     "F": [f1_ask_first, f2_checkout_read_only_acting, f3_hook_approves_nothing,
           f4_untrusted_repository, f5_shared_checks, f6_isolation_and_plan],
@@ -1332,6 +1375,8 @@ async def run_shard(shard: str, wanted: set[str], spent_before: int) -> tuple[li
     live_e2e.BASE = f"http://127.0.0.1:{port}"
     serve_in_thread(Workspace(), SLACK_TOKEN, slack_port)
     parent = os.environ.get("LIVE_AGENTS_ROOT") or None
+    if parent:
+        Path(parent).mkdir(parents=True, exist_ok=True)  # (Named, not made yet: made here.)
     root = Path(tempfile.mkdtemp(prefix=f"cos-claude-{shard}-", dir=parent)).resolve()
     home, project, truth = setup(root)
     (root / "marks").mkdir()
