@@ -685,6 +685,11 @@ async def test_a_claude_workers_process_runs_no_update_of_the_owners(
     session, turn = await open_session(backend, tmp_path)
     await session.send("Reply with just: ok")
     await turn.wait()
+    for _ in range(150):
+        # (It looks at its plugins' updates as it starts, beside the turn: under load, after.)
+        if debug.exists() and "Plugin autoupdate:" in debug.read_text():
+            break
+        await asyncio.sleep(0.1)
     await session.disconnect()
     for _ in range(100):
         if not session.worker.alive():
