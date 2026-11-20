@@ -237,6 +237,23 @@ def newer_protocol(error: BaseException | str) -> bool:
     return bool(found) and int(found.group(3)) > int(found.group(2))
 
 
+# Copilot's own runtime (the SDK's: FALLBACK_CLI) runs no extension by itself: a session that
+# asks for them must bring the JavaScript SDK they import and a launcher for them, and this SDK
+# has neither. A session asks for them with config discovery (every worker) once the owner's
+# Copilot is in experimental mode ("experimental": true in its settings.json, as
+# `/experimental on` leaves it): then each create and resume failed ("Failed to initialize
+# standalone session extensions: extensionSdkPath is required when standalone extensions are
+# requested"). The owner's own CLI brings both, and runs them.
+EXTENSIONS_REFUSED = re.compile(
+    r"Failed to initialize standalone session extensions?:", re.IGNORECASE
+)
+
+
+def extensions_refused(error: BaseException | str) -> bool:
+    """Whether Copilot refused to open a session for the extensions it could not run."""
+    return bool(EXTENSIONS_REFUSED.search(str(error)))
+
+
 class ExpectedRefusal(logging.Filter):
     """The SDK's warning, with its traceback, when it refuses a CLI that speaks a newer protocol:
     expected (FALLBACK_CLI runs then), and said in one line instead (CopilotBackend.start)."""
@@ -388,6 +405,9 @@ class CopilotBackend:
         # Where a refusal of the owner's CLI is kept (REFUSED_CLI, in Chief of Staff's data
         # folder: Runtime sets it); None: not kept, the owner's is tried at each start.
         self.refusals: Path | None = None
+        # Its sessions say they run no extension (EXTENSIONS_REFUSED): on Copilot's own runtime,
+        # or once Copilot refused one for them.
+        self.no_extensions = False
 
     async def start(self) -> None:
         self.starting = asyncio.get_running_loop().create_future()
@@ -498,6 +518,7 @@ class CopilotBackend:
                 f"up: {exc}"
             ) from exc
         self.fallback = (theirs, ours)
+        self.no_extensions = True
 
     def cli_process(self) -> subprocess.Popen | None:
         """The CLI's process, wherever this SDK keeps it: `_cli_process` (SDK 1.0), `_process`
@@ -585,10 +606,31 @@ class CopilotBackend:
 
     async def create_session(self, *, session_id: str, name: str, **options: Any) -> AgentSession:
         client = await self.ready_client()
-        return await client.create_session(session_id=session_id, name=name, **options)
+        return await self.opening(
+            lambda tuned: client.create_session(session_id=session_id, name=name, **tuned), options
+        )
 
     async def resume_session(self, session_id: str, **options: Any) -> AgentSession:
-        return await (await self.ready_client()).resume_session(session_id, **options)
+        client = await self.ready_client()
+        return await self.opening(lambda tuned: client.resume_session(session_id, **tuned), options)
+
+    async def opening(self, open_with: Callable[[dict], Any], options: dict) -> AgentSession:
+        """A session created or resumed without the extensions Copilot cannot run for it
+        (EXTENSIONS_REFUSED): said so on Copilot's own runtime; with another, once it refused
+        one, then for every session after it."""
+        if "request_extensions" in options:
+            return await open_with(options)
+        try:
+            return await open_with(
+                {**options, "request_extensions": False} if self.no_extensions else options
+            )
+        except Exception as exc:
+            if self.no_extensions or not extensions_refused(exc):
+                raise
+        logger.info("This Copilot cannot run extensions for Chief of Staff's sessions: they open "
+                    "without them.")  # fmt: skip
+        self.no_extensions = True
+        return await open_with({**options, "request_extensions": False})
 
     async def mcp_sign_in_url(self, session: Any, server: str) -> str:
         login = await session.rpc.mcp.oauth.login(MCPOauthLoginRequest(server_name=server))

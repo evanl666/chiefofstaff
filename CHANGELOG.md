@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Workers start and resume again with your Copilot in experimental mode** (Copilot CLI 1.0.114
+  and later, with `/experimental on`): a worker's message failed with "Could not deliver the
+  message: … extensionSdkPath is required when standalone extensions are requested", and a new
+  worker failed to start. Experimental mode turns on Copilot's extensions, which every worker asks
+  for (it loads what your own sessions load), and the Copilot version Chief of Staff runs when
+  your CLI is newer than it supports (1.0.112) cannot run them on its own. Its sessions now open
+  without extensions; on your own CLI, workers load them as before.
+
 ## 0.1.49 (2026-11-20)
 
 - **A worker runs a command you asked for, a sleep included.** A Codex worker skipped the
