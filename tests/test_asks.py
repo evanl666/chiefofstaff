@@ -539,6 +539,21 @@ async def test_a_peer_waited_for_in_chinese_is_waited_for(harness, said):
     await settle(runtime)
     assert not any("report-missing" in sent for sent in session.sent), said
     assert harness.store.session(writer)["activity"] == "waiting for “Column Maker”"
+    # The name, told by Column Maker itself, starts its next turn; the Router has heard of no
+    # wait to answer, only of the two results.
+    await call_tool(runtime, "tell_session", maker, session_id=f"worker:{writer[:8]}",
+                    text="列名是 col_377a85。")  # fmt: skip
+    assert "col_377a85" in session.sent[-1]
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    for worker, task, text in ((maker, made, "列名 col_377a85。"),
+                               (writer, None, "已写入 query.sql。")):  # fmt: skip
+        await call_tool(runtime, "report", worker, status="done", summary=text,
+                        **({"task_id": task} if task else {}))  # fmt: skip
+    heard = [(m["meta"]["from"], m["meta"]["status"])
+             for m in harness.store.messages(harness.router_id)
+             if m["kind"] == "inbound" and m["meta"].get("status")]  # fmt: skip
+    assert heard == [(maker, "done"), (writer, "done")]
 
 
 async def test_a_peer_waited_for_by_its_name_or_id_under_a_long_title(harness):
