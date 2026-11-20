@@ -150,7 +150,7 @@ export function taskItem(task, phase = phaseOf(task)) {
     key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}${choosing(task, phase)}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}${task.progress_updates?.length ? `:${JSON.stringify(task.progress_updates)}` : ""}`,
+    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}:${keptWords(task.progress_updates).map((item) => item.at).join(",")}`,
     build: () => taskCard(task, phase),
     refresh: (node) => refreshTaskCard(node, task, phase),
   };
@@ -722,7 +722,7 @@ function taskBody(task, phase = {}) {
     // Monitoring: what it waits on; under Needs you for its PR: what is wrong there.
     const waits = phase.section === "monitoring" || [...PR_TO_FIX, "runs-unknown"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
-    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found, isRow(phase) ? earlierUpdatesBlock(task, progressUpdates(task)) : null, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
+    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
   if (task.status === "review") {
@@ -738,8 +738,7 @@ function taskBody(task, phase = {}) {
   if (!text && !found) return null;
   const wrapper = el("div", { class: "task-body" });
   if (text) foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text, { chars: 360, lines: 5 });
-  const updates = progressUpdates(task);
-  const earlier = earlierUpdatesBlock(task, updates);
+  const earlier = earlierFold(task, progressNow(task).earlier, "updates");
   if (earlier) wrapper.append(earlier);
   if (found) wrapper.append(found);
   return wrapper;
@@ -1007,13 +1006,11 @@ function runningBody(task, worker, phase = {}) {
   else nodes.push(waitLine(task, worker, phase));
   // Its own progress: what it last reported on this task (not its asides while it works);
   // gray once it is old news.
-  const updates = progressUpdates(task);
-  const latest = updates[0];
-  const stale = section !== "running" && latest?.at && Date.now() - Date.parse(latest.at) > 3600000;
-  const progress = latest ? progressLine(latest.text, latest.at, task.id, stale) : null;
-  if (progress) nodes.push(progress);
-  const earlier = earlierUpdatesBlock(task, updates.slice(1));
-  if (earlier) nodes.push(earlier);
+  const { latest, earlier } = progressNow(task);
+  const stale = section !== "running" && Boolean(latest?.at) && Date.now() - Date.parse(latest.at) > 3600000;
+  if (latest) nodes.push(progressLine(latest.text, latest.at, task.id, stale));
+  // The progress it reported before, folded.
+  nodes.push(earlierFold(task, earlier, "updates"));
   const found = artifacts(task, worker, { active: true, phase });
   if (found) nodes.push(found);
   return el("div", { class: "task-body" }, ...nodes.filter(Boolean));
@@ -1315,63 +1312,48 @@ function report(task) {
         }),
       )
     : null;
-  return el("div", { class: "report" }, text ? el("div", { class: "body markdown", html: markdown(text) }) : null, criteria, more.length ? el("div", { class: "receipts" }, ...more) : null, earlierUpdatesBlock(task, progressUpdates(task)), earlierBlock(task));
+  return el("div", { class: "report" }, text ? el("div", { class: "body markdown", html: markdown(text) }) : null, criteria, more.length ? el("div", { class: "receipts" }, ...more) : null, earlierFold(task, keptWords(task.progress_updates), "updates"), earlierBlock(task));
 }
-// The five latest meaningful progress reports the server keeps with the task, newest first.
-// A task from an older store still has its compatible `progress` field.
-export function progressUpdates(task) {
-  const list = Array.isArray(task?.progress_updates) ? task.progress_updates : [];
-  const updates = list
-    .filter((item) => typeof item?.text === "string" && item.text.trim())
-    .slice(0, 5)
-    .map((item) => ({ at: typeof item.at === "string" && !Number.isNaN(Date.parse(item.at)) ? item.at : "", text: item.text }));
-  if (!updates.length && task?.status === "running" && typeof task.progress === "string" && task.progress.trim()) {
-    updates.push({ at: typeof task.updated_at === "string" && !Number.isNaN(Date.parse(task.updated_at)) ? task.updated_at : "", text: task.progress });
-  }
-  return updates;
+// Words of its worker's kept with a task (`progress_updates`, `earlier_results`): newest first,
+// each with when it was said.
+function keptWords(list) {
+  return (Array.isArray(list) ? list : []).filter((item) => typeof item?.text === "string" && item.text.trim()).map((item) => ({ at: typeof item.at === "string" && !Number.isNaN(Date.parse(item.at)) ? item.at : "", text: item.text }));
 }
-// Older updates stay one quiet line until opened; their full words and times remain on the card.
-const openEarlierUpdates = new Set();
-function earlierUpdatesBlock(task, list) {
-  if (!list.length) return null;
-  const fold = el(
-    "details",
-    { class: "earlier-reports earlier-updates", open: openEarlierUpdates.has(task.id) },
-    el("summary", { text: `Earlier updates (${list.length})`, "data-tip": "Recent progress on this task, newest first" }),
-    ...list.map((item) => {
-      const entry = el("div", { class: "earlier-report earlier-update" }, item.at ? el("div", { class: "when", text: `Reported ${since(item.at)}`, "data-tip": new Date(item.at).toLocaleString() }) : "");
-      foldable(entry, el("div", { class: "body markdown", html: markdown(item.text) }), item.text, { chars: 360, lines: 5 });
-      return entry;
-    }),
-  );
-  fold.addEventListener("toggle", () => openEarlierUpdates[fold.open ? "add" : "delete"](task.id));
-  return fold;
+// Its latest progress, as its card says it is at now (`progress`: none once it went on from a
+// question, say) and when it reported it, and the progress reports before that the server keeps
+// (bug E115: only the latest was kept).
+export function progressNow(task) {
+  const updates = keptWords(task?.progress_updates);
+  const text = typeof task?.progress === "string" ? task.progress.trim() : "";
+  if (!text) return { latest: null, earlier: updates };
+  const reported = updates[0]?.text.trim() === text;
+  const at = reported ? updates[0].at : typeof task.updated_at === "string" && !Number.isNaN(Date.parse(task.updated_at)) ? task.updated_at : "";
+  return { latest: { text: task.progress, at }, earlier: reported ? updates.slice(1) : updates };
 }
 // What it reported before its result (a newer report on the same task took their place), as
-// the server keeps them (`earlier_results`): newest first, each when it was said and what.
-export function earlierResults(task) {
-  const list = Array.isArray(task?.earlier_results) ? task.earlier_results : [];
-  return list.filter((item) => typeof item?.text === "string" && item.text.trim()).map((item) => ({ at: typeof item.at === "string" && !Number.isNaN(Date.parse(item.at)) ? item.at : "", text: item.text }));
-}
-// Its earlier reports, folded under its result and read as it is; open, they stay open while
-// the card is redrawn.
-const openEarlier = new Set();
-function earlierBlock(task) {
-  const list = earlierResults(task);
+// the server keeps them (`earlier_results`).
+export const earlierResults = (task) => keptWords(task?.earlier_results);
+// Earlier words on a task folded under one quiet line, read as they were said; open, they stay
+// open while the card is redrawn.
+const openFolds = { reports: new Set(), updates: new Set() };
+function earlierFold(task, list, kind) {
   if (!list.length) return null;
+  const opened = openFolds[kind];
+  const [label, tip] = kind === "updates" ? ["Earlier updates", "Its progress reports on this task before, newest first"] : ["Earlier reports", "What it reported on this task before its latest result, newest first"];
   const fold = el(
     "details",
-    { class: "earlier-reports", open: openEarlier.has(task.id) },
-    el("summary", { text: `Earlier reports (${list.length})`, "data-tip": "What it reported on this task before its latest result, newest first" }),
+    { class: `earlier-reports${kind === "updates" ? " earlier-updates" : ""}`, open: opened.has(task.id) },
+    el("summary", { text: `${label} (${list.length})`, "data-tip": tip }),
     ...list.map((item) => {
       const entry = el("div", { class: "earlier-report" }, item.at ? el("div", { class: "when", text: `Reported ${since(item.at)}`, "data-tip": new Date(item.at).toLocaleString() }) : "");
       foldable(entry, el("div", { class: "body markdown", html: markdown(item.text) }), item.text, { chars: 360, lines: 5 });
       return entry;
     }),
   );
-  fold.addEventListener("toggle", () => openEarlier[fold.open ? "add" : "delete"](task.id));
+  fold.addEventListener("toggle", () => opened[fold.open ? "add" : "delete"](task.id));
   return fold;
 }
+const earlierBlock = (task) => earlierFold(task, earlierResults(task), "reports");
 // Tests it ran outside its own checkout (someone's source, to check what it reports): what they
 // found, as evidence; where, and how they ended, on hover.
 function testsElsewhere(item) {

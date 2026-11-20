@@ -264,6 +264,8 @@ async def test_task_api_keeps_the_last_five_progress_reports(harness):
             status="progress",
             summary=f"Meaningful update {number}.",
         )
+    # The same words again are one update.
+    await call_tool(runtime, "report", worker, status="progress", summary="Meaningful update 6.")
 
     stored = runtime.tasks.get(task["id"])
     shown = view(runtime, task["id"])

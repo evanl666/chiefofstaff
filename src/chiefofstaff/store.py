@@ -136,6 +136,9 @@ class Store:
             text TEXT NOT NULL, meta TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS messages_by_session ON messages(session_id, id);
+        -- A task's latest progress reports (TaskActions.progress_updates), not every step.
+        CREATE INDEX IF NOT EXISTS reports_by_session ON messages(session_id, id)
+            WHERE kind='report';
         CREATE TABLE IF NOT EXISTS triggers (
             id TEXT PRIMARY KEY, source TEXT NOT NULL, key TEXT NOT NULL UNIQUE,
             text TEXT NOT NULL, created_at TEXT NOT NULL

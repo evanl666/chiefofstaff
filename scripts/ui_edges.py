@@ -43,7 +43,6 @@ PORT = int(os.environ.get("UI_EDGES_PORT", "8798"))
 TOKEN = "ui-edges-token"
 BASE = f"http://127.0.0.1:{PORT}"
 SHOTS = ROOT / "browser-shots"
-QA8_REPORT_SHOTS = Path(os.environ.get("QA8_REPORT_SHOTS", SHOTS / "qa8-report"))
 # A 1x1 PNG, for images sent with a message.
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -5180,7 +5179,6 @@ async def round_qa8_report(runtime, browser, failures: list[str]):
         summary="Answer for the owner: 1,240 rows are ready.",
     )
     await settle(runtime)
-    QA8_REPORT_SHOTS.mkdir(parents=True, exist_ok=True)
     for scheme in ("light", "dark"):
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900}, color_scheme=scheme
@@ -5207,7 +5205,7 @@ async def round_qa8_report(runtime, browser, failures: list[str]):
             await expect(earlier).to_contain_text("Import update 2")
             await expect(earlier).not_to_contain_text("Import update 1")
             assert not await card.evaluate(OVERFLOWS), (width, scheme)
-            await page.screenshot(path=QA8_REPORT_SHOTS / f"ui-edges-progress-{width}-{scheme}.png")
+            await page.screenshot(path=SHOTS / f"ui-edges-progress-{width}-{scheme}.png")
         await context.close()
     log("E115: latest progress is visible; four earlier updates are folded with their times")
 

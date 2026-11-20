@@ -1262,29 +1262,43 @@ def test_earlier_reports_are_kept_and_a_row_says_the_latest():
     assert found[3:] == ["Cache at 96 MB.", "The bucket is gone."]
 
 
-def test_progress_updates_keep_five_and_old_tasks_keep_their_latest_words():
+def test_a_cards_latest_progress_and_the_updates_before_it():
+    """E115: a card's latest progress is what its task says it is at now, dated by the report
+    that said it; the progress reports the server keeps from before fold under it. A task from
+    before keeps its latest words; one whose progress went (it went on from a question) or is
+    not a report (a decision) shows every kept report as earlier."""
     found = tasks_js(
         """
-        const updates = Array.from({ length: 7 }, (_, i) => ({
+        const updates = Array.from({ length: 5 }, (_, i) => ({
           at: `2026-11-19T10:0${i}:00Z`, text: `Update ${i + 1}.`
         })).reverse();
+        const now = (task) => k.progressNow({ updated_at: "2026-11-19T11:00:00Z", ...task });
         return [
-          k.progressUpdates({ id: "t1", progress_updates: updates }),
-          k.progressUpdates({ id: "t2", status: "running", progress: "Old update.",
-            updated_at: "2026-11-18T09:00:00Z" }),
-          k.progressUpdates({ id: "t3", progress_updates: [{ text: " " }, null] }),
+          now({ progress: "Update 5.", progress_updates: [...updates, { text: " " }, null] }),
+          now({ progress: "Old update.", updated_at: "2026-11-18T09:00:00Z" }),
+          now({ progress: "", progress_updates: updates.slice(0, 2) }),
+          now({ progress: "Going on with your decision.", progress_updates: updates.slice(0, 1) }),
         ];
         """
     )
-    assert [item["text"] for item in found[0]] == [
-        "Update 7.",
-        "Update 6.",
-        "Update 5.",
+    assert found[0]["latest"] == {"text": "Update 5.", "at": "2026-11-19T10:04:00Z"}
+    assert [item["text"] for item in found[0]["earlier"]] == [
         "Update 4.",
         "Update 3.",
+        "Update 2.",
+        "Update 1.",
     ]
-    assert found[1] == [{"at": "2026-11-18T09:00:00Z", "text": "Old update."}]
-    assert found[2] == []
+    assert found[1] == {
+        "latest": {"text": "Old update.", "at": "2026-11-18T09:00:00Z"},
+        "earlier": [],
+    }
+    assert found[2]["latest"] is None
+    assert [item["text"] for item in found[2]["earlier"]] == ["Update 5.", "Update 4."]
+    assert found[3]["latest"] == {
+        "text": "Going on with your decision.",
+        "at": "2026-11-19T11:00:00Z",
+    }
+    assert [item["text"] for item in found[3]["earlier"]] == ["Update 5."]
 
 
 def other_looks(cases: dict) -> dict:

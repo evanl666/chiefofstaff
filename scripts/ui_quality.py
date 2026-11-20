@@ -45,7 +45,6 @@ PORT = int(os.environ.get("UI_QUALITY_PORT", "8796"))
 TOKEN = "ui-quality-token"
 BASE = f"http://127.0.0.1:{PORT}"
 SHOTS = ROOT / "browser-shots"
-QA8_REPORT_SHOTS = Path(os.environ.get("QA8_REPORT_SHOTS", SHOTS / "qa8-report"))
 AXE = "https://cdn.jsdelivr.net/npm/axe-core@4.10.2/axe.min.js"
 WIDTHS = (800, 1024, 1280, 1440)
 ASK = (
@@ -504,7 +503,6 @@ async def run(runtime, seeded, browser, quality: Quality, phase: str):
 
 async def report_views(runtime, browser, quality: Quality):
     """E115's Answer/Update line and folded progress history at both compact widths."""
-    QA8_REPORT_SHOTS.mkdir(parents=True, exist_ok=True)
     for scheme in ("light", "dark"):
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900}, color_scheme=scheme
@@ -531,9 +529,7 @@ async def report_views(runtime, browser, quality: Quality):
             )
             await quality.check(page, f"report progress {width} {scheme}", "#tasks-running")
             await card.scroll_into_view_if_needed()
-            await page.screenshot(
-                path=QA8_REPORT_SHOTS / f"ui-quality-progress-{width}-{scheme}.png"
-            )
+            await page.screenshot(path=SHOTS / f"quality-progress-{width}-{scheme}.png")
         await context.close()
     log("Answer/Update and five recent progress reports: 800/1280, light/dark")
 
