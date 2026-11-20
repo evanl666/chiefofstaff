@@ -331,6 +331,22 @@ async def test_your_ok_is_one_item_of_needs_you_and_approve_all_safe_takes_only_
     assert [item["text"] for item in left["target"]["lessons"]] == ["Ask before you delete data"]
 
 
+# Folder settings holds: their own row under Needs you, only while the worker is sandboxed.
+
+
+async def test_a_settings_hold_is_under_needs_you_only_while_its_worker_is_sandboxed(harness):
+    runtime = await harness.connect()
+    worker, task = await spawn(runtime, harness.router_id, "Fix login")
+    runtime.settings_held.add(worker)  # (Left from before the sandbox was turned off.)
+    runtime.settings_reasons[worker] = "Its folder's settings changed"
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert shown["attention"] != "settings" and task["id"] not in needs(runtime).markers
+    runtime.settings_guarded = lambda row: True
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert shown["attention"] == "settings" and needs(runtime).markers[task["id"]] == "settings"
+    assert not needs(runtime).of("card"), "its own row, not a line of Your OK"
+
+
 # 9. The Watchdog
 
 

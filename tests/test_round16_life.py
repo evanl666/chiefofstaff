@@ -554,6 +554,9 @@ async def settings_wait(harness, runtime, worker: str, digest: str = "abc123"):
     line = ("Copilot settings Chief of Staff hasn't checked yet (.claude/settings.json); Chief "
             "of Staff won't start the worker there until you say to use them.")  # fmt: skip
     refusal = runtime.settings_refusal
+    guarded = runtime.settings_guarded
+    # It runs sandboxed: only then do its folder's settings wait for the owner (E123, holds).
+    runtime.settings_guarded = lambda row: row["id"] == worker or guarded(row)
 
     async def refused(row):  # Its folder as it is now: the same change, until the owner's word.
         if row["id"] != worker:

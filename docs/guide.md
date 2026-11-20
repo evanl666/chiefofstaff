@@ -695,8 +695,12 @@ means something (it says so when things moved on since):
 - a habit your own words backed three times or more, kept (*Undo* drops it; once you dropped or
   undid more than one in five of those, they wait on *Your OK* again);
 - the one configured project a task fits, picked (*Change* brings its card back);
-- a server that changed in a worker's folder, kept off for it (*Turn on*);
-- git files that appeared in a worktree folder of Chief of Staff's own, moved aside (*Put back*).
+- with the sandbox on, a server that changed in a worker's folder, kept off for it (*Turn on*);
+- on Linux with the sandbox on, git files that appeared in a worktree folder of Chief of Staff's
+  own, moved aside (*Put back*).
+
+Folder settings that wait for your word (with the sandbox on) are not on *Your OK*: each is its
+worker's own row under *Needs you*, with *Use these settings*.
 
 There are no per-tool settings: Chief of Staff uses whatever your Copilot has (MCP servers,
 CLIs). For a new ability ("read our company docs"), the Router starts a setup worker that finds

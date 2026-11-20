@@ -4630,6 +4630,9 @@ async def life_seeded(runtime) -> dict:
         return line
 
     runtime.settings_refusal = refused
+    # It runs sandboxed: only then do its folder's settings wait for the owner.
+    guarded = runtime.settings_guarded
+    runtime.settings_guarded = lambda row: row["id"] == held or guarded(row)
     await refused(store.session(held))
     await runtime.settings_stop(held)
     queued = await runtime.owner_send(held, "ok")
@@ -4911,6 +4914,23 @@ async def approvals_seeded(runtime) -> dict:
     store.create_draft(form, "signin", {"server": "docs", "url": "https://docs.acme.test/login"},
                        "Sign in to the docs server so the worker can read the spec.")  # fmt: skip
     reply = store.create_draft(form, "reply", {"to": "Maya", "where": "email"}, "Ships Friday.")
+    # A sandboxed worker held for its folder's settings: its own row, never a line of Your OK.
+    held = await start("QA8 fix the cache headers")
+    guarded, refusal = runtime.settings_guarded, runtime.settings_refusal
+    runtime.settings_guarded = lambda row: row["id"] == held or guarded(row)
+    reason = "Copilot settings in this folder changed (added .mcp.json)"
+    line = f"{reason}; Chief of Staff won't start the worker there until you say to use them."
+
+    async def refused(row):  # As they are: changed, until the owner's word.
+        if row["id"] != held:
+            return await refusal(row)
+        runtime.settings_reasons[held] = reason
+        runtime.settings_said(held, line, {"digest": "qa8", "changes": [("added", ".mcp.json")]})
+        return line
+
+    runtime.settings_refusal = refused
+    await refused(store.session(held))
+    await runtime.settings_stop(held)
     # Handled for the owner: a report accepted once read (Undo), a lesson kept (Undo).
     reader = await start("QA8 compare queues")
     await call_tool(runtime, "report", reader, status="done", summary="SQS fits; Kafka is more.")
@@ -4942,7 +4962,7 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
     merge, reply, report = seeded["merge"], seeded["reply"], seeded["report"]
     for width, scheme in itertools.product((1280, 800), ("light", "dark")):
         context = await browser.new_context(
-            viewport={"width": width, "height": 1000}, color_scheme=scheme
+            viewport={"width": width, "height": 1800}, color_scheme=scheme
         )
         page = await context.new_page()
         errors: list[str] = []
@@ -4962,6 +4982,10 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
             await expect(rows.filter(has_text=kind).locator(".ok-safe")).to_have_count(0)
         await expect(ok.locator('.ok-row[data-lesson="l8force"] .ok-safe')).to_have_count(0)
         await expect(ok.get_by_role("button", name="Approve all safe (3)")).to_be_visible()
+        # A folder's settings to use: its worker's own row, not a line of Your OK.
+        hold = page.locator("#needs > .items > .card.task", has_text="QA8 fix the cache headers")
+        await expect(hold.get_by_role("button", name="Use these settings")).to_be_visible()
+        await expect(ok.locator(".ok-row", has_text="cache headers")).to_have_count(0)
         # What speaks as the owner keeps its own card; Your OK counts once.
         await expect(page.locator(f'#needs .card.draft[data-id="{reply["id"]}"]')).to_be_visible()
         await expect(page.locator(".home-item .badge")).to_have_text(str(needs_you(runtime)))

@@ -4351,8 +4351,8 @@ class Runtime:
         if session_id not in self.settings_held:
             return ""
         row = self.store.find_session(session_id)
-        if not row or row["closed_at"]:
-            return ""
+        if not row or row["closed_at"] or not self.settings_guarded(row):
+            return ""  # (No hold without the sandbox: one left from before goes at its next look.)
         if task["status"] == "waiting":
             if self.store.get(f"stopped:{task['id']}") != SETTINGS_STOP:
                 return ""

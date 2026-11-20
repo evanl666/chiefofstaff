@@ -699,7 +699,7 @@ async def test_a_worker_used_in_a_terminal_catches_up_and_is_refused_while_open_
 
 # After 0.1.49 (E115): messages' reports_by_session index (a task's progress reports). E123: the
 # handled table (Handled for you).
-STORE_SCHEMA = (9997, "c134af2d084b187db71d9b45ce5c9b6205d6280969694add4e7bc7b510f1a1b0")
+STORE_SCHEMA = (10436, "dfc7aa068456381b962cda365f7dfa4925750b2924ee53ba0886810ca33d3a97")
 
 
 def stored(path) -> dict[str, list]:
