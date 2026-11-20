@@ -547,6 +547,25 @@ async def test_a_pr_its_task_opened_is_kept_when_its_receipts_could_not_read_it(
         assert runtime.store.get(f"noteligible:{TARGET}")
 
 
+@pytest.mark.parametrize("stopped", [False, True])
+async def test_a_pr_its_task_opened_and_never_named_by_its_url_is_followed_and_kept(world, stopped):
+    """Live SY8 on 0.1.48: its worker reported "Opened #377", with no URL, so it never
+    followed the PR it opened, and Prepared for you keeps only followed ones: never kept
+    moving. One it opened is followed as it is claimed; not one the owner stopped following."""
+    runtime = await world.start()
+    runtime.store.execute("DELETE FROM pr_claims WHERE target=?", (TARGET,))  # (Unclaimed.)
+    runtime.store.unfollow(TARGET, world.worker)
+    if stopped:
+        runtime.store.set(f"stopped:{world.worker}:{TARGET}", "1")
+    await runtime.shepherd.claim_worker_prs()
+    claim = runtime.shepherd.control.claim(TARGET)
+    if stopped:
+        assert claim is None and TARGET not in runtime.store.follows(world.worker)
+    else:
+        assert claim and claim["holder"] == world.task, claim
+        assert TARGET in runtime.store.follows(world.worker)
+
+
 async def test_your_message_stops_the_step_first(world):
     runtime = await claimed(world)
     await runtime.shepherd.fix_it(TARGET)
