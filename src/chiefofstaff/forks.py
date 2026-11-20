@@ -104,32 +104,42 @@ class Forks:
             load["busy"] = busy
         return load
 
-    def reason(self, target: dict, earlier: str = "", same_worker: bool = False) -> str:
+    def reason(
+        self, target: dict, earlier: str = "", same_worker: bool = False, parallel: bool = False
+    ) -> str:
         """Why a new task for this worker goes to a second worker with its context ("" when it
-        stays with it, as it always did): it is busy, a slot is free and its session can fork.
-        `same_worker`, and `earlier="superseded"` (the new task replaces its running one), are
-        the Router's: the task is that worker's own."""
+        stays with it, as it always did): it is busy, or in a turn while the Router says the
+        owner wants the task done in parallel (`parallel`), a slot is free and its session can
+        fork. `same_worker`, and `earlier="superseded"` (the new task replaces its running one),
+        are the Router's: the task is that worker's own."""
         settings = self.store.settings()
         if not settings.fork_busy or same_worker or earlier == "superseded":
             return ""
-        if target["role"] != WORKER or not (busy := self.busy(target)):
+        if target["role"] != WORKER or self.runtime.special(target):
             return ""
+        why = self.busy(target) or ("wanted in parallel" if self.parallel(target, parallel) else "")
+        return why if why and not self.unforkable(target) else ""
+
+    def parallel(self, target: dict, parallel: bool) -> bool:
+        """The Router wants this new task done in parallel with the turn the worker is in."""
+        return parallel and self.store.settings().fork_busy and self.in_turn(target)
+
+    def unforkable(self, target: dict) -> str:
+        """Why no second worker can be started from this one now ("" when one can)."""
         copilot = self.runtime.copilot_id(target["id"])
-        if (
-            not self.runtime.made(target["id"])
-            or self.store.get(f"fresh:{copilot}")
-            or copilot in self.runtime.elsewhere
-        ):
-            return ""  # Nothing of it to fork yet, or open in a terminal.
+        if not self.runtime.made(target["id"]) or self.store.get(f"fresh:{copilot}"):
+            return "nothing of its conversation to copy yet"
+        if copilot in self.runtime.elsewhere:
+            return "it is open in a terminal"
         if any(c.get("in_place") for c in self.runtime.workspaces.checkouts(target)):
-            return ""  # The owner's own folder: one worker writes there.
+            return "it works in the owner's own folder"  # One worker writes there.
         if self.backend(target) is None:
-            return ""
-        if self.runtime.workers.running() >= settings.max_workers:
-            return ""  # No free slot: it waits for this worker, as it would for a slot.
+            return "its agent's sessions are not forked"
+        if self.runtime.workers.running() >= self.store.settings().max_workers:
+            return "every worker slot is taken"  # It waits for this worker, as for a slot.
         if machine.short_of_memory() is not None or machine.short_of_disk() is not None:
-            return ""
-        return busy
+            return "this computer is short of memory or disk"
+        return ""
 
     async def make(self, source: dict, title: str) -> str:
         """Fork the busy worker's session for the second worker: its id."""

@@ -190,8 +190,9 @@ doing now and where. It works in a folder and branch of its own (from the projec
 busy worker goes on undisturbed. The Router chat says *Started a second worker for “…” (context
 from “…”)*; in the sidebar the second worker sits under the first, and its task's row says
 *Worker from “…”*. With every slot taken, or when only that worker can do it (its branch or PR,
-or you asked for it), the task waits for it as before; work you want done in parallel with a
-worker that is at work but not busy still gets a new worker. Turn it off in Settings → General
+or you asked for it), the task waits for it as before. Work you ask for in parallel (meanwhile,
+at the same time) with what a worker is doing goes to a second worker at once too, busy or not.
+Turn it off in Settings → General
 (*Give a busy worker's new task to a second worker with its context*). Workers on other agents
 (Codex) are not forked yet: their new tasks wait.
 
