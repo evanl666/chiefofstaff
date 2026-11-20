@@ -293,6 +293,20 @@ def test_comments_a_decided_plan_had_are_not_tried_again(control):
                                clicked=True) == ""  # fmt: skip
 
 
+@pytest.mark.parametrize("again", ["unstarted", True])
+def test_attempts_stopped_for_the_owners_work(control, again):
+    """Stopped for the owner's work: before it spent anything, no attempt at all (ten PRs
+    handed to one worker in a row stopped one attempt three times, live SY12); after, one of
+    the day's three, and no try at its fix."""
+    control.give(T, "t1", H0)
+    for _ in range(3):
+        step = step_of(control, fingerprint="f1", started_at="x", evidence={"again": again})
+        control.move_step(step["id"], QUEUED, state="interrupted")
+    assert control.cap_reached(T, "fix-ci", "f1", H0) == (
+        "" if again == "unstarted" else "3 attempts today"
+    )
+
+
 def test_one_approval_wins_and_operations_are_journaled(control):
     control.give(T, "t1", H0)
     step = step_of(control, state=PREPARED)
