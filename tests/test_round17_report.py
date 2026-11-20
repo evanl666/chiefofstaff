@@ -88,6 +88,23 @@ async def test_an_owner_chat_answer_reported_as_progress_reaches_home_once(harne
     assert not [m for m in home if m["kind"] == "answer"], "not shown on Home a second time"
 
 
+async def test_progress_after_its_done_report_is_no_answer(harness):
+    """Its continue was answered by its done report: progress on that task later (woken by a
+    command it left running, say) is its own news, not that answer again."""
+    runtime = await harness.connect()
+    worker, task = await spawn(runtime, harness.router_id, "Tidy the schema")
+    session = harness.session(worker)
+    await turn(runtime, session)
+    await continued(runtime, harness, worker, task, "Also drop the unused table.")
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="done", summary="Dropped `old_users`.")
+    before = len(router_reports(harness))
+
+    await call_tool(runtime, "report", worker, status="progress", summary="Vacuum finished.")
+
+    assert len(router_reports(harness)) == before
+
+
 async def test_a_check_back_progress_report_stays_quiet(harness):
     runtime = await harness.connect()
     worker, task = await spawn(runtime, harness.router_id, "Watch the export")
