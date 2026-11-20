@@ -374,9 +374,12 @@ async def test_a_new_watch_starts_a_day_back_whatever_other_watches_hold_back(tm
     harness = Harness(tmp_path / "data", settings)
     runtime = await harness.connect()
     harness.store.set("watch_done_at", str(time.time() - 5 * 86400))
+    before = time.time()
     job = await scan(harness, runtime)
     started = datetime.fromisoformat(since(job)).timestamp()
-    assert started >= time.time() - 86400 - OVERLAP_SECONDS - 60, job
+    # A day back from the scan, said to the minute: from before it, not after (a scan in the
+    # last moment of a minute, asserted in the next one, was a minute and a moment back).
+    assert started >= before - 86400 - OVERLAP_SECONDS - 60, job
     for key in ("watchfrom:", "watchdone:"):
         harness.store.delete(key + watch_key("PR mentions"))
     # Never scanned (in the last scan, with no place of its own, it is one an older version
