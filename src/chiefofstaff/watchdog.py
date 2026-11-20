@@ -54,6 +54,9 @@ def minutes(seconds: float) -> str:
 # what its instruction asked, which stays the turn's (bug E96: after a retry, its answer to the
 # Router's note on finished work was taken for a report owed on another task).
 RETRY_PROMPT = '<message from="system" type="retry"'
+# The note a worker that was at work when Chief of Staff stopped goes on with (Runtime): its
+# turn goes on where it left off.
+RESTART_PROMPT = '<message from="system" type="restart"'
 
 
 def instruction(message: dict) -> bool:
@@ -67,14 +70,15 @@ def instruction(message: dict) -> bool:
     )
 
 
-def last_instruction(store: Store, session_id: str) -> int:
-    """The id of the last instruction a session received (as instruction() has it), 0 if none."""
+def last_instruction(store: Store, session_id: str, upto: int | None = None) -> int:
+    """The id of the last instruction a session received (as instruction() has it), 0 if none.
+    `upto`: none after that message id."""
     return store.value(
-        "SELECT coalesce(max(id), 0) FROM messages WHERE session_id=? "
+        "SELECT coalesce(max(id), 0) FROM messages WHERE session_id=? AND id<=? "
         "AND json_type(meta, '$.prompt') IS NOT NULL "
         "AND coalesce(json_extract(meta, '$.thread'), '') IN ('', 0) "
         "AND substr(json_extract(meta, '$.prompt'), 1, ?) != ?",
-        (session_id, len(RETRY_PROMPT), RETRY_PROMPT),
+        (session_id, (1 << 63) - 1 if upto is None else upto, len(RETRY_PROMPT), RETRY_PROMPT),
     )
 
 

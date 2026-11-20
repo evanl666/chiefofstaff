@@ -489,7 +489,9 @@ class Workers:
                 continue
             reported = self.store.value(
                 "SELECT count(*) FROM messages WHERE session_id=? AND kind='report' AND "
-                "json_extract(meta, '$.task_id')=? AND created_at>?",
+                "json_extract(meta, '$.task_id')=? AND created_at>? "
+                # An answer about it is no report of what it changed (bug E115).
+                "AND coalesce(json_extract(meta, '$.status'), '') != 'answer'",
                 (session_id, task["id"], since),
             )
             if reported or not await self.runtime.task_actions.changed_since_result(task):
@@ -513,10 +515,10 @@ class Workers:
     async def ask_what_it_waits_for(
         self, session_id: str, task: dict, asked: dict, report: dict
     ) -> None:
-        """Its turn ended after a progress report on a task that is still running, with
-        nothing that will wake it (no check-back, no thread or PR followed for it, no card or
-        question for the owner): it is asked once what it waits for, so the task does not sit
-        under Running with nobody on it. Not after that question itself."""
+        """Its turn ended after a progress report (or an answer) on a task that is still
+        running, with nothing that will wake it (no check-back, no thread or PR followed for it,
+        no card or question for the owner): it is asked once what it waits for, so the task does
+        not sit under Running with nobody on it. Not after that question itself."""
         status = report["meta"].get("status")
         about = report["meta"].get("task_id") or task["id"]
         task = self.tasks.find(about) or task
@@ -537,13 +539,14 @@ class Workers:
             or self.runtime.peers.waiting_on(session_id, report["text"])
         ):
             return
+        said = "an answer" if status == "answer" else "a progress report"
         text = (
-            f"Your turn ended after a progress report, and task {task['id']} “{task['title']}” "
-            "is still running with nothing that will wake you: no check-back, and no thread or "
-            "PR you follow for it. Say what happens next. If you need something from the owner "
-            "(a key, access, a choice), report blocked or question with exactly what. If you "
-            "wait for something outside (a run, a deploy, a reply), call check_back with when "
-            "to look again. If it is finished, report done. Otherwise go on with it now."
+            f"Your turn ended after {said}, and task {task['id']} “{task['title']}” is still "
+            "running with nothing that will wake you: no check-back, and no thread or PR you "
+            "follow for it. Say what happens next. If you need something from the owner (a key, "
+            "access, a choice), report blocked or question with exactly what. If you wait for "
+            "something outside (a run, a deploy, a reply), call check_back with when to look "
+            "again. If it is finished, report done. Otherwise go on with it now."
         )
         with suppress(Exception):
             await self.delivery.deliver(
