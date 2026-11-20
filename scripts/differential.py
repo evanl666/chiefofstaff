@@ -316,6 +316,13 @@ FIXES: list[Allow] = [
         "be done, and what you tried",
     ),
     Allow("Router and worker answer/report rules", data=r"\.system_message\.content$"),
+    # E116: an account Watch for you could not use and the owner has not connected yet (null
+    # while there is none).
+    Allow(
+        "Watch for you's account to connect",
+        data=r"/api/state\.connector\.connection_needed$",
+        value=None,
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
