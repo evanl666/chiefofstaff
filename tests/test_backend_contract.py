@@ -39,6 +39,7 @@ from chiefofstaff import settings_guard
 from chiefofstaff.backend import (
     SandboxPolicy,
     copilot_backend,
+    older,
     process_table,
     running_background,
     sandbox_supported,
@@ -588,6 +589,7 @@ async def test_many_mcp_tools_are_searched_and_chief_of_staffs_own_stay_loaded(t
             now["context_tier"] = then["context_tier"] = "default"
         before = await one_turn(backend, then, "Reply with just: ok")
         after = await one_turn(backend, now, "Reply with just: ok")
+        version = await backend.version()
     finally:
         await backend.stop()
         await runtime.stop()
@@ -599,7 +601,8 @@ async def test_many_mcp_tools_are_searched_and_chief_of_staffs_own_stay_loaded(t
         {k: v for k, v in after.get("model", {}).items() if k in TOOL_FACTS},
     )
     blocked = any("tool definitions exceed" in error for error in before["errors"])
-    if not blocked:
+    # 0.1.46's options failed so on 1.0.112; Copilot 1.0.113 and later search them by itself.
+    if not blocked and older(version, "1.0.113"):
         sent = {tool["name"] for tool in before["model"]["tools"]}
         assert before["model"]["tools_truncated"] > 0 and not own <= sent, before
     assert not after["errors"], after["errors"]
