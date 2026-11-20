@@ -623,7 +623,7 @@ async def test_workers_open_and_resume_on_copilots_own_runtime_in_experimental_m
     from conftest import Harness
     from test_progress import spawn
 
-    from chiefofstaff.backend import FALLBACK_CLI, cli_version
+    from chiefofstaff.backend import FALLBACK_CLI, cli_version, fallback_runtime
 
     home = tmp_path / "copilot-home"
     (home / "extensions" / "probe").mkdir(parents=True)
@@ -682,6 +682,20 @@ async def test_workers_open_and_resume_on_copilots_own_runtime_in_experimental_m
         for session_id in [made, *opened]:
             with contextlib.suppress(Exception):
                 await backend.client.delete_session(session_id)
+        await backend.stop()
+    # A Copilot not known to run no extension (the owner's own, a later one): refused once,
+    # the same session is created without them at once, and every one after it.
+    backend = copilot_backend(fallback_runtime())
+    await backend.start()
+    again = str(uuid4())
+    try:
+        assert not backend.fallback and not backend.no_extensions
+        session = await backend.create_session(session_id=again, name="contract test", **options)
+        assert session.session_id == again and backend.no_extensions
+        await session.disconnect()
+    finally:
+        with contextlib.suppress(Exception):
+            await backend.client.delete_session(again)
         await backend.stop()
 
 

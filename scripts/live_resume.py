@@ -19,8 +19,12 @@ A Copilot home of its own (experimental mode on, a user extension in it); the ow
 ~/.copilot is not used or changed. Signs in with COPILOT_GITHUB_TOKEN, or the gh CLI's token
 when that is not set. Consumes a few premium requests (LIVE_RESUME_MODEL, the workers' model:
 claude-haiku-5.5 by default) and takes about 5 minutes. Its port is LIVE_RESUME_PORT (20860).
+LIVE_RESUME_CLI names the Copilot to run instead of the installed one (Settings → Copilot
+command): Copilot's own 1.0.112 runtime, say, where the installed CLI is not refused.
 
     uv run python scripts/live_resume.py
+    LIVE_RESUME_CLI=~/Library/Caches/github-copilot-sdk/cli/1.0.112/prebuilds/darwin-arm64/\
+copilot-runtime uv run python scripts/live_resume.py
 """
 
 import asyncio
@@ -38,6 +42,7 @@ live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
 from live_e2e import App, log, transcript, wait_for  # noqa: E402
 
 MODEL = os.environ.get("LIVE_RESUME_MODEL", "claude-haiku-5.5")
+CLI = str(Path(given).expanduser()) if (given := os.environ.get("LIVE_RESUME_CLI")) else ""
 EXTENSION = 'import { joinSession } from "@github/copilot-sdk/extension";\nawait joinSession({});\n'
 # What 0.1.48 showed, and what no line may show now.
 RAW = ("JSON-RPC", "extensionSdkPath", "standalone")
@@ -130,15 +135,19 @@ async def main():
             state = await app.get("/api/state")
             assert state["runtime"]["state"] == "ready", state["runtime"]
             log(f"connected: {state['runtime'].get('warning') or 'the owner CLI'}")
-            await app.post(
-                "/api/settings",
-                {
-                    "role_models": {"worker": MODEL},
-                    "max_workers": 1,
-                    "mac_notifications": False,
-                    "digest_time": "",
-                },
-            )
+            settings = {
+                "role_models": {"worker": MODEL},
+                "max_workers": 1,
+                "mac_notifications": False,
+                "digest_time": "",
+            }
+            await app.post("/api/settings", settings | ({"copilot_command": CLI} if CLI else {}))
+            if CLI:
+                await app.stop()
+                await app.start()
+                state = await app.get("/api/state")
+                assert state["runtime"]["state"] == "ready", state["runtime"]
+                log(f"connected to {CLI}: {state['runtime'].get('warning') or 'as given'}")
             worker, task_id = await scenario_ask(app)
             await scenario_answer(app, worker, task_id)
             log("RESUME SCENARIOS PASSED")
