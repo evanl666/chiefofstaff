@@ -51,7 +51,8 @@ def view(runtime, task_id):
 
 async def test_a_research_report_waits_for_accept_whatever_happens_meanwhile(harness):
     """E28: a report that changes no code (research) is a result to accept like any other:
-    reading it, its worker going idle or on to other work, and days passing settle nothing."""
+    reading it, its worker going idle or on to other work, and days passing settle nothing by
+    themselves (E123's rule accepts it for the owner a while after they read it: round 17)."""
     runtime = await harness.connect()
     worker, task = await spawn(runtime, harness.router_id, "Compare vector databases")
     summary = "Qdrant fits best: it filters by payload and runs on one box."
@@ -465,30 +466,33 @@ async def test_its_own_pr_to_fix_is_what_needs_the_owner_before_and_after_accept
     assert watch["waiting_for"] == "changes"
 
 
-async def test_reports_settled_before_every_result_waited_for_accept_are_accepted_once(harness):
+async def test_reports_settled_before_every_result_waited_for_accept_are_accepted(harness):
     """Upgraded: a report an earlier version counted as finished once read is not suddenly
-    under Needs you; one the owner never opened waits for Accept, as any result now."""
+    under Needs you; one the owner never opened waits for Accept until a day after it finished
+    (E123: the rule stands, round 17), one they wanted to see waits for it."""
     runtime = await harness.connect()
     reports = {}
     for title in ("Read it", "Never opened", "Old one", "Wanted a look"):
         worker, task = await spawn(runtime, harness.router_id, title)
         await call_tool(runtime, "report", worker, status="done", summary=f"{title}: done.")
         reports[title] = runtime.tasks.get(task["id"])
+    await settle(runtime)
     runtime.task_actions.mark_read(reports["Read it"]["id"])
     old = "2020-01-01T00:00:00+00:00"
-    runtime.tasks.update(reports["Old one"]["id"], ended_at=old)
+    harness.store.execute(
+        "UPDATE runs SET ended_at=? WHERE task_id=?", (old, reports["Old one"]["id"])
+    )
     harness.store.set(f"reviewreq:{reports['Wanted a look']['id']}", "1")
     runtime.task_actions.mark_read(reports["Wanted a look"]["id"])  # Read, still to accept.
     harness.store.delete("migrated:accept_all")  # As a database from before.
-    runtime.task_actions.settle_old_reports(72)
+    runtime.task_actions.settle_reports(datetime.now(UTC) + timedelta(minutes=30))
     status = {title: runtime.tasks.get(task["id"])["status"] for title, task in reports.items()}
     assert status == {"Read it": "done", "Never opened": "review", "Old one": "done",
                       "Wanted a look": "review"}  # fmt: skip
     assert runtime.tasks.get(reports["Old one"]["id"])["ended_at"] == old
-    harness.store.delete(f"read:{reports['Never opened']['id']}")
-    runtime.tasks.update(reports["Never opened"]["id"], ended_at=old)
-    runtime.task_actions.settle_old_reports(72)
-    assert runtime.tasks.get(reports["Never opened"]["id"])["status"] == "review", "once only"
+    runtime.task_actions.settle_reports(datetime.now(UTC) + timedelta(days=2))
+    assert runtime.tasks.get(reports["Never opened"]["id"])["status"] == "done", "a day on"
+    assert runtime.tasks.get(reports["Wanted a look"]["id"])["status"] == "review"
 
 
 def test_a_pr_read_before_roles_were_kept_is_refreshed_as_it_was():

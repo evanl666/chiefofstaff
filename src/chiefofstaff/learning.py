@@ -9,7 +9,8 @@ Once enough new feedback came in, or enough of the owner's own words were collec
 (see habits.py), a learning worker turns them into a few short lessons, each with what it rests on
 and where it applies (everywhere, Slack replies, one project), and updates how the owner writes
 (their style, which applies at once and can be undone). The owner reviews lessons on a card, and
-only what they approve goes into the sessions' instructions. How often the owner takes a
+only what they approve goes into the sessions' instructions; one their own words back often is
+kept at once, with Undo under Handled for you (E123). How often the owner takes a
 recommendation, sends a draft as written or accepts a result as it was shows whether the sessions
 get closer to them.
 """
@@ -19,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING
@@ -54,6 +56,26 @@ MAX_LESSONS = 40
 TALLIED = {"accept", "draft-sent"}
 # A learning worker in one of these states is still at work.
 ACTIVE = {"queued", "starting", "working"}
+# How sure a lesson is: how many times the owner's own words back it (the feedback and
+# observations it rests on, the same words counted once, as its card lists them). The learning
+# worker proposes what those words back "preferably more than once", a single strong correction
+# when it is clearly general: one or two is a proposal's floor, three is more than the floor asks.
+# A lesson backed that often is kept at once, with Undo under Handled for you (E123); one backed
+# less waits on Your OK.
+SURE_SUPPORT = 3
+# Kept at once only while the owner keeps most of the lessons that sure: once this many were
+# kept, dropped or undone and fewer than this share stayed, they wait for the owner again.
+SURE_REVIEWED = 5
+SURE_KEPT_SHARE = 0.8
+# A lesson about secrets, money, or what goes out or cannot be taken back is never kept unseen,
+# nor offered as safe to approve with others.
+SENSITIVE = re.compile(
+    r"\b(?:secrets?|passwords?|credentials?|tokens?|api[ -]?keys?|private keys?|ssh keys?"
+    r"|spend\w*|budgets?|credits?|pay|pays|paid|paying|payments?|pric\w+|billing|merg\w+"
+    r"|deploy\w*|releas\w+(?!\s+notes?)|publish\w*|push\w*|force\w*|delet\w+|permissions?"
+    r"|sudo|approv\w+|sign(?:ing)?[ -]?in|log(?:ging)?[ -]?in|accounts?|production)\b",
+    re.IGNORECASE,
+)
 
 
 class LessonProposal(BaseModel):
@@ -293,6 +315,8 @@ class Learning:
         given = set(json.loads(self.store.get("learning_feedback") or "[]"))
         seen = set(json.loads(self.store.get("learning_observations") or "[]"))
         proposed = []
+        kept: list[tuple[str, str, int]] = []
+        trusted = self.sure_trusted()
         for item in params.lessons[:8]:
             text = clean(item.lesson, 300)
             if not text:
@@ -300,13 +324,18 @@ class Learning:
             identifier = "l" + uuid4().hex[:7]
             evidence = [i for i in item.feedback if i in given]
             observed = [i for i in item.observations if i in seen]
+            backing = self.support(evidence, observed)
+            sure = trusted and backing >= SURE_SUPPORT and not SENSITIVE.search(text)
             self.store.execute(
                 """INSERT INTO lessons(id, text, scope, evidence, observed, status, created_at,
                 updated_at) VALUES (?,?,?,?,?,?,?,?)""",
                 (identifier, text, self.scope(item.scope), json.dumps(evidence),
-                 json.dumps(observed), "proposed", now(), now()),
+                 json.dumps(observed), "active" if sure else "proposed", now(), now()),
             )  # fmt: skip
-            proposed.append(identifier)
+            if sure:
+                kept.append((identifier, text, backing))
+            else:
+                proposed.append(identifier)
         # Only "?" placeholders go into the SQL text below.
         if given:
             marks = ",".join("?" * len(given))
@@ -346,7 +375,20 @@ class Learning:
                 needs_action=True,
                 title="Lessons to review",
             )
+        for identifier, text, backing in kept:
+            self.runtime.handled.record(
+                "lesson",
+                f"Kept the lesson “{text}”: your own words said so {backing} times",
+                ref=identifier,
+                undo="Undo",
+            )
+        if kept:
+            self.retire_oldest()
+            self.runtime.background(self.runtime.refresh(ROUTER, SLACK, WORKER))
+            self.bus.publish("state")
         result = f"Proposed {len(proposed)} lesson(s)."
+        if kept:
+            result += f" {len(kept)} more, backed often by the owner's words, are in use now."
         if refused := self.runtime.habits.refused(caller):
             # A style it must still write again: it ends once that is done.
             self.store.set(f"lessons_done:{caller}", result)
@@ -363,6 +405,59 @@ class Learning:
         if task and task["status"] not in {"done", "cancelled"}:
             self.runtime.tasks.move(task["id"], "done", result=result)
         self.runtime.states[caller].close_after_turn = True
+
+    def support(self, evidence: list[int], observed: list[int]) -> int:
+        """How many times the owner's own words back a lesson (SURE_SUPPORT): the feedback and
+        observations it rests on, the same words counted once."""
+        # Only "?" placeholders (or an empty string) go into the SQL text below.
+        marks = ",".join("?" * len(evidence)) or "''"
+        said = [
+            row["owner"]
+            for row in self.store.all(
+                f"SELECT owner FROM feedback WHERE id IN ({marks})",  # noqa: S608
+                tuple(evidence),
+            )
+        ]
+        marks = ",".join("?" * len(observed)) or "''"
+        said += [
+            own_words(row)
+            for row in self.store.all(
+                f"SELECT kind, text, meta FROM observations WHERE id IN ({marks})",  # noqa: S608
+                tuple(observed),
+            )
+        ]
+        return len({" ".join(text.split()).casefold() for text in said if text.strip()})
+
+    def sure_trusted(self) -> bool:
+        """Whether lessons this sure are kept at once: not once the owner dropped or undid too
+        many of those so far (SURE_KEPT_SHARE)."""
+        kept = dropped = 0
+        for row in self.store.all(
+            "SELECT status, evidence, observed FROM lessons "
+            "WHERE status IN ('active', 'retired', 'rejected')"
+        ):
+            evidence = json.loads(row["evidence"] or "[]")
+            observed = json.loads(row["observed"] or "[]")
+            if self.support(evidence, observed) < SURE_SUPPORT:
+                continue
+            if row["status"] == "rejected":
+                dropped += 1
+            else:
+                kept += 1
+        return kept + dropped < SURE_REVIEWED or kept >= SURE_KEPT_SHARE * (kept + dropped)
+
+    async def unkeep(self, entry: dict) -> str:
+        """Undo of a lesson kept at once: sessions no longer use it, and it is not proposed
+        again (as one the owner dropped)."""
+        lesson = self.store.one("SELECT * FROM lessons WHERE id=?", (entry["ref"],))
+        if not lesson or lesson["status"] != "active":
+            raise ValueError("That lesson is no longer in use.")
+        self.store.execute(
+            "UPDATE lessons SET status='rejected', updated_at=? WHERE id=?", (now(), lesson["id"])
+        )
+        await self.runtime.refresh(ROUTER, SLACK, WORKER)
+        self.bus.publish("state")
+        return f"Dropped the lesson “{lesson['text']}”: sessions no longer use it."
 
     def pending_card(self) -> dict | None:
         return next((d for d in self.store.drafts() if d["kind"] == "lessons"), None)
@@ -400,6 +495,8 @@ class Learning:
             "text": lesson["text"],
             "scope": lesson["scope"],
             "because": unique,
+            # Not offered as safe to keep with others on Your OK (E123).
+            "sensitive": bool(SENSITIVE.search(lesson["text"])),
         }
 
     async def review(self, card: dict, decision: DraftDecision) -> dict:

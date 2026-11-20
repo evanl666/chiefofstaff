@@ -732,6 +732,19 @@ class DraftDecision(StrictModel):
     accept: str = Field(default="", max_length=64)
 
 
+class OkItem(StrictModel):
+    """A row of Your OK the owner saw marked safe: a card, and on a lessons card one lesson."""
+
+    draft: str = Field(max_length=64)
+    lesson: str = Field(default="", max_length=64)
+
+
+class ApproveSafe(StrictModel):
+    """Your OK's Approve all safe: the rows the owner saw, each checked again as it is now."""
+
+    items: list[OkItem] = Field(max_length=100)
+
+
 class WithdrawDraft(BaseModel):
     draft_id: str = Field(description="Your draft that waits for the owner (d…)")
     reason: str = Field(

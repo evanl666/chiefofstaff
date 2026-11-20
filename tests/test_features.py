@@ -644,7 +644,10 @@ async def test_the_owner_picks_the_folder_when_the_router_is_unsure(tmp_path):
     started = await spawn(runtime, router, "Fix search", project=str(notes), why_new="t")
     assert started["cwd"] == str(notes.resolve())
 
-    await ask(str(app))
+    # The one configured project offered: picked for the owner, no card (E123, round 17).
+    assert (await ask(str(app))).startswith(f"Only one configured project fits: {app.resolve()}")
+    assert not harness.store.drafts()
+    await ask(str(app), str(notes))
     second = harness.store.drafts()[0]["id"]
     await runtime.drafts.resolve(second, DraftDecision(action="choose", choice=""))
     assert (
@@ -652,7 +655,7 @@ async def test_the_owner_picks_the_folder_when_the_router_is_unsure(tmp_path):
         .sent[-1]
         .endswith("the owner chose no project: start the worker without one.\n</message>")
     )
-    await ask(str(app))
+    await ask(str(app), str(notes))
     third = harness.store.drafts()[0]["id"]
     await runtime.drafts.resolve(third, DraftDecision(action="reject", reason="later"))
     assert "do not start it. Reason: later" in harness.session(router).sent[-1]

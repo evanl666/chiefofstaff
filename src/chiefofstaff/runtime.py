@@ -88,6 +88,7 @@ from .envelope import (
 from .events import EFFORT_REFUSED, MODEL_REFUSED, ROUTER_CONTEXT, Events
 from .focus import Focus
 from .habits import Habits
+from .handled import Handled
 from .learning import Learning
 from .models import AS_SAVED, Attachment, SentItem, Settings
 from .notify import mac_notification
@@ -490,6 +491,18 @@ UPDATE_FAILED = (
 )
 
 
+def mcp_called(off: dict[str, list[str]], tool: str) -> list[str]:
+    """Of the servers off for a worker, the MCP server a tool is of (Copilot names an MCP
+    server's tools "<server>-<tool>")."""
+    return [
+        server
+        for server in off
+        if server.startswith("mcp/")
+        and "@" not in server
+        and tool.startswith(server.partition("/")[2] + "-")
+    ]
+
+
 def server_labels(servers: list[str]) -> str:
     """Servers (settings_guard: "mcp/name", "lsp/name", "mcp/name@agent"), as the owner reads
     them: "MCP server self", "language server x and MCP server t (of the custom agent a)"."""
@@ -642,6 +655,8 @@ class Runtime:
         self.workers = Workers(self)
         self.task_actions = TaskActions(self)
         self.drafts = Drafts(self)
+        # What it settled for the owner instead of asking (E123).
+        self.handled = Handled(self)
         self.asks = Asks(self)
         self.asks.migrate_questions()
         self.decisions = Decisions(self)
@@ -699,7 +714,7 @@ class Runtime:
             ("Chief of Staff stopped while sending. Check whether it was delivered.",),
         )
         self.asks.expire_requests()
-        self.task_actions.settle_old_reports(TASKS_SHOWN_HOURS)
+        self.task_actions.settle_reports()
         await self.connect()
         self.after_update()
         await self.recover_agents()
@@ -4092,8 +4107,9 @@ class Runtime:
 
     async def git_appeared(self, row: dict) -> str:
         """Its line while a git file appeared in a .git it can write waits for the owner ("" for
-        none: one they removed is let go of). "Use it"; "Keep it removed" too where only
-        Chief of Staff's own worktree folders hold them."""
+        none: one they removed is let go of, one in Chief of Staff's own worktree folders is
+        moved aside). "Use it"; "Keep it removed" too where only those folders hold them (one
+        asked about before they were moved aside by themselves)."""
         pending = json.loads(self.store.get(f"gitappeared:{row['id']}") or "[]")
         there = [p for p in pending if await self.settings_thread(os.path.lexists, p)]
         if there != pending:
@@ -4103,10 +4119,38 @@ class Runtime:
                 self.store.delete(f"gitappeared:{row['id']}")
         if not there:
             return ""
-        names = ", ".join(git_name(path) for path in there)
-        line = f"A git file appeared in .git ({names}). If you made it, use it."
         admins = [c.get("admin") or "" for c in self.workspaces.checkouts(row) if c.get("worktree")]
+        asked = self.git_asked(row["id"])
+        if own := [p for p in there if p not in asked and any(a and within(p, a) for a in admins)]:
+            # In Chief of Staff's own worktree folders (E123): moved aside at once, the worker
+            # goes on; Put back under Handled for you. One in the owner's own repository (or
+            # asked about already) still waits for their word.
+            aside = await self.git_set_aside(row["id"], own)
+            there = [path for path in there if path not in own]
+            if there:
+                self.store.set(f"gitappeared:{row['id']}", json.dumps(there))
+            else:
+                self.store.delete(f"gitappeared:{row['id']}")
+            moved = ", ".join(git_name(path) for path in own)
+            self.add_message(
+                row["id"],
+                "notice",
+                f"Moved {moved} out of this worker's worktree .git: Chief of Staff's own folder, "
+                f"not your repository (a copy is in {home_shown(aside)}).",
+            )
+            self.handled.record(
+                "git",
+                f"Moved {moved} out of “{self.display_title(row)}”'s worktree .git",
+                session_id=row["id"],
+                ref=aside,
+                undo="Put back",
+                data={"paths": own, "aside": aside},
+            )
+            if not there:
+                return ""
+        names = ", ".join(git_name(path) for path in there)
         removable = all(any(a and within(p, a) for a in admins) for p in there)
+        line = f"A git file appeared in .git ({names}). If you made it, use it."
         self.settings_reasons[row["id"]] = f"A git file appeared in .git ({names})"
         digest = settings_guard.digest({"appeared": {p: [] for p in there}})
         meta = {"git_quarantine": {"paths": there, "removable": removable}}
@@ -4137,17 +4181,57 @@ class Runtime:
             ]
             if not all(any(a and within(p, a) for a in admins) for p in pending):
                 raise ValueError("That is your repository's: remove it yourself, or use it.")
-            aside = self.store.directory / "quarantine" / session_id / str(int(time.time() * 1000))
-            for path in pending:
-                if await asyncio.to_thread(os.path.lexists, path):
-                    moved = aside / path.lstrip(os.sep)
-                    await asyncio.to_thread(moved.parent.mkdir, parents=True, exist_ok=True)
-                    await asyncio.to_thread(shutil.move, path, moved)
-            said = f"{names}: kept removed (a copy is in {home_shown(str(aside))})."
+            aside = await self.git_set_aside(session_id, pending)
+            said = f"{names}: kept removed (a copy is in {home_shown(aside)})."
         self.store.delete(f"gitappeared:{session_id}")
         self.add_message(session_id, "notice", said)
         self.store.delete(f"settingssaid:{session_id}")
         await self.release_held(session_id)
+        return said
+
+    def git_asked(self, session_id: str) -> set[str]:
+        """The git files its timeline last asked the owner about (left to their word)."""
+        found = self.store.one(
+            "SELECT meta FROM messages WHERE session_id=? AND kind='notice' "
+            "AND json_extract(meta, '$.git_quarantine') IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        )
+        return set(json.loads(found["meta"])["git_quarantine"]["paths"]) if found else set()
+
+    async def git_set_aside(self, session_id: str, paths: list[str]) -> str:
+        """Git files moved into Chief of Staff's data folder (never deleted): where."""
+        aside = self.store.directory / "quarantine" / session_id / str(int(time.time() * 1000))
+        for path in paths:
+            if await asyncio.to_thread(os.path.lexists, path):
+                moved = aside / path.lstrip(os.sep)
+                await asyncio.to_thread(moved.parent.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(shutil.move, path, moved)
+        return str(aside)
+
+    async def git_put_back(self, entry: dict) -> str:
+        """Put back, under Handled for you: the git files moved aside are where they were, and
+        used as the owner's "Use it" would (no longer looked for)."""
+        aside, paths = Path(entry["data"]["aside"]), entry["data"]["paths"]
+        moves = [(aside / path.lstrip(os.sep), path) for path in paths]
+
+        def put_back():
+            if not all(os.path.lexists(kept) for kept, _ in moves):
+                raise ValueError("The copy is gone: there's nothing to put back.")
+            if any(os.path.lexists(path) for _, path in moves):
+                raise ValueError("Something is in its place now: it stays as it is.")
+            for kept, path in moves:
+                shutil.move(kept, path)
+
+        await asyncio.to_thread(put_back)
+        for key in self.store.keys("gitwatch:"):
+            watched = json.loads(self.store.get(key) or "[]")
+            if kept_paths := [path for path in watched if path not in paths]:
+                self.store.set(key, json.dumps(kept_paths))
+            else:
+                self.store.delete(key)
+        said = f"Put back {', '.join(git_name(path) for path in paths)}: workers use them."
+        if self.store.find_session(entry["session_id"]):
+            self.add_message(entry["session_id"], "notice", said)
         return said
 
     # A .git a worker replaced (workspaces.replaceable_git_paths: the sandbox holds paths, and
@@ -4545,8 +4629,11 @@ class Runtime:
             # (Copilot takes the agent's name as it is written; any case here.)
             agent = str(arguments.get("agent_type") or "").casefold()
             servers = [s for s in off if agent and s.partition("@")[2].casefold() == agent]
+        else:
+            servers = mcp_called(off, tool)
         if not servers:
             return ""
+        self.servers_asked(row, servers)  # It does call it: now the owner is asked.
         return (
             f"The {server_labels(servers)} changed in this folder since the owner last let you use "
             f"{'it' if len(servers) == 1 else 'them'}: it's off for you. Work without it; the "
@@ -4554,7 +4641,9 @@ class Runtime:
         )
 
     def servers_said(self, row: dict):
-        """Opened with servers off: its timeline says so once (each, while it stays off)."""
+        """Opened with servers off: quietly (E123), under Handled for you with Turn on, once
+        (each, while it stays off). Its timeline asks the owner only once it calls one
+        (servers_asked)."""
         off = self.servers_off.get(row["id"], {})
         key = f"serversoff:{row['id']}"
         said = set(json.loads(self.store.get(key) or "[]"))
@@ -4564,8 +4653,29 @@ class Runtime:
             self.store.set(key, json.dumps(sorted(off)))
         else:
             self.store.delete(key)
+            self.store.delete(f"serversasked:{row['id']}")
         if not set(off) - said:
             return  # (Fewer off: said as they were turned on.)
+        digest = servers_digest(off)
+        self.handled.record(
+            "servers",
+            f"Kept its {server_labels(sorted(off))} off for “{self.display_title(row)}”: "
+            "changed in its folder",
+            session_id=row["id"],
+            ref=digest,
+            undo="Turn on",
+            data={"digest": digest},
+        )
+
+    def servers_asked(self, row: dict, servers: list[str]):
+        """A worker calls a server off for it: its timeline says so, with Use these settings
+        (once for each, while it stays off)."""
+        off = self.servers_off.get(row["id"], {})
+        key = f"serversasked:{row['id']}"
+        asked = set(json.loads(self.store.get(key) or "[]"))
+        if not set(servers) - asked or not off:
+            return
+        self.store.set(key, json.dumps(sorted(asked | set(servers))))
         paths = sorted({path for server in off for path in off[server]})
         line = (
             f"Its {server_labels(sorted(off))} changed in this worker's folder, so it runs "
@@ -4577,6 +4687,17 @@ class Runtime:
             line,
             {"agent_servers": {"digest": servers_digest(off), "changes": ", ".join(paths)}},
         )
+
+    def servers_called(self, row: dict, tool: str):
+        """A worker's tool as it starts: one of an MCP server off for it asks the owner now."""
+        if (off := self.servers_off.get(row["id"])) and (called := mcp_called(off, tool)):
+            self.servers_asked(row, called)
+
+    async def servers_back(self, entry: dict) -> str:
+        """Turn on, under Handled for you: as Use these settings on its line."""
+        if not self.store.find_session(entry["session_id"]):
+            raise ValueError("That worker is gone.")
+        return await self.accept_servers(entry["session_id"], entry["data"]["digest"])
 
     async def accept_servers(self, session_id: str, digest: str) -> str:
         """The owner says to use the servers its line names (Use these settings): what they
@@ -6268,6 +6389,8 @@ class Runtime:
                 self.task_actions.wake_check_backs,
                 self.task_actions.nudge_stalled,
                 self.task_actions.remind_failed,
+                # Reports only, read (or a day old): accepted for the owner (E123).
+                self.task_actions.settle_reports_now,
                 # Queued work starts once memory frees up, not only when a turn ends.
                 self.workers.pump,
                 self.digest_once,
@@ -6882,6 +7005,8 @@ class Runtime:
             "connector": self.connector.view(),
             "checks": self.checks.view(),
             "setup_notes": self.asks.setup_notes(),
+            # What Chief of Staff settled for the owner instead of asking, the last week's.
+            "handled": self.handled.view(),
             "sandbox": {
                 "supported": self.sandbox_host,
                 "gh_trusted": self.sandbox_gh,

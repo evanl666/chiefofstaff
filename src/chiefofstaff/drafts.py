@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING
 from . import threads
 from .asks import REQUEST_KINDS
 from .envelope import short, wrap
-from .models import DraftDecision
+from .learning import SENSITIVE
+from .models import DraftDecision, OkItem
 from .peers import clip
 from .roles import ROUTER, SLACK, WORKER
 from .sources.github import REVIEW_EVENTS, merge_refusal
@@ -66,6 +67,13 @@ CARD_WORDS = {
     "profile": "profile to review",
     "adopt": "session to take over",
 }
+# Your OK (E123): the approvals on one card under Needs you, a line each, counted once there. Not
+# what speaks as the owner (Slack replies, PR reviews, replies they send), their decisions, nor
+# the questions and forms workers ask them: those keep cards of their own. A merge, a sign-in or
+# a link to open is on it, never approved with others.
+YOUR_OK = frozenset(
+    {"change", "lessons", "check", "profile", "adopt", "workspace", "merge", "signin", "link"}
+)
 
 
 class Drafts:
@@ -108,6 +116,45 @@ class Drafts:
             finally:
                 if draft["kind"] == "github":
                     self.link_reviews()  # Replies that waited for it may go now.
+
+    async def approve_safe(self, items: list[OkItem]) -> dict:
+        """Your OK's Approve all safe (E123): of the rows the owner saw, those safe to approve
+        together as they are now (a changed decision seen, a check used, a lesson kept that is
+        not about secrets, money or what goes out); anything else, or settled meanwhile, is
+        left. Lessons of one card are kept in one go; those not asked for stay on a card."""
+        approved = left = 0
+        lessons: dict[str, dict[str, str]] = {}
+        for item in items:
+            try:
+                draft = self.store.draft(item.draft)
+            except LookupError:
+                left += 1
+                continue
+            if draft["status"] != "pending":
+                left += 1
+            elif draft["kind"] == "lessons":
+                lesson = next(
+                    (one for one in draft["target"]["lessons"] if one["id"] == item.lesson), None
+                )
+                if lesson and not SENSITIVE.search(lesson["text"]):
+                    lessons.setdefault(draft["id"], {})[lesson["id"]] = lesson["text"]
+                else:
+                    left += 1
+            elif draft["kind"] in {"change", "check"}:
+                try:
+                    await self.resolve(draft["id"], DraftDecision(action="answer"))
+                    approved += 1
+                except ValueError:  # Settled meanwhile (another tab).
+                    left += 1
+            else:
+                left += 1
+        for draft_id, kept in lessons.items():
+            try:
+                await self.resolve(draft_id, DraftDecision(action="answer", content=dict(kept)))
+                approved += len(kept)
+            except ValueError:
+                left += len(kept)
+        return {"approved": approved, "left": left}
 
     async def decide(self, draft_id: str, decision: DraftDecision) -> dict:
         """The owner's decision on a pending draft; the caller holds draft_lock."""
@@ -865,6 +912,14 @@ class Drafts:
 
     async def answer_workspace(self, draft: dict, decision: DraftDecision) -> dict:
         title = draft["target"]["title"]
+        # Picked for the owner (the one project that fits, E123) and Changed: its worker may be
+        # at work there already.
+        picked = draft["target"].get("picked", "")
+        started = (
+            f" If you started its worker in {picked} already, cancel that task first."
+            if picked
+            else ""
+        )
         if decision.action == "reject":
             draft = self.store.update_draft(
                 draft["id"], status="rejected", outcome=decision.reason, resolved_at=now()
@@ -873,7 +928,8 @@ class Drafts:
             reason = f" Reason: {decision.reason}" if decision.reason else ""
             await self.tell_drafter(
                 draft,
-                f"The owner did not choose a folder for “{title}”: do not start it.{reason}",
+                f"The owner did not choose a folder for “{title}”: do not start it.{started}"
+                f"{reason}",
                 True,
                 display=f"You chose no folder for “{title}”: it does not start.{reason}",
             )
@@ -885,16 +941,35 @@ class Drafts:
             draft["id"], status="chosen", outcome=choice or "no project", resolved_at=now()
         )
         self.bus.publish("draft", draft)
+        if picked and choice == picked:
+            await self.tell_drafter(
+                draft, f"For “{title}” the owner kept {picked}.", display=f"Kept {picked}."
+            )
+            return draft
         if choice:
             text = (
                 f"For “{title}” the owner chose {choice} (now in list_sessions().projects): "
-                "start the worker there."
+                f"start the worker there.{started}"
             )
         else:
-            text = f"For “{title}” the owner chose no project: start the worker without one."
+            text = (
+                f"For “{title}” the owner chose no project: start the worker without one.{started}"
+            )
         shown = f"You chose {choice or 'no project'} for “{title}”."
         await self.tell_drafter(draft, text, True, display=shown)
         return draft
+
+    async def change_workspace(self, entry: dict) -> str:
+        """Change, on a folder picked for the owner (Handled for you): its card again, to choose
+        another folder (or none) or keep it."""
+        draft = self.store.draft(entry["ref"])
+        if draft["kind"] != "workspace" or draft["status"] != "chosen":
+            raise ValueError("That folder choice is settled already.")
+        if not draft["target"].get("picked"):
+            raise ValueError("You chose that folder yourself.")
+        draft = self.store.update_draft(draft["id"], status="pending", outcome="", resolved_at=None)
+        self.bus.publish("draft", draft)
+        return f"Choose where “{draft['target']['title']}” works: its card is under Needs you."
 
     async def settle_uncertain(self, draft: dict, decision: DraftDecision) -> dict:
         """The owner decides about a draft whose sending a stop interrupted."""

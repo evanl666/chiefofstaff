@@ -235,6 +235,12 @@ class Store:
             runs INTEGER NOT NULL DEFAULT 0, caught INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS handled (
+            id TEXT PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL,
+            session_id TEXT NOT NULL DEFAULT '', ref TEXT NOT NULL DEFAULT '',
+            undo TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'done', created_at TEXT NOT NULL, undone_at TEXT
+        );
         """)
         for row in self.db.execute("SELECT key, value FROM kv WHERE key LIKE 'question:%'"):
             # Questions between sessions used to live in kv.

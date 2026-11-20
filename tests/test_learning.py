@@ -62,7 +62,12 @@ async def test_the_owners_feedback_becomes_lessons_they_approve(tmp_path, monkey
         "propose_lessons",
         learner["id"],
         lessons=[
-            {"lesson": "Give every migration a rollback", "scope": str(project), "feedback": ids},
+            # (Backed twice: the owner's to review. Three times: kept, see round 17.)
+            {
+                "lesson": "Give every migration a rollback",
+                "scope": str(project),
+                "feedback": ids[:2],
+            },
             {"lesson": "Answer in one line", "scope": "slack", "feedback": ids[:1]},
         ],
     )

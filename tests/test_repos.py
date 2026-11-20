@@ -1666,9 +1666,10 @@ async def test_a_link_out_of_the_repository_is_held_by_where_it_leads(
         await runtime.owner_send(worker, "Again")
         assert runtime.states.is_live(worker)
         assert harness.session(worker).options["disabled_mcp_servers"] == ["s"]
-        assert [t for k, t in harness.kinds(worker) if t.startswith("Its MCP")] == [
-            "Its MCP server s changed in this worker's folder, so it runs without it."
-        ]
+        # Off quietly (E123): handled for the owner, asked only once it is called.
+        assert [t for k, t in harness.kinds(worker) if t.startswith("Its MCP")] == []
+        [entry] = [e for e in runtime.handled.view() if e["kind"] == "servers"]
+        assert entry["text"].startswith("Kept its MCP server s off for “")
     finally:
         await runtime.stop()
 
@@ -1719,8 +1720,9 @@ HOOKED = {
 async def test_the_files_settings_run_are_held_with_them(tmp_path, git_repo, monkeypatch):
     """A hook's script named by its settings: changed, the worker waits as for the settings
     themselves. What an MCP, language or agent's server runs, changed: that server is off for
-    the worker from its next start, said once, never a wait. A command that runs project code
-    otherwise (`uv run`) is said once: a change to that code isn't caught."""
+    the worker from its next start, quietly (E123: under Handled for you), never a wait. A
+    command that runs project code otherwise (`uv run`) is said once: a change to that code
+    isn't caught."""
     for name, text in HOOKED.items():
         commit(git_repo, name, text)
     trusting(tmp_path, monkeypatch, git_repo)
@@ -1748,11 +1750,12 @@ async def test_the_files_settings_run_are_held_with_them(tmp_path, git_repo, mon
             "mcp/t@a": ["tools/agent_server.sh (run by .github/agents/a.agent.md)"],
             "mcp/tool": ["tools/mcp_server.py (run by .mcp.json)"],
         }
-        line = [t for k, t in harness.kinds(worker) if t.startswith("Its ")]
-        assert line == [
-            "Its language server x, MCP server t (of the custom agent a) and MCP server tool "
-            "changed in this worker's folder, so it runs without them."
-        ]
+        assert not [t for k, t in harness.kinds(worker) if t.startswith("Its ")]
+        [entry] = [e for e in runtime.handled.view() if e["kind"] == "servers"]
+        assert entry["text"].startswith(
+            "Kept its language server x, MCP server t (of the custom agent a) and MCP server "
+            "tool off for “"
+        )
         assert harness.session(worker).options["disabled_mcp_servers"] == ["t", "tool"]
         await at_rest(runtime, harness, worker)
         # What its hooks run: as the settings themselves, it waits.
@@ -2176,8 +2179,9 @@ async def test_a_server_the_worker_develops_is_off_for_it_after_a_build_never_a_
     """A repository that develops its own MCP server and dogfoods its build (`node
     dist/index.js`, dist/ gitignored): the worker builds and edits it freely. What the build
     made turns that server off for the worker from its next turn (Copilot opens MCP servers as
-    a session opens; nothing stops mid-turn), said once; never a wait. "Use these settings" on
-    that line turns it on again from its next turn."""
+    a session opens; nothing stops mid-turn), quietly (E123: under Handled for you, with Turn
+    on); never a wait. Its timeline asks the owner only once the worker calls it, and "Use
+    these settings" there (or Turn on) turns it on again from its next turn."""
     commit(git_repo, ".gitignore", "dist/\n")
     commit(git_repo, "src/index.ts", "export {}\n")
     commit(git_repo, ".mcp.json", json.dumps(
@@ -2200,16 +2204,16 @@ async def test_a_server_the_worker_develops_is_off_for_it_after_a_build_never_a_
         await turn_over(runtime, harness, worker)
         session.emit("session.idle")
         await settle(runtime)
-        # Its next turn: opened again without that server, said once.
+        # Its next turn: opened again without that server, quietly: handled for the owner.
         await runtime.owner_send(worker, "Next")
         await settle(runtime)
         assert runtime.states.is_live(worker) and not settings_notices(harness, worker)
         assert harness.session(worker) is not session
         assert harness.session(worker).options["disabled_mcp_servers"] == ["self"]
-        said = [t for k, t in harness.kinds(worker) if t.startswith("Its MCP server")]
-        assert said == [
-            "Its MCP server self changed in this worker's folder, so it runs without it."
-        ]
+        assert not [t for k, t in harness.kinds(worker) if t.startswith("Its MCP server")]
+        [entry] = [e for e in runtime.handled.view() if e["kind"] == "servers"]
+        assert entry["text"].startswith("Kept its MCP server self off for “")
+        assert entry["undo"] == "Turn on"
         # Built again, its source edited: still off, nothing more said, no wait.
         await turn_over(runtime, harness, worker)
         harness.session(worker).emit("session.idle")
@@ -2220,10 +2224,17 @@ async def test_a_server_the_worker_develops_is_off_for_it_after_a_build_never_a_
         await runtime.owner_send(worker, "More")
         await settle(runtime)
         assert harness.session(worker) is session, "the same servers off: not opened again"
-        assert len([t for k, t in harness.kinds(worker) if t.startswith("Its MCP server")]) == 1
-        # The owner turns it on: from its next turn.
-        line = [m for m in harness.store.messages(worker) if m["meta"].get("agent_servers")][-1]
-        said = await runtime.accept_settings(worker, line["meta"]["agent_servers"]["digest"])
+        assert len([e for e in runtime.handled.view() if e["kind"] == "servers"]) == 1
+        # It calls it after all: now its timeline asks the owner, once.
+        for call in ("c1", "c2"):
+            session.emit("tool.execution_start", tool_name="self-ping", tool_call_id=call)
+        await settle(runtime)
+        said = [t for k, t in harness.kinds(worker) if t.startswith("Its MCP server")]
+        assert said == [
+            "Its MCP server self changed in this worker's folder, so it runs without it."
+        ]
+        # The owner turns it on (Turn on, as Use these settings there): from its next turn.
+        said = await runtime.handled.undo(entry["id"])
         assert said == "You let this worker use its MCP server self again."
         await turn_over(runtime, harness, worker)
         harness.session(worker).emit("session.idle")
@@ -2265,11 +2276,14 @@ async def test_a_language_or_agent_server_off_for_a_worker_is_never_started(
         await settle(runtime)
         assert runtime.states.is_live(worker)
         hook = harness.session(worker).options["hooks"]["on_pre_tool_use"]
+        assert not [m for m in harness.store.messages(worker) if m["meta"].get("agent_servers")]
         denied = await asked(hook, lsp, worker)
         assert denied["permissionDecision"] == "deny"
         assert denied["permissionDecisionReason"].startswith(
             "The language server x changed in this folder since the owner last let you use it"
         )
+        # Called: now its timeline asks the owner (E123), with Use these settings.
+        assert [m for m in harness.store.messages(worker) if m["meta"].get("agent_servers")]
         denied = await asked(hook, task, worker)
         assert denied["permissionDecisionReason"].startswith(
             "The MCP server t (of the custom agent a) changed"
@@ -3941,8 +3955,9 @@ async def test_on_linux_a_git_file_a_worker_could_have_made_waits_for_the_owner(
     what git runs or which repository it uses is looked for after each turn, as it stops or
     closes, and before Chief of Staff runs git. Nothing is moved out of the owner's repository:
     the worker waits for the owner's word, and Chief of Staff runs no git there until then. In
-    its own worktree's folder, the owner may keep one removed. What the owner's own git makes
-    (a shallow fetch, submodules) is not looked for."""
+    its own worktree's folder, one is moved aside by itself and the worker goes on (E123), with
+    Put back under Handled for you. What the owner's own git makes (a shallow fetch,
+    submodules) is not looked for."""
     trusting(tmp_path, monkeypatch, git_repo)
     monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", "linux")
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
@@ -3984,16 +3999,38 @@ async def test_on_linux_a_git_file_a_worker_could_have_made_waits_for_the_owner(
         await settle(runtime)
         assert runtime.states.is_live(worker) and unsent(harness, worker) == []
         await workspaces_module.git("-C", str(git_repo), "status", "--porcelain")
-        # Its own worktree's folder, where the repository reads one: kept removed, on a click.
+        # Its own worktree's folder, where the repository reads one: moved aside by itself, the
+        # worker goes on (E123); Put back under Handled for you.
         run("git", "config", "extensions.worktreeConfig", "true", cwd=git_repo)
         runtime.sandbox_policy(harness.store.session(worker))
-        (admin / "config.worktree").write_text("[core]\n\tfsmonitor = touch PWNED\n")
+        planted = admin / "config.worktree"
+        planted.write_text("[core]\n\tfsmonitor = touch PWNED\n")
+        asked = len([m for m in harness.store.messages(worker) if m["meta"].get("git_quarantine")])
         harness.session(worker).emit("session.idle")
         await settle(runtime)
+        assert not planted.exists() and worker not in runtime.settings_held
+        assert runtime.states.is_live(worker), "it goes on"
         lines = [m for m in harness.store.messages(worker) if m["meta"].get("git_quarantine")]
-        assert lines[-1]["meta"]["git_quarantine"]["removable"] is True
+        assert len(lines) == asked, "not asked"
+        moved = [t for k, t in harness.kinds(worker) if t.startswith("Moved ")]
+        assert moved[-1].startswith("Moved worktrees/") and "not your repository" in moved[-1]
+        [entry] = [e for e in runtime.handled.view() if e["kind"] == "git"]
+        assert entry["undo"] == "Put back"
+        said = await runtime.handled.undo(entry["id"])
+        assert said.startswith("Put back worktrees/") and planted.exists()
+        assert runtime.git_watch_scan(worker) == {}, "put back: used, not looked for"
+        planted.unlink()
+        # One asked about before this version: still the owner's to answer (kept removed).
+        runtime.git_watch(worker, [str(planted)])
+        planted.write_text("[core]\n")
+        harness.store.set(f"gitappeared:{worker}", json.dumps([str(planted)]))
+        quarantine = {"paths": [str(planted)], "removable": True}
+        runtime.add_message(worker, "notice", "asked", {"git_quarantine": quarantine})
+        assert "If you made it, use it." in await runtime.git_appeared(
+            harness.store.session(worker)
+        )
         said = await runtime.answer_git_quarantine(worker, use=False)
-        assert "kept removed" in said and not (admin / "config.worktree").exists()
+        assert "kept removed" in said and not planted.exists()
         await settle(runtime)
         assert worker not in runtime.settings_held
         # Used: then not looked for any more.

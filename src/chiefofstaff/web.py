@@ -19,6 +19,7 @@ from . import agents
 from .bus import Bus
 from .models import (
     AgentSettings,
+    ApproveSafe,
     ArtifactHide,
     CheckBackAction,
     DraftDecision,
@@ -709,6 +710,16 @@ def create_app(
     @app.post("/api/drafts/{draft_id}")
     async def resolve(draft_id: str, decision: DraftDecision):
         return await runtime.drafts.resolve(draft_id, decision)
+
+    @app.post("/api/your-ok/approve-safe")
+    async def approve_safe(payload: ApproveSafe):
+        """Your OK's Approve all safe (E123): only rows marked safe, each checked again now."""
+        return await runtime.drafts.approve_safe(payload.items)
+
+    @app.post("/api/handled/{entry_id}/undo")
+    async def undo_handled(entry_id: str):
+        """Undo of something handled for the owner (E123): their click only."""
+        return {"ok": True, "said": await runtime.handled.undo(entry_id)}
 
     # One save at a time: each merges into what the one before saved.
     settings_lock = asyncio.Lock()
