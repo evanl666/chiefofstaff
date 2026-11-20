@@ -255,7 +255,9 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
     if (task.status === "review") {
       const news = task.news ? `News: ${task.news.text || task.news.summary || "something new on it"}` : "";
       const issue = standing && standing.marker !== "mergeable" ? standing.why : news;
-      return at("needs", "review", issue || (task.attention === "acceptance" ? task.attention_why || "" : ""));
+      // A report only (no code, no PR, nothing failing): accepted for the owner once read (E123).
+      const settles = task.report_only ? (task.read ? "Read: accepted for you shortly" : "A report: accepted for you once you've read it") : "";
+      return at("needs", "review", issue || (task.attention === "acceptance" ? task.attention_why || "" : "") || settles);
     }
     if (task.news) return at("needs", "update", "");
     // Cancelled after it finished, before it was accepted: over, not done.

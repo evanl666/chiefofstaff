@@ -191,6 +191,11 @@ async def memory(runtime, browser, failures: list[str]):
         page.on("pageerror", lambda error: failures.append(str(error)))
         page.on("console", lambda m: failures.append(m.text) if m.type == "error" else None)
         await page.goto(f"{BASE}/#token={TOKEN}")
+        # On Your OK (E123): its line, and its whole card on Details.
+        row = page.locator(f'#needs .your-ok .ok-row[data-id="{seeded["card"]["id"]}"]')
+        await expect(row).to_be_visible(timeout=15000)
+        await row.locator(".more-button").click()
+        await row.get_by_role("menuitem", name="Details").click()
         card = page.locator(f'.card.draft[data-id="{seeded["card"]["id"]}"]')
         await expect(card).to_be_visible(timeout=15000)
         await expect(card.locator("pre")).to_contain_text("git grep")
@@ -212,18 +217,24 @@ async def memory(runtime, browser, failures: list[str]):
     page = await context.new_page()
     page.on("pageerror", lambda error: failures.append(str(error)))
     await page.goto(f"{BASE}/#token={TOKEN}")
-    card = page.locator(f'.card.draft[data-id="{seeded["card"]["id"]}"]')
-    await card.get_by_role("button", name="Use this check").click()
+    card = page.locator(f'#needs .your-ok .ok-row[data-id="{seeded["card"]["id"]}"]')
+    await card.get_by_role("button", name="Use", exact=True).click()
     await expect(card).to_have_count(0, timeout=10000)
     assert store.one("SELECT status FROM checks WHERE id='kcard'")["status"] == "active"
-    lessons = page.locator(f'.card.draft[data-id="{seeded["lessons"]["id"]}"]')
-    await lessons.locator('input[type="checkbox"]').last.uncheck()
-    await lessons.get_by_role("button", name="Keep ticked").click()
-    await expect(lessons).to_have_count(0, timeout=10000)
+    rows = page.locator(f'#needs .your-ok .ok-row[data-id="{seeded["lessons"]["id"]}"]')
+    await expect(rows).to_have_count(2)
+    drop = page.locator('#needs .your-ok .ok-row[data-lesson="ldrop"]')
+    await drop.locator(".more-button").click()
+    await drop.get_by_role("menuitem", name="Drop").click()
+    await expect(drop).to_have_count(0, timeout=10000)
+    # The other one: still on Your OK (on a card of its own now), kept from its line.
+    keep = page.locator('#needs .your-ok .ok-row[data-lesson="lkeep"]')
+    await keep.get_by_role("button", name="Keep").click()
+    await expect(keep).to_have_count(0, timeout=10000)
     statuses = {row["id"]: row["status"] for row in store.all("SELECT id, status FROM lessons")}
     assert statuses == {"lkeep": "active", "ldrop": "rejected"}, statuses
     assert not [d for d in store.drafts() if d["kind"] == "lessons"], "both were seen"
-    log("check card: proof shown, used; lessons card: unticked is dropped, not re-asked")
+    log("check: proof shown on Details, used from its line; lessons: dropped, kept, a line each")
 
     await page.locator("#settings-button").click()
     dialog = page.locator("#settings-dialog")
@@ -1006,14 +1017,17 @@ async def round_three(runtime, browser, failures: list[str]):
     await expect(needs.locator(".card.task", has_text="Which Friday?")).to_be_visible()
     log("a question stays under Needs you after its task is cancelled; a task and its draft both")
 
-    merge_card = needs.locator(".card.draft.merge")
-    await expect(merge_card).to_contain_text("Ready to merge · app#7")
+    # On Your OK (E123): a line, Merge its own button, never with others.
+    merge_card = needs.locator(f'.your-ok .ok-row[data-id="{merge["id"]}"]')
+    await expect(merge_card).to_contain_text("Ready to merge")
+    await expect(merge_card).to_contain_text("app#7")
+    await expect(merge_card.locator(".ok-safe")).to_have_count(0)
     await expect(merge_card.get_by_role("button", name="Merge")).to_be_visible()
     await merge_card.locator(".more-button").click()
     await merge_card.get_by_role("menuitem", name="Not now").click()
     await expect(merge_card).to_have_count(0, timeout=10000)
     assert store.draft(merge["id"])["status"] == "rejected"
-    log("a PR ready to merge is a card: Merge, or not now")
+    log("a PR ready to merge is a line on Your OK: Merge, or not now")
 
     # The sidebar says what Home says.
     def dot(title):
@@ -2089,8 +2103,8 @@ async def round_six(runtime, browser, failures: list[str]):
         await node.get_by_role("button", name="Send", exact=True).click()
         await expect(node.locator(".error")).to_have_text("The reply is empty.")
         assert store.draft(draft["id"])["status"] == "pending"
-    merge_card = needs.locator(f'.card.draft[data-id="{merge["id"]}"]')
-    await expect(merge_card).to_contain_text("No checks")
+    merge_card = needs.locator(f'.your-ok .ok-row[data-id="{merge["id"]}"]')
+    await expect(merge_card).to_contain_text("no checks")
     moved_card = needs.locator(f'.card.draft[data-id="{moved["id"]}"]')
     await expect(moved_card.locator(".fresh-label")).to_contain_text("New since the draft: @Bob")
     await expect(moved_card.locator(".fresh-label")).to_contain_text("not sent yet")
@@ -2120,8 +2134,11 @@ async def round_six(runtime, browser, failures: list[str]):
     await expect(record.locator(".outcome")).to_have_text("Withdrawn: the thread was solved")
     log("drafts: an emptied reply is refused, not the draft sent; Slack names; no checks")
 
-    # Lessons: a long one is read whole, at the narrowest panel too.
+    # Lessons: a long one is read whole, at the narrowest panel too (its card on Details).
     await page.evaluate("document.querySelector('#panel').style.width = '352px'")
+    row = needs.locator('.your-ok .ok-row[data-lesson="llong"]')
+    await row.locator(".more-button").click()
+    await row.get_by_role("menuitem", name="Details").click()
     lesson = needs.locator(".card.lessons textarea").first
     await expect(lesson).to_have_value(long_lesson.strip())
     await page.wait_for_timeout(200)
@@ -4796,6 +4813,167 @@ async def round_qa7_life(runtime, browser, failures: list[str]):
     await context.close()
 
 
+async def approvals_seeded(runtime) -> dict:
+    """E123: Your OK with a changed decision (one worker's work changes), a lesson that is safe and
+    one that is not, a learned check, a PR ready to merge and a sign-in; a reply in the owner's
+    voice beside it; handled for the owner: a report accepted once read, a lesson kept."""
+    store = runtime.store
+    router = store.get("router_id")
+    for draft in store.drafts():  # Earlier rounds': this one's cards alone.
+        store.update_draft(draft["id"], status="expired", outcome="Left by an earlier round.")
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    api, form = await start("QA8 login API"), await start("QA8 login form")
+    tasks = [runtime.tasks.current(api)["id"], runtime.tasks.current(form)["id"]]
+    said = await call_tool(runtime, "record_decision", router, decision="QA8 email login only",
+                           tasks=tasks)  # fmt: skip
+    first = said.text_result_for_llm.split()[1].rstrip(",.")
+    await call_tool(runtime, "record_decision", router, decision="QA8 email and SMS login",
+                    replaces=[first])  # fmt: skip
+    decision = next(d for d in runtime.decisions.active() if "QA8" in d["text"])
+    await call_tool(runtime, "ack_decision", form, decision=decision["id"],
+                    plan="Add a phone field")  # fmt: skip
+    for lesson_id, text in [("l8short", "Keep reports to five lines"),
+                            ("l8force", "Never force-push a shared branch")]:  # fmt: skip
+        store.execute(
+            "INSERT INTO lessons(id, text, scope, evidence, status, created_at, updated_at) "
+            "VALUES (?, ?, '', '[]', 'proposed', 'now', 'now')",
+            (lesson_id, text),
+        )
+    store.create_draft(router, "lessons", {"lessons": [
+        runtime.learning.card_item("l8short"), runtime.learning.card_item("l8force")]},
+        "2 lessons")  # fmt: skip
+    evidence = {"failing": {"exit": 1, "output": "x"}, "fixed": {"exit": 0, "output": ""}}
+    store.execute(
+        """INSERT INTO checks(id, case_id, repo, name, why, applies_to, command, evidence,
+        status, created_at, updated_at) VALUES ('k8', 'c8', 'svc', 'No print in the API',
+        'Logs go through the logger.', '[]', '! git grep -n print', ?, 'proposed', 'x', 'x')""",
+        (json.dumps(evidence),),
+    )
+    check = {
+        "check": "k8", "name": "No print in the API", "why": "Logs go through the logger.",
+        "command": "! git grep -n print", "applies_to": [], "repo": "svc", "task": "",
+    }  # fmt: skip
+    store.create_draft(router, "check", {**check, **evidence}, "A check")
+    merge = store.create_draft(api, "merge", {
+        "label": "acme/app#18", "repo": "acme/app", "number": 18, "title": "Email login",
+        "url": "https://github.com/acme/app/pull/18", "head": "abc1234def", "review": "APPROVED",
+    }, "Email login")  # fmt: skip
+    store.create_draft(form, "signin", {"server": "docs", "url": "https://docs.acme.test/login"},
+                       "Sign in to the docs server so the worker can read the spec.")  # fmt: skip
+    reply = store.create_draft(form, "reply", {"to": "Maya", "where": "email"}, "Ships Friday.")
+    # Handled for the owner: a report accepted once read (Undo), a lesson kept (Undo).
+    reader = await start("QA8 compare queues")
+    await call_tool(runtime, "report", reader, status="done", summary="SQS fits; Kafka is more.")
+    await settle(runtime)
+    report = runtime.tasks.current(reader)
+    runtime.task_actions.mark_read(report["id"])
+    runtime.task_actions.settle_reports(datetime.now(UTC) + timedelta(minutes=11))
+    store.execute(
+        "INSERT INTO lessons(id, text, scope, evidence, status, created_at, updated_at) "
+        "VALUES ('l8kept', 'Name branches after the ticket', '', '[]', 'active', 'x', 'x')"
+    )
+    runtime.handled.record("lesson", "Kept the lesson “Name branches after the ticket”: your own "
+                           "words said so 4 times", ref="l8kept", undo="Undo")  # fmt: skip
+    runtime.publish_state()
+    return {"merge": merge, "reply": reply, "report": report}
+
+
+async def round_qa8_approvals(runtime, browser, failures: list[str]):
+    """E123, smooth by default: the approvals are one card under Needs you, Your OK, counted
+    once (a line each with its own button, the safe ones marked and taken by Approve all safe;
+    a merge or a sign-in never), what speaks as the owner keeps its own card, and what was
+    handled for the owner is one quiet line with Undo. Light and dark, 800 and 1280 px."""
+    from chiefofstaff.digest import needs_you
+
+    shots = Path(os.environ.get("QA8_APPROVALS_SHOTS", SHOTS))
+    shots.mkdir(parents=True, exist_ok=True)
+    store = runtime.store
+    seeded = await approvals_seeded(runtime)
+    merge, reply, report = seeded["merge"], seeded["reply"], seeded["report"]
+    for width, scheme in itertools.product((1280, 800), ("light", "dark")):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 1000}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        ok = page.locator("#needs .card.your-ok")
+        await expect(ok).to_have_count(1)
+        rows = ok.locator(".ok-row")
+        await expect(rows).to_have_count(6)
+        await expect(ok.locator(".ok-count")).to_have_text("6")
+        # Safe: the changed decision seen, the check, the lesson not about what can't be undone.
+        await expect(ok.locator(".ok-row:has(.ok-safe)")).to_have_count(3)
+        for kind in ("Ready to merge", "Sign-in"):
+            await expect(rows.filter(has_text=kind).locator(".ok-safe")).to_have_count(0)
+        await expect(ok.locator('.ok-row[data-lesson="l8force"] .ok-safe')).to_have_count(0)
+        await expect(ok.get_by_role("button", name="Approve all safe (3)")).to_be_visible()
+        # What speaks as the owner keeps its own card; Your OK counts once.
+        await expect(page.locator(f'#needs .card.draft[data-id="{reply["id"]}"]')).to_be_visible()
+        await expect(page.locator(".home-item .badge")).to_have_text(str(needs_you(runtime)))
+        found = await page.locator("#needs").evaluate(OVERFLOWS)
+        assert not found, (width, found)
+        handled = page.locator("#needs details.handled")
+        await expect(handled.locator("summary")).to_contain_text("Handled for you")
+        await expect(handled.locator("summary .count")).to_have_text("2")
+        await handled.locator("summary").click()
+        await expect(handled.locator("li")).to_have_count(2)
+        await expect(handled).to_contain_text("Accepted “QA8 compare queues” after you read it")
+        await ok.screenshot(path=shots / f"your-ok-{width}-{scheme}.png")
+        await page.locator("#needs").screenshot(path=shots / f"needs-you-{width}-{scheme}.png")
+        # Details: the line's whole card, under it.
+        merge_row = ok.locator(f'.ok-row[data-id="{merge["id"]}"]')
+        await merge_row.locator(".more-button").click()
+        await merge_row.get_by_role("menuitem", name="Details").click()
+        await expect(ok.locator(".ok-details .card.merge")).to_contain_text("Checks pass")
+        await expect(ok.locator(".ok-details .card.merge").get_by_role("button", name="Merge"))\
+            .to_be_visible()  # fmt: skip
+        await ok.screenshot(path=shots / f"your-ok-details-{width}-{scheme}.png")
+        assert not errors, errors
+        await context.close()
+    log("Your OK: one card, a line each, the safe ones marked; replies keep their cards")
+
+    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    ok = page.locator("#needs .card.your-ok")
+    await ok.get_by_role("button", name="Approve all safe (3)").click()
+    await expect(page.locator(".toast", has_text="Approved 3.")).to_be_visible()
+    await expect(ok.locator(".ok-row")).to_have_count(3, timeout=10000)
+    await expect(ok.get_by_role("button", name=re.compile("Approve all safe"))).to_have_count(0)
+    assert store.one("SELECT status FROM checks WHERE id='k8'")["status"] == "active"
+    statuses = {r["id"]: r["status"] for r in store.all("SELECT id, status FROM lessons")}
+    assert (statuses["l8short"], statuses["l8force"]) == ("active", "proposed"), statuses
+    assert store.draft(merge["id"])["status"] == "pending", "a merge: never with others"
+    log("Approve all safe: the three safe ones; the merge, the sign-in, the risky lesson stay")
+
+    handled = page.locator("#needs details.handled")
+    await handled.locator("summary").click()
+    line = handled.locator("li", has_text="QA8 compare queues")
+    await line.get_by_role("button", name="Undo").click()
+    await expect(page.locator(".toast", has_text="waits for your Accept again")).to_be_visible()
+    await expect(line).to_contain_text("(undone)", timeout=10000)
+    await expect(line.get_by_role("button", name="Undo")).to_have_count(0)
+    assert runtime.tasks.get(report["id"])["status"] == "review"
+    await expect(page.locator("#needs .card.task", has_text="QA8 compare queues")).to_be_visible()
+    log("Handled for you: one quiet line; Undo puts a result back to accept")
+    await context.close()
+    for draft in store.drafts():
+        store.update_draft(draft["id"], status="expired", outcome="End of the round.")
+    runtime.publish_state()
+
+
 async def main():
     from chiefofstaff import machine
 
@@ -5138,7 +5316,7 @@ async def main():
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
                           round_send, round_agents, round_qa6, round_qa7_life,
-                          round_layout):  # fmt: skip
+                          round_qa8_approvals, round_layout):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()

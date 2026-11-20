@@ -6,7 +6,7 @@ import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, ownerUp
 import { boardOf, followingUp, workerSection } from "./board.js";
 import { renderSidebar, renderStatusLine } from "./sidebar.js";
 import { renderHeader, scrollToBottom, select } from "./session.js";
-import { draftCard, draftKey, relabel, uncertainCard } from "./drafts.js";
+import { draftCard, draftKey, relabel, uncertainCard, YOUR_OK, yourOkCard, yourOkKey } from "./drafts.js";
 import { expandTask, followUpItem, inTerminal, ownTasks, questionParts, taskItem, terminalItem, unfoldTask } from "./tasks.js";
 import { artifactItems } from "./artifacts.js";
 import { duck } from "./mascot.js";
@@ -15,19 +15,24 @@ import { duck } from "./mascot.js";
 // worker's question whose task does not show it (cancelled, finished, or none); the Router's
 // notes that need the owner, until seen. A task waiting on a decision card shows as that card.
 export function needsYou() {
-  const drafts = pendingDrafts();
+  const pending = pendingDrafts();
   const found = board();
-  const deciding = new Set(drafts.filter((draft) => draft.kind === "decision").flatMap((draft) => draft.target.askers.map((asker) => asker.task_id)));
+  const deciding = new Set(pending.filter((draft) => draft.kind === "decision").flatMap((draft) => draft.target.askers.map((asker) => asker.task_id)));
   const waiting = found.sections.needs.filter((task) => !(task.status === "waiting" && deciding.has(task.id)));
   const shownTasks = new Set(waiting.map((task) => task.id));
   const questions = ownerQuestions().filter((question) => !shownTasks.has(question.task_id));
-  return { drafts, uncertain: uncertainDrafts(), tasks: waiting, questions, updates: ownerUpdates(), board: found };
+  // The approvals on Your OK (E123), one card; the other cards, those of a kind together.
+  const ok = pending.filter((draft) => YOUR_OK.has(draft.kind));
+  const kinds = [...new Set(pending.map((draft) => draft.kind))];
+  const drafts = pending.filter((draft) => !YOUR_OK.has(draft.kind)).sort((a, b) => kinds.indexOf(a.kind) - kinds.indexOf(b.kind));
+  return { drafts, ok, uncertain: uncertainDrafts(), tasks: waiting, questions, updates: ownerUpdates(), board: found };
 }
-// What the badge counts: not the cards the owner just acted on.
+// What the badge counts: not the cards the owner just acted on; Your OK once.
 export function needsCount() {
   const items = needsYou();
   const shown = (key) => !state.leaving.has(key);
-  return items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.id}`)).length + items.updates.filter((update) => shown(`update:${update.id}`)).length;
+  const ok = items.ok.some((draft) => shown(`draft:${draft.id}`)) ? 1 : 0;
+  return ok + items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.id}`)).length + items.updates.filter((update) => shown(`update:${update.id}`)).length;
 }
 // Where a worker stands, as its sidebar dot says and as Home shows it: the same four places.
 export const WORKER_STATES = [
@@ -42,7 +47,7 @@ export function workerStates() {
   const { phases } = needs.board;
   // Every worker a decision card waits for, not only the first that asked.
   const askers = needs.drafts.flatMap((draft) => (draft.kind === "decision" ? (draft.target.askers || []).map((asker) => asker.session_id) : []));
-  const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...needs.uncertain.map((draft) => draft.session_id), ...askers, ...needs.questions.map((question) => question.session_id), ...needs.tasks.map((task) => task.session_id)]);
+  const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...needs.ok.map((draft) => draft.session_id), ...needs.uncertain.map((draft) => draft.session_id), ...askers, ...needs.questions.map((question) => question.session_id), ...needs.tasks.map((task) => task.session_id)]);
   const mine = new Map();
   for (const task of ownTasks()) mine.set(task.session_id, [...(mine.get(task.session_id) || []), task]);
   const found = new Map();
@@ -66,7 +71,7 @@ function board() {
   // A result its worker drafted something for (a reply, a review) is accepted on that card: its
   // task's card goes in it (the first one about it). Not a Ready-to-merge card: merging is its
   // own decision, and the result's receipts (tests, CI) are what to look at before it.
-  const onCards = new Set(pendingDrafts().filter((draft) => draft.kind !== "merge").filter((draft) => { const task = draftTask(draft); return task && (task.status === "review" || (task.status === "done" && task.news) || (task.status === "waiting" && task.question_draft === draft.id)); }).map((draft) => draftTask(draft).id));
+  const onCards = new Set(pendingDrafts().filter((draft) => !YOUR_OK.has(draft.kind)).filter((draft) => { const task = draftTask(draft); return task && (task.status === "review" || (task.status === "done" && task.news) || (task.status === "waiting" && task.question_draft === draft.id)); }).map((draft) => draftTask(draft).id));
   const workers = new Map([...sessions(), ...closedWorkers()].map((session) => [session.id, session]));
   const stallHours = state.snapshot.settings.stall_hours || 4;
   const found = boardOf(mine, workers, { stallHours, onCards });
@@ -248,16 +253,18 @@ function renderPanel() {
   const embedded = new Set();
   const needItems = [
     ...items.updates.map(updateItem),
+    ...okItem(items.ok),
     ...items.drafts.map((draft) => draftItem(draft, tasks.phases, embedded)),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
     ...items.tasks.map((task) => taskItem(task, tasks.phases.get(task.id))),
     ...items.questions.map(questionItem),
   ];
   // Folded, it opens by itself when something new needs the owner.
-  const needKeys = [...items.updates.map((update) => `update:${update.id}`), ...items.drafts.map((draft) => `draft:${draft.id}`), ...items.uncertain.map((draft) => `draft:${draft.id}`), ...items.tasks.map((task) => `task:${task.id}`), ...items.questions.map((question) => `question:${question.id}`)];
+  const needKeys = [...items.updates.map((update) => `update:${update.id}`), ...items.ok.map((draft) => `draft:${draft.id}`), ...items.drafts.map((draft) => `draft:${draft.id}`), ...items.uncertain.map((draft) => `draft:${draft.id}`), ...items.tasks.map((task) => `task:${task.id}`), ...items.questions.map((question) => `question:${question.id}`)];
   if (state.needKeys && needKeys.some((key) => !state.needKeys.has(key) && !state.leaving.has(key))) needs.open = true;
   state.needKeys = new Set(needKeys);
   reconcile(needs.querySelector(".items"), steady(needs, needItems), editing);
+  handledLine(needs);
 
   // The four parts below Needs you; on a narrow window, the Tasks tab.
   const taskBox = document.getElementById("tasks") || el("section", { id: "tasks", "aria-label": "Tasks" });
@@ -292,6 +299,54 @@ function renderPanel() {
   tabs[1].textContent = active ? String(active) : "";
 }
 const FINISHED_PAGE = 30;
+// Your OK (E123): the approvals, one card, drawn again as any of them changes.
+function okItem(drafts) {
+  const shown = drafts.filter((draft) => !state.leaving.has(`draft:${draft.id}`));
+  return shown.length ? [{ key: yourOkKey(shown), build: () => yourOkCard(shown) }] : [];
+}
+// Handled for you (E123): one quiet line under Needs you while the last week has any; open, what
+// Chief of Staff settled instead of asking, the newest first, each with Undo where it can.
+function handledLine(needs) {
+  const entries = state.snapshot.handled || [];
+  const node = needs.querySelector(":scope > details.handled");
+  if (!entries.length) {
+    node?.remove();
+    return;
+  }
+  const key = JSON.stringify(entries.map((entry) => [entry.id, entry.status]));
+  if (node?.dataset.key === key) return;
+  const open = node?.open || false;
+  const rows = entries.map((entry) => {
+    const undo = entry.status === "done" && entry.undo
+      ? el("button", { type: "button", class: "link quiet", text: entry.undo, onclick: (event) => undoHandled(event.currentTarget, entry) })
+      : null;
+    return el(
+      "li",
+      { class: entry.status === "done" ? "" : "undone", "data-id": entry.id },
+      el("span", { class: "handled-text", text: entry.status === "undone" ? `${entry.text} (undone)` : entry.text, title: clock(entry.created_at) }),
+      el("time", { text: ago(entry.created_at) }),
+      undo,
+    );
+  });
+  const fresh = el("details", { class: "handled", open }, el("summary", {}, el("span", { text: "Handled for you" }), el("span", { class: "count", text: String(entries.filter((entry) => entry.status === "done").length || "") })), el("ul", {}, ...rows));
+  fresh.dataset.key = key;
+  if (node) node.replaceWith(fresh);
+  else needs.append(fresh);
+}
+const ago = (iso) => {
+  const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
+  return minutes < 1 ? "now" : minutes < 60 ? `${minutes}m` : minutes < 1440 ? `${Math.round(minutes / 60)}h` : `${Math.round(minutes / 1440)}d`;
+};
+async function undoHandled(button, entry) {
+  button.disabled = true;
+  try {
+    const { said } = await api(`/api/handled/${entry.id}/undo`, { method: "POST" });
+    toast(said);
+  } catch (error) {
+    toast(error.message, "error");
+    button.disabled = false;
+  }
+}
 // The task a card is about: the one its worker is on (a decision card lists its own).
 function draftTask(draft) {
   if (draft.kind === "decision") return null;

@@ -5,7 +5,7 @@ is shown (browser-shots/others/: a title keeps its width); Send to Chief's line 
 sent item's line on Home (browser-shots/send/); Monitoring's runs and Artifacts' folded runs
 (browser-shots/qa-e41/); the Coding agents group in Settings → Models and a worker on Codex
 (browser-shots/agents-m2/); a task's life: its cards, a failed task out of Needs you, failing
-Watch scans (browser-shots/qa7-life/).
+Watch scans (browser-shots/qa7-life/); Your OK and Handled for you (browser-shots/qa8-approvals/).
 
 Fails on: horizontal scrolling; elements overflowing their card or overlapping each other;
 more than one main (filled) button per card or dialog footer; controls under 28 px tall or
@@ -915,6 +915,45 @@ async def life_views(runtime, browser, quality: Quality):
     runtime.store.delete("watch_failed")
 
 
+async def approvals_views(runtime, browser, quality: Quality):
+    """E123: Your OK (a line per approval, the safe ones marked, a card opened on Details) and
+    Handled for you, open; 800 to 1440 px, light and dark (browser-shots/qa8-approvals/)."""
+    from ui_edges import approvals_seeded
+
+    folder = SHOTS / "qa8-approvals"
+    folder.mkdir(exist_ok=True)
+    found = await approvals_seeded(runtime)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 1400}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        needs = page.locator("#needs")
+        ok = needs.locator(".card.your-ok")
+        await expect(ok.locator(".ok-row")).to_have_count(6, timeout=15000)
+        await needs.locator("details.handled > summary").click()
+        merge = ok.locator(f'.ok-row[data-id="{found["merge"]["id"]}"]')
+        await merge.locator(".more-button").click()
+        await merge.get_by_role("menuitem", name="Details").click()
+        await expect(ok.locator(".ok-details .card.merge")).to_be_visible()
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1400})
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            await page.wait_for_timeout(150)
+            await needs.screenshot(path=folder / f"quality-{width}-{scheme}-needs.png")
+            await quality.check(page, f"approvals {width} {scheme}", "#needs", KNOWN_ROW_FINDINGS)
+        await quality.contrast(page, f"approvals {scheme}", "#needs")
+        quality.failures += [f"page error {scheme}: {error}" for error in errors]
+        await context.close()
+    for draft in runtime.store.drafts():
+        runtime.store.update_draft(draft["id"], status="expired")
+    runtime.publish_state()
+
+
 async def signed_out(route):
     codex = {
         "name": "codex", "label": "Codex", "enabled": False, "model": "", "limit": 0,
@@ -1072,6 +1111,8 @@ async def main():
             log(
                 "a task's life: its cards, a failed task out of Needs you, failing scans (qa7-life/)"
             )
+            await approvals_views(runtime, browser, quality)
+            log("Your OK and Handled for you (qa8-approvals/)")
             await browser.close()
         server.should_exit = True
         await serving

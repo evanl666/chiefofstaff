@@ -1126,7 +1126,8 @@ function rowWhy(task, worker, phase) {
     // status says it waits for Accept), and why it needs a look when something does: its PR's
     // changes requested or failing CI, news on it since.
     const words = phase.marker === "question" ? "" : phase.why;
-    const flagged = phase.marker === "review" && Boolean(phase.why) && !phase.why.startsWith("News: ");
+    // A report only says it is accepted once read (E123): nothing to look at, no warning.
+    const flagged = phase.marker === "review" && Boolean(phase.why) && !phase.why.startsWith("News: ") && !task.report_only;
     return { text: words, help: "", warn: flagged || ["failed", "blocked", "stalled", "check-failed", ...PR_TO_FIX].includes(phase.marker) };
   }
   return { text: phase.marker === "background" ? "" : phase.why, help: "" };
