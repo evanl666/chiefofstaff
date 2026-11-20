@@ -76,7 +76,7 @@ def answer(body: dict) -> tuple[list[dict], str]:
         plan.append(call(f"mcp__chief__{found.group(1)}", {"text": found.group(2)}))
     if found := re.search(r"Fill the form of (\w+)", prompt):
         plan.append(call(f"mcp__{found.group(1)}__form", {}))
-    if found := re.search(r"Use Claude's (\w+) tool with (\{.*?\})(?:\.|$)", prompt):
+    for found in re.finditer(r"Use Claude's (\w+) tool with (\{.*?\})(?:\.|$)", prompt):
         plan.append(call(found.group(1), json.loads(found.group(2))))
     if "call CronDelete for each job it lists as session-only" in prompt:
         # Chief of Staff's request once a task ended, as a model takes it: CronList, then

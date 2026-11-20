@@ -53,7 +53,10 @@ Codex and Claude can do what Copilot workers can.
   no longer gives a task to a worker whose agent is turned off (it stayed running, never
   sent); a Claude worker whose background command ends takes the turn that end wakes (its
   process could be let go of just as that turn began, and the worker then held its report,
-  told it was declined).
+  told it was declined); a worker whose instructions changed during its turn (a style learned,
+  a worker added beside it) and that ended without a report is asked for one as any other (it
+  was opened again silently, until the Watchdog); a Claude worker's message to another worker
+  by the name Chief of Staff gives it (`worker:…`) goes through Chief of Staff, not to your card.
 - **Codex workers' supervisor starts isolated.** It ran with the folder Chief of Staff was
   started in first on Python's import path: started inside a repository, a `typing.py` or a
   `chiefofstaff/` folder there would have run as it. It now runs with `python -I`, in a folder
