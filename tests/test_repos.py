@@ -858,6 +858,39 @@ async def test_a_settings_held_worker_with_no_open_task_closes_and_drops_owner_c
         await runtime.stop()
 
 
+async def test_a_held_worker_whose_result_is_set_aside_closes_one_accepted_stays(
+    tmp_path, git_repo, monkeypatch
+):
+    """E124: cancelling a reported task sets its result aside: a worker held with a follow-up on
+    it closes, the follow-up dropped. Accepting it is not that: the worker stays held, the
+    follow-up waits for the owner's word on its settings."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        workers = []
+        for _ in range(2):
+            worker, cwd = await isolated(runtime, harness, git_repo)
+            await at_rest(runtime, harness, worker)
+            plant(cwd, ".mcp.json")
+            queued = await runtime.owner_send(worker, "And the changelog")
+            assert worker in runtime.settings_held
+            workers.append((worker, task_of(harness, worker), queued))
+        (aside, task, queued), (accepted, other, kept) = workers
+        with pytest.raises(ValueError, match="finished just now"):
+            await runtime.task_actions.cancel(task)
+        await runtime.task_actions.cancel(task)
+        runtime.task_actions.accept(other)
+        await settle(runtime)
+        assert harness.store.session(aside)["closed_at"]
+        assert harness.store.message(queued["id"])["meta"]["dropped"]
+        assert not harness.store.session(accepted)["closed_at"]
+        assert accepted in runtime.settings_held
+        assert not harness.store.message(kept["id"])["meta"].get("dropped")
+    finally:
+        await runtime.stop()
+
+
 async def test_settings_held_chat_follows_only_a_proven_replacement_task(
     tmp_path, git_repo, monkeypatch
 ):
