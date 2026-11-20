@@ -643,7 +643,17 @@ class Shepherd(Keeping, Steps):
             if not row or row["closed_at"] or row["role"] != WORKER:
                 continue
             followed = set(actions.followed_for(task, self.store.follows(row["id"])))
-            for pr in (actions.receipts(task) or {}).get("prs") or []:
+            prs = list((actions.receipts(task) or {}).get("prs") or [])
+            # One it opened that its receipts could not read (GitHub did not answer for it as
+            # its result was read, and they keep it out until it does): its own all the same,
+            # read for its author and state as it is claimed (give_task).
+            read = {threads.normalize(f"github:{pr['label']}") for pr in prs}
+            prs += [
+                {"label": label, "own": True, "state": "", "opened": True}
+                for label in sorted(actions.opened_prs(task["id"]))
+                if threads.normalize(f"github:{label}") not in read
+            ]
+            for pr in prs:
                 target = threads.normalize(f"github:{pr['label']}")
                 if (
                     not pr.get("own")
@@ -663,7 +673,7 @@ class Shepherd(Keeping, Steps):
         except Exception:
             return
         for target, task, pr in found:
-            if pr.get("author") in mine and not self.control.claim(target):
+            if (pr.get("author") in mine or pr.get("opened")) and not self.control.claim(target):
                 await self.give_task(target, task)
 
     async def eligible(self, details: dict, mine: set[str]) -> str:
@@ -692,7 +702,10 @@ class Shepherd(Keeping, Steps):
         except Exception:
             logger.info("Could not read %s to claim it.", target, exc_info=True)
             return None
-        if why := await self.eligible(details, mine):
+        why = await self.eligible(details, mine)
+        if not why and (details.get("merged") or (details.get("state") or "OPEN") != "OPEN"):
+            why = "not open"
+        if why:
             self.store.set(f"noteligible:{target}", str(time.time()))
             logger.info("Not keeping %s moving: %s.", target, why)
             return None
