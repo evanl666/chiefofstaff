@@ -3132,6 +3132,9 @@ class ClaudeWorker:
                 kind="shell",
                 full_command_text=str(arguments.get(SHELL_TOOLS[name]) or ""),
                 shell=bash_shell(),  # As the policy reads it (zsh: Tally.zsh).
+                # Where it runs: Claude's shell stays in the folder a command cd'd to, which
+                # PreToolUse says (policy.owners_checkout reads it, as Codex's).
+                cwd=cwd or self.cwd,
                 intention=str(arguments.get("description") or ""),
                 commands=[],
                 possible_paths=[],

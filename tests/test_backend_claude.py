@@ -614,6 +614,26 @@ async def test_a_worker_whose_hooks_are_not_in_effect_does_not_run(agent, tmp_pa
     assert not agent.workers
 
 
+async def test_a_command_is_checked_in_the_folder_claudes_shell_is_in(agent, tmp_path):
+    """Claude's shell stays in the folder a command cd'd to, which PreToolUse says: each
+    command is checked as run there (the policy's rule for the owner's checkout given to read
+    reads it, as for Codex's), else in the worker's folder."""
+    seen = []
+
+    def check(request, context):
+        seen.append(getattr(request, "cwd", None))
+        return PermissionDecisionApproveOnce()
+
+    session = await agent.create_session(
+        session_id="b5" * 16, name="t", **options(tmp_path, on_permission_request=check)
+    )
+    elsewhere = str(tmp_path / "sub")
+    command = {"command": "echo y >> AGENTS.md"}
+    assert await session.worker.decide("Bash", command, "c1", {"cwd": elsewhere}) == ""
+    assert await session.worker.decide("Monitor", command, "c2") == ""
+    assert seen == [elsewhere, str(tmp_path)]
+
+
 async def test_a_turn_run_with_other_settings_stops_its_worker(agent, tmp_path, monkeypatch):
     ended = []
     agent.ended = lambda worker, epoch, why: ended.append(why)

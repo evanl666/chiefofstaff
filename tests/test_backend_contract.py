@@ -905,6 +905,35 @@ async def test_a_turn_a_claude_commands_end_wakes_calls_chief_of_staffs_tools(ba
     assert "session.idle" not in kinds[: ended + 1], kinds
 
 
+async def test_claudes_shell_stays_where_a_command_cd_d_and_its_next_command_is_checked_there(
+    backend, tmp_path
+):
+    """Claude Code (2.1.322) keeps its shell in the folder a command cd'd to; PreToolUse says
+    that folder, so Chief of Staff checks the next command as run there (a write in the
+    owner's checkout given to read: policy.owners_checkout)."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    seen = []
+
+    def check(request, invocation):
+        if request.kind == "shell":
+            seen.append((request.full_command_text, request.cwd))
+        return PermissionDecisionApproveOnce()
+
+    session, turn = await open_session(backend, tmp_path, on_permission_request=check)
+    await session.send(
+        f'Use Claude\'s Bash tool with {{"command": "cd {sub}"}}. '
+        'Use Claude\'s Bash tool with {"command": "pwd"}. Then reply with just: ok'
+    )
+    await turn.wait()
+    assert [c for c, _ in seen] == [f"cd {sub}", "pwd"], turn.kinds()
+    # (As given, or as the system resolves it: macOS's /var is /private/var.)
+    assert seen[0][1] in {str(tmp_path), str(tmp_path.resolve())}
+    assert seen[1][1] in {str(sub), str(sub.resolve())}, "where its shell is now"
+
+
 async def test_claudes_sendmessage_to_a_worker_as_chief_of_staff_names_it_reaches_it(
     backend, tmp_path
 ):
