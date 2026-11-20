@@ -58,7 +58,11 @@ Codex and Claude can do what Copilot workers can.
   told it was declined); a worker whose instructions changed during its turn (a style learned,
   a worker added beside it) and that ended without a report is asked for one as any other (it
   was opened again silently, until the Watchdog); a Claude worker's message to another worker
-  by the name Chief of Staff gives it (`worker:…`) goes through Chief of Staff, not to your card.
+  by the name Chief of Staff gives it (`worker:…`) goes through Chief of Staff, not to your card;
+  a sandboxed Claude worker given your checkout to read can't write it with a command (Claude's
+  sandbox lets a command write the folder it runs in, whatever else it says: that folder is now
+  held read-only there), and its commands are checked in the folder its shell is in, after a
+  `cd` too.
 - **Codex workers' supervisor starts isolated.** It ran with the folder Chief of Staff was
   started in first on Python's import path: started inside a repository, a `typing.py` or a
   `chiefofstaff/` folder there would have run as it. It now runs with `python -I`, in a folder

@@ -585,6 +585,28 @@ async def test_claudes_sandbox_adds_only_its_staging_folder_to_the_global_git_ig
     assert (tmp_path / "global-git-ignore").read_text() == "**/.claude/.cc-writes/\n"
 
 
+async def test_claudes_sandbox_writes_its_folder_unless_its_policy_holds_it(backend, tmp_path):
+    """Claude's sandbox (2.1.322) lets a command write the folder it runs in whatever its
+    allowWrite says; held read-only (denyWrite), it is not. So a sandboxed worker whose folder
+    is the owner's checkout given to read has it held (Runtime.agent_options)."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    if not sandbox_supported():
+        pytest.skip("Claude's sandbox does not run on this machine.")
+    own, checkout = tmp_path / "own", tmp_path / "checkout"
+    own.mkdir()
+    checkout.mkdir()
+    command = "Run the shell command `echo y >> notes.txt` and then reply with just: finished"
+    for held in ((), (str(checkout),)):
+        policy = SandboxPolicy(readwrite=(str(own),), readonly=held)
+        session, turn = await open_session(backend, checkout, sandbox=policy)
+        await session.send(command)
+        await turn.wait()
+        await session.disconnect()
+        assert (checkout / "notes.txt").exists() is not bool(held), held
+        (checkout / "notes.txt").unlink(missing_ok=True)
+
+
 async def test_claudes_sandbox_holds_the_settings_chief_of_staffs_policy_holds(backend, tmp_path):
     """Claude's own settings where its policy holds them (the owner's checkout: Runtime.
     sandbox_policy), there or not yet (2.1.322): its commands neither change nor make them,

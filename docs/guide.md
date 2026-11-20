@@ -1293,7 +1293,8 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   asking first.
 - **Sandbox:** Claude workers run in Claude's own sandbox, set as Chief of Staff's is for a
   Copilot worker (writes only in its folders, your secrets unreadable, the network as Settings
-  says), on a version whose check showed it holding. Codex workers can't run while Settings →
+  says; your checkout given to read stays read-only even as the folder its commands run in),
+  on a version whose check showed it holding. Codex workers can't run while Settings →
   *Workers* sandboxes workers (Codex's sandbox has not passed Chief of Staff's checks yet); with
   it off they run as Copilot workers do then, with your caches, tools and network
   (`danger-full-access`), and every edit and every command that writes still asks Chief of

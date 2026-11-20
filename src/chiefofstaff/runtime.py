@@ -36,7 +36,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -2420,6 +2420,20 @@ class Runtime:
             and self.backend.capabilities.sandbox
         )
 
+    def held_where_it_runs(self, row: dict, sandbox: SandboxPolicy) -> SandboxPolicy:
+        """A Claude worker's sandbox: Claude's lets a command write the folder it runs in,
+        whatever its list of writable folders says (2.1.322, contract test), so its folder and
+        checkouts that are not its to write (the owner's, given to read) are held read-only."""
+        places = [row["cwd"], *(c.get("path") for c in self.workspaces.checkouts(row))]
+        held = [
+            os.path.realpath(place)
+            for place in dict.fromkeys(place for place in places if place)
+            if not any(within(place, root) for root in sandbox.readwrite)
+        ]
+        if not held:
+            return sandbox
+        return replace(sandbox, readonly=(*sandbox.readonly, *held))
+
     def settings_guarded(self, row: dict) -> bool:
         """Whether a worker's folder settings (and the .git it can write) wait for the owner's
         word when they change: only while its commands run in the sandbox. Without it, a worker
@@ -3353,6 +3367,8 @@ class Runtime:
             options["skill_directories"] = skills
         if sandbox := self.sandbox_policy(row):
             options["sandbox"] = sandbox  # Its agent's own, as Chief of Staff's (agent_block).
+            if self.agent(row["id"]) == "claude":
+                options["sandbox"] = self.held_where_it_runs(row, sandbox)
         if row["slack"] and self.agent(row["id"]) == "claude":
             # Never Slack's token in Claude's MCP configuration (a file of its own): its read
             # tools come from this process (open_live: read_proxy). None until then.

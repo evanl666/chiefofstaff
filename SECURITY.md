@@ -93,7 +93,9 @@ Settings → *Coding agents*). For such a worker:
 
 - **Sandbox.** A Claude worker runs in Claude's own sandbox, set from Chief of Staff's policy for
   a Copilot worker (writes only in its folders, protected paths read-only, your service secrets
-  unreadable, the network as Settings says), only on a Claude version whose check showed a write
+  unreadable, the network as Settings says; Claude's sandbox lets a command write the folder it
+  runs in whatever else it says, so a folder that is not the worker's to write, your checkout
+  given to read, is held read-only there), only on a Claude version whose check showed a write
   outside its folder, a read of a protected file and a request to a host off the list all
   failing, with settings of the owner's that try to switch its sandbox off or weaken it in place
   (Chief of Staff's own settings win over those). Claude merges the lists of its sandbox settings

@@ -143,6 +143,7 @@ class Fake:
                 "disabled_servers": (settings if isinstance(settings, dict) else {}).get(
                     "disabledMcpjsonServers"
                 ),
+                "deny_write": (self.sandbox.get("filesystem") or {}).get("denyWrite"),
             },
         )
         self.state = self.load() if flags.get("resume") else self.fresh()
@@ -1340,11 +1341,16 @@ class Fake:
         words = shlex.split(command) if command else []
 
         def under(path: str, roots: list) -> bool:
-            path = os.path.normpath(Path(self.cwd) / path)
+            path = os.path.realpath(Path(self.cwd) / path)
+            roots = [os.path.realpath(r) for r in roots]
             return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
 
         refused = None
-        if words[:1] == ["touch"] and not under(words[1], [self.cwd, *files.get("allowWrite", [])]):
+        # (Its folder is writable whatever allowWrite says, unless denyWrite holds it: 2.1.322.)
+        allowed = [self.cwd, *files.get("allowWrite", [])]
+        if words[:1] == ["touch"] and (
+            not under(words[1], allowed) or under(words[1], files.get("denyWrite", []))
+        ):
             refused = f"touch: {words[1]}: Operation not permitted"
         if words[:1] == ["cat"] and under(words[1], files.get("denyRead", [])):
             refused = f"cat: {words[1]}: Operation not permitted"

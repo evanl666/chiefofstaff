@@ -1233,6 +1233,43 @@ async def test_a_replaced_git_folder_keeps_a_claude_worker_from_a_terminal(
         await runtime.stop()
 
 
+@pytest.mark.usefixtures("sandbox_holds")
+async def test_a_sandboxed_claude_worker_given_the_owners_checkout_to_read_cannot_write_it(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Claude's sandbox lets a command write the folder it runs in, whatever its writable
+    folders are (2.1.322, contract test): a sandboxed worker given the owner's checkout to read
+    (its folder) has it held read-only there, so a command that writes it fails whatever else
+    lets it through. A worker's own worktree is not held."""
+    from test_round7_split import published
+
+    starts = tmp_path / "starts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
+    app = published(tmp_path, "app")
+    harness, runtime = await started(tmp_path, Settings(projects=[str(app)], worker_sandbox=True))
+    runtime.sandbox_host = True
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")  # (Its version's check: its sandbox holds.)
+        for isolate in (False, True):
+            result = await spawn_on(
+                harness, runtime, title="Read", agent="claude", project=str(app),
+                isolate=isolate, instructions="Run the shell command `touch notes.txt`. Report "
+                "done: tried",
+            )  # fmt: skip
+            worker = result["session_id"]
+            await until(lambda w=worker: harness.store.session(w)["status"] == "done", 30)
+            row = harness.store.session(worker)
+            assert runtime.sandboxed(row)
+            start = [json.loads(line) for line in starts.read_text().splitlines()][-1]
+            held = row["cwd"] in start["deny_write"]  # (Its real path, as held.)
+            assert held is not isolate, (isolate, start["deny_write"])
+            assert (Path(row["cwd"]) / "notes.txt").exists() is isolate
+        assert not (app / "notes.txt").exists(), "the owner's checkout: not written"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_sandboxed_claude_workers_commands_use_its_own_caches(
     tmp_path, claude_on_path, monkeypatch
 ):
