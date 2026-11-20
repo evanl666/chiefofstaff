@@ -118,12 +118,13 @@ async def test_a_check_back_progress_report_stays_quiet(harness):
         "check_back",
         worker,
         task_id=task["id"],
-        minutes=1,
+        minutes=5,
         what="whether the export finished",
     )
     await idle(runtime, session)
-    await runtime.task_actions.wake_check_backs(datetime.now(UTC) + timedelta(minutes=2))
+    await runtime.task_actions.wake_check_backs(datetime.now(UTC) + timedelta(minutes=6))
     await settle(runtime)
+    assert 'type="check-back"' in session.sent[-1], "woken by its check-back"
     await turn(runtime, session)
     before = len(router_reports(harness))
 
@@ -467,3 +468,43 @@ async def test_an_answer_on_a_check_back_is_news_on_the_accepted_task(harness):
     shown = view(runtime, a["id"])
     assert shown["status"] == "done"
     assert shown["news"] and "bucket is gone" in shown["news"]["text"]
+
+
+@pytest.mark.parametrize("status", ["answer", "progress"])
+async def test_a_peer_waits_and_hands_over_with_the_router_told_no_more(harness, status):
+    """Live E3 (r71): the G2 rule (a check-back's or thread's news is news on its task) tells
+    the Router nothing more in a hand-over between peers: the maker's answer after its tell
+    reaches it as before; the writer, waiting with a check-back and woken without the name,
+    says so on its card only (an answer there reached the Router before), and neither turn is
+    a thread's."""
+    runtime = await harness.connect()
+    maker, made = await spawn(runtime, harness.router_id, "Column Maker")
+    writer, wanted = await spawn(runtime, harness.router_id, "Query Writer",
+                                 works_with=[made["id"]])  # fmt: skip
+    writing = harness.session(writer)
+    await turn(runtime, writing)
+    await call_tool(runtime, "check_back", writer, task_id=wanted["id"], minutes=5,
+                    what="whether Column Maker sent the column name")  # fmt: skip
+    await idle(runtime, writing, "我在等 Column Maker 告诉我列名。")
+    await runtime.task_actions.wake_check_backs(datetime.now(UTC) + timedelta(minutes=6))
+    await settle(runtime)
+    assert 'type="check-back"' in writing.sent[-1], "woken by its check-back"
+    await turn(runtime, writing)
+    before = len(router_reports(harness))
+
+    await call_tool(runtime, "report", writer, status=status, task_id=wanted["id"],
+                    summary="还没有收到 Column Maker 的列名。")  # fmt: skip
+
+    assert len(router_reports(harness)) == before, "the Router hears of no wait"
+    assert runtime.tasks.get(wanted["id"])["status"] == "running"
+
+    making = harness.session(maker)
+    await turn(runtime, making)
+    await call_tool(runtime, "tell_session", maker, session_id=f"worker:{writer[:8]}",
+                    text="列名是 col_377a85。")  # fmt: skip
+    assert not runtime.states[writer].thread_turn, "a peer's note is no thread's news"
+    await call_tool(runtime, "report", maker, status="answer", task_id=made["id"],
+                    summary="列名 col_377a85 已直接告知 Query Writer。")  # fmt: skip
+    told = router_reports(harness)[-1]
+    assert (told["meta"]["status"], told["meta"]["task_id"]) == ("answer", made["id"])
+    assert runtime.tasks.get(made["id"])["status"] == "running", "an answer changes nothing"
