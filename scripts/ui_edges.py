@@ -5138,7 +5138,7 @@ async def main():
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
                           round_send, round_agents, round_qa6, round_qa7_life,
-                          round_layout):  # fmt: skip
+                          round_layout, round_qa8_auth):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -5147,6 +5147,120 @@ async def main():
         if failures:
             raise AssertionError(f"browser errors: {failures}")
     print("UI EDGE CASES PASSED")
+
+
+async def round_qa8_auth(runtime, browser, failures: list[str]):
+    """E116: two workers whose MCP tool says its account must be connected share one card. Its
+    error and link are plain text (a link outside the server's own addresses says who gave it);
+    the link opens only on a click; "I've done it" keeps the card until a retry works. Settings
+    and the sidebar say Watch for you needs a connection, not "0 found". Light and dark, 800
+    and 1280 wide."""
+    from chiefofstaff.models import Watch
+
+    store = runtime.store
+    before = store.settings()
+    servers = {
+        "acme-platform": {"type": "http", "url": "https://mcp.acme.test/api"},
+    }
+    store.save_settings(
+        before.model_copy(
+            update={"mcp_servers": servers, "watches": [Watch(what="Acme Search launch notes")]}
+        )
+    )
+    error = (
+        "MCP server 'acme-platform': Authorization required for Acme Search. <b>Not bold.</b> "
+        "Connect your Acme Search account in a browser at https://login.acme-id.test/connect?f=ui"
+    )
+    workers = []
+    for title in ("Search launch notes", "Find the account plan"):
+        result = await call_tool(
+            runtime, "spawn_worker", store.get("router_id"),
+            title=title, instructions=title, why_new="UI check",
+        )  # fmt: skip
+        workers.append(json.loads(result.text_result_for_llm)["session_id"])
+    await settle(runtime)
+    store.set("watch_scanned_at", "0")
+    await runtime.connector.scan()
+    await settle(runtime)
+    watcher = runtime.connector.session()["id"]
+    for number, session_id in enumerate([*workers, watcher]):
+        session = runtime.states.handle(session_id)
+        session.emit("user.message", content=session.raw_sent[-1])
+        session.emit("assistant.turn_start")
+        session.emit(
+            "tool.execution_start", tool_call_id=f"qa8-{number}", tool_name="acme-platform-search",
+            mcp_config_server_name="acme-platform", mcp_tool_name="search",
+        )  # fmt: skip
+        session.emit(
+            "tool.execution_complete", tool_call_id=f"qa8-{number}", success=False,
+            result=SimpleNamespace(content=error), error=SimpleNamespace(message=error),
+        )  # fmt: skip
+    await settle(runtime)
+    await call_tool(runtime, "report_found", watcher, items=[])
+    scanning = runtime.states.handle(watcher)
+    scanning.emit("user.message", content=scanning.raw_sent[-1])  # Its note, steered in.
+    scanning.emit("session.idle")
+    await settle(runtime)
+    [draft] = [item for item in store.drafts() if item["kind"] == "connection"]
+    shots = Path(os.environ.get("QA8_AUTH_SHOTS", SHOTS / "qa8-auth"))
+    shots.mkdir(parents=True, exist_ok=True)
+    for scheme, width in itertools.product(("light", "dark"), (800, 1280)):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 900}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        if await page.locator("#home-tabs").is_visible():
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        card = page.locator(f'.card.draft[data-id="{draft["id"]}"]')
+        await expect(card).to_be_visible()
+        await expect(card).to_contain_text("acme-platform needs you to connect Acme Search")
+        await expect(card).to_contain_text("3 sessions waiting")
+        await expect(card).to_contain_text("<b>Not bold.</b>")
+        await expect(card.locator("b")).to_have_count(0)
+        await expect(card).to_contain_text("Link supplied by acme-platform")
+        link = card.get_by_role("link", name="Open link")
+        await expect(link).to_have_attribute("href", "https://login.acme-id.test/connect?f=ui")
+        await expect(link).to_have_attribute("target", "_blank")
+        await expect(link).to_have_attribute("rel", "noreferrer")
+        assert len(context.pages) == 1, "nothing opened by itself"
+        await expect(card.get_by_role("button", name="Not now")).to_be_visible()
+        await expect(card.get_by_role("button", name="I've done it")).to_be_visible()
+        assert not await card.evaluate(OVERFLOWS), (width, scheme)
+        await expect(page.locator("#status-line")).to_contain_text(
+            "Watch for you: connection needed for Acme Search"
+        )
+        await page.screenshot(path=shots / f"connection-{width}-{scheme}.png")
+        await context.close()
+    page = await browser.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    if await page.locator("#home-tabs").is_visible():
+        await page.locator("#home-tabs [data-tab=needs]").click()
+    await page.locator("#settings-button").click()
+    await page.locator("#settings-tabs [data-tab=connections]").click()
+    state = page.locator("#watch-state")
+    await expect(state).to_contain_text("Connection needed: Acme Search (acme-platform)")
+    await expect(state).not_to_contain_text("found")
+    await expect(state).to_have_class(re.compile(r"\berror\b"))
+    await page.keyboard.press("Escape")
+    card = page.locator(f'.card.draft[data-id="{draft["id"]}"]')
+    await card.get_by_role("button", name="I've done it").click()
+    await expect(card).to_contain_text("Each session retries once")
+    await expect(card).to_be_visible()
+    await page.close()
+    store.update_draft(draft["id"], status="rejected", outcome="UI check over", resolved_at="now")
+    for record in runtime.accounts.records():
+        runtime.accounts.drop(record)
+    for session_id in workers:
+        await runtime.workers.close(session_id)
+    store.save_settings(before)
+    await settle(runtime)
+    runtime.publish_state()
+    log("E116: one connection card for three sessions, plain text, a link only on a click")
 
 
 async def round_layout(runtime, browser, failures: list[str]):

@@ -848,7 +848,7 @@ function deliveredChip(item, removable) {
   if (removable) chip.append(offButton(item.key, item.name, item.tone));
   return chip;
 }
-const WAITS_WORDS = { review: "Review draft", github: "Reply draft", slack: "Slack draft", reply: "Reply draft", merge: "Ready to merge", question: "Question", form: "Form", link: "Link to open", signin: "Sign-in", workspace: "Where to work" };
+const WAITS_WORDS = { review: "Review draft", github: "Reply draft", slack: "Slack draft", reply: "Reply draft", merge: "Ready to merge", question: "Question", form: "Form", link: "Link to open", signin: "Sign-in", connection: "Connection needed", workspace: "Where to work" };
 // Cards under Needs you from this task's worker about this task (one it names, else the task it
 // is on now).
 function ownerItems(task, worker) {

@@ -550,6 +550,10 @@ details.steps .step {
   background: var(--bg);
   color: var(--text);
 }
+.connection-error { margin: 6px 0; color: var(--soft); font-size: var(--small); overflow-wrap: anywhere; }
+.connection-link { display: grid; gap: 2px; margin: 6px 0; }
+.connection-link code { overflow-wrap: anywhere; color: var(--text); font-size: var(--small); }
+.connection-link small { color: var(--muted); }
 a.button {
   display: inline-flex;
   align-items: center;
