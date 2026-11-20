@@ -244,7 +244,9 @@ def create_app(
     @app.exception_handler(RuntimeError)
     async def failed(request, exc):
         logger.warning("Request failed: %s", exc)
-        return JSONResponse({"detail": str(exc)}, status_code=409)
+        # A session Copilot can't reopen (FreshStartError): which one, for its Start fresh button.
+        fresh = {"fresh": exc.fresh} if getattr(exc, "fresh", "") else {}
+        return JSONResponse({"detail": str(exc), **fresh}, status_code=409)
 
     @app.get("/")
     async def index():
@@ -645,6 +647,11 @@ def create_app(
     async def send_now(session_id: str):
         """What waits to be sent to a worker (a free slot, its next message) goes now."""
         return await runtime.send_now(session_id)
+
+    @app.post("/api/sessions/{session_id}/fresh")
+    async def start_fresh(session_id: str):
+        """The owner's word only: a session Copilot can't reopen goes on in a fresh one."""
+        return {"ok": True, "said": await runtime.start_fresh(session_id)}
 
     @app.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str):

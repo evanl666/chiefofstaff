@@ -5138,7 +5138,7 @@ async def main():
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
                           round_send, round_agents, round_qa6, round_qa7_life,
-                          round_layout):  # fmt: skip
+                          round_layout, round_fresh_start):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -5213,6 +5213,117 @@ async def round_layout(runtime, browser, failures: list[str]):
         store.save_settings(before)
     assert not problems, problems
     log("0.1.49: the code folder's card above the timeline, the → line above its message")
+
+
+async def round_fresh_start(runtime, browser, failures: list[str]):
+    """0.1.48 on Copilot 1.0.112, the owner's Copilot in experimental mode: a worker's Copilot
+    session refused for its extensions showed the raw "JSON-RPC Error -32603 … extensionSdkPath
+    is required …" under the owner's answer, which was then lost. Now, should Copilot still
+    refuse one: its chat says "Reconnecting this worker…" while a fresh session takes over, and
+    the answer reaches that session once; with no fresh session either, one plain sentence and
+    "Start a fresh worker with its context", on the card and in its chat, and the answer kept
+    goes once that is clicked."""
+    store, client = runtime.store, runtime.backend
+    router = store.get("router_id")
+    refused = (
+        "JSON-RPC Error -32603: Request session.resume failed with message: Failed to "
+        "initialize standalone session extensions: extensionSdkPath is required when "
+        "standalone extensions are requested"
+    )
+    resume, create = client.resume_session, client.create_session
+    gone: set[str] = set()
+    opening = asyncio.Event()
+    opening.set()
+    refusing = {"create": False}
+
+    async def resuming(session_id, **options):
+        if session_id in gone:
+            raise RuntimeError(refused)
+        return await resume(session_id, **options)
+
+    async def creating(**options):
+        await opening.wait()
+        if refusing["create"]:
+            raise RuntimeError(refused.replace("session.resume", "session.create"))
+        return await create(**options)
+
+    async def asking(title: str) -> str:
+        spawned = await call_tool(runtime, "spawn_worker", router, title=title,
+                                  instructions=title, why_new="test")  # fmt: skip
+        worker = json.loads(spawned.text_result_for_llm)["session_id"]
+        await call_tool(runtime, "report", worker, status="question", summary=f"{title} now?")
+        client.sessions[runtime.copilot_id(worker)].emit("session.idle")
+        await settle(runtime)
+        await runtime.detach(worker)  # As after a restart.
+        gone.add(runtime.copilot_id(worker))
+        return worker
+
+    fresh = "Start a fresh worker with its context"
+
+    def given(worker: str, text: str) -> int:
+        return sum(item.count(text) for item in client.sessions[runtime.copilot_id(worker)].sent)
+
+    client.resume_session, client.create_session = resuming, creating
+    try:
+        first = await asking("Retry the probe access")
+        second = await asking("Retry the mirror access")
+        runtime.publish_state()
+        context = await browser.new_context(viewport={"width": 1400, "height": 900})
+        page = await context.new_page()
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        needs = page.locator("#needs")
+
+        # In its chat, the owner answers; a fresh session takes over, said in one line.
+        await page.locator("#session-list .item", has_text="Retry the probe access").click()
+        await expect(page.locator("#session-title")).to_have_text("Retry the probe access")
+        opening.clear()
+        await page.locator("#composer-input").fill("Yes, retry it")
+        await page.locator("#composer-input").press("Enter")
+        line = page.locator("#timeline .working-line")
+        await expect(line).to_have_text("Reconnecting this worker…", timeout=10000)
+        await expect(page.locator("#session-meta")).to_contain_text("Reconnecting this worker…")
+        opening.set()
+        notice = page.locator("#timeline .line.notice", has_text="Continued in a fresh Copilot")
+        await expect(notice).to_have_count(1, timeout=10000)
+        await expect(page.locator("#timeline")).not_to_contain_text("JSON-RPC")
+        await expect(page.locator("#timeline .line.error")).to_have_count(0)
+        await settle(runtime)
+        assert given(first, "Yes, retry it") == 1, "the fresh session has it, once"
+        log("a worker Copilot can't reopen: Reconnecting this worker…, then a fresh one has it")
+
+        # No fresh session either: said plainly, with its button; the answer is kept.
+        refusing["create"] = True
+        await page.locator("#back-home").click()
+        card = needs.locator(".card.task", has_text="Retry the mirror access now?")
+        await expect(card).to_be_visible(timeout=10000)
+        await card.get_by_role("button", name="Reply").click()
+        await card.locator("textarea").fill("Yes, the mirror too")
+        await card.get_by_role("button", name="Send").click()
+        said = page.locator(".toast", has_text="can't be reopened; your message is kept")
+        await expect(said).to_be_visible(timeout=10000)
+        await expect(said.get_by_role("button", name=fresh)).to_be_visible()
+        await expect(said).not_to_contain_text("JSON-RPC")
+        await expect(needs).not_to_contain_text("JSON-RPC")
+        await page.locator("#session-list .item", has_text="Retry the mirror access").click()
+        timeline = page.locator("#timeline")
+        line = timeline.locator(".line.error", has_text="can't be reopened")
+        await expect(line).to_have_count(1)
+        await expect(timeline).not_to_contain_text("JSON-RPC")
+        await line.screenshot(path=SHOTS / "fresh-start-line.png")
+        refusing["create"] = False
+        await line.get_by_role("button", name=fresh).click()
+        await expect(page.locator(".toast", has_text="Started a fresh worker with its context."))\
+            .to_be_visible(timeout=10000)  # fmt: skip
+        await settle(runtime)
+        assert given(second, "Yes, the mirror too") == 1, "the answer kept goes once"
+        await expect(timeline.locator(".line.note", has_text="can't be reopened")).to_have_count(1)
+        await expect(timeline.get_by_role("button", name="Start a fresh worker")).to_have_count(0)
+        await expect(timeline).not_to_contain_text("JSON-RPC")
+        await context.close()
+        log("with no fresh session either: one plain line, Start a fresh worker; kept, then sent")
+    finally:
+        client.resume_session, client.create_session = resume, create
 
 
 async def round_storage(runtime, browser, failures: list[str]):

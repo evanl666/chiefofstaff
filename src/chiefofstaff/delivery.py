@@ -24,6 +24,7 @@ from . import agents
 from .backend import (
     COPILOT_AGENT,
     NotStartedError,
+    extensions_refused,
     running_background,
     stop_background,
     take_queued,
@@ -74,6 +75,28 @@ def reason(error: BaseException) -> str:
     """Why a send failed, in a line (not the CLI's whole output), without a closing period."""
     lines = describe(error).strip().splitlines() or [type(error).__name__]
     return lines[0].strip().rstrip(".")[:300]
+
+
+def refused_for_extensions(error: BaseException | None) -> bool:
+    """Whether an error (or one it came from) is Copilot refusing to open a session for its
+    extensions (backend.EXTENSIONS_REFUSED)."""
+    for _ in range(10):  # A chain of causes, not a loop.
+        if error is None:
+            return False
+        if extensions_refused(error):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+class FreshStartError(RuntimeError):
+    """A session Copilot refused to reopen for its extensions, which no fresh Copilot session
+    could go on for either (Runtime.continue_fresh): what it was sent waits for the owner's
+    Start fresh (Runtime.start_fresh). `fresh`: the session."""
+
+    def __init__(self, text: str, session_id: str):
+        super().__init__(text)
+        self.fresh = session_id
 
 
 def connection_lost(error: BaseException | None) -> bool:
@@ -184,6 +207,8 @@ class Delivery:
                 # Kept to send: it goes out once Copilot runs again (Runtime.resume_working).
                 self.copilot_down(session_id)
                 return message
+            if agent == COPILOT_AGENT and refused_for_extensions(exc):
+                raise self.fresh_needed(row) from exc  # Kept for it, unlike any other.
             # Not replayed later: the caller sees the error (a watcher re-polls the event).
             self.store.update_message_meta(message["id"], meta or {})
             self.runtime.add_message(session_id, "error", f"Delivery failed: {reason(exc)}.")
@@ -219,6 +244,9 @@ class Delivery:
                 logger.warning("Could not deliver held messages to %s.", session_id, exc_info=True)
                 if self.copilot_gone(exc, backend, connection, agent):
                     self.copilot_down(session_id)  # Not Copilot's own output: it reconnects.
+                elif agent == COPILOT_AGENT and refused_for_extensions(exc):
+                    self.fresh_needed(row)
+                    return  # Kept until the owner starts it fresh: tried again, it would fail.
                 elif attempt == 0:
                     failed = reason(exc)
                     note = self.runtime.add_message(
@@ -231,6 +259,27 @@ class Delivery:
                 self.schedule_flush(session_id, min(60, RETRY_DELAY * 2**attempt), attempt + 1)
 
         self.runtime.background(later())
+
+    def fresh_needed(self, row: dict) -> FreshStartError:
+        """A session Copilot can't reopen, nor a fresh one go on for: said once in its chat,
+        plainly, with Start fresh; what it was sent kept for that."""
+        who = "This worker's" if row["role"] == WORKER else "Its"
+        text = f"{who} Copilot session can't be reopened; your message is kept for a fresh start."
+        if not self.store.get(f"freshneeded:{row['id']}"):
+            note = self.runtime.add_message(row["id"], "error", text, {"fresh": True})
+            self.store.set(f"freshneeded:{row['id']}", str(note["id"]))
+        return FreshStartError(text, row["id"])
+
+    def fresh_started(self, session_id: str):
+        """Started fresh (Runtime.start_fresh): the line that asked for it says so."""
+        if not (noted := self.store.get(f"freshneeded:{session_id}")):
+            return
+        self.store.delete(f"freshneeded:{session_id}")
+        with suppress(LookupError):
+            message = self.store.message(int(noted))
+            self.store.update_message_meta(message["id"], {**message["meta"], "resolved": True})
+            shown = self.store.message(message["id"]) | {"amended": True}
+            self.runtime.bus.publish("message", shown)
 
     def copilot_gone(
         self, error: BaseException, backend: object, connection: int, agent: str

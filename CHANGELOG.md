@@ -11,7 +11,9 @@
   without extensions; on your own CLI, workers load them as before. Should Copilot still refuse
   to resume one for its extensions, a fresh Copilot session goes on for it at once, told its task,
   last report and folders from Chief of Staff's records; what you sent it goes there, once, and
-  its timeline stays.
+  its timeline stays. Its chat says *Reconnecting this worker…* meanwhile; and should no fresh
+  session start either, one plain line says so (no Copilot error text) with *Start a fresh worker
+  with its context*, your message kept for it.
 
 - **Security: a worker given your checkout only to read can't write there with a command
   either.** Its edits there were refused, but a command such as `echo y >> AGENTS.md` went

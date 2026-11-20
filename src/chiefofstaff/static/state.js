@@ -11,6 +11,8 @@ import { refreshUsageLink, renderConnections, renderLearning } from "./settings.
 export const HOME = "home";
 // Workers in the sidebar: running first.
 export const STATUS_ORDER = { working: 0, starting: 0, waiting: 1, queued: 2, failed: 3, idle: 4, done: 5 };
+// A worker whose Copilot session a fresh one takes over meanwhile (Runtime.continue_fresh).
+export const RECONNECTING = "Reconnecting this worker…";
 export const STATUS_TEXT = {
   working: "Working",
   starting: "Starting",

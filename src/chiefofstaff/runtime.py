@@ -3748,6 +3748,43 @@ class Runtime:
         self.add_message(session_id, "notice", CONTINUED_FRESH)
         return session
 
+    async def start_fresh(self, session_id: str) -> str:
+        """The owner's Start fresh, where a session Copilot can't reopen, nor a fresh one go on
+        for, said so (Delivery.fresh_needed): a fresh one goes on for it as continue_fresh's
+        does, and gets what was kept for it."""
+        row = self.store.session(session_id)
+        if row["closed_at"]:
+            raise ValueError("That session is closed.")
+        async with self.states[session_id].lifecycle:
+            if not self.states.handle(session_id):
+                self.store.delete(f"continued:{session_id}")  # The owner's word: once more.
+                try:
+                    await self.continue_fresh(
+                        row, self.copilot_id(session_id), RuntimeError("Started fresh.")
+                    )
+                except Exception as exc:
+                    logger.warning("Could not start %s fresh.", session_id, exc_info=True)
+                    raise RuntimeError(
+                        "Copilot couldn't start a fresh session for it; try again in a while."
+                    ) from exc
+        self.delivery.fresh_started(session_id)
+        if row["role"] != WORKER:
+            if self.delivery.has_unsent(session_id):
+                self.delivery.schedule_flush(session_id, 0)
+        elif self.store.session(session_id)["status"] in {"starting", "working"}:
+            # At work when Copilot refused it: what it was kept goes on in its slot.
+            if await self.delivery.flush(session_id, await self.session_for(session_id)):
+                self.update_session(session_id, status="working")
+        else:
+            self.states[session_id].now = True  # As the owner's Send now.
+            try:
+                await self.delivery.resume(session_id, now=True)
+            finally:
+                if self.store.session(session_id)["status"] != "queued":
+                    self.states[session_id].now = False
+        who = "worker" if row["role"] == WORKER else "session"
+        return f"Started a fresh {who} with its context."
+
     def continuation(self, row: dict) -> str:
         """What a fresh session of a worker (or Watchdog, Slack) needs from Chief of Staff's
         records to go on where its earlier one was."""
