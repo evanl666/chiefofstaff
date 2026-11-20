@@ -108,7 +108,7 @@ class Steps:
             self.end_step(step, "withdrawn", why)
             return
         self.mark(row["id"], step["id"])
-        self.spent[step["id"]] = 0.0
+        self.spent.pop(step["id"], None)  # No model call of it reported yet (see stop_step).
         self.runtime.background(self.run(step["id"]))
 
     def permitted(self: Shepherd, kind: str) -> float:  # type: ignore[misc]
@@ -617,10 +617,11 @@ class Steps:
                 # Not tried for its fix or round (the day's attempts count it): the PR's next
                 # read queues it again if its signal is still current, behind the owner's work.
                 ended = self.control.step(step["id"]) or step
-                # Before its first model call was charged it ran nothing: no attempt at all
-                # (ten PRs handed to one worker in a row stopped one attempt three times).
-                spent = self.spent.get(step["id"], 0.0)
-                evidence = {**(ended["evidence"] or {}), "again": True if spent else "unstarted"}
+                # Before its first model call was reported (one that cost nothing counts too)
+                # it ran nothing: no attempt at all (ten PRs handed to one worker in a row
+                # stopped one attempt three times).
+                used = step["id"] in self.spent
+                evidence = {**(ended["evidence"] or {}), "again": True if used else "unstarted"}
                 self.control.move_step(step["id"], state, evidence=evidence)
                 if step["clicked"]:
                     self.store.set(f"clickfirst:{step['target']}", "1")  # Still the owner's ask.
