@@ -291,8 +291,10 @@ FIXES: list[Allow] = [
         lines=r"^The same command was not run in the owner's checkout; your own (copy|worktree) ",
     ),
     # E115: answers have their own report status, routine progress stays quiet, and task views
-    # expose the five recent progress reports already kept in messages.
+    # expose the five recent progress reports already kept in messages (read through an index of
+    # reports).
     Allow("tasks' recent progress updates", data=r"\.tasks\[\d+\]\.progress_updates$"),
+    Allow("messages' index of reports", data=r"\.db\._schema\.reports_by_session$"),
     Allow(
         "report's answer status",
         data=r"\.options\.tools\[\d+\]\.parameters\.properties\.status\.enum\[\d+\]$",
@@ -307,6 +309,11 @@ FIXES: list[Allow] = [
     Allow(
         "report summary's answer guidance",
         data=r"\.options\.tools\[\d+\]\.parameters\.properties\.summary\.description$",
+        value="What happened, the answer, or the one concrete question. With status answer: the "
+        "whole answer to the Router's or owner's message; it changes no task state. With status "
+        "done: the whole result the owner reads (tables, lists, every row asked for), up to "
+        "30,000 characters; never only a pointer to a file. With status failed: why it cannot "
+        "be done, and what you tried",
     ),
     Allow("Router and worker answer/report rules", data=r"\.system_message\.content$"),
 ]
