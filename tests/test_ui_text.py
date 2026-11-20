@@ -1262,6 +1262,31 @@ def test_earlier_reports_are_kept_and_a_row_says_the_latest():
     assert found[3:] == ["Cache at 96 MB.", "The bucket is gone."]
 
 
+def test_progress_updates_keep_five_and_old_tasks_keep_their_latest_words():
+    found = tasks_js(
+        """
+        const updates = Array.from({ length: 7 }, (_, i) => ({
+          at: `2026-11-19T10:0${i}:00Z`, text: `Update ${i + 1}.`
+        })).reverse();
+        return [
+          k.progressUpdates({ id: "t1", progress_updates: updates }),
+          k.progressUpdates({ id: "t2", status: "running", progress: "Old update.",
+            updated_at: "2026-11-18T09:00:00Z" }),
+          k.progressUpdates({ id: "t3", progress_updates: [{ text: " " }, null] }),
+        ];
+        """
+    )
+    assert [item["text"] for item in found[0]] == [
+        "Update 7.",
+        "Update 6.",
+        "Update 5.",
+        "Update 4.",
+        "Update 3.",
+    ]
+    assert found[1] == [{"at": "2026-11-18T09:00:00Z", "text": "Old update."}]
+    assert found[2] == []
+
+
 def other_looks(cases: dict) -> dict:
     """How the sidebar draws each of the owner's other Copilot sessions (sidebar.js otherLook):
     `cases` maps a name to (open, status or None, why)."""

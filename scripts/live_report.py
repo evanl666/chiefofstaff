@@ -4,8 +4,12 @@ R1. The Router asks a worker about a task it finished (a note): the worker's ans
     the Router, the task keeps its result, and the worker is not asked to report (E85, E96).
 R2. A worker asks the owner a question; the owner tells the Router the answer, and the Router
     passes it on: the task goes on at once, it does not wait under Needs you (E97).
+R3. The owner asks a worker a direct question; report(status="answer") reaches Home once and
+    leaves the finished task unchanged.
+R4. An older worker answers the owner's direct question with status="progress"; it is forwarded
+    as an Answer/Update and leaves the finished task unchanged.
 
-    uv run python scripts/live_report.py [R1 R2]
+    uv run python scripts/live_report.py [R1 R2 R3 R4]
 
 LIVE_REPORT_PORT sets its port (default 18777; Slack's fake on the port + 50).
 """
@@ -160,7 +164,96 @@ async def _finished(app: App, task_id: str):
     return found if found["status"] in {"review", "done", "failed"} else None
 
 
-SCENARIOS = {"R1": r1_answer_about_finished_work, "R2": r2_the_routers_answer_moves_the_task_on}
+async def reported_answer(app: App, status: str) -> list[tuple[str, bool, str]]:
+    label = "answer" if status == "answer" else "progress compatibility"
+    mark = await say(
+        app,
+        "Start a new worker (no project): write the number 42 into answer.txt in its folder, "
+        "then report done.",
+    )
+    done = await task_of(app, mark, {"review", "done"}, f"the {label} task is reported")
+    worker = done["session_id"]
+    await idle(app, worker, "its first turn ends")
+    before = await task(app, done["id"])
+    router = await router_id(app)
+    router_mark = max(
+        (m["id"] for m in await app.get(f"/api/sessions/{router}/messages")), default=0
+    )
+    worker_mark = max(
+        (m["id"] for m in await app.get(f"/api/sessions/{worker}/messages")), default=0
+    )
+    wording = (
+        "Use report(status='answer'"
+        if status == "answer"
+        else "For this backward-compatibility check, use report(status='progress'"
+    )
+    await app.post(
+        f"/api/sessions/{worker}/messages",
+        {
+            "text": "Read answer.txt and tell me which number it contains. "
+            f"{wording}, task_id='{done['id']}') with the answer; do not report done."
+        },
+    )
+
+    async def reached():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={router_mark}")
+        answers = [
+            message
+            for message in messages
+            if message["kind"] == "inbound"
+            and message["meta"].get("from") == worker
+            and message["meta"].get("status") == "answer"
+        ]
+        return answers or None
+
+    answers = await wait_for(f"the {label} reaches Home", reached, 600, app)
+    await idle(app, worker, f"its {label} turn ends")
+    after = await task(app, done["id"])
+    worker_messages = await app.get(f"/api/sessions/{worker}/messages?after={worker_mark}")
+    reports = [
+        message
+        for message in worker_messages
+        if message["kind"] == "report" and "42" in message["text"]
+    ]
+    prefix = "R3" if status == "answer" else "R4"
+    return [
+        (
+            f"{prefix} its answer reaches Home once",
+            len(answers) == 1,
+            f"{len(answers)} Answer/Update(s)",
+        ),
+        (
+            f"{prefix} its task association is retained",
+            answers[0]["meta"].get("task_id") == done["id"],
+            answers[0]["meta"].get("task_id") or "",
+        ),
+        (
+            f"{prefix} its task state and result stay unchanged",
+            (after["status"], after["result"]) == (before["status"], before["result"]),
+            after["status"],
+        ),
+        (
+            f"{prefix} its report is marked told",
+            bool(reports and reports[-1]["meta"].get("told")),
+            str(reports[-1]["meta"])[:120] if reports else "no report",
+        ),
+    ]
+
+
+async def r3_answer_status(app: App) -> list[tuple[str, bool, str]]:
+    return await reported_answer(app, "answer")
+
+
+async def r4_progress_answer_compatibility(app: App) -> list[tuple[str, bool, str]]:
+    return await reported_answer(app, "progress")
+
+
+SCENARIOS = {
+    "R1": r1_answer_about_finished_work,
+    "R2": r2_the_routers_answer_moves_the_task_on,
+    "R3": r3_answer_status,
+    "R4": r4_progress_answer_compatibility,
+}
 
 
 async def main():

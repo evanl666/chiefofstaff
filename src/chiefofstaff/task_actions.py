@@ -4350,6 +4350,27 @@ class TaskActions:
             **spend,
         }
 
+    def progress_updates(self, task: dict) -> list[dict[str, str]]:
+        """The task's five newest progress reports, newest first.
+
+        Reports already live in messages, including reports from older databases, so the
+        history needs no second store. A task imported without those messages still exposes
+        its compatible `progress` value as its latest update.
+        """
+        rows = self.store.all(
+            """SELECT text, created_at FROM messages
+            WHERE session_id=? AND kind='report'
+            AND json_extract(meta, '$.task_id')=?
+            AND json_extract(meta, '$.status')='progress'
+            AND length(trim(text)) > 0
+            ORDER BY id DESC LIMIT 5""",
+            (task["session_id"], task["id"]),
+        )
+        updates = [{"text": row["text"], "at": row["created_at"]} for row in rows]
+        if not updates and task["status"] == "running" and task["progress"].strip():
+            updates.append({"text": task["progress"], "at": task["updated_at"]})
+        return updates
+
     def view(self, task: dict) -> dict:
         row = self.store.find_session(task["session_id"]) or {}
         follows = self.store.follows(row["id"]) if row else []
@@ -4393,6 +4414,7 @@ class TaskActions:
             **self.agent_spend(task, row),
             "blocked": task["status"] == "queued" and bool(self.tasks.broken(task)),
             "receipts": shown_receipts,
+            "progress_updates": self.progress_updates(task),
             # What it reported before its latest result (see keep_earlier_result).
             "earlier_results": json.loads(self.store.get(f"results:{task['id']}") or "[]"),
             "decisions": self.runtime.decisions.for_task(task["id"]),

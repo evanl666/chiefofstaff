@@ -290,6 +290,25 @@ FIXES: list[Allow] = [
         data=r"(/messages\[\d+\]|\.db\.messages\.[^.]+)\.text$",
         lines=r"^The same command was not run in the owner's checkout; your own (copy|worktree) ",
     ),
+    # E115: answers have their own report status, routine progress stays quiet, and task views
+    # expose the five recent progress reports already kept in messages.
+    Allow("tasks' recent progress updates", data=r"\.tasks\[\d+\]\.progress_updates$"),
+    Allow(
+        "report's answer status",
+        data=r"\.options\.tools\[\d+\]\.parameters\.properties\.status\.enum\[\d+\]$",
+        value="answer",
+    ),
+    Allow(
+        "report's answer-aware description",
+        data=r"\.options\.tools\[\d+\]\.description$",
+        value="Report to the Router: answer, progress (rare), question, blocked, failed or "
+        "done. Answers always reach the Router; routine progress stays on the task.",
+    ),
+    Allow(
+        "report summary's answer guidance",
+        data=r"\.options\.tools\[\d+\]\.parameters\.properties\.summary\.description$",
+    ),
+    Allow("Router and worker answer/report rules", data=r"\.system_message\.content$"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Answers and progress updates no longer disappear.** A worker can report an Answer/Update
+  without completing or changing its task; answers to a Router or owner message still reach
+  Home when an older worker calls them progress. Routine progress remains quiet, and a task's
+  card keeps its latest update plus the four before it, folded with their times.
+
 ## 0.1.50 (2026-11-20)
 
 - **Workers start and resume again with your Copilot in experimental mode** (Copilot CLI 1.0.114

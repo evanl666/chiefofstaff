@@ -583,7 +583,7 @@ function imageLoaded(event) {
     scroller.scrollTop = scroller.scrollHeight;
   }
 }
-const STATUS_CHIP = { done: "Done", progress: "Progress", question: "Question", blocked: "Blocked", failed: "Failed" };
+const STATUS_CHIP = { answer: "Answer/Update", done: "Done", progress: "Progress", question: "Question", blocked: "Blocked", failed: "Failed" };
 // A done report whose result waits for the owner's Accept says so, as Home does.
 const toReview = (taskId) => tasks().find((item) => item.id === taskId)?.status === "review";
 export function chip(status, taskId = "") {
@@ -654,6 +654,7 @@ function eventLine({ mark = "·", kind = "", text, time, view = null, viewText =
 // What a worker's report says, in a word: the report itself is on the task's card. Blocked, it
 // could not go on (not "Slack is blocked", which reads as if the connection broke).
 const REPORTED = {
+  answer: ["↩", "", "has an answer/update"],
   done: ["✓", "done", "finished"],
   question: ["?", "waiting", "has a question"],
   blocked: ["!", "waiting", "couldn't go on"],
@@ -685,6 +686,9 @@ function homeEntry(message) {
         return eventLine({ mark: "⚠", kind: "waiting", text: `Watchdog: “${meta.title}” looks ${meta.status.replace("watchdog: ", "").replace("_", " ")}`, time, body: text });
       }
       if (meta.from && meta.status) {
+        if (meta.status === "answer") {
+          return eventLine({ mark: "↩", text: `Answer/Update from “${meta.title}”: ${firstLine(text)}`, time, body: text, view: () => focusTask(meta.task_id, meta.from) });
+        }
         const [mark, kind, what] = REPORTED[meta.status] || ["·", "", meta.status];
         // What it found, or why it could not go on, in a line (the whole report opens here;
         // its card has the receipts).
