@@ -972,9 +972,16 @@ class Server:
                 item.update(status="failed", error={"message": "user rejected MCP tool call"})
                 self.item("item/completed", thread_id, turn_id, item)
                 return
-        item.update(
-            status="completed", result={"content": [{"type": "text", "text": f"{tool} ran"}]}
-        )
+        if tool.startswith("locked_"):  # Its account is not connected: a failed call says so.
+            message = (
+                "Authorization required for Acme Search. Connect your Acme Search account in a "
+                "browser at https://auth.acme.test/connect"
+            )
+            item.update(status="failed", error={"message": message})
+        else:
+            item.update(
+                status="completed", result={"content": [{"type": "text", "text": f"{tool} ran"}]}
+            )
         self.item("item/completed", thread_id, turn_id, item)
 
     async def child(self, thread_id, turn_id, tool, words, prompt, how=""):

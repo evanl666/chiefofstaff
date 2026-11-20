@@ -630,6 +630,8 @@ class Asks:
                     return cancelled
                 if not url and not command:
                     return cancelled  # Signed in already: Copilot keeps the credentials.
+                if url:
+                    self.runtime.accounts.signin_started(server, url)
                 finished = asyncio.Event()
                 self.signin_pending[key] = finished
             connected = asyncio.Event()
@@ -652,6 +654,9 @@ class Asks:
                 self.signin_pending.pop(key, None)
                 finished.set()
             action = (result or {}).get("action")
+            if not command:
+                # Sessions whose tool failed for want of this sign-in meanwhile retry once.
+                self.runtime.accounts.signin_ended(server, connected.is_set() or action == "done")
             if action == "closed":
                 return cancelled  # The session closed; another session may still ask.
             if command and action == "done":

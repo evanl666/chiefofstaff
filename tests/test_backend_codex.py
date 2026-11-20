@@ -2771,6 +2771,23 @@ async def test_a_codex_worker_whose_mcp_server_needs_sign_in_has_the_owner_asked
         await runtime.stop()
 
 
+async def test_a_codex_workers_mcp_tool_that_needs_an_account_connected_has_one_card(
+    tmp_path, monkeypatch
+):
+    """E116 on Codex: its MCP call's server and tool are named as Copilot's are, so a failure
+    saying the account must be connected is the same shared card."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        await spawn(runtime, harness, "Call the MCP tool locked_search of acme. Report done: x.")
+        await until(lambda: [d for d in harness.store.drafts() if d["kind"] == "connection"], 30)
+        (card,) = harness.store.drafts()
+        assert card["text"] == "acme needs you to connect Acme Search"
+        assert card["target"]["url"] == "https://auth.acme.test/connect"
+        assert card["target"]["url_note"] == "Link supplied by acme"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_codex_worker_codex_no_longer_has_cannot_be_reopened(tmp_path, monkeypatch):
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:

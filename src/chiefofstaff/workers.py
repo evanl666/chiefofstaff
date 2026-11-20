@@ -853,6 +853,7 @@ class Workers:
             keep_questions=self.runtime.working_on(session_id) if row["role"] == WORKER else None,
         )
         await self.runtime.asks.cancel_questions(session_id)
+        self.runtime.accounts.closed(session_id)
         # What it had received of each open task: one it worked on comes back when it reopens.
         received = {
             task["id"]: self.delivery.drop_pending(session_id, task["id"])

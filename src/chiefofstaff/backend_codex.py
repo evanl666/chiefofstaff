@@ -2592,6 +2592,8 @@ class CodexSession:
                 tool_call_id=item_id,
                 tool_name=f"{item.get('server', '')}-{item.get('tool', '')}",
                 arguments=item.get("arguments") or {},
+                mcp_server_name=item.get("server", ""),
+                mcp_tool_name=item.get("tool", ""),
                 **parent,
             )
         elif kind == "dynamicToolCall":

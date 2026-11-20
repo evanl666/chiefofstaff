@@ -558,6 +558,13 @@ class Events:
         self.states[row["id"]].turn_tools += 1
         arguments = getattr(data, "arguments", None)
         call = getattr(data, "tool_call_id", "") or f"step-{time.monotonic()}"
+        server = getattr(data, "mcp_config_server_name", None) or getattr(
+            data, "mcp_server_name", None
+        )
+        if row["role"] == WORKER and server and (tool := getattr(data, "mcp_tool_name", None)):
+            # Which MCP server and tool, as the backend says (never as their result says): an
+            # account it needs connected is the owner's to connect (accounts.py).
+            self.states[row["id"]].mcp_calls[call] = (str(server), str(tool))
         if getattr(data, "parent_tool_call_id", None):
             # A sub-agent's steps show as its one step; the commands it runs (a test suite, a
             # flow, often run again there) are receipts all the same.
@@ -607,6 +614,11 @@ class Events:
             return
         result = getattr(data, "result", None)
         output = (getattr(result, "content", "") or "") if result else ""
+        if mcp := self.states[row["id"]].mcp_calls.pop(getattr(data, "tool_call_id", ""), None):
+            error = getattr(getattr(data, "error", None), "message", "") or ""
+            self.runtime.accounts.tool_result(
+                row["id"], *mcp, getattr(data, "success", True) is not False, output or error
+            )
         # Kept for the watchdog: the tail of the latest output shows hangs and errors.
         if output and not sub:
             self.states[row["id"]].last_output = output[-1500:]

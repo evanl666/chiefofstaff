@@ -46,6 +46,7 @@ from uuid import uuid4
 from . import agents, caches, prompts, settings_guard, threads, updates
 from . import workspaces as workspaces_module
 from .abilities import Abilities
+from .accounts import Accounts
 from .asks import Asks
 from .backend import (
     COPILOT_AGENT,
@@ -644,6 +645,7 @@ class Runtime:
         self.drafts = Drafts(self)
         self.asks = Asks(self)
         self.asks.migrate_questions()
+        self.accounts = Accounts(self)
         self.decisions = Decisions(self)
         self.peers = Peers(self)
         self.learning = Learning(self)
@@ -699,6 +701,7 @@ class Runtime:
             ("Chief of Staff stopped while sending. Check whether it was delivered.",),
         )
         self.asks.expire_requests()
+        self.accounts.restore()
         self.task_actions.settle_old_reports(TASKS_SHOWN_HOURS)
         await self.connect()
         self.after_update()
@@ -3501,6 +3504,7 @@ class Runtime:
         state.stale = False
         state.after_refresh = ""  # The next connection has the new options from the start.
         state.steps.clear()  # A disconnected session is in no step.
+        state.mcp_calls.clear()
         state.unread.clear()  # What it was sent is resent or replayed, not waiting in a turn.
         state.unseen.clear()
         state.echo_wait.clear()

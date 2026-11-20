@@ -105,6 +105,8 @@ class SessionState:
     # The steps (tool calls) it is in now, by call id: when each started, what it is for and
     # what it runs.
     steps: dict[str, tuple[float, str, str]] = field(default_factory=dict)
+    # Its MCP calls by call id: (server, tool), as the backend named them.
+    mcp_calls: dict[str, tuple[str, str]] = field(default_factory=dict)
     # Its calls that read, type into or stop a shell, by call id: (tool, shell id).
     shell_calls: dict[str, tuple[str, str]] = field(default_factory=dict)
     # Calls of a tool that opens a PR (a GitHub MCP server's create_pull_request): its result
