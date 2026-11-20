@@ -220,12 +220,14 @@ async def test_the_owners_queued_work_preempts_an_attempt(world):
     await settle(runtime)
     step = runtime.shepherd.control.open_step(TARGET)
     assert step["state"] == "running"
+    runtime.shepherd.usage(world.worker, 2.5)  # It ran a model call.
     await call_tool(
         runtime, "spawn_worker", runtime.router_id(), title="Another", instructions="Do it."
     )
     await settle(runtime)
     ended = runtime.shepherd.control.step(step["id"])
     assert ended["state"] == "interrupted", ended
+    assert ended["evidence"]["again"] is True  # One of the day's attempts.
     assert not runtime.shepherd.stepping
     # Queued again, behind the owner's task, at the PR's next read.
     await runtime.shepherd.read(TARGET)
