@@ -52,7 +52,8 @@ from .task_actions import (
     style_note,
 )
 from .tasks import ADOPTED, OPEN
-from .watchdog import instruction, last_instruction
+from .watchdog import RESTART_PROMPT, last_instruction
+from .workers import router_message, router_note
 from .workspaces import resolve_project
 
 if TYPE_CHECKING:
@@ -3075,26 +3076,32 @@ class Tools:
         )
 
     def answers_instruction(self, caller: str) -> bool:
-        """Whether this turn began with a question or note from the Router or owner.
-
-        A retry's system note is not an instruction (watchdog.instruction/last_instruction
-        deliberately skip it), so the message the failed turn was answering stays the source.
-        Thread activity and check-back wakes are updates of their own, not answers.
-        """
-        if self.states[caller].thread_turn:
+        """Whether its turn answers the Router or the owner (bug E115: an older worker reports
+        that answer as progress): the last instruction it has seen is the Router's note or
+        continue, or the owner's chat about a task. Not one still on its way, or sent into its
+        turn and not shown to it yet: what it reports is about the work before that. A retry's
+        note (last_instruction skips it) or a restart's resumes the turn it interrupted: that
+        turn's instruction still counts. A check-back, a thread's news or another wake brings
+        news of its own, not an answer."""
+        state = self.states[caller]
+        if state.thread_turn:
             return False
-        found = last_instruction(self.store, caller)
-        if not found:
-            return False
-        asked = self.store.message(found)
-        if not instruction(asked) or asked["meta"].get("check_back"):
-            return False
-        prompt = str(asked["meta"].get("prompt") or "")
-        if asked["kind"] == "router":
-            return prompt.startswith(
-                ('<message from="router" type="note"', '<message from="router" type="message"')
-            )
-        return asked["kind"] == "owner" and bool(asked["meta"].get("chat"))
+        upto = int(sent) if (sent := self.store.get(f"sent:{caller}")) else None
+        if state.unread:
+            unseen = min(entry[2] for entry in state.unread.values()) - 1
+            upto = unseen if upto is None else min(upto, unseen)
+        while found := last_instruction(self.store, caller, upto):
+            asked = self.store.message(found)
+            prompt = str(asked["meta"].get("prompt") or "")
+            if asked["kind"] == "notice" and prompt.startswith(RESTART_PROMPT):
+                upto = found - 1
+                continue
+            if asked["meta"].get("check_back"):
+                return False
+            if asked["kind"] == "router":
+                return router_note(asked) or router_message(asked)
+            return asked["kind"] == "owner" and bool(asked["meta"].get("chat"))
+        return False
 
     async def t_report(self, params: Report, caller: str):
         row = self.caller(caller, WORKER, SLACK)
@@ -3216,7 +3223,7 @@ class Tools:
         # question about it too: once answered, its next report is that new result).
         changed = bool(
             task
-            and not answer
+            and params.status != "answer"
             and finished
             and params.status in {"progress", "done", "question", "blocked"}
             and (chat or (self.runtime.turn_task(caller) == task["id"] and not landed))
@@ -3370,10 +3377,12 @@ class Tools:
             if params.status == "answer":
                 pass
             elif progress_answer:
-                # Older workers use progress for a direct answer. Keep its latest words on the
-                # task without moving the task, replacing its result or creating a second
-                # finished/update notification.
-                task = self.tasks.update(task["id"], progress=params.summary[:6000])
+                # An older worker's answer as progress (bug E115): told as an answer, its task
+                # stays as it is; one at work shows these words as its latest progress.
+                if task["status"] == "running":
+                    task = self.tasks.update(task["id"], progress=params.summary[:6000])
+                else:
+                    self.runtime.task_actions.publish(task)  # Its card's earlier updates.
             elif task["status"] == "cancelled" and not asked:
                 # Cancelled (a report already on its way, say): it stays cancelled.
                 settled = True
@@ -3527,7 +3536,9 @@ class Tools:
                 task = self.tasks.move(task["id"], "running", progress=params.summary[:6000])
             else:
                 task = self.tasks.update(task["id"], progress=params.summary[:6000])
-        self.states[caller].resting = ""
+        if not answer:
+            # An answer changes nothing: asked about its work, it returns to where it was.
+            self.states[caller].resting = ""
         if params.status in {"question", "blocked"}:
             # Under Needs you until answered, whatever becomes of the task (the Slack
             # session's too: it has no task).
@@ -3594,11 +3605,10 @@ class Tools:
         news = self.states[caller].thread_turn and (not task or task["status"] != "running")
         self.states[caller].thread_turn = False  # It told the owner.
         if params.status == "progress" and not news and not progress_answer:
-            where = " and on the task card" if task else ""
+            where = "on the task's card and in your session" if task else "in your session"
             return (
-                f"Noted in your session{where}. The Router is not interrupted for routine "
-                'progress. If this answers the Router or owner, use status="answer"; this call '
-                "is forwarded automatically only when its instruction can be identified."
+                f"Noted {where}; the Router is not told of routine progress. To answer the "
+                'Router or the owner, use report(status="answer").'
             )
         crossed = ""
         if task and params.status == "done" and unread:
@@ -3615,7 +3625,7 @@ class Tools:
         # On Home now (a line in the Router's chat, a card): an answer to the owner's @ there
         # is not shown again.
         self.store.update_message_meta(reported["id"], {**meta, "told": True})
-        if news and params.status == "progress" and not progress_answer:
+        if news and params.status == "progress":
             # News on a PR it follows, for work already finished: the owner reads it.
             self.runtime.alert(
                 f"Update on “{task['title'] if task else self.runtime.display_title(row)}”",
@@ -3623,8 +3633,13 @@ class Tools:
                 needs_action=False,
                 title="PR update",
             )  # fmt: skip
+        if progress_answer:
+            return (
+                "Reported to the Router as your answer to its or the owner's message; the owner "
+                'sees it as an Answer/Update. Next time, answer with report(status="answer").'
+            )
         if answer:
-            return "Answer/Update reported to the Router." + split_note
+            return "Reported to the Router as your answer; the owner sees it as an Answer/Update."
         return "Reported to the Router." + split_note + self.run_note(row, task, params.status)
 
     def run_note(self, row: dict, task: dict | None, status: str) -> str:

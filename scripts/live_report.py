@@ -1,7 +1,8 @@
 """Live test of which task a worker's words belong to (QA round 7), on real Copilot sessions.
 
-R1. The Router asks a worker about a task it finished (a note): the worker's answer reaches
-    the Router, the task keeps its result, and the worker is not asked to report (E85, E96).
+R1. The Router asks a worker about a task it finished (a note): the worker's answer (in its
+    chat, or an Answer/Update) reaches the Router, the task keeps its result, and the worker is
+    not asked to report (E85, E96, E115).
 R2. A worker asks the owner a question; the owner tells the Router the answer, and the Router
     passes it on: the task goes on at once, it does not wait under Needs you (E97).
 R3. The owner asks a worker a direct question; report(status="answer") reaches Home once and
@@ -108,10 +109,19 @@ async def r1_answer_about_finished_work(app: App) -> list[tuple[str, bool, str]]
     nudged = [m for m in said if "without a report" in m["text"]]
     results = [("R1 no report asked of it", not nudged, f"{len(nudged)} nudge(s)")]
     if reports and not answers:
-        # It reported instead of answering in its chat (the model's choice): its report is its
-        # answer, and that report is what the Router has.
-        log("R1: the worker reported instead of answering in its chat")
+        # It reported instead of answering in its chat: its report is its answer, and that report
+        # is what the Router has. An Answer/Update (as its prompt asks, E115) changes no task.
+        statuses = [m["meta"]["status"] for m in reports]
+        log(f"R1: the worker reported ({', '.join(statuses)}) instead of answering in its chat")
         results.append(("R1 the Router has its answer", True, "as a report"))
+        if set(statuses) == {"answer"}:
+            results.append(
+                (
+                    "R1 its Answer/Update leaves the finished task as it was",
+                    (after["status"], after["result"]) == (done["status"], done["result"]),
+                    f"{after['status']}: {after['result'][:60]!r}",
+                )
+            )
         return results
     results += [
         ("R1 the Router has its answer", bool(answers), answers[0]["text"][:80] if answers else ""),
@@ -206,8 +216,9 @@ async def reported_answer(app: App, status: str) -> list[tuple[str, bool, str]]:
         ]
         return answers or None
 
-    answers = await wait_for(f"the {label} reaches Home", reached, 600, app)
+    await wait_for(f"the {label} reaches Home", reached, 600, app)
     await idle(app, worker, f"its {label} turn ends")
+    answers = await reached() or []  # All of them, once its turn is over.
     after = await task(app, done["id"])
     worker_messages = await app.get(f"/api/sessions/{worker}/messages?after={worker_mark}")
     reports = [
