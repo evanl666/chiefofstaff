@@ -318,7 +318,8 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   of its own, made then and once: a worktree of your checkout's commit with your uncommitted
   changes copied in (never through a link; files over 20 MB, links that lead out of it and
   repositories in it are left out, and it is told which). It runs the command there, without
-  asking you.
+  asking you. On Windows its PowerShell and cmd lines are read the same way, and anything else
+  run in your checkout, or naming it, goes to the copy too.
   Ask in so many words for the work to be done directly in your folder (no worktree), and that
   worker may change it.
 - Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
