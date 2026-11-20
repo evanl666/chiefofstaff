@@ -25,6 +25,11 @@
   Each time Copilot connects again, it is chosen again, so a CLI that updated itself meanwhile is
   probed afresh. Events of a newer Copilot this SDK can't read no longer fail: a session's whole
   history failed to load for one.
+- For maintainers: a daily workflow (*Copilot compatibility*) starts the newest Copilot CLI with
+  the SDK Chief of Staff ships, as Chief of Staff does (a handshake, a session created and
+  resumed; no model call, no secret), and opens one `copilot-compat` issue when that SDK can't
+  drive it (added to only when what it says changes, closed once it can again). Dependabot no
+  longer proposes the Copilot SDK: its package is frozen at a last release the pin keeps out.
 
 ## 0.1.49 (2026-11-20)
 

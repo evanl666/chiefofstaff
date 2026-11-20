@@ -1,0 +1,98 @@
+name: Copilot compatibility
+# Daily, the newest Copilot CLI (npm) against Chief of Staff, before users get it: the CLI
+# updates itself every few days, and a new protocol (as 4 was, with 1.0.113) is what can stop
+# Chief of Staff. scripts/compat_probe.py starts it with the SDK Chief of Staff ships (and its
+# protocol adapter) as Chief of Staff does, and creates and resumes a session on it: no model
+# call, no secret. When that SDK can't drive it, one issue labelled copilot-compat opens (or is
+# added to, when what it says changed); once it can again, the issue closes. (The SDK's package
+# is frozen at its last release: only the CLI moves.)
+on:
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only: open, add to or close no issue"
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  compat:
+    name: Newest Copilot CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.13"
+      - name: The newest Copilot CLI
+        run: |
+          npm install -g @github/copilot@latest
+          copilot --version
+      - run: uv sync --locked
+      - name: Probe
+        id: probe
+        continue-on-error: true
+        run: uv run --locked python scripts/compat_probe.py --report probe.md
+      - name: Open, add to or close the copilot-compat issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PROBE: ${{ steps.probe.outcome }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "Copilot CLI: $(copilot --version | head -1)"
+            echo
+            echo "Probe: $PROBE"
+            if [ -f probe.md ]; then echo; cat probe.md; fi
+          } > report.md
+          # What this report says, but for the run: an open issue is added to only when it differs.
+          mark="copilot-compat $(sha256sum report.md | cut -c1-16)"
+          printf '\nRun: %s\n\n<!-- %s -->\n' "$RUN" "$mark" >> report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PROBE" != success ] && [ "$PROBE" != failure ]; then
+            echo "The probe did not run: no issue."
+            exit 1
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            [ "$PROBE" = success ]
+            exit
+          fi
+          open=$(gh issue list -R "$REPO" --label copilot-compat --state open --json number --jq '.[0].number // empty')
+          if [ "$PROBE" = success ]; then
+            if [ -n "$open" ]; then
+              gh issue comment "$open" -R "$REPO" --body-file report.md
+              gh issue close "$open" -R "$REPO" --reason completed
+            fi
+            exit 0
+          fi
+          gh label create copilot-compat -R "$REPO" --color D93F0B \
+            --description "Chief of Staff's Copilot SDK can't drive the newest Copilot CLI" 2>/dev/null || true
+          if [ -n "$open" ]; then
+            said=$(gh issue view "$open" -R "$REPO" --json body,comments --jq '[.body, .comments[].body] | join("\n")')
+            case "$said" in
+              *"$mark"*) echo "Issue #$open says this already." ;;
+              *) gh issue comment "$open" -R "$REPO" --body-file report.md ;;
+            esac
+          else
+            gh issue create -R "$REPO" --label copilot-compat \
+              --title "Chief of Staff's Copilot SDK can't drive the newest Copilot CLI" --body-file report.md
+          fi
+          exit 1
