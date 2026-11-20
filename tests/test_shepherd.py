@@ -564,6 +564,8 @@ async def test_your_message_stops_the_step_first(world):
     assert now.options.get("enable_config_discovery") is True
     # Stopped for the owner's work, not tried: once that turn ends, the PR's next read queues
     # the attempt again, still the owner's click (live SY12: it was never tried again).
+    # Stopped before its first model call was charged: it ran nothing, no attempt at all.
+    assert runtime.shepherd.control.step(step["id"])["evidence"]["again"] == "unstarted"
     now.emit("session.idle")
     await settle(runtime)
     await runtime.shepherd.read(TARGET)
