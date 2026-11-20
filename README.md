@@ -123,7 +123,8 @@ To start this checkout after `uv sync --extra dev`:
 - **GitHub**: `gh auth login` with every account you use, to review PRs and open them.
 - **Slack**: paste a user token in Settings ([how](docs/guide.md#slack)), or reach Slack through
   a tool your Copilot already has, such as Glean.
-- **Other services** (docs, issue trackers): a sign-in card appears when a worker needs one.
+- **Other services** (docs, issue trackers): a sign-in card appears when a worker needs one, and
+  one card when an MCP tool says an account must be connected (however many workers it stops).
 
 ## How it works
 

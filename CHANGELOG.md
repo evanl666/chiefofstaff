@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **An account an MCP tool needs connected is one card, not a question from every worker
+  (E116).** A tool can reach its server and still fail with "connect your account in a
+  browser"; each worker met it alone, your *done* reached one of them, and Watch for you stopped
+  trying it. Now every session it stops shares one card under Needs you, by server and account,
+  with the last error and how many sessions wait. *I've done it* has each of them retry once
+  (Watch for you scans again at once, from where each watch was last covered); another failure
+  updates the same card, and only a call that works closes it. While it waits, Watch for you
+  still tries every watch once a scan, keeps the window it could not read open, and says
+  *connection needed*, not *0 found*. The tool's text is untrusted: a card only for a failed
+  call of an MCP tool whose server the backend names, a link only as a plain http(s) address,
+  labelled when it is not the server's own, and opened only when you click it.
 - **Security: a worker given your checkout only to read can't write there with a command
   either.** Its edits there were refused, but a command such as `echo y >> AGENTS.md` went
   through for a worker with no system sandbox (on Codex always; on Copilot with the sandbox off),

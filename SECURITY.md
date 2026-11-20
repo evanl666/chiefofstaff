@@ -115,6 +115,12 @@ Workers can also run on Codex (off by default; Settings → Models). For such a 
   that sign-in, and every later session can use the server with your identity. Sign in only to
   servers you want all your workers to use. Remove a sign-in with `copilot` (`/mcp`) or in your
   OS keychain (`copilot-mcp-oauth`).
+- **An MCP tool's error is untrusted.** One that says an account must be connected becomes a card
+  only for a failed call of an MCP tool whose server the backend names (never one its text
+  names), and only for a narrow authorization-required message. Its text and link show as plain
+  text; a link only as a normalized http(s) address (none with credentials, other schemes or
+  hidden characters, which leave it an ordinary error), labelled *Link supplied by <server>*
+  unless it is one of the server's own addresses. Nothing opens it but your click.
 - **Your Slack token** is stored in the OS keychain and given only to Copilot as an MCP header;
   sessions receive only read-only Slack tools.
 - **GitHub**: workers use your `gh` and `git` sign-in (through the sandbox proxy when it is on).
