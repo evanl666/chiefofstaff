@@ -1071,8 +1071,8 @@ async def test_a_claude_workers_changed_mcp_server_is_off_for_it_not_a_wait(
 ):
     """As for a Copilot worker: what a sandboxed worker's folder's MCP server runs (a
     repository developing its own server) stays the worker's to build and edit; changed, that
-    server is off for it from its next process (Claude's disabledMcpjsonServers), said once,
-    never a wait."""
+    server is off for it from its next process (Claude's disabledMcpjsonServers), said once
+    under Handled for you, never a wait."""
     from test_round7_split import published
 
     starts = tmp_path / "starts.jsonl"
@@ -1107,8 +1107,9 @@ async def test_a_claude_workers_changed_mcp_server_is_off_for_it_not_a_wait(
         await until(lambda: ("report", "again") in harness.kinds(worker), 30)
         opened = [json.loads(line) for line in starts.read_text().splitlines()]
         assert [entry["disabled_servers"] for entry in opened] == [None, ["x"]]
-        line = "Its MCP server x changed in this worker's folder, so it runs without it."
-        assert ("notice", line) in harness.kinds(worker)
+        # Said quietly, under Handled for you with Turn on (E123), as for a Copilot worker.
+        [entry] = [e for e in runtime.handled.view() if e["kind"] == "servers"]
+        assert entry["text"].startswith("Kept its MCP server x off for “")
         assert worker not in runtime.settings_held, "never a wait"
     finally:
         await runtime.stop()
@@ -1213,13 +1214,14 @@ async def test_turning_the_sandbox_off_lets_a_claude_worker_held_for_its_setting
         await runtime.stop()
 
 
+@pytest.mark.usefixtures("sandbox_holds")
 async def test_a_replaced_git_folder_keeps_a_claude_worker_from_a_terminal(
     tmp_path, claude_on_path
 ):
-    """Its worktree's folder in the repository replaced since Chief of Staff first saw it (git
-    there could run what the worker put in its place): not handed to the owner's terminal,
-    whose Claude would run git there; said with Use this .git."""
-    harness, runtime, worker, _ = await claude_in_worktree(tmp_path)
+    """A sandboxed worker's worktree's folder in the repository replaced since Chief of Staff
+    first saw it (git there could run what the worker put in its place): not handed to the
+    owner's terminal, whose Claude would run git there; said with Use this .git."""
+    harness, runtime, worker, _ = await claude_in_worktree(tmp_path, sandboxed=True)
     try:
         await runtime.detach(worker)
         (checkout,) = runtime.workspaces.checkouts(harness.store.session(worker))

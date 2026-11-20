@@ -164,7 +164,9 @@ Settings → *Coding agents*). For such a worker:
   sent it, and any process of yours can give any name), never as yours or a worker's, can approve
   nothing, and starts a turn only if Chief of Staff admits it; messages between Chief of Staff's own workers go through it, with
   the limits of `tell_session`, and one to a session that isn't one of them asks you each time.
-- **A Codex worker's own changes to `.codex/` never load.** Codex reads a folder's `.codex/`
+- **A Codex worker's own changes to `.codex/` never load, with the sandbox on.** (Codex workers
+  run only without it, so for now their threads trust their folder's `.codex/` as your own Codex
+  sessions do: see *Folder settings without the sandbox*.) Codex reads a folder's `.codex/`
   when a thread starts or resumes there: a rule in it lets commands run without asking Chief of Staff, an MCP
   server runs its command, and its settings reach every command's environment. So each time a
   Codex worker's thread starts or resumes, Chief of Staff compares each `.codex/` folder Codex

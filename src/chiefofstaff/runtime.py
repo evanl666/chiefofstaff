@@ -2860,8 +2860,10 @@ class Runtime:
         """Whether a worker's folder settings (and the .git it can write) wait for the owner's
         word when they change: only while its commands run in the sandbox. Without it, a worker
         already runs commands as the owner: a hold there adds friction, not protection, and none
-        of the looks (settings_refusal, the glances) run."""
-        return self.sandboxed(row)
+        of the looks (settings_refusal, the glances) run. Whatever its agent: a Claude worker
+        without the sandbox is not guarded either (one with it runs in Claude's own sandbox, or
+        not at all, as a Codex worker can't yet)."""
+        return row["role"] == WORKER and self.sandbox_for(bool(row["slack"]))
 
     def sandbox_policy(self, row: dict) -> SandboxPolicy | None:
         """What a worker's shell commands may touch; None when they run unsandboxed, like the
@@ -3867,12 +3869,12 @@ class Runtime:
     async def agent_subagent(self, session_id: str, tool: str, arguments: Any) -> str:
         """Why a Claude worker's subagent may not start ("" when it may): its folder's settings
         changed (a glance, the full check only when that changed: settings_look, which stops
-        the worker; sandboxed only: settings_free), or the subagent's own server is off for it
-        (server_refusal)."""
+        the worker; a sandboxed one only: settings_guarded), or the subagent's own server is off
+        for it (server_refusal)."""
         row = self.store.find_session(session_id)
         if not row or row["closed_at"] or not row["cwd"] or row["role"] != WORKER:
             return ""
-        if self.settings_free(row):
+        if not self.settings_guarded(row):
             return self.server_refusal(row, tool, arguments)
         try:
             why = await asyncio.wait_for(self.settings_look(row), SETTINGS_SECONDS)
@@ -3884,15 +3886,13 @@ class Runtime:
     async def terminal_settings(self, row: dict, agent: str) -> str:
         """Why a Claude or Codex worker may not go to a terminal now ("" when it may): its
         folder's settings of that agent differ from what the owner last let workers use (the
-        owner's own session there would load them, with no check of Chief of Staff's; for a
-        sandboxed worker only: without the sandbox its commands ran as the owner), or a .git
-        there was replaced. Its timeline says so, with Use these settings."""
-        if agent not in {"claude", "codex"} or not row["cwd"]:
+        owner's own session there would load them, with no check of Chief of Staff's), or a
+        .git there was replaced. Its timeline says so, with Use these settings. A sandboxed
+        worker's only (settings_guarded): without the sandbox its commands ran as the owner."""
+        if agent not in {"claude", "codex"} or not row["cwd"] or not self.settings_guarded(row):
             return ""
         if replaced := await self.settings_thread(self.git_replaced, row):
             return self.git_replaced_said(row, replaced)
-        if not self.sandboxed(row):
-            return ""
         names = agent_settings(agent)
         verdict = await self.settings_verdict(row, names)
         if verdict is None:
@@ -6273,24 +6273,6 @@ class Runtime:
             logger.warning("No look at %s's folder: too many at once.", row["id"])
             return self.settings_unchecked(row, "too many checks at once; it's looked at again")
 
-    def settings_free(self, row: dict) -> bool:
-        """A Claude worker without the worker sandbox (the default): its folder's Claude
-        settings neither hold it nor are looked at, as it starts, at its turns and subagents,
-        nor before a terminal (the owner's choice: its commands run as the owner and could do
-        what those settings would). Sandboxed, they are held: Claude runs their hooks and
-        servers outside its sandbox."""
-        return self.agent(row["id"]) == "claude" and not self.sandboxed(row)
-
-    def settings_freed(self, row: dict):
-        """Nothing of its folder's settings holds it now (its sandbox turned off): a wait for
-        their word ends, and a server off for it is on again from its next process."""
-        self.settings_sigs.pop(row["id"], None)
-        self.settings_paths.pop(row["id"], None)
-        if row["id"] in self.servers_off:
-            self.servers_seen(row, {})
-            self.servers_said(row)
-        self.settings_unsaid(row["id"])
-
     def settings_unchecked(self, row: dict, why: str) -> str:
         """Its line when its folder could not be looked at: it waits until it can (said once)."""
         reason = f"This worker's folder can't be checked ({why})"
@@ -6306,16 +6288,6 @@ class Runtime:
             return line
         if (agent := self.agent(row["id"])) not in {COPILOT_AGENT, "claude"}:
             return ""  # (Codex: a thread doesn't trust such a folder, codex_settings.)
-        if self.settings_free(row):
-            self.settings_freed(row)
-            if not self.store.get(f"sent:{row['id']}"):
-                # Its folder as handed out, kept once before it runs anything there (as for
-                # any worker; no look at its turns): a sandboxed or Copilot worker there later
-                # compares with it, not with nothing.
-                top, cwd, _ = self.settings_place(row)
-                if settings_guard.load(self.store, top) is None:
-                    await self.settings_thread(self.settings_handout, row, top, cwd)
-            return ""
         names = agent_settings(agent)
         # Taken before they are read: a change while they are is a change at the next look.
         seen = await self.settings_thread(self.settings_signature, row)
@@ -9994,11 +9966,6 @@ class Runtime:
             # Other agents' workers do not run sandboxed, and act on their own or ask first only
             # where their version's check allows it: stopped at once, with their commands.
             stopped = await self.stop_ineligible()
-        if old.worker_sandbox != new.worker_sandbox:
-            # A Claude worker held for its folder's settings goes on once nothing holds it.
-            for session_id in list(self.settings_held):
-                if (row := self.store.find_session(session_id)) and self.settings_free(row):
-                    self.settings_freed(row)
         if self.agents and old.worker_yolo != new.worker_yolo:
             # Those following the default switched between acting on their own and Ask first,
             # which their agent takes up in a new process (agent_mode_changed).
