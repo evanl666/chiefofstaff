@@ -1066,6 +1066,49 @@ async def test_the_agent_chooses_its_sessions_ids_or_takes_ours(backend, tmp_pat
     assert [e.data.content for e in await resumed.get_events()] == ["Reply with just: ok", "ok"]
 
 
+ACME_AUTH = Path(__file__).resolve().parent.parent / "scripts" / "acme_auth_result_mcp.py"
+
+
+async def test_an_mcp_tools_error_result_is_a_failed_call_naming_its_server_and_tool(
+    backend, tmp_path
+):
+    """E116: an MCP tool whose result is an error (its account is not connected) is a failed
+    call with that text, and its start names its server and tool: Chief of Staff reads them
+    there (accounts.py), never in the result's text. (The stand-in Codex makes the call up.)"""
+    if isinstance(backend, AgentLikeBackend | ScriptedBackend):
+        pytest.skip("No MCP servers in a scripted backend.")
+    server = {
+        "type": "local",
+        "command": sys.executable,
+        "args": [str(ACME_AUTH)],
+        "env": {
+            "ACME_AUTH_MARKER": str(tmp_path / "never"),
+            "ACME_AUTH_URL": "https://auth.acme.test/connect",
+        },
+        "tools": ["*"],
+    }
+    session, turn = await open_session(backend, tmp_path, mcp_servers={"acme": server})
+    tool = "locked_search" if not real_codex(backend) and agent_like(backend) else "search_acme"
+    await session.send(
+        f"Call the MCP tool {tool} of acme with the query 'notes', once. Then reply with just: ok"
+    )
+    await turn.wait(240)
+    [start] = [
+        e.data
+        for e in turn.events
+        if e.type.value == "tool.execution_start" and getattr(e.data, "mcp_tool_name", None) == tool
+    ]
+    assert (getattr(start, "mcp_config_server_name", None) or start.mcp_server_name) == "acme"
+    [end] = [
+        e.data
+        for e in turn.events
+        if e.type.value == "tool.execution_complete" and e.data.tool_call_id == start.tool_call_id
+    ]
+    assert end.success is False
+    error = getattr(getattr(end, "error", None), "message", "") or ""
+    assert "Authorization required for Acme Search" in (end.result.content or error)
+
+
 # Codex's adapter: what it relies on from the app-server, on the stand-in CLI always and on the
 # owner's own Codex with CHIEFOFSTAFF_TEST_CODEX=1 (design: more-agents.md, section 7).
 

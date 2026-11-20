@@ -1,8 +1,8 @@
 """Local fake MCP server whose tool returns an account-connection error until authorized.
 
-Used only by scripts/live_auth_result.py. It runs over stdio, writes each call's outcome to the
-file ACME_AUTH_CALLS names, and treats ACME_AUTH_MARKER's existence as the browser step being
-complete.
+Used by scripts/live_auth_result.py and tests/test_backend_contract.py. It runs over stdio,
+writes each call's outcome to the file ACME_AUTH_CALLS names (when set), and treats
+ACME_AUTH_MARKER's existence as the browser step being complete.
 """
 
 import asyncio
@@ -26,7 +26,6 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
-                "required": ["query"],
             },
         )
     ]
