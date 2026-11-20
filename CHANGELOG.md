@@ -8,6 +8,17 @@
   now one sent that way after a Router or owner message is forwarded the same way. Routine
   progress stays quiet, and a task's card keeps its latest update with the four before it folded
   under *Earlier updates*, each with its time (reports from before this version too).
+- **An account an MCP tool needs connected is one card, not a question from every worker
+  (E116).** A tool can reach its server and still fail with "connect your account in a
+  browser"; each worker met it alone, your *done* reached one of them, and Watch for you stopped
+  trying it. Now every session it stops shares one card under Needs you, by server and account,
+  with the last error and how many sessions wait. *I've done it* has each of them retry once
+  (Watch for you scans again at once, from where each watch was last covered); another failure
+  updates the same card, and only a call that works closes it. While it waits, Watch for you
+  still tries every watch once a scan, keeps the window it could not read open, and says
+  *connection needed*, not *0 found*. The tool's text is untrusted: a card only for a failed
+  call of an MCP tool whose server the backend names, a link only as a plain http(s) address,
+  labelled when it is not the server's own, and opened only when you click it.
 
 ## 0.1.50 (2026-11-20)
 

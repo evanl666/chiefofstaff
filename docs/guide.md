@@ -619,6 +619,14 @@ notification:
 - **Forms and links**: an MCP tool asks for input, or for you to open a link.
 - **Sign-ins**: an MCP server needs OAuth. Sign in in the browser tab; the card closes by
   itself. Copilot keeps the sign-in for every session (see [SECURITY.md](../SECURITY.md)).
+- **Connections**: an MCP tool works but says an account must be connected, often "in a
+  browser". Every session it stops, Watch for you included, shares one card: the last error, how
+  many sessions wait, and its link (*Open link* only when you click it; *Link supplied by …*
+  when it is not the server's own address). Connect, then *I've done it*: each session retries
+  once, and the card closes when a retry works (another failure updates it). Watch for you
+  scans again at once, from where each watch was last covered; until then it still tries every
+  watch once a scan, and Settings says *connection needed*. A tool failure while Copilot's own
+  sign-in card for that server is open joins that card.
 - **A folder**: the Router is not sure where a task belongs.
 - **Approvals**: Slack replies and PR reviews drafted in your voice. Edit and *Send*; or,
   under **⋯**, *Ask to redo…* (say what should change, it is needed: the same session drafts it
