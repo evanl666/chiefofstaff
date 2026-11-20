@@ -8,7 +8,10 @@
   worker failed to start. Experimental mode turns on Copilot's extensions, which every worker asks
   for (it loads what your own sessions load), and the Copilot version Chief of Staff runs when
   your CLI is newer than it supports (1.0.112) cannot run them on its own. Its sessions now open
-  without extensions; on your own CLI, workers load them as before.
+  without extensions; on your own CLI, workers load them as before. Should Copilot still refuse
+  to resume one for its extensions, a fresh Copilot session goes on for it at once, told its task,
+  last report and folders from Chief of Staff's records; what you sent it goes there, once, and
+  its timeline stays.
 
 - **Security: a worker given your checkout only to read can't write there with a command
   either.** Its edits there were refused, but a command such as `echo y >> AGENTS.md` went

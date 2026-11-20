@@ -62,6 +62,7 @@ from .backend import (
     copilot_tree,
     copilot_trusts,
     end_processes,
+    extensions_refused,
     older,
     owner_tool_search,
     sandbox_supported,
@@ -184,6 +185,14 @@ def needs_trust(top: Path, cwd: Path) -> bool:
 
 # Copilot's own threshold for deferring MCP tools behind tool search (its SDK's default).
 COPILOT_DEFER_THRESHOLD = 30
+
+# A Copilot session that could not be resumed for the extensions it asks for (Runtime.
+# continue_fresh): what its worker shows meanwhile, and the line its timeline keeps.
+RECONNECTING = "Reconnecting this worker…"
+CONTINUED_FRESH = (
+    "Continued in a fresh Copilot session: the old one used an extension setup this Copilot "
+    "can't resume."
+)
 
 PROMPTS = {
     ROUTER: prompts.ROUTER,
@@ -3652,6 +3661,8 @@ class Runtime:
                         "there, then try again.",
                         0,
                     ) from None
+                if agent == COPILOT_AGENT and extensions_refused(exc):
+                    return await self.continue_fresh(row, copilot_id, exc)
                 if not self.store.get(f"fresh:{copilot_id}"):
                     raise
                 session = await self.without_unsupported_effort(
@@ -3699,6 +3710,69 @@ class Runtime:
             await self.workers.import_history(row, session)
         self.publish_session(self.store.session(session_id))
         return session
+
+    async def continue_fresh(self, row: dict, old: str, error: BaseException):
+        """Its Copilot session could not be resumed for the extensions it asks for, even
+        declined (backend.EXTENSIONS_REFUSED): a fresh one goes on as the same Chief of Staff
+        session (its timeline, tasks and folders stay), told what it needs from Chief of Staff's
+        records; what it was not given yet goes with that. Once: a fresh one failing so too is
+        said as it is. The caller holds its lifecycle lock."""
+        session_id = row["id"]
+        if self.store.get(f"continued:{session_id}") == old:
+            raise error
+        logger.warning("%s session %s could not be resumed (%s): a fresh one goes on.",
+                       row["role"], session_id, describe(error))  # fmt: skip
+        new = str(uuid4())
+        self.store.set(f"alias:{old}", session_id)
+        self.store.set(f"alias:{new}", session_id)  # Its events may arrive during creation.
+        before = self.store.session(session_id)["activity"]
+        if row["role"] == WORKER:
+            self.update_session(session_id, activity=RECONNECTING)
+        try:
+            session = await self.open_live(row, create=True, copilot=new)
+        except Exception:
+            self.store.delete(f"alias:{new}")
+            raise
+        finally:
+            if row["role"] == WORKER and self.store.session(session_id)["activity"] == RECONNECTING:
+                self.update_session(session_id, activity=before)
+        self.store.set(f"copilot:{session_id}", new)
+        self.store.set(f"continued:{session_id}", new)
+        if row["role"] == ROUTER:
+            self.store.delete(f"rotated:{session_id}")  # Nothing to go back to.
+            self.store.set(f"context:{session_id}", "0")
+            preamble = self.handover("that could not be resumed", upto_sent=True)
+        else:
+            preamble = self.continuation(row)
+        self.store.set(f"preamble:{session_id}", preamble)
+        self.add_message(session_id, "notice", CONTINUED_FRESH)
+        return session
+
+    def continuation(self, row: dict) -> str:
+        """What a fresh session of a worker (or Watchdog, Slack) needs from Chief of Staff's
+        records to go on where its earlier one was."""
+        lines = [
+            "You go on from an earlier session of yours that could not be resumed. This is "
+            "where it was; what it did stays done: don't do it again."
+        ]
+        lines.append(f"This session: “{row['title']}” ({row['role']}).")
+        if task := self.tasks.current(row["id"]):
+            lines.append(
+                f"Its task {task['id']} “{task['title']}” ({task['status']}): "
+                f"{clip_words(task['goal'], 2000)}"
+            )
+            if task["progress"]:
+                lines.append(f"Its progress: {clip_words(task['progress'], 1000)}")
+            if task["result"]:
+                lines.append(f"Its last report: {clip_words(task['result'], 1000)}")
+        if row["role"] == WORKER:
+            for checkout in self.workspaces.checkouts(row):
+                if path := checkout.get("path"):
+                    branch = f" (branch {checkout['branch']})" if checkout.get("branch") else ""
+                    lines.append(f"Checkout: {path}{branch}")
+        if row["cwd"]:
+            lines.append(f"Working folder: {row['cwd']}")
+        return wrap("system", "handover", "\n".join(lines))
 
     # The agent settings a worker's folder may carry (settings_guard): as Chief of Staff last
     # saw them, before every open and every turn.
@@ -4918,8 +4992,9 @@ class Runtime:
             window = info["long_context"]
         return max(ROUTER_CONTEXT, int(window * 0.8))
 
-    def handover(self, why: str = "whose context had grown long") -> str:
-        """What a new Router session needs to know, from Chief of Staff's records."""
+    def handover(self, why: str = "whose context had grown long", upto_sent: bool = False) -> str:
+        """What a new Router session needs to know, from Chief of Staff's records. `upto_sent`:
+        the conversation up to what it was given (what it was not, it is given after this)."""
 
         def clip(text: str, size: int = 240) -> str:
             text = " ".join((text or "").split())
@@ -5022,13 +5097,15 @@ class Runtime:
         # The conversation, newest first until the budget: everything the owner said (their
         # requests, facts to remember, preferences) matters most, so theirs are kept long.
         talk, size = [], 0
+        mark = int(self.store.get(f"sent:{router}") or 0)
+        unsent = {m["id"] for m in self.store.prompts(router, after=mark)} if upto_sent else set()
         for message in self.store.all(
             """SELECT * FROM messages WHERE session_id=?
             AND kind IN ('owner','update','assistant') ORDER BY id DESC LIMIT 2000""",
             (router,),
         ):
             meta = json.loads(message["meta"] or "{}")
-            if meta.get("internal"):
+            if meta.get("internal") or message["id"] in unsent:
                 continue
             text = clip(message["text"], 3000 if message["kind"] == "owner" else 600)
             if size + len(text) > HANDOVER_CHARS:
