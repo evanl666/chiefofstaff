@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.49 (2026-11-20)
 
 - **A worker runs a command you asked for, a sleep included.** A Codex worker skipped the
   `sleep 240` its task asked for, saying it must never sit and wait: that rule is about waiting
