@@ -261,6 +261,15 @@ FIXES: list[Allow] = [
     # 0.1.48 (E98, E89): what a task's Use these settings sends (null unless its worker waits for
     # that word), and whether a failed one is out of Needs you.
     Allow("tasks' settings and aged", data=r"\.tasks\[\d+\]\.(settings|aged)$"),
+    # 0.1.50: a command the task itself asks a worker to run, a sleep included, runs as asked (a
+    # Codex worker skipped the owner's `sleep 240`, live C5, citing "Never sit and wait").
+    Allow(
+        "workers' rule on waiting: a command the task asks for runs",
+        data=r"\.system_message\.content$",
+        lines=r"^  (reviews or long runs \(a Flyte or Airflow run, an eval\)\. (Do everything else "
+        r"first and check|A command the task itself asks you)|to run, a sleep included, is not "
+        r"waiting: run it as asked\. Do everything else first and check)$",
+    ),
     # 0.1.48 (E111): follow_thread says what a PR merged or closed already brings.
     Allow(
         "follow_thread's description",

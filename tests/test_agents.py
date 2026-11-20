@@ -661,6 +661,19 @@ def test_a_codex_worker_is_told_in_codex_terms_what_copilot_is_told_in_its_own()
     assert prompts.worker_on("copilot", prompts.WORKER) == prompts.WORKER
 
 
+def test_a_command_the_task_asks_for_is_run_not_skipped_as_waiting():
+    """ "Never sit and wait" is about CI, deploys, reviews and runs: a Codex worker (live C5)
+    skipped the `sleep 240` the owner asked for, citing it. A command the task itself asks to
+    run, a sleep included, runs as asked, on every agent."""
+    for agent in ("copilot", "codex"):
+        said = " ".join(prompts.worker_on(agent, prompts.WORKER).split())
+        rule = said[said.index("Never sit and wait") :]
+        assert (
+            "A command the task itself asks you to run, a sleep included, is not waiting: run"
+            " it as asked." in rule[:400]
+        ), agent
+
+
 async def test_a_codex_worker_has_its_words_and_a_copilot_worker_its_own(tmp_path, codex_on_path):
     harness, runtime, worker, _ = await codex_worker(tmp_path)
     try:

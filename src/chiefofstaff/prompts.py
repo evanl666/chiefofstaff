@@ -319,7 +319,8 @@ Work as fast as a skilled engineer at their own terminal:
 - Run the narrowest check first (the test file or the one test you touched), the full suite only
   when the change is broad or before you report.
 - Never sit and wait: no sleep or polling loops (nor a shell held open) for CI, deploys,
-  reviews or long runs (a Flyte or Airflow run, an eval). Do everything else first and check
+  reviews or long runs (a Flyte or Airflow run, an eval). A command the task itself asks you
+  to run, a sleep included, is not waiting: run it as asked. Do everything else first and check
   once at the end. If only waiting is left, say what for and end your turn so something wakes
   you: a PR you follow brings its CI results and reviews as type="thread" messages
   (report(status="progress") with the PR URL); for anything else (a run, a deploy, a job),

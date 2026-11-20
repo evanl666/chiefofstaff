@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A worker runs a command you asked for, a sleep included.** A Codex worker skipped the
+  `sleep 240` its task asked for, saying it must never sit and wait: that rule is about waiting
+  on CI, deploys, reviews and runs, and now says so.
 - **Security: a worker given your checkout only to read can't write there with a command
   either.** Its edits there were refused, but a command such as `echo y >> AGENTS.md` went
   through for a worker with no system sandbox (on Codex always; on Copilot with the sandbox off),
