@@ -301,8 +301,8 @@ class Keeping:
         found = await self.give_task(target, task)
         if not found:
             return (
-                "Not kept moving: it is not the owner's own PR from the same repository (or is a "
-                "draft, or stacked)."
+                "Not kept moving: it is not the owner's own open PR from the same repository (or "
+                "is a draft, or stacked)."
             )
         self.store.set(f"handed:{target}", task_id)
         self.store.set(f"clickfirst:{target}", "1")

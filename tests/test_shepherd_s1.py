@@ -563,6 +563,17 @@ async def test_a_pr_already_kept_by_another_task_is_not_taken(world):
     assert runtime.shepherd.control.claim(TARGET)["holder"] == world.task
 
 
+async def test_a_closed_pr_is_not_taken_and_the_router_hears_why(world):
+    """A PR merged or closed is not kept moving (give_task reads its state): the Router is not
+    told it is someone else's."""
+    runtime = await world.start()
+    runtime.store.execute("DELETE FROM pr_claims WHERE target=?", (TARGET,))  # (Unclaimed.)
+    world.github.state, world.github.merged = "MERGED", True
+    words = await runtime.shepherd.take("acme/api#12", world.task)
+    assert words.startswith("Not kept moving") and "own open PR" in words, words
+    assert runtime.shepherd.control.claim(TARGET) is None
+
+
 async def test_the_owners_other_prs_are_found_and_one_handed_to_a_worker(world):
     from chiefofstaff import discovery
 
