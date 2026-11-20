@@ -64,6 +64,10 @@ from chiefofstaff.workspaces import protected_git_paths
 
 REAL = os.environ.get("CHIEFOFSTAFF_TEST_COPILOT") == "1"
 MODEL = os.environ.get("CHIEFOFSTAFF_TEST_MODEL", "claude-haiku-5.5")
+# The Copilot CLI the real contract runs on: the installed one (protocol 4 from 1.0.113, spoken
+# through compat.adapt), or another (Copilot's own runtime 1.0.112, protocol 3, from the SDK's
+# cache), so that the contract runs on both protocols.
+COPILOT_CLI = os.environ.get("CHIEFOFSTAFF_TEST_COPILOT_CLI") or "copilot"
 REAL_CODEX = os.environ.get("CHIEFOFSTAFF_TEST_CODEX") == "1"
 
 
@@ -97,7 +101,9 @@ def test_every_repository_file_the_installed_copilot_reads_is_held_or_known():
     names fails this until it is held (policy.REPOSITORY_SETTINGS) or known to run nothing."""
     from chiefofstaff.policy import REPOSITORY_SETTINGS
 
-    copilot = shutil.which("copilot")
+    copilot = shutil.which(COPILOT_CLI)
+    if copilot and "copilot-runtime" in copilot:
+        pytest.skip("Copilot's own runtime has no help to read.")
     assert copilot, "the Copilot CLI is not installed"
     topics = ("config", "mcp", "lsp", "extensions", "permissions", "commands", "environment")
     commands = ("plugin", "mcp", "skill", "instruction", "lsp")
@@ -161,7 +167,7 @@ async def backend(request, tmp_path, monkeypatch):
     if request.param == "copilot":
         if not REAL:
             pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 to check the real Copilot backend.")
-        backend = copilot_backend("copilot")
+        backend = copilot_backend(COPILOT_CLI)
     elif request.param == "codex":
         if not REAL_CODEX:
             pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check the Codex adapter on real Codex.")
@@ -477,7 +483,7 @@ async def test_a_sandboxed_workers_commands_write_nothing_in_home_but_their_own(
     harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Build")
-    backend = copilot_backend("copilot")
+    backend = copilot_backend(COPILOT_CLI)
     await backend.start()
     try:
         for slack in (0, 1):
@@ -572,7 +578,7 @@ async def test_many_mcp_tools_are_searched_and_chief_of_staffs_own_stay_loaded(t
         "tool_search": {"defer_threshold": now["tool_search"]["defer_threshold"]},
         "tools": [dataclasses.replace(tool, defer=None) for tool in now["tools"]],
     }
-    backend = copilot_backend("copilot")
+    backend = copilot_backend(COPILOT_CLI)
     await backend.start()
     try:
         [model] = [m for m in await backend.list_models() if m.id == MODEL]
@@ -603,6 +609,55 @@ async def test_many_mcp_tools_are_searched_and_chief_of_staffs_own_stay_loaded(t
     assert facts["tools_truncated"] == 0 and "tool_search_tool" in sent
     assert own <= sent, f"Chief of Staff's own left out: {sorted(own - sent)}"
     assert not any(name.startswith("acme-") for name in sent), "the MCP tools are searched"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shell script")
+async def test_copilot_set_up_ahead_runs_once_the_owners_cli_updates_past_this_sdk(
+    tmp_path, monkeypatch
+):
+    """compat.py on real Copilot: Chief of Staff starts on the owner's CLI (the installed one:
+    protocol 4 from 1.0.113, spoken through the adapter) and sets up Copilot FALLBACK_CLI in the
+    background (a real download, into a cache of the test's own). When that CLI then updates
+    itself past this SDK (a stand-in of protocol 5), the next start runs that Copilot at once:
+    no set-up said, signed in, and a session on it runs a turn."""
+    if not REAL:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 to check the real Copilot backend.")
+    from test_runtime import fake_copilot
+
+    from chiefofstaff import backend as backend_module
+
+    monkeypatch.setattr(backend_module, "PREFETCH", True)
+    monkeypatch.setenv("COPILOT_CLI_EXTRACT_DIR", str(tmp_path / "runtime"))
+    owners = copilot_backend(COPILOT_CLI)
+    await owners.start()
+    try:
+        assert owners.fallback is None
+        assert (await owners.get_auth_status()).isAuthenticated
+        version = await owners.version()
+    finally:
+        await owners.stop()
+    setting_up = backend_module.PROVISIONED[backend_module.FALLBACK_CLI]
+    path = Path(await asyncio.wait_for(asyncio.wrap_future(setting_up), 900))
+    assert await asyncio.to_thread(path.is_file) and path.is_relative_to(tmp_path / "runtime")
+    updated = fake_copilot(tmp_path / "bin" / "copilot", "1.0.130", 5)
+    backend = copilot_backend(updated)
+    notes: list[str] = []
+    backend.note = notes.append
+    backend.created = []  # type: ignore[attr-defined]
+    await backend.start()
+    try:
+        assert backend.fallback == ("1.0.130", backend_module.FALLBACK_CLI), version
+        assert notes == [], "set up ahead: nothing to wait for"
+        assert (await backend.get_auth_status()).isAuthenticated
+        session, turn = await open_session(backend, tmp_path)
+        await session.send("Reply with just: ok")
+        await turn.wait(300)
+        assert "ok" in turn.said().lower()
+    finally:
+        for session_id in backend.created:  # type: ignore[attr-defined]
+            with contextlib.suppress(Exception):
+                await backend.client.delete_session(session_id)
+        await backend.stop()
 
 
 TOOL_FACTS = {"tool_count", "tool_tokens", "tools_truncated", "prompt_tokens"}
@@ -719,7 +774,7 @@ async def test_copilots_base_profile_reads_what_chief_of_staff_leaves_out(tmp_pa
     harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Build")
-    backend = copilot_backend("copilot")
+    backend = copilot_backend(COPILOT_CLI)
     await backend.start()
     try:
         for slack in (0, 1):
@@ -782,7 +837,7 @@ async def test_what_is_denied_in_copilots_own_places_is_refused_to_a_slack_reade
     harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Answer")
-    backend = copilot_backend("copilot")
+    backend = copilot_backend(COPILOT_CLI)
     await backend.start()
     try:
         for slack in (1, 0):
