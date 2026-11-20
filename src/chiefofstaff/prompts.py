@@ -255,9 +255,12 @@ How to route:
   answer right away from what each is doing now and said last: one "- " line per task, never one
   blended summary: its title, its state (working / waiting for X / needs you / done), what it
   is doing now, and what comes next. If the owner needs a worker to answer a new question or
-  give a fresh update, send it with message_session and explicitly ask it to reply with
-  report(status="answer"); never promise that report(status="progress") reaches the owner:
-  routine progress is quiet and stays in the worker's session and on its task card.
+  give a fresh update about a task already under way or finished, send it with message_session
+  (task="note" or "continue") and explicitly ask it to reply with report(status="answer");
+  never promise that report(status="progress") reaches the owner: routine progress is quiet and
+  stays in the worker's session and on its task card. A new task's instructions (spawn_worker,
+  or message_session task="new") never ask for status="answer": a task's result, even one
+  that is only an answer or a message to pass on, is always report(status="done").
 - PRs ("is #12 green?", "status of my PRs"): call check_prs with them (list_sessions shows each
   task's PRs) and answer from it at once: it reads GitHub now. Never answer from what an
   earlier report said about checks, and never send a worker to look. To keep an eye on a PR or
@@ -353,9 +356,11 @@ Communicating:
   get more tasks on the same subject: each is reported on separately. type="message" adds to the
   task it names; type="results" are reports of tasks yours waited for; from="owner" is the owner
   directly. They may arrive while you work; take them into account. type="cancelled" means stop
-  work on that task and do not report on it. When the Router asks you something (a note or a
-  message), answer with report(status="answer", task_id=…): it reaches the Router and the owner
-  and changes no task (your reply in chat reaches neither). Work it asks for you report as usual.
+  work on that task and do not report on it. When the Router asks you something about a task
+  you were given (a note or a message), answer with report(status="answer", task_id=…): it
+  reaches the Router and the owner and changes no task (your reply in chat reaches neither).
+  Work it asks for you report as usual. A task you were given (type="task") ends with
+  report(status="done"), even when its result is only an answer: never with "answer".
 - type="thread": new activity in a Slack thread, DM or PR you follow (review comments, CI
   results, replies, new commits). You follow every PR your tasks name or you open. Its task
   attribute names the task it is about: report with that task_id. Never handle it silently:
@@ -398,8 +403,9 @@ Communicating:
   Take them seriously; if you are legitimately waiting on something outside, call check_back
   (or say which PR or thread you follow); if you wait for the owner, report blocked.
 - Use the report tool to talk to the Router. status="answer" for the whole answer to what the
-  Router asked you (or the owner, when they ask for a report): it always reaches them and
-  changes no task state or result. status="progress" only for rare, meaningful milestones: it
+  Router asked you about a task you were given (or the owner, when they ask for a report): it
+  always reaches them and changes no task state or result; never for the task itself, whose
+  result is "done". status="progress" only for rare, meaningful milestones: it
   shows on the task's card, and neither the Router nor the owner is told. Use "question" when
   the Router should decide (scope, priorities, other workers); "blocked" when you cannot
   proceed (say what is missing); "failed" when the task cannot be done at all (what it needs

@@ -319,10 +319,10 @@ FIXES: list[Allow] = [
         "report summary's answer guidance",
         data=r"\.options\.tools\[\d+\]\.parameters\.properties\.summary\.description$",
         value="What happened, the answer, or the one concrete question. With status answer: the "
-        "whole answer to the Router's or owner's message; it changes no task state. With status "
-        "done: the whole result the owner reads (tables, lists, every row asked for), up to "
-        "30,000 characters; never only a pointer to a file. With status failed: why it cannot "
-        "be done, and what you tried",
+        "whole answer to the Router's or owner's message about a task; it changes no task state "
+        "(a task's own result is status done). With status done: the whole result the owner "
+        "reads (tables, lists, every row asked for), up to 30,000 characters; never only a "
+        "pointer to a file. With status failed: why it cannot be done, and what you tried",
     ),
     # 0.1.51 (live agentsB B3, live_smooth B, approvals A3): a new worker when the owner asks for
     # one in so many words, also next to related workers: the Router's rule (in its role, under

@@ -376,10 +376,10 @@ class Report(NestedArguments):
     status: Literal["answer", "progress", "question", "blocked", "done", "failed"]
     summary: str = Field(
         description="What happened, the answer, or the one concrete question. With status "
-        "answer: the whole answer to the Router's or owner's message; it changes no task state. "
-        "With status done: the whole result the owner reads (tables, lists, every row asked "
-        "for), up to 30,000 characters; never only a pointer to a file. With status failed: "
-        "why it cannot be done, and what you tried"
+        "answer: the whole answer to the Router's or owner's message about a task; it changes no "
+        "task state (a task's own result is status done). With status done: the whole result the "
+        "owner reads (tables, lists, every row asked for), up to 30,000 characters; never only a "
+        "pointer to a file. With status failed: why it cannot be done, and what you tried"
     )
     task_id: str = Field(
         default="",

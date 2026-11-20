@@ -12,9 +12,10 @@
   nothing about its task. Before, an answer it sent as a progress report stayed in its own chat;
   now one sent that way after a Router or owner message is forwarded the same way. What a PR or
   thread it follows, or its check-back, brings stays news on its task (under *Needs you* once
-  the task is finished), whatever the worker calls it. Routine progress stays quiet, and a
-  task's card keeps its latest update with the four before it folded under *Earlier updates*,
-  each with its time (reports from before this version too).
+  the task is finished), whatever the worker calls it; and an answer to the task it was given,
+  with nothing asked of it since, is that task's result: the task finishes. Routine progress
+  stays quiet, and a task's card keeps its latest update with the four before it folded under
+  *Earlier updates*, each with its time (reports from before this version too).
 - **An account an MCP tool needs connected is one card, not a question from every worker
   (E116).** A tool can reach its server and still fail with "connect your account in a
   browser"; each worker met it alone, your *done* reached one of them, and Watch for you stopped
