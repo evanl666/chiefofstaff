@@ -39,6 +39,9 @@ P4  Continue with Codex from a Copilot worker with an uncommitted file: the prev
     one line; the new worker reads that file in its copy; the first stays open
 P5  Codex signed out, named for a task: one line with the command (codex login), nothing started
     elsewhere; Run on Copilot instead starts it there
+P6  Codex signed out, work for a Codex worker the owner has (P1's): the same card, for that
+    worker, nothing started elsewhere; Continue with Copilot goes on with its work there, with
+    what it was given, and answers
 
     env LIVE_AGENTS_ROOT=<tree>/.cos-live \
         uv run --extra claude --with playwright python scripts/live_roles.py R|S|W|F [R1 R3 …]
@@ -353,6 +356,7 @@ SOUTH = "How many data rows of data/sales.csv are for the south region? Don't ch
 # sends to the worker that answered it (a follow-up, not a new worker: live run ca, P3 and P5).
 VERSION = "What version does pyproject.toml give the project? Just the version. Don't change files."
 MONEY = "Which function does textkit/money.py define? Just its name. Don't change any files."
+TOTAL = "How many data rows does data/sales.csv have in all, every region? Just the number."
 
 
 async def p1_chip_with_model(ctx: Ctx):
@@ -364,6 +368,7 @@ async def p1_chip_with_model(ctx: Ctx):
     assert view.get("model_choice") == model or view.get("model") == model, (model, view)
     task = await la.task_ended(ctx, worker, "south's rows on Codex")
     assert "180" in task["result"], task["result"]
+    ctx.notes["codex_worker"] = worker  # (P6's.)
     log(f"P1 passed on {model}")
 
 
@@ -489,6 +494,8 @@ async def p5_named_not_ready(ctx: Ctx):
 
         found = await wait_for("the card with its fix", card, 300, ctx.app)
         log(f"P5: {found['text']!r} {found['meta'].get('fix')}")
+        # For a Codex worker it had (P6's case), not a new one: not this check's case either.
+        assert not found["meta"].get("worker"), f"given to a worker it had: {found['text']!r}"
         assert found["meta"]["fix"]["command"] == "codex login", found["meta"]
         now = {s["id"] for s in (await la.state(ctx))["sessions"] if s["role"] == "worker"}
         assert now <= before, "nothing started elsewhere"
@@ -504,12 +511,73 @@ async def p5_named_not_ready(ctx: Ctx):
     log("P5 passed")
 
 
+async def p6_worker_signed_out(ctx: Ctx):
+    worker = ctx.notes.get("codex_worker")
+    if not worker:  # (P6 alone: a Codex worker of its own first.)
+        router, mark = await send(ctx, f"In {ctx.project}: {SOUTH}", agent="codex")
+        worker = await la.assigned(ctx, router, mark)
+        await la.worker_on(ctx, worker, "codex")
+        await la.task_ended(ctx, worker, "south's rows on Codex")
+    await la.until("it is idle", lambda: la.idle(ctx, worker), 300)
+    title = (await la.session(ctx, worker))["title"]
+    ctx.notes["flag"].touch()
+    await la.settings(ctx, agents={"codex": {"enabled": False}})
+    await la.settings(ctx, agents={"codex": {"enabled": True}})
+    try:
+        before = {s["id"] for s in (await la.state(ctx))["sessions"] if s["role"] == "worker"}
+        router, mark = await say_text(
+            ctx, f"Tell the worker “{title}” (on Codex), about the same file: {TOTAL}"
+        )
+
+        async def card():
+            rows = [m for m in await la.messages(ctx, router) if m["id"] > mark]
+            started = [m["text"] for m in rows if m["kind"] == "notice"
+                       and m["text"].startswith(("Started", "Queued"))]  # fmt: skip
+            if started:
+                raise AssertionError(f"a new worker, not the one named: {started[0][:160]!r}")
+            found = next((m for m in rows if m["meta"].get("agent_refused")), None)
+            if found and found["meta"].get("worker") != worker:
+                raise AssertionError(f"not the card for its worker: {found['text']!r}")
+            return found
+
+        found = await wait_for("the card for its worker", card, 300, ctx.app)
+        log(f"P6: {found['text']!r} {found['meta'].get('fix')}")
+        assert "did not get this on Codex" in found["text"], found["text"]
+        assert found["meta"]["fix"]["command"] == "codex login", found["meta"]
+        now = {s["id"] for s in (await la.state(ctx))["sessions"] if s["role"] == "worker"}
+        assert now <= before, "nothing started elsewhere"
+        await ctx.app.post(
+            f"/api/agent-refusals/{found['meta']['agent_refused']}", {"action": "copilot"}
+        )
+
+        async def continued():
+            rows = await la.messages(ctx, router)
+            return next((m["meta"]["session_id"] for m in rows if m["id"] > found["id"]
+                         and m["kind"] == "notice" and m["meta"].get("session_id")
+                         and m["text"].startswith("Continued “")), None)  # fmt: skip
+
+        moved = await wait_for("its work goes on on Copilot", continued, 120, ctx.app)
+        await la.worker_on(ctx, moved, "copilot")
+        task = await la.task_ended(ctx, moved, "the total on Copilot, with what it was given")
+        assert "540" in task["result"], task["result"]
+    finally:
+        ctx.notes["flag"].unlink(missing_ok=True)
+    log("P6 passed")
+
+
 SCENARIOS: dict[str, list] = {
     "R": [r1_told_then_moved, r2_routing, r3_task_and_report, r4_decision, r5_back_to_copilot],
     "S": [s1_told_then_moved, s2_routing, s3_task_and_report, s4_decision, s5_back_to_copilot],
     "W": [w1_watch_for_you],
     "F": [f1_signed_out, f2_back_by_itself],
-    "P": [p1_chip_with_model, p2_compare, p3_restart_on, p4_continue_left_open, p5_named_not_ready],
+    "P": [
+        p1_chip_with_model,
+        p2_compare,
+        p3_restart_on,
+        p4_continue_left_open,
+        p5_named_not_ready,
+        p6_worker_signed_out,
+    ],
 }
 
 
@@ -558,7 +626,7 @@ async def run_shard(
         folder, flag = codex_wrapper(root)
         env["PATH"] = f"{folder}:{os.environ.get('PATH', '')}"
         if shard == "P":
-            flag.unlink()  # Signed in, until P5.
+            flag.unlink()  # Signed in, until P5 and P6.
     app = App(root / "data", root / "log", env, agents=True)
     await app.start()
     ctx = Ctx(shard, app, root, home, project, truth)
