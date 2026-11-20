@@ -629,6 +629,7 @@ class Runtime:
         self.rotate_lock = asyncio.Lock()
         self.work_root = store.directory / "work"
         self.workspaces = Workspaces(store, self.work_root)
+        self.workspaces.guarding = self.sandbox_for
         workspaces_module.GIT_GUARD = weakref.WeakMethod(self.git_guard)
         workspaces_module.CLONE_REMADE = weakref.WeakMethod(self.clone_remade)
         self.workspaces.github_token = lambda repo: self.github.token_for(repo)
@@ -944,6 +945,9 @@ class Runtime:
                     # Copilot stopped (crashed, killed) and started again: what the turns it cut
                     # short used is in their logs, not in events that came by.
                     await self.workers.sync_all_usage()
+                # Held for their folder's settings by an earlier version (or with the sandbox
+                # on then): without it now, they go on (release_unguarded).
+                await self.release_unguarded()
                 await self.resume_working()
                 try:
                     await self.ensure_slack_session()
@@ -2050,14 +2054,25 @@ class Runtime:
 
     def sandboxed(self, row: dict) -> bool:
         """Whether a worker's shell commands run in the sandbox (sandbox_policy)."""
+        return row["role"] == WORKER and self.sandbox_for(bool(row["slack"]))
+
+    def sandbox_for(self, slack: bool) -> bool:
+        """Whether a worker's commands run in the sandbox, as Settings say and where there is
+        one: those of workers that read Slack (`slack`) always, as what they read must not leave
+        through a command."""
         return bool(
-            row["role"] == WORKER
-            # Workers that read Slack always: what they read must not leave through a command.
-            and (self.store.settings().worker_sandbox or row["slack"])
+            (self.store.settings().worker_sandbox or slack)
             and self.sandbox_host
             and self.backend
             and self.backend.capabilities.sandbox
         )
+
+    def settings_guarded(self, row: dict) -> bool:
+        """Whether a worker's folder settings (and the .git it can write) wait for the owner's
+        word when they change: only while its commands run in the sandbox. Without it, a worker
+        already runs commands as the owner: a hold there adds friction, not protection, and none
+        of the looks (settings_refusal, the glances) run."""
+        return self.sandboxed(row)
 
     def sandbox_policy(self, row: dict) -> SandboxPolicy | None:
         """What a worker's shell commands may touch; None when they run unsandboxed, like the
@@ -2182,16 +2197,9 @@ class Runtime:
         past the sandbox's paths (a folder renamed over `.github`) is found before the tool
         that would load it (a custom agent's `task`, the lsp tool, an extensions reload) and
         before its folder's own hook scripts' answers stand. Not for a worker without the
-        sandbox (its commands run as the owner, and it would pay a few ms a tool): its tools
-        are glanced at as they start (Events.tool_start), its turns checked before they start;
-        unless a language server or a custom agent's is off for it (the tool that would start
-        it, denied)."""
-        if row["role"] != WORKER or not row["cwd"]:
-            return False
-        return sandboxed or any(
-            server.startswith("lsp/") or "@" in server
-            for server in self.servers_off.get(row["id"], {})
-        )
+        sandbox: its commands run as the owner, and nothing of its folder's settings is
+        checked (settings_guarded)."""
+        return bool(row["role"] == WORKER and row["cwd"] and sandboxed)
 
     def cache_plan(self, row: dict) -> caches.Plan:
         """A sandboxed worker's caches (caches.plan): what they add to its sandbox, and its
@@ -2518,7 +2526,9 @@ class Runtime:
                 )
             checkout = found
         else:
-            checkout = await self.workspaces.clone_checkout(workspace, slug, repo)
+            checkout = await self.workspaces.clone_checkout(
+                workspace, slug, repo, slack=bool(row["slack"])
+            )
         self.update_session(caller, repos=json.dumps([*checkouts, checkout]))
         self.add_message(caller, "notice", f"Added {checkout['path']} ({checkout['branch']})")
         result = {key: checkout[key] for key in ("path", "branch", "base")}
@@ -3980,9 +3990,14 @@ class Runtime:
     async def settings_refusal(self, row: dict) -> str:
         """Before a Copilot worker opens or starts a turn: why not (its folder's Copilot
         settings differ from what the owner last let it use: Copilot would load them), "" when
-        it may; said in its timeline. Within SETTINGS_SECONDS: past that, its folder can't be
+        it may; said in its timeline. Only for a sandboxed one (settings_guarded): "" at once
+        for any other. Within SETTINGS_SECONDS: past that, its folder can't be
         checked, and it waits."""
         if row["role"] != WORKER or not row["cwd"]:
+            return ""
+        if not self.settings_guarded(row):
+            if row["id"] in self.settings_held:
+                self.settings_unsaid(row["id"])  # (The sandbox was turned off meanwhile.)
             return ""
         try:
             return await asyncio.wait_for(self.settings_refused(row), SETTINGS_SECONDS)
@@ -4306,7 +4321,13 @@ class Runtime:
     def git_after_turn(self, session_id: str):
         """Its turn over: a .git it replaced is said now, and it waits (not at its next turn)."""
         row = self.store.find_session(session_id)
-        if row and row["role"] == WORKER and row["cwd"] and (replaced := self.git_replaced(row)):
+        if (
+            row
+            and row["role"] == WORKER
+            and row["cwd"]
+            and self.settings_guarded(row)
+            and (replaced := self.git_replaced(row))
+        ):
             self.git_replaced_said(row, replaced)
             self.background(self.settings_stop(session_id))
 
@@ -4344,6 +4365,9 @@ class Runtime:
         """The owner's word on a .git a worker's folder had replaced (git_replaced): what is
         there now is what Chief of Staff compares with from now on; the worker goes on."""
         row = self.store.session(session_id)
+        if not self.settings_guarded(row):
+            await self.release_unguarded()
+            return "Nothing waits: without the sandbox, workers use their folders as they are."
         replaced = await self.settings_thread(self.git_replaced, row)
         if not replaced:
             said = "It is as it was: nothing to change."
@@ -4462,6 +4486,8 @@ class Runtime:
         folder's settings (some lstat calls, off the event loop), against its last full check's;
         when that changed, the full check, whose line says why the tool may not run ("" when it
         may: a script Copilot made executable)."""
+        if not self.settings_guarded(row):
+            return ""
         if paths := self.settings_paths.get(row["id"]):
             # (Where its last full check found them: the files' places alone, no snapshot read.)
             now = await self.settings_thread(settings_guard.signature, paths[0], paths[1],
@@ -4615,7 +4641,7 @@ class Runtime:
         rounds: stopped at once if its folder's settings changed meanwhile (a glance, the full
         check only when that changed: settings_look), or if they could not be looked at."""
         row = self.store.find_session(session_id)
-        if not row or row["closed_at"] or not row["cwd"]:
+        if not row or row["closed_at"] or not row["cwd"] or not self.settings_guarded(row):
             return
         try:
             await asyncio.wait_for(self.settings_look(row), SETTINGS_SECONDS)
@@ -4633,7 +4659,10 @@ class Runtime:
 
     async def codex_settings(self, row: dict) -> list[str]:
         """The folders whose Codex settings differ from what Chief of Staff last saw (a Codex
-        thread is not to trust them); its timeline says so."""
+        thread is not to trust them); its timeline says so. None of them without the sandbox:
+        its threads trust them as the owner's own Codex sessions do."""
+        if not self.settings_guarded(row):
+            return []
         verdict = await self.settings_verdict(row, CODEX_SETTINGS)
         if verdict is None:
             self.settings_unsaid(row["id"])
@@ -4656,9 +4685,13 @@ class Runtime:
         these settings"): they become what Chief of Staff compares with, and the worker goes on
         with what waited for it. Only when they are still what the owner was shown; ones too
         many to check are used unchecked from then on (until they can be checked again)."""
+        row = self.store.session(session_id)
+        if not self.settings_guarded(row):
+            # (A line from before the sandbox was turned off.)
+            await self.release_unguarded()
+            return "Nothing waits: without the sandbox, workers use their folder's settings."
         if digest.startswith("servers:"):
             return await self.accept_servers(session_id, digest)
-        row = self.store.session(session_id)
         names = REPOSITORY_SETTINGS if self.agent(session_id) == COPILOT_AGENT else CODEX_SETTINGS
         verdict = await self.settings_verdict(row, names)
         if verdict is None:
@@ -4834,6 +4867,36 @@ class Runtime:
             await self.workers.close(session_id)
         finally:
             self.settings_orphans_closing.discard(session_id)
+
+    async def release_unguarded(self):
+        """Workers held for their folder's settings (or a .git they could write) that are not
+        guarded now (settings_guarded: the sandbox is off, after an update or turned off in
+        Settings) go on: what the owner wrote them goes out, but for a task that is over or
+        another's, which is dropped (settle_held_chat)."""
+        for row in self.store.open_sessions(WORKER):
+            if self.settings_guarded(row):
+                continue
+            self.servers_off.pop(row["id"], None)  # (What a look found, before.)
+            stopped = any(
+                task["status"] == "waiting"
+                and self.store.get(f"stopped:{task['id']}") == SETTINGS_STOP
+                for task in self.tasks.for_session(row["id"])
+            )
+            if (
+                row["id"] not in self.settings_held
+                and row["activity"] != SETTINGS_WAIT
+                and not stopped
+            ):
+                continue
+            self.settings_sigs.pop(row["id"], None)
+            for key in (f"gitappeared:{row['id']}", f"gitwatch:{row['id']}"):
+                self.store.delete(key)
+            # A .git it replaced is what Chief of Staff's own git compares with from now on.
+            for path in await self.settings_thread(self.git_replaced, row):
+                self.git_record(path, identity_of(path) + self.git_served(path, identity_of(path)))
+            self.settings_held.add(row["id"])
+            await self.settle_held_chat(row, closing=False)
+            self.settings_unsaid(row["id"])  # (It goes on: settings_go_on.)
 
     def carried_theirs(self, row: dict, top: Path, now: dict[str, dict]):
         """Settings carried into a worker's worktree from the owner's checkout that the owner
@@ -7040,6 +7103,9 @@ class Runtime:
             # next turn.
             self.send.switch(new.send_to_chief)
             await self.refresh(ROUTER)
+        if old.worker_sandbox and not new.worker_sandbox:
+            # Without the sandbox nothing waits for its folder's settings: held ones go on.
+            self.background(self.release_unguarded())
         if self.agents and (
             old.worker_sandbox != new.worker_sandbox or old.worker_yolo != new.worker_yolo
         ):

@@ -564,7 +564,7 @@ async def test_a_worker_with_agent_settings_it_wrote_starts_no_turn_until_the_ow
     tmp_path, git_repo, monkeypatch, name
 ):
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -599,7 +599,7 @@ async def test_agent_settings_a_live_worker_changes_stop_it_before_its_next_turn
     turn is not sent; the worker is stopped and let go of, saying why. The owner's "Use these
     settings" goes on with it (no Go on to click after)."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -631,7 +631,7 @@ async def test_agent_settings_are_checked_where_every_turn_starts(tmp_path, git_
     """Not only when a message comes: a send of what it has not received (a resume, a start
     from the queue, a take-back), a message sent again, and a turn Copilot starts by itself."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -687,7 +687,7 @@ async def test_a_worker_at_work_when_chief_of_staff_stopped_waits_for_the_owner(
     """Mid-turn at a restart, its folder changed meanwhile: it does not go on (nor fail); it
     waits at rest, and goes on once the owner says to use them."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -714,7 +714,9 @@ async def test_a_queued_worker_whose_folder_changed_waits_for_the_owner(
     """Started from the queue with its session still open, it is not: it waits there, saying
     why, and is not tried again until the owner says to use them."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], max_workers=1))
+    harness = Harness(
+        tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)], max_workers=1)
+    )
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -752,7 +754,7 @@ async def test_send_now_waits_for_the_owners_word_on_a_changed_folder(
     is held for its next message, as a stopped worker's is: Send now does not start its turn
     (Use these settings does, and the held message goes with it), and says why."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     harness.client.capabilities = replace(harness.client.capabilities, echoes=True)
     try:
@@ -876,7 +878,7 @@ async def test_committed_agent_settings_still_load(tmp_path, git_repo, monkeypat
     run("git", "add", ".", cwd=git_repo)
     run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "link", cwd=git_repo)
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -910,13 +912,59 @@ async def test_committed_agent_settings_still_load(tmp_path, git_repo, monkeypat
         await runtime.stop()
 
 
+async def test_workers_held_for_their_settings_go_on_once_the_sandbox_is_off(
+    tmp_path, git_repo, monkeypatch
+):
+    """Without the sandbox nothing waits for a folder's settings: at the next start, a worker
+    held for them goes on with what the owner wrote it; what was written about a task that
+    ended meanwhile is dropped (said on Home), never sent later."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        going, cwd = await isolated(runtime, harness, git_repo)
+        ended, other = await isolated(runtime, harness, git_repo)
+        for worker, folder, text in [(going, cwd, "Keep going"), (ended, other, "And this")]:
+            await at_rest(runtime, harness, worker)
+            plant(folder, ".mcp.json")
+            await runtime.owner_send(worker, text)
+            assert worker in runtime.settings_held
+        await runtime.owner_send(going, "Also the docs")
+    finally:
+        await runtime.stop()
+    # Its task over while Chief of Staff was stopped (another version, say).
+    harness.store.execute("UPDATE tasks SET status='cancelled' WHERE session_id=?", (ended,))
+    again = Harness(
+        tmp_path / "data", Settings(worker_sandbox=False, projects=[str(git_repo)]),
+        client=harness.client,
+    )  # fmt: skip
+    runtime = await again.connect()
+    try:
+        await settle(runtime)
+        assert not runtime.settings_held
+        assert again.store.session(going)["activity"] == ""
+        assert "Keep going" in again.session(going).sent[-1]
+        assert "Also the docs" in again.session(going).sent[-1]
+        assert not any("And this" in text for text in again.session(ended).sent)
+        (dropped,) = [m for m in again.store.messages(ended) if m["text"] == "And this"]
+        assert dropped["meta"]["dropped"]
+        assert any(
+            text.startswith("Your message “And this” to “")
+            and text.endswith("won't be sent later.")
+            for kind, text in again.kinds(again.router_id)
+            if kind == "notice"
+        )
+    finally:
+        await runtime.stop()
+
+
 async def test_agent_settings_a_worker_commits_or_merges_are_still_changed(
     tmp_path, git_repo, monkeypatch
 ):
     """What it was handed is what counts, not its git: committed in its worktree, or merged
     from upstream (a teammate's), a change waits for the owner's word."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -950,7 +998,7 @@ async def test_agent_settings_in_the_owners_checkout_are_what_was_there_when_han
     same."""
     trusting(tmp_path, monkeypatch, git_repo)
     plant(git_repo, ".claude/settings.local.json")
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     added = runtime.add_message
     threads = []
@@ -1001,7 +1049,7 @@ async def test_a_workers_commit_makes_no_baseline_in_the_owners_checkout(
 ):
     """Its HEAD is the worker's to move: a plant it commits there is a plant still."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         info = await spawn(runtime, harness.router_id, title="Look", instructions="l",
@@ -1023,7 +1071,7 @@ async def test_agent_settings_in_a_checkout_handed_out_before_snapshots_were_kep
     """No snapshot yet (a worker given it by an older version): nothing there is taken by its
     date (a worker's `mv` keeps one); what is there is the owner's to look at once."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         info = await spawn(runtime, harness.router_id, title="Look", instructions="l",
@@ -1053,7 +1101,7 @@ async def test_the_owners_own_session_taken_up_keeps_their_local_settings(
     commit(git_repo, ".gitignore", ".claude/settings.local.json\n")
     plant(git_repo, ".claude/settings.local.json")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data")
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True))
     runtime = await harness.connect()
     try:
         adopted = await runtime.workers.adopt(owners_session(harness, git_repo))
@@ -1088,7 +1136,7 @@ async def test_the_owners_own_session_waits_at_rest_when_its_settings_changed(
     plant(git_repo, ".claude/settings.local.json")
     trusting(tmp_path, monkeypatch, git_repo)
     await asyncio.sleep(0.01)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         info = await spawn(runtime, harness.router_id, title="Look", instructions="l",
@@ -1144,7 +1192,7 @@ async def test_settings_too_many_to_check_are_the_owners_to_use_unchecked(
     unchecked; once they can be checked again, they are checked from there."""
     trusting(tmp_path, monkeypatch, git_repo)
     monkeypatch.setattr(settings_guard, "MOST_ENTRIES", 3)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -1203,7 +1251,7 @@ async def test_a_second_folder_of_the_owners_checkout_is_the_owners_to_look_at_o
     commit(git_repo, "web/.claude/settings.json", '{"permissions": {}}')
     trusting(tmp_path, monkeypatch, git_repo)
     projects = [str(git_repo / "api"), str(git_repo / "web")]
-    harness = Harness(tmp_path / "data", Settings(projects=projects))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=projects))
     runtime = await harness.connect()
     try:
         api = await spawn(runtime, harness.router_id, title="Look api", instructions="l",
@@ -1238,7 +1286,7 @@ async def test_a_worker_waiting_for_its_settings_says_so_to_the_router_and_the_o
     """At rest when its folder changed, sent new work: it shows as waiting for the owner (not
     done), and the Router hears it, once."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -1269,7 +1317,7 @@ async def test_a_waiting_worker_goes_on_once_its_settings_are_as_they_were(
     """The owner removes what the worker wrote, rather than using it: the button (or the
     queue's next run) finds nothing changed, and every worker that waited goes on."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -1335,7 +1383,7 @@ async def test_agent_settings_carried_into_a_worktree_are_the_owners(
     commit(git_repo, ".worktreeinclude", ".claude/settings.local.json\n")
     plant(git_repo, ".claude/settings.local.json")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -1362,7 +1410,7 @@ async def test_agent_settings_changed_between_the_top_and_its_folder_count(
     sub.mkdir()
     commit(git_repo, "app/README.md", "x")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(sub)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(sub)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, sub)
@@ -1384,7 +1432,7 @@ async def test_agent_settings_changed_in_an_untrusted_folder_wait_too(
     """Whether Copilot trusts the folder is not taken on trust (a worktree of a trusted
     repository is trusted by Copilot itself): the same."""
     trusting(tmp_path, monkeypatch, tmp_path / "elsewhere")
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -1471,7 +1519,7 @@ async def test_checking_agent_settings_runs_nothing_of_a_workers_repository(
 async def test_a_worker_folder_outside_git_is_checked(tmp_path, git_repo, monkeypatch):
     """Its own folder (no repository: a task's, a workspace) in a folder the owner trusts."""
     trusting(tmp_path, monkeypatch, tmp_path)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         info = await spawn(runtime, harness.router_id, title="Look", instructions="l")
@@ -1492,7 +1540,7 @@ async def test_news_for_a_worker_whose_settings_changed_waits_for_it(
 ):
     """It keeps following the PR; the news goes to it once the owner says to use them."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -1565,7 +1613,7 @@ async def test_settings_a_worker_moves_into_place_are_the_owners_to_look_at(
     run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "demo", cwd=git_repo)
     trusting(tmp_path, monkeypatch, git_repo)
     projects = [str(git_repo / "api"), str(git_repo / "web")]
-    harness = Harness(tmp_path / "data", Settings(projects=projects))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=projects))
     runtime = await harness.connect()
     try:
         api = await spawn(runtime, harness.router_id, title="Look api", instructions="l",
@@ -1655,7 +1703,7 @@ async def test_a_setting_linked_out_of_its_folder_or_special_is_never_taken(
     """A link out of the folder (what it leads to can change with nothing there changing) and
     a FIFO (any content at each read): the worker waits until they are gone, with no button."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -1707,7 +1755,7 @@ async def test_a_link_out_of_the_repository_is_held_by_where_it_leads(
     commit(git_repo, ".mcp.json", json.dumps(server))
     commit(git_repo, "server.py", "print('serve')\n")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     workspaces = str((tmp_path / "data").resolve())
     monkeypatch.setattr(runtime, "writable_roots", lambda: (workspaces,))
@@ -1757,7 +1805,7 @@ async def test_a_committed_link_out_of_the_repository_is_never_taken(
     run("git", "add", ".mcp.json", cwd=git_repo)
     run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "l", cwd=git_repo)
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         (tmp_path / "data" / "work" / "workspaces").mkdir(parents=True, exist_ok=True)
@@ -1798,7 +1846,7 @@ async def test_the_files_settings_run_are_held_with_them(tmp_path, git_repo, mon
     for name, text in HOOKED.items():
         commit(git_repo, name, text)
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -2018,7 +2066,7 @@ async def test_settings_carried_from_the_owners_checkout_are_what_it_holds(
     commit(git_repo, ".worktreeinclude", ".mcp.json\n.claude/settings.local.json\n")
     plant(git_repo, ".claude/settings.local.json")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         info = await spawn(runtime, harness.router_id, title="One", instructions="f",
@@ -2047,7 +2095,10 @@ async def test_settings_a_worker_put_in_a_folder_are_never_shown_as_the_owners(
     reads as the owner's own)."""
     commit(git_repo, "sub/README.md", "x")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo), str(git_repo / "sub")]))
+    harness = Harness(
+        tmp_path / "data",
+        Settings(worker_sandbox=True, projects=[str(git_repo), str(git_repo / "sub")]),
+    )
     runtime = await harness.connect()
     try:
         info = await spawn(runtime, harness.router_id, title="One", instructions="f",
@@ -2122,7 +2173,9 @@ async def test_a_workers_edit_of_a_file_its_settings_run_is_refused(
     commit(git_repo, ".github/hooks/guard.json", json.dumps(hook))
     commit(git_repo, "guard.sh", "#!/bin/sh\necho '{}'\n")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_yolo=True))
+    harness = Harness(
+        tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)], worker_yolo=True)
+    )
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -2139,7 +2192,7 @@ async def test_a_git_folder_a_worker_replaced_waits_for_the_owner(tmp_path, git_
     worker's with a config that runs code). Its identity, kept as handed out, tells it: the
     worker waits, and Chief of Staff runs no git there, until the owner says to use it."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         info = await spawn(runtime, harness.router_id, title="Fix", instructions="f",
@@ -2257,7 +2310,7 @@ async def test_a_server_the_worker_develops_is_off_for_it_after_a_build_never_a_
     commit(git_repo, ".mcp.json", json.dumps(
         {"mcpServers": {"self": {"command": "node", "args": ["dist/index.js"]}}}))  # fmt: skip
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
@@ -2314,8 +2367,8 @@ async def test_a_language_or_agent_server_off_for_a_worker_is_never_started(
 ):
     """Copilot starts a language server as its lsp tool first needs it, a custom agent's MCP
     servers as the agent runs: off for the worker (what they run changed), the tool that
-    would start them is denied before it runs (Chief of Staff's pre-tool hook: for a worker
-    without the sandbox, only while one of those is off)."""
+    would start them is denied before it runs (Chief of Staff's pre-tool hook, as for every
+    sandboxed worker)."""
     lsp = {"command": "node", "args": ["lsp/server.js"], "fileExtensions": {".x": "x"}}
     commit(git_repo, ".github/lsp.json", json.dumps({"lspServers": {"x": lsp}}))
     commit(git_repo, "lsp/server.js", "// a server\n")
@@ -2323,12 +2376,11 @@ async def test_a_language_or_agent_server_off_for_a_worker_is_never_started(
            "    command: node\n    args: [tools/agent.js]\n---\nAn agent.\n")  # fmt: skip
     commit(git_repo, "tools/agent.js", "// a server\n")
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
         await settle(runtime)
-        assert "hooks" not in harness.session(worker).options
         lsp = {"toolName": "lsp", "toolArgs": {"file": "a.x"}}
         task = {"toolName": "task", "toolArgs": {"agent_type": "a", "prompt": "hi"}}
         other = {"toolName": "task", "toolArgs": {"agent_type": "explore", "prompt": "hi"}}
@@ -3349,8 +3401,8 @@ async def test_copilot_asks_first_before_every_tool_of_a_sandboxed_worker_only(
 ):
     """Every sandboxed worker's tools wait for Chief of Staff's pre-tool hook (a setting moved
     in past the sandbox's paths is found before the tool that would load it). One without the
-    sandbox is not asked first (its commands run as the owner; a few ms a tool): unless a
-    language server or a custom agent's is off for it (an MCP server off needs no tool's)."""
+    sandbox is never asked first: its commands run as the owner, and nothing of its folder's
+    settings is checked (no server is ever off for it)."""
     monkeypatch.setattr(workspaces_module, "SANDBOX_PLATFORM", platform)
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)], worker_sandbox=True))
@@ -3362,11 +3414,9 @@ async def test_copilot_asks_first_before_every_tool_of_a_sandboxed_worker_only(
         assert "hooks" in harness.session(worker).options and worker in runtime.pre_tool_on
         harness.store.save_settings(Settings(projects=[str(git_repo)], worker_sandbox=False))
         assert "hooks" not in runtime.options(row)
-        runtime.servers_off[worker] = {"mcp/s": [".mcp.json"]}
-        assert "hooks" not in runtime.options(row)
-        for server in ("lsp/x", "mcp/t@a"):
+        for server in ("mcp/s", "lsp/x", "mcp/t@a"):
             runtime.servers_off[worker] = {server: ["server.js"]}
-            assert "hooks" in runtime.options(row), server
+            assert "hooks" not in runtime.options(row), server
     finally:
         await runtime.stop()
 
@@ -3517,7 +3567,7 @@ async def test_a_model_round_whose_look_fails_stops_the_worker(
 
     monkeypatch.setattr(runtime_module, "SETTINGS_SECONDS", 0.3)
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, _ = await isolated(runtime, harness, git_repo)
@@ -3561,7 +3611,7 @@ async def test_a_look_at_a_folder_past_its_time_makes_the_worker_wait(
 
     monkeypatch.setattr(runtime_module, "SETTINGS_SECONDS", 0.3)
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     never = asyncio.Event()
     try:
@@ -3764,28 +3814,43 @@ async def test_a_worktree_made_again_under_its_name_is_no_replaced_git(
         await runtime.stop()
 
 
-async def test_a_worker_without_the_sandbox_is_glanced_at_as_each_tool_starts(
+async def test_a_worker_without_the_sandbox_is_never_held_nor_looked_at(
     tmp_path, git_repo, monkeypatch
 ):
-    """Copilot doesn't wait for Chief of Staff before an unsandboxed worker's tools: each one's
-    start is a glance at its settings, off Copilot's path; a change stops it there."""
+    """Without the sandbox a worker runs commands as the owner: a hook or server it puts in its
+    folder holds nothing (that would be friction, not protection), and nothing of its folder's
+    settings is read, kept or looked at: not as it is made, before a turn, as a tool or a
+    model round starts, nor after a turn."""
     trusting(tmp_path, monkeypatch, git_repo)
     harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
     runtime = await harness.connect()
+    looks: list[str] = []
+    for name in ("settings_verdict", "settings_signature", "git_replaced", "settings_read"):
+        real = getattr(runtime, name)
+        monkeypatch.setattr(
+            runtime,
+            name,
+            lambda *a, _real=real, _name=name, **k: looks.append(_name) or _real(*a, **k),
+        )
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
         await settle(runtime)
         session = harness.session(worker)
         assert "hooks" not in session.options and worker not in runtime.pre_tool_on
-        session.emit("tool.execution_start", tool_name="bash", tool_call_id="c0",
-                     arguments={"command": "ls"})  # fmt: skip
-        await settle(runtime)
-        assert runtime.states.is_live(worker)
         plant(cwd, ".github/hooks/h.json")
+        plant(cwd, ".mcp.json")
         session.emit("tool.execution_start", tool_name="bash", tool_call_id="c1",
                      arguments={"command": "ls"})  # fmt: skip
+        session.emit("subagent.started", agent_name="p")
+        session.emit("assistant.turn_start")
         await settle(runtime)
-        assert session.aborted and not runtime.states.is_live(worker)
+        assert runtime.states.is_live(worker) and not session.aborted
+        await at_rest(runtime, harness, worker)
+        await runtime.owner_send(worker, "Go on")
+        assert runtime.states.is_live(worker) and "Go on" in session.sent[-1]
+        assert worker not in runtime.settings_held and not settings_notices(harness, worker)
+        assert looks == []
+        assert not harness.store.keys(settings_guard.KEY), "no snapshot kept"
     finally:
         await runtime.stop()
 
@@ -3796,7 +3861,7 @@ async def test_a_model_round_reads_no_settings_unless_the_glance_changed(
     """Each model round of a turn (assistant.turn_start) glances at the folder's settings; the
     full check (every file read) runs only when that glance found a change."""
     trusting(tmp_path, monkeypatch, git_repo)
-    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
     runtime = await harness.connect()
     try:
         worker, cwd = await isolated(runtime, harness, git_repo)
