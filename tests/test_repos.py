@@ -1233,6 +1233,47 @@ async def test_workers_held_for_their_settings_go_on_once_the_sandbox_is_off(
         await runtime.stop()
 
 
+async def test_a_worker_held_a_quarter_hour_in_its_own_worktree_goes_on_in_a_fresh_one(
+    tmp_path, git_repo, monkeypatch
+):
+    """No hours-long wait for the owner's word: held 15 minutes in a worktree Chief of Staff
+    made, its task goes on in a new worker, in a fresh worktree from the base (what it planted
+    is not there), with what the owner wrote it for that task; it closes; Home says so once.
+    In the owner's own checkout it waits for their word."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        task = task_of(harness, worker)
+        await settle(runtime)
+        await runtime.detach(worker)  # (At work on its task; let go of.)
+        own = await spawn(runtime, harness.router_id, title="Fix in place", instructions="f",
+                          project=str(git_repo), in_place=True)  # fmt: skip
+        await at_rest(runtime, harness, own["session_id"])
+        for held, folder in [(worker, cwd), (own["session_id"], git_repo)]:
+            plant(folder, ".github/hooks/p.json")
+            await runtime.owner_send(held, "Also the retry path")
+            assert held in runtime.settings_held
+        soon = time.time() + runtime_module.SETTINGS_MOVE_SECONDS - 60
+        await runtime.move_long_held(soon)
+        assert not harness.store.session(worker)["closed_at"], "not yet"
+        await runtime.move_long_held(time.time() + runtime_module.SETTINGS_MOVE_SECONDS + 1)
+        await settle(runtime)
+        assert harness.store.session(worker)["closed_at"]
+        new = harness.store.get(f"replacedby:{task}")
+        moved_to = harness.store.one("SELECT session_id FROM tasks WHERE id=?", (new,))
+        fresh = harness.store.session(moved_to["session_id"])
+        assert not (Path(fresh["cwd"]) / ".github" / "hooks" / "p.json").exists()
+        assert "Also the retry path" in harness.session(fresh["id"]).sent[-1]
+        lines = [t for k, t in harness.kinds(harness.router_id) if "waited 15 minutes" in t]
+        assert len(lines) == 1 and "fresh checkout" in lines[0]
+        assert own["session_id"] in runtime.settings_held, "the owner's checkout waits"
+        assert not harness.store.session(own["session_id"])["closed_at"]
+    finally:
+        await runtime.stop()
+
+
 async def test_agent_settings_a_worker_commits_or_merges_are_still_changed(
     tmp_path, git_repo, monkeypatch
 ):
