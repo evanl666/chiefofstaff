@@ -148,7 +148,14 @@ async def scenario_d_cancelled_while_held(app: App, project: Path):
         f"/api/sessions/{worker}/messages", {"text": "Also count the files in textkit."}
     )
     assert sent["meta"].get("settings_hold"), sent["meta"]
-    await app.post(f"/api/tasks/{task['id']}/cancel", {"text": "Not needed after all."})
+    cancel = f"/api/tasks/{task['id']}/cancel"
+    try:
+        await app.post(cancel, {"text": "Not needed after all."})
+    except RuntimeError as error:
+        # Its result came just now: asked once, the owner cancels again, as it says (r70).
+        if "cancel again" not in str(error):
+            raise
+        await app.post(cancel, {"text": "Not needed after all."})
 
     async def closed():
         return (await app.get(f"/api/sessions/{worker}"))["closed_at"]
