@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **When you ask for a new worker, you get one.** "A new worker, a question only…", "Start one
+  worker for exactly this…", 新开一个 worker: asked for in so many words, in any language, the
+  Router starts a new worker even when one already worked on that project or topic, and says
+  why with your words (*new because …*). Before, its rule to reuse a worker that knows the
+  subject won over what you said, and the request went to that worker as a new task.
 - **A worker's answers and progress updates are no longer lost.** Asked something by the
   Router or by you, a worker answers with an *Answer/Update*: it reaches Home once and changes
   nothing about its task. Before, an answer it sent as a progress report stayed in its own chat;

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import Harness, call_tool, env, said, settle, task_of
 
-from chiefofstaff import catalog
+from chiefofstaff import catalog, prompts
 from chiefofstaff.digest import digest
 from chiefofstaff.events import describe_step, describe_tool
 from chiefofstaff.models import DraftDecision, Settings
@@ -257,6 +257,53 @@ async def test_spawning_next_to_related_workers_needs_a_reason(tmp_path):
     assert research in refused.text_result_for_llm
     await call_tool(runtime, "message_session", router, session_id=research, text="its history")
     assert harness.store.messages(router)[-1]["text"] == "Continued in “Research OpenHands agent”"
+
+
+async def test_the_owner_asking_for_a_new_worker_is_reason_enough_next_to_related_ones(
+    tmp_path,
+):
+    """Live (agentsB B3, live_smooth B, approvals A3): "A new worker, a question only…" and "Start
+    one worker for exactly this…" went to the project's existing worker as a new task: reuse
+    ("even when it is a different question") won over the owner's words. Asked for in so many
+    words, in any language, a new worker is started, why_new quoting them; what the Router is
+    told next to related workers, and spawn_worker's refusal, say so too."""
+    rule = " ".join(prompts.ROUTER.split())
+    assert (
+        "When the owner asks for a new worker in so many words (a new, fresh or separate worker, "
+        '"one worker for exactly this", 新开一个 worker, in any language), start one: '
+        "spawn_worker, with why_new quoting their words. Never give that request to an existing "
+        "worker with message_session"
+    ) in rule
+    assert "Reuse before you spawn (unless the owner asked for a new worker: see above)." in rule
+    assert "the owner asking for a new worker is reason enough (quote their words)" in rule
+    project = tmp_path / "app"
+    project.mkdir()
+    harness = Harness(tmp_path / "data", Settings(projects=[str(project)]))
+    runtime = await harness.connect()
+    router = harness.router_id
+    first = (await spawn(runtime, router, "Add login", project=str(project)))["session_id"]
+    await call_tool(runtime, "report", first, status="done", summary="Login added.")
+    await runtime.owner_send(router, "新开一个 worker, 只回答问题: app 的登录用的是什么?")
+    hint = " ".join(harness.session(router).sent[-1].split())
+    assert first in hint
+    assert (
+        "Start a new worker only if none does, or when the owner asks for a new worker in so "
+        "many words: then always, with why_new quoting them."
+    ) in hint
+    refused = await call_tool(runtime, "spawn_worker", router, title="登录方式",
+                              instructions="只回答问题", project=str(project))  # fmt: skip
+    said = " ".join(refused.text_result_for_llm.split())
+    assert refused.result_type == "failure" and first in said
+    assert said.startswith(
+        "Error: Related workers exist. If the owner asked for a new worker in so many words (a "
+        "new, fresh or separate one, one worker for exactly this, in any language), that is "
+        "reason enough: call spawn_worker again with why_new quoting their words"
+    ), said
+    second = await spawn(runtime, router, "登录方式", instructions="只回答问题",
+                         project=str(project), why_new="你说要新开一个 worker")  # fmt: skip
+    assert second["session_id"] != first
+    notices = [m["text"] for m in harness.store.messages(router) if m["kind"] == "notice"]
+    assert notices[-1] == "Started “登录方式” · new because 你说要新开一个 worker"
 
 
 async def test_the_router_hears_about_related_workers(harness):

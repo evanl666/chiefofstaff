@@ -183,6 +183,9 @@ Chinese included). For work on a subject a worker already knows, the Router eith
   change with its own branch and PR, or work that must run in parallel. It gets the earlier
   tasks' results, folders and files, not their whole conversations.
 
+When you ask for a new worker in so many words ("a new worker", "one worker for exactly this",
+新开一个 worker), you get one, however related an earlier worker is; *new because* quotes you.
+
 `spawn_worker` refuses once when related workers exist, so the Router decides explicitly; so
 does a new task for a worker given one in the last half hour ("oh wait, one more thing" is
 more of that task), unless the Router says why it is another. The timeline shows *New task …

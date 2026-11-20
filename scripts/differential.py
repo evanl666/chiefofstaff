@@ -324,6 +324,30 @@ FIXES: list[Allow] = [
         "30,000 characters; never only a pointer to a file. With status failed: why it cannot "
         "be done, and what you tried",
     ),
+    # 0.1.51 (live agentsB B3, live_smooth B, approvals A3): a new worker when the owner asks for
+    # one in so many words, also next to related workers: the Router's rule (in its role, under
+    # the system messages' entry below), the line under the related workers it is shown, and
+    # spawn_worker's why_new.
+    Allow(
+        "related workers' line: a new worker when the owner asks for one",
+        data=r"(\.prompt|^backend\.turns\.router:[^.]*)$",
+        lines=r"^If this request concerns the same project, repo or topic as one of them, send it "
+        r"to that worker with message_session \(a closed one reopens with its context and "
+        r"files\)\. Start a new worker only if none does(\.|, or when the owner asks for a new "
+        r"worker in so many words: then always, with why_new quoting them\.)$",
+    ),
+    Allow(
+        "spawn_worker's why_new: at once when the owner asks for a new worker",
+        data=r"\.tools\[\d+\]\.parameters\.properties\.why_new\.description$",
+        value="After spawn_worker listed related workers: why none of them should take this "
+        "(different subject, an independent change that needs its own PR, or work that must run "
+        "in parallel with theirs). At once when the owner asked for a new worker in so many "
+        "words: their words, quoted. The owner reads it after “new because”, so a short phrase "
+        "that goes on from there, said to them (“a different repository”, “you asked for a "
+        "separate PR”), never your reasoning (not “separate decision task, no code change”). In "
+        "the language the owner writes in: to an owner who writes Chinese, in Chinese (“你要单独"
+        "的 PR”), or it is not shown",
+    ),
     Allow("Router and worker answer/report rules", data=r"\.system_message\.content$"),
     # E116: an account Watch for you could not use and the owner has not connected yet (null
     # while there is none).

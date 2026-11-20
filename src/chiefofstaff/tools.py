@@ -182,9 +182,10 @@ class SpawnWorker(BaseModel):
     )
     why_new: str = Field(
         default="",
-        description="Only after spawn_worker listed related workers: why none of them should "
-        "take this (different subject, an independent change that needs its own PR, or work "
-        "that must run in parallel with theirs). " + WHY_NEW_WORDS,
+        description="After spawn_worker listed related workers: why none of them should take "
+        "this (different subject, an independent change that needs its own PR, or work that "
+        "must run in parallel with theirs). At once when the owner asked for a new worker in so "
+        "many words: their words, quoted. " + WHY_NEW_WORDS,
     )
     replaces: list[str] = Field(
         default_factory=list,
@@ -1664,14 +1665,17 @@ class Tools:
             if related:
                 # Routing to the worker that already knows the subject matters: decide explicitly.
                 raise ValueError(
-                    "Related workers exist. If this is about the same subject as one of them, "
-                    "send it there with message_session instead (a closed one reopens with its "
-                    "context and files; one without a branch takes its own worktree with "
-                    "add_repo to change code, so needing a worktree is no reason for a new "
-                    "worker). A code change on another subject (another feature, function or "
-                    "bug, even in the same project) is not theirs: on their branch it would ship "
-                    "in the same PR. Then call spawn_worker again with why_new.\n"
-                    + json.dumps(related, ensure_ascii=False)
+                    "Related workers exist. If the owner asked for a new worker in so many words "
+                    "(a new, fresh or separate one, one worker for exactly this, in any "
+                    "language), that is reason enough: call spawn_worker again with why_new "
+                    "quoting their words, and give it to none of them. Otherwise, if this is "
+                    "about the same subject as one of them, send it there with message_session "
+                    "instead (a closed one reopens with its context and files; one without a "
+                    "branch takes its own worktree with add_repo to change code, so needing a "
+                    "worktree is no reason for a new worker). A code change on another subject "
+                    "(another feature, function or bug, even in the same project) is not "
+                    "theirs: on their branch it would ship in the same PR. Then call "
+                    "spawn_worker again with why_new.\n" + json.dumps(related, ensure_ascii=False)
                 )
         session_id = str(uuid4())
         slack = (params.slack and self.runtime.slack.configured()) or untrusted
@@ -2953,7 +2957,8 @@ class Tools:
             + "\n".join(lines)
             + "\nIf this request concerns the same project, repo or topic as one of them, send it "
             "to that worker with message_session (a closed one reopens with its context and "
-            "files). Start a new worker only if none does."
+            "files). Start a new worker only if none does, or when the owner asks for a new "
+            "worker in so many words: then always, with why_new quoting them."
         )
 
     async def t_find_sessions(self, params: FindSessions, caller: str):

@@ -41,9 +41,10 @@ from chiefofstaff.store import Store
 COMMAND = Path(sys.executable).parent / "chiefofstaff"
 
 # The Router's system message in a fresh store, as 0.1.38 sent it (and since, how to write a task
-# kept out of its title, E44; a worker's Answer/Update, E115): while Send to Chief is off it must
-# not change by a byte. (Change it here only with a deliberate change to the Router's prompt.)
-ROUTER_PROMPT = (25974, "cf7a0b5aaffe8bbdc3287b69498749f7603c458bd88ac89f8b1d389780268d6e")
+# kept out of its title, E44; a worker's Answer/Update, E115; a new worker when the owner asks for
+# one): while Send to Chief is off it must not change by a byte. (Change it here only with a
+# deliberate change to the Router's prompt.)
+ROUTER_PROMPT = (26477, "2f8b8ad3d3af6fe1fe206d5f36f03e453da1c7da2ca8f9258c340b883b34de89")
 
 HELP = """\
 usage: chiefofstaff [-h] [--version] [--port PORT] [--data-dir DATA_DIR] [--no-browser] [--demo]
