@@ -3363,6 +3363,9 @@ class Workspaces:
         # a closed worker's worktrees must stay as they are ("" when they need not).
         self.on_release: Callable[[dict, list[str], list[dict]], None] | None = None
         self.holds: Callable[[dict], str] | None = None
+        # Whether a worker (one that reads Slack, or not) runs sandboxed, the one place its
+        # folder's agent settings are checked (Runtime.settings_guarded); None: as if it does.
+        self.guarding: Callable[[bool], bool] | None = None
         # The folders programs run in, read once for a whole cleanup pass (see storage.py).
         self.known_cwds: set[str] | None = None
 
@@ -3644,7 +3647,7 @@ class Workspaces:
                     raise
                 checkout["admin"] = admin
             self.store.delete(REMOVING + tree)
-            if not row["slack"]:
+            if not row["slack"] and self.keeps(slack=False):
                 # What it carries is the owner's, as at its first making: kept as now, as far
                 # as the owner's checkout holds it so (vet_carried).
                 await asyncio.to_thread(settings_guard.refresh, self.store, Path(tree), carried)
@@ -3885,13 +3888,19 @@ class Workspaces:
             "admin": admin,
             "carried": carried,
         }
-        # The agent settings it is given, as Chief of Staff made it (settings_guard), what it
-        # carried from the owner's checkout only as the owner's checkout holds it.
-        await asyncio.to_thread(self.keep_settings, tree, Path(checkout["path"]))
-        await asyncio.to_thread(self.vet_carried, tree, top, [*carried, *copied])
+        if self.keeps(slack=not carry):
+            # The agent settings it is given, as Chief of Staff made it (settings_guard), what
+            # it carried from the owner's checkout only as the owner's checkout holds it.
+            await asyncio.to_thread(self.keep_settings, tree, Path(checkout["path"]))
+            await asyncio.to_thread(self.vet_carried, tree, top, [*carried, *copied])
         if copy:
             checkout |= {"copy": start, "left_out": left}
         return checkout
+
+    def keeps(self, slack: bool) -> bool:
+        """Whether a folder made for a worker has its agent settings kept as it was made: only
+        for one that runs sandboxed (guarding), where they are checked."""
+        return self.guarding is None or self.guarding(slack)
 
     def staging(self) -> contextlib.AbstractAsyncContextManager[Path]:
         """A folder of Chief of Staff's own, beside workers' folders (the same disk, so one
@@ -3945,7 +3954,9 @@ class Workspaces:
         (settings_guard.keep), as they are now: each agent's."""
         settings_guard.keep(self.store, top, cwd, (REPOSITORY_SETTINGS, CODEX_SETTINGS))
 
-    async def clone_checkout(self, workspace: Path, slug: str, repo: str) -> dict:
+    async def clone_checkout(
+        self, workspace: Path, slug: str, repo: str, slack: bool = False
+    ) -> dict:
         """Clone a repository that is not on this machine into a worker's workspace."""
         url, name = clone_source(repo)
         branch = f"{BRANCH_PREFIX}{slug}"
@@ -3967,7 +3978,8 @@ class Workspaces:
             destination = await asyncio.to_thread(
                 place_tree, staged, workspace, workspace.parent, name
             )
-        await asyncio.to_thread(self.keep_settings, destination, destination)
+        if self.keeps(slack):
+            await asyncio.to_thread(self.keep_settings, destination, destination)
         made = await asyncio.to_thread(clone_identity, destination / ".git")
         return {
             "project": "",

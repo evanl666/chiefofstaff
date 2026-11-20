@@ -384,11 +384,30 @@ def test_the_owner_requests_changes_and_sees_where_a_message_stands(app_client):
     assert refused.status_code == 400, "a PR it does not follow"
 
 
+def sandboxed(app_client) -> Runtime:
+    """Workers sandboxed: the one way their folders' settings wait for the owner's word."""
+    runtime = app_client.app.state.runtime
+    runtime.sandbox_host = True  # Whatever machine the tests run on.
+    runtime.store.save_settings(
+        runtime.store.settings().model_copy(update={"worker_sandbox": True})
+    )
+    return runtime
+
+
+def until(app_client, done, seconds: float = 5.0):
+    """Waits (the app's loop running) until `done()` holds."""
+    for _ in range(int(seconds / 0.02)):
+        if done():
+            return
+        app_client.portal.call(lambda: asyncio.sleep(0.02))
+    assert done()
+
+
 def test_the_owner_lets_a_worker_use_the_settings_in_its_folder(app_client):
     """Only the owner's page says to use a worker's changed agent settings, as it was shown
     them: a change since is refused."""
     sign_in(app_client)
-    runtime = app_client.app.state.runtime
+    runtime = sandboxed(app_client)
     router = app_client.get("/api/state").json()["router_id"]
     result = app_client.portal.call(
         lambda: call_tool(runtime, "spawn_worker", router, title="Docs", instructions="Write docs")
@@ -421,8 +440,7 @@ def test_the_owner_lets_a_worker_use_the_settings_in_its_folder(app_client):
         "ok": True,
         "said": "You let this worker use these settings (added .mcp.json).",
     }
-    app_client.portal.call(lambda: asyncio.sleep(0.05))
-    assert "And a FAQ" in app_client.fake.sessions[worker].sent[-1]
+    until(app_client, lambda: "And a FAQ" in app_client.fake.sessions[worker].sent[-1])
 
 
 async def test_closing_the_bus_ends_every_event_stream():

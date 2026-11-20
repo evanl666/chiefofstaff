@@ -205,10 +205,13 @@ FIXES: list[Allow] = [
     Allow("Storage's report's order", data=r"/api/storage\.order"),
     # 0.1.46 (security): what the agent settings in each folder handed to a worker held then,
     # kept in Chief of Staff's own data (settings_guard), empty ones too. Nothing is shown.
+    # Since qa8 (the owner's decision), only for workers that run sandboxed: this run's, without
+    # the sandbox, keep none where 0.1.46-0.1.48 kept them.
     Allow("agent settings snapshots", data=r"\.db\.kv\.settingssnap:"),
     # 0.1.46 (security): the identity of each .git folder a worker's commands could replace, as
     # first seen (a folder moved into its place is another), and (Linux) the git files that
-    # appeared in one a worker writes. Nothing is shown.
+    # appeared in one a worker writes. Nothing is shown. Since qa8, as for the snapshots: only
+    # for sandboxed workers.
     Allow(".git identities", data=r"\.db\.kv\.git(id|appeared):"),
     # 0.1.46 (QA6-1): a message held for its session's next message (it was stopped, it failed,
     # a note that rides along) says so: held, not "Waiting to be sent".

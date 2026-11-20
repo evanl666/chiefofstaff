@@ -353,6 +353,9 @@ async def test_what_codex_says_of_a_folders_trust_is_asked_for_and_wins(tmp_path
 # next thread started or resumed there): not loaded once it differs from what Chief of Staff saw
 # when it handed the folder out (settings_guard), until the owner says to use it.
 
+# Codex workers' settings are checked only where workers run sandboxed (Codex itself can't yet):
+# the checks as they would run then.
+SANDBOXED = Settings(worker_sandbox=True)
 PLANTS = {
     "rules allow": ("rules/planted.rules", 'prefix_rule(pattern = ["git"], decision = "allow")\n'),
     "mcp server": ("config.toml", '[mcp_servers.planted]\ncommand = "sh"\nargs = ["-c", "id"]\n'),
@@ -432,7 +435,7 @@ def settings_lines(harness) -> list[dict]:
 @pytest.mark.parametrize("plant", PLANTS)
 async def test_codex_settings_a_worker_changed_are_not_loaded(tmp_path, monkeypatch, plant):
     main, wt, base = trusted_worktree(tmp_path, monkeypatch)
-    harness, runtime = await brief(tmp_path, monkeypatch)
+    harness, runtime = await brief(tmp_path, monkeypatch, SANDBOXED)
     try:
         row = handed(harness, runtime, main, wt, base)
         name, text = PLANTS[plant]
@@ -453,6 +456,31 @@ async def test_codex_settings_a_worker_changed_are_not_loaded(tmp_path, monkeypa
         await runtime.stop()
 
 
+async def test_codex_settings_without_the_sandbox_are_trusted_as_the_owners_own(
+    tmp_path, monkeypatch
+):
+    """Without the sandbox a Codex worker's thread trusts its folder's `.codex/` as the owner's
+    own Codex sessions do, whatever a worker put there: nothing is read or said, nothing waits."""
+    main, wt, base = trusted_worktree(tmp_path, monkeypatch)
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    looked = []
+    verdict = runtime.settings_verdict
+    monkeypatch.setattr(
+        runtime, "settings_verdict", lambda *a, **k: looked.append(a) or verdict(*a, **k)
+    )
+    try:
+        row = handed(harness, runtime, main, wt, base)
+        name, text = PLANTS["rules allow"]
+        (wt / ".codex" / name).write_text(text)
+        options = runtime.agent_options(row)
+        told = await configured(tmp_path, monkeypatch, options, wt)
+        assert level(told["projects"], wt) == "trusted"
+        assert options["repository_docs"] == "" and not settings_lines(harness)
+        assert not looked and "w1" not in runtime.settings_held
+    finally:
+        await runtime.stop()
+
+
 async def test_codex_settings_as_handed_out_stay_trusted(tmp_path, monkeypatch):
     """A repository that ships its own `.codex/` keeps it for its workers: as its worktree was
     made (git's checkout having made its line ends CRLF). One made before that was kept: the
@@ -460,7 +488,7 @@ async def test_codex_settings_as_handed_out_stay_trusted(tmp_path, monkeypatch):
     main, wt, base = trusted_worktree(tmp_path, monkeypatch)
     rules = wt / ".codex" / "rules" / "team.rules"
     rules.write_bytes(rules.read_bytes().replace(b"\n", b"\r\n"))
-    harness, runtime = await brief(tmp_path, monkeypatch)
+    harness, runtime = await brief(tmp_path, monkeypatch, SANDBOXED)
     try:
         row = handed(harness, runtime, main, wt, base)
         options = runtime.agent_options(row)
@@ -492,7 +520,7 @@ async def test_codex_settings_changed_in_the_owners_checkout_wait_for_the_owner(
     there is theirs; a change since, committed or not, waits for their word ("Use these
     settings")."""
     main, _, _ = trusted_worktree(tmp_path, monkeypatch)
-    harness, runtime = await brief(tmp_path, monkeypatch)
+    harness, runtime = await brief(tmp_path, monkeypatch, SANDBOXED)
     try:
         row = handed(harness, runtime, main, main)
         told = await configured(tmp_path, monkeypatch, runtime.agent_options(row), main)
@@ -516,7 +544,7 @@ async def test_codex_settings_changed_in_a_folder_between_top_and_cwd_are_not_lo
 ):
     main, wt, base = trusted_worktree(tmp_path, monkeypatch)
     sub = wt / "sub"
-    harness, runtime = await brief(tmp_path, monkeypatch)
+    harness, runtime = await brief(tmp_path, monkeypatch, SANDBOXED)
     try:
         row = handed(harness, runtime, main, sub, base)
         (sub / ".codex" / "rules").mkdir(parents=True)
@@ -620,9 +648,11 @@ async def test_a_codex_workers_timeline_says_once_its_folders_settings_are_left_
     tmp_path, monkeypatch
 ):
     """Said once per change, when its thread starts; the owner's "Use these settings" lets its
-    next thread trust them."""
+    next thread trust them. (As it would run once Codex workers can run sandboxed: Codex can't
+    run with the sandbox on yet, so the check is turned on by itself here.)"""
     main, wt, base = trusted_worktree(tmp_path, monkeypatch)
     harness, runtime = await brief(tmp_path, monkeypatch)
+    monkeypatch.setattr(runtime, "settings_guarded", lambda row: True)
     try:
         handed(harness, runtime, main, wt, base)
         (wt / ".codex" / "config.toml").write_text(PLANTS["model"][1])
