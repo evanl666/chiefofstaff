@@ -613,7 +613,11 @@ function okRow(draft, line) {
   const main = line.main.href
     ? el("a", { class: "button secondary", href: line.main.href, target: "_blank", rel: "noreferrer", text: line.main.text })
     : el("button", { type: "button", class: "secondary", text: line.main.text, onclick: act(line.main) });
-  const more = [...(line.more || []), ...(line.main.details ? [] : [{ text: okOpen.has(draft.id) ? "Hide details" : "Details", details: true }])];
+  const more = [...(line.more || []), ...(line.main.details ? [] : [{ text: "Details", details: true }])];
+  // Its whole card open below: its actions are there, once; the line only folds it again.
+  const actions = okOpen.has(draft.id)
+    ? [el("button", { type: "button", class: "link quiet", text: "Hide details", onclick: act({ details: true }) })]
+    : [moreMenu(more.map((item) => ({ text: item.text, onclick: act(item) }))), main];
   row.append(
     el(
       "div",
@@ -621,7 +625,7 @@ function okRow(draft, line) {
       el("div", { class: "ok-kind" }, line.kind, line.safe ? el("span", { class: "ok-safe", text: " · safe", title: "Local, and undone in Settings: Approve all safe includes it" }) : null),
       el("div", { class: "ok-text", text: line.text, title: line.text }),
     ),
-    el("span", { class: "ok-actions" }, error, moreMenu(more.map((item) => ({ text: item.text, onclick: act(item) }))), main),
+    el("span", { class: "ok-actions" }, error, ...actions),
   );
   return row;
 }

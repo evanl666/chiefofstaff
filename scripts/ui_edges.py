@@ -4982,7 +4982,13 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
         await expect(ok.locator(".ok-details .card.merge")).to_contain_text("Checks pass")
         await expect(ok.locator(".ok-details .card.merge").get_by_role("button", name="Merge"))\
             .to_be_visible()  # fmt: skip
+        # Its action once, in the card opened: the line's own buttons step aside for Hide details.
+        await expect(ok.get_by_role("button", name="Merge", exact=True)).to_have_count(1)
+        await expect(merge_row.locator(".more-button")).to_have_count(0)
         await ok.screenshot(path=shots / f"your-ok-details-{width}-{scheme}.png")
+        await merge_row.get_by_role("button", name="Hide details").click()
+        await expect(ok.locator(".ok-details")).to_have_count(0)
+        await expect(merge_row.get_by_role("button", name="Merge", exact=True)).to_be_visible()
         assert not errors, errors
         await context.close()
     log("Your OK: one card, a line each, the safe ones marked; replies keep their cards")
