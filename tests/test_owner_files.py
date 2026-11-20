@@ -82,7 +82,18 @@ def test_a_live_run_allows_claudes_own_caches_and_sync_marks_only(owner_files, t
     is still a change."""
     config = tmp_path / "config"
     state = config / ".claude.json"
-    state.write_text(json.dumps({"groveChoiceSeenAt": {"a": 1}, "projects": {}}))
+    state.write_text(
+        json.dumps(
+            {
+                "groveChoiceSeenAt": {"a": 1},
+                "cachedExperimentData": {"a": 1},
+                "cachedExperimentFeatures": {"a": 1},
+                "cachedGrowthBookFeatures": {"a": 1},
+                "cachedGrowthBookFeaturesAt": 1,
+                "projects": {},
+            }
+        )
+    )
     synced = config / "skills" / "synced" / "org_skill"
     synced.mkdir(parents=True)
     (synced / ".last-complete-round").write_text("1")
@@ -91,7 +102,16 @@ def test_a_live_run_allows_claudes_own_caches_and_sync_marks_only(owner_files, t
     (config / "plugins" / "known_marketplaces.json").write_text('{"m": {"lastUpdated": "1"}}')
     before = owner_files.record()
     root = str(tmp_path / "live")
-    changed(state, lambda d: d.update(groveChoiceSeenAt={"a": 2}))
+    changed(
+        state,
+        lambda d: d.update(
+            groveChoiceSeenAt={"a": 2},
+            cachedExperimentData={"a": 2},
+            cachedExperimentFeatures={"a": 2},
+            cachedGrowthBookFeatures={"a": 2},
+            cachedGrowthBookFeaturesAt=2,
+        ),
+    )
     (synced / ".last-complete-round").write_text("2")
     assert owner_files.changes(before, [root]) == []
     assert owner_files.changes(before) == [

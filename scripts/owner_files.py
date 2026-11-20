@@ -44,6 +44,10 @@ STATE_KEYS = {
     "promptQueueUseCount", "lastReleaseNotesSeen", "changelogLastFetched", "cachedChangelog",
     "hasResetAutoModeOptInForDefaultOffer", "opusProMigrationComplete",
     "sonnet1m45MigrationComplete",
+    # Experiment caches refresh independently of a plain calibration run: a later session may
+    # update them even when calibration found none (live G7 on 2.1.322).
+    "cachedExperimentData", "cachedExperimentFeatures", "cachedGrowthBookFeatures",
+    "cachedGrowthBookFeaturesAt",
     # When Anthropic's server last confirmed the owner's own Consumer Terms answer: a cache of
     # an hour that any session of a signed-in Claude renews (2.1.322); never a notice marked as
     # seen (a session started without a terminal only says to run `claude` to review them).
