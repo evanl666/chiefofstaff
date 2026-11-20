@@ -291,6 +291,11 @@ async def run(scheme: str):
             # Chief of Staff's own learning worker is not one of the owner's.
             for place in ("#session-list", "#tasks", "#closed-list"):
                 await expect(page.locator(place)).not_to_contain_text("Learn how you work")
+            # On Your OK (E123): a line each; Details opens the whole card (keep, reword, untick).
+            line = page.locator("#needs .your-ok .ok-row[data-lesson]").first
+            await expect(line).to_be_visible(timeout=30000)
+            await line.locator(".more-button").click()
+            await line.get_by_role("menuitem", name="Details").click()
             lessons = page.locator("#needs .card.lessons")
             await expect(lessons).to_be_visible(timeout=30000)
             await expect(lessons).to_contain_text("because you said")
