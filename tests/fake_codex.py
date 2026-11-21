@@ -149,8 +149,7 @@ class Server:
                 self.serving.add(task)
                 task.add_done_callback(self.serving.discard)
         for _, process, *_rest in list(self.terminals.values()):
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+            await kill_group(process.pid)
         self.release_locks()
 
     async def serve(self, message: dict):
@@ -463,8 +462,7 @@ class Server:
         self.loaded_thread(params["threadId"])
         for thread, process, *_rest in list(self.terminals.values()):
             if thread == params["threadId"]:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)  # The command's whole group.
+                await kill_group(process.pid)  # The command's whole group.
         return {}
 
     async def on_turn_start(self, params):
@@ -1201,6 +1199,25 @@ def approval_mode(config: dict, server: str, tool: str) -> str:
             policy = ((plugins.get(plugin) or {}).get("mcp_servers") or {}).get(server) or {}
     mode = ((policy.get("tools") or {}).get(tool) or {}).get("approval_mode")
     return mode or policy.get("default_tools_approval_mode") or "auto"
+
+
+def kill_group(pid: int) -> asyncio.Task:
+    """SIGKILL to a command's whole process group now, and again while any of it is left (the
+    task: done once none is): one that lands as its shell forks a child can miss that child
+    (macOS), which then holds the command's output open, so its end, awaited, never comes (a
+    `sleep 60` of the command: for 60 s)."""
+
+    async def again():
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                return
+
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGKILL)
+    return asyncio.get_running_loop().create_task(again())
 
 
 def ended(how: str):

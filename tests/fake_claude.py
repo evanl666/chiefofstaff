@@ -61,6 +61,25 @@ def note(name: str, entry):
             file.write(json.dumps(entry) + "\n")
 
 
+def kill_group(pid: int) -> asyncio.Task:
+    """SIGKILL to a command's whole process group now, and again while any of it is left (the
+    task: done once none is): one that lands as its shell forks a child can miss that child
+    (macOS), which then holds the command's output open, so its end, awaited, never comes (a
+    `sleep 60` of the command: for 60 s)."""
+
+    async def again():
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                return
+
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGKILL)
+    return asyncio.get_running_loop().create_task(again())
+
+
 def arguments(argv: list[str]) -> dict:
     """The flags the SDK passes, by name (a flag alone is True)."""
     found: dict = {}
@@ -343,8 +362,7 @@ class Fake:
         elif subtype == "interrupt":
             self.interrupted = True
             if self.running and self.running.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(self.running.pid, signal.SIGKILL)
+                self.tasks.add(kill_group(self.running.pid))
         elif subtype == "set_model":
             self.model = request.get("model") or "claude-fake-1"
         elif subtype == "apply_flag_settings" and os.environ.get("FAKE_CLAUDE_FIXED_EFFORT"):
@@ -375,8 +393,7 @@ class Fake:
                 )
                 return
             task["stopped"] = True
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(task["process"].pid, signal.SIGKILL)
+            self.tasks.add(kill_group(task["process"].pid))
         elif subtype == "mcp_status":
             answer = {"mcpServers": self.mcp_status()}
         self.send(
@@ -1545,9 +1562,8 @@ class Fake:
         for process in self.stdio.values():
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
-        for task in self.background.values():
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(task["process"].pid, signal.SIGKILL)
+        for task in list(self.background.values()):
+            await kill_group(task["process"].pid)
         self.save()
         os._exit(0)
 
