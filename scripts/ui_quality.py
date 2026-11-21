@@ -1008,6 +1008,39 @@ async def approvals_views(runtime, browser, quality: Quality):
     runtime.publish_state()
 
 
+async def teams_views(runtime, browser, quality: Quality):
+    """E129: Home's chat with what workers told each other folded (one line: how many, who,
+    what waits) and the routing receipts folded, open; 800 to 1440 px, light and dark
+    (browser-shots/teams/)."""
+    from ui_edges import teams_seeded
+
+    folder = SHOTS / "teams"
+    folder.mkdir(exist_ok=True)
+    await teams_seeded(runtime)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 1000}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        timeline = page.locator("#timeline")
+        team = timeline.locator(":scope > .fold.team", has_text="5 team messages")
+        await expect(team).to_be_visible(timeout=15000)
+        await team.locator(".fold-line button.line").click()
+        routing = timeline.locator(":scope > .fold.routing").last
+        await routing.locator(".fold-line button.line").click()
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1000})
+            await page.wait_for_timeout(150)
+            await timeline.screenshot(path=folder / f"quality-{width}-{scheme}-chat.png")
+            await quality.check(page, f"teams chat {width} {scheme}", "#timeline")
+        await quality.contrast(page, f"teams chat {scheme}", "#timeline")
+        quality.failures += [f"page error {scheme}: {error}" for error in errors]
+        await context.close()
+
+
 async def signed_out(route):
     codex = {
         "name": "codex", "label": "Codex", "enabled": False, "model": "", "limit": 0,
@@ -1202,6 +1235,8 @@ async def main():
             )
             await approvals_views(runtime, browser, quality)
             log("Your OK and Handled for you (qa8-approvals/)")
+            await teams_views(runtime, browser, quality)
+            log("what workers told each other, folded on Home (teams/)")
             await browser.close()
         server.should_exit = True
         await serving

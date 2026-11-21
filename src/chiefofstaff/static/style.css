@@ -1084,6 +1084,26 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .event.opens.sent .line:disabled .what { color: var(--soft); }
 .markdown.sent .sent-note { white-space: pre-wrap; }
 .event.opens > .markdown { margin: 4px 0 8px 24px; padding: 8px 12px; font-size: var(--body); color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+/* A run of what workers told each other, or of routing receipts, folded in one line (E129):
+   open, its lines below it (a team's last three). */
+.fold + .event, .event + .fold, .fold + .fold { margin-top: -8px; }
+.fold-items { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.fold:not(.open) > .fold-items { display: none; }
+.fold > .fold-items { margin: 2px 0 4px 7px; padding-left: 16px; border-left: 1px solid var(--line); }
+.fold.team.open > .fold-items > :nth-last-child(n + 4) { display: none; }
+.fold-line .avatars { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.fold-line .avatars .more { margin-left: 4px; font-size: var(--small); color: var(--muted); }
+.fold-line .waiting { flex: none; color: var(--amber); }
+/* A worker's avatar: its initials in its color, the same everywhere. */
+.avatar { display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; font-size: var(--small); font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: #fff; background: var(--muted); }
+.avatar.c0 { background: #2f68c9; }
+.avatar.c1 { background: #1d7a50; }
+.avatar.c2 { background: #a5581a; }
+.avatar.c3 { background: #8344a3; }
+.avatar.c4 { background: #b23a30; }
+.avatar.c5 { background: #13757e; }
+.avatar.c6 { background: #9c3f86; }
+.avatar.c7 { background: #586776; }
 
 /* Home: the conversation, and the panel with Needs you and Tasks */
 

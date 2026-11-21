@@ -5083,6 +5083,126 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
     runtime.publish_state()
 
 
+async def teams_seeded(runtime) -> dict:
+    """Two workers that work together (E129): routing receipts, then five messages between them
+    (told twice, a question answered, a question open 9 minutes), the owner, then one more."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(store.settings().model_copy(update={"max_workers": 1000}))
+
+    async def start(title, **extra):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test", **extra)  # fmt: skip
+        await settle(runtime)
+        return json.loads(result.text_result_for_llm)["session_id"]
+
+    runtime.add_message(router, "owner", "Rotate the API token and update the client with it.")
+    scout = await start("Token Scout: rotate the API token")
+    writer = await start("Column Maker: use the new token in the client",
+                         works_with=[runtime.tasks.current(scout)["id"]])  # fmt: skip
+
+    async def tool(name, caller, **arguments):
+        return (await call_tool(runtime, name, caller, **arguments)).text_result_for_llm
+
+    await tool("tell_session", scout, session_id=writer, text="The new token is in vault:api/v2.")
+    await tool("tell_session", scout, session_id=writer, text="Old one stops working at 18:00.")
+    asked = await tool("ask_session", writer, session_id=scout, question="Read or write scope?")
+    first = asked.split("(")[1].split(")")[0]
+    await tool("answer_session", scout, question_id=first, answer="Read only.")
+    asked = await tool("ask_session", writer, session_id=scout, question="Rotate staging too?")
+    second = asked.split("(")[1].split(")")[0]
+    store.execute("UPDATE questions SET asked=? WHERE id=?", (time.time() - 9 * 60, second))
+    runtime.add_message(router, "owner", "How is the token going?")
+    await tool("tell_session", writer, session_id=scout, text="Client switched to the new token.")
+    runtime.publish_state()
+    return {"scout": scout, "writer": writer, "open": second}
+
+
+async def round_teams(runtime, browser, failures: list[str]):
+    """E129, phase 1: on Home, a run of what workers told each other is one line (how many, who,
+    what waits), open to its last three; a run of routing receipts is one line too; one alone
+    stays a line. Light and dark, 800, 1280 and 1440 px."""
+    shots = Path(os.environ.get("TEAMS_SHOTS", SHOTS / "teams"))
+    shots.mkdir(parents=True, exist_ok=True)
+    seeded = await teams_seeded(runtime)
+    for width, scheme in itertools.product((1440, 1280, 800), ("light", "dark")):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 900}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        timeline = page.locator("#timeline")
+        team = timeline.locator(":scope > .fold.team").last
+        await expect(team.locator(".fold-line .what")).to_have_text("5 team messages")
+        await expect(team.locator(".fold-line .avatar")).to_have_count(2)
+        await expect(team.locator(".fold-line .avatar").first).to_have_text("TS")
+        await expect(team.locator(".fold-line .waiting")).to_have_text("1 waiting 9 min")
+        await expect(team.locator(".fold-items")).to_be_hidden()
+        routing = timeline.locator(":scope > .fold.routing").last
+        await expect(routing.locator(".fold-line .what")).to_have_text("2 routing updates")
+        # One alone after the owner's message: a line by the workers' short names.
+        alone = timeline.locator(':scope > .event[data-kind="peer"]').last
+        await expect(alone.locator(".what")).to_have_text(
+            "Column Maker told Token Scout: Client switched to the new token."
+        )
+        found = await timeline.evaluate(OVERFLOWS)
+        assert not found, (width, found)
+        await timeline.screenshot(path=shots / f"home-folded-{width}-{scheme}.png")
+        await team.locator(".fold-line button.line").click()
+        toggle = team.locator(".fold-line button.line")
+        await expect(toggle).to_have_attribute("aria-expanded", "true")
+        shown = team.locator(".fold-items > .event:visible")
+        await expect(shown).to_have_count(3)
+        await expect(shown.first).to_contain_text("Column Maker asked Token Scout: Read or write")
+        await expect(shown.last).to_contain_text("Column Maker asked Token Scout: Rotate staging")
+        await routing.locator(".fold-line button.line").click()
+        await expect(routing.locator(".fold-items > .event:visible")).to_have_count(2)
+        await timeline.screenshot(path=shots / f"home-open-{width}-{scheme}.png")
+        assert not errors, errors
+        await context.close()
+    log("Home: a run of team messages and of routing receipts, one line each")
+
+    # The open question is answered: the line says nothing waits, without a reload.
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    team = page.locator("#timeline > .fold.team", has_text="5 team messages")
+    await expect(team.locator(".fold-line .waiting")).to_have_text("1 waiting 9 min")
+    await call_tool(runtime, "answer_session", seeded["scout"], question_id=seeded["open"],
+                    answer="Yes, staging too.")  # fmt: skip
+    await expect(team.locator(".fold-line .waiting")).to_have_count(0, timeout=10000)
+    await context.close()
+    log("Home: an answered question no longer waits")
+
+    # A run longer than a page: Load earlier brings the rest into the same fold.
+    router = runtime.store.get("router_id")
+    runtime.add_message(router, "owner", "Thanks, both.")
+    for index in range(405):
+        runtime.add_message(router, "peer", f"“Token Scout: rotate the API token” told “Column "
+                            f"Maker: use the new token in the client”: note {index}",
+                            {"peer_from": seeded["scout"], "peer_to": seeded["writer"],
+                             "peer_kind": "told"})  # fmt: skip
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    timeline = page.locator("#timeline")
+    await expect(
+        timeline.locator(":scope > .fold.team").last.locator(".fold-line .what")
+    ).to_have_text("400 team messages", timeout=15000)
+    await timeline.locator(":scope > .earlier button").click()
+    longest = timeline.locator(":scope > .fold.team").last
+    await expect(longest.locator(".fold-line .what")).to_have_text(
+        "405 team messages", timeout=15000
+    )
+    await context.close()
+    log("Home: a run longer than a page is one fold once the earlier messages load")
+
+
 async def main():
     from chiefofstaff import machine
 
@@ -5435,7 +5555,7 @@ async def main():
                           round_picker_ux, round_agent_parity, round_qa6, round_qa7_life,
                           round_qa8_report,
                           round_layout, round_fresh_start, round_qa8_auth,
-                          round_qa8_approvals, round_e125):  # fmt: skip
+                          round_qa8_approvals, round_e125, round_teams):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()

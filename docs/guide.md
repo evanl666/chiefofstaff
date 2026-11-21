@@ -34,7 +34,10 @@ you asked, its short answers, and one line for each thing that happened on the w
 “Fix the flaky login test”*, *Fix the flaky login test finished · View*; a worker that could not
 go on says why, *Slack couldn't go on: …*). **View** brings up the
 task's card on the right instead of repeating its report in the chat; lines from Slack, the
-Watchdog and other sessions open in place, as does a report's line (to read all of it).
+Watchdog and other sessions open in place, as does a report's line (to read all of it). Two or
+more such lines in a row of the same kind are one: the Router's routing (*4 routing updates*)
+and what workers that work together told each other (*↔ 5 team messages*, below); click it to
+see them.
 
 On the right, everything has one place:
 
@@ -166,8 +169,11 @@ together; each is told about the others. They pass what the other needs straight
 Router turn in between. A worker waiting for another one's message waits quietly (its card
 says *waiting for “…”*) and goes on when it arrives; when the other one finishes, its result
 reaches the ones still at work. The Router keeps the picture without being in the way: a copy
-of each message rides along with its next turn, and Home shows it in a line (*↔ “Token Scout”
-told “Token Writer”: …*), so "what did the scout pass on?" is answered at once. What workers
+of each message rides along with its next turn, and Home shows it in a line by the workers'
+short names (*↔ Token Scout told Token Writer: …*), so "what did the scout pass on?" is answered
+at once. Several in a row are one line: how many, the workers' initials in their colors, and
+what still waits (*↔ 5 team messages · TS TW · 1 waiting 9 min*); click it for the last three,
+*Open* for the worker it went to last. What workers
 tell each other is information, never new work: when one should change course (scope, another
 approach, overlapping work), it asks the Router, which decides or asks you. Independent tasks
 started together are not linked.

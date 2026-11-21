@@ -229,6 +229,17 @@ FIXES: list[Allow] = [
     # E126: tasks replaced before their replacedby: link was kept get it once, read back from
     # their progress words; the mark that this ran is in the store. Nothing is shown.
     Allow("replaced tasks' links, read back once", data=r"\.db\.kv\.migrated:replacedby$"),
+    # E129 (team threads): questions workers wait on each other for are in the state; on Home,
+    # a run of two or more routing receipts (Started, Queued, New task, Continued, Told) or of
+    # what workers told each other is one line that opens to them (a line alone is as it was).
+    Allow("open questions between workers", data=r"/api/state\.peer_waiting$"),
+    Allow(
+        "Home's routing receipts and peer messages, a run folded in one line",
+        element='#timeline > .fold, #timeline > .event[data-kind="peer"], #timeline > '
+        '.event[data-kind="notice"]:has(> .what:is([title^="Started"], [title^="Queued"], '
+        '[title^="New task"], [title^="Continued"], [title^="Told"]))',
+        views=r"^home",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

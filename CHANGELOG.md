@@ -114,6 +114,13 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   waiting) no longer gives it that task's name; its own turns come first.
 - **A worker let go of at a start with nothing open and nothing left for it closes** (E128),
   instead of staying open under the name of a cancelled task.
+- **What workers tell each other no longer fills Home's chat (E129).** Workers that work
+  together pass values and questions straight to each other, and each message was a line of its
+  own in your chat with the Router (139 in a day in one QA run, against 84 of yours). Now two or
+  more in a row are one line: how many, the workers' initials in their colors, and what still
+  waits (*↔ 5 team messages · TS CM · 1 waiting 9 min*); click it to see the last three. A line
+  alone names the workers by a short name (*Column Maker told Token Scout: …*), not by their
+  whole task titles. The Router's routing lines in a row fold the same way (*4 routing updates*).
 
 ## 0.1.52 (2026-11-20)
 

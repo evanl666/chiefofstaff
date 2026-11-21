@@ -12,6 +12,7 @@ import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLin
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
+import { avatar, peerOf, peerLine, waitingWords } from "./team.js";
 // A chat loads a page of its messages at a time: its latest, then earlier ones when asked.
 export const PAGE = 400;
 // The chat shown: its first message loaded, and how many come before it (null: not known).
@@ -642,6 +643,14 @@ function prependMessages(messages) {
     last.remove();
     summarize(top);
   }
+  // A run folded on Home goes on across the page boundary: one fold.
+  const kind = foldKind(last);
+  if (kind && foldKind(top) === kind) {
+    const group = top.dataset.fold ? top : wrapFold(top, kind);
+    group.lastElementChild.prepend(...(last.dataset.fold ? last.lastElementChild.children : [last]));
+    if (last.dataset.fold) last.remove();
+    summarizeFold(group);
+  }
   if (control) control.after(...box.children);
   else timeline.prepend(...box.children);
   updateDraftRecords();
@@ -682,6 +691,9 @@ async function showTaskInTimeline(taskId) {
   // Not among the latest messages: earlier ones, a page at a time, until it is there.
   for (let pages = 0; !node && pages < 25 && (await loadEarlier()); pages += 1) node = find();
   if (!node) return;
+  // In a fold on Home (a routing receipt): the fold opens to it.
+  const group = node.closest(".fold");
+  if (group) toggleFold(group, true);
   node.scrollIntoView({ block: "start" });
   node.classList.remove("flash");
   void node.offsetWidth;  // Restarts the highlight.
@@ -746,6 +758,7 @@ function showChip(node, status = "done") {
 // As its task stands now: accepted since, it is done.
 export function refreshChips() {
   for (const node of document.querySelectorAll("#timeline .chip[data-task]")) showChip(node);
+  refreshFolds();
 }
 // A card: a header (what, status, time, optional "Open"), then the markdown body. Long bodies fold.
 function card({ label, body, className = "", status, task = "", time, open }) {
@@ -851,9 +864,12 @@ function homeEntry(message) {
     }
     case "ask":
       return eventLine({ mark: "→", text: `Asked ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.target), viewText: "Open" });
-    case "peer":
-      // What workers that work together told each other: the Router's copy, in a line.
-      return eventLine({ mark: "↔", text: firstLine(text), time, body: text, view: () => select(meta.peer_to), viewText: "Open" });
+    case "peer": {
+      // What workers that work together told each other: the Router's copy, in a line by their
+      // short names (a run of them folds: see foldInto).
+      const peer = peerOf(message);
+      return eventLine({ mark: "↔", text: peerLine(peer), time, body: peer.text, view: () => select(peer.to), viewText: "Open" });
+    }
     case "watchdog": {
       const verdict = { stuck: "looks stuck", looping: "looks like it is looping", off_track: "looks off track" }[meta.verdict];
       return eventLine({ mark: "⚠", kind: "waiting", text: `Watchdog${verdict ? ` · ${verdict}` : ""}: ${firstLine(text)}`, time, body: `${text}${meta.reason ? `\n\nWhy it stepped in: ${meta.reason}` : ""}` });
@@ -1346,6 +1362,8 @@ export function replaceMessage(message) {
   const node = old && renderMessage(message);
   if (!node?.dataset) return;
   Object.assign(node.dataset, { ...old.dataset, id: message.id });
+  // A line of a fold on Home (or one that may start one) stays what it was.
+  Object.assign(node, { foldKind: old.foldKind, peer: old.peer });
   if (message.kind === "owner") {
     if (DELIVERY_WORDS[message.delivery]) node.dataset.delivery = message.delivery;
     else delete node.dataset.delivery;
@@ -1370,10 +1388,12 @@ export function appendMessages(messages) {
   updateWorkingLine();
   updateDraftRecords();
   showDeliveries();
+  refreshFolds();
   scrollToBottom();
   followAnchor();
 }
-// One message at the end of `container`: a step (or narration) joins the fold before it.
+// One message at the end of `container`: a step (or narration) joins the fold before it; on
+// Home, what workers tell each other and the Router's routing receipts join a run of their kind.
 function place(container, message, next, shown) {
   if (message.kind === "tool" || narration(message, next, shown?.role === "worker")) {
     addWork(container, message.kind === "tool" ? "tool" : "narration", asShown(message).text, shown?.cwd);
@@ -1385,7 +1405,76 @@ function place(container, message, next, shown) {
     node.dataset.kind = message.kind;
     if (message.meta?.task_id) node.dataset.task = message.meta.task_id;
   }
-  container.append(node);
+  const kind = node?.dataset && foldOf(message);
+  if (kind) foldInto(container, kind, node, message);
+  else container.append(node);
+}
+// Home's chat is the owner's and the Router's (E129): a run of two or more lines of what workers
+// told each other folds into one ("↔ 5 team messages"), as does a run of the Router's routing
+// receipts ("4 routing updates"). One alone stays a line.
+const ROUTING = /^(Started|Queued|New task|Continued|Told)\b/;
+function foldOf(message) {
+  if (state.selected !== HOME || message.session_id !== routerId()) return "";
+  if (message.kind === "peer") return "team";
+  return message.kind === "notice" && message.meta?.session_id && ROUTING.test(message.text || "") ? "routing" : "";
+}
+// A line that may start a fold says its kind (not in the page: a line alone is as it was);
+// a fold says it in data-fold.
+const foldKind = (node) => node?.dataset?.fold || node?.foldKind || "";
+function foldInto(container, kind, node, message) {
+  node.foldKind = kind;
+  if (kind === "team") node.peer = peerOf(message);
+  const last = container.lastElementChild;
+  if (foldKind(last) !== kind) {
+    container.append(node);
+    return;
+  }
+  const group = last.dataset.fold ? last : wrapFold(last, kind);
+  group.lastElementChild.append(node);
+  summarizeFold(group);
+}
+// The second of a run: the first line goes into a fold, in its place.
+function wrapFold(first, kind) {
+  const group = el("div", { class: `fold ${kind}`, "data-fold": kind }, el("div", { class: "event opens fold-line" }), el("div", { class: "fold-items" }));
+  first.replaceWith(group);
+  group.lastElementChild.append(first);
+  return group;
+}
+const FOLDS = { team: ["↔", "team message"], routing: ["·", "routing update"] };
+// A fold's line: how many, who (a team's workers by their avatars), what still waits, and the
+// time of the latest; open, its lines (a team's last three: its thread has them all).
+function summarizeFold(group) {
+  const items = [...group.querySelector(":scope > .fold-items").children];
+  const line = group.querySelector(":scope > .fold-line");
+  const kind = group.dataset.fold;
+  const [mark, noun] = FOLDS[kind];
+  const peers = items.map((node) => node.peer).filter(Boolean);
+  const ids = [...new Set(peers.flatMap((peer) => [peer.from, peer.to]).filter(Boolean))];
+  const waiting = kind === "team" ? waitingWords(new Set(peers.filter((peer) => peer.kind === "asked").map((peer) => peer.question).filter(Boolean))) : "";
+  const key = `${items.length}|${ids.join()}|${waiting}`;
+  if (line.dataset.key === key) return;
+  line.dataset.key = key;
+  const titles = new Map(peers.flatMap((peer) => [[peer.from, peer.fromTitle], [peer.to, peer.toTitle]]));
+  const shown = ids.slice(0, 5);
+  const parts = [
+    el("span", { class: "mark", text: mark }),
+    el("span", { class: "what", text: `${items.length} ${noun}s` }),
+    ids.length ? el("span", { class: "avatars" }, ...shown.map((id) => avatar(id, titles.get(id) || "")), ids.length > shown.length ? el("span", { class: "more", text: `+${ids.length - shown.length}` }) : null) : null,
+    waiting ? el("span", { class: "waiting", text: waiting }) : null,
+  ];
+  const open = group.classList.contains("open");
+  const toggle = el("button", { type: "button", class: "line", "aria-expanded": String(open), onclick: () => toggleFold(group) }, ...parts);
+  const last = items.at(-1).peer?.to;
+  const view = kind === "team" && last ? el("button", { type: "button", class: "link", text: "Open", title: "The worker it went to last", onclick: (event) => { event.stopPropagation(); select(last); } }) : null;
+  line.replaceChildren(el("div", { class: "row" }, toggle, view, items.at(-1).querySelector("time")?.cloneNode(true) || null));
+}
+function toggleFold(group, open = !group.classList.contains("open")) {
+  group.classList.toggle("open", open);
+  group.querySelector(":scope > .fold-line button.line")?.setAttribute("aria-expanded", String(open));
+}
+// What still waits changes as questions are answered: the folds say it as it is now.
+function refreshFolds() {
+  for (const group of document.querySelectorAll("#timeline .fold.team")) summarizeFold(group);
 }
 export function updateWorkingLine() {
   const timeline = $("#timeline");

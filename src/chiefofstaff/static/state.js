@@ -202,6 +202,7 @@ function handleEvent({ type, data }) {
     heardOthers(data);
   } else if (type === "message") {
     noteUpdate(data);
+    notePeer(data);
     // Where a message sent to a worker stands: the row it was sent from says it too.
     if (noteDelivery(data) && data.session_id !== viewedId()) scheduleHome();
     if (data.amended) {
@@ -239,6 +240,15 @@ function notify({ text = "", session_id: sessionId, needs_action: needsAction, u
   const looking = document.hasFocus() && (sessionId === viewedId() || (state.selected === HOME && !needsAction));
   if (!urgent && (focusing() || looking)) return;
   toast(shorten(firstLine(text) || text, 200), needsAction || urgent ? "attention" : "", sessionId);
+}
+// A question one worker asked another waits until its answer comes (Home: "1 waiting 9 min"):
+// as their rows reach the Router, without reading the whole state again.
+function notePeer(message) {
+  const meta = message.meta || {};
+  if (!state.snapshot || message.amended || message.kind !== "peer" || !meta.question_id || message.session_id !== routerId()) return;
+  const others = (state.snapshot.peer_waiting || []).filter((item) => item.id !== meta.question_id);
+  const asked = meta.peer_kind === "asked" ? [{ id: meta.question_id, asker: meta.peer_from, target: meta.peer_to, asked: message.created_at }] : [];
+  state.snapshot.peer_waiting = [...others, ...asked];
 }
 // A note of the Router's that needs the owner waits under Needs you; what the owner writes to
 // the Router after it answers it (as the server counts it; not what they told one worker).
