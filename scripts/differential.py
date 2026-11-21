@@ -363,6 +363,9 @@ FIXES: list[Allow] = [
         data=r"\.options\.client_name$",
         value="copilot-cli/chiefofstaff",
     ),
+    # E133: how much each session's conversation holds, kept for every session (the Router's
+    # only before), so Watch for you starts a fresh one once it is long. Nothing is shown.
+    Allow("every session's context size", data=r"\.db\.kv\.context:"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
