@@ -1942,7 +1942,7 @@ def test_which_codex_runs_and_which_runs_workers_that_ask_first(version, runs, a
     [
         ({"FAKE_CODEX_VERSION": "0.167.1"}, "older than the versions tested"),
         ({"FAKE_CODEX_VERSION": "unknown"}, "could not tell which version of Codex"),
-        ({"FAKE_CODEX_SIGNED_OUT": "1"}, "not signed in: run codex login in a terminal"),
+        ({"FAKE_CODEX_SIGNED_OUT": "1"}, "not signed in: sign in from Settings → Coding agents"),
     ],
 )
 async def test_a_codex_it_cannot_run_on_says_why(tmp_path, monkeypatch, env, why):
@@ -1952,6 +1952,19 @@ async def test_a_codex_it_cannot_run_on_says_why(tmp_path, monkeypatch, env, why
     with pytest.raises(RuntimeError, match=why):
         await backend.start()
     assert not backend.alive()
+
+
+async def test_a_codex_signed_in_with_an_api_key_is_signed_in(tmp_path, monkeypatch):
+    """`codex login status` says "API key configured - …" (exit 0) for an API key: signed in
+    (its glance read "Logged in" only, so an API key read as signed out)."""
+    command = fake_codex(tmp_path / "fake", monkeypatch)
+    home = Path(os.environ["FAKE_CODEX_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "auth.json").write_text(json.dumps({"auth_mode": "apikey"}))
+    monkeypatch.setattr(backend_codex, "set_up", lambda: True)
+    found = await backend_codex.glance(command, tmp_path / "folder")
+    assert found["account"] == "apiKey"
+    assert agents.pays("codex", found["account"]) == "Uses your OpenAI API key"
 
 
 async def test_without_the_cli_it_says_so(tmp_path):

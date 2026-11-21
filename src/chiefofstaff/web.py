@@ -18,8 +18,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import agents
 from .bus import Bus
 from .models import (
+    AgentInstall,
     AgentOffer,
     AgentSettings,
+    AgentSetupInput,
+    AgentSignIn,
     ApproveSafe,
     ArtifactHide,
     CheckBackAction,
@@ -409,6 +412,27 @@ def create_app(
         """Each agent's status, glanced at again where it was not lately (the @ picker)."""
         return {"agents_status": await runtime.refresh_agent_status()}
 
+    @app.post("/api/agents/{name}/signin")
+    async def agent_sign_in(name: str, payload: AgentSignIn):
+        """Sign in to an agent with its own CLI, as its workers run it (agentsetup.py): the run
+        as the page shows it (its page's link, a code, its output), followed by agent_setup
+        events until it ends."""
+        return await runtime.setups.sign_in(name, payload.method, payload.confirm, payload.key)
+
+    @app.post("/api/agents/{name}/install")
+    async def agent_install(name: str, payload: AgentInstall):
+        """Install an agent with the official installer its row shows, word for word."""
+        return await runtime.setups.install(name, payload.method)
+
+    @app.post("/api/agents/{name}/setup/input")
+    async def agent_setup_input(name: str, payload: AgentSetupInput):
+        """A code its sign-in asked to be pasted, to its stdin."""
+        return await runtime.setups.send(name, payload.text)
+
+    @app.post("/api/agents/{name}/setup/cancel")
+    async def agent_setup_cancel(name: str):
+        return await runtime.setups.cancel(name)
+
     @app.post("/api/agents/{name}/offer")
     async def agent_offer(name: str, payload: AgentOffer):
         """The owner's answer on an agent's first-run card (Allow, or Not now)."""
@@ -757,6 +781,12 @@ def create_app(
             await runtime.answer_refusal(key, payload.action)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        return runtime.snapshot()
+
+    @app.post("/api/role-waits/{role}")
+    async def role_wait(role: str):
+        """Use Copilot until then, on the card of a role waiting for its agent (Ask me)."""
+        await runtime.answer_role_wait(role)
         return runtime.snapshot()
 
     @app.post("/api/sessions/{session_id}/restart")

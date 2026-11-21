@@ -8111,7 +8111,7 @@ async def send_pins(runtime, browser):
 AGENT_SHOTS = Path(os.environ.get("UI_AGENT_SHOTS") or SHOTS / "agents-m2")
 # (UI_AGENT_WIDTHS, UI_PICKER_WIDTHS, comma-separated: other widths, for a review's shots.)
 AGENT_WIDTHS = tuple(int(w) for w in os.environ.get("UI_AGENT_WIDTHS", "800,1024,1440").split(","))
-SIGNED_OUT_CODEX = "Codex is not signed in: run codex login in a terminal."
+SIGNED_OUT_CODEX = "Codex is not signed in: sign in from Settings → Coding agents."
 OLD_CODEX = "Codex 0.160.0 is older than the versions tested (0.167.2): update it."
 SANDBOXED_CODEX = (
     "Can't run while workers are sandboxed: its sandbox has not passed Chief of Staff's checks yet."
@@ -9183,7 +9183,8 @@ async def round_roles(runtime, browser, failures: list[str]):
                     await system.locator("summary").click()
                 why = group.locator("#role-router-line")
                 await expect(why).to_have_text(
-                    "On Copilot for now: Codex is not signed in: run codex login in a terminal.",
+                    "On Copilot for now: Codex is not signed in: sign in from Settings → Coding "
+                    "agents.",
                     timeout=20000,
                 )
                 await expect(choose).to_have_attribute("aria-describedby", "role-router-line")
@@ -9492,7 +9493,7 @@ async def picker_workers(runtime, browser):
     # to do (the Router does not say it again).
     runtime.agent_refused_card(
         "codex",
-        "Codex is not signed in: run codex login in a terminal.",
+        "Codex is not signed in: sign in from Settings → Coding agents.",
         {"title": "Benchmark the importer", "instructions": "Benchmark it", "why_new": "t"},
     )
     for scheme in ("light", "dark"):
@@ -9528,7 +9529,7 @@ async def picker_workers(runtime, browser):
     # work goes on on Copilot (from its summary, with what it was given); it stays open.
     runtime.agent_refused_card(
         "codex",
-        "Codex is not signed in: run codex login in a terminal.",
+        "Codex is not signed in: sign in from Settings → Coding agents.",
         {"title": "Port the parser"},
         worker=worker,
         text="Also port the tokenizer.",

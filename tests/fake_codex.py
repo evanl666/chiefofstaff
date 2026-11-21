@@ -9,7 +9,14 @@ the features an administrator keeps on or off), UNASKED (actions taken without a
 RESTORES_LESS (what a resumed thread's totals lose), LOG (a file each request's method and params
 are appended to, one JSON line each), RUNS (a file each run's arguments are appended to), PLUGINS
 (JSON: the plugins on, and the MCP servers each adds), FAILS_ON (a turn whose prompt has it fails
-at once).
+at once). A prompt saying "Lose the sign-in" fails, after its commands ran, as for a sign-in
+that ended (a 401), signed out from then on.
+
+`login` (browser), `login --device-auth`, `login --with-api-key` and `logout` work as 0.167.2's
+say it (the browser's URL on stderr, the device code on stdout, the key read from stdin): a
+sign-in is kept in FAKE_CODEX_HOME (auth.json, signed-out), over SIGNED_OUT. A browser or device
+sign-in waits until a file `approve` there says how it went ("ok", else its words: an error), as
+the owner finishing it in their browser would.
 """
 
 import asyncio
@@ -193,7 +200,7 @@ class Server:
         return {"requirements": json.loads(os.environ.get("FAKE_CODEX_REQUIREMENTS") or "null")}
 
     async def on_account_read(self, params):
-        if os.environ.get("FAKE_CODEX_SIGNED_OUT"):
+        if signed_out():
             return {"account": None, "requiresOpenaiAuth": True}
         account = {"type": "chatgpt", "email": None, "planType": "plus"}
         return {"account": account, "requiresOpenaiAuth": True}
@@ -724,6 +731,13 @@ class Server:
                 await self.say(thread_id, turn_id, "No shell here.")  # Not offered (Codex).
                 continue
             await self.shell(thread_id, turn_id, match.group(1))
+        if "Lose the sign-in" in prompt:
+            # Its sign-in ended on the server's side mid-turn (after what it ran above).
+            sign_out()
+            raise RuntimeError(
+                "unexpected status 401 Unauthorized: Your refresh token has expired. Please log "
+                "out and sign in again."
+            )
         if found := re.search(r"Report done: ([^\n<]+)", prompt):
             summary = {"status": "done", "summary": found.group(1).strip()}
             await self.dynamic(thread_id, turn_id, "report", summary)
@@ -1292,16 +1306,109 @@ def text(items) -> str:
     return "\n".join(part.get("text", "") for part in items if part.get("type") == "text")
 
 
+AUTH = HOME / "auth.json"
+SIGNED_OUT_MARK = HOME / "signed-out"
+
+
+def signed_out() -> bool:
+    """Signed out: by its own sign-in's files (a login, a logout), else FAKE_CODEX_SIGNED_OUT."""
+    if AUTH.exists():
+        return False
+    return SIGNED_OUT_MARK.exists() or bool(os.environ.get("FAKE_CODEX_SIGNED_OUT"))
+
+
+def sign_out():
+    HOME.mkdir(parents=True, exist_ok=True)
+    AUTH.unlink(missing_ok=True)
+    SIGNED_OUT_MARK.write_text("")
+
+
+def signed_in(mode: str):
+    HOME.mkdir(parents=True, exist_ok=True)
+    AUTH.write_text(json.dumps({"auth_mode": mode}))
+    SIGNED_OUT_MARK.unlink(missing_ok=True)
+
+
+def approved() -> str:
+    """What the owner's browser said of a sign-in waited for: "" while they have not."""
+    approve = HOME / "approve"
+    while True:
+        if approve.exists():
+            said = approve.read_text().strip() or "ok"
+            approve.unlink(missing_ok=True)
+            return said
+        time.sleep(0.05)
+
+
+def login(arguments: list[str]):
+    """`codex login …` as 0.167.2 runs it, its words where it says them."""
+    if arguments[:1] == ["status"]:
+        # On stderr, failing when signed out.
+        if signed_out():
+            sys.stderr.write("Not logged in\n")
+            sys.exit(1)
+        mode = json.loads(AUTH.read_text()).get("auth_mode") if AUTH.exists() else "chatgpt"
+        if mode == "apikey":
+            sys.stderr.write("API key configured - sk-proj-***ABCD\n")
+            sys.stderr.write("Authentication is checked when you send a request.\n")
+        else:
+            sys.stderr.write("Logged in using ChatGPT\n")
+        return
+    if "--with-api-key" in arguments:
+        if sys.stdin.isatty():
+            sys.stderr.write(
+                "--with-api-key expects the API key on stdin. Try piping it, e.g. "
+                "`printenv OPENAI_API_KEY | codex login --with-api-key`.\n"
+            )
+            sys.exit(1)
+        sys.stderr.write("Reading API key from stdin...\n")
+        key = sys.stdin.read().strip()
+        if not key:
+            sys.stderr.write("No API key provided via stdin.\n")
+            sys.exit(1)
+        HOME.mkdir(parents=True, exist_ok=True)
+        (HOME / "api-key").write_text(key)
+        signed_in("apikey")
+        sys.stderr.write("API key saved. Authentication is checked when you send a request.\n")
+        return
+    # Its existing sign-in cleared first (clear_existing_auth_before_login).
+    sign_out()
+    if "--device-auth" in arguments:
+        blue, gray, reset = "\x1b[94m", "\x1b[90m", "\x1b[0m"
+        sys.stdout.write(
+            f"\nWelcome to Codex [v{gray}{VERSION}{reset}]\n{gray}OpenAI's command-line coding "
+            f"agent{reset}\n\nFollow these steps to sign in with ChatGPT using device code "
+            "authorization:\n\n1. Open this link in your browser and sign in to your account\n"
+            f"   {blue}https://auth.openai.com/codex/device{reset}\n\n2. Enter this one-time "
+            f"code {gray}(expires in 15 minutes){reset}\n   {blue}FAKE-12345{reset}\n\n"
+        )
+        sys.stdout.flush()
+    else:
+        sys.stderr.write(
+            "Starting local login server on http://localhost:1455.\nIf your browser did not "
+            "open, navigate to this URL to authenticate:\n\nhttps://auth.openai.com/oauth/"
+            f"authorize?response_type=code&client_id=fake&state={os.getpid()}\n\nOn a remote "
+            "or headless machine? Use `codex login --device-auth` instead.\n"
+        )
+        sys.stderr.flush()
+    said = approved()
+    if said != "ok":
+        sys.stderr.write(f"Error logging in: {said}\n")
+        sys.exit(1)
+    signed_in("chatgpt")
+    sys.stderr.write("Successfully logged in\n")
+
+
 def main():
     if runs := os.environ.get("FAKE_CODEX_RUNS"):
         with Path(runs).open("a") as file:
             file.write(" ".join(sys.argv[1:]) + "\n")
-    if sys.argv[1:3] == ["login", "status"]:
-        # As 0.167.2 says it: on stderr, failing when signed out.
-        if os.environ.get("FAKE_CODEX_SIGNED_OUT"):
-            sys.stderr.write("Not logged in\n")
-            sys.exit(1)
-        sys.stderr.write("Logged in using ChatGPT\n")
+    if sys.argv[1:2] == ["login"]:
+        login(sys.argv[2:])
+        return
+    if sys.argv[1:2] == ["logout"]:
+        sign_out()
+        sys.stderr.write("Successfully logged out\n")
         return
     if sys.argv[1:2] != ["app-server"]:
         sys.stdout.write(f"codex-cli {VERSION}\n")

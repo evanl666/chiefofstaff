@@ -115,9 +115,9 @@ SDK_OLDEST = (0, 2, 182)
 SDK_BEFORE = (0, 3, 0)
 EXTRA = "Needs Chief of Staff's Claude extra: `uv tool install 'chiefofstaff[claude]'`"
 NOT_FOUND = "Not found on this computer: install Claude Code."
-NOT_SIGNED_IN = "Not signed in: run `claude` in a terminal and sign in."
+NOT_SIGNED_IN = "Not signed in to Claude Code: sign in from Settings → Coding agents."
 # Claude never set up for the owner (no state file): `claude auth status` would make its files.
-NOT_SET_UP = "Not set up: run `claude` in a terminal and sign in."
+NOT_SET_UP = "Not set up: sign in to Claude Code from Settings → Coding agents."
 # How long Settings waits for `claude --version` and `claude auth status`.
 LOOK_SECONDS = 30.0
 # How long a hook of Chief of Staff's may take before Claude blocks what it was asked about.
@@ -143,7 +143,7 @@ WAKE_SECONDS = 10.0
 ALIASES = (("default", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"))
 # Of `claude auth status --json`, only these are read; the rest (who, which organization, which
 # plan) is dropped as it is parsed, never kept, shown or logged.
-AUTH_FIELDS = ("loggedIn", "authMethod", "apiProvider", "apiKeySource")
+AUTH_FIELDS = ("loggedIn", "authMethod", "apiProvider", "apiKeySource", "loginExpiresAt")
 # The prompt a resumed session's process is sent first, blocked at the gate before any model
 # call: Claude's answer says what the session restored (its totals), which its spend counts from.
 PROBE = (
@@ -388,6 +388,33 @@ def signed_in(auth: dict) -> str:
     if method in {"api_key", "apiKey"} or auth.get("apiKeySource"):
         return "apiKey"
     return ""
+
+
+def sign_in_facts(auth: dict) -> dict:
+    """What the @ picker and Settings say of a sign-in beyond how (signed_in): when it ends
+    (loginExpiresAt, 2.1.318 and later: seconds since the epoch, 0 when not said) and a key in
+    Chief of Staff's environment its workers use instead (ANTHROPIC_API_KEY, by name only)."""
+    facts: dict = {"account": signed_in(auth)}
+    if expires := epoch(auth.get("loginExpiresAt")):
+        facts["expires"] = expires
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        facts |= {"account": "apiKey", "key_env": "ANTHROPIC_API_KEY"}
+    return facts
+
+
+def epoch(value) -> float:
+    """A time as Claude may say it (seconds or milliseconds since the epoch, or ISO 8601) in
+    seconds since the epoch; 0 when it is none of these."""
+    if isinstance(value, bool) or value in (None, ""):
+        return 0.0
+    if isinstance(value, int | float):
+        return float(value) / 1000 if value > 1e11 else float(value)
+    if isinstance(value, str):
+        with suppress(ValueError):
+            return epoch(float(value))
+        with suppress(ValueError):
+            return datetime.fromisoformat(value).timestamp()
+    return 0.0
 
 
 def bash_shell() -> str:
@@ -750,7 +777,7 @@ async def look(command: str = "claude", folder: Path | None = None) -> dict:
         raise RuntimeError(NOT_SIGNED_IN)
     return {
         "version": version,
-        "account": signed_in(auth),
+        **sign_in_facts(auth),
         "models": list(LISTED.get(version) or alias_models()),
         # Its own list once a worker's process said it; until then, its aliases (not kept).
         "models_known": version in LISTED,
@@ -774,7 +801,7 @@ async def glance(command: str = "claude", folder: Path | None = None) -> dict:
     auth = await auth_status(path, folder)
     if not auth.get("loggedIn"):
         raise RuntimeError(NOT_SIGNED_IN)
-    return {"version": version, "account": signed_in(auth)}
+    return {"version": version, **sign_in_facts(auth)}
 
 
 # Each version's models as the last worker's process listed them (initialize), for Settings.
@@ -3506,7 +3533,7 @@ class ClaudeAgent:
             raise RuntimeError(self.trouble)
         return {
             "version": self.cli_version,
-            "account": signed_in(self.auth),
+            **sign_in_facts(self.auth),
             "models": await self.list_models(),
             "models_known": self.models_known,
             "check_key": self.key,

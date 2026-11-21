@@ -172,6 +172,8 @@ MODEL_REFUSED = re.compile(
 # Copilot kept a thinking effort the session's model takes none of ("Reasoning effort 'low' is
 # not supported for model …"): chosen for the model the session had before.
 EFFORT_REFUSED = re.compile(r"effort\b[^.\n]{0,40}\bnot supported", re.IGNORECASE)
+# A turn's failure about an MCP server's sign-in (that server's, not its agent's).
+MCP_SAID = re.compile(r"\bMCP\b", re.IGNORECASE)
 ROUTER_CONTEXT = int(os.environ.get("CHIEFOFSTAFF_ROUTER_CONTEXT", "150000"))
 # The Router's closing words in a turn without the owner that only say it has nothing to say
 # ("(quiet)", as its prompt asks, or "Nothing more to route: …"): not shown to the owner.
@@ -935,6 +937,10 @@ class Events:
         self.states[session_id].retuned = False
         self.states[session_id].awaiting = None  # Copilot said what went wrong.
         self.states[session_id].steps.clear()
+        if not self.runtime.on_copilot(session_id) and not MCP_SAID.search(message):
+            # Its agent's own sign-in lost (signed out, expired): Sign-in needed wherever its
+            # status shows, at once (an MCP server's sign-in is that server's).
+            self.runtime.sign_in_lost(self.runtime.agent(session_id), message)
         if (
             row["role"] != WORKER
             and not self.runtime.on_copilot(session_id)

@@ -120,8 +120,8 @@ async def test_a_codex_never_set_up_is_not_offered_and_nothing_of_it_runs_or_is_
         await runtime.offer_agents()
         assert "agent_offers" not in runtime.snapshot()
         (entry,) = (await runtime.look_for_agents())["agents"]
-        assert entry["problem"] == "Not set up: run `codex` in a terminal and sign in."
-        with pytest.raises(RuntimeError, match=r"^Not set up: run `codex`"):
+        assert entry["problem"] == "Not set up: sign in to Codex from Settings → Coding agents."
+        with pytest.raises(RuntimeError, match=r"^Not set up: sign in to Codex"):
             await CodexAgent("codex").start()
         assert not runs.exists(), "nothing of Codex ran"
         assert list(home.iterdir()) == [] and not (tmp_path / "codex-home").exists()
@@ -204,8 +204,10 @@ async def test_each_agent_says_if_it_is_ready_who_pays_and_what_makes_it_ready(
         claude = found["claude"]
         assert (claude["said"], claude["fix"]["command"]) == (
             "Not installed",
-            "npm install -g @anthropic-ai/claude-code",
+            "curl -fsSL https://claude.ai/install.sh | bash",
         )
+        # Install runs that, word for word (agentsetup.py).
+        assert claude["install"][0] == {"method": "script", "command": claude["fix"]["command"]}
         assert statuses(runtime.snapshot()["agents_status"])["codex"]["status"] == "ready"
         monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
         found = statuses(await runtime.refresh_agent_status())
@@ -226,7 +228,9 @@ async def test_signed_in_again_settings_says_ready_and_new_workers_start_there(
 ):
     _, runtime = await started(tmp_path)
     try:
-        runtime.agent_failed["codex"] = "Codex is not signed in: run codex login in a terminal."
+        runtime.agent_failed["codex"] = (
+            "Codex is not signed in: sign in from Settings → Coding agents."
+        )
         assert runtime.agent_status("codex")["said"] == "Sign-in needed"
         assert (await runtime.look_for_agent("codex"))["said"] == "Ready", "looked at again"
         assert "codex" not in runtime.agent_failed
@@ -243,7 +247,7 @@ async def test_claude_on_an_api_key_says_whose_key_it_uses(tmp_path, claude_on_p
         monkeypatch.setenv("FAKE_CLAUDE_SIGNED_OUT", "1")
         runtime.glanced.clear()
         claude = statuses(await runtime.refresh_agent_status())["claude"]
-        assert claude["fix"] == {"command": "claude", "then": "then /login"}
+        assert claude["fix"] == {"command": "claude auth login", "then": ""}
         assert (await runtime.look_for_agent("claude"))["said"] == "Sign-in needed"
     finally:
         await runtime.stop()
@@ -597,7 +601,10 @@ async def test_a_named_agent_that_cannot_run_offers_choices_and_starts_nothing_e
             m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
         ]
         key = card["meta"]["agent_refused"]
-        assert card["text"] == "“Fix the login test” did not start on Codex: sign-in needed."
+        assert card["text"] == (
+            "Codex needs you to sign in. Your message is saved: “Fix the login test” starts on "
+            "Codex once you have."
+        )
         # The command that makes it ready, for the owner to run; Copilot offered instead.
         assert card["meta"]["fix"] == {"command": "codex login", "then": ""}
         assert card["meta"]["instead"] == "copilot"
@@ -648,7 +655,10 @@ async def test_work_for_a_worker_whose_agent_is_signed_out_continues_on_copilot_
         (card,) = [
             m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
         ]
-        assert card["text"] == "“Fix it” did not get this on Codex: sign-in needed."
+        assert card["text"] == (
+            "Codex needs you to sign in. Your message is saved: “Fix it” gets it on Codex once you "
+            "have."
+        )
         assert card["meta"]["worker"] == worker and card["meta"]["instead"] == "copilot"
         assert card["meta"]["fix"] == {"command": "codex login", "then": ""}
         moved = await runtime.answer_refusal(card["meta"]["agent_refused"], "copilot")

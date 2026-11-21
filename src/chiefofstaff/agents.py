@@ -45,6 +45,11 @@ ROLES = {
     "slack": "Slack",
 }
 ROLE_CHOICES = "roles"
+# What a role does while the agent chosen for it can't run it (signed out, not installed, its
+# plan's limit): go on on Copilot and say so (the default), or wait for the owner ("ask": its
+# messages kept until they sign in or say Use Copilot until then). {role: "ask"}, none else.
+ROLE_UNAVAILABLE = "role_unavailable"
+ASK = "ask"
 # The agents what reads Slack for Chief of Staff runs on beside Copilot (Watch for you): none
 # until Claude's Slack safeguards are reviewed again, as for workers that read Slack (d82aff5);
 # never Codex, which has no sandbox Chief of Staff's checks passed for what it runs.
@@ -154,6 +159,12 @@ def role_agent(store: Store, role: str) -> str:
     return roles(store).get(role, COPILOT)
 
 
+def role_unavailable(store: Store, role: str) -> str:
+    """What a role does while its agent can't run it: "copilot" (go on there), or "ask"."""
+    chosen = stored(store).get(ROLE_UNAVAILABLE)
+    return ASK if isinstance(chosen, dict) and chosen.get(role) == ASK else COPILOT
+
+
 def limit(store: Store, name: str) -> int:
     """The tokens each of its workers may spend (0: no limit)."""
     value = configured(store).get(name, {}).get("limit")
@@ -192,7 +203,7 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
         raise ValueError("Coding agents: expected each agent's settings.")
     plan: dict[str, Any] = {**stored(store)}
     for name, entry in change.items():
-        if name in {NEW_WORKERS, ROLE_CHOICES}:
+        if name in {NEW_WORKERS, ROLE_CHOICES, ROLE_UNAVAILABLE}:
             continue
         if name == ROUTER_CHOOSES:
             if not isinstance(entry, bool):
@@ -252,6 +263,23 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
         plan[ROLE_CHOICES] = dict(sorted(kept.items()))
     else:
         plan.pop(ROLE_CHOICES, None)
+    waits = stored(store).get(ROLE_UNAVAILABLE)
+    waits = {r: ASK for r, how in waits.items() if how == ASK} if isinstance(waits, dict) else {}
+    if ROLE_UNAVAILABLE in change:
+        asked = change[ROLE_UNAVAILABLE]
+        if not isinstance(asked, dict):
+            raise ValueError("Coding agents: expected what each role does if its agent can't run.")
+        for role, how in asked.items():
+            if role not in ROLES or how not in (COPILOT, ASK):
+                raise ValueError("If unavailable: use Copilot and tell me, or ask me.")
+            if how == ASK:
+                waits[role] = ASK
+            else:
+                waits.pop(role, None)
+    if waits:
+        plan[ROLE_UNAVAILABLE] = dict(sorted(waits.items()))
+    else:
+        plan.pop(ROLE_UNAVAILABLE, None)
     return plan
 
 
@@ -309,18 +337,20 @@ PAYS = {
     "foundry": "Uses your Foundry account",
 }
 API_KEY_PAYS = {"codex": "Uses your OpenAI API key", "claude": "Uses your Anthropic API key"}
-# What makes an agent ready, run by the owner in a terminal (Chief of Staff never installs one
-# nor signs in for them): the command, and what to do in it after.
+# What makes an agent ready, as the owner would run it in a terminal (Copy command beside Sign
+# in and Install, which run the same for them: agentsetup.py): the command, and what to do after.
 INSTALL_FIX = {
-    "codex": {"command": "npm install -g @openai/codex", "then": ""},
-    "claude": {"command": "npm install -g @anthropic-ai/claude-code", "then": ""},
+    "codex": {"command": "curl -fsSL https://chatgpt.com/codex/install.sh | sh", "then": ""},
+    "claude": {"command": "curl -fsSL https://claude.ai/install.sh | bash", "then": ""},
 }
 SIGN_IN_FIX = {
     "codex": {"command": "codex login", "then": ""},
-    "claude": {"command": "claude", "then": "then /login"},
+    "claude": {"command": "claude auth login", "then": ""},
 }
 # An agent as the @ picker and Settings say it: ready, its sign-in needed, not installed.
 READY, SIGN_IN, MISSING, PROBLEM, CHECKING = "ready", "signin", "missing", "problem", "checking"
+# Why work for an agent is held for it (its card's Sign in, Install), to go on by itself after.
+HELD = frozenset({SIGN_IN, MISSING})
 STATUS_WORDS = {
     READY: "Ready",
     SIGN_IN: "Sign-in needed",
@@ -329,15 +359,24 @@ STATUS_WORDS = {
 }
 NEEDS_SIGN_IN = re.compile(
     r"\b401\b|unauthori[sz]ed|not (?:signed|logged) in|not set up|invalid api key"
-    r"|please run /login|oauth token has expired|authentication (?:failed|error)",
+    r"|please run /login|oauth token has expired|authentication[ _](?:failed|error)"
+    r"|login (?:expired|reached its time limit)|refresh token|(?:sign|log) ?in again",
     re.IGNORECASE,
 )
 
 
-def pays(name: str, account: str) -> str:
-    """Whose plan or key an agent's work uses, from how it is signed in ("" when unknown)."""
+# A key in the environment Chief of Staff started in, which an agent's workers use over its
+# sign-in (Claude Code: ANTHROPIC_API_KEY, its billing then the key's).
+KEY_VARIABLES = {"claude": "ANTHROPIC_API_KEY"}
+
+
+def pays(name: str, account: str, key_env: str = "") -> str:
+    """Whose plan or key an agent's work uses, from how it is signed in ("" when unknown); a key
+    in the environment it runs in (key_env) is said by its name."""
     if name == COPILOT:
         return COPILOT_PAYS
+    if key_env:
+        return f"{API_KEY_PAYS.get(name, 'Uses an API key')} ({key_env})"
     if account == "apiKey":
         return API_KEY_PAYS.get(name, "")
     return PAYS.get(account, "")

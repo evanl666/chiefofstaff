@@ -1816,10 +1816,17 @@ class Tools:
                     # card says why: the Router does not say it again.
                     self.runtime.agent_refused_card(named, str(exc), params.model_dump())
                     instead = agents.display(self.runtime.instead_of(named))
+                    held = agents.status_of(named, str(exc))["status"] in agents.HELD
+                    can = (
+                        f"sign in or install it, and it starts there by itself; or run it on "
+                        f"{instead} instead"
+                        if held
+                        else f"run it on {instead} instead, or wait"
+                    )
                     raise ValueError(
                         f"Not started: {exc} The owner sees this on a card in this chat, with "
-                        f"what they can do (run it on {instead} instead, or wait): do not say "
-                        "it again, and start it nowhere else."
+                        f"what they can do ({can}): do not say it again, and start it nowhere "
+                        "else."
                     ) from exc
                 raise
             if named and agent == named:
@@ -2337,13 +2344,23 @@ class Tools:
             # take up; the owner's card says why, with the fix, and continues it elsewhere.
             name = self.runtime.display_title(target)
             self.runtime.agent_refused_card(
-                agent, why, {"title": name}, worker=target["id"], text=params.text
+                agent,
+                why,
+                {"title": name},
+                worker=target["id"],
+                text=params.text,
+                replay=params.model_dump(),
             )
             instead = agents.display(self.runtime.instead_of(agent))
+            held = agents.status_of(agent, why)["status"] in agents.HELD
+            can = (
+                f"sign in, and it gets this by itself; or continue its work on {instead}, with this"
+                if held
+                else f"continue this worker's work on {instead}, with this, or wait"
+            )
             raise ValueError(
                 f"Not sent: {why} The owner sees this on a card in this chat, with what they can "
-                f"do (continue this worker's work on {instead}, with this, or wait): do not say "
-                "it again, and give it to no other worker."
+                f"do ({can}): do not say it again, and give it to no other worker."
             )
         # Checked before anything changes: a closed worker is not reopened for a refused title.
         title = deliverable_title(params.title) if params.task == "new" else ""

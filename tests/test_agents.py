@@ -135,7 +135,10 @@ def test_agents_are_looked_for_only_once_the_group_is_opened(web, codex_on_path)
 @pytest.mark.parametrize(
     ("env", "problem"),
     [
-        ({"FAKE_CODEX_SIGNED_OUT": "1"}, "Codex is not signed in: run codex login in a terminal."),
+        (
+            {"FAKE_CODEX_SIGNED_OUT": "1"},
+            "Codex is not signed in: sign in from Settings → Coding agents.",
+        ),
         ({"FAKE_CODEX_VERSION": "0.167.1"}, "Codex 0.167.1 is older than the versions tested"),
         (
             {"FAKE_CODEX_REQUIREMENTS": json.dumps({"allowedApprovalsReviewers": ["auto_review"]})},
@@ -443,8 +446,8 @@ async def test_a_named_agent_that_cannot_run_is_an_error_not_copilot(
         )
         assert result.result_type == "failure"
         assert result.error.startswith(
-            "Not started: Codex could not start: Codex is not signed in: run codex login in a "
-            "terminal. The owner sees this on a card in this chat"
+            "Not started: Codex could not start: Codex is not signed in: sign in from Settings → "
+            "Coding agents. The owner sees this on a card in this chat"
         )
         assert len(harness.store.open_sessions()) == before, "no worker made"
         slack = await spawn_on(

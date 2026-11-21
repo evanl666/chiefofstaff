@@ -97,7 +97,7 @@ OLDEST_CODEX = "0.167.2"
 LOOK_SECONDS = 30
 # Where Codex was never set up (no CODEX_HOME, ~/.codex), nothing of it runs: any run makes that
 # folder and its databases (0.167.2).
-NOT_SET_UP = "Not set up: run `codex` in a terminal and sign in."
+NOT_SET_UP = "Not set up: sign in to Codex from Settings → Coding agents."
 # What a look's own process turns off: the plugin sync each app-server runs as it starts,
 # which rewrites the records in Codex's plugin cache (0.167.2). Workers keep it.
 LOOK_SETTINGS = [
@@ -986,7 +986,7 @@ class CodexBackend:
                 raise RuntimeError(why)
             await self.check_requirements()
             if self.needs_sign_in and not (await self.get_auth_status()).isAuthenticated:
-                raise RuntimeError("Codex is not signed in: run codex login in a terminal.")
+                raise RuntimeError("Codex is not signed in: sign in from Settings → Coding agents.")
         except BaseException:
             await self.stop()
             raise
@@ -3554,6 +3554,7 @@ async def run_codex(command: str, *arguments: str, folder: Path | None = None) -
 LOGIN_KINDS = (
     ("Logged in using ChatGPT", "chatgpt"),
     ("Amazon Bedrock", "amazonBedrock"),
+    ("API key configured", "apiKey"),
     ("API key", "apiKey"),
 )
 
@@ -3575,11 +3576,12 @@ async def glance(command: str = "codex", folder: Path | None = None) -> dict:
     if why := codex_refused(version):
         raise RuntimeError(why)
     code, said = await run_codex(path, "login", "status", folder=folder)
-    signed = code == 0 and "Logged in" in said
+    # Its exit code says it ("Logged in using ChatGPT", "API key configured - …": 0).
+    signed = code == 0 and "Not logged in" not in said
     account = next((kind for phrase, kind in LOGIN_KINDS if phrase in said), "") if signed else ""
     del said
     if not signed:
-        raise RuntimeError("Codex is not signed in: run codex login in a terminal.")
+        raise RuntimeError("Codex is not signed in: sign in from Settings → Coding agents.")
     return {"version": version, "account": account}
 
 

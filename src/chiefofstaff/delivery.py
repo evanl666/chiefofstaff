@@ -442,6 +442,9 @@ class Delivery:
         worker = self.store.session(session_id)
         if worker["role"] == WORKER and self.states[session_id].confined:
             return False  # Kept for its sandboxed session (see deliver).
+        if self.runtime.role_waiting(worker):
+            # Its role waits for the owner (its agent can't run it; Ask me): kept until then.
+            return False
         if worker["role"] == WORKER and await self.runtime.settings_refusal(worker):
             # No turn starts while its folder's agent settings are changed (see deliver).
             self.runtime.background(self.runtime.settings_stop(session_id))

@@ -43,7 +43,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from . import agents, caches, compat, prompts, settings_guard, threads, updates
+from . import agents, agentsetup, caches, compat, prompts, settings_guard, threads, updates
 from . import workspaces as workspaces_module
 from .abilities import Abilities
 from .accounts import Accounts
@@ -347,6 +347,10 @@ USAGE_SETTLES = 60.0
 FOUND_SECONDS = 60.0
 # How long an agent's glance is taken as its status when the page asks again (agent_status).
 STATUS_SECONDS = 30.0
+# How soon one that could not run (signed out, not installed) is looked at again when asked.
+UNREADY_SECONDS = 5.0
+# How long held work waits, "Resuming…" with Cancel, once its agent can run it (resume_held).
+RESUME_SECONDS = 5.0
 # What a worker has done once it said any of these: a step, a report, an update (until then,
 # Restart on… starts its task on another agent instead; Runtime.restart_on).
 DOING = frozenset({"tool", "report", "update"})
@@ -715,6 +719,17 @@ class Runtime:
         # Each agent's last glance (its version and sign-in, or why it cannot run), and when:
         # what the @ picker and Settings say of it (agent_status).
         self.glanced: dict[str, tuple[float, dict | str]] = {}
+        # The agents seen able to run since they last could not (agent_up: what waited on one
+        # goes on), and the words a worker's turn last lost its agent's sign-in with.
+        self.ready_seen: set[str] = set()
+        self.down_seen: set[str] = set()
+        self.lost_sign_in: dict[str, str] = {}
+        # Held work's cards resuming now (resume_held: once each); roles whose wait for the
+        # owner ended, what they were sent meanwhile to go to them (role_waits).
+        self.resuming: set[str] = set()
+        self.roles_unwaited: set[str] = set()
+        # Sign-ins and installs the owner started from the page (agentsetup.py).
+        self.setups = agentsetup.Setups(self)
         # Every turn of another agent's worker begins only once admitted (admit_turn), one at a
         # time; what can make a worker ineligible bumps the generation under this lock first.
         self.admission = asyncio.Lock()
@@ -882,6 +897,7 @@ class Runtime:
         )
         self.asks.expire_requests()
         self.accounts.restore()
+        agentsetup.kept_paths(self.store)  # Agents installed from here, found as before.
         self.task_actions.settle_reports()
         await self.connect()
         self.after_update()
@@ -1781,6 +1797,7 @@ class Runtime:
     def agent_start_failed(self, agent: str, error: BaseException) -> str:
         why = f"{agents.display(agent)} could not start: {describe(error)}"
         self.agent_failed[agent] = why
+        self.agent_down(agent)
         return why
 
     async def place_role(self, role: str):
@@ -1795,29 +1812,115 @@ class Runtime:
             fell = self.store.get(f"rolefallback:{role}")
             target, why = await self.role_start(role)
             row = self.store.session(row["id"])
-            if target == self.agent(row["id"]):
-                if why and why != fell:
-                    # Chosen for an agent that can't run it now: said once, where it runs.
-                    label = agents.ROLES[role]
-                    self.add_message(
-                        row["id"], "notice", f"{label} runs on Copilot for now: {plain_why(why)}"
-                    )
-                return
-            busy = row["status"] == "working" or self.states[row["id"]].busy
-            if busy and self.states.handle(row["id"]):
-                return  # At its turn's end.
-            kind = "fallback" if why else ""
+            waited = bool(self.role_wait(role))
             try:
-                await self.switch_role(row, role, target, kind, why)
-            except Exception as exc:
-                if target == COPILOT_AGENT:
-                    raise
-                why = self.agent_start_failed(target, exc)
-                self.hold_role(role, target, why)
-                self.store.set(f"rolefallback:{role}", why)
-                if self.agent(row["id"]) != COPILOT_AGENT:
-                    await self.switch_role(row, role, COPILOT_AGENT, "fallback", why)
-        self.publish_state()
+                if await self.role_waits(role, row, target, why):
+                    changed = not waited
+                else:
+                    changed = await self.put_role(role, row, target, why, fell) or waited
+            finally:
+                if role in self.roles_unwaited:
+                    # What waited for it goes to it now, where it runs.
+                    self.roles_unwaited.discard(role)
+                    self.delivery.schedule_flush(row["id"])
+        if changed:
+            self.publish_state()
+
+    async def put_role(self, role: str, row: dict, target: str, why: str, fell: str | None) -> bool:
+        """place_role's switch, its role's lock held: whether it switched."""
+        if target == self.agent(row["id"]):
+            if why and why != fell:
+                # Chosen for an agent that can't run it now: said once, where it runs.
+                label = agents.ROLES[role]
+                self.add_message(
+                    row["id"], "notice", f"{label} runs on Copilot for now: {plain_why(why)}"
+                )
+            return False
+        busy = row["status"] == "working" or self.states[row["id"]].busy
+        if busy and self.states.handle(row["id"]):
+            return False  # At its turn's end.
+        kind = "fallback" if why else ""
+        try:
+            await self.switch_role(row, role, target, kind, why)
+        except Exception as exc:
+            if target == COPILOT_AGENT:
+                raise
+            why = self.agent_start_failed(target, exc)
+            self.hold_role(role, target, why)
+            self.store.set(f"rolefallback:{role}", why)
+            if self.agent(row["id"]) != COPILOT_AGENT:
+                await self.switch_role(row, role, COPILOT_AGENT, "fallback", why)
+        return True
+
+    async def role_waits(self, role: str, row: dict, target: str, why: str) -> bool:
+        """Whether a role waits for the owner now, its messages kept (Settings: If unavailable,
+        Ask me): its agent can't run it, and they have not said Use Copilot until then. Its card
+        in the Router's chat says why, with Sign in (or Install). Once it can run there again,
+        or they said Copilot, it goes on with what was kept."""
+        wanted = agents.role_agent(self.store, role)
+        waiting = self.role_wait(role)
+        label = agents.ROLES[role]
+        if not why or target != COPILOT_AGENT or wanted == COPILOT_AGENT:
+            self.store.delete(f"roleok:{role}")
+            if waiting:
+                self.role_waited(role, waiting, f"Runs on {agents.display(target)} now")
+            return False
+        if agents.role_unavailable(self.store, role) != agents.ASK or (
+            self.store.get(f"roleok:{role}") == wanted
+        ):
+            if waiting:
+                self.role_waited(role, waiting, "On Copilot until then")
+            return False
+        if waiting:
+            return True
+        found = self.unready(wanted, why)
+        name = agents.display(wanted)
+        if found["status"] == agents.SIGN_IN:
+            needs = f"{name} needs you to sign in"
+        elif found["status"] == agents.MISSING:
+            needs = f"{name} isn't installed"
+        else:
+            needs = f"{name} can't run it: {plain_why(why)}"
+        card = self.add_message(
+            self.router_id(),
+            "notice",
+            f"{label} waits for {name}. {needs}. What it is sent is kept until then.",
+            {
+                "role_wait": role,
+                "agent": wanted,
+                "status": found["status"],
+                **({"fix": found["fix"]} if found.get("fix") else {}),
+            },
+        )
+        self.store.set(
+            f"rolewait:{role}", json.dumps({"agent": wanted, "why": why, "card": card["id"]})
+        )
+        return True
+
+    def role_wait(self, role: str) -> dict:
+        try:
+            found = json.loads(self.store.get(f"rolewait:{role}") or "{}")
+        except ValueError:
+            return {}
+        return found if isinstance(found, dict) else {}
+
+    def role_waited(self, role: str, waiting: dict, said: str):
+        """A role's wait over: its card says how, and what it was sent goes to it."""
+        self.store.delete(f"rolewait:{role}")
+        self.refusal_said(waiting, {"resumed": said})
+        self.roles_unwaited.add(role)
+
+    def role_waiting(self, row: dict) -> bool:
+        """Whether nothing is sent to this session now: its role waits for the owner."""
+        return row["role"] in PLACED_ROLES and bool(self.store.get(f"rolewait:{row['role']}"))
+
+    async def answer_role_wait(self, role: str):
+        """Use Copilot until then, on a waiting role's card: it goes on there, with what was
+        kept, and back on its agent once that can run it."""
+        if role not in PLACED_ROLES or not self.role_wait(role):
+            raise ValueError("That card was answered already.")
+        self.store.set(f"roleok:{role}", agents.role_agent(self.store, role))
+        await self.place_role(role)
 
     async def role_start(self, role: str) -> tuple[str, str]:
         """Where a role runs now (role_target), its agent started (one that can't start leaves
@@ -2071,15 +2174,23 @@ class Runtime:
         row = {"id": "", "role": WORKER, "slack": slack, "yolo": "", "closed_at": None}
         if slack and not named and self.blocked_on(chosen, row):
             return COPILOT_AGENT, ""  # Not this agent's to run (it reads Slack): nothing to say.
-        if not (why := self.blocked_on(chosen, row)):
+        if chosen in self.lost_sign_in:
+            # A turn lost its sign-in: looked at again first (signed in meanwhile, it runs).
+            with suppress(Exception):
+                await self.glance_agent(chosen)
+        if lost := self.lost_sign_in.get(chosen):
+            why = f"{agents.display(chosen)} could not run: {lost}"
+        elif not (why := self.blocked_on(chosen, row)):
             try:
                 await self.connect_agent(chosen)
                 await self.recheck_agent(chosen)
             except Exception as exc:
                 why = f"{agents.display(chosen)} could not start: {describe(exc)}"
                 self.agent_failed[chosen] = why  # Said to the Router (agent_unavailable).
+                self.agent_down(chosen)
             else:
                 self.agent_failed.pop(chosen, None)
+                self.agent_up(chosen)
                 why = self.blocked_on(chosen, row)  # What its version showed, now known.
         if not why:
             return chosen, ""
@@ -3988,30 +4099,49 @@ class Runtime:
         self.add_message(row["id"], "notice", text)
 
     def agent_refused_card(
-        self, agent: str, why: str, params: dict, worker: str = "", text: str = ""
+        self,
+        agent: str,
+        why: str,
+        params: dict,
+        worker: str = "",
+        text: str = "",
+        replay: dict | None = None,
     ):
         """A worker the owner named an agent for could not start on it (more-agents.md 5.12.8,
         recovery), or (`worker`) what the Router gave a worker of theirs on an agent that
-        cannot run now (signed out, say), `text`, did not reach it: the owner's card in the
-        Router's chat says why in one line, with the command that fixes it, and offers one
-        click: run it on Copilot instead (continue that worker's work there, with what it was
-        given), or wait; the Router not saying it again; nothing starts elsewhere unasked."""
+        cannot run now (signed out, say), `text` (`replay`: that message as the Router sent
+        it), did not reach it: the owner's card in the Router's chat says why in one line and
+        offers what fixes it (Sign in, Install: agentsetup.py), or one click to run it on
+        Copilot instead (continue that worker's work there, with what it was given), or to
+        drop it; the Router not saying it again; nothing starts elsewhere unasked. Held for a
+        sign-in or an install, it is kept: it goes on by itself once that agent can run it
+        (resume_held), as nothing of it ran yet."""
         key = uuid4().hex[:10]
         instead = self.instead_of(agent)
-        record = {"agent": agent, "params": params, "instead": instead}
+        found = self.unready(agent, why)
+        record = {"agent": agent, "params": params, "instead": instead, "status": found["status"]}
         if worker:
-            record |= {"worker": worker, "text": text}
-        self.store.set(f"agentrefusal:{key}", json.dumps(record))
-        found = agents.status_of(agent, why)
-        # One line: its status where a command makes it ready (that command under it), else why.
-        said = f"{found['said'].lower()}." if found.get("fix") else why
+            record |= {"worker": worker, "text": text, **({"replay": replay} if replay else {})}
+        name = agents.display(agent)
         title = params.get("title") or "The task"
-        line = (
-            f"“{title}” did not get this on {agents.display(agent)}: {said}"
-            if worker
-            else f"“{title}” did not start on {agents.display(agent)}: {said}"
-        )
-        self.add_message(
+        if found["status"] in agents.HELD:
+            needs = (
+                f"{name} needs you to sign in"
+                if found["status"] == agents.SIGN_IN
+                else f"{name} isn't installed"
+            )
+            once = "once you have" if found["status"] == agents.SIGN_IN else "once it is"
+            goes = f"gets it on {name}" if worker else f"starts on {name}"
+            line = f"{needs}. Your message is saved: “{title}” {goes} {once}."
+        else:
+            # One line: why it cannot run (its status's words where they say it).
+            said = f"{found['said'].lower()}." if found.get("fix") else why
+            line = (
+                f"“{title}” did not get this on {name}: {said}"
+                if worker
+                else f"“{title}” did not start on {name}: {said}"
+            )
+        message = self.add_message(
             self.router_id(),
             "notice",
             line,
@@ -4019,9 +4149,124 @@ class Runtime:
                 "agent_refused": key,
                 "agent": agent,
                 "instead": instead,
+                "status": found["status"],
                 **({"worker": worker} if worker else {}),
                 **({"fix": found["fix"]} if found.get("fix") else {}),
             },
+        )
+        record["card"] = message["id"]
+        self.store.set(f"agentrefusal:{key}", json.dumps(record))
+
+    def refusal_said(self, found: dict, change: dict):
+        """A refusal's card as it stands now (resuming, resumed, answered): its meta changed,
+        and the page told."""
+        card = found.get("card")
+        if not card:
+            return
+        with suppress(LookupError):
+            message = self.store.message(int(card))
+            meta = {k: v for k, v in (message["meta"] or {}).items() if k != "resuming"}
+            self.store.update_message_meta(message["id"], {**meta, **change})
+            self.bus.publish("message", {**self.store.message(message["id"]), "amended": True})
+
+    async def resume_held(self, name: str):
+        """An agent that can run now (signed in, installed): each card of work it held for that
+        (agent_refused_card) goes on by itself on it, once, after RESUME_SECONDS in which the
+        owner can Cancel ("Resuming…"); a receipt says so, and it is listed under Handled for
+        you. One the owner answered, kept for them to start (Cancel), or held for another
+        reason is left as it is."""
+        armed = False
+        for key, raw in self.store.items("agentrefusal:").items():
+            try:
+                found = json.loads(raw)
+            except ValueError:
+                continue
+            if (
+                found.get("agent") != name
+                or found.get("status") not in agents.HELD
+                or found.get("kept")
+                or key in self.resuming
+            ):
+                continue
+            until = time.time() + RESUME_SECONDS
+            self.resuming.add(key)
+            self.store.set(f"agentrefusal:{key}", json.dumps(found | {"resuming": until}))
+            self.refusal_said(found, {"resuming": until})
+            self.background(self.resume_later(key, until))
+            armed = True
+        if armed:
+            self.publish_state()
+
+    async def resume_later(self, key: str, until: float):
+        try:
+            await asyncio.sleep(max(0.0, until - time.time()))
+            raw = self.store.get(f"agentrefusal:{key}")
+            if not raw:
+                return
+            found = json.loads(raw)
+            if found.get("resuming") != until:
+                return  # Cancelled meanwhile.
+            after = (
+                "resumed after sign-in"
+                if found.get("status") == agents.SIGN_IN
+                else "resumed once installed"
+            )
+            await self.resume_refused(key, found, after=after)
+        finally:
+            self.resuming.discard(key)
+
+    async def resume_refused(self, key: str, found: dict, after: str):
+        """Held work started on its agent now: its card done first (never twice: a restart
+        meanwhile finds nothing to do), then started as it was given; refused again (still not
+        able to run), a new card says why."""
+        self.store.delete(f"agentrefusal:{key}")
+        agent = found["agent"]
+        name = agents.display(agent)
+        title = (found.get("params") or {}).get("title") or "the work"
+        words = after[:1].upper() + after[1:]
+        self.refusal_said(found, {"resumed": words})
+        try:
+            if found.get("worker"):
+                from .tools import MessageSession
+
+                replay = found.get("replay") or {
+                    "session_id": found["worker"],
+                    "text": found.get("text", ""),
+                }
+                await self.toolset.t_message_session(
+                    MessageSession.model_validate(replay), self.router_id()
+                )
+                self.add_message(
+                    self.router_id(),
+                    "notice",
+                    f"Gave “{title}” what it was waiting for on {name}: {after}",
+                    {"session_id": found["worker"]},
+                )
+                made = {"session_id": found["worker"]}
+            else:
+                from .tools import SpawnWorker
+
+                params = {k: v for k, v in found["params"].items() if k in SpawnWorker.model_fields}
+                made = await self.toolset.t_spawn_worker(
+                    SpawnWorker.model_validate(params),
+                    self.router_id(),
+                    agent=agent,
+                    instead=f" on {name}: {after}",
+                )
+        except ValueError as exc:
+            # Refused again: its new card says why (spawn_worker's, message_session's).
+            logger.info("Held work for %s refused again: %s", agent, exc)
+            self.refusal_said(found, {"resumed": f"Not resumed: {name} still can't run it"})
+            return
+        except Exception as exc:
+            logger.warning("Held work for %s did not resume.", agent, exc_info=True)
+            self.refusal_said(found, {"resumed": f"Not resumed: {describe(exc)}"})
+            return
+        self.handled.record(
+            "resumed",
+            f"“{title}” went on on {name} once you signed in",
+            session_id=made.get("session_id", ""),
+            ref=key,
         )
 
     async def worker_agent_down(self, agent: str) -> str:
@@ -4046,18 +4291,29 @@ class Runtime:
 
     async def answer_refusal(self, key: str, action: str) -> dict:
         """The owner's answer on an agent refusal's card: start it on the agent it offers
-        instead (Copilot, or the one new workers start on), or wait (nothing starts; they ask
-        again once the agent can run it)."""
+        instead (Copilot, or the one new workers start on); start it on its own agent now
+        (`now`: it can run there); keep it, not going on by itself (`keep`: Cancel while it
+        was resuming); or drop it (`wait`: nothing starts)."""
         raw = self.store.get(f"agentrefusal:{key}")
         if not raw:
             raise ValueError("That card was answered already.")
         found = json.loads(raw)
+        if action == "keep":
+            kept = {k: v for k, v in found.items() if k != "resuming"} | {"kept": True}
+            self.store.set(f"agentrefusal:{key}", json.dumps(kept))
+            self.refusal_said(found, {"kept": True})
+            self.publish_state()
+            return {}
+        if action == "now":
+            await self.resume_refused(key, found, after="started when you asked")
+            return {}
         if found.get("worker") and action == "copilot":
             # One of the owner's workers on an agent that could not run: its work goes on, with
             # what the Router gave it, on the agent offered (as Continue with… does).
             instead = found.get("instead") or COPILOT_AGENT
             made = await self.continue_on(found["worker"], instead, also=found.get("text", ""))
             self.store.delete(f"agentrefusal:{key}")
+            self.refusal_said(found, {"resumed": f"Continued on {agents.display(instead)}"})
             title = (found.get("params") or {}).get("title") or "the work"
             self.add_message(
                 self.router_id(),
@@ -4068,15 +4324,17 @@ class Runtime:
             return made
         self.store.delete(f"agentrefusal:{key}")
         if action != "copilot":
+            self.refusal_said(found, {"resumed": "Not run"})
             self.add_message(
                 self.router_id(),
                 "notice",
-                f"Waiting for {agents.display(found['agent'])}: ask again once it can run it.",
+                f"Not run on {agents.display(found['agent'])}: ask again whenever you like.",
             )
             return {}
         from .tools import SpawnWorker
 
         instead = found.get("instead") or COPILOT_AGENT
+        self.refusal_said(found, {"resumed": f"Started on {agents.display(instead)} instead"})
         params = {k: v for k, v in found["params"].items() if k in SpawnWorker.model_fields}
         await self.toolset.t_spawn_worker(
             SpawnWorker.model_validate(params | {"model": ""}),
@@ -4666,6 +4924,19 @@ class Runtime:
         found = [await self.look_for_agent(name) for name in agents.NAMES]
         return {
             "agents": [entry for entry in found if entry["found"] or entry["enabled"]],
+            # Beside one found, each not installed, with Install (agentsetup.py).
+            **(
+                {"missing": missing}
+                if any(entry["found"] for entry in found)
+                and (
+                    missing := [
+                        {key: entry[key] for key in ("name", "label", "said", "fix", "install")}
+                        for entry in found
+                        if not entry["found"] and entry.get("install")
+                    ]
+                )
+                else {}
+            ),
             # What it supports, for when none is found ("the Codex CLI").
             "supported": [agents.INSTALL[name] for name in agents.NAMES],
             "new_workers": agents.new_workers_choice(self.store),
@@ -4682,6 +4953,12 @@ class Runtime:
                     "agents": sorted(agents.role_agents(role)),
                     "chosen": agents.role_agent(self.store, role),
                     "line": self.role_line(role),
+                    # If unavailable: use Copilot and tell me, or ask me (its own roles only).
+                    **(
+                        {"unavailable": agents.role_unavailable(self.store, role)}
+                        if role in PLACED_ROLES
+                        else {}
+                    ),
                 }
                 for role, label in agents.ROLES.items()
                 if agents.role_agents(role)
@@ -4692,9 +4969,8 @@ class Runtime:
         """One agent's row (look_for_agents), with its status as the @ picker says it."""
         entry = await self.looked_at_agent(name)
         status = self.agent_status(name)
-        return entry | {
-            key: status[key] for key in ("status", "said", "pays", "fix") if key in status
-        }
+        kept = ("status", "said", "pays", "fix", "ways", "install", "expires", "key_env")
+        return entry | {key: status[key] for key in kept if key in status}
 
     async def looked_at_agent(self, name: str) -> dict:
         chosen = agents.configured(self.store).get(name, {})
@@ -4854,22 +5130,39 @@ class Runtime:
         if name == COPILOT_AGENT:
             return entry | {"status": agents.READY, "said": "Ready", "pays": agents.COPILOT_PAYS}
         if name not in self.agents_found():
-            return entry | agents.status_of(name, "not installed")
+            return entry | self.unready(name, "not installed")
         seen = self.glanced.get(name, (0.0, None))[1]
         facts = seen if isinstance(seen, dict) else {}
         backend, _ = self.connection(name)
         why = "" if backend and backend.alive() else self.agent_failed.get(name, "")
         if not why and isinstance(seen, str) and not (backend and backend.alive()):
             why = seen
-        if why:
-            return entry | agents.status_of(name, why)
+        if why := self.lost_sign_in.get(name) or why:
+            return entry | self.unready(name, why)
         if not facts and not (backend and backend.alive()):
             return entry | {"status": agents.CHECKING, "said": agents.STATUS_WORDS["checking"]}
         return entry | {
             "status": agents.READY,
             "said": agents.STATUS_WORDS[agents.READY],
-            "pays": agents.pays(name, facts.get("account", "")),
+            "pays": agents.pays(name, facts.get("account", ""), facts.get("key_env", "")),
+            # When its sign-in ends (the page warns a week before), and a key it uses instead.
+            **({"expires": facts["expires"]} if facts.get("expires") else {}),
+            **({"key_env": facts["key_env"]} if facts.get("key_env") else {}),
+            # Signing in again is the owner's to ask for (Settings: Sign in again).
+            "ways": agentsetup.sign_in_methods(name),
         }
+
+    @staticmethod
+    def unready(name: str, why: str) -> dict:
+        """An agent that cannot run, as agents.status_of says it, with what the page can do for
+        it: its ways to sign in (agentsetup.SIGN_IN) or its installers (the official one
+        first), each its own command."""
+        found = agents.status_of(name, why)
+        if found["status"] == agents.SIGN_IN:
+            found["ways"] = agentsetup.sign_in_methods(name)
+        elif found["status"] == agents.MISSING:
+            found["install"] = agentsetup.install_methods(name)
+        return found
 
     def agents_status(self) -> list[dict]:
         """Every agent's status (agent_status), Copilot first: only where another agent is
@@ -4879,13 +5172,21 @@ class Runtime:
         return [self.agent_status(name) for name in (COPILOT_AGENT, *agents.NAMES)]
 
     async def refresh_agent_status(self) -> list[dict]:
-        """The page asks (the @ picker opened, Settings shown): each installed agent not
-        running now glanced at again (its version and sign-in, in its own folder of Chief of
-        Staff's) unless it was within STATUS_SECONDS; its status then."""
+        """The page asks (the @ picker opened, the window focused, Settings shown): each
+        installed agent not running now glanced at again (its version and sign-in, in its own
+        folder of Chief of Staff's) unless it was within STATUS_SECONDS (UNREADY_SECONDS for
+        one that could not run: signed in meanwhile, it turns Ready at once); its status then.
+        One being signed in is looked at by its sign-in (agentsetup.POLL_SECONDS)."""
+        if time.monotonic() - self.found_cache[0] > UNREADY_SECONDS:
+            self.found_cache = (float("-inf"), [])  # Installed meanwhile: found now.
         for name in self.agents_found():
             backend, _ = self.connection(name)
             at = self.glanced.get(name, (float("-inf"), None))[0]
-            if (backend and backend.alive()) or time.monotonic() - at < STATUS_SECONDS:
+            unready = self.agent_status(name)["status"] not in {agents.READY, agents.CHECKING}
+            if not unready and backend and backend.alive():
+                continue
+            wait = UNREADY_SECONDS if unready else STATUS_SECONDS
+            if time.monotonic() - at < wait or self.setups.running(name):
                 continue
             with suppress(Exception):
                 await self.glance_agent(name)  # (Why it cannot run is its status.)
@@ -4898,20 +5199,73 @@ class Runtime:
             facts = await agents.glance(name, self.agent_folder(name))
         except Exception as exc:
             self.glanced[name] = (time.monotonic(), describe(exc))
+            self.agent_down(name)
             raise
         self.seen_ready(name, facts)
         return facts
 
     def seen_ready(self, name: str, facts: dict):
         """An agent's glance or look found it signed in: its status, and a start that failed
-        for its sign-in (or as not installed) is past."""
+        for its sign-in (or as not installed) is past, as is a sign-in a turn lost."""
+        kept = {key: facts[key] for key in ("expires", "key_env") if facts.get(key)}
         self.glanced[name] = (
             time.monotonic(),
-            {"version": facts.get("version", ""), "account": facts.get("account", "")},
+            {"version": facts.get("version", ""), "account": facts.get("account", ""), **kept},
         )
         failed = self.agent_failed.get(name)
         if failed and agents.status_of(name, failed)["status"] in {agents.SIGN_IN, agents.MISSING}:
             self.agent_failed.pop(name, None)
+        self.lost_sign_in.pop(name, None)
+        self.agent_up(name)
+
+    def agent_up(self, name: str):
+        """An agent seen able to run (its glance or look, a start), the first time since it
+        could not: what waited on it goes on (agent_back), and the page says Ready (told only
+        where it was seen unable to before: at startup, nothing changed for the page)."""
+        if name in self.ready_seen or name not in agents.NAMES:
+            return
+        self.ready_seen.add(name)
+        if name in self.down_seen:
+            self.down_seen.discard(name)
+            self.publish_state()
+        if self.store.items("agentrefusal:") or (
+            self.agents and name in agents.roles(self.store).values()
+        ):
+            self.background(self.agent_back(name))
+
+    def agent_down(self, name: str):
+        """An agent seen unable to run (signed out, not installed, …): seen able again, what
+        waits on it goes on (agent_up)."""
+        self.ready_seen.discard(name)
+        self.down_seen.add(name)
+
+    def sign_in_lost(self, agent: str, message: str):
+        """A turn of an agent's session failed for its sign-in (signed out, expired): it says
+        Sign-in needed now, wherever its status shows, until a look finds it signed in."""
+        if agent not in agents.NAMES or not agents.NEEDS_SIGN_IN.search(message):
+            return
+        self.lost_sign_in[agent] = message[:300]
+        self.glanced[agent] = (time.monotonic(), message[:300])
+        self.agent_down(agent)
+        self.publish_state()
+
+    async def agent_back(self, name: str):
+        """An agent that could not run can now (signed in, installed): the work it held goes
+        on (resume_held), and a role of Chief of Staff's put on it moves back there at once."""
+        await self.resume_held(name)
+        if not self.agents:
+            return
+        for role in PLACED_ROLES:
+            if agents.role_agent(self.store, role) != name:
+                continue
+            row = self.role_row(role)
+            if row is None or self.agent(row["id"]) == name:
+                continue
+            self.store.delete(f"roleheld:{role}")
+            try:
+                await self.place_role(role)
+            except Exception:
+                logger.warning("Could not put the %s back on %s.", role, name, exc_info=True)
 
     def agents_found(self) -> list[str]:
         """The other agents installed here (their CLI on the PATH: nothing runs), looked at a
@@ -10127,6 +10481,14 @@ class Runtime:
             # Each agent's status for the @ picker (ready, its sign-in needed, not installed).
             **({"agents_status": status} if (status := self.agents_status()) else {}),
             **({"agent_offers": offers} if (offers := self.agent_offers()) else {}),
+            # Sign-ins and installs started from the page, while they run (and their last words).
+            **({"agent_setups": setups} if (setups := self.setups.view()) else {}),
+            # Roles waiting for the owner (If unavailable: Ask me), their cards' actions open.
+            **(
+                {"role_waits": waits}
+                if (waits := sorted(role for role in PLACED_ROLES if self.role_wait(role)))
+                else {}
+            ),
             # Cards for workers their named agent could not start, not answered yet.
             **(
                 {"agent_refusals": sorted(refusals)}

@@ -1183,11 +1183,11 @@ async def signed_out(route):
     codex = {
         "name": "codex", "label": "Codex", "enabled": False, "model": "", "limit": 0,
         "found": True, "state": "", "models": [],
-        "problem": "Codex is not signed in: run codex login in a terminal.",
+        "problem": "Codex is not signed in: sign in from Settings → Coding agents.",
     }  # fmt: skip
     claude = codex | {
         "name": "claude", "label": "Claude",
-        "problem": "Not signed in: run `claude` in a terminal and sign in.",
+        "problem": "Not signed in to Claude Code: sign in from Settings → Coding agents.",
     }  # fmt: skip
     answer = {"agents": [codex, claude], "new_workers": "copilot", "sandboxed": False}
     await route.fulfill(json=answer)

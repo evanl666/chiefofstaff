@@ -2,21 +2,27 @@
 Chief of Staff use), for tests: run by the Agent SDK as the CLI, with a tiny scripted model that
 understands the prompts the tests send.
 
-Run as `fake_claude.py --version`, `fake_claude.py auth status --json`, or as the SDK runs the CLI
-(`--output-format stream-json --input-format stream-json ...`). Its sessions are kept in
-FAKE_CLAUDE_HOME (one JSON file each, and a transcript where the SDK reads Claude's), so another
-process resumes them. FAKE_CLAUDE_* variables shape it: VERSION; SIGNED_OUT; AUTH (JSON: what
-`auth status` says); INIT (JSON merged into the answer to initialize: hooks not applied, say);
-SYSTEM (JSON merged into each turn's system/init: another permission mode); UNASKED (tools it
-runs without asking PreToolUse, comma-separated); RUNS (a file each run's arguments are appended
-to); LOG (a file each message from the SDK is appended to); ON_ITS_OWN (a turn it starts after
-each one, past the gate: one no gate admitted); LIMIT (JSON: a rate_limit_event's info, sent
+Run as `fake_claude.py --version`, `fake_claude.py auth status --json`, `fake_claude.py auth login`,
+or as the SDK runs the CLI (`--output-format stream-json --input-format stream-json ...`). Its
+sessions are kept in FAKE_CLAUDE_HOME (one JSON file each, and a transcript where the SDK reads
+Claude's), so another process resumes them. FAKE_CLAUDE_* variables shape it: VERSION; SIGNED_OUT;
+AUTH (JSON: what `auth status` says); INIT (JSON merged into the answer to initialize: hooks not
+applied, say); SYSTEM (JSON merged into each turn's system/init: another permission mode); UNASKED
+(tools it runs without asking PreToolUse, comma-separated); RUNS (a file each run's arguments are
+appended to); LOG (a file each message from the SDK is appended to); ON_ITS_OWN (a turn it starts
+after each one, past the gate: one no gate admitted); LIMIT (JSON: a rate_limit_event's info, sent
 as each turn's first request is answered); GATE_DELAY (seconds a prompt waits before its gate);
-NO_STEER (notes sent during a turn are taken up after it); EXIT_DELAY (seconds it takes to end
-once its input closes, its sessions/<pid>.json kept meanwhile). With ANTHROPIC_BASE_URL set
-(Chief of Staff's check), its turns come from that stand-in Messages API, as Claude Code's would.
-A prompt saying "Hit the usage limit" (or "rate limit") is refused as for a rate limit (a 429),
-as 2.1.322 says it."""
+NO_STEER (notes sent during a turn are taken up after it); EXIT_DELAY (seconds it takes to end once
+its input closes, its sessions/<pid>.json kept meanwhile). With ANTHROPIC_BASE_URL set (Chief of
+Staff's check), its turns come from that stand-in Messages API, as Claude Code's would. A prompt
+saying "Hit the usage limit" (or "rate limit") is refused as for a rate limit (a 429), as 2.1.322
+says it.
+
+`auth login [--claudeai|--console]` signs in as 2.1.322 says it (the page's URL, then "Login
+successful."), kept in its configuration folder (fake-auth.json, fake-signed-out: over SIGNED_OUT;
+`auth logout` too): it waits until a file `approve` there says how the owner's browser went ("ok",
+else its words: an error), or, with PASTE set, asks "Paste code here if prompted" and takes that
+code from stdin (another code fails)."""
 
 import asyncio
 import atexit
@@ -1579,22 +1585,26 @@ async def serve(flags: dict):
     turns.cancel()
 
 
-def main():
-    argv = sys.argv[1:]
-    note("FAKE_CLAUDE_RUNS", argv)
-    note("FAKE_CLAUDE_CWDS", str(Path.cwd()))
-    if argv[:1] == ["--version"]:
-        sys.stdout.write(f"{VERSION} (Claude Code)\n")
-        return
-    if argv[:2] == ["auth", "status"]:
-        # As 2.1.322 does where Claude was never set up: its state file and a backups folder.
-        given = os.environ.get("CLAUDE_CONFIG_DIR")
-        config = Path(given) if given else Path.home() / ".claude"
-        state = config / ".claude.json" if given else Path.home() / ".claude.json"
-        if not state.exists():
-            (config / "backups").mkdir(parents=True, exist_ok=True)
-            state.write_text("{}\n")
-        if os.environ.get("FAKE_CLAUDE_SIGNED_OUT"):
+def configuration() -> tuple[Path, Path]:
+    """Its configuration folder and state file, made as 2.1.322 makes them where Claude was
+    never set up (that file, a backups folder)."""
+    given = os.environ.get("CLAUDE_CONFIG_DIR")
+    config = Path(given) if given else Path.home() / ".claude"
+    state = config / ".claude.json" if given else Path.home() / ".claude.json"
+    if not state.exists():
+        (config / "backups").mkdir(parents=True, exist_ok=True)
+        state.write_text("{}\n")
+    return config, state
+
+
+def auth(argv: list[str]):
+    config, _ = configuration()
+    kept, out_mark = config / "fake-auth.json", config / "fake-signed-out"
+    if argv[:1] == ["status"]:
+        signed = kept.exists() or not (
+            out_mark.exists() or os.environ.get("FAKE_CLAUDE_SIGNED_OUT")
+        )
+        if not signed:
             out = {"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"}
             sys.stdout.write(json.dumps(out) + "\n")
             sys.exit(1)
@@ -1607,7 +1617,54 @@ def main():
             "orgName": "Example",
         }
         said |= json.loads(os.environ.get("FAKE_CLAUDE_AUTH") or "{}")
+        if kept.exists():
+            said |= json.loads(kept.read_text())
         sys.stdout.write(json.dumps(said) + "\n")
+        return
+    if argv[:1] == ["logout"]:
+        kept.unlink(missing_ok=True)
+        out_mark.write_text("")
+        sys.stdout.write("Successfully logged out from your Anthropic account.\n")
+        return
+    if argv[:1] != ["login"]:
+        sys.stderr.write(f"error: unknown command '{' '.join(argv)}'\n")
+        sys.exit(1)
+    console = "--console" in argv
+    sys.stdout.write("Opening browser to sign in…\n")
+    sys.stdout.write(
+        "If the browser didn't open, visit: https://claude.ai/oauth/authorize?code=true&"
+        f"client_id=fake&state={os.getpid()}\n"
+    )
+    sys.stdout.flush()
+    if code := os.environ.get("FAKE_CLAUDE_PASTE"):
+        sys.stdout.write("Paste code here if prompted > ")
+        sys.stdout.flush()
+        given = sys.stdin.readline().strip()
+        said = "ok" if given == code else "Invalid code"
+    else:
+        approve = config / "approve"
+        while not approve.exists():
+            time.sleep(0.05)
+        said = approve.read_text().strip() or "ok"
+        approve.unlink(missing_ok=True)
+    if said != "ok":
+        sys.stdout.write(f"Login failed: {said}\n")
+        sys.exit(1)
+    method = {"authMethod": "api_key", "apiKeySource": "/login managed key"} if console else {}
+    kept.write_text(json.dumps(method or {"authMethod": "claude.ai"}))
+    out_mark.unlink(missing_ok=True)
+    sys.stdout.write("Login successful.\n")
+
+
+def main():
+    argv = sys.argv[1:]
+    note("FAKE_CLAUDE_RUNS", argv)
+    note("FAKE_CLAUDE_CWDS", str(Path.cwd()))
+    if argv[:1] == ["--version"]:
+        sys.stdout.write(f"{VERSION} (Claude Code)\n")
+        return
+    if argv[:1] == ["auth"]:
+        auth(argv[1:])
         return
     asyncio.run(serve(arguments(argv)))
 

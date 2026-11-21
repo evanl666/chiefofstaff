@@ -606,7 +606,26 @@ class RestartOn(StrictModel):
 
 
 class RefusalAnswer(StrictModel):
-    action: Literal["copilot", "wait"]
+    # Run it on the agent offered instead, drop it, start it on its own agent now, or keep it
+    # (not going on by itself: Cancel while it was resuming).
+    action: Literal["copilot", "wait", "now", "keep"]
+
+
+class AgentSignIn(StrictModel):
+    method: Literal["browser", "device", "key", "console"] = "browser"
+    # Signed in already: the owner confirmed signing in again (`codex login` signs out first).
+    confirm: bool = False
+    # An API key for `codex login --with-api-key`: sent to its stdin, kept nowhere.
+    key: str = Field(default="", max_length=1000)
+
+
+class AgentInstall(StrictModel):
+    method: Literal["script", "npm", "brew"] = "script"
+
+
+class AgentSetupInput(StrictModel):
+    # A code the agent's sign-in page showed, which its CLI asked to be pasted.
+    text: str = Field(min_length=1, max_length=4000)
 
 
 class OwnerMessage(StrictModel):

@@ -678,7 +678,7 @@ async def test_a_turn_no_gate_admitted_stops_its_worker_and_its_version(
     [
         ({"FAKE_CLAUDE_VERSION": "2.1.300"}, "Older than the versions tested (2.1.322)"),
         ({"FAKE_CLAUDE_VERSION": "nonsense"}, "could not tell which version"),
-        ({"FAKE_CLAUDE_SIGNED_OUT": "1"}, "Not signed in: run `claude` in a terminal"),
+        ({"FAKE_CLAUDE_SIGNED_OUT": "1"}, "Not signed in to Claude Code: sign in from Settings"),
     ],
 )
 async def test_a_claude_that_cannot_run_says_why(tmp_path, monkeypatch, env, problem):
@@ -716,7 +716,7 @@ async def test_the_look_keeps_how_it_is_signed_in_and_never_who(tmp_path, monkey
     agent = claude_backend(command, folder=tmp_path / "agent")
     await agent.start()
     assert agent.auth == {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
-                          "apiKeySource": None, "exit": 0}  # fmt: skip
+                          "apiKeySource": None, "loginExpiresAt": None, "exit": 0}  # fmt: skip
 
 
 @pytest.mark.parametrize("configured", [True, False], ids=["CLAUDE_CONFIG_DIR", "home"])
@@ -735,9 +735,9 @@ async def test_a_claude_never_set_up_is_said_so_and_none_of_its_files_is_made(
         config.rmdir()
     runs = tmp_path / "runs"
     monkeypatch.setenv("FAKE_CLAUDE_RUNS", str(runs))
-    with pytest.raises(RuntimeError, match=r"^Not set up: run `claude` in a terminal and sign in"):
+    with pytest.raises(RuntimeError, match=r"^Not set up: sign in to Claude Code from Settings"):
         await backend_claude.look(command)
-    with pytest.raises(RuntimeError, match=r"^Not set up: run `claude`"):
+    with pytest.raises(RuntimeError, match=r"^Not set up: sign in to Claude Code"):
         await claude_backend(command, folder=tmp_path / "agent").start()
     ran = [json.loads(line) for line in runs.read_text().splitlines()]
     assert ran == [["--version"], ["--version"]], "only its version, which makes nothing"

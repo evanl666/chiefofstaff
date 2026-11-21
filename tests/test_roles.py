@@ -144,7 +144,7 @@ async def test_settings_lists_the_roles_an_agent_can_run_and_why_one_is_on_copil
         router = next(r for r in looked["roles"] if r["role"] == "router")
         assert router["chosen"] == "codex"
         assert router["line"] == (
-            "On Copilot for now: Codex is not signed in: run codex login in a terminal."
+            "On Copilot for now: Codex is not signed in: sign in from Settings → Coding agents."
         )
     finally:
         await runtime.stop()
@@ -279,8 +279,8 @@ async def test_a_signed_out_codex_leaves_the_router_on_copilot_until_it_is_back(
         await saved(runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"}})
         assert runtime.agent(router) == "copilot"
         assert notices(harness, router) == [
-            "The Router runs on Copilot for now: Codex is not signed in: run codex login in a "
-            "terminal."
+            "The Router runs on Copilot for now: Codex is not signed in: sign in from Settings → "
+            "Coding agents."
         ]
         await runtime.owner_send(router, "Hello")
         await settle(runtime)
@@ -542,3 +542,99 @@ async def test_signed_in_again_the_router_goes_back_without_waiting_out_its_retr
         assert runtime.role_held(ROUTER) == {}
     finally:
         await runtime.stop()
+
+
+async def test_signed_in_from_the_page_the_router_goes_back_at_once(
+    tmp_path, codex_log, monkeypatch
+):
+    """Signed in with Sign in (agentsetup.py): the Router moves back to Codex as soon as the
+    sign-in is seen, without waiting for its next check."""
+    from pathlib import Path
+
+    from chiefofstaff import agentsetup
+
+    monkeypatch.setattr(agentsetup, "POLL_SECONDS", 0.1)
+    harness, runtime = await started(tmp_path)
+    router = harness.router_id
+    try:
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        await saved(runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"}})
+        assert runtime.agent(router) == "copilot"
+        await runtime.setups.sign_in("codex")
+        await until(lambda: runtime.setups.view()["codex"].get("url"))
+        (Path(runtime_module.os.environ["FAKE_CODEX_HOME"]) / "approve").write_text("ok")
+        await until(lambda: runtime.agent(router) == "codex")
+        assert runtime.role_held(ROUTER) == {}
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("then", ["copilot", "signed in"])
+async def test_ask_me_keeps_the_routers_messages_until_the_owner_says(
+    tmp_path, codex_log, monkeypatch, then
+):
+    """If unavailable: Ask me. Codex can't run the Router: it waits, what it is sent kept, its
+    card saying why with Sign in; Use Copilot until then (or signing in) and it goes on with
+    what was kept, once."""
+    monkeypatch.setattr(runtime_module, "UNREADY_SECONDS", 0.0)
+    harness, runtime = await started(tmp_path)
+    router = harness.router_id
+    try:
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        await saved(
+            runtime,
+            {
+                "codex": {"enabled": True},
+                "roles": {"router": "codex"},
+                "role_unavailable": {"router": "ask"},
+            },
+        )
+        assert agents.role_unavailable(harness.store, ROUTER) == "ask"
+        assert runtime.snapshot()["role_waits"] == [ROUTER]
+        (card,) = [m for m in harness.store.messages(router) if m["meta"].get("role_wait")]
+        assert card["text"] == (
+            "The Router waits for Codex. Codex needs you to sign in. What it is sent is kept "
+            "until then."
+        )
+        assert card["meta"]["status"] == agents.SIGN_IN
+        assert not any("runs on Copilot for now" in text for text in notices(harness, router))
+        sent_before = list(harness.session(router).sent)
+        await runtime.owner_send(router, "Hello")
+        await settle(runtime)
+        assert harness.session(router).sent == sent_before, "kept, not sent"
+        if then == "copilot":
+            await runtime.answer_role_wait(ROUTER)
+            await until(lambda: any("Hello" in text for text in harness.session(router).sent))
+            assert runtime.agent(router) == "copilot"
+            said = "On Copilot until then"
+        else:
+            monkeypatch.delenv("FAKE_CODEX_SIGNED_OUT")
+            await runtime.refresh_agent_status()
+            await until(lambda: runtime.agent(router) == "codex")
+            inputs = lambda: [  # noqa: E731
+                "\n".join(str(item.get("text") or "") for item in params.get("input") or [])
+                for params in codex_log("turn/start")
+            ]
+            await until(lambda: any("Hello" in text for text in inputs()))
+            said = "Runs on Codex now"
+        assert harness.store.message(card["id"])["meta"]["resumed"] == said
+        assert "role_waits" not in runtime.snapshot()
+        with pytest.raises(ValueError, match="answered already"):
+            await runtime.answer_role_wait(ROUTER)
+    finally:
+        await runtime.stop()
+
+
+def test_if_unavailable_is_copilot_unless_ask_me_is_chosen(tmp_path):
+    from chiefofstaff.store import Store
+
+    store = Store(tmp_path)
+    agents.configure(store, "codex", enabled=True)
+    assert agents.role_unavailable(store, ROUTER) == "copilot"
+    plan = agents.planned(store, {"role_unavailable": {"watchdog": "ask"}})
+    assert plan["role_unavailable"] == {"watchdog": "ask"}
+    agents.save(store, plan)
+    plan = agents.planned(store, {"role_unavailable": {"watchdog": "copilot"}})
+    assert "role_unavailable" not in plan
+    with pytest.raises(ValueError, match="If unavailable"):
+        agents.planned(store, {"role_unavailable": {"watchdog": "later"}})
