@@ -86,9 +86,12 @@ page, and what waited for it goes on by itself.
   now it gets a short digest of who told or asked whom and what still waits, and reads a team's
   thread only when you ask about it or a question there holds a task up.
 - **Fixes:** a Codex signed in with an API key ("API key configured") read as signed out; an
-  agent signed out while its workers ran still said *Ready*; work you asked done directly in
+  agent signed out while its workers ran still said *Ready*, and a new task or message for it
+  went to it and failed there (it is saved with its card now); work you asked done directly in
   your folder could go to a worker you had that only reads it (it declined, and a new worker
-  took it): it goes to one started in place.
+  took it): it goes to one started in place. Asking for the agents' statuses never waits on a
+  slow one (one that keeps failing is asked less often); in the chip's popover, Enter no
+  longer drops the focus.
 
 ## 0.1.53 (2026-11-22)
 

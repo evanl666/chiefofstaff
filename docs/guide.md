@@ -1324,7 +1324,8 @@ command, word for word, before anything runs (Codex's `curl -fsSL
 https://chatgpt.com/codex/install.sh | sh`, Claude Code's `curl -fsSL https://claude.ai/install.sh |
 bash`; Homebrew or npm under *Other ways* where you have them), runs it with its output shown, finds
 the agent where installers put it (also outside the folders your terminal had on its path when Chief
-of Staff started), and goes on to *Sign in*. On Windows it shows the PowerShell command to copy.
+of Staff started; that folder goes after yours, so your own programs stay first), and goes on to
+*Sign in*. On Windows it shows the PowerShell command to copy.
 Where Claude Code says when your sign-in ends, the `@` list says so from a week before ("Claude
 sign-in ends Dec 11"); with `ANTHROPIC_API_KEY` set where Chief of Staff runs, Claude's workers use
 that key, and its status says so ("Uses your Anthropic API key (ANTHROPIC_API_KEY)").
