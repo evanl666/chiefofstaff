@@ -1291,29 +1291,52 @@ your own sign-in, and so can the Router and the Watchdog. The Slack session, *Wa
 Chief of Staff's own helpers stay on Copilot. With neither installed, nothing of this shows
 anywhere.
 
-**Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once per
-agent: *Codex is ready. Allow workers to use it?* *Allow* makes it available to workers (new
-workers stay on Copilot); *Not now* leaves it off and is not asked again. Settings → *Coding
-agents* (a tab that shows once one is installed) has a row per agent: its status and whose plan
-or key it uses ("Ready · Uses your ChatGPT sign-in"; its version on hover), how much of its
-plan's limits is used, and *Available for workers*, which turns on only once it is ready: signed
-out or not installed, its row says so with the command that fixes it, to run in a terminal
-(`codex login`; `claude`, then `/login`; Chief of Staff never signs in for you) and a *Copy*
-button. While it is available: the *Model* its workers use (empty: the agent's default) and a
-*Limit per worker* in tokens (empty: none). Once one is available, the first line is *New workers
-start on*: Copilot by default, each agent that is available and can run (picking one makes it
-available), or *Last used* (the agent you last chose for a worker). A worker keeps the agent it
-started on.
+**Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once per agent:
+*Codex is ready. Allow workers to use it?* *Allow* makes it available to workers (new workers stay
+on Copilot); *Not now* leaves it off and is not asked again. Settings → *Coding agents* (a tab that
+shows once one is installed) has a row per agent: its status and whose plan or key it uses ("Ready ·
+Uses your ChatGPT sign-in"; its version on hover), how much of its plan's limits is used, and
+*Available for workers*, which turns on only once it is ready. Signed out, its row says so with
+*Sign in*; one not installed is listed with *Install* (see **Signing in and installing from here**
+below), each with *Copy command* to run it in a terminal yourself instead. A ready one has *Sign in
+again*. While it is available: the *Model* its workers use (empty: the agent's default) and a *Limit
+per worker* in tokens (empty: none). Once one is available, the first line is *New workers start
+on*: Copilot by default, each agent that is available and can run (picking one makes it available),
+or *Last used* (the agent you last chose for a worker). A worker keeps the agent it started on.
 
-**Choosing it for one task.** Type `@` in Home's message box: it lists every agent first, each
-with its status (*Ready*, *Sign-in needed*, *Not installed*; one not ready is dimmed, with the
-command that makes it ready and *Copy*), then your workers. The agent you pick becomes a chip
-above the box ("On Codex", × removes it), and the Router starts that work there; click the chip
-to pick another agent, or that agent's model and effort, with whose plan it uses under them.
-Saying so works too ("do this with Claude"). The chip wins over the Router's own choice.
-While more than one agent is on, each worker shows its agent's mark (a small diamond of its
-colour, its model on hover) on its sidebar row, its tasks and its header, and on the line that
-says it started in your chat.
+**Signing in and installing from here.** Wherever an agent says *Sign-in needed* (the `@` list, the
+chip's popover, a card in your chat, its row in Settings, *System agents*), *Sign in* runs that
+agent's own sign-in for you, as its workers run it (your `CODEX_HOME` or `CLAUDE_CONFIG_DIR`):
+`codex login`, or `claude auth login --claudeai`. It opens the agent's own sign-in page in your
+browser; the dialog has *Open sign-in page* and *Copy link* too, a *Paste code* field where Claude
+asks for the code its page shows, and *Show output*. You sign in on that page; Chief of Staff never
+signs in for you and never reads an agent's sign-in (Claude's tokens or keychain above all): it only
+runs the agent's program and its status command. The agent turns *Ready* by itself as soon as you
+have (its status is looked at every second or two meanwhile, again when you come back to the page or
+open the `@` list, and before a worker starts on it). *Other ways*: for Codex, *Use a code instead*
+(`codex login --device-auth`: a page and a one-time code, for when you use Chief of Staff from
+another device) and *Use an API key* (it goes to `codex login --with-api-key` on its input, never on
+a command line, and Chief of Staff keeps no copy); for Claude, an Anthropic Console account (`claude
+auth login --console`). `codex login` signs you out of Codex as it begins, so signing in again asks
+first, and *Cancel* says it leaves Codex signed out. *Install* shows the official installer's
+command, word for word, before anything runs (Codex's `curl -fsSL
+https://chatgpt.com/codex/install.sh | sh`, Claude Code's `curl -fsSL https://claude.ai/install.sh |
+bash`; Homebrew or npm under *Other ways* where you have them), runs it with its output shown, finds
+the agent where installers put it (also outside the folders your terminal had on its path when Chief
+of Staff started), and goes on to *Sign in*. On Windows it shows the PowerShell command to copy.
+Where Claude Code says when your sign-in ends, the `@` list says so from a week before ("Claude
+sign-in ends Dec 11"); with `ANTHROPIC_API_KEY` set where Chief of Staff runs, Claude's workers use
+that key, and its status says so ("Uses your Anthropic API key (ANTHROPIC_API_KEY)").
+
+**Choosing it for one task.** Type `@` in Home's message box: it lists every agent first, each with
+its status (*Ready*, *Sign-in needed*, *Not installed*; one not ready is dimmed: picking it signs in
+or installs it), then your workers, and marks the agent the Router runs on (*Router*). Arrows, Enter
+and Escape work in the list and in the chip's popover. The agent you pick becomes a chip above the
+box ("On Codex", × removes it), and the Router starts that work there; click the chip to pick
+another agent, or that agent's model and effort, with whose plan it uses under them. Saying so works
+too ("do this with Claude"). The chip wins over the Router's own choice. While more than one agent
+is on, each worker shows its agent's mark (a small diamond of its colour, its model on hover) on its
+sidebar row, its tasks and its header, and on the line that says it started in your chat.
 
 **Comparing two agents.** Pick two agents (`@codex`, then `@claude`: "Compare on Codex and
 Claude"), or say "do this with Codex and Claude": the same task runs on each, a worker each in a
@@ -1327,12 +1350,18 @@ picks that agent's model and effort. Once it has begun, *Continue with…* is wh
 
 **When it can't run.**
 
-- An agent you named that cannot run (signed out, too old, turned off): one line in your chat
-  says why, with the command that makes it ready (and *Copy*), and nothing starts elsewhere; its
-  card offers *Wait*, or *Run on Copilot instead* (on the agent new workers start on, where that
-  is another that can run it). Work for a worker you have on that agent gets the same card, with
-  *Continue with Copilot*: a new worker there goes on from a summary of its work, with what it
-  was given.
+- An agent you named that is signed out or not installed: your message is saved. Its card in your
+  chat says so ("Codex needs you to sign in. Your message is saved: “Count the rows” starts on Codex
+  once you have.") with *Sign in* (or *Install*), *Don't run it*, and *Continue with Copilot* (or
+  the agent new workers start on, where that is another that can run it). Once you have signed in,
+  it starts there by itself, once, after a few seconds' *Resuming… Cancel* (Cancel keeps it for you
+  to start), and the card says *Resumed after sign-in*; it is listed under *Handled for you*. Only
+  work that had not begun goes on by itself: a task whose turn had already run something is never
+  sent again (its sign-in lost mid-turn says *Sign-in needed* at once; *Go on* is yours). Work for a
+  worker you have on that agent gets the same card (it gets your message once you have signed in),
+  with *Continue with Copilot*: a new worker there goes on from a summary of its work, with what it
+  was given. One that can't run for another reason (too old, turned off) says why, with *Wait* or
+  *Run on Copilot instead*, and nothing starts elsewhere.
 - The agent new workers use cannot run: they start on Copilot, and their name says why.
 - A plan's usage limit, or a rate limit the agent gave up on, reached in the middle of a task:
   the worker pauses under *Needs you*, saying when the limit resets when the agent says it. *Go
@@ -1340,25 +1369,28 @@ picks that agent's model and effort. Once it has begun, *Continue with…* is wh
   something since), *Go on* once it has, or *Continue with* the other agent (a menu of them,
   where there are several). Nothing switches by itself.
 
-**The Router and the Watchdog on another agent.** Once Codex or Claude is available, the same
-tab has *System agents*, folded: *The Router runs on* and *The Watchdog runs on* (Copilot by
-default; its line names any that runs elsewhere). Put on Codex or
-Claude, each runs there with nothing but its own tools, as on Copilot: none of the agent's
-commands, files, web search, subagents, hooks or MCP servers. The switch needs nothing from you:
-a fresh session on that agent takes over (the Router's with a summary of what it knew: your
-open work, cards, decisions and your conversation), your chat stays one, and one line in it says
-so ("The Router runs on Codex now, with a summary of what it knew."). Its **⋯** then lists that
-agent's models; it uses the *Model* of the agent's row unless you pick one there. Its spend is
-tokens on that agent (in *Usage*), with no limit per worker. If the agent can't run it (signed
-out, not installed, a plan's limit reached, its process stopped), it goes on on Copilot by itself,
-with what it was answering, says why in one line ("The Router runs on Copilot for now: Codex is
-not signed in: …", also under its choice in Settings), and goes back by itself once the agent can
-(once the limit resets; within a couple of minutes of signing in again). The agent compacts a long
-conversation itself, where on Copilot the Router moves to a fresh session with a summary. The
-Slack session and *Watch for you* read your messages as you: they stay on Copilot (Watch for you
-runs commands, which only Copilot's and Claude's sandboxes hold, and what reads Slack doesn't run
-on Claude yet). Turning an agent off puts them back on Copilot; so does
-`chiefofstaff --prepare-downgrade`.
+**The Router and the Watchdog on another agent.** Once Codex or Claude is available, the same tab
+has *System agents*, folded: *The Router runs on* and *The Watchdog runs on* (Copilot by default;
+its line names any that runs elsewhere). Put on Codex or Claude, each runs there with nothing but
+its own tools, as on Copilot: none of the agent's commands, files, web search, subagents, hooks or
+MCP servers. The switch needs nothing from you: a fresh session on that agent takes over (the
+Router's with a summary of what it knew: your open work, cards, decisions and your conversation),
+your chat stays one, and one line in it says so ("The Router runs on Codex now, with a summary of
+what it knew."). Its **⋯** then lists that agent's models; it uses the *Model* of the agent's row
+unless you pick one there. Its spend is tokens on that agent (in *Usage*), with no limit per worker.
+If the agent can't run it (signed out, not installed, a plan's limit reached, its process stopped),
+it goes on on Copilot by itself, with what it was answering, says why in one line ("The Router runs
+on Copilot for now: Codex is not signed in: …", also under its choice in Settings), and goes back by
+itself once the agent can (once the limit resets; at once when you sign in here, within a couple of
+minutes when you sign in elsewhere). Under each, *If unavailable* chooses that (*Use Copilot and
+tell me*, the default) or *Ask me*: it waits instead, what it is sent kept, its card in your chat
+saying why ("The Router waits for Codex. Codex needs you to sign in. What it is sent is kept until
+then.") with *Sign in* and *Use Copilot until then*. An agent it runs on that is not ready shows
+*Sign in* (or *Install*) in its row. The agent compacts a long conversation itself, where on Copilot
+the Router moves to a fresh session with a summary. The Slack session and *Watch for you* read your
+messages as you: they stay on Copilot (Watch for you runs commands, which only Copilot's and
+Claude's sandboxes hold, and what reads Slack doesn't run on Claude yet). Turning an agent off puts
+them back on Copilot; so does `chiefofstaff --prepare-downgrade`.
 
 **Continue with another agent.** An idle worker's **⋯** has *Continue with Claude…* (or another
 agent on), and you can ask the Router ("hand this to Claude"). A dialog says in one line what

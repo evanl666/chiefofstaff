@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+Choosing and using another coding agent is smoother: sign in to it and install it from the
+page, and what waited for it goes on by itself.
+
+- **Sign in and Install without a terminal.** Wherever Codex or Claude Code says *Sign-in
+  needed* (the `@` list, the chip's popover, a card, Settings, *System agents*), *Sign in* runs
+  its own sign-in for you (`codex login`, `claude auth login`) and shows its page's link, a
+  one-time code, or a field for the code Claude asks for; *Other ways* has Codex's device code
+  and API key and Claude's Console account. You sign in on the agent's own page: Chief of Staff
+  never signs in for you and never reads an agent's sign-in. It turns *Ready* by itself.
+  *Install* shows the official installer's command first, runs it, finds the agent, then signs
+  in. A task you put on an agent that was signed out is saved and starts there by itself once
+  you have signed in (*Resuming… Cancel*, then *Resumed after sign-in*, under *Handled for
+  you*); work that had already begun is never sent again. *If unavailable: Ask me* makes the
+  Router or the Watchdog wait for you instead of going on on Copilot. The `@` list marks the
+  agent the Router runs on and says when Claude's sign-in ends, a week before.
+- **With the sandbox off, a worker on any agent can delete files you can.** Its commands run as
+  you; the guide now says so plainly, and that turning the sandbox on prevents it.
 - **Slack searches ask the way Slack's search takes them now.** Slack's search lists its words
   and its modifiers (*to:me*, *hasmy::robot_face:*, *from:me*) apart since November 2026, and no
   longer lists the single query Chief of Staff gave it (still taken, for now). Chief of Staff's own
@@ -68,6 +85,7 @@
   along with its next turn (up to 600 characters each, about 80,000 a day in a busy QA run);
   now it gets a short digest of who told or asked whom and what still waits, and reads a team's
   thread only when you ask about it or a question there holds a task up.
+- **Fixes:** a Codex signed in with an API key ("API key configured") read as signed out.
 
 ## 0.1.53 (2026-11-22)
 
