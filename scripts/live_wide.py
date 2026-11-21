@@ -1922,7 +1922,8 @@ async def w38_drafted_replies(ctx: Ctx):
         if d["session_id"] == draft["session_id"] and d["kind"] == "reply"
     ]  # fmt: skip
     log(f"W38: {len(mine)} draft(s): {[(d['target'], d['text']) for d in mine]}")
-    assert re.search(r"nov|20|date|ship|launch", draft["text"], re.IGNORECASE)
+    # The reply about the launch date is one of its drafts, not always the first (r73).
+    assert any(re.search(r"nov|20|date|ship|launch", d["text"], re.IGNORECASE) for d in mine)
     for each in mine:
         body = {"action": "send", "text": each["text"]}
         assert (await ctx.app.post(f"/api/drafts/{each['id']}", body))["status"] == "sent"
