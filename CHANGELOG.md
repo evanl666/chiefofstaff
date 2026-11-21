@@ -52,7 +52,7 @@
   Staff already kept but never showed together: one waits on another's result, does a task
   instead of another, builds on what another found, was split off, or is one part of a request.
   A team's view now has a *Tasks* section: a row per task with its status and the one relation
-  that matters most (*waits on Checkout UI · 9 min*, *handed to E2E Runner*, *2 of 3 parts*,
+  that matters most (*waits on Checkout UI · 9 min*, *handed to E2E Runner*, *3 parts · 1 landed*,
   *split from …*), counts above it (*⇉ 3 parts ●●○ · ⇢ 1 waiting · #482*, a click lights their
   rows), and a task's lineage on a click, in one line that never crosses, with a caption in
   plain words (*3 workers, one request · ready when 3 of 3 land*; *All 3 parts landed · 42

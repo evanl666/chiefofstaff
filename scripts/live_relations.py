@@ -219,7 +219,7 @@ async def r4_parts_in_the_page(ctx: Ctx):
         view = page.locator("#timeline .team-view")
         await expect(view.locator(".rel-summary .rel-chip").first).to_have_text("2 parts")
         part = view.locator(f'.trow[data-task="{scout}"]')
-        await expect(part.locator(".rel")).to_have_text("2 of 2 parts")
+        await expect(part.locator(".rel")).to_have_text("2 parts · all landed")
         await part.locator(".main").click()
         await expect(view.locator(".lineage .caption")).to_have_text(
             re.compile(r"^All 2 parts landed( · \d+ (min|h))?$")

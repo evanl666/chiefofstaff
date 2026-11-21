@@ -40,6 +40,18 @@ const workerOf = (id) => byId(id) || closedWorkers().find((item) => item.id === 
 // The agent a worker runs on, when it is not the default one (0.1.53's agents).
 const agentOf = (id) => workerOf(id)?.agent_name || "";
 
+// A task's title where its worker's avatar or name is beside it: without the worker's name it
+// starts with ("Checkout UI: the v2 pages" by Checkout UI: "The v2 pages"); the whole title on
+// hover. A title that is only the name stays whole.
+const AFTER_NAME = /^(?:\s*[:·|]|\s+[-\u2013\u2014]\s)\s*([\s\S]*\S)\s*$/;
+export function shownTitle(row) {
+  const title = row?.title || "";
+  const label = labelOf(row?.session_id || "");
+  const rest = label && title.startsWith(label) ? title.slice(label.length).match(AFTER_NAME) : null;
+  if (!rest) return title;
+  // "the v2 pages" begins as a line does; "v2 pages", "iOS app" as they are.
+  return /^[a-z]+(\s|$)/.test(rest[1]) ? rest[1][0].toUpperCase() + rest[1].slice(1) : rest[1];
+}
 // A team's data as its view read it (/api/teams/<id>/thread): its tasks by id.
 function indexed(data) {
   if (!data.byTask) data.byTask = new Map((data.tasks || []).map((row) => [row.id, row]));
@@ -50,7 +62,7 @@ function indexed(data) {
 function nameOf(data, taskId, from = "") {
   const row = indexed(data).get(taskId);
   if (!row) return "an earlier task";
-  return row.session_id !== from ? labelOf(row.session_id) : `“${shorten(row.title, 32)}”`;
+  return row.session_id !== from ? labelOf(row.session_id) : `“${shorten(shownTitle(row), 32)}”`;
 }
 const workerName = (data, taskId) => labelOf(indexed(data).get(taskId)?.session_id || "");
 // Who it went to: by agent when the work changed agent ("handed to Codex"), else by worker.
@@ -91,8 +103,11 @@ export function chipWords(data, row, chip) {
       return ["branched", chip.side === "to" ? `split from ${other}` : `split off ${other}`, ""];
     case "fork":
       return ["branched", chip.side === "to" ? `forked from ${workerName(data, chip.other)}` : `forked as ${workerName(data, chip.other)}`, ""];
-    case "parts":
-      return ["parts", `${chip.landed} of ${chip.total} parts${chip.failed ? ` · ${chip.failed} failed` : ""}`, ""];
+    case "parts": {
+      // The fan's state, the same on each of its parts: "3 parts · 1 landed".
+      const landed = chip.landed === chip.total ? "all landed" : `${chip.landed} landed`;
+      return ["parts", `${chip.total} parts · ${landed}${chip.failed ? ` · ${chip.failed} failed` : ""}`, ""];
+    }
     case "compare": {
       if (!chip.picked) return ["vs", `vs ${chip.others.map((id) => agentOf(indexed(data).get(id)?.session_id) || workerName(data, id)).join(", ")}`, "waiting"];
       return chip.picked === row.id ? ["vs", "picked", ""] : ["vs", `${agentOf(indexed(data).get(chip.picked)?.session_id) || workerName(data, chip.picked)} picked`, "over"];
@@ -216,7 +231,7 @@ export function taskList(view, rerender) {
             { type: "button", class: "main", "aria-expanded": String(open), title: open ? "Close its lineage" : row.lineage ? "Where it came from and what came of it" : "About this task", onclick: () => { view.open = open ? "" : row.id; view.peek = ""; rerender(); } },
             avatar(row.session_id),
             el("span", { class: `sdot ${row.status}`, title: statusWord(row) }),
-            el("span", { class: "title", text: row.title }),
+            el("span", { class: "title", text: shownTitle(row), title: row.title }),
           ),
           chipNode(view, row),
           row.more ? el("span", { class: "more", text: `+${row.more}`, title: `${plural(row.more, "more relation")}: open its lineage` }) : null,
@@ -262,7 +277,7 @@ export function lineageOf(view, row, rerender) {
       { class: "peek" },
       avatar(peeked.session_id),
       el("span", { class: "who", text: labelOf(peeked.session_id) }),
-      el("span", { class: "what", text: peeked.title, title: peeked.title }),
+      el("span", { class: "what", text: shownTitle(peeked), title: peeked.title }),
       el("span", { class: "state", text: `${statusWord(peeked)} · ${ago(ageOf(peeked))}` }),
       el("button", { type: "button", class: "link", text: "Open", title: "Its chat, at this task", onclick: () => select(peeked.session_id, { task: peeked.id }) }),
     ),
@@ -278,7 +293,7 @@ function lineageNode(view, taskId, own, rerender, verb = "") {
     verb ? glyph(verb, "lead") : null,
     avatar(row.session_id),
     el("span", { class: `sdot ${row.status}` }),
-    el("span", { class: "name", text: shorten(row.title, 26) }),
+    el("span", { class: "name", text: shorten(shownTitle(row), 48) }),
   );
 }
 // Its parts' or compare's others, under it: one fan.
@@ -347,10 +362,10 @@ export function caption(view, row) {
       const giver = agentOf(from.session_id) && agentOf(to.session_id) && agentOf(from.session_id) !== agentOf(to.session_id) ? [agentOf(from.session_id), agentOf(to.session_id)] : [labelOf(from.session_id), labelOf(to.session_id)];
       return `${giver[0]} handed this to ${giver[1]}`;
     }
-    return chip.side === "from" ? `${me} started it over: “${shorten(to?.title || "", 40)}”` : `${me} started it over, instead of “${shorten(from?.title || "", 40)}”`;
+    return chip.side === "from" ? `${me} started it over: “${shorten(shownTitle(to), 40)}”` : `${me} started it over, instead of “${shorten(shownTitle(from), 40)}”`;
   }
   if (chip?.kind === "context") return chip.side === "to" ? `${me} picks up from ${workerName(view, chip.other)}` : `${workerName(view, chip.other)} picks up from here`;
-  if (chip?.kind === "split") return chip.side === "to" ? `${me} split this off “${shorten(data.get(chip.other)?.title || "", 40)}”` : `${me} split “${shorten(data.get(chip.other)?.title || "", 40)}” off`;
+  if (chip?.kind === "split") return chip.side === "to" ? `${me} split this off “${shorten(shownTitle(data.get(chip.other)), 40)}”` : `${me} split “${shorten(shownTitle(data.get(chip.other)), 40)}” off`;
   if (chip?.kind === "fork") return chip.side === "to" ? `Forked from ${workerName(view, chip.other)} while it was busy` : `${workerName(view, chip.other)} forked from ${me} while it was busy`;
   if (chip?.kind === "after") return `${workerName(view, chip.other)} ${chip.state === "pending" ? "waits on" : "started once"} ${me}${chip.state === "pending" ? "" : " delivered"}`;
   if (chip?.kind === "followups") return `${me} followed it up ${chip.count === 1 ? "once" : `${chip.count} times`}`;
@@ -362,7 +377,7 @@ function fanWords(view, group) {
   if (group.state === "resolved") return `All ${group.total} parts landed${group.landed_at ? ` · ${span(group.started_at, group.landed_at)}` : ""}`;
   const workers = new Set(group.tasks.map((id) => indexed(view).get(id)?.session_id).filter(Boolean)).size;
   const failed = group.failed ? ` · ${group.failed} won't` : "";
-  return `${workers} workers, one request · ${group.landed} of ${group.total} landed, ready when ${group.total} of ${group.total} land${failed}`;
+  return `${workers} workers, one request · ready when ${group.total} of ${group.total} land${failed}`;
 }
 
 // Home's line of a team: one word-sized cue of its tasks (a fan landing, or tasks waiting on

@@ -197,11 +197,13 @@ and the parts of one request. A team's view says it in counts first (*⇉ 3 part
 waiting · ⑂ 1 split · #482*; click one to light the tasks it counts), then *Tasks*, a row per
 task with its status and the one relation that matters most: what it waits on (*waits on
 Checkout UI · 9 min*, amber like a question waiting), the task that replaced it (its row
-dimmed), its part of a request (*2 of 3 parts*), where it branched from, what it continues,
-*+2* for the rest. Click a task for its lineage: where it came from and what came of it, its
-other parts under it, in one line with a caption (*3 workers, one request · ready when 3 of 3
-land*, *All 3 parts landed · 42 min*, *Checkout tests handed this to E2E Runner*); click any
-task in it for its title, worker, status and *Open*. When a wait clears while you look, its
+dimmed), its part of a request (*3 parts · 1 landed*, the same on each part), where it
+branched from, what it continues, *+2* for the rest. Click a task for its lineage: where it
+came from and what came of it, its other parts under it, in one line with a caption (*3
+workers, one request · ready when 3 of 3 land*, *All 3 parts landed · 42 min*, *Checkout tests
+handed this to E2E Runner*); click any task in it for its title, worker, status and *Open*.
+Beside a worker's avatar, a title leaves out the worker's own name (*The v2 pages* for
+*Checkout UI: the v2 pages*; all of it on hover). When a wait clears while you look, its
 line draws itself solid and the row says *Checkout UI delivered · unblocked*, then *✓ after
 Checkout UI*. A PR or project the tasks share is a chip, never a link that makes a team. On
 Home, a team's line adds one cue (*●●○ 2 of 3 parts* or *⇢ 1 waiting*); a worker's *Team* tab

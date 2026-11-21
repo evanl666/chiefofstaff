@@ -1217,10 +1217,11 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 /* A lineage: left to right, its own task ringed, its parts under it; one caption; a peek. */
 .lineage { display: grid; gap: 8px; margin: 2px 0 8px 38px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); min-width: 0; }
 .lineage .strip { display: flex; align-items: flex-start; gap: 4px; min-width: 0; overflow-x: auto; padding-bottom: 2px; }
-.lineage .col { display: grid; gap: 4px; flex: none; }
+/* A column takes its tasks' names whole, and gives way (an ellipsis) only when the line is full. */
+.lineage .col { display: grid; justify-items: start; gap: 4px; flex: 0 1 auto; min-width: 0; }
 .lineage .fan { position: relative; display: grid; gap: 4px; margin: 2px 0 0 14px; padding: 4px 0 0 14px; border-left: 1px solid var(--line); }
 .lineage .fan-mark { position: absolute; left: -8px; top: 9px; display: inline-flex; padding: 1px 0; color: var(--muted); background: var(--card); }
-.lnode { display: inline-flex; align-items: center; gap: 6px; max-width: 200px; min-height: 30px; padding: 0 10px 0 4px; border: 1px solid var(--line); border-radius: 15px; background: var(--bg); color: var(--text); font-size: var(--small); font-weight: 400; }
+.lnode { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: min(260px, 100%); min-height: 30px; padding: 0 10px 0 4px; border: 1px solid var(--line); border-radius: 15px; background: var(--bg); color: var(--text); font-size: var(--small); font-weight: 400; }
 .lnode .glyph.lead { margin-left: 4px; color: var(--muted); }
 .lnode:hover { background: var(--hover); opacity: 1; }
 .lnode.self { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent); }
@@ -1244,7 +1245,6 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .lineage .peek .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .lineage .peek .state { flex: none; white-space: nowrap; }
 .lineage .peek .link { margin-left: auto; flex: none; min-height: 28px; }
-@media (max-width: 900px) { .lnode { max-width: 170px; } }
 /* A worker's Team tab: its task's lineage first. */
 #timeline > .team-lineage > .lineage { margin: 0 0 4px; }
 /* Home: a line per team, above Running. */

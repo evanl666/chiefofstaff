@@ -80,6 +80,10 @@ LONG_PATH = (
     "normalizers/CompanyNameNormalizer.scala"
 )
 # Nothing in it may run past it: the elements that do, with how far.
+# Elements cut short with an ellipsis (wider than they are shown), under a root.
+TRUNCATED = """(root, selector) => [...root.querySelectorAll(selector)]
+  .filter((node) => node.offsetParent && node.scrollWidth > node.clientWidth + 1)
+  .map((node) => `${node.className}: ${node.textContent}`)"""
 OVERFLOWS = """root => [root, ...root.querySelectorAll("*")].filter((node) => {
   const box = node.getBoundingClientRect();
   if (!box.width || node.closest("pre")) return false;
@@ -5492,12 +5496,20 @@ async def round_relations(runtime, browser, failures: list[str]):
         )
         await expect(rows["notes_task"].locator(".rel")).to_have_class(re.compile(r"\bwaiting\b"))
         await expect(rows["notes_task"].locator(".more")).to_have_text("+1")
-        await expect(rows["api_task"].locator(".rel")).to_have_text("1 of 3 parts")
+        # Every part says the fan's state alike (not "1 of 3" as if it were the first).
+        for key in ("api_task", "ui_task", "e2e_task"):
+            await expect(rows[key].locator(".rel")).to_have_text("3 parts · 1 landed")
+        # Beside its worker's avatar, a title without the worker's own name; whole on hover.
+        await expect(rows["ui_task"].locator(".title")).to_have_text("The v2 pages")
+        await expect(rows["ui_task"].locator(".title")).to_have_attribute(
+            "title", "Checkout UI: the v2 pages"
+        )
+        await expect(rows["e2e_task"].locator(".title")).to_have_text("Checkout tests on Linux")
         await expect(rows["tests_task"].locator(".rel")).to_have_text("handed to E2E Runner")
         await expect(rows["tests_task"]).to_have_class(re.compile(r"\bover\b"))
         # Its worker's own earlier task: by its title.
         await expect(view.locator(f'.trow[data-task="{seeded["dark"]}"] .rel')).to_have_text(
-            "split from “Checkout UI: the v2 pages”"
+            "split from “The v2 pages”"
         )
         # A count chip lights the rows it counts; again, it lets go.
         await chips.filter(has_text="1 waiting").click()
@@ -5515,11 +5527,16 @@ async def round_relations(runtime, browser, failures: list[str]):
         await expect(lineage.locator(".lnode")).to_have_count(5)
         await expect(lineage.locator(".col.own .fan .lnode")).to_have_count(2)
         await expect(lineage.locator(".caption")).to_have_text(
-            "3 workers, one request · 1 of 3 landed, ready when 3 of 3 land"
+            "3 workers, one request · ready when 3 of 3 land"
         )
         await expect(lineage.locator(".llink.pending")).to_have_count(1)
+        await expect(lineage.locator(".lnode.self .name")).to_have_text("The v2 pages")
+        await expect(lineage.locator(".peek .what")).to_have_text("The v2 pages")
         found = await lineage.evaluate(OVERFLOWS)
         assert not found, (width, found)
+        # Room enough at every width: no name of a row, a lineage or the peek cut short.
+        cut = await view.evaluate(TRUNCATED, ".trow .title, .lnode .name, .peek .what")
+        assert not cut, (width, scheme, cut)
         await page.locator("#main").screenshot(path=shots / f"lineage-{width}-{scheme}.png")
         # Peek at another: its title, worker, status, age and Open.
         await lineage.locator(f'.lnode[data-task="{seeded["notes_task"]}"]').click()
@@ -5578,6 +5595,14 @@ async def round_relations(runtime, browser, failures: list[str]):
     await expect(notes_row.locator(".rel")).to_have_text(re.compile(r"^after Checkout UI$"))
     await expect(notes_row.locator(".rel")).to_have_class(re.compile(r"\bsettled\b"))
     await expect(view.locator(".rel-summary .rel-chip", has_text="waiting")).to_have_count(0)
+    # The last part lands: every part says so, the caption closes the fan.
+    runtime.tasks.move(seeded["e2e_task"], "review")
+    api_row = view.locator(f'.trow[data-task="{seeded["api_task"]}"]')
+    await expect(api_row.locator(".rel")).to_have_text("3 parts · all landed", timeout=10000)
+    await api_row.locator(".main").click()
+    await expect(view.locator(".lineage .caption")).to_have_text(
+        re.compile(r"^All 3 parts landed · \d+ min$")
+    )
     await context.close()
     log("Relations: a wait clearing draws its line solid once, rings its worker, then settles")
 
@@ -5589,7 +5614,7 @@ async def round_relations(runtime, browser, failures: list[str]):
     await page.goto(f"{BASE}/#token={TOKEN}")
     await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
     view = page.locator("#timeline .team-view")
-    running = view.locator(f'.trow[data-task="{seeded["e2e_task"]}"] .sdot.running')
+    running = view.locator(f'.trow[data-task="{seeded["dark"]}"] .sdot.running')
     assert await running.evaluate("node => getComputedStyle(node).animationName") == "none"
     await context.close()
 
@@ -5601,7 +5626,10 @@ async def round_relations(runtime, browser, failures: list[str]):
     await page.locator("#session-list .item", has_text="Release Notes").first.click()
     await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
     strip = page.locator("#timeline > .team-lineage .lineage")
-    await expect(strip.locator(".lnode.self")).to_contain_text("Release Notes")
+    await expect(strip.locator(".lnode.self .name")).to_have_text("Checkout v2")
+    await expect(strip.locator(".lnode.self")).to_have_attribute(
+        "title", re.compile(r"^Release Notes: checkout v2 · Release Notes · ")
+    )
     await expect(strip.locator(".caption")).to_have_text(
         "Release Notes started once Checkout UI delivered"
     )
