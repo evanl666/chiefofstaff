@@ -1944,6 +1944,10 @@ class Tools:
         )
         if params.review:
             self.store.set(f"reviewreq:{task['id']}", "1")
+        if context_from:
+            # What it builds on (relations.py: "picks up from"), beside its briefing.
+            built_on = list(dict.fromkeys(context_from))
+            self.store.set(f"contextfrom:{task['id']}", json.dumps(built_on))
         if not special:
             # Given out in this turn, from now: a decision recorded in it relies on it. And one
             # recorded meanwhile (the Router's calls run at once) is this task's too.
@@ -1963,6 +1967,10 @@ class Tools:
                 if row["id"] not in known
             ]
         self.runtime.peers.link(session_id, [row["id"] for row in peers])
+        # Parts of one request, task by task (peers are workers): their tasks now.
+        parts = [found["id"] for row in peers if (found := self.tasks.current(row["id"]))]
+        if parts:
+            self.store.set(f"parts:{task['id']}", json.dumps(parts))
         if special:  # Its own tools: see Runtime.tool_names.
             self.store.set(f"{special}:{session_id}", "1")
         # A PR the task is to act on is followed: its reviews, replies and CI come to the worker
@@ -2493,6 +2501,8 @@ class Tools:
                         await self.runtime.task_actions.cancel(
                             old["id"], f"Superseded by “{task['title']}”.", by="the Router"
                         )
+                        # The new task instead of it (relations.py: "replaced by").
+                        self.store.set(f"supersededby:{old['id']}", task["id"])
         self.runtime.add_message(
             caller,
             "notice",

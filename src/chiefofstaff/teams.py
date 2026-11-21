@@ -1,10 +1,12 @@
 """Teams (E129, E130): the workers that work together, as the owner and the Router see them.
 
 A team is a connected group of workers linked as working together (Peers.link: `works_with`,
-or a worker saying it waits for another) or that told or asked each other something
-(Peers.talked). Nothing is stored for it: it is read from those links, named after its workers,
-and its thread is what its workers told and asked each other (their `tell` messages and the
-`questions` between them), a question paired with its answer.
+or a worker saying it waits for another), that told or asked each other something
+(Peers.talked), or whose tasks are related (one waits on, replaces, builds on or was handed
+another's: relations.py). Nothing is stored for it: it is read from those links, named after its
+workers, and its thread is what its workers told and asked each other (their `tell` messages and
+the `questions` between them), a question paired with its answer, beside its tasks and how they
+are related.
 
 The owner sees a team as one line on Home and one thread; the Router gets a short digest of who
 told or asked whom with its next turn, never the words (it reads a thread when it must:
@@ -83,10 +85,13 @@ class Teams:
 
     def components(self) -> list[list[str]]:
         """The teams' members (2 or more), each oldest first; the oldest team first. Read again
-        only when the links changed."""
+        only when the links changed. Workers a task relation joins (one waits on, replaces or
+        builds on another's task: relations.py) are one team too; a PR they share is not."""
+        joined = self.runtime.relations.links()
         links = {
             **{f"peers:{key}": value for key, value in self.store.items("peers:").items()},
             **{f"talks:{key}": value for key, value in self.store.items("talks:").items()},
+            "tasks": joined,
         }
         if links == self.cache[0]:
             return self.cache[1]
@@ -100,8 +105,13 @@ class Teams:
             return node
 
         for key, value in links.items():
+            if key == "tasks":
+                continue
             one = key.split(":", 1)[1]
             for other in json.loads(value or "[]"):
+                parent[root(one)] = root(other)
+        for one, others in joined.items():
+            for other in others:
                 parent[root(one)] = root(other)
         groups: dict[str, list[str]] = {}
         for node in parent:
@@ -138,9 +148,11 @@ class Teams:
         """A team's members, by its id, one of its workers (worker:<id>, a short id) or one of
         their tasks."""
         reference = " ".join(reference.split()).removeprefix("worker:")
+        # A team's id names its earliest worker: one joined later by an earlier one is its team.
+        worker = reference.removeprefix("team-")
         for members in self.components():
             if reference == self.team_id(members) or any(
-                member == reference or (len(reference) >= 8 and member.startswith(reference))
+                member == worker or (len(worker) >= 8 and member.startswith(worker))
                 for member in members
             ):
                 return members
@@ -284,6 +296,9 @@ class Teams:
             if not open_:
                 continue
             labels = self.labels(members)
+            counts = self.counts(members)
+            # Active as its workers talk, and as their tasks become related or a wait clears.
+            counts["last_at"] = max(counts["last_at"], self.runtime.relations.latest(members))
             found.append(
                 {
                     "id": self.team_id(members),
@@ -292,7 +307,9 @@ class Teams:
                     "open": open_,
                     "labels": labels,
                     "waiting": self.waiting(members),
-                    **self.counts(members),
+                    # Its tasks' relations, as Home's line says them (counts only).
+                    "cue": self.runtime.relations.cue(members),
+                    **counts,
                 }
             )
         return sorted(found, key=lambda team: team["last_at"], reverse=True)
@@ -360,9 +377,12 @@ class Teams:
                 "open": [],
                 "labels": labels,
                 "waiting": [],
+                "cue": self.runtime.relations.cue(members),
                 **self.counts(members),
             }
-        return {"team": team, "items": self.thread(members)}
+        # Its tasks and how they are related (relations.py), beside what its workers said.
+        related = self.runtime.relations.team(members, team["waiting"])
+        return {"team": team, "items": self.thread(members), **related}
 
     def thread_text(self, members: list[str], last: int) -> str:
         """A team's latest exchanges in words, for the Router."""

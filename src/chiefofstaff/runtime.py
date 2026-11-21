@@ -113,6 +113,7 @@ from .policy import (
     within,
 )
 from .provenance import ALIVE_EVERY, RUNS_KEPT, Provenance, log_of, runs_of
+from .relations import Relations
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .send import shell_command
 from .sendsocket import LimitedError, SendSocket
@@ -825,6 +826,7 @@ class Runtime:
         self.accounts = Accounts(self)
         self.decisions = Decisions(self)
         self.peers = Peers(self)
+        self.relations = Relations(self)
         self.teams = Teams(self)
         self.learning = Learning(self)
         self.habits = Habits(self)
