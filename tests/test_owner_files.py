@@ -77,7 +77,8 @@ def test_a_live_run_may_change_no_trust_project_server_or_account(
 
 def test_a_live_run_allows_claudes_own_caches_and_sync_marks_only(owner_files, tmp_path):
     """Claude's own housekeeping in any session of the owner's signed-in Claude (2.1.322): the
-    hourly cache of their Consumer Terms answer and the mark of a skill sync round. A synced
+    hourly caches of their Consumer Terms answer and its config, of its model options and client
+    data, and the mark of a skill sync round. A synced
     skill itself, or a marketplace refreshed (no worker's process updates: DISABLE_AUTOUPDATER),
     is still a change."""
     config = tmp_path / "config"
@@ -90,6 +91,9 @@ def test_a_live_run_allows_claudes_own_caches_and_sync_marks_only(owner_files, t
                 "cachedExperimentFeatures": {"a": 1},
                 "cachedGrowthBookFeatures": {"a": 1},
                 "cachedGrowthBookFeaturesAt": 1,
+                "additionalModelOptionsAnsweredAt": 1,
+                "clientDataCacheSlots": {"a": 1},
+                "groveConfigCache": {"a": 1},
                 "projects": {},
             }
         )
@@ -110,6 +114,9 @@ def test_a_live_run_allows_claudes_own_caches_and_sync_marks_only(owner_files, t
             cachedExperimentFeatures={"a": 2},
             cachedGrowthBookFeatures={"a": 2},
             cachedGrowthBookFeaturesAt=2,
+            additionalModelOptionsAnsweredAt=2,
+            clientDataCacheSlots={"a": 2},
+            groveConfigCache={"a": 2},
         ),
     )
     (synced / ".last-complete-round").write_text("2")

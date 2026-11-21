@@ -52,6 +52,11 @@ STATE_KEYS = {
     # an hour that any session of a signed-in Claude renews (2.1.322); never a notice marked as
     # seen (a session started without a terminal only says to run `claude` to review them).
     "groveChoiceSeenAt",
+    # Caches any session of a signed-in Claude refreshes on its own clock, as the experiment
+    # caches above (live r75, 2.1.322): that Consumer Terms config by account, when the model
+    # options were last fetched and its client data slots; a plain `claude -p` run changes the
+    # last two (F's calibration). Chief of Staff writes none of Claude's state.
+    "groveConfigCache", "additionalModelOptionsAnsweredAt", "clientDataCacheSlots",
 }  # fmt: skip
 # Of the owner's synced claude.ai skills (~/.claude/skills/synced/<id>/): the mark Claude
 # (2.1.322) writes at the end of each sync round, about every ten minutes a session runs.
