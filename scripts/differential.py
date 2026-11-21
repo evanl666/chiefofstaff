@@ -356,6 +356,13 @@ FIXES: list[Allow] = [
         data=r"/api/state\.connector\.connection_needed$",
         value=None,
     ),
+    # E137: every session a Copilot CLI client to the MCP servers it calls (its User-Agent), so
+    # a server that keeps the owner's connections per app gives it those made for Copilot.
+    Allow(
+        "sessions' client name: a Copilot CLI client",
+        data=r"\.options\.client_name$",
+        value="copilot-cli/chiefofstaff",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
