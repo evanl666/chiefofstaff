@@ -865,8 +865,18 @@ enable.
 React with 🤖 (`:robot_face:`) to any Slack message, in any channel, yours or someone else's,
 to hand it to your chief of staff: "take care of this". The Router treats it as a request from
 you: it starts a worker (or gives it to the one that knows the subject), and when the author is
-waiting, the worker drafts a reply in that thread with the outcome for you to approve. Write a
-note to yourself and react to it to delegate from your phone.
+waiting, the worker replies in that thread with the outcome. Write a note to yourself and react
+to it to delegate from your phone.
+
+Your reaction is your OK for that one reply: it goes out at once, as you, in the thread of the
+message you reacted to (or a new thread under it), with no card. The worker is told it writes
+straight to the people there. Only your own reaction counts, and only that reply: anything else
+it sends, anywhere else, waits for your OK as usual. It falls back to the card, with one line
+saying why, when someone else wrote in the thread since, when the reply looks like it holds a
+secret or names a file on your computer, or when the check before sending holds it. Each reply
+sent this way is listed under *Handled for you* with a link to it in Slack (Slack's MCP server
+can't delete messages, so there is no Undo). *Reply directly when you react with :robot_face:*
+in **Settings → Connections → Slack** turns this off: every reply then waits for your OK.
 
 Change the emoji (or empty it to turn this off) in **Settings → Connections → Slack**. The watcher finds
 reactions with Slack's `hasmy::robot_face:` search, among the 20 most recent messages you

@@ -139,6 +139,19 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   is one plain line (*Couldn't read this conversation from Slack just now; the reply still goes
   to …*), the details go to the log, email addresses are never kept, and a message can't pass
   off its own text as someone else's message in the new format either.
+- **React with your delegate emoji, and the reply goes out without asking.** When you react to a
+  Slack message with your delegate emoji (*:robot_face:* unless you changed it), the worker that
+  takes it on replies in that message's thread directly, as you: no card to approve. It's told
+  the reply goes straight to the people there, so it writes it for them (no file paths, no notes
+  about its work). Only your own reaction counts, and only that one reply in that thread: anything
+  else it sends, anywhere else, still waits for your OK. It falls back to the usual card, with one
+  line saying why, when someone else wrote in the thread since, when the reply looks like it holds
+  a secret or names a file on your computer, or when the check before sending holds it. Each reply
+  sent this way is one line under *Handled for you* (*Replied in the thread in #deploys for you
+  (you reacted :robot_face:)*, with *Open in Slack*) and one quiet line in the Router's chat; it
+  doesn't count as something that needs you. Slack's MCP server can't delete messages, so there's
+  no Undo. Turn it off in Settings → Connections → Slack (*Reply directly when you react with
+  :robot_face:*).
 
 ## 0.1.52 (2026-11-20)
 
