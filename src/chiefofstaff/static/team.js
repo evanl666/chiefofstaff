@@ -9,11 +9,25 @@ import { renderSidebar } from "./sidebar.js";
 import { closeMentions, setRecipient } from "./mention.js";
 
 // A color per worker (and per team), from its id: the same on every page and after a reload.
+// In a team, its workers' colors differ: each, in the order they joined, takes the first color
+// from its own that an earlier one has not (a worker keeps its color as its team grows).
 const COLORS = 8;
-export function colorOf(id = "") {
+function hashColor(id = "") {
   let hash = 0;
   for (const char of id) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
   return hash % COLORS;
+}
+export function colorOf(id = "") {
+  const team = teamOf(id);
+  if (!team) return hashColor(id);
+  const used = new Set();
+  for (const member of team.members) {
+    let color = hashColor(member);
+    while (used.has(color) && used.size < COLORS) color = (color + 1) % COLORS;
+    used.add(color);
+    if (member === id) return color;
+  }
+  return hashColor(id);
 }
 // A worker's short name, from its title: the part before ":", "·", "(" or " - ", cut at a word
 // to 24 characters. (The owner's own name for it, when they gave one, comes from the server.)

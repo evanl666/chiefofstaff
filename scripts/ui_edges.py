@@ -5295,8 +5295,29 @@ async def teams_views_checked(runtime, browser, failures, seeded, shots):
     await call_tool(runtime, "answer_session", scout, question_id=question, answer="EU first.")
     await expect(held).to_have_count(0, timeout=10000)
     runtime.teams.set_label(writer, "")
+
+    # A team's workers' colors differ, even two whose ids would give them the same one.
+    def hashed(text):
+        value = 0
+        for char in text:
+            value = (value * 31 + ord(char)) % 2**32
+        return value % 8
+
+    one = "w-same-0"
+    two = next(f"w-same-{i}" for i in range(1, 200) if hashed(f"w-same-{i}") == hashed(one))
+    colors = await page.evaluate(
+        """async ([one, two]) => {
+          const { state } = await import("/static/state.js");
+          const { colorOf } = await import("/static/team.js");
+          const team = { id: "team-same", name: "", members: [one, two], labels: {} };
+          state.snapshot.teams = [...(state.snapshot.teams || []), team];
+          return [colorOf(one), colorOf(two)];
+        }""",
+        [one, two],
+    )
+    assert colors[0] == hashed(one) and colors[1] != colors[0], colors
     await context.close()
-    log("Teams: Nudge tells the one asked; a short name of the owner's shows everywhere")
+    log("Teams: Nudge tells the one asked; a short name of the owner's shows everywhere; colors")
 
 
 async def round_teams(runtime, browser, failures: list[str]):
