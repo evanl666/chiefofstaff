@@ -303,3 +303,33 @@ def test_a_wait_cleared_long_ago_settles(harness):
     assert chip_of(task("t2"), [waits], [], None, {}, NOW)[0].get("just") is True
     waits["resolved_at"] = (NOW - timedelta(minutes=5)).isoformat()
     assert "just" not in chip_of(task("t2"), [waits], [], None, {}, NOW)[0]
+
+
+async def test_a_compare_is_one_team_its_sides_side_by_side_the_one_accepted_picked(
+    tmp_path, codex_installed
+):
+    """The owner's "do this with Copilot and Codex" (0.1.53's Compare): its workers are one team
+    (they never message), its sides one group, pending until the owner accepts one: picked."""
+    from test_agents import saved, spawn_on, started
+
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        found = await spawn_on(harness, runtime, title="Fix the login test",
+                               instructions="Report done: x", agent="codex",
+                               compare_with=["copilot"])  # fmt: skip
+        made = [worker["session_id"] for worker in found["workers"]]
+        tasks = [worker["task_id"] for worker in found["workers"]]
+        [team] = [members for members in runtime.teams.components() if made[0] in members]
+        assert sorted(team) == sorted(made)
+        [group] = [g for g in runtime.relations.graph().groups if g["kind"] == "compare"]
+        assert sorted(group["tasks"]) == sorted(tasks) and group["state"] == "pending"
+        thread = runtime.teams.thread_view(runtime.teams.team_of(made[0]))
+        rows = {row["id"]: row for row in thread["tasks"]}
+        assert {rows[task]["relation"]["kind"] for task in tasks} == {"compare"}
+        assert thread["summary"]["compare"] == 1
+        runtime.tasks.move(tasks[1], "done")
+        [group] = [g for g in runtime.relations.graph().groups if g["kind"] == "compare"]
+        assert (group["state"], group["picked"]) == ("resolved", tasks[1])
+    finally:
+        await runtime.stop()

@@ -9849,6 +9849,33 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             await ux_shoot(page, "task-marks", scheme, focus=task)
             assert not errors, errors
             await context.close()
+        # Its team's view (E130): the two sides side by side, each "vs" the other; the one the
+        # owner accepts is picked, the other dimmed.
+        team = runtime.teams.team_of(pair[0])
+        sides = [worker["task_id"] for worker in made["workers"]]
+        context, page, errors, _ = await agents_page(browser, "light")
+        await at_home(page)
+        if await page.locator("#home-tabs").is_visible():
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
+        view = page.locator("#timeline .team-view")
+        first, second = (view.locator(f'.trow[data-task="{task}"]') for task in sides)
+        await expect(first.locator(".rel")).to_have_text("vs Codex")
+        await expect(second.locator(".rel")).to_have_text("vs Copilot")
+        await expect(view.locator(".rel-summary .rel-chip", has_text="compare")).to_have_count(1)
+        await first.locator(".main").click()
+        lineage = view.locator(".lineage")
+        await expect(lineage.locator(".fan.compare .lnode")).to_have_count(1)
+        await expect(lineage.locator(".caption")).to_have_text(
+            "The same task on Copilot and Codex · yours to pick"
+        )
+        runtime.tasks.move(sides[1], "done")  # The owner accepts Codex's.
+        await expect(second.locator(".rel")).to_have_text("picked", timeout=10000)
+        await expect(first.locator(".rel")).to_have_text("Codex picked")
+        await expect(first).to_have_class(re.compile(r"\bover\b"))
+        await ux_shoot(page, "compare-team", "light", focus=view)
+        assert not errors, errors
+        await context.close()
         # A worker on Codex in the @ list is a worker (to message), not the agent Codex.
         context, page, errors, _ = await agents_page(browser, "light")
         await at_home(page)

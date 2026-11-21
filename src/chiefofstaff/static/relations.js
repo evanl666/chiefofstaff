@@ -8,6 +8,7 @@ import { el } from "./dom.js";
 import { byId, closedWorkers } from "./state.js";
 import { select } from "./session.js";
 import { avatar, labelOf } from "./team.js";
+import { agentName, marksShown } from "./agentpick.js";
 
 const SVG = "http://www.w3.org/2000/svg";
 function svg(tag, attributes = {}, ...children) {
@@ -37,8 +38,13 @@ const ago = (count) => (count < 1 ? "just now" : `${minutes(count)} ago`);
 const shorten = (text, most) => (text.length > most ? `${text.slice(0, most - 1).trimEnd()}…` : text);
 const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
 const workerOf = (id) => byId(id) || closedWorkers().find((item) => item.id === id);
-// The agent a worker runs on, when it is not the default one (0.1.53's agents).
-const agentOf = (id) => workerOf(id)?.agent_name || "";
+// The agent a worker runs on, where that tells something (more than one agent on): a side of a
+// Compare is "Codex" or "Copilot", work handed on "handed to Claude".
+function agentOf(id) {
+  const worker = workerOf(id);
+  if (!worker || !marksShown()) return "";
+  return worker.agent_name || agentName(worker.agent || "copilot");
+}
 
 // A task's title where its worker's avatar or name is beside it: without the worker's name it
 // starts with ("Checkout UI: the v2 pages" by Checkout UI: "The v2 pages"); the whole title on
