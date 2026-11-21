@@ -8457,6 +8457,25 @@ async def at_home(page):
         await page.locator("#home-tabs [data-tab=chat]").click()
 
 
+def start_fold(page, title: str):
+    """On Home, the fold of a run of routing receipts (E129) that holds `title`'s start line."""
+    return page.locator("#timeline > .fold.routing").filter(
+        has=page.locator(".event.started", has_text=title)
+    )
+
+
+async def start_line(page, title: str):
+    """`title`'s start line on Home, shown: in a run of routing receipts it is in a fold (E129),
+    opened first, with its chip."""
+    line = page.locator("#timeline .event.started", has_text=title)
+    await expect(line).to_have_count(1)
+    fold = start_fold(page, title)
+    if await fold.count() and not await line.is_visible():
+        await fold.locator(":scope > .fold-line button.line").click()
+    await expect(line).to_be_visible()
+    return line
+
+
 ROLE_SHOTS = Path(os.environ.get("UI_ROLE_SHOTS") or SHOTS / "roles")
 ROLE_WIDTHS = (800, 1280)
 
@@ -9231,7 +9250,19 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
                 "aria-label", re.compile(r"^Copilot")
             )
             await sidebar_shoot_to(page, "compare-sidebar", scheme)
-            line = page.locator("#timeline .event.started", has_text="Draft the release notes")
+            # The start lines in a row are a run of routing receipts, one line (E129), their
+            # chips folded with them; opened, every chip shows and opens its menu.
+            fold = start_fold(page, "Draft the release notes")
+            await expect(fold.locator(".fold-line .what")).to_have_text(
+                re.compile(r"^[2-9] routing updates$")
+            )
+            chips = fold.locator(".fold-items .event.started .agent-chip")
+            await expect(chips).to_have_count(3)
+            await expect(chips.first).to_be_hidden()
+            await ux_shoot(page, "start-chips-folded", scheme, focus=fold)
+            line = await start_line(page, "Draft the release notes")
+            await expect(fold.locator(".fold-items .agent-chip:visible")).to_have_count(3)
+            await expect(chips).to_have_text(["Copilot", "Codex", "Copilot"])
             start = line.locator(".agent-chip")
             await expect(start).to_have_text("Copilot")
             await start.click()
@@ -9417,7 +9448,7 @@ async def round_agent_parity(runtime, browser, failures: list[str]):
         assert runtime.view(store.session(untouched))["untouched"]
         context, page, errors, _ = await agents_page(browser, "light")
         await at_home(page)
-        line = page.locator("#timeline .event.started", has_text="Parity draft the notes")
+        line = await start_line(page, "Parity draft the notes")
         await line.locator(".agent-chip").click()
         await expect(line.locator(".agent-chip-wrap .menu").get_by_role("menuitem")).to_have_text(
             ["Restart on Codex", "Restart on Claude"]
