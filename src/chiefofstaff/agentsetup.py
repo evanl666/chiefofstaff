@@ -150,11 +150,12 @@ async def npm_bin() -> Path | None:
 
 
 def on_path(folder: Path):
-    """A folder an agent's CLI was found in, put on Chief of Staff's PATH (first): its workers
-    and its looks run that CLI from now on, as a new terminal would."""
+    """A folder an agent's CLI was found in, put on Chief of Staff's PATH (last: what the owner's
+    PATH found first stays first, Homebrew's or npm's Python or git never in their place): its
+    workers and its looks run that CLI from now on, as a new terminal would."""
     parts = os.environ.get("PATH", "").split(os.pathsep)
     if str(folder) not in parts:
-        os.environ["PATH"] = os.pathsep.join([str(folder), *filter(None, parts)])
+        os.environ["PATH"] = os.pathsep.join([*filter(None, parts), str(folder)])
 
 
 async def locate(name: str) -> str:

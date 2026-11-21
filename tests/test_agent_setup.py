@@ -232,8 +232,10 @@ async def test_install_runs_the_official_installer_finds_it_and_goes_on_to_sign_
     tmp_path, monkeypatch, quick
 ):
     """The installer puts `codex` in ~/.local/bin, which is not on the PATH Chief of Staff
-    started with: found there, put on its PATH, kept for next time; signed out, Sign in
-    follows at once."""
+    started with: found there, put on its PATH (after the owner's own: a `git` beside it is not
+    the one workers run), kept for next time; signed out, Sign in follows at once."""
+    import shutil
+
     from conftest import fake_codex
 
     home = tmp_path / "home"
@@ -242,7 +244,11 @@ async def test_install_runs_the_official_installer_finds_it_and_goes_on_to_sign_
     monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
     stand_in = fake_codex(tmp_path / "fake", monkeypatch)
     bin_dir = home / ".local" / "bin"
-    script = f'echo "Installing Codex…"; mkdir -p "{bin_dir}" && cp "{stand_in}" "{bin_dir}/codex"'
+    script = (
+        f'echo "Installing Codex…"; mkdir -p "{bin_dir}" && cp "{stand_in}" "{bin_dir}/codex"'
+        f' && printf "#!/bin/sh\\n" > "{bin_dir}/git" && chmod +x "{bin_dir}/git"'
+    )
+    git = shutil.which("git")
     monkeypatch.setattr(agentsetup, "INSTALLERS", {"codex": (("script", script, ""),),
                                                    "claude": ()})  # fmt: skip
     monkeypatch.setattr(agentsetup, "known_dirs", lambda: [bin_dir])
@@ -255,6 +261,7 @@ async def test_install_runs_the_official_installer_finds_it_and_goes_on_to_sign_
         await runtime.setups.install("codex")
         await until(lambda: runtime.setups.runs["codex"].kind == "signin", 20)
         assert str(bin_dir) in os.environ["PATH"].split(os.pathsep)
+        assert shutil.which("git") == git, "the owner's own, first on their PATH"
         assert harness.store.get("agentpath:codex") == str(bin_dir)
         assert runtime.agents_found() == ["codex"]
         await until(lambda: runtime.setups.view()["codex"].get("url"))
