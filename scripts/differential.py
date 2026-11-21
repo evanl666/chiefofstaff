@@ -5,7 +5,7 @@ differences the feature declares by name in FEATURES below.
     uv run --with playwright python scripts/differential.py [--feature NAME] [--mode off|on] [--out DIR]
     uv run --with playwright python scripts/differential.py --copilot-alone [--out DIR]
 
---mode off (the default): the baseline (git tag v0.1.48, checked out with `git worktree add` and
+--mode off (the default): the baseline (git tag v0.1.52, checked out with `git worktree add` and
 run in its own `uv run` environment) against this working tree with every registered feature (or
 only --feature) at its off settings, allowing only those features' `allow_off`. The baseline runs
 with those of the settings it has: a feature it shipped with is off on both sides.
@@ -90,7 +90,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(__file__).resolve()
-BASELINE = "v0.1.48"
+BASELINE = "v0.1.52"
 # DIFFERENTIAL_PORT_BASE moves the ten ports (another checkout's run on the same machine).
 PORT_BASE = int(os.environ.get("DIFFERENTIAL_PORT_BASE", "8810"))
 PORTS = range(PORT_BASE, PORT_BASE + 10)
@@ -216,115 +216,16 @@ EXAMPLE = Feature(
 )
 
 # Deliberate fixes of how the baseline looks, not any feature's: allowed in every run (the plain
-# one, and each feature's off and on), each with why. Those of 0.1.41 to 0.1.48 (the one-line
+# one, and each feature's off and on), each with why. Those of 0.1.41 to 0.1.52 (the one-line
 # heading, workers' batch CLI line, learning from talked sessions, the runs kept, role rules, the
 # Router's title rule, a check-back's runs, workers' own caches, agent settings snapshots, .git
 # identities, held messages, a chat's task, tool search, the Router's rule for a crossed report,
 # ask_decision's task, Watch scans that failed, drafts' has_final, tasks' settings and aged,
-# follow_thread's description) are the baseline's own behaviour.
-FIXES: list[Allow] = [
-    # Not a difference of behaviour: a .git folder's identity (0.1.46, workspaces.identity_of)
-    # holds its inode number, and each side's run makes its folders anew.
-    Allow(
-        ".git identities' inode numbers, each run's own",
-        data=r"\.db\.kv\.gitid:.*\.value(\[3\]\.id)?\[2\]$",
-    ),
-    # 0.1.50: a command the task itself asks a worker to run, a sleep included, runs as asked (a
-    # Codex worker skipped the owner's `sleep 240`, live C5, citing "Never sit and wait").
-    Allow(
-        "workers' rule on waiting: a command the task asks for runs",
-        data=r"\.system_message\.content$",
-        lines=r"^  (reviews or long runs \(a Flyte or Airflow run, an eval\)\. (Do everything else "
-        r"first and check|A command the task itself asks you)|to run, a sleep included, is not "
-        r"waiting: run it as asked\. Do everything else first and check)$",
-    ),
-    # E123 (smooth by default): what was handled for the owner, the last week's (none here), in
-    # its own table; whether a result is a report only (accepted for the owner once read: its
-    # opened report says so, a row at rest does not).
-    Allow("Handled for you", data=r"/api/state\.handled$"),
-    Allow("the handled table", data=r"\.db\.(_schema\.)?handled$"),
-    Allow("tasks' report_only", data=r"\.tasks\[\d+\]\.report_only$"),
-    # 0.1.49: a worker given the owner's checkout to read gets a copy of its own for a command
-    # refused there (Runtime.own_copy): its prompt's line for that checkout says so, and the
-    # refusal (a notice in its chat) says where the copy is.
-    Allow(
-        "a read-only checkout's line in a worker's prompt",
-        data=r"\.system_message\.content$",
-        lines=r"^- .+: the project folder itself, which the owner works in: change nothing there",
-    ),
-    Allow(
-        "a refusal in the owner's checkout that names the worker's own copy",
-        data=r"(/messages\[\d+\]|\.db\.messages\.[^.]+)\.text$",
-        lines=r"^The same command was not run in the owner's checkout; your own (copy|worktree) ",
-    ),
-    # E115: answers have their own report status, routine progress stays quiet, and task views
-    # expose the five recent progress reports already kept in messages (read through an index of
-    # reports).
-    Allow("tasks' recent progress updates", data=r"\.tasks\[\d+\]\.progress_updates$"),
-    Allow("messages' index of reports", data=r"\.db\._schema\.reports_by_session$"),
-    Allow(
-        "report's answer status",
-        data=r"\.options\.tools\[\d+\]\.parameters\.properties\.status\.enum\[\d+\]$",
-        value="answer",
-    ),
-    Allow(
-        "report's answer-aware description",
-        data=r"\.options\.tools\[\d+\]\.description$",
-        value="Report to the Router: answer, progress (rare), question, blocked, failed or "
-        "done. Answers always reach the Router; routine progress stays on the task.",
-    ),
-    Allow(
-        "report summary's answer guidance",
-        data=r"\.options\.tools\[\d+\]\.parameters\.properties\.summary\.description$",
-        value="What happened, the answer, or the one concrete question. With status answer: the "
-        "whole answer to the Router's or owner's message about a task; it changes no task state "
-        "(a task's own result is status done). With status done: the whole result the owner "
-        "reads (tables, lists, every row asked for), up to 30,000 characters; never only a "
-        "pointer to a file. With status failed: why it cannot be done, and what you tried",
-    ),
-    # 0.1.51 (live agentsB B3, live_smooth B, approvals A3): a new worker when the owner asks for
-    # one in so many words, also next to related workers: the Router's rule (in its role, under
-    # the system messages' entry below), the line under the related workers it is shown, and
-    # spawn_worker's why_new.
-    Allow(
-        "related workers' line: a new worker when the owner asks for one",
-        data=r"(\.prompt|^backend\.turns\.router:[^.]*)$",
-        lines=r"^If this request concerns the same project, repo or topic as one of them, send it "
-        r"to that worker with message_session \(a closed one reopens with its context and "
-        r"files\)\. Start a new worker only if none does(\.|, or when the owner asks for a new "
-        r"worker in so many words: then always, with why_new quoting them\.)$",
-    ),
-    Allow(
-        "spawn_worker's why_new: at once when the owner asks for a new worker",
-        data=r"\.tools\[\d+\]\.parameters\.properties\.why_new\.description$",
-        value="After spawn_worker listed related workers: why none of them should take this "
-        "(different subject, an independent change that needs its own PR, or work that must run "
-        "in parallel with theirs). At once when the owner asked for a new worker in so many "
-        "words: their words, quoted. The owner reads it after “new because”, so a short phrase "
-        "that goes on from there, said to them (“a different repository”, “you asked for a "
-        "separate PR”), never your reasoning (not “separate decision task, no code change”). In "
-        "the language the owner writes in: to an owner who writes Chinese, in Chinese (“你要单独"
-        "的 PR”), or it is not shown",
-    ),
-    Allow("Router and worker answer/report rules", data=r"\.system_message\.content$"),
-    # E116: an account Watch for you could not use and the owner has not connected yet (null
-    # while there is none).
-    Allow(
-        "Watch for you's account to connect",
-        data=r"/api/state\.connector\.connection_needed$",
-        value=None,
-    ),
-    # E137: every session a Copilot CLI client to the MCP servers it calls (its User-Agent), so
-    # a server that keeps the owner's connections per app gives it those made for Copilot.
-    Allow(
-        "sessions' client name: a Copilot CLI client",
-        data=r"\.options\.client_name$",
-        value="copilot-cli/chiefofstaff",
-    ),
-    # E133: how much each session's conversation holds, kept for every session (the Router's
-    # only before), so Watch for you starts a fresh one once it is long. Nothing is shown.
-    Allow("every session's context size", data=r"\.db\.kv\.context:"),
-]
+# follow_thread's description, a read-only checkout's own copy, workers' rule on waiting, QA8's
+# settings kept only for sandboxed workers, Handled for you, E115's answers, a new worker when
+# the owner asks for one, a task's result being done, E116's account to connect, sessions'
+# client name, every session's context size) are the baseline's own behaviour.
+FIXES: list[Allow] = []
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
 # by default (the owner agreed), so it is compared switched off against the baseline. On, the
@@ -625,9 +526,10 @@ INSTALLED = [
         data=r"\./api/state\.agents_status$",
     ),
     Allow(
-        "Claude's first-run card on Home (the notices it alone is in)",
+        "Claude's first-run card on Home (the notices it alone is in; Home shows at the corners "
+        "of the Settings dialog too)",
         element="#notices:has(> #agent-offer:only-child), #notices[hidden]:empty",
-        views=r"^home",
+        views=r"^(home|settings)",
     ),
     Allow("the first-run card published: one more state event", data=r"^steps\.\w+\.bus\.state$",
           more=1),
