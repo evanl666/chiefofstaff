@@ -1328,7 +1328,10 @@ of Staff started; that folder goes after yours, so your own programs stay first)
 *Sign in*. On Windows it shows the PowerShell command to copy.
 Where Claude Code says when your sign-in ends, the `@` list says so from a week before ("Claude
 sign-in ends Dec 11"); with `ANTHROPIC_API_KEY` set where Chief of Staff runs, Claude's workers use
-that key, and its status says so ("Uses your Anthropic API key (ANTHROPIC_API_KEY)").
+that key, and its status says so ("Uses your Anthropic API key (ANTHROPIC_API_KEY)"); with
+`CODEX_ACCESS_TOKEN` set, Codex's workers use that token over your `codex login` ("Uses your access
+token (CODEX_ACCESS_TOKEN)"). `CODEX_API_KEY` and `OPENAI_API_KEY` don't change what Codex workers
+use (only `codex exec` reads the first), so nothing is said of them.
 
 **Choosing it for one task.** Type `@` in Home's message box: it lists every agent first, each with
 its status (*Ready*, *Sign-in needed*, *Not installed*; one not ready is dimmed: picking it signs in

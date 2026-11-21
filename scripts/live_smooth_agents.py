@@ -20,7 +20,8 @@ M4  A turn that ran a command, then lost its sign-in: Sign-in needed at once, no
     in again, that turn is never run again (its command ran once)
 M5  Claude, live: signed out in a terminal, then in, the page's next ask says so (and when its
     sign-in ends); signed in from the page with a pasted code, Ready by itself; ANTHROPIC_API_KEY
-    in the environment Chief of Staff starts in: said as what pays, its value nowhere
+    and Codex's CODEX_ACCESS_TOKEN in the environment Chief of Staff starts in: said as what
+    pays, by name, their values nowhere
 M6  "work in place, directly in my folder (not a copy)" while a worker that read the project is
     idle: a new worker in place does it; the one that read it gets nothing
 
@@ -421,23 +422,29 @@ async def m5_claude_live(ctx: Ctx):
     await wait_for("Claude Ready by itself", ready, 30)
     assert (await ctx.setup("claude"))["state"] == "done"
     assert PASTE not in json.dumps(await ctx.state()), "the code kept nowhere"
-    # A key in the environment Chief of Staff starts in: said as what pays, by its name only.
-    key = "sk-ant-live-smooth-not-a-key"
-    ctx.app.extra_env["ANTHROPIC_API_KEY"] = key
+    # A key in the environment Chief of Staff starts in, which workers use over the sign-in:
+    # said as what pays, by its name only (Claude's ANTHROPIC_API_KEY, Codex's access token).
+    keys = {
+        "ANTHROPIC_API_KEY": "sk-ant-live-smooth-not-a-key",
+        "CODEX_ACCESS_TOKEN": "codex-live-smooth-not-a-token",
+    }
+    ctx.app.extra_env.update(keys)
     try:
         await ctx.app.stop()
         await ctx.app.start()
 
         async def keyed():
-            found = await ctx.status("claude", ask=True)
-            return found if found.get("key_env") else None
+            found = [await ctx.status(name, ask=True) for name in ("claude", "codex")]
+            return found if all(entry.get("key_env") for entry in found) else None
 
-        claude = await wait_for("the key said", keyed, 60)
+        claude, codex = await wait_for("the keys said", keyed, 60)
         assert claude["pays"] == "Uses your Anthropic API key (ANTHROPIC_API_KEY)", claude
+        assert codex["pays"] == "Uses your access token (CODEX_ACCESS_TOKEN)", codex
         shown = json.dumps(await ctx.state()) + json.dumps(await ctx.app.get("/api/agents"))
-        assert key not in shown, "its value nowhere"
+        assert not [value for value in keys.values() if value in shown], "their values nowhere"
     finally:
-        ctx.app.extra_env.pop("ANTHROPIC_API_KEY")
+        for name in keys:
+            ctx.app.extra_env.pop(name)
         await ctx.app.stop()
         await ctx.app.start()
     ctx.no_real_agent()

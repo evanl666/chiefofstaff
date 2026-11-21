@@ -213,6 +213,36 @@ async def test_claudes_sign_in_end_and_a_key_in_the_environment_are_said(
         await runtime.stop()
 
 
+async def test_an_access_token_codex_uses_over_its_sign_in_is_said_by_name_and_keys_it_leaves_not(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """Codex's app-server, as its workers run it, uses CODEX_ACCESS_TOKEN from the environment
+    over the sign-in `codex login` keeps (0.167.2: login/src/auth/manager.rs, load_auth): its
+    status says so by the variable's name, in its glance and in Settings' look, never its value.
+    CODEX_API_KEY (read by `codex exec` alone) and OPENAI_API_KEY (no sign-in of Codex's own
+    provider) change nothing it says."""
+    secrets = {"CODEX_API_KEY": "sk-exec-only-1", "OPENAI_API_KEY": "sk-not-codex-2"}
+    for name, value in secrets.items():
+        monkeypatch.setenv(name, value)
+    _, runtime = await started(tmp_path)
+    try:
+        await runtime.refresh_agent_status()
+        status = runtime.agent_status("codex")
+        assert status["pays"] == "Uses your ChatGPT sign-in" and "key_env" not in status
+        monkeypatch.setenv("CODEX_ACCESS_TOKEN", secrets.setdefault("token", "codex-pat-3"))
+        await runtime.glance_agent("codex")
+        status = runtime.agent_status("codex")
+        assert status["pays"] == "Uses your access token (CODEX_ACCESS_TOKEN)", status
+        assert status["key_env"] == "CODEX_ACCESS_TOKEN"
+        found = await runtime.look_for_agents()
+        (codex,) = [entry for entry in found["agents"] if entry["name"] == "codex"]
+        assert codex["pays"] == "Uses your access token (CODEX_ACCESS_TOKEN)", "Settings' look"
+        shown = json.dumps(runtime.snapshot()) + json.dumps(found)
+        assert not [value for value in secrets.values() if value in shown], "by name only"
+    finally:
+        await runtime.stop()
+
+
 async def test_signed_in_in_a_terminal_meanwhile_turns_ready_when_the_page_asks(
     tmp_path, codex_installed, monkeypatch, quick
 ):

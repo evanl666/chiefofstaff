@@ -16,7 +16,8 @@ that ended (a 401), signed out from then on.
 say it (the browser's URL on stderr, the device code on stdout, the key read from stdin): a
 sign-in is kept in FAKE_CODEX_HOME (auth.json, signed-out), over SIGNED_OUT. A browser or device
 sign-in waits until a file `approve` there says how it went ("ok", else its words: an error), as
-the owner finishing it in their browser would. `login status` takes STATUS_DELAY seconds.
+the owner finishing it in their browser would. `login status` takes STATUS_DELAY seconds. An
+access token in its environment (CODEX_ACCESS_TOKEN) signs it in over all that, as 0.167.2's.
 """
 
 import asyncio
@@ -1318,8 +1319,10 @@ SIGNED_OUT_MARK = HOME / "signed-out"
 
 
 def signed_out() -> bool:
-    """Signed out: by its own sign-in's files (a login, a logout), else FAKE_CODEX_SIGNED_OUT."""
-    if AUTH.exists():
+    """Signed out: by its own sign-in's files (a login, a logout), else FAKE_CODEX_SIGNED_OUT;
+    never with an access token in its environment (CODEX_ACCESS_TOKEN), which 0.167.2 uses over
+    what `codex login` keeps."""
+    if AUTH.exists() or os.environ.get("CODEX_ACCESS_TOKEN", "").strip():
         return False
     return SIGNED_OUT_MARK.exists() or bool(os.environ.get("FAKE_CODEX_SIGNED_OUT"))
 
@@ -1357,7 +1360,9 @@ def login(arguments: list[str]):
             sys.stderr.write("Not logged in\n")
             sys.exit(1)
         mode = json.loads(AUTH.read_text()).get("auth_mode") if AUTH.exists() else "chatgpt"
-        if mode == "apikey":
+        if os.environ.get("CODEX_ACCESS_TOKEN", "").strip():
+            sys.stderr.write("Logged in using access token\n")
+        elif mode == "apikey":
             sys.stderr.write("API key configured - sk-proj-***ABCD\n")
             sys.stderr.write("Authentication is checked when you send a request.\n")
         else:

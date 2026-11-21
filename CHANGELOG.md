@@ -16,7 +16,9 @@ page, and what waited for it goes on by itself.
   you have signed in (*Resuming… Cancel*, then *Resumed after sign-in*, under *Handled for
   you*); work that had already begun is never sent again. *If unavailable: Ask me* makes the
   Router or the Watchdog wait for you instead of going on on Copilot. The `@` list marks the
-  agent the Router runs on and says when Claude's sign-in ends, a week before.
+  agent the Router runs on and says when Claude's sign-in ends, a week before. A key or token in
+  the environment an agent's workers use over its sign-in is named in its status
+  (`ANTHROPIC_API_KEY` for Claude, `CODEX_ACCESS_TOKEN` for Codex), never shown.
 - **With the sandbox off, a worker on any agent can delete files you can.** Its commands run as
   you; the guide now says so plainly, and that turning the sandbox on prevents it.
 - **Slack searches ask the way Slack's search takes them now.** Slack's search lists its words

@@ -1324,7 +1324,7 @@ class CodexBackend:
         auth = await self.get_auth_status()
         return {
             "version": self.cli_version,
-            "account": auth.authType if auth.isAuthenticated else "",
+            **sign_in_facts(auth.authType if auth.isAuthenticated else ""),
             "models": await self.list_models(),
             "limits": await self.plan_limits() if auth.isAuthenticated else [],
         }
@@ -3553,6 +3553,7 @@ async def run_codex(command: str, *arguments: str, folder: Path | None = None) -
 # How `codex login status` (0.167.2) says each way of signing in, as Settings names it.
 LOGIN_KINDS = (
     ("Logged in using ChatGPT", "chatgpt"),
+    ("access token", "accessToken"),  # (A personal access token too.)
     ("Amazon Bedrock", "amazonBedrock"),
     ("API key configured", "apiKey"),
     ("API key", "apiKey"),
@@ -3582,7 +3583,19 @@ async def glance(command: str = "codex", folder: Path | None = None) -> dict:
     del said
     if not signed:
         raise RuntimeError("Codex is not signed in: sign in from Settings → Coding agents.")
-    return {"version": version, "account": account}
+    return {"version": version, **sign_in_facts(account)}
+
+
+def sign_in_facts(account: str) -> dict:
+    """How Codex's workers are signed in: `account` (how it says it is), unless the environment
+    Chief of Staff started in has an access token, which every Codex it runs uses over that
+    (agents.KEY_VARIABLES): then that, by its variable's name."""
+    from .agents import KEY_VARIABLES
+
+    variable = KEY_VARIABLES["codex"]
+    if account and os.environ.get(variable, "").strip():
+        return {"account": "accessToken", "key_env": variable}
+    return {"account": account}
 
 
 def codex_backend(command: str = "codex", folder: Path | None = None) -> CodexAgent:

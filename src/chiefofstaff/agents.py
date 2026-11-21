@@ -315,6 +315,7 @@ def display(name: str) -> str:
 SIGNED_IN = {
     "chatgpt": "signed in with ChatGPT",
     "apiKey": "signed in with an API key",
+    "accessToken": "signed in with an access token",
     "amazonBedrock": "signed in with Amazon Bedrock",
     "gcp": "signed in with Google Cloud",
     "claudePlan": "signed in with your Claude plan",
@@ -331,6 +332,7 @@ PLAN_NOTES = {
 COPILOT_PAYS = "Uses your Copilot plan"
 PAYS = {
     "chatgpt": "Uses your ChatGPT sign-in",
+    "accessToken": "Uses your access token",
     "claudePlan": "Uses your Claude plan",
     "amazonBedrock": "Uses your Amazon Bedrock account",
     "gcp": "Uses your Google Cloud account",
@@ -366,8 +368,11 @@ NEEDS_SIGN_IN = re.compile(
 
 
 # A key in the environment Chief of Staff started in, which an agent's workers use over its
-# sign-in (Claude Code: ANTHROPIC_API_KEY, its billing then the key's).
-KEY_VARIABLES = {"claude": "ANTHROPIC_API_KEY"}
+# sign-in, its billing then the key's: Claude Code's ANTHROPIC_API_KEY; Codex's access token
+# (CODEX_ACCESS_TOKEN: its app-server's, as every Codex command's, over what `codex login` keeps;
+# not CODEX_API_KEY, which `codex exec` alone reads, nor OPENAI_API_KEY, no sign-in of Codex's own
+# provider; 0.167.2, login/src/auth/manager.rs). Said by name; its value is never kept.
+KEY_VARIABLES = {"claude": "ANTHROPIC_API_KEY", "codex": "CODEX_ACCESS_TOKEN"}
 
 
 def pays(name: str, account: str, key_env: str = "") -> str:
@@ -376,7 +381,8 @@ def pays(name: str, account: str, key_env: str = "") -> str:
     if name == COPILOT:
         return COPILOT_PAYS
     if key_env:
-        return f"{API_KEY_PAYS.get(name, 'Uses an API key')} ({key_env})"
+        said = API_KEY_PAYS.get(name) if account == "apiKey" else PAYS.get(account)
+        return f"{said or 'Uses an API key'} ({key_env})"
     if account == "apiKey":
         return API_KEY_PAYS.get(name, "")
     return PAYS.get(account, "")
