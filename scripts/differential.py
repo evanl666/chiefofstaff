@@ -10,7 +10,8 @@ run in its own `uv run` environment) against this working tree with every regist
 only --feature) at its off settings, allowing only those features' `allow_off`. The baseline runs
 with those of the settings it has: a feature it shipped with is off on both sides.
 --copilot-alone: as off mode, every feature off, with no other coding agent on the PATH (no
-stand-ins; the owner's own hidden): only COPILOT_ALONE is allowed (and FIXES).
+stand-ins; the owner's own hidden): only COPILOT_ALONE is allowed (and FIXES, and the `allow_off`
+of the features the baseline lacks, see below).
 --mode on: this working tree with --feature off against the same with it on, allowing only that
 feature's `allow_on` (and its own settings keys). A feature not behind a setting does its
 `on_action` instead (more_agents: Codex turned on, then off again; claude_agents: Claude). A
@@ -54,8 +55,10 @@ allow_on=[...]). `off` and `on` are the settings the working tree runs with (off
 the baseline; on mode compares off to on, every other feature off); each Allow names one allowed
 difference: a settings key at a value, a data path (regex), lines of text, or a page element
 (CSS selector) left out of DOM snapshots and screenshots. See Allow and EXAMPLE.
---feature in off mode applies only that feature (others run as they are); --tree tests another
-checkout, --baseline another ref.
+--feature in off mode applies only that feature (others run as they are, but for those behind a
+setting the baseline lacks: off too, with their `allow_off`, as one on by default, such as
+delegate_reply, would differ from the baseline; --copilot-alone turns those off as well); --tree
+tests another checkout, --baseline another ref.
 
 Prints a report (also in OUT/report.txt, with OUT/differences.json) and exits 1 on any difference
 that is not allowed; screenshots of both sides are in OUT/<side>/, and before/after/diff images of
@@ -125,7 +128,8 @@ class Allow:
     API's snapshot and in the stored settings) or `data` (a regex searched in the difference's
     path, e.g. `steps.ask.api./api/state.tasks[0].status` or `backend.sessions.router.options.
     system_message.content`), optionally only at `value` (on the side tested), and for changed
-    text only when each line added or removed matches `lines`, or only by `added` (a regex: the
+    text only when each line added or removed matches `lines` (or that of another allowance of the
+    same text: a text two features change, each its own lines), or only by `added` (a regex: the
     text tested is the other side's with one match of it put in). An `element` (a CSS selector) is
     left out of the DOM snapshots and hidden in the screenshots, on both sides, in the views
     whose names match `views`: screenshots home-1280, home-needs-800, sidebar-1024,
@@ -1950,11 +1954,32 @@ def allow(differences: list[Difference], allowances: dict[str, Allow]):
         if difference.where in {"dom", "pixels"}:
             continue
         changed = [line[1:] for line in difference.lines] if difference.lines is not None else None
+        value = difference.after if difference.kind != "removed" else difference.before
         for name, allowance in allowances.items():
-            value = difference.after if difference.kind != "removed" else difference.before
             if allowance.matches(difference.path, value, changed, difference.before):
                 difference.allowed = name
                 break
+        else:
+            if not changed:
+                continue
+            # Text more than one feature changes (the Router's role, say): each changed line
+            # allowed by one of them, all those named.
+            by: list[str] = []
+            for line in changed:
+                name = next(
+                    (
+                        name
+                        for name, allowance in allowances.items()
+                        if allowance.lines
+                        and allowance.matches(difference.path, value, [line], difference.before)
+                    ),
+                    "",
+                )
+                if not name:
+                    break
+                by += [name] if name not in by else []
+            else:
+                difference.allowed = " + ".join(by)
 
 
 async def pixels(before: Path, after: Path, out: Path, page) -> tuple[int, str]:
@@ -2141,7 +2166,7 @@ def report(
             lines += [f"  {text[0]}", *(f"  {line}" for line in text[1:])]
         if len(mine) > SHOWN:
             lines.append(f"  … {len(mine) - SHOWN} more (all in differences.json)")
-    used = Counter(d.allowed for d in differences if d.allowed)
+    used = Counter(name for d in differences if d.allowed for name in d.allowed.split(" + "))
     if allowances:
         lines.append("Allowed:")
         for name, allowance in allowances.items():
@@ -2220,6 +2245,21 @@ def classify(differences: list[Difference]):
             difference.where = section(difference.path)
 
 
+def baseline_lacks(baseline: str) -> list[str]:
+    """The features behind a setting the baseline has none of (in its Settings, models.py): off in
+    every run against it, whichever feature is chosen, as one on by default (delegate_reply)
+    would differ there."""
+    models = git("show", f"{baseline}:src/chiefofstaff/models.py")
+    return [
+        name
+        for name, feature in FEATURES.items()
+        if feature.off
+        and not any(
+            re.search(rf"^\s+{re.escape(key)}\s*:", models, re.MULTILINE) for key in feature.off
+        )
+    ]
+
+
 def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
     """The two sides and the differences allowed between them."""
     if args.feature and args.feature not in FEATURES:
@@ -2228,19 +2268,23 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
     if args.mode == "on" and not args.feature:
         parser.error("--mode on needs --feature")
     tree = args.tree.resolve()
+    lacking = baseline_lacks(args.baseline)
     if args.copilot_alone:
         if args.feature or args.mode != "off":
             parser.error("--copilot-alone compares the baseline with every feature off")
         allowances = {f"fix: {a.name}": a for a in FIXES} | {
             f"Copilot alone: {a.name}": a for a in COPILOT_ALONE
         }
-        sides = [Side("baseline", WORK / f"baseline-{port}", {}), Side("current", tree, {})]
+        allowances |= {f"{name}: {a.name}": a for name in lacking for a in FEATURES[name].allow_off}
+        off = {key: value for name in lacking for key, value in FEATURES[name].off.items()}
+        sides = [Side("baseline", WORK / f"baseline-{port}", off), Side("current", tree, off)]
         return (
             sides,
             allowances,
             f"Differential test, Copilot alone: {args.baseline} against {tree}",
         )
     chosen = [args.feature] if args.feature and args.mode == "off" else list(FEATURES)
+    chosen += [name for name in lacking if name not in chosen]
     off = {key: value for name in chosen for key, value in FEATURES[name].off.items()}
     fixes = {f"fix: {a.name}": a for a in FIXES}
     installed = {f"installed: {a.name}": a for a in INSTALLED}
