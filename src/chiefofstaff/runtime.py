@@ -4262,9 +4262,11 @@ class Runtime:
             logger.warning("Held work for %s did not resume.", agent, exc_info=True)
             self.refusal_said(found, {"resumed": f"Not resumed: {describe(exc)}"})
             return
+        once = "once you signed in" if found.get("status") == agents.SIGN_IN else "once installed"
+        did = f"Gave “{title}” your message" if found.get("worker") else f"Started “{title}”"
         self.handled.record(
             "resumed",
-            f"“{title}” went on on {name} once you signed in",
+            f"{did} on {name} {once}",
             session_id=made.get("session_id", ""),
             ref=key,
         )
@@ -5107,6 +5109,10 @@ class Runtime:
             "names": {name: agents.display(name) for name in on},
             "new_workers": agents.new_workers(self.store),
             "router_chooses": agents.router_chooses(self.store),
+            # The agent the Router runs on now (the @ list marks it).
+            "router_on": (
+                self.agent(found) if (found := self.store.get("router_id")) else COPILOT_AGENT
+            ),
             # Each one's models' names as last listed (nothing started for them): the page
             # names a model as its agent does, wherever it shows one.
             **({"model_names": names} if (names := self.agent_model_names(on)) else {}),

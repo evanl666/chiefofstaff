@@ -8,6 +8,7 @@ import { scheduleHome } from "./inbox.js";
 import { upsertTask } from "./tasks.js";
 import { isTeamView, scheduleTeam } from "./team.js";
 import { refreshUsageLink, renderConnections, renderLearning } from "./settings.js";
+import { heardSetup } from "./agentsetup.js";
 // Home: the Router's conversation, with what needs the owner and every task beside it.
 export const HOME = "home";
 // Workers in the sidebar: running first.
@@ -233,6 +234,8 @@ function handleEvent({ type, data }) {
     applyDraft(data);
   } else if (type === "toast") {
     notify(data);
+  } else if (type === "agent_setup") {
+    heardSetup(data);
   } else if (type === "state") {
     scheduleReload();
   }

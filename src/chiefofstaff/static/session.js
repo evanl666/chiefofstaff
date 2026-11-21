@@ -9,6 +9,7 @@ import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, markOf, marksShown, modelLabel, ready, statuses, statusOf } from "./agentpick.js";
+import { setupAction } from "./agentsetup.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
@@ -917,6 +918,7 @@ function homeEntry(message) {
       if (meta.settings) return eventLine({ mark: "✦", text, time, view: () => openSettings(meta.settings), viewText: "Open Settings" });
       if (meta.away_reply) return eventLine({ mark: "↩", text, time });
       if (meta.agent_refused) return refusalCard(text, meta, time);
+      if (meta.role_wait) return roleWaitCard(text, meta, time);
       // "Started “X” · new because …": the why is on hover (a " · " in the title is the title's).
       const started = /^(Started|New task|Continued|Restarted)/.test(text);
       const node = eventLine({ mark: started ? "" : "·", kind: started ? "started" : "", text: headOf(text), time, view: meta.session_id ? () => focusTask(meta.task_id || "", meta.session_id) : null });
@@ -1175,10 +1177,18 @@ function renderOne(original) {
   }
 }
 // A worker the owner named an agent for that could not start on it: why, and what they can do
-// (nothing starts elsewhere unasked). Its actions go once answered.
+// (nothing starts elsewhere unasked). Held for a sign-in or an install, it says the message is
+// saved: Sign in (or Install) and it goes on by itself ("Resuming…", with Cancel), or Continue
+// with Copilot, or Don't run it. Its actions go once answered; how it ended is said under it.
 const SIGN_IN_HELP = "https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#workers-on-other-coding-agents";
 function refusalCard(text, meta, time) {
   const open = (state.snapshot.agent_refusals || []).includes(meta.agent_refused);
+  const node = el("div", { class: "card agent-refused", title: clock(time) }, el("p", {}, meta.agent ? agentMark(meta.agent) : "", ` ${text}`));
+  if (meta.resumed) {
+    node.append(el("p", { class: "card-outcome", role: "status", text: meta.resumed }));
+    return node;
+  }
+  if (!open) return node;
   const answer = async (action, button) => {
     button.disabled = true;
     try {
@@ -1191,28 +1201,68 @@ function refusalCard(text, meta, time) {
       toast(error.message, "error");
     }
   };
+  const name = agentName(meta.agent);
+  if (meta.resuming) {
+    // Its agent can run it now: it goes on in a moment, unless Cancel keeps it for the owner.
+    const keep = el("button", { type: "button", class: "text", text: "Cancel", title: "Keep it here: start it yourself when you like" });
+    keep.onclick = () => answer("keep", keep);
+    node.append(el("div", { class: "actions" }, el("span", { class: "resuming", role: "status" }, el("span", { class: "spinner", "aria-hidden": "true" }), `Resuming on ${name}…`), el("span", { class: "spacer" }), keep));
+    return node;
+  }
   // The agent it is offered on instead: the one new workers start on, else Copilot. For a worker
   // of theirs whose agent could not run, its work goes on there, with what it was given.
   const instead = agentName(meta.instead || "copilot");
+  const held = meta.status === "signin" || meta.status === "missing";
   const copilot = el("button", {
     type: "button",
     class: "secondary",
-    text: meta.worker ? `Continue with ${instead}` : `Run on ${instead} instead`,
+    text: meta.worker || held ? `Continue with ${instead}` : `Run on ${instead} instead`,
     title: meta.worker ? `A new worker on ${instead} goes on from a summary of this one's work, with what it was given; this one stays open` : undefined,
   });
-  const wait = el("button", { type: "button", class: "text", text: "Wait" });
   copilot.onclick = () => answer("copilot", copilot);
+  if (held) {
+    const drop = el("button", { type: "button", class: "text", text: "Don't run it" });
+    drop.onclick = () => answer("wait", drop);
+    const status = statusOf(meta.agent);
+    let first = null;
+    if (meta.kept || ready(status)) {
+      first = el("button", { type: "button", text: meta.worker ? `Send it on ${name}` : `Start on ${name}` });
+      first.onclick = () => answer("now", first);
+    } else {
+      first = setupAction(status || { name: meta.agent, status: meta.status });
+    }
+    node.append(el("div", { class: "actions" }, first || (meta.fix ? fixLine(meta.fix) : ""), el("span", { class: "spacer" }), drop, copilot));
+    return node;
+  }
+  const wait = el("button", { type: "button", class: "text", text: "Wait" });
   wait.onclick = () => answer("wait", wait);
   // The command that makes it ready, the owner's to run (else a link to the guide).
   const fix = meta.fix ? fixLine(meta.fix) : null;
-  const node = el(
-    "div",
-    { class: "card agent-refused", title: clock(time) },
-    el("p", {}, meta.agent ? agentMark(meta.agent) : "", ` ${text}`),
-    open
-      ? el("div", { class: "actions" }, fix || el("a", { class: "link", href: SIGN_IN_HELP, target: "_blank", rel: "noreferrer", text: "Sign-in help" }), el("span", { class: "spacer" }), wait, copilot)
-      : null,
-  );
+  node.append(el("div", { class: "actions" }, fix || el("a", { class: "link", href: SIGN_IN_HELP, target: "_blank", rel: "noreferrer", text: "Sign-in help" }), el("span", { class: "spacer" }), wait, copilot));
+  return node;
+}
+// A role waiting for its agent (Settings: If unavailable, Ask me): Sign in (or Install), or Use
+// Copilot until then; what it was sent meanwhile goes to it after.
+function roleWaitCard(text, meta, time) {
+  const node = el("div", { class: "card agent-refused role-wait", title: clock(time) }, el("p", {}, agentMark(meta.agent), ` ${text}`));
+  if (meta.resumed) {
+    node.append(el("p", { class: "card-outcome", role: "status", text: meta.resumed }));
+    return node;
+  }
+  if (!(state.snapshot.role_waits || []).includes(meta.role_wait)) return node;
+  const copilot = el("button", { type: "button", class: "secondary", text: "Use Copilot until then" });
+  copilot.onclick = async () => {
+    copilot.disabled = true;
+    try {
+      state.snapshot = { ...state.snapshot, ...(await api(`/api/role-waits/${meta.role_wait}`, { method: "POST" })) };
+      node.querySelector(".actions")?.remove();
+    } catch (error) {
+      copilot.disabled = false;
+      toast(error.message, "error");
+    }
+  };
+  const first = setupAction(statusOf(meta.agent) || { name: meta.agent, status: meta.status });
+  node.append(el("div", { class: "actions" }, first || (meta.fix ? fixLine(meta.fix) : ""), el("span", { class: "spacer" }), copilot));
   return node;
 }
 // "Use these settings": what changed is in its line; the worker goes on with them.

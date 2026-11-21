@@ -6,6 +6,7 @@ import { closedWorkers, followOthers, HOME, loadState, sessions, state } from ".
 import { renderSidebar } from "./sidebar.js";
 import { EFFORTS, renderHeader, select } from "./session.js";
 import { agentMark, fixLine, statusText } from "./agentpick.js";
+import { openSetup, setupLine, setupWords } from "./agentsetup.js";
 // Settings opens on the tab last used, or the one asked for ("you" for what was learned).
 const TAB = "cos.settingsTab";
 export function showSettingsTab(tab) {
@@ -1161,6 +1162,8 @@ async function lookForAgents() {
   // shown to hold, or your Claude settings widening it).
   $("#agents-rows").replaceChildren(
     ...(found.agents.length ? found.agents.map((agent) => agentRow(found.sandboxed && agent.sandbox ? { ...agent, problem: agent.sandbox } : agent, false)) : [el("small", { class: "agents-none", role: "status", text: noAgentWords(found.supported) })]),
+    // Each one not installed, beside one that is: Install, its command shown before it runs.
+    ...(found.missing || []).map((agent) => el("div", { class: "agent-row agent-missing", "data-agent": agent.name }, el("div", { class: "agent-head" }, agentMark(agent.name), el("strong", { text: agent.label }), el("small", { class: "agent-problem", role: "status", text: setupWords(agent.name) || agent.said })), el("small", { class: "agent-note" }, setupLine({ ...agent, status: "missing" }) || fixLine(agent.fix)))),
   );
   $("#agents-roles").replaceChildren(...(found.roles || []).map(roleRow));
   newWorkersChoices(found.new_workers);
@@ -1172,11 +1175,23 @@ function roleRow(role) {
   const select = el("select", { name: `role_${role.role}`, "data-chosen": role.chosen });
   if (role.line) select.setAttribute("aria-describedby", lineId);
   select.addEventListener("change", () => newWorkersChoices($("#settings-form").agent_new_workers.value));
+  // If its agent can't run it (signed out, not installed, a limit): Copilot and tell me, or ask.
+  const fallback = role.unavailable
+    ? el(
+        "label",
+        { class: "agents-choice agents-unavailable" },
+        el("span", { text: "If unavailable" }),
+        el("select", { name: `unavailable_${role.role}`, "data-chosen": role.unavailable }, el("option", { value: "copilot", text: "Use Copilot and tell me" }), el("option", { value: "ask", text: "Ask me" })),
+      )
+    : "";
+  if (fallback) fallback.querySelector("select").value = role.unavailable;
   return el(
     "div",
     { class: "agents-role", "data-role": role.role, "data-agents": role.agents.join(" "), hidden: true },
     el("label", { class: "agents-choice" }, el("span", { text: `${role.label} runs on` }), select),
+    fallback,
     role.line ? el("small", { id: lineId, class: "agents-role-line", role: "status", text: role.line }) : "",
+    el("div", { class: "role-setup" }),
   );
 }
 // A token count as the page shows it (200,000), and as the owner types it: grouped or not, as
@@ -1223,9 +1238,14 @@ function agentRow(agent, disabled) {
   box.disabled = disabled || (!agent.enabled && (Boolean(agent.problem) || unready));
   // Its status as the @ picker says it ("Ready · Uses your ChatGPT sign-in"), its version on
   // hover; why it can't run, else; the command that makes it ready, under it.
-  const said = unready && agent.fix ? agent.said : agent.status && !agent.problem ? statusText({ ...agent, on: true }) : agent.problem || agent.state || "";
+  const said = unready && setupWords(agent.name) ? setupWords(agent.name) : unready && agent.fix ? agent.said : agent.status && !agent.problem ? statusText({ ...agent, on: true }) : agent.problem || agent.state || "";
   const line = el("small", { id, role: "status", class: agent.problem || unready ? "agent-problem" : "agent-state", title: agent.state || undefined, html: codeHtml(said) });
-  const fix = unready && agent.fix ? el("small", { class: "agent-note" }, fixLine(agent.fix)) : null;
+  // Sign in (or Install) where it says so, its command to copy beside; signed in, Sign in again.
+  const fix = unready && agent.fix ? el("small", { class: "agent-note" }, setupLine(agent) || fixLine(agent.fix)) : null;
+  const again =
+    !unready && agent.status === "ready" && agent.ways?.length
+      ? el("button", { type: "button", class: "link sign-in-again", text: "Sign in again", "aria-label": `Sign in to ${agent.label} again`, onclick: () => openSetup(agent.name, { again: true }) })
+      : null;
   const most = Math.max(0, ...(agent.usage || []).map((entry) => entry.used));
   const chip = most >= USED_CHIP ? el("span", { class: `chip ${most >= 100 ? "blocked" : "waiting"}`, text: `${most}% used`, title: usageLine(agent.usage) }) : null;
   const usage = agent.usage?.length ? el("small", { class: "agent-usage", text: usageLine(agent.usage) }) : null;
@@ -1263,7 +1283,7 @@ function agentRow(agent, disabled) {
     fields.hidden = !box.checked;
     newWorkersChoices($("#settings-form").agent_new_workers.value);
   });
-  const head = el("div", { class: "agent-head" }, agentMark(agent.name), el("strong", { text: agent.label }), chip, el("label", { class: "check agent-switch" }, box, " Available for workers"));
+  const head = el("div", { class: "agent-head" }, agentMark(agent.name), el("strong", { text: agent.label }), chip, again, el("label", { class: "check agent-switch" }, box, " Available for workers"));
   // One that cannot be turned on looks it, its reason in its line.
   return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, head, line, fix, usage, ...notes, fields);
 }
@@ -1287,6 +1307,16 @@ function newWorkersChoices(chosen) {
     choice.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...runs.map((agent) => el("option", { value: agent.name, text: agent.label })));
     choice.value = runs.some((agent) => agent.name === kept) ? kept : "copilot";
     row.hidden = !runs.length;
+    // One of them not ready: Sign in (or Install) here too, never hidden.
+    const unready = runs.filter((agent) => agent.status && agent.status !== "ready");
+    row.querySelector(".role-setup")?.replaceChildren(
+      ...unready
+        .map((agent) => [agent, setupLine(agent)])
+        .filter(([, setup]) => setup)
+        .map(([agent, setup]) => el("small", { class: "agent-note" }, agentMark(agent.name), ` ${agent.label}: ${agent.said} `, setup)),
+    );
+    const fallback = row.querySelector(".agents-unavailable");
+    if (fallback) fallback.hidden = choice.value === "copilot";
   }
   // Folded, its line saying where any of them runs other than on Copilot.
   const system = $("#agents-system");
@@ -1333,12 +1363,16 @@ function agentsBody() {
   }
   if (form.agent_new_workers.value !== agentsLooked.new_workers) body.new_workers = form.agent_new_workers.value;
   const roles = {};
+  const unavailable = {};
   for (const row of document.querySelectorAll("#agents-roles .agents-role")) {
     const choice = row.querySelector("select");
     const value = row.hidden ? "copilot" : choice.value;
     if (value !== choice.dataset.chosen) roles[row.dataset.role] = value;
+    const fallback = row.querySelector(".agents-unavailable select");
+    if (fallback && fallback.value !== fallback.dataset.chosen) unavailable[row.dataset.role] = fallback.value;
   }
   if (Object.keys(roles).length) body.roles = roles;
+  if (Object.keys(unavailable).length) body.role_unavailable = unavailable;
   return Object.keys(body).length ? body : null;
 }
 // None of the coding agents it supports is on this computer (bug E80): which they are, and

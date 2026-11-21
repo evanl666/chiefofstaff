@@ -3319,3 +3319,62 @@ async def test_an_owners_codex_thread_is_listed_and_continued_in_a_thread_of_chi
         await agent.stop()
         await owners.stop()
         model.close()
+
+
+def run_cli(*command: str, cwd) -> subprocess.CompletedProcess:
+    """A real CLI's help or status, run here (no model call, no sign-in)."""
+    return subprocess.run(command, capture_output=True, text=True, timeout=60, cwd=cwd)
+
+
+@pytest.mark.skipif(not REAL_CODEX, reason="Set CHIEFOFSTAFF_TEST_CODEX=1 to read the real Codex.")
+async def test_the_real_codex_signs_in_as_sign_in_runs_it_and_its_status_reads_as_said(
+    tmp_path, monkeypatch
+):
+    """Sign in's commands (agentsetup.SIGN_IN) are the real Codex's, and `codex login status`
+    reads as its glance reads it (on stderr; exit 1 signed out): with a CODEX_HOME of the
+    test's own, signed out. Nothing signs in; only its help and its status run."""
+    from chiefofstaff import agents, agentsetup, backend_codex
+
+    codex = CODEX_COMMAND
+    assert Path(codex).is_absolute(), "the real Codex CLI is not installed"
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    said = run_cli(codex, "login", "--help", cwd=tmp_path)
+    for method in ("device", "key"):
+        assert agentsetup.SIGN_IN["codex"][method][-1] in said.stdout, (method, said)
+    status = run_cli(codex, "login", "status", cwd=tmp_path)
+    assert (status.returncode, status.stdout.strip()) == (1, ""), status
+    assert "Not logged in" in status.stderr
+    with pytest.raises(RuntimeError) as raised:
+        await backend_codex.glance(codex, tmp_path / "look")
+    assert agents.status_of("codex", str(raised.value))["status"] == agents.SIGN_IN
+
+
+@pytest.mark.skipif(
+    not REAL_CLAUDE_RUN, reason="Set CHIEFOFSTAFF_TEST_CLAUDE=1 to read the real Claude Code."
+)
+async def test_the_real_claude_signs_in_as_sign_in_runs_it_and_its_status_reads_as_said(
+    tmp_path, monkeypatch
+):
+    """Sign in's commands (agentsetup.SIGN_IN) are the real Claude Code's, and `claude auth
+    status` reads as its glance reads it (JSON; exit 1 signed out): with a Claude configuration
+    folder of the test's own, signed out. Nothing signs in, nothing of its sign-in is read."""
+    from chiefofstaff import agents, agentsetup
+
+    claude = REAL_CLAUDE
+    assert claude, "the real Claude Code is not installed"
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    (config / ".claude.json").write_text("{}\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    for name in (*CLAUDE_PROVIDERS, "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    said = run_cli(claude, "auth", "login", "--help", cwd=tmp_path)
+    for method in ("browser", "console"):
+        assert agentsetup.SIGN_IN["claude"][method][-1] in said.stdout, (method, said)
+    auth = await backend_claude.auth_status(claude, tmp_path / "look")
+    assert (auth["loggedIn"], auth["exit"]) == (False, 1), auth
+    with pytest.raises(RuntimeError) as raised:
+        await backend_claude.glance(claude, tmp_path / "look")
+    assert agents.status_of("claude", str(raised.value))["status"] == agents.SIGN_IN

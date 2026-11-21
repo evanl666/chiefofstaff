@@ -42,7 +42,14 @@ D3  a small token limit: stopped once used; raised, Go on finishes it
 D4  the worker sandbox turned on while a Codex worker works: it is stopped, and says why
 D5  Codex turned off while its worker runs a dev server: no Codex process, nor the server
 
-    uv run python scripts/live_agents.py A|B|C|D [A1 A3 …]
+Shard S, signing in from the page (stand-in CLIs: tests/fake_codex.py as `codex`, signed out;
+no real account touched, the owner's Codex never run; the Router on Copilot, real):
+S1  "use codex for …" while Codex is signed out: not started, its card says the message is saved
+    (Sign in); Sign in runs the stand-in's `codex login` (its page's link shown), the owner's
+    browser says ok: Codex is Ready by itself and the task starts there once, Resumed after
+    sign-in, under Handled for you
+
+    uv run python scripts/live_agents.py A|B|C|D|S [A1 A3 …]
 
 LIVE_AGENTS_PORT moves its ports (Chief of Staff's there, the stand-in Slack's the next one),
 for a run beside another.
@@ -77,7 +84,13 @@ from fake_slack_mcp import Workspace, serve_in_thread
 from live_e2e import SLACK_TOKEN, App, cleanup, git, log, transcript, wait_for
 from live_parity import setup, write
 
-SHARDS = {"A": (19100, 19150), "B": (19101, 19151), "C": (19102, 19152), "D": (19103, 19153)}
+SHARDS = {
+    "A": (19100, 19150),
+    "B": (19101, 19151),
+    "C": (19102, 19152),
+    "D": (19103, 19153),
+    "S": (19104, 19154),
+}
 MODEL = os.environ.get(
     "LIVE_AGENTS_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5")
 )
@@ -1187,6 +1200,87 @@ async def d5_off_while_serving(ctx: Ctx):
     log("D5 passed")
 
 
+def stand_ins(root: Path) -> dict[str, str]:
+    """Shard S's environment: the stand-in CLIs as `codex` and `claude` (the owner's own taken
+    off the PATH), Codex signed out, each with folders of this run's own."""
+    sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
+    from agent_paths import without_agents
+
+    folder = root / "stand-ins"
+    folder.mkdir()
+    for name in ("codex", "claude"):
+        script = Path(__file__).parent.parent / "tests" / f"fake_{name}.py"
+        (folder / name).write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+        (folder / name).chmod(0o755)
+    home = root / "fake-codex-home"
+    home.mkdir()
+    (home / "signed-out").write_text("")
+    (root / "codex-home").mkdir()
+    (root / "claude-config").mkdir()
+    (root / "claude-config" / ".claude.json").write_text("{}\n")
+    path = without_agents(os.environ.get("PATH", ""), root / "path")
+    return {
+        "PATH": f"{folder}{os.pathsep}{path}",
+        "FAKE_CODEX_HOME": str(home),
+        "FAKE_CLAUDE_HOME": str(root / "fake-claude-home"),
+        "CODEX_HOME": str(root / "codex-home"),
+        "CLAUDE_CONFIG_DIR": str(root / "claude-config"),
+        # (The stand-in Claude signed out too: only Codex is asked for here.)
+        "FAKE_CLAUDE_SIGNED_OUT": "1",
+    }
+
+
+async def s1_sign_in_resumes(ctx: Ctx):
+    router, mark = await say(
+        ctx,
+        "Use codex for this: count the rows of data/sales.csv whose region is south, and tell "
+        "me the number.",
+    )
+
+    async def card():
+        found = await ctx.app.get(f"/api/sessions/{router}/messages?after={mark}")
+        return next((m for m in found if m["meta"].get("agent_refused")), None)
+
+    held = await wait_for("its card: the message saved", card, 300, ctx.app)
+    assert held["text"].startswith("Codex needs you to sign in. Your message is saved:"), held
+    snap = await state(ctx)
+    assert snap["agent_refusals"] == [held["meta"]["agent_refused"]]
+    assert not [r for r in snap["sessions"] if r["role"] == "worker"], "nothing started"
+    status = {s["name"]: s for s in snap["agents_status"]}["codex"]
+    assert status["status"] == "signin" and status["ways"], status
+    run = await ctx.app.post("/api/agents/codex/signin", {"method": "browser"})
+    assert run["state"] == "running", run
+
+    async def link():
+        found = (await state(ctx)).get("agent_setups", {}).get("codex", {})
+        return found.get("url")
+
+    url = await wait_for("its page's link", link, 60, ctx.app)
+    assert url.startswith("https://auth.openai.com/oauth/authorize?"), url
+    (ctx.root / "fake-codex-home" / "approve").write_text("ok")  # The owner's browser: ok.
+
+    async def resumed():
+        found = await ctx.app.get(f"/api/sessions/{router}/messages")
+        now = next(m for m in found if m["id"] == held["id"])
+        return now["meta"].get("resumed")
+
+    said = await wait_for("it resumes by itself", resumed, 120, ctx.app)
+    assert said == "Resumed after sign-in", said
+    snap = await state(ctx)
+    status = {s["name"]: s for s in snap["agents_status"]}["codex"]
+    assert status["status"] == "ready", status
+    assert "agent_refusals" not in snap
+    workers = [r for r in snap["sessions"] if r["role"] == "worker"]
+    assert len(workers) == 1 and workers[0].get("agent") == "codex", workers
+    handled = [entry for entry in snap.get("handled", []) if entry["kind"] == "resumed"]
+    assert len(handled) == 1, snap.get("handled")
+    await asyncio.sleep(10)
+    again = [r for r in (await state(ctx))["sessions"] if r["role"] == "worker"]
+    assert len(again) == 1, "once"
+    await ctx.app.post(f"/api/sessions/{workers[0]['id']}/close", {})
+    log("S1 passed")
+
+
 SCENARIOS: dict[str, list] = {
     "A": [
         a1_task_and_follow_up, a2_receipts, a3_stop_cancel_close, a4_dev_server, a5_in_place,
@@ -1196,6 +1290,7 @@ SCENARIOS: dict[str, list] = {
     "C": [c1_named_agent, c2_ask_across, c3_tell_across, c4_follow_up_routed, c5_works_with,
           c6_named_agent_off],
     "D": [d1_restart_mid_turn, d2_codex_killed, d3_limit, d4_sandbox_on, d5_off_while_serving],
+    "S": [s1_sign_in_resumes],
 }  # fmt: skip
 
 
@@ -1260,6 +1355,8 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
         "CHIEFOFSTAFF_MIN_FREE_MEMORY": "0",
         **({"CHIEFOFSTAFF_RELEASE_IDLE_MINUTES": "1"} if shard == "A" else {}),
     }
+    if shard == "S":
+        env |= stand_ins(root)
     if shard == "B":
         github = {"type": "local", "command": sys.executable, "args": [str(MARKERS)],
                   "env": {"MARKER_DIR": str(root / "marks"), "MARKER_NAME": "github"},
@@ -1305,8 +1402,9 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
         log_copy = root.parent / f"cos-agents-{shard}-{int(time.time())}.log"
         with contextlib.suppress(OSError):
             log_copy.write_text((root / "log").read_text())
-        with contextlib.suppress(Exception):
-            await archive_threads(ctx)
+        if shard != "S":  # (Shard S's threads are the stand-in's: the owner's Codex never runs.)
+            with contextlib.suppress(Exception):
+                await archive_threads(ctx)
         with contextlib.suppress(Exception):
             await cleanup(root / "data")
         with contextlib.suppress(Exception):

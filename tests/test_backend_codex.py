@@ -1954,13 +1954,17 @@ async def test_a_codex_it_cannot_run_on_says_why(tmp_path, monkeypatch, env, why
     assert not backend.alive()
 
 
+def signed_in_with_a_key(home: Path):
+    """The stand-in signed in with an API key, as `codex login --with-api-key` leaves it."""
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "auth.json").write_text(json.dumps({"auth_mode": "apikey"}))
+
+
 async def test_a_codex_signed_in_with_an_api_key_is_signed_in(tmp_path, monkeypatch):
     """`codex login status` says "API key configured - …" (exit 0) for an API key: signed in
     (its glance read "Logged in" only, so an API key read as signed out)."""
     command = fake_codex(tmp_path / "fake", monkeypatch)
-    home = Path(os.environ["FAKE_CODEX_HOME"])
-    home.mkdir(parents=True, exist_ok=True)
-    (home / "auth.json").write_text(json.dumps({"auth_mode": "apikey"}))
+    signed_in_with_a_key(Path(os.environ["FAKE_CODEX_HOME"]))
     monkeypatch.setattr(backend_codex, "set_up", lambda: True)
     found = await backend_codex.glance(command, tmp_path / "folder")
     assert found["account"] == "apiKey"

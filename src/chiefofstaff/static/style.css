@@ -733,7 +733,8 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 #session-meta .agent-chip > * { vertical-align: top; }
 #session-meta .agent-chip .agent-mark { margin: 0 5px 0 1px; vertical-align: 1px; }
 /* The @ list: an agent not ready, dimmed, with the command that makes it ready. */
-#mention-list li.agent .status { display: grid; justify-items: end; gap: 2px; max-width: 60%; }
+#mention-list li.agent .status { display: grid; justify-items: end; gap: 2px; max-width: 60%; margin-left: auto; }
+#mention-list li.agent .name { flex: 0 1 auto; }
 #mention-list li.dim { cursor: default; }
 /* Agents, then workers: a small quiet label over each kind where both are listed. */
 #mention-list li.group-label { display: block; padding: 6px 8px 2px; font-size: var(--small); font-weight: 600; color: var(--muted); cursor: default; }
@@ -773,6 +774,50 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 .continue-dialog footer { display: flex; gap: 8px; }
 .continue-dialog .spacer { flex: 1; }
 .card.agent-refused .actions { align-items: center; flex-wrap: wrap; }
+.card.agent-refused > p:first-child { margin-top: 0; }
+.card.agent-refused > p:last-child { margin-bottom: 0; }
+/* Sign in and Install (agentsetup.js): a small button where an agent says it is not ready, and
+   the dialog that shows its run. */
+.setup-line { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+button.setup-action.compact { min-height: 24px; padding: 2px 10px; font-size: var(--small); }
+.agent-pop-row .setup-line { padding-left: 22px; }
+.agent-setup { width: min(520px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); color: var(--text); box-shadow: var(--shadow-pop); }
+.agent-setup h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; font-size: var(--title); }
+.agent-setup-body { display: grid; gap: 10px; margin-bottom: 16px; color: var(--soft); }
+.agent-setup-body p { margin: 0; }
+.agent-setup footer { display: flex; align-items: center; gap: 8px; }
+.agent-setup .spacer { flex: 1; }
+.setup-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.setup-command { margin: 0; padding: 8px 10px; border-radius: var(--radius); background: var(--bubble); color: var(--text); font: var(--small)/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.setup-code { display: flex; align-items: center; gap: 12px; }
+.setup-code code { padding: 6px 12px; border-radius: var(--radius); background: var(--bubble); color: var(--text); font: 600 20px/1.3 var(--mono); letter-spacing: 0.08em; }
+.setup-paste { display: grid; gap: 4px; }
+.setup-paste > span:first-child { color: var(--soft); font-size: var(--small); font-weight: 500; }
+.setup-paste-row { display: flex; gap: 8px; }
+.setup-paste-row input { flex: 1; min-width: 0; }
+.setup-waiting { display: flex; align-items: center; gap: 2px; color: var(--muted); font-size: var(--small); }
+.setup-elapsed { margin-left: 6px; font-variant-numeric: tabular-nums; }
+.setup-tail { margin: 0; max-height: 4.8em; overflow: hidden; color: var(--muted); font: var(--small)/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.setup-output summary, .setup-other summary { cursor: pointer; color: var(--muted); font-size: var(--small); }
+.setup-output pre { max-height: 220px; overflow: auto; margin: 6px 0 0; padding: 8px 10px; border-radius: var(--radius); background: var(--bubble); color: var(--text); font: var(--small)/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.setup-other { display: grid; gap: 4px; }
+.setup-other[open] { gap: 6px; }
+.setup-other button.link { justify-self: start; padding: 0; color: var(--accent); font-size: var(--small); }
+.setup-way { display: flex; align-items: center; gap: 8px; }
+.setup-way code { flex: 1; min-width: 0; font: var(--small) var(--mono); overflow-wrap: anywhere; }
+.setup-error { color: var(--red); }
+.setup-done { color: var(--text); }
+.setup-check { color: var(--green); font-weight: 700; }
+.setup-note { color: var(--muted); font-size: var(--small); }
+.spinner { display: inline-block; flex: none; width: 10px; height: 10px; margin-right: 7px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
+.card .card-outcome { margin: 6px 0 0; color: var(--muted); font-size: var(--small); }
+.card.agent-refused .resuming { display: inline-flex; align-items: center; color: var(--soft); font-size: var(--small); }
+#mention-list .role-tag { flex: none; margin-left: -2px; padding: 0 5px; border-radius: 4px; background: var(--bubble); color: var(--muted); font-size: var(--small); font-weight: 500; }
+.agent-head button.sign-in-again { margin-left: 4px; padding: 0 4px; font-size: var(--small); color: var(--accent); }
+.agent-missing .agent-head small { margin-left: 4px; }
+.role-setup { display: grid; gap: 4px; }
+.role-setup:empty { display: none; }
+.role-setup .agent-note { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
 /* System agents: where Chief of Staff's own sessions run, folded. */
 .agents-system summary { cursor: pointer; color: var(--soft); }
 .agents-system[open] summary { margin-bottom: 10px; }

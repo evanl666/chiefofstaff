@@ -186,6 +186,7 @@ def test_turning_codex_on_stores_its_configuration_and_nothing_of_the_settings(w
         "names": {"codex": "Codex"},
         "new_workers": "codex",
         "router_chooses": False,
+        "router_on": "copilot",  # (The @ list marks the agent the Router runs on.)
     }
     assert "stopped" not in snapshot
     assert stored(web.data) == {

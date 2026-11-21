@@ -1,9 +1,10 @@
 // Coding agents in the page (the agent picker): each agent's mark (a dot of its colour), its
-// status (Ready, Sign-in needed, Not installed) with the command that makes it ready (the
-// owner's to run: nothing here signs in), whose plan or key it uses, and the one popover that
+// status (Ready, Sign-in needed, Not installed) with what makes it ready (Sign in, Install:
+// agentsetup.js; its command to copy), whose plan or key it uses, and the one popover that
 // picks an agent with its model and effort. Nothing of it shows with Copilot alone.
 import { api, el, toast } from "./dom.js";
 import { state } from "./state.js";
+import { setupLine, setupWords } from "./agentsetup.js";
 
 export const AGENT_NAMES = { copilot: "Copilot", codex: "Codex", claude: "Claude" };
 export const agentName = (name) => AGENT_NAMES[name] || state.snapshot?.agents?.names?.[name] || name;
@@ -36,11 +37,20 @@ export function markOf(session) {
   return agentMark(agent, [modelLabel(agent, session.model), session.agent_fallback].filter(Boolean).join(" · "));
 }
 
-// "Ready · Uses your ChatGPT sign-in", "Sign-in needed", "Not installed", or why it can't run.
+// "Ready · Uses your ChatGPT sign-in", "Sign-in needed", "Not installed", or why it can't run;
+// "Signing in…" while its sign-in runs; when its sign-in ends, a week before.
 export function statusText(status) {
   if (!status) return "";
-  if (ready(status) && !status.on) return "Ready · off for workers";
-  return [status.said, ready(status) ? status.pays : ""].filter(Boolean).join(" · ");
+  if (!ready(status) && setupWords(status.name)) return setupWords(status.name);
+  if (ready(status) && !status.on) return ["Ready · off for workers", endsLine(status)].filter(Boolean).join(" · ");
+  return [status.said, ready(status) ? status.pays : "", ready(status) ? endsLine(status) : ""].filter(Boolean).join(" · ");
+}
+// "Claude sign-in ends Dec 11": within a week of the end its agent said (loginExpiresAt).
+export function endsLine(status) {
+  const at = Number(status?.expires || 0) * 1000;
+  if (!at || at - Date.now() > 7 * 86400000) return "";
+  if (at <= Date.now()) return `${agentName(status.name)} sign-in ended`;
+  return `${agentName(status.name)} sign-in ends ${new Date(at).toLocaleDateString([], { month: "short", day: "numeric" })}`;
 }
 
 // The command that makes an agent ready, copied, said by one toast: one an earlier copy left
@@ -146,6 +156,17 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
   closeAgentPopover();
   let picked = { agent: chosen.agent || "copilot", model: chosen.model || "", effort: chosen.effort || "" };
   const left = el("div", { class: "agent-pop-agents", role: "radiogroup", "aria-label": title });
+  // Arrows move between the agents (one not ready too: its Sign in is a Tab away), Home and End
+  // to the first and last; Enter or Space picks one that can run; Escape closes it.
+  left.addEventListener("keydown", (event) => {
+    const keys = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 };
+    const items = [...left.querySelectorAll(".agent-pop-agent")];
+    const at = items.indexOf(document.activeElement);
+    if (at < 0 || !(event.key in keys || event.key === "Home" || event.key === "End")) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (at + keys[event.key] + items.length) % items.length;
+    items[next].focus();
+  });
   const right = el("div", { class: "agent-pop-models" });
   const pays = el("small", { class: "agent-pop-pays" });
   const node = el("div", { class: "agent-popover", role: "dialog", "aria-label": title }, el("div", { class: "agent-pop-body" }, left, right), pays);
@@ -195,7 +216,8 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
             el("span", { class: "name", text: agentName(status.name) }),
             el("small", { class: "status", text: can ? "" : statusText(status) }),
           );
-          return el("div", { class: "agent-pop-row" }, button, can ? "" : fixLine(status.fix) || "");
+          // One not ready: Sign in (or Install) under it, else the command that makes it ready.
+          return el("div", { class: "agent-pop-row" }, button, can ? "" : setupLine(status) || fixLine(status.fix) || "");
         }),
     );
     pays.textContent = statusOf(picked.agent)?.pays || (picked.agent === "copilot" ? "Uses your Copilot plan" : "");

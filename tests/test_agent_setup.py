@@ -322,6 +322,7 @@ async def test_work_held_for_a_sign_in_starts_by_itself_once_signed_in_and_only_
         await until(lambda: harness.store.all("SELECT id FROM handled"))
         (handled,) = harness.store.all("SELECT kind, text, session_id FROM handled")
         assert handled["kind"] == "resumed" and handled["session_id"] == worker["id"]
+        assert handled["text"] == "Started “Count the rows · data” on Codex once you signed in"
         # Seen able to run again (a look, a restart): nothing more starts.
         runtime.ready_seen.clear()
         await runtime.glance_agent("codex")

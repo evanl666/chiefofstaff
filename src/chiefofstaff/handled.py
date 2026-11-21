@@ -3,7 +3,8 @@
 A report with no code or PR accepted once read (or a day on), a changed decision every affected
 worker said changes nothing for, a lesson the owner's own words back often, the one project a
 task fits, a server kept off for the worker whose folder changed it, git files moved out of Chief
-of Staff's own worktree folders. Each is listed for a week, in one quiet line under Needs you,
+of Staff's own worktree folders, work held for an agent's sign-in that went on once the owner
+signed in (agentsetup.py). Each is listed for a week, in one quiet line under Needs you,
 with Undo where undoing it still means something; Undo looks again at how things stand now and
 refuses what moved on since. Nothing that speaks as the owner, merges, spends or signs in is ever
 handled here, but for one thing the owner asked for: a reply in the thread of a Slack message they

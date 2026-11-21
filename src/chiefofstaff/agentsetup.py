@@ -85,6 +85,8 @@ END_SECONDS = 10.0
 # Lines of its output kept (shown under Show output), and of each line.
 TAIL_LINES = 200
 LINE_CHARS = 500
+# How often what a run shows is sent to the page while it runs, at most.
+SEND_SECONDS = 0.25
 # How long an ended run stays in the page (its last words, done or failed).
 KEPT_SECONDS = 10 * 60
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
@@ -226,6 +228,8 @@ class SetupRun:
         self.process: asyncio.subprocess.Process | None = None
         self.readers: list[asyncio.Task] = []
         self.secret = ""
+        self.follows = False  # An install whose Sign in follows (it is signed out).
+        self.seq = 0  # Each change counted: the page keeps the newest it heard.
         self.changed: Callable[[], None] | None = None  # Called as what it shows changes.
 
     def view(self) -> dict[str, Any]:
@@ -236,11 +240,13 @@ class SetupRun:
             **({"command": self.command} if self.kind == "install" else {}),
             "state": self.state,
             "started": self.started,
+            "seq": self.seq,
             **({"ended": self.ended} if self.ended else {}),
             **({"url": self.url} if self.url else {}),
             **({"code": self.code} if self.code else {}),
             **({"asks_code": True} if self.asks_code else {}),
             **({"error": self.error} if self.error else {}),
+            **({"follows": "signin"} if self.follows else {}),
             "tail": list(self.tail)[-40:],
         }
 
@@ -260,6 +266,7 @@ class SetupRun:
             if line.strip():
                 self.tail.append(self.hidden(line.rstrip())[:LINE_CHARS])
             self.read(line)
+        self.seq += 1
         if self.changed:
             self.changed()
 
@@ -309,6 +316,7 @@ class SetupRun:
         if close:
             self.process.stdin.close()
         self.asks_code = False
+        self.seq += 1
 
     def terminate(self):
         """Its process group asked to end (Windows: its process)."""
@@ -349,6 +357,7 @@ class SetupRun:
             return
         self.state, self.error, self.ended = state, error, time.time()
         self.asks_code = False
+        self.seq += 1
         if self.changed:
             self.changed()
 
@@ -365,6 +374,7 @@ class Setups:
         self.runtime = runtime
         self.runs: dict[str, SetupRun] = {}
         self.sent_at: dict[str, float] = {}
+        self.later: set[str] = set()
 
     def view(self) -> dict[str, dict]:
         """Each agent's run, while it runs and a little after (its last words)."""
@@ -380,12 +390,22 @@ class Setups:
         return run if run and run.state == "running" else None
 
     def changed(self, run: SetupRun):
-        """What a run shows, sent to the page (at most every quarter second while it runs)."""
-        now = time.monotonic()
-        if run.state == "running" and now - self.sent_at.get(run.agent, 0.0) < 0.25:
+        """What a run shows, sent to the page: at most every SEND_SECONDS while it runs (what
+        came meanwhile, sent then), at once as it ends; never one another run replaced."""
+        if self.runs.get(run.agent) not in (run, None):
             return
-        self.sent_at[run.agent] = now
+        wait = SEND_SECONDS - (time.monotonic() - self.sent_at.get(run.agent, 0.0))
+        if run.state == "running" and wait > 0:
+            if run.agent not in self.later:
+                self.later.add(run.agent)
+                asyncio.get_running_loop().call_later(wait, self.send_later, run)
+            return
+        self.sent_at[run.agent] = time.monotonic()
         self.runtime.bus.publish("agent_setup", run.view())
+
+    def send_later(self, run: SetupRun):
+        self.later.discard(run.agent)
+        self.changed(run)
 
     def check(self, name: str):
         if name not in agents.NAMES:
@@ -426,11 +446,12 @@ class Setups:
         run.changed = lambda: self.changed(run)
         folder = self.runtime.agent_folder(name)
         await asyncio.to_thread(folder.mkdir, mode=0o700, parents=True, exist_ok=True)
+        self.runs[name] = run
         try:
             await run.start(argv, folder, environment(name), secret=key.strip())
         except OSError as exc:
+            self.runs.pop(name, None)
             raise ValueError(f"{agents.display(name)} could not start: {exc.strerror}") from None
-        self.runs[name] = run
         self.runtime.background(self.watch(run))
         self.runtime.publish_state()
         return run.view()
@@ -452,11 +473,12 @@ class Setups:
         run = SetupRun(name, "install", method, offered[method])
         run.changed = lambda: self.changed(run)
         home = Path.home()
+        self.runs[name] = run
         try:
             await run.start(["/bin/sh", "-c", offered[method]], home, environment(name))
         except OSError as exc:
+            self.runs.pop(name, None)
             raise ValueError(f"The installer could not start: {exc.strerror}") from None
-        self.runs[name] = run
         self.runtime.background(self.watch(run))
         self.runtime.publish_state()
         return run.view()
@@ -471,6 +493,7 @@ class Setups:
             raise ValueError("Paste the code the sign-in page showed.")
         await run.send(text)
         run.tail.append("(code sent)")
+        run.seq += 1
         self.changed(run)
         return run.view()
 
@@ -529,7 +552,7 @@ class Setups:
         if run.kind == "signin":
             await self.signed_in(run, code)
         else:
-            follow = await self.installed(run, code)
+            follow = run.follows = await self.installed(run, code)
         self.changed(run)
         self.runtime.publish_state()
         if follow:

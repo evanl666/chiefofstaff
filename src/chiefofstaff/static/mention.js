@@ -6,6 +6,7 @@
 import { $, api, el, toast } from "./dom.js";
 import { byId, HOME, sessions, state, workerTitle } from "./state.js";
 import { agentMark, agentName, agentPopover, closeAgentPopover, copyFix, EFFORT_WORDS, modelLabel, ready, refreshStatuses, statuses, statusText } from "./agentpick.js";
+import { openSetup, setupKind, setupWords } from "./agentsetup.js";
 
 export const mention = { to: null, agent: null, agents: [], options: [], active: 0, dismissed: -1 };
 // Agents on at once for one task, at most (Compare).
@@ -61,33 +62,44 @@ function render() {
   );
 }
 
-// An agent in the list: its mark, its name and status; one not ready, the command that makes
-// it ready (picking it copies that command: never a control inside an option), or, ready but
-// off for workers, that picking it turns it on.
+// An agent in the list: its mark, its name and status (the one the Router runs on says so);
+// one not ready, what picking it does (Sign in, Install: never a control inside an option; else
+// its command copied), or, ready but off for workers, that picking it turns it on.
 function agentOption(option) {
   const status = option.status;
-  const fix = option.dim && status && !ready(status) ? status.fix : null;
+  const unready = option.dim && status && !ready(status);
+  const setup = unready ? setupKind(status) : "";
+  const fix = unready && !setup ? status.fix : null;
   const off = option.dim && ready(status) && !status.on;
+  const router = state.snapshot?.agents?.router_on === option.agent;
   return [
     agentMark(option.agent),
     el("span", { class: "name", text: option.label }),
+    router ? el("span", { class: "role-tag", text: "Router", title: "The Router runs on it" }) : "",
     el(
       "span",
       { class: "status" },
       el("span", { text: status ? statusText(status) : `Run it on ${option.label}` }),
-      fix?.command
-        ? el("span", { class: "fix agent-fix" }, "Run ", el("code", { text: fix.command }), fix.then ? ` ${fix.then}` : "", " in a terminal · ", el("span", { class: "hint", text: "pick to copy" }))
-        : off
-          ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: "Pick to turn it on for workers" }))
-          : "",
+      setup && !setupWords(option.agent)
+        ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: setup === "install" ? "Pick to install" : "Pick to sign in" }))
+        : fix?.command
+          ? el("span", { class: "fix agent-fix" }, "Run ", el("code", { text: fix.command }), fix.then ? ` ${fix.then}` : "", " in a terminal · ", el("span", { class: "hint", text: "pick to copy" }))
+          : off
+            ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: "Pick to turn it on for workers" }))
+            : "",
     ),
   ];
 }
-// One not ready picked: its command copied (to run in a terminal; nothing here signs in); one
-// ready and off: on, as its first-run card's Allow does (new workers stay where they start),
-// then chosen.
+// One not ready picked: Sign in (or Install) for it (agentsetup.js), else its command copied;
+// one ready and off: on, as its first-run card's Allow does (new workers stay where they
+// start), then chosen.
 async function pickUnready(option) {
   const status = option.status;
+  if (setupKind(status)) {
+    closeMentions();
+    openSetup(option.agent);
+    return;
+  }
   if (status?.fix?.command) {
     await copyFix(status.fix);
     return;

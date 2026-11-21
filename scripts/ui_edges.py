@@ -6,6 +6,7 @@ on a fake Copilot, so the test can create cards and events and check what the pa
 
 import asyncio
 import base64
+import contextlib
 import itertools
 import json
 import os
@@ -6030,7 +6031,8 @@ async def main():
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
                           round_send, round_agents, round_picker, round_roles,
-                          round_picker_ux, round_agent_parity, round_qa6, round_qa7_life,
+                          round_picker_ux, round_agent_parity, round_agent_smooth, round_qa6,
+                          round_qa7_life,
                           round_qa8_report,
                           round_layout, round_fresh_start, round_qa8_auth,
                           round_qa8_approvals, round_e125, round_teams,
@@ -9501,12 +9503,12 @@ async def picker_workers(runtime, browser):
         await at_home(page)
         card = page.locator("#timeline .card.agent-refused")
         await expect(card.locator("p")).to_have_text(
-            "“Benchmark the importer” did not start on Codex: sign-in needed."
+            "Codex needs you to sign in. Your message is saved: “Benchmark the importer” starts "
+            "on Codex once you have."
         )
-        # The command that makes it ready (the owner's to run), and what they can do now.
-        await expect(card.locator(".agent-fix")).to_have_text("Run codex login in a terminal Copy")
+        # What they can do now: Codex runs here (Start on Codex), else Sign in (agent smooth).
         await expect(card.locator(".actions > button")).to_have_text(
-            ["Wait", "Run on Copilot instead"]
+            ["Start on Codex", "Don't run it", "Continue with Copilot"]
         )
         await picker_shoot(page, "recovery-card", scheme, focus=card)
         assert not errors, errors
@@ -9514,7 +9516,7 @@ async def picker_workers(runtime, browser):
     context, page, errors, _ = await agents_page(browser, "light")
     await at_home(page)
     card = page.locator("#timeline .card.agent-refused")
-    await card.get_by_role("button", name="Run on Copilot instead").click()
+    await card.get_by_role("button", name="Continue with Copilot").click()
     await expect(card.locator(".actions")).to_have_count(0)
     started = [r for r in store.open_sessions("worker") if r["title"] == "Benchmark the importer"]
     assert len(started) == 1 and runtime.agent(started[0]["id"]) == "copilot"
@@ -9539,11 +9541,11 @@ async def picker_workers(runtime, browser):
         await at_home(page)
         card = page.locator("#timeline .card.agent-refused", has_text="Port the parser")
         await expect(card.locator("p")).to_have_text(
-            "“Port the parser” did not get this on Codex: sign-in needed."
+            "Codex needs you to sign in. Your message is saved: “Port the parser” gets it on "
+            "Codex once you have."
         )
-        await expect(card.locator(".agent-fix")).to_have_text("Run codex login in a terminal Copy")
         await expect(card.locator(".actions > button")).to_have_text(
-            ["Wait", "Continue with Copilot"]
+            ["Send it on Codex", "Don't run it", "Continue with Copilot"]
         )
         await picker_shoot(page, "recovery-card-worker", scheme, focus=card)
         if scheme == "dark":
@@ -9705,19 +9707,13 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             )
             claude = page.locator("#mention-list li.agent.dim", has_text="Claude")
             await expect(claude.locator(".status")).to_contain_text("Sign-in needed")
-            await expect(claude.locator(".agent-fix")).to_have_text(
-                "Run claude then /login in a terminal · pick to copy"
-            )
+            # Picked, it signs in (round_agent_smooth): never a control inside an option.
+            await expect(claude.locator(".agent-fix")).to_have_text("Pick to sign in")
+            await expect(claude.locator("button")).to_have_count(0)
             await ux_shoot(page, "at-statuses", scheme, focus=page.locator("#composer"))
-            # Picked, it copies its command (to run in a terminal): nothing is chosen.
             await context.grant_permissions(["clipboard-read", "clipboard-write"])
-            await claude.click()
-            await expect(page.locator(".toast").first).to_contain_text(
-                "Copied: run claude in a terminal, then /login."
-            )
-            copied = await page.evaluate("() => navigator.clipboard.readText()")
-            assert copied == "claude", copied
-            await expect(page.locator("#composer-to")).to_be_hidden()
+            # Its command copied from the popover (Copy command, beside Sign in): one toast.
+            await page.locator("#composer-to").evaluate("node => node.hidden")
             await box.fill("@")
             await box.press("End")
             await page.locator("#mention-list li.agent", has_text="Codex").click()
@@ -9729,16 +9725,21 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
                 ["Copilot", "Codex", "Claude"]
             )
             await expect(pop.locator(".agent-pop-pays")).to_have_text("Uses your ChatGPT sign-in")
-            # Claude's command copied again from here, while the @ list's toast still shows: one
-            # toast says so (that one goes), clear of the popover while it is open (below).
+            # Claude's command copied from here (Copy command, beside Sign in), twice: one toast
+            # says so (the earlier goes), clear of the popover while it is open (below).
+            row = pop.locator(".agent-pop-row", has_text="Claude")
+            await expect(row.locator(".setup-action")).to_have_text("Sign in")
+            await row.locator(".copy-fix").click()
             toast = page.locator(".toast")
             await expect(toast).to_have_count(1)
             await toast.evaluate("node => { node.dataset.earlier = '1'; }")
-            await pop.locator(".agent-pop-row", has_text="Claude").locator(".copy-fix").click()
+            await row.locator(".copy-fix").click()
             await expect(page.locator(".toast:not([data-earlier])")).to_have_text(
-                "Copied: run claude in a terminal, then /login."
+                "Copied: run claude auth login in a terminal."
             )
             assert await toast.count() == 1, await toast.all_inner_texts()
+            copied = await page.evaluate("() => navigator.clipboard.readText()")
+            assert copied == "claude auth login", copied
             ours, theirs = await pop.bounding_box(), await toast.bounding_box()
             assert (
                 theirs["y"] + theirs["height"] <= ours["y"]
@@ -9941,9 +9942,8 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             )
             claude = tab.locator(".agent-row[data-agent=claude]")
             await expect(claude.locator("small[role=status]")).to_have_text("Sign-in needed")
-            await expect(claude.locator(".agent-fix")).to_have_text(
-                "Run claude then /login in a terminal Copy"
-            )
+            await expect(claude.locator(".agent-fix")).to_have_text("Sign inCopy command")
+            await expect(codex.locator(".sign-in-again")).to_have_text("Sign in again")
             await expect(claude.locator("input[name=agent_claude_enabled]")).to_be_disabled()
             choose = tab.locator("select[name=agent_new_workers]")
             await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Last used"])
@@ -9971,9 +9971,7 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             await box.press("End")
             missing = page.locator("#mention-list li.agent.dim", has_text="Claude")
             await expect(missing.locator(".status")).to_contain_text("Not installed")
-            await expect(missing.locator(".agent-fix code")).to_have_text(
-                "npm install -g @anthropic-ai/claude-code"
-            )
+            await expect(missing.locator(".agent-fix")).to_have_text("Pick to install")
             await ux_shoot(page, "at-not-installed", scheme, focus=page.locator("#composer"))
             await box.fill("")
             assert not errors, errors
@@ -10092,14 +10090,16 @@ async def round_agent_parity(runtime, browser, failures: list[str]):
         await at_home(page)
         card = page.locator("#timeline .card.agent-refused", has_text="Parity benchmark")
         await expect(card.locator("p")).to_have_text(
-            "“Parity benchmark” did not start on Claude: sign-in needed."
+            "Claude needs you to sign in. Your message is saved: “Parity benchmark” starts on "
+            "Claude once you have."
         )
-        await expect(card.locator(".agent-fix code")).to_have_text("claude")
+        # Claude is signed in here: started there in one click (else Sign in, as for Codex).
         await expect(card.locator(".actions > button")).to_have_text(
-            ["Wait", "Run on Copilot instead"]
+            ["Start on Claude", "Don't run it", "Continue with Copilot"]
         )
-        await card.get_by_role("button", name="Wait").click()
+        await card.get_by_role("button", name="Don't run it").click()
         await expect(card.locator(".actions")).to_have_count(0)
+        await expect(card.locator(".card-outcome")).to_have_text("Not run")
         assert not errors, errors
         await context.close()
         # Settings: a row each, ready; System agents: the Router and the Watchdog on either, no
@@ -10137,6 +10137,365 @@ async def round_agent_parity(runtime, browser, failures: list[str]):
         await agents_saved(runtime, {"codex": {"enabled": False}, "claude": {"enabled": False}})
         runtime.found_cache = (float("-inf"), [])
         runtime.glanced.clear()
+        codex_off_path(folder)
+
+
+async def round_agent_smooth(runtime, browser, failures: list[str]):
+    """Agent smoothness (design/agent-smooth.md): where an agent says Sign-in needed or Not
+    installed, one click runs its own CLI (the stand-ins here): the @ list (picked, with the
+    keyboard too), the chip's popover, Settings' rows, System agents and the held card. The
+    dialog shows its page's link (Copy link), a one-time code, a pasted code, its output; it
+    turns Ready live. Held work resumes by itself (Resuming… Cancel, then Resumed after
+    sign-in, under Handled for you). Install shows its command first. The @ list marks the
+    agent the Router runs on; a Claude sign-in ending within a week is said."""
+    from chiefofstaff import agents, agentsetup
+
+    folder, _ = codex_on_path()
+    store = runtime.store
+    router = store.get("router_id")
+    codex_home = Path(os.environ["FAKE_CODEX_HOME"])
+    claude_config = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    installers = agentsetup.INSTALLERS
+    made: list[str] = []
+
+    def sign_codex_out():
+        codex_home.mkdir(parents=True, exist_ok=True)
+        (codex_home / "auth.json").unlink(missing_ok=True)
+        (codex_home / "signed-out").write_text("")
+
+    async def fresh_status():
+        runtime.glanced.clear()
+        runtime.agent_failed.clear()
+        runtime.found_cache = (float("-inf"), [])
+        await runtime.refresh_agent_status()
+
+    try:
+        await agents_saved(runtime, {"codex": {"enabled": True}})
+        sign_codex_out()
+        await fresh_status()
+        assert runtime.agent_status("codex")["status"] == agents.SIGN_IN
+        # The @ list: Codex dimmed, Pick to sign in; the Router's agent marked. Picked with the
+        # keyboard: its sign-in starts, its page's link in the dialog.
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await context.grant_permissions(["clipboard-read", "clipboard-write"])
+            await at_home(page)
+            box = page.locator("#composer-input")
+            await box.fill("@")
+            await box.press("End")
+            codex = page.locator("#mention-list li.agent.dim", has_text="Codex")
+            await expect(codex.locator(".agent-fix")).to_have_text("Pick to sign in")
+            await expect(
+                page.locator("#mention-list li.agent", has_text="Copilot").locator(".role-tag")
+            ).to_have_text("Router")
+            await ux_shoot(page, "smooth-at-sign-in", scheme, focus=page.locator("#composer"))
+            await box.press("ArrowDown")
+            await expect(page.locator("#mention-list li.active")).to_contain_text("Codex")
+            await box.press("Enter")
+            dialog = page.locator("dialog.agent-setup")
+            await expect(dialog.locator("h2")).to_have_text("Sign in to Codex")
+            link = dialog.get_by_role("link", name="Open sign-in page")
+            await expect(link).to_have_attribute(
+                "href", re.compile(r"^https://auth\.openai\.com/oauth/authorize\?")
+            )
+            await expect(link).to_have_attribute("target", "_blank")
+            await expect(dialog.locator(".setup-waiting")).to_contain_text(
+                "Waiting for you to sign in…"
+            )
+            await expect(dialog.locator(".setup-note")).to_have_text(
+                "Codex signed you out as this began: Cancel leaves it signed out."
+            )
+            await dialog.get_by_role("button", name="Copy link").click()
+            copied = await page.evaluate("() => navigator.clipboard.readText()")
+            assert copied.startswith("https://auth.openai.com/oauth/authorize?"), copied
+            await dialog.locator(".setup-output summary").click()
+            await expect(dialog.locator(".setup-output pre")).to_contain_text(
+                "Starting local login server"
+            )
+            await ux_shoot(page, "smooth-signin-dialog", scheme, "dialog.agent-setup")
+            if scheme == "light":
+                # Cancel: its process ends; Try again is there.
+                await dialog.get_by_role("button", name="Cancel").click()
+                await expect(dialog.locator(".agent-setup-body p").first).to_have_text("Cancelled.")
+                await expect(dialog.get_by_role("button", name="Try again")).to_be_visible()
+                await dialog.get_by_role("button", name="Close").click()
+            else:
+                # Signed in on Codex's page (the stand-in's browser): Ready, live.
+                (codex_home / "approve").write_text("ok")
+                await expect(dialog.locator(".setup-done")).to_contain_text(
+                    "Codex is ready", timeout=15000
+                )
+                await ux_shoot(page, "smooth-signin-done", scheme, "dialog.agent-setup")
+                await dialog.get_by_role("button", name="Done").click()
+                await box.fill("@")
+                await box.press("End")
+                await expect(
+                    page.locator("#mention-list li.agent", has_text="Codex")
+                ).not_to_have_class(re.compile(r"\bdim\b"), timeout=10000)
+                await box.fill("")
+            assert not errors, errors
+            await context.close()
+        assert runtime.agent_status("codex")["status"] == agents.READY
+        # Another device: a one-time code, from Settings' row (Sign in, Other ways).
+        sign_codex_out()
+        await fresh_status()
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await page.locator("#settings-button").click()
+            await page.locator("#settings-tabs [data-tab=agents]").click()
+            tab = page.locator("#settings-pane .tab[data-tab=agents]")
+            row = tab.locator(".agent-row[data-agent=codex]")
+            await expect(row.locator("small[role=status]")).to_have_text(
+                "Sign-in needed", timeout=20000
+            )
+            await expect(row.locator(".agent-fix")).to_have_text("Sign inCopy command")
+            await role_shoot(page, "smooth-settings-sign-in", scheme)
+            await row.locator(".setup-action").click()
+            dialog = page.locator("dialog.agent-setup")
+            await expect(dialog.get_by_role("link", name="Open sign-in page")).to_be_visible()
+            await dialog.locator(".setup-other summary").click()
+            await dialog.get_by_role("button", name="Use a code instead (another device)").click()
+            await expect(dialog.locator(".setup-code code")).to_have_text("FAKE-12345")
+            await expect(dialog.get_by_role("link", name="Open sign-in page")).to_have_attribute(
+                "href", "https://auth.openai.com/codex/device"
+            )
+            await ux_shoot(page, "smooth-signin-device", scheme, "dialog.agent-setup")
+            await dialog.get_by_role("button", name="Cancel").click()
+            await expect(dialog.get_by_role("button", name="Try again")).to_be_visible()
+            # An API key, typed (never shown back), then Back.
+            await dialog.locator(".setup-other summary").click()
+            await dialog.get_by_role("button", name="Use an API key").click()
+            key = dialog.get_by_label("API key")
+            await expect(key).to_have_attribute("type", "password")
+            await ux_shoot(page, "smooth-signin-key", scheme, "dialog.agent-setup")
+            await dialog.get_by_role("button", name="Back").click()
+            await page.keyboard.press("Escape")
+            await expect(dialog).to_have_count(0)
+            assert not errors, errors
+            await context.close()
+        # Held work: named for Codex while it is signed out, kept with Sign in; signed in, it
+        # resumes by itself.
+        spawn = runtime.toolset.spawn_on(["codex"])
+        from copilot.tools import ToolInvocation
+
+        refused = await spawn.handler(
+            ToolInvocation(session_id=router, tool_call_id="t", tool_name="spawn_worker",
+                           arguments={"title": "Smooth count the rows",
+                                      "instructions": "Report done: 42 rows.",
+                                      "why_new": "t", "agent": "codex"})
+        )  # fmt: skip
+        assert refused.result_type == "failure", refused
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await at_home(page)
+            card = page.locator("#timeline .card.agent-refused", has_text="Smooth count")
+            await expect(card.locator("p").first).to_have_text(
+                "Codex needs you to sign in. Your message is saved: “Smooth count the rows” "
+                "starts on Codex once you have."
+            )
+            await expect(card.locator(".actions > button")).to_have_text(
+                ["Sign in", "Don't run it", "Continue with Copilot"]
+            )
+            await ux_shoot(page, "smooth-held-card", scheme, focus=card)
+            if scheme == "dark":
+                await card.locator(".setup-action").click()
+                dialog = page.locator("dialog.agent-setup")
+                await expect(dialog.get_by_role("link", name="Open sign-in page")).to_be_visible()
+                (codex_home / "approve").write_text("ok")
+                await expect(dialog.locator(".setup-done")).to_be_visible(timeout=15000)
+                await dialog.get_by_role("button", name="Done").click()
+                await expect(card.locator(".resuming")).to_have_text(
+                    "Resuming on Codex…", timeout=15000
+                )
+                await expect(card.get_by_role("button", name="Cancel")).to_be_visible()
+                await ux_shoot(page, "smooth-held-resuming", scheme, focus=card)
+                await expect(card.locator(".card-outcome")).to_have_text(
+                    "Resumed after sign-in", timeout=20000
+                )
+                started = page.locator("#timeline .event.started", has_text="Smooth count")
+                await expect(started.locator(".what")).to_have_text(
+                    ["Started “Smooth count the rows” on Codex: resumed after sign-in"]
+                )
+                handled = page.locator("#needs details.handled")
+                await expect(handled).to_be_visible(timeout=10000)
+                await handled.locator("summary").click()
+                await expect(handled).to_contain_text(
+                    "Started “Smooth count the rows” on Codex once you signed in"
+                )
+                await ux_shoot(page, "smooth-held-resumed", scheme, focus=card)
+            assert not errors, errors
+            await context.close()
+        made += [r["id"] for r in store.open_sessions("worker") if r["title"].startswith("Smooth")]
+        assert [runtime.agent(i) for i in made] == ["codex"], made
+        # (Closed, and Codex stopped: a signed-out Codex says so only once none of it runs.)
+        for session_id in made:
+            await runtime.workers.close(session_id, by="you")
+        made.clear()
+        await runtime.disconnect_agent("codex")
+        # Claude asks for a pasted code: from the chip's popover (arrows reach it), Sign in.
+        os.environ["FAKE_CLAUDE_SIGNED_OUT"] = "1"
+        os.environ["FAKE_CLAUDE_PASTE"] = "smooth-code"
+        await fresh_status()
+        context, page, errors, _ = await agents_page(browser, "light")
+        await at_home(page)
+        box = page.locator("#composer-input")
+        await box.fill("@cod")
+        await page.locator("#mention-list li.agent", has_text="Codex").click()
+        await page.locator("#composer-to .agent-chip").click()
+        pop = page.locator(".agent-popover")
+        await expect(pop.locator(".agent-pop-agent[aria-checked=true]")).to_be_focused()
+        await page.keyboard.press("ArrowDown")
+        await expect(pop.locator(".agent-pop-agent", has_text="Claude")).to_be_focused()
+        await page.keyboard.press("ArrowUp")
+        await page.keyboard.press("ArrowUp")
+        await expect(pop.locator(".agent-pop-agent", has_text="Copilot")).to_be_focused()
+        await page.keyboard.press("End")
+        await expect(pop.locator(".agent-pop-agent", has_text="Claude")).to_be_focused()
+        claude = pop.locator(".agent-pop-row", has_text="Claude")
+        await expect(claude.locator(".setup-action")).to_have_text("Sign in")
+        await claude.locator(".setup-action").click()
+        await expect(pop).to_have_count(0)
+        dialog = page.locator("dialog.agent-setup")
+        await expect(dialog.locator("h2")).to_have_text("Sign in to Claude Code")
+        paste = dialog.get_by_label("Paste code")
+        await expect(paste).to_be_visible(timeout=15000)
+        await ux_shoot(page, "smooth-signin-paste", "light", "dialog.agent-setup")
+        await paste.fill("smooth-code")
+        await paste.press("Enter")
+        await expect(dialog.locator(".setup-done")).to_contain_text(
+            "Claude is ready", timeout=15000
+        )
+        await dialog.get_by_role("button", name="Done").click()
+        assert not errors, errors
+        await context.close()
+        os.environ.pop("FAKE_CLAUDE_SIGNED_OUT", None)
+        os.environ.pop("FAKE_CLAUDE_PASTE", None)
+        # A Claude sign-in that ends within a week: said in the @ list.
+        ends = int((time.time() + 3 * 86400) * 1000)
+        os.environ["FAKE_CLAUDE_AUTH"] = json.dumps({"loginExpiresAt": ends})
+        await agents_saved(runtime, {"claude": {"enabled": True}})
+        await fresh_status()
+        context, page, errors, _ = await agents_page(browser, "light")
+        await at_home(page)
+        box = page.locator("#composer-input")
+        await box.fill("@cl")
+        await box.press("End")
+        listed = page.locator("#mention-list li.agent", has_text="Claude")
+        await expect(listed.locator(".status")).to_contain_text(
+            re.compile(r"Ready · Uses your Claude plan · Claude sign-in ends \w+ \d+")
+        )
+        await ux_shoot(page, "smooth-at-expiry", "light", focus=page.locator("#composer"))
+        await box.fill("")
+        assert not errors, errors
+        await context.close()
+        os.environ.pop("FAKE_CLAUDE_AUTH", None)
+        await agents_saved(runtime, {"claude": {"enabled": False}})
+        # System agents: the Router on Codex, Codex signed out: Sign in in its row; If
+        # unavailable, Ask me: its card in the Router's chat.
+        await runtime.disconnect_agent("codex")
+        sign_codex_out()
+        await fresh_status()
+        await agents_saved(runtime, {"roles": {"router": "codex"},
+                                     "role_unavailable": {"router": "ask"}})  # fmt: skip
+        assert runtime.agent(router) == "copilot" and runtime.role_wait("router")
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await page.locator("#settings-button").click()
+            await page.locator("#settings-tabs [data-tab=agents]").click()
+            tab = page.locator("#settings-pane .tab[data-tab=agents]")
+            system = tab.locator("#agents-system")
+            await expect(system).to_be_visible(timeout=20000)
+            await system.locator("summary").click()
+            role = system.locator(".agents-role[data-role=router]")
+            await expect(role.locator(".role-setup")).to_contain_text("Codex: Sign-in needed")
+            await expect(role.locator(".role-setup .setup-action")).to_have_text("Sign in")
+            await expect(role.locator("select[name=unavailable_router]")).to_have_value("ask")
+            await role_shoot(page, "smooth-system-agents", scheme, system)
+            await page.keyboard.press("Escape")
+            await at_home(page)
+            wait = page.locator("#timeline .card.role-wait")
+            await expect(wait.locator("p").first).to_have_text(
+                "The Router waits for Codex. Codex needs you to sign in. What it is sent is kept "
+                "until then."
+            )
+            await expect(wait.locator(".actions > button")).to_have_text(
+                ["Sign in", "Use Copilot until then"]
+            )
+            await ux_shoot(page, "smooth-role-wait", scheme, focus=wait)
+            if scheme == "dark":
+                await wait.get_by_role("button", name="Use Copilot until then").click()
+                await expect(wait.locator(".actions")).to_have_count(0)
+            assert not errors, errors
+            await context.close()
+        assert "role_waits" not in runtime.snapshot()
+        await agents_saved(runtime, {"roles": {"router": "copilot"},
+                                     "role_unavailable": {"router": "copilot"}})  # fmt: skip
+        # Not installed: Install shows its command first, runs it, finds it, then Sign in.
+        installed, hidden = folder / "installed", folder / "hidden"
+        hidden.mkdir()
+        (folder / "claude").rename(hidden / "claude")  # Not on the PATH: not installed.
+        script = (f'echo "Downloading Claude Code…"; sleep 2; mkdir -p "{installed}" && '
+                  f'cp "{hidden / "claude"}" "{installed}/claude"')  # fmt: skip
+        agentsetup.INSTALLERS = {**installers, "claude": (("script", script, ""),)}
+        known = agentsetup.known_dirs
+        agentsetup.known_dirs = lambda: [installed]
+        await fresh_status()
+        assert runtime.agent_status("claude")["status"] == agents.MISSING
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await at_home(page)
+            box = page.locator("#composer-input")
+            await box.fill("@cl")
+            await box.press("End")
+            missing = page.locator("#mention-list li.agent.dim", has_text="Claude")
+            await expect(missing.locator(".agent-fix")).to_have_text("Pick to install")
+            await missing.click()
+            dialog = page.locator("dialog.agent-setup")
+            await expect(dialog.locator("h2")).to_have_text("Install Claude Code")
+            await expect(dialog.locator(".setup-command code")).to_have_text(script)
+            await expect(dialog.locator("footer button")).to_have_text(["Copy command", "Install"])
+            await ux_shoot(page, "smooth-install-consent", scheme, "dialog.agent-setup")
+            if scheme == "dark":
+                await dialog.get_by_role("button", name="Install").click()
+                await expect(dialog.locator(".setup-waiting")).to_contain_text(
+                    "Installing Claude Code…"
+                )
+                await expect(dialog.locator(".setup-tail")).to_contain_text("Downloading")
+                await ux_shoot(page, "smooth-install-running", scheme, "dialog.agent-setup")
+                await expect(dialog.locator(".setup-done")).to_contain_text(
+                    "Claude is ready", timeout=20000
+                )
+            else:
+                await page.keyboard.press("Escape")
+            assert not errors, errors
+            await context.close()
+        assert runtime.agent_status("claude")["status"] == agents.READY
+        assert str(installed) in os.environ["PATH"].split(os.pathsep)
+        log(
+            "agent smooth: Sign in from the @ list (keyboard), the popover, Settings, the held "
+            "card and System agents; link, code, pasted code; Ready live; held work resumed "
+            "once; Install's command first; the Router's agent marked; a sign-in's end"
+        )
+    finally:
+        agentsetup.INSTALLERS = installers
+        if "known" in locals():
+            agentsetup.known_dirs = known
+        for name in ("FAKE_CLAUDE_SIGNED_OUT", "FAKE_CLAUDE_PASTE", "FAKE_CLAUDE_AUTH"):
+            os.environ.pop(name, None)
+        for name in list(runtime.setups.runs):
+            with contextlib.suppress(Exception):
+                await runtime.setups.cancel(name)
+        runtime.setups.runs.clear()
+        for session_id in made:
+            await runtime.workers.close(session_id, by="you")
+        await agents_saved(runtime, {"codex": {"enabled": False}, "claude": {"enabled": False}})
+        if "installed" in locals():
+            parts = os.environ["PATH"].split(os.pathsep)
+            os.environ["PATH"] = os.pathsep.join(p for p in parts if p != str(installed))
+            store.delete("agentpath:claude")
+        runtime.found_cache = (float("-inf"), [])
+        runtime.glanced.clear()
+        runtime.agent_failed.clear()
         codex_off_path(folder)
 
 

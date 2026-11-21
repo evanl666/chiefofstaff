@@ -11,6 +11,7 @@ import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, sh
 import { bindSettings, openSettings, refreshUsageLink, showUsage } from "./settings.js";
 import { bindSplitter } from "./splitter.js";
 import { bindStorage } from "./storage.js";
+import { watchFocus } from "./agentsetup.js";
 // Whether Other Copilot sessions are unfolded (kept with the setting on).
 const FOLD = "cos.section.external";
 function bindUi() {
@@ -235,6 +236,7 @@ async function boot() {
   bindSplitter();
   closeOnBackdrop();
   connectEvents();
+  watchFocus();
   loadModels();
   refreshUsageLink();
   await select(state.selected || HOME);
