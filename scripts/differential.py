@@ -233,6 +233,13 @@ FIXES: list[Allow] = [
     # a run of two or more routing receipts (Started, Queued, New task, Continued, Told) or of
     # what workers told each other is one line that opens to them (a line alone is as it was).
     Allow("open questions between workers", data=r"/api/state\.peer_waiting$"),
+    # Slack's MCP server answers in JSON since 2026-11-21 (read again in 0.1.53): Chief of Staff's
+    # own searches ask for messages only, so no other section follows a search's last message.
+    Allow(
+        "Slack searches ask for messages only",
+        data=r"^slack\.\w+\[\d+\]\.arguments\.content_types$",
+        value="messages",
+    ),
     Allow(
         "Home's routing receipts and peer messages, a run folded in one line",
         element='#timeline > .fold, #timeline > .event[data-kind="peer"], #timeline > '
