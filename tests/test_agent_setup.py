@@ -14,7 +14,7 @@ from conftest import call_tool
 from test_agent_picker import started, until
 from test_agents import ran, saved, spawn_on
 
-from chiefofstaff import agents, agentsetup
+from chiefofstaff import agents, agentsetup, backend_claude
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff.roles import WORKER
 
@@ -467,3 +467,32 @@ async def test_settings_lists_an_agent_not_installed_beside_one_found_with_insta
         assert claude["install"][0]["command"] == "curl -fsSL https://claude.ai/install.sh | bash"
     finally:
         await runtime.stop()
+
+
+async def test_signed_out_while_its_backend_runs_says_sign_in_needed_when_the_page_asks(
+    tmp_path, claude_on_path, monkeypatch, quick
+):
+    """Claude's backend started (its workers each run a process of their own): signed out in a
+    terminal meanwhile, the page's next ask says Sign-in needed (it said Ready while the
+    backend ran, never glanced at); a start that runs again clears it."""
+    from test_agents import saved
+
+    monkeypatch.setattr(runtime_module, "STATUS_SECONDS", 0.0)
+    monkeypatch.setattr(backend_claude.ClaudeAgent, "check", checked_ok)
+    _, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")
+        assert runtime.agent_status("claude")["status"] == agents.READY
+        monkeypatch.setenv("FAKE_CLAUDE_SIGNED_OUT", "1")
+        found = {status["name"]: status for status in await runtime.refresh_agent_status()}
+        assert found["claude"]["status"] == agents.SIGN_IN, found["claude"]
+        monkeypatch.delenv("FAKE_CLAUDE_SIGNED_OUT")
+        found = {status["name"]: status for status in await runtime.refresh_agent_status()}
+        assert found["claude"]["status"] == agents.READY
+    finally:
+        await runtime.stop()
+
+
+async def checked_ok(self, folder):
+    return {"ran": True, "acting": "", "ask_first": "", "steering": True, "usage": True}

@@ -5154,8 +5154,12 @@ class Runtime:
         facts = seen if isinstance(seen, dict) else {}
         backend, _ = self.connection(name)
         why = "" if backend and backend.alive() else self.agent_failed.get(name, "")
-        if not why and isinstance(seen, str) and not (backend and backend.alive()):
-            why = seen
+        if not why and isinstance(seen, str):
+            # Its last glance failed: why, unless its backend runs, as it did since then (a
+            # start clears it: agent_up), and the glance found no sign-in or install missing.
+            alive = backend and backend.alive()
+            if not alive or agents.status_of(name, seen)["status"] in agents.HELD:
+                why = seen
         if why := self.lost_sign_in.get(name) or why:
             return entry | self.unready(name, why)
         if not facts and not (backend and backend.alive()):
@@ -5192,18 +5196,16 @@ class Runtime:
 
     async def refresh_agent_status(self) -> list[dict]:
         """The page asks (the @ picker opened, the window focused, Settings shown): each
-        installed agent not running now glanced at again (its version and sign-in, in its own
-        folder of Chief of Staff's) unless it was within STATUS_SECONDS (UNREADY_SECONDS for
-        one that could not run: signed in meanwhile, it turns Ready at once); its status then.
-        One being signed in is looked at by its sign-in (agentsetup.POLL_SECONDS)."""
+        installed agent glanced at again (its version and sign-in, in its own folder of Chief
+        of Staff's) unless it was within STATUS_SECONDS (UNREADY_SECONDS for one that could not
+        run: signed in meanwhile, it turns Ready at once), also while its workers run (signed
+        out meanwhile, it says so before their next turn fails); its status then. One being
+        signed in is looked at by its sign-in (agentsetup.POLL_SECONDS)."""
         if time.monotonic() - self.found_cache[0] > UNREADY_SECONDS:
             self.found_cache = (float("-inf"), [])  # Installed meanwhile: found now.
         for name in self.agents_found():
-            backend, _ = self.connection(name)
             at = self.glanced.get(name, (float("-inf"), None))[0]
             unready = self.agent_status(name)["status"] not in {agents.READY, agents.CHECKING}
-            if not unready and backend and backend.alive():
-                continue
             wait = UNREADY_SECONDS if unready else STATUS_SECONDS
             if time.monotonic() - at < wait or self.setups.running(name):
                 continue
@@ -5244,6 +5246,8 @@ class Runtime:
         if name in self.ready_seen or name not in agents.NAMES:
             return
         self.ready_seen.add(name)
+        if isinstance(self.glanced.get(name, (0.0, None))[1], str):
+            self.glanced.pop(name, None)  # (A glance that failed before: past.)
         if name in self.down_seen:
             self.down_seen.discard(name)
             self.publish_state()
