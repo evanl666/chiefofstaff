@@ -411,7 +411,9 @@ async def p3_restart_on(ctx: Ctx):
             return (await la.session(ctx, holder))["status"] == "working"
 
         await la.until("it holds the slot", busy, 120)
-        router, mark = await say_text(ctx, f"In {ctx.project}: {VERSION}")
+        # A new worker in so many words: the Router starts one (0.1.51), not a new task for the
+        # worker that already read this project (r75: P1's, reused, so no worker to restart).
+        router, mark = await say_text(ctx, f"A new worker: in {ctx.project}: {VERSION}")
         worker = await started_by(ctx, router, mark)
         view = await la.session(ctx, worker)
         assert view["status"] == "queued" and view.get("untouched"), (view["status"], view)
@@ -481,7 +483,11 @@ async def p5_named_not_ready(ctx: Ctx):
     await la.settings(ctx, agents={"codex": {"enabled": True}})
     try:
         before = {s["id"] for s in (await la.state(ctx))["sessions"] if s["role"] == "worker"}
-        router, mark = await say_text(ctx, f"Use codex for this: in {ctx.project}: {MONEY}")
+        # A new worker, named for Codex while it is signed out: its card, not a task for the
+        # Codex worker it has on this project (r75: reused, so P6's card, for that worker).
+        router, mark = await say_text(
+            ctx, f"Use codex for this, a new worker: in {ctx.project}: {MONEY}"
+        )
 
         async def card():
             rows = [m for m in await la.messages(ctx, router) if m["id"] > mark]

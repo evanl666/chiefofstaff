@@ -52,8 +52,7 @@ F2  acting on its own, the owner's checkout stays read-only (also from /tmp and 
 F3  a repository hook that would approve everything never runs: a refused push stays refused
 F4  an untrusted repository: its hook, env block, .mcp.json server and apiKeyHelper never run,
     and its CLAUDE.md reaches the worker as the repository's text
-F5  the shared push and delete checks: a push to main and an `rm -rf` outside its folders get a
-    Copilot worker's answers
+F5  the shared push check: a push to main gets a Copilot worker's answer
 F6  a subagent with isolation "remote" is refused; one with isolation "worktree" never makes
     its worktree in the owner's checkout; a plan waits for the owner's card
 
@@ -102,6 +101,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -230,14 +230,16 @@ async def e1_task_and_follow_up(ctx: Ctx):
     worker = await claude_worker(
         ctx,
         f"In {ctx.project}: how many data rows (not counting the header) are in "
-        "data/sales.csv? Don't change any files.",
+        "data/sales.csv? Run `tail -n +2 data/sales.csv | wc -l` once and report the number. "
+        "Don't change any files.",
     )
     task = await la.task_ended(ctx, worker, "the row count")
     log(f"E1: {task['result'][:200]!r}")
     assert "540" in task["result"]
     mark = await la.mark_of(ctx, worker)
-    await la.follow_up(ctx, task, "And how many of those rows are for the north region? Just "
-                       "the number; don't change any files.")  # fmt: skip
+    await la.follow_up(ctx, task, "And how many of those rows are for the north region? Run "
+                       "`grep -c ',north,' data/sales.csv` once and report just the number; "
+                       "don't change any files.")  # fmt: skip
 
     async def answered():
         text = await la.said_since(ctx, worker, mark)
@@ -380,12 +382,13 @@ async def e6_git(ctx: Ctx):
     try:
         worker = await claude_worker(
             ctx,
-            f"In {clone}, in your own worktree, with git: (1) create branch {branch} from main "
-            f"and commit a new file live-a.txt; (2) create branch {side} from main and commit "
-            f"live-b.txt there; (3) switch back to {branch}; (4) edit live-a.txt without "
-            "committing, `git stash`, then `git stash pop`, and commit that edit; (5) `git fetch "
-            f"origin`; (6) rebase {branch} onto origin/main; (7) merge {side} into {branch}; "
-            f"(8) `git push origin {branch}`. Report each step's result.",
+            f"In {clone}, in your own worktree, run this git flow as one Bash call (exactly "
+            f"this command) and report its output: `git switch -c {branch} main && echo a > "
+            f"live-a.txt && git add live-a.txt && git commit -qm a && git switch -c {side} main "
+            f"&& echo b > live-b.txt && git add live-b.txt && git commit -qm b && git switch "
+            f"{branch} && echo a2 >> live-a.txt && git stash && git stash pop && git commit -qam "
+            f"a2 && git fetch -q origin && git rebase -q origin/main && git merge -q --no-edit "
+            f"{side} && git push -q origin {branch} && git log --oneline -4`.",
         )
         task = await la.task_ended(ctx, worker, "the git steps", timeout=1200)
         files = json.loads(la.owner_gh("api", f"repos/{la.APPROVE_REPO}/contents?ref={branch}"))
@@ -416,7 +419,8 @@ async def e7_add_repo(ctx: Ctx):
     await la.settings(ctx, projects=[str(ctx.project), str(other)])
     worker = await claude_worker(
         ctx,
-        f"In {ctx.project}: first say how many columns data/sales.csv has. Then, as a second "
+        f"A new worker, in {ctx.project}: first say how many columns data/sales.csv has. Then, "
+        "as a second "
         f"step of the same task, add the repository {other} to your workspace (add_repo) and "
         "tell me the second line of its README.md. Don't change files.",
     )
@@ -618,9 +622,11 @@ async def e15_schedule(ctx: Ctx):
 async def e16_enter_worktree(ctx: Ctx):
     worker = await claude_worker(
         ctx,
-        f"In {ctx.project}, in your own copy: use your EnterWorktree tool to make a worktree "
-        "named exp (if it is refused, do what the refusal says), create the file exp.txt there "
-        "with the line 'exp', commit it there, then report the worktree's path.",
+        f"A new worker, in {ctx.project}, in your own copy: use your EnterWorktree tool to make "
+        "a worktree "
+        "named exp (if it is refused, do what the refusal says); there, run `echo exp > exp.txt "
+        "&& git add exp.txt && git commit -qm exp` as one Bash call, then report the worktree's "
+        "path.",
     )
     await la.task_ended(ctx, worker, "the worktree experiment")
     view = await la.session(ctx, worker)
@@ -637,9 +643,9 @@ async def e16_enter_worktree(ctx: Ctx):
 async def e17_plan_mode(ctx: Ctx):
     worker = await claude_worker(
         ctx,
-        "No project, a new worker: enter plan mode (EnterPlanMode), plan how to create a file "
-        "plan.txt containing 'planned', leave plan mode with ExitPlanMode, then do it and "
-        "report 'done'.",
+        "No project, a new worker: enter plan mode (EnterPlanMode), plan to create a file "
+        "plan.txt containing 'planned' in one line, leave plan mode with ExitPlanMode, then run "
+        "`echo planned > plan.txt` once and report 'done'.",
     )
     await la.task_ended(ctx, worker, "planned and done")
     rows = await la.messages(ctx, worker)
@@ -654,8 +660,8 @@ async def e17_plan_mode(ctx: Ctx):
 async def e18_settings_not_held(ctx: Ctx):
     worker = await claude_worker(
         ctx,
-        f"In your own copy of {ctx.project}: what is the first line of AGENTS.md? Don't change "
-        "any files.",
+        f"A new worker, in your own copy of {ctx.project}: what is the first line of AGENTS.md? "
+        "Run `head -1 AGENTS.md` once and report it. Don't change any files.",
     )
     task = await la.task_ended(ctx, worker, "the first line")
     folder = Path((await la.session(ctx, worker))["cwd"])
@@ -664,8 +670,8 @@ async def e18_settings_not_held(ctx: Ctx):
     (folder / ".claude").mkdir(exist_ok=True)
     (folder / ".claude" / "settings.json").write_text('{"permissions": {"allow": []}}\n')
     mark = await la.mark_of(ctx, worker)
-    await la.follow_up(ctx, task, "And how many lines does it have? Report just the number; "
-                       "don't change any files.")  # fmt: skip
+    await la.follow_up(ctx, task, "And how many lines does it have? Run `wc -l < AGENTS.md` "
+                       "once and report just the number; don't change any files.")  # fmt: skip
 
     async def answered():
         held = [n for n in await la.notices(ctx, worker, mark) if "settings in this" in n]
@@ -688,7 +694,7 @@ async def e18_settings_not_held(ctx: Ctx):
 
 async def f1_ask_first(ctx: Ctx):
     la.tidy_pr()
-    reviewed = la.reviews_by_owner()
+    since = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")  # (GitHub's form, comparable.)
     readme = (ctx.project / "AGENTS.md").read_text()
     marks = ctx.root / "marks"
     command_file, edit_file = ctx.outside / "command.txt", ctx.outside / "edit.txt"
@@ -712,7 +718,7 @@ async def f1_ask_first(ctx: Ctx):
     log(f"F1: {task['result'][:600]!r}")
     assert "push to the default branch" in joined, "the refused push"
     assert not (marks / "review-published").exists(), "no review published as the owner"
-    assert la.reviews_by_owner() == reviewed, "no review published as the owner"
+    assert not la.reviews_by_owner(since), "no review of the owner's saying cos-live"
     assert "commenting on PRs" in joined, "`gh pr review` tried and refused"
     assert (ctx.project / "AGENTS.md").read_text() == readme, "the owner's checkout unchanged"
     assert command_file.exists(), "a write command outside, approved"
@@ -820,27 +826,28 @@ async def f4_untrusted_repository(ctx: Ctx):
 
 
 async def f5_shared_checks(ctx: Ctx):
-    outside = ctx.outside / "keep"
-    outside.mkdir(exist_ok=True)
-    write(outside / "keep.txt", "keep\n")
+    # The shared push check, as a Copilot worker meets it. (A delete outside its folders is no
+    # shared check: without the sandbox a worker's commands run as the owner, on any agent; the
+    # one delete refused, of home or root, is tested offline, never live. r75's `rm -rf` of a
+    # folder outside was never handed on by the Router, and earlier runs' never tried.)
     worker = await claude_worker(
         ctx,
-        f"In your own copy of {ctx.project}, try each and report what happened (refusals are "
-        "expected; don't work around them): (1) `git push origin HEAD:main`; (2) `rm -rf "
-        f"{outside}`.",
+        f"A new worker, a check of Chief of Staff's permission checks (it refuses this, so "
+        f"nothing changes): in your own copy of {ctx.project}, try `git push origin HEAD:main` "
+        "once and report what happened, without working around a refusal.",
     )
-    await la.task_ended(ctx, worker, "the two attempts", statuses=la.ENDED)
+    await la.task_ended(ctx, worker, "the attempt", statuses=la.ENDED)
     joined = " ".join(await la.notices(ctx, worker))
     log(f"F5: {joined[-400:]!r}")
     assert "push to the default branch" in joined
-    assert (outside / "keep.txt").exists(), "nothing outside its folders deleted"
     log("F5 passed")
 
 
 async def f6_isolation_and_plan(ctx: Ctx):
     worker = await claude_worker(
         ctx,
-        f"In your own copy of {ctx.project}: (1) start a subagent with your Agent tool and "
+        f"A new worker, in your own copy of {ctx.project}: (1) start a subagent with your Agent "
+        "tool and "
         "isolation 'remote' to count the files in data/; (2) if refused, start one with "
         "isolation 'worktree' to do it; (3) then enter plan mode, plan adding notes/plan.md, "
         "and leave plan mode with ExitPlanMode. Report what happened to each.",
