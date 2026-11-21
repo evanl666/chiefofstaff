@@ -298,6 +298,48 @@ async def test_a_worker_is_named_by_what_its_turn_is_on(harness):
     assert entry["title"] == "Fix the login"
 
 
+async def test_a_worker_is_not_named_after_a_task_it_never_ran(harness):
+    """E127: given a second task while at work on its first, the owner's messages about the
+    second never reaching it (held, then dropped as that task was cancelled): the worker, with
+    nothing open, is named after the task it did, not the one it never got to."""
+    runtime = await harness.connect()
+    worker, session, a = await busy_worker(runtime, harness, "Fix the login")
+    given = {"task": "new", "why_new": "test", "earlier": "keep", "title": "Write the docs"}
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    text="Then write the docs.", **given)  # fmt: skip
+    b = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", task_id=a["id"], summary="Fixed.")
+    await idle(runtime, session)
+    await runtime.task_actions.cancel(b["id"], "Not needed.", by="you")
+    written = harness.store.add_message(worker, "owner", "Add a FAQ to the docs too.",
+                                        {"task_id": b["id"], "prompt": "Add a FAQ."})  # fmt: skip
+    runtime.drop_held_owner_message(written, "dropped", "Not sent: its task was cancelled.")
+    assert runtime.display_title(harness.store.session(worker)) == "Fix the login"
+
+
+async def test_a_worker_is_named_after_its_own_turns_not_a_message_never_delivered(harness):
+    """E127: a message about a task still above what the worker has seen (it never had it) does
+    not name the worker, nor does one sent on to another worker: the task it worked on does."""
+    runtime = await harness.connect()
+    worker, session, a = await busy_worker(runtime, harness, "Fix the login")
+    given = {"task": "new", "why_new": "test", "earlier": "keep", "title": "Write the docs"}
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    text="Then write the docs.", **given)  # fmt: skip
+    b = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", task_id=a["id"], summary="Fixed.")
+    await idle(runtime, session)
+    harness.store.execute("UPDATE tasks SET status='cancelled' WHERE id=?", (b["id"],))
+    seen = int(harness.store.get(f"seen:{worker}") or harness.store.get(f"sent:{worker}") or 0)
+    late = harness.store.add_message(worker, "owner", "One more thing about the docs.",
+                                     {"task_id": b["id"], "prompt": "One more thing."})  # fmt: skip
+    assert late["id"] > seen
+    sent_on = harness.store.add_message(
+        worker, "owner", "And the FAQ.", {"task_id": b["id"], "forwarded_to": "elsewhere"}
+    )
+    assert sent_on["id"] > late["id"]
+    assert runtime.display_title(harness.store.session(worker)) == "Fix the login"
+
+
 async def asking(harness):
     """A worker that asked the owner a question on its task: waiting, under Needs you."""
     runtime = await harness.connect()

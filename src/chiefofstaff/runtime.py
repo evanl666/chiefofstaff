@@ -9675,23 +9675,30 @@ class Runtime:
             return open_[-1]["title"]
 
         # Nothing open: the task it did last (not the newest made: one split off keeps the
-        # worker's name with the task it came from, until the worker works on it).
+        # worker's name with the task it came from, until the worker works on it). By its own
+        # turns first; else by what reached it about a task, never what Chief of Staff told it
+        # (cancelled, closed: bug E88), nor what never reached it: a message dropped, sent on
+        # to another worker, or past what it has seen (E127: a held worker was named after
+        # the cancelled task the owner had written to it about).
+        seen = int(self.store.get(f"seen:{row['id']}") or self.store.get(f"sent:{row['id']}") or 0)
+
         def last_active(task: dict) -> tuple:
             split = json.loads(self.store.get(f"splitfrom:{task['id']}") or "null")
+            found = self.store.one(
+                """SELECT max(CASE WHEN kind IN ('assistant', 'report', 'tool', 'update')
+                THEN id END) AS own, max(CASE WHEN ? OR kind!='notice' THEN id END) AS given
+                FROM messages WHERE session_id=? AND id>? AND json_extract(meta, '$.task_id')=?
+                AND json_extract(meta, '$.dropped') IS NULL
+                AND json_extract(meta, '$.forwarded_to') IS NULL
+                AND json_extract(meta, '$.undelivered') IS NULL
+                AND (json_extract(meta, '$.prompt') IS NULL OR id<=?)""",
+                (bool(split), row["id"], split["mark"] if split else 0, task["id"], seen),
+            ) or {"own": None, "given": None}
+            if found["own"]:
+                return (2, found["own"])
             if split:
-                worked = self.store.value(
-                    "SELECT max(id) FROM messages WHERE session_id=? AND id>? "
-                    "AND json_extract(meta, '$.task_id')=?",
-                    (row["id"], split["mark"], task["id"]),
-                )
-                return (1, worked) if worked else (0, 0)
-            # Not what Chief of Staff told it about the task (cancelled, closed: bug E88).
-            worked = self.store.value(
-                "SELECT max(id) FROM messages WHERE session_id=? AND kind!='notice' "
-                "AND json_extract(meta, '$.task_id')=?",
-                (row["id"], task["id"]),
-            )
-            return (1, worked or 0)
+                return (1, found["given"]) if found["given"] else (0, 0)
+            return (1, found["given"] or 0)
 
         return max(tasks, key=last_active)["title"]
 
