@@ -9453,6 +9453,7 @@ async def round_e125(runtime, browser, failures: list[str]):
     router = store.get("router_id")
     before = len(store.messages(router))
     seeded = await cleanup_seeded(runtime)
+    assert store.session(seeded["held"])["closed_at"], "nothing open, nothing left: closed"
     assert not [m for m in store.messages(router)[before:] if "not sent" in m["text"]]
     for message_id in seeded["written"]:
         assert store.message(message_id)["meta"]["cleanup"]

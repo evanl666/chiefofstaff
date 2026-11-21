@@ -7644,7 +7644,8 @@ class Runtime:
         """Workers held for their folder's settings (or a .git they could write) that are not
         guarded now (settings_guarded: the sandbox is off, after an update or turned off in
         Settings) go on: what the owner wrote them goes out, but for a task that is over or
-        another's, which is dropped (settle_held_chat: a cleanup, under Handled for you)."""
+        another's, which is dropped (settle_held_chat: a cleanup, under Handled for you). One
+        with no open task and nothing left for it closes (E128)."""
         for row in self.store.open_sessions(WORKER):
             if self.settings_guarded(row):
                 continue
@@ -7674,7 +7675,19 @@ class Runtime:
                 # (It stays held: tried again at the next start or sandbox change.)
                 logger.warning("Could not let %s go on.", row["id"], exc_info=True)
                 continue
-            self.settings_unsaid(row["id"])  # (It goes on: settings_go_on.)
+            if any(task["status"] in OPEN for task in self.tasks.for_session(row["id"])) or (
+                self.unsent_owner_chat(row["id"])
+            ):
+                self.settings_unsaid(row["id"])  # (It goes on: settings_go_on.)
+                continue
+            # Nothing open, nothing left for it (E128): closed, as when its task ends held.
+            self.settings_held.discard(row["id"])
+            self.settings_reasons.pop(row["id"], None)
+            for key in (f"settingssaid:{row['id']}", f"settingsheldat:{row['id']}"):
+                self.store.delete(key)
+            if row["activity"] == SETTINGS_WAIT:
+                self.update_session(row["id"], activity="")
+            await self.workers.close(row["id"])
 
     def carried_theirs(self, row: dict, top: Path, now: dict[str, dict]):
         """Settings carried into a worker's worktree from the owner's checkout that the owner

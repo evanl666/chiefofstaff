@@ -1270,6 +1270,9 @@ async def test_workers_held_for_their_settings_go_on_once_the_sandbox_is_off(
         assert entry["text"].startswith("Your message “And this” to “")
         assert entry["text"].endswith("was not sent: its task was cancelled.")
         assert entry["at"] == [dropped["created_at"], dropped["created_at"]]
+        # E128: with no open task and nothing left for it, it closes.
+        assert again.store.session(ended)["closed_at"]
+        assert not again.store.session(going)["closed_at"]
     finally:
         await runtime.stop()
 
@@ -1362,6 +1365,7 @@ async def test_a_held_workers_messages_whose_task_moved_on_are_one_handled_line_
         for message in written:
             meta = again.store.message(message["id"])["meta"]
             assert meta["dropped"] and meta["cleanup"] and "prompt" not in meta
+        assert again.store.session(worker)["closed_at"]
     finally:
         await runtime.stop()
 
