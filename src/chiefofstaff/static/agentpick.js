@@ -197,6 +197,8 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
   }
   function draw() {
     const names = ["copilot", ...Object.keys(AGENT_NAMES).filter((name) => name !== "copilot")];
+    // The agent focused (arrows, Enter) stays focused as the list is drawn again.
+    const focused = left.contains(document.activeElement) ? document.activeElement.closest(".agent-pop-agent")?.dataset.agent : "";
     left.replaceChildren(
       ...names
         .map((name) => statusOf(name) || (name === "copilot" ? { name, status: "ready", on: true, said: "Ready" } : null))
@@ -209,6 +211,7 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
               type: "button",
               role: "radio",
               class: `agent-pop-agent${can ? "" : " dim"}`,
+              "data-agent": status.name,
               "aria-checked": String(status.name === picked.agent),
               "aria-disabled": String(!can),
               onclick: () => can && status.name !== picked.agent && pick({ agent: status.name, model: "", effort: "" }),
@@ -221,6 +224,7 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
           return el("div", { class: "agent-pop-row" }, button, can ? "" : setupLine(status) || fixLine(status.fix) || "");
         }),
     );
+    if (focused) left.querySelector(`.agent-pop-agent[data-agent="${focused}"]`)?.focus();
     pays.textContent = statusOf(picked.agent)?.pays || (picked.agent === "copilot" ? "Uses your Copilot plan" : "");
     right.replaceChildren(el("small", { class: "agent-pop-loading", text: "Models…" }));
     drawModels();
