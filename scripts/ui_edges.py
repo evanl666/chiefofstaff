@@ -5638,6 +5638,15 @@ async def round_relations(runtime, browser, failures: list[str]):
     await expect(chips).to_have_count(8)
     await view.locator(".team-tasks .earlier-rows").click()
     await expect(view.locator(".team-tasks .trow")).to_have_count(13)
+    # What a task waits on failed: its wait says so (it will not clear by itself).
+    found = await call_tool(runtime, "spawn_worker", router, title="Deploy Note: checkout v2",
+                            instructions="Deploy note", why_new="test",
+                            after=[seeded["e2e_task"]])  # fmt: skip
+    deploy = json.loads(found.text_result_for_llm)["task_id"]
+    runtime.tasks.move(seeded["e2e_task"], "failed")
+    await expect(view.locator(f'.trow[data-task="{deploy}"] .rel')).to_have_text(
+        "waits on E2E Runner · it failed", timeout=10000
+    )
     await context.close()
     log("Relations: a large team shows its latest workers and tasks, the rest on asking")
 

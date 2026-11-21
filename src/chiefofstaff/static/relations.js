@@ -68,7 +68,12 @@ export function chipWords(data, row, chip) {
   switch (chip.kind) {
     case "after":
       if (chip.side === "from") return chip.state === "pending" ? ["waits", `${other} waits on it`, ""] : ["settled", `unblocked ${other}`, "settled"];
-      if (chip.state === "pending") return ["waits", `waits on ${other}${waited(chip.minutes)}`, "waiting"];
+      if (chip.state === "pending") {
+        // What it waits on ended without its result: it will not come by itself.
+        const ended = indexed(data).get(chip.other);
+        if (["failed", "cancelled"].includes(ended?.status)) return ["waits", `waits on ${other} · it ${ended.status === "failed" ? "failed" : "was cancelled"}`, "waiting"];
+        return ["waits", `waits on ${other}${waited(chip.minutes)}`, "waiting"];
+      }
       if (chip.just) return ["settled", `${workerName(data, chip.other)} delivered · unblocked`, "cleared"];
       return ["settled", `after ${other}`, "settled"];
     case "question":
