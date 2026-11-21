@@ -496,3 +496,113 @@ async def test_signed_out_while_its_backend_runs_says_sign_in_needed_when_the_pa
 
 async def checked_ok(self, folder):
     return {"ran": True, "acting": "", "ask_first": "", "steering": True, "usage": True}
+
+
+async def test_signed_out_in_a_terminal_while_codex_runs_holds_new_work_before_it_goes(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """Codex's one app-server runs on for its workers after the owner signed out in a terminal:
+    the page says Sign-in needed (its look), and what goes to Codex now is looked at again
+    first, then held with its card, not started (nor delivered) to fail there."""
+    monkeypatch.setattr(runtime_module, "STATUS_SECONDS", 0.0)
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        made = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: Fixed.",
+                              agent="codex")  # fmt: skip
+        worker = made["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        backend, _ = runtime.connection("codex")
+        assert backend and backend.alive()
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        await runtime.refresh_agent_status()
+        assert runtime.agent_status("codex")["status"] == agents.SIGN_IN
+        refused = await spawn_on(harness, runtime, title="Count the rows · data",
+                                 instructions="Report done: 42 rows.", agent="codex")  # fmt: skip
+        assert "it starts there by itself" in refused.text_result_for_llm
+        assert [r["id"] for r in harness.store.open_sessions(WORKER)] == [worker], "not started"
+        refused = await call_tool(
+            runtime, "message_session", harness.router_id, session_id=worker,
+            text="Also count the rows. Report done: 42 rows.", task="new",
+            title="Count the rows · data", why_new="Another deliverable.",
+        )  # fmt: skip
+        assert "it gets this by itself" in refused.error
+        assert len(runtime.tasks.for_session(worker)) == 1, "not delivered"
+        cards = [
+            m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
+        ]
+        assert [card["meta"]["status"] for card in cards] == [agents.SIGN_IN] * 2
+        # Signed in again in the terminal: both go on, once each.
+        monkeypatch.delenv("FAKE_CODEX_SIGNED_OUT")
+        await runtime.refresh_agent_status()
+        await until(lambda: len(harness.store.open_sessions(WORKER)) == 2, 15)
+        await until(lambda: len(runtime.tasks.for_session(worker)) == 2, 15)
+    finally:
+        await runtime.stop()
+
+
+async def test_the_pages_ask_never_waits_on_a_slow_look_and_hears_once_it_ends(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    monkeypatch.setattr(runtime_module, "REFRESH_WAIT", 0.3, raising=False)
+    monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+    _, runtime = await started(tmp_path)
+
+    def looking() -> dict:
+        return getattr(runtime, "glancing", {})
+
+    try:
+        await runtime.refresh_agent_status()
+        await until(lambda: all(task.done() for task in looking().values()))
+        assert runtime.agent_status("codex")["status"] == agents.SIGN_IN
+        published = []
+        monkeypatch.setattr(runtime, "publish_state", lambda: published.append(1))
+        monkeypatch.delenv("FAKE_CODEX_SIGNED_OUT")  # Signed in in a terminal…
+        monkeypatch.setenv("FAKE_CODEX_STATUS_DELAY", "1.5")  # … its status slow to say so.
+        begun = time.monotonic()
+        found = {status["name"]: status for status in await runtime.refresh_agent_status()}
+        assert time.monotonic() - begun < 1.2, "not held up by the look"
+        assert found["codex"]["status"] == agents.SIGN_IN, "as last known"
+        look = looking()["codex"]
+        again = asyncio.ensure_future(runtime.refresh_agent_status())
+        await until(lambda: runtime.agent_status("codex")["status"] == agents.READY, 10)
+        assert published, "the page is told"
+        await again
+        assert looking()["codex"] is look, "the same look, not a second one"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_look_that_fails_otherwise_is_asked_for_later_each_time(
+    tmp_path, codex_installed, monkeypatch
+):
+    """A look that fails for another reason than a sign-in or an install (a Codex too old
+    here; one that timed out) is looked at twice as late each time the page asks."""
+    _, runs = codex_installed
+    monkeypatch.setattr(runtime_module, "UNREADY_SECONDS", 1.0)
+    monkeypatch.setenv("FAKE_CODEX_VERSION", "0.100.0")
+    _, runtime = await started(tmp_path)
+
+    def looks() -> int:
+        return sum(1 for line in ran(runs) if line == "--version")
+
+    try:
+        await runtime.refresh_agent_status()
+        status = runtime.agent_status("codex")
+        assert status["status"] == agents.PROBLEM and "older" in status["said"]
+        first = looks()
+        await asyncio.sleep(1.3)
+        await runtime.refresh_agent_status()
+        assert looks() == first, "after 2 seconds, not 1"
+        await asyncio.sleep(1.0)
+        await runtime.refresh_agent_status()
+        assert looks() == first + 1
+        monkeypatch.delenv("FAKE_CODEX_VERSION")
+        await asyncio.sleep(2.0)
+        await runtime.refresh_agent_status()
+        assert looks() == first + 1, "then after 4"
+        await asyncio.sleep(2.3)
+        await runtime.refresh_agent_status()
+        assert runtime.agent_status("codex")["status"] == agents.READY
+    finally:
+        await runtime.stop()

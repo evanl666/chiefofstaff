@@ -16,7 +16,7 @@ that ended (a 401), signed out from then on.
 say it (the browser's URL on stderr, the device code on stdout, the key read from stdin): a
 sign-in is kept in FAKE_CODEX_HOME (auth.json, signed-out), over SIGNED_OUT. A browser or device
 sign-in waits until a file `approve` there says how it went ("ok", else its words: an error), as
-the owner finishing it in their browser would.
+the owner finishing it in their browser would. `login status` takes STATUS_DELAY seconds.
 """
 
 import asyncio
@@ -1343,6 +1343,8 @@ def approved() -> str:
 def login(arguments: list[str]):
     """`codex login …` as 0.167.2 runs it, its words where it says them."""
     if arguments[:1] == ["status"]:
+        if delay := os.environ.get("FAKE_CODEX_STATUS_DELAY"):
+            time.sleep(float(delay))  # (A slow look.)
         # On stderr, failing when signed out.
         if signed_out():
             sys.stderr.write("Not logged in\n")

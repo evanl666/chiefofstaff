@@ -349,6 +349,12 @@ FOUND_SECONDS = 60.0
 STATUS_SECONDS = 30.0
 # How soon one that could not run (signed out, not installed) is looked at again when asked.
 UNREADY_SECONDS = 5.0
+# One whose look failed otherwise (it timed out, say): looked at again twice as late each time,
+# up to this.
+PROBLEM_SECONDS = 60.0
+# How long the page's ask for statuses waits for the looks it started: one slower goes on, and
+# the page hears once its status changes.
+REFRESH_WAIT = 3.0
 # How long held work waits, "Resuming…" with Cancel, once its agent can run it (resume_held).
 RESUME_SECONDS = 5.0
 # What a worker has done once it said any of these: a step, a report, an update (until then,
@@ -724,6 +730,10 @@ class Runtime:
         self.ready_seen: set[str] = set()
         self.down_seen: set[str] = set()
         self.lost_sign_in: dict[str, str] = {}
+        # Each agent's look running now (one at a time), and how many failed in a row for a
+        # reason other than its sign-in or install (refresh_agent_status: looked at later).
+        self.glancing: dict[str, asyncio.Task] = {}
+        self.glance_failures: dict[str, int] = {}
         # Held work's cards resuming now (resume_held: once each); roles whose wait for the
         # owner ended, what they were sent meanwhile to go to them (role_waits).
         self.resuming: set[str] = set()
@@ -2174,12 +2184,10 @@ class Runtime:
         row = {"id": "", "role": WORKER, "slack": slack, "yolo": "", "closed_at": None}
         if slack and not named and self.blocked_on(chosen, row):
             return COPILOT_AGENT, ""  # Not this agent's to run (it reads Slack): nothing to say.
-        if chosen in self.lost_sign_in:
-            # A turn lost its sign-in: looked at again first (signed in meanwhile, it runs).
-            with suppress(Exception):
-                await self.glance_agent(chosen)
-        if lost := self.lost_sign_in.get(chosen):
-            why = f"{agents.display(chosen)} could not run: {lost}"
+        if said := await self.looked_again(chosen):
+            # Signed out (in a terminal, a turn that lost it) while its process runs: held.
+            how = "run" if chosen in self.lost_sign_in else "start"
+            why = f"{agents.display(chosen)} could not {how}: {said}"
         elif not (why := self.blocked_on(chosen, row)):
             try:
                 await self.connect_agent(chosen)
@@ -4288,6 +4296,8 @@ class Runtime:
         """Why a worker on another agent cannot be given anything now: its agent does not
         start (signed out, not installed, …), tried now as its next message would; "" when
         it runs."""
+        if said := await self.looked_again(agent):
+            return said  # Signed out while its process runs.
         try:
             await self.connect_agent(agent)
         except Exception as exc:
@@ -5198,32 +5208,92 @@ class Runtime:
         """The page asks (the @ picker opened, the window focused, Settings shown): each
         installed agent glanced at again (its version and sign-in, in its own folder of Chief
         of Staff's) unless it was within STATUS_SECONDS (UNREADY_SECONDS for one that could not
-        run: signed in meanwhile, it turns Ready at once), also while its workers run (signed
-        out meanwhile, it says so before their next turn fails); its status then. One being
+        run: signed in meanwhile, it turns Ready at once; later each time for one whose look
+        failed otherwise), also while its workers run (signed out meanwhile, it says so before
+        their next turn fails); its status then. The looks run at once, one per agent, waited
+        for REFRESH_WAIT at most (a slower one's change is published as it ends). One being
         signed in is looked at by its sign-in (agentsetup.POLL_SECONDS)."""
         if time.monotonic() - self.found_cache[0] > UNREADY_SECONDS:
             self.found_cache = (float("-inf"), [])  # Installed meanwhile: found now.
+        looks = []
         for name in self.agents_found():
             at = self.glanced.get(name, (float("-inf"), None))[0]
-            unready = self.agent_status(name)["status"] not in {agents.READY, agents.CHECKING}
-            wait = UNREADY_SECONDS if unready else STATUS_SECONDS
-            if time.monotonic() - at < wait or self.setups.running(name):
+            if time.monotonic() - at < self.look_every(name) or self.setups.running(name):
                 continue
-            with suppress(Exception):
-                await self.glance_agent(name)  # (Why it cannot run is its status.)
+            looks.append(self.glance_soon(name))
+        if looks:
+            await asyncio.wait(looks, timeout=REFRESH_WAIT)
         return self.agents_status()
+
+    def look_every(self, name: str) -> float:
+        """How long an agent's last look stands when the page asks (refresh_agent_status)."""
+        status = self.agent_status(name)["status"]
+        if status in {agents.READY, agents.CHECKING}:
+            return STATUS_SECONDS
+        if status in agents.HELD:
+            return UNREADY_SECONDS
+        return min(PROBLEM_SECONDS, UNREADY_SECONDS * 2 ** self.glance_failures.get(name, 0))
+
+    def glance_soon(self, name: str) -> asyncio.Task:
+        """An agent's look, one at a time: asked for while one runs, that one."""
+        task = self.glancing.get(name)
+        if task is None or task.done():
+            task = self.background(self.quiet_glance(name))
+            self.glancing[name] = task
+        return task
+
+    async def quiet_glance(self, name: str):
+        with suppress(Exception):
+            await self.glance_agent(name)  # (Why it cannot run is its status.)
 
     async def glance_agent(self, name: str) -> dict:
         """An agent's glance (agents.glance), kept as its status: raises with why it cannot
-        run, kept too."""
+        run, kept too. The page is told where its status changed."""
+        before = self.agent_status(name)["status"]
         try:
             facts = await agents.glance(name, self.agent_folder(name))
         except Exception as exc:
-            self.glanced[name] = (time.monotonic(), describe(exc))
+            said = describe(exc)
+            self.glanced[name] = (time.monotonic(), said)
+            if agents.status_of(name, said)["status"] in agents.HELD:
+                self.glance_failures.pop(name, None)
+            else:
+                self.glance_failures[name] = self.glance_failures.get(name, 0) + 1
             self.agent_down(name)
+            self.status_changed(name, before)
             raise
+        self.glance_failures.pop(name, None)
         self.seen_ready(name, facts)
+        self.status_changed(name, before)
         return facts
+
+    def status_changed(self, name: str, before: str):
+        """The page told of an agent's status changed by a look: one it showed (Ready, Sign-in
+        needed, …), not its first look's (Checking…, as at startup: the page reads it then)."""
+        if before != agents.CHECKING and self.agent_status(name)["status"] != before:
+            self.publish_state()
+
+    async def looked_again(self, name: str) -> str:
+        """Before work goes to an agent whose sign-in a turn lost, or that the page says is
+        signed out while its process runs all the same (one Codex app-server for all its
+        workers; Claude's of a worker at work: never told, it would take the work and fail):
+        one fresh look. Why it still can't (the turn's words, or its look's), else "" (signed
+        in meanwhile, it runs; not running, its start finds out itself)."""
+        if name not in agents.NAMES:
+            return ""
+        backend, _ = self.connection(name)
+        signed_out = self.agent_status(name)["status"] == agents.SIGN_IN
+        if name not in self.lost_sign_in and not (signed_out and backend and backend.alive()):
+            return ""
+        try:
+            await self.glance_agent(name)
+        except Exception as exc:
+            if lost := self.lost_sign_in.get(name):
+                return lost
+            if agents.status_of(name, said := describe(exc))["status"] == agents.SIGN_IN:
+                self.agent_start_failed(name, exc)
+                return said
+        return ""
 
     def seen_ready(self, name: str, facts: dict):
         """An agent's glance or look found it signed in: its status, and a start that failed
