@@ -349,8 +349,9 @@ async def e5_in_place(ctx: Ctx):
     made = ctx.project / "IN_PLACE_CLAUDE.md"
     router, mark = await la.say(
         ctx,
-        f"Work in place, directly in my folder {ctx.project} (not a copy of it): create the file "
-        "IN_PLACE_CLAUDE.md there with the line 'made in place', don't commit, and report.",
+        f"A new worker: work in place, directly in my folder {ctx.project} (not a copy of it): "
+        "create the file IN_PLACE_CLAUDE.md there with the line 'made in place', don't commit, "
+        "and report.",
     )
 
     async def placed():
@@ -452,9 +453,14 @@ async def e8_subagent_report(ctx: Ctx):
 
 
 async def e9_envelope_text(ctx: Ctx):
-    worker = ctx.notes.get("e1_worker") or await claude_worker(
-        ctx, "A new worker, no project: run `echo ready` and report 'ready'."
-    )
+    # E1's worker while its latest task is finished (r76: the Router gave it E5's in-place
+    # task, which it could not do, and replaced it: cancelled), else one of its own.
+    worker = ctx.notes.get("e1_worker")
+    task = await la.latest_task(ctx, worker) if worker else None
+    if not task or task["status"] not in la.FINISHED:
+        worker = await claude_worker(
+            ctx, "A new worker, no project: run `echo ready` and report 'ready'."
+        )
     await la.task_ended(ctx, worker, "ready")
     await la.until("its turn over", lambda: la.idle(ctx, worker), 120)
     task = await la.latest_task(ctx, worker)
