@@ -167,9 +167,10 @@ async def scenario_d_cancelled_while_held(app: App, project: Path):
     assert message["meta"].get("dropped") and not message.get("delivery"), message
     notices = [
         m["text"] for m in await app.get(f"/api/sessions/{router}/messages")
-        if m["kind"] == "notice" and "was not sent: its task is over" in m["text"]
+        if m["kind"] == "notice" and "was not sent: its task was" in m["text"]
     ]  # fmt: skip
-    assert notices, "Home says what was dropped"
+    # (E125: one line, when it was written, and what became of its task: set aside here.)
+    assert len(notices) == 1 and "won't be sent later" in notices[0], notices
     log("D: cancelled while held: it closed; the message was dropped and Home says so")
 
 

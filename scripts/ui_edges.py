@@ -5435,7 +5435,7 @@ async def main():
                           round_picker_ux, round_agent_parity, round_qa6, round_qa7_life,
                           round_qa8_report,
                           round_layout, round_fresh_start, round_qa8_auth,
-                          round_qa8_approvals):  # fmt: skip
+                          round_qa8_approvals, round_e125):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -9393,6 +9393,100 @@ async def sidebar_shoot_to(page, name: str, scheme: str):
         if folded:
             await page.keyboard.press("Escape")
     await page.set_viewport_size({"width": 1280, "height": 900})
+
+
+async def cleanup_seeded(runtime) -> dict:
+    """E125: a worker held for its folder's settings by an earlier version, four messages of
+    the owner's written to it yesterday afternoon waiting, its task replaced (the link only in
+    its words, as before 0.1.51) by another worker's, which finished it yesterday evening."""
+    from chiefofstaff import tasks as tasks_module
+    from chiefofstaff.workers import SETTINGS_WAIT
+
+    store = runtime.store
+    router = store.get("router_id")
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        await settle(runtime)
+        worker = json.loads(result.text_result_for_llm)["session_id"]
+        return worker, runtime.tasks.current(worker)["id"]
+
+    held, replaced = await start("QA9 tidy the export script")
+    other, instead = await start("QA9 rewrite the export script")
+    await call_tool(runtime, "report", other, status="done", summary="Rewritten.")
+    await settle(runtime)
+    yesterday = (datetime.now().astimezone() - timedelta(days=1)).replace(second=0, microsecond=0)
+
+    def at(hour: int, minute: int) -> str:
+        return yesterday.replace(hour=hour, minute=minute).astimezone(UTC).isoformat()
+
+    written = []
+    for text, when in [("Keep the CSV header", at(15, 2)), ("And the dates in UTC", at(15, 40)),
+                       ("Skip empty rows", at(16, 30)), ("Then tell me", at(17, 40))]:  # fmt: skip
+        message = store.add_message(held, "owner", text, {"task_id": replaced, "prompt": text})
+        store.execute("UPDATE messages SET created_at=? WHERE id=?", (when, message["id"]))
+        written.append(message["id"])
+    finished = at(21, 56)
+    store.execute("UPDATE runs SET ended_at=? WHERE task_id=?", (finished, instead))
+    store.execute(
+        "UPDATE tasks SET status='cancelled', ended_at=?, progress=? WHERE id=?",
+        (finished, f"Cancelled by the Router: Replaced by {instead} “QA9 rewrite the export "
+         "script”.", replaced),
+    )  # fmt: skip
+    store.delete(f"replacedby:{replaced}")
+    store.delete("migrated:replacedby")
+    tasks_module.migrate_replacedby(store)  # (As this version starts.)
+    runtime.update_session(held, activity=SETTINGS_WAIT)
+    await runtime.release_unguarded()
+    await settle(runtime)
+    return {"held": held, "written": written, "finished": finished, "first": at(15, 2)}
+
+
+async def round_e125(runtime, browser, failures: list[str]):
+    """E125: what an update's start cleaned up is one line under Handled for you, with when the
+    messages were written (not the start's time) and what became of their task; nothing new in
+    the Router's chat, the worker closed (E128). Light and dark, 800 and 1280 px."""
+    from chiefofstaff.runtime import said_at
+
+    store = runtime.store
+    router = store.get("router_id")
+    before = len(store.messages(router))
+    seeded = await cleanup_seeded(runtime)
+    assert not [m for m in store.messages(router)[before:] if "not sent" in m["text"]]
+    for message_id in seeded["written"]:
+        assert store.message(message_id)["meta"]["cleanup"]
+    expected = (
+        "Your 4 messages to “QA9 tidy the export script” were not sent: its task moved to “QA9 "
+        f"rewrite the export script”, which finished it {said_at(seeded['finished'])}."
+    )
+    shots = Path(os.environ.get("E125_SHOTS", SHOTS / "e125"))
+    shots.mkdir(parents=True, exist_ok=True)
+    for width, scheme in itertools.product((1280, 800), ("light", "dark")):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 1400}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        handled = page.locator("#needs details.handled")
+        await handled.locator("summary").click()
+        line = handled.locator("li", has_text="Your 4 messages to “QA9 tidy the export script”")
+        await expect(line.locator(".handled-text")).to_have_text(expected)
+        written = line.locator("time")
+        await expect(written).to_contain_text("3:02")
+        await expect(written).to_contain_text("5:40")
+        await expect(written).not_to_have_text("now")
+        await expect(line.get_by_role("button")).to_have_count(0)
+        await line.scroll_into_view_if_needed()
+        await handled.screenshot(path=shots / f"handled-cleanup-{width}-{scheme}.png")
+        assert not errors, errors
+        await context.close()
+    log("E125: an update's cleanup is one line under Handled for you, with when it was written")
 
 
 if __name__ == "__main__":

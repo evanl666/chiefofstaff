@@ -79,12 +79,17 @@ class Handled:
         self.bus.publish("state")
 
     def view(self) -> list[dict]:
-        """The last week's, the newest first, as Home lists them."""
-        return self.store.all(
-            """SELECT id, kind, text, session_id, ref, undo, status, created_at, undone_at
+        """The last week's, the newest first, as Home lists them; `at`: when what an entry is
+        about was written ([first, last]), where that is not when it was handled (E125)."""
+        rows = self.store.all(
+            """SELECT id, kind, text, session_id, ref, undo, status, created_at, undone_at,
+            json_extract(data, '$.at') AS at
             FROM handled WHERE created_at>=? ORDER BY created_at DESC LIMIT ?""",
             (hours_ago(SHOWN_DAYS * 24), SHOWN_MAX),
         )
+        for row in rows:
+            row["at"] = json.loads(row["at"]) if row["at"] else None
+        return rows
 
     async def undo(self, entry_id: str) -> str:
         """The owner's Undo: what was done is reversed if nothing moved on since; what it says."""

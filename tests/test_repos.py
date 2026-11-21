@@ -838,24 +838,30 @@ async def test_a_settings_held_worker_with_no_open_task_closes_and_drops_owner_c
         task = task_of(harness, worker)
         plant(cwd, ".mcp.json")
         queued = await runtime.owner_send(worker, "Keep the tests running")
+        also = await runtime.owner_send(worker, "And the linter")
         assert worker in runtime.settings_held
+        title = runtime.display_title(harness.store.session(worker))
 
         await runtime.task_actions.cancel(task)
         await settle(runtime)
 
         assert harness.store.session(worker)["closed_at"]
         assert worker not in runtime.settings_held
-        dropped = harness.store.message(queued["id"])
-        assert dropped["meta"]["dropped"]
-        assert runtime.delivery.delivery_for(worker, [dropped]) == [""]
-        router_notices = [
-            text for kind, text in harness.kinds(harness.router_id) if kind == "notice"
-        ]
-        assert any(
-            text.startswith("Your message “Keep the tests running” to “")
-            and text.endswith("was not sent: its task is over. It won't be sent later.")
-            for text in router_notices
+        for message in (queued, also):
+            dropped = harness.store.message(message["id"])
+            assert dropped["meta"]["dropped"]
+            assert runtime.delivery.delivery_for(worker, [dropped]) == [""]
+        # E125: one line for both, when they were written, and what became of their task.
+        (line,) = [
+            m for m in harness.store.messages(harness.router_id)
+            if m["kind"] == "notice" and "not sent" in m["text"]
+        ]  # fmt: skip
+        when = runtime_module.said_between(queued["created_at"], also["created_at"])
+        assert line["text"] == (
+            f"Your 2 messages to “{title}” ({when}) were not sent: its task was cancelled. "
+            "They won't be sent later."
         )
+        assert line["meta"]["at"] == [queued["created_at"], also["created_at"]]
     finally:
         await runtime.stop()
 
@@ -1257,13 +1263,13 @@ async def test_workers_held_for_their_settings_go_on_once_the_sandbox_is_off(
         assert "Also the docs" in again.session(going).sent[-1]
         assert not any("And this" in text for text in again.session(ended).sent)
         (dropped,) = [m for m in again.store.messages(ended) if m["text"] == "And this"]
-        assert dropped["meta"]["dropped"]
-        assert any(
-            text.startswith("Your message “And this” to “")
-            and text.endswith("won't be sent later.")
-            for kind, text in again.kinds(again.router_id)
-            if kind == "notice"
-        )
+        assert dropped["meta"]["dropped"] and dropped["meta"]["cleanup"]
+        # E125: a cleanup at the start: under Handled for you, not a line in the chat.
+        assert not [t for k, t in again.kinds(again.router_id) if "not sent" in t]
+        (entry,) = [e for e in runtime.handled.view() if e["kind"] == "cleanup"]
+        assert entry["text"].startswith("Your message “And this” to “")
+        assert entry["text"].endswith("was not sent: its task was cancelled.")
+        assert entry["at"] == [dropped["created_at"], dropped["created_at"]]
     finally:
         await runtime.stop()
 
@@ -1295,6 +1301,69 @@ def test_tasks_replaced_before_their_link_was_kept_get_it_once(tmp_path):
         assert store.get(f"replacedby:{kept['id']}") == other["id"]
         assert store.get(f"replacedby:{gone['id']}") is None
         assert store.get(f"replacedby:{other['id']}") is None
+
+
+async def test_a_held_workers_messages_whose_task_moved_on_are_one_handled_line_at_start(
+    tmp_path, git_repo, monkeypatch
+):
+    """E125, E126, E128 (0.1.51, after the update): a worker held for its folder's settings,
+    four messages of the owner's waiting for it, its task replaced, by an earlier version (no
+    replacedby record), by one another worker then finished. At the start without the sandbox
+    those messages are one line under Handled for you, with when they were written and what
+    became of their task, not four lines in the Router's chat stamped now; the link is read
+    back first; the worker, with nothing open nor left for it, closes."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        task = task_of(harness, worker)
+        other, _ = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, other)  # (It reported its task done: finished.)
+        instead = task_of(harness, other)
+        plant(cwd, ".mcp.json")
+        written = [
+            await runtime.owner_send(worker, text) for text in ("One", "Two", "Three", "Four")
+        ]
+        assert worker in runtime.settings_held
+    finally:
+        await runtime.stop()
+    # As 0.1.50 left it: written Thursday afternoon; the task replaced, its link only in words.
+    times = ["2026-11-19T23:02:00+00:00", "2026-11-19T23:40:00+00:00",
+             "2026-11-20T00:30:00+00:00", "2026-11-20T01:40:00+00:00"]  # fmt: skip
+    for message, at in zip(written, times, strict=True):
+        harness.store.execute("UPDATE messages SET created_at=? WHERE id=?", (at, message["id"]))
+    finished = "2026-11-20T05:56:00+00:00"
+    harness.store.execute(
+        "UPDATE tasks SET status='cancelled', ended_at=?, progress=? WHERE id=?",
+        (finished, f"Cancelled by the Router: Replaced by {instead} “Fix it again”.", task),
+    )
+    harness.store.execute("UPDATE runs SET ended_at=? WHERE task_id=?", (finished, instead))
+    harness.store.delete(f"replacedby:{task}")
+    harness.store.delete("migrated:replacedby")  # (Its database, from before this version.)
+    again = Harness(
+        tmp_path / "data", Settings(worker_sandbox=False, projects=[str(git_repo)]),
+        client=harness.client,
+    )  # fmt: skip
+    runtime = await again.connect()
+    try:
+        await settle(runtime)
+        assert again.store.get(f"replacedby:{task}") == instead
+        assert not [t for k, t in again.kinds(again.router_id) if "not sent" in t]
+        (entry,) = [e for e in runtime.handled.view() if e["kind"] == "cleanup"]
+        there = runtime.display_title(again.store.session(other))
+        title = runtime.display_title(again.store.session(worker))
+        assert entry["text"] == (
+            f"Your 4 messages to “{title}” were not sent: its task moved to “{there}”, which "
+            f"finished it {runtime_module.said_at(finished)}."
+        )
+        assert entry["at"] == [times[0], times[-1]] and entry["session_id"] == worker
+        assert not entry["undo"]
+        for message in written:
+            meta = again.store.message(message["id"])["meta"]
+            assert meta["dropped"] and meta["cleanup"] and "prompt" not in meta
+    finally:
+        await runtime.stop()
 
 
 async def test_a_worker_held_a_quarter_hour_in_its_own_worktree_goes_on_in_a_fresh_one(

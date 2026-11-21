@@ -387,6 +387,39 @@ def clock_time(at: float) -> str:
     return datetime.fromtimestamp(at, UTC).astimezone().strftime("%I:%M %p").lstrip("0")
 
 
+def said_parts(iso: str) -> tuple[datetime, str, str, str]:
+    """(the time, its day as a prefix: "" today, "Thu " this week, "Nov 12, " before; its
+    clock, "3:02"; "AM" or "PM"), in this computer's time."""
+    at = datetime.fromisoformat(iso).astimezone()
+    days = (datetime.now().astimezone().date() - at.date()).days
+    day = "" if days == 0 else f"{at:%a} " if 0 < days < 7 else f"{at:%b} {at.day}, "
+    return at, day, f"{at.hour % 12 or 12}:{at.minute:02d}", "AM" if at.hour < 12 else "PM"
+
+
+def said_at(iso: str) -> str:
+    """When something was, as the owner reads it: "3:02 PM", "Thu 3:02 PM", "Nov 12, 3:02 PM"."""
+    _, day, clock, half = said_parts(iso)
+    return f"{day}{clock} {half}"
+
+
+DASH = "\u2013"  # (An en dash: "3:02-5:40 PM" as the owner reads it.)
+
+
+def said_between(first: str, last: str) -> str:
+    """When things were, from the first to the last, with an en dash between: "Thu 3:02-5:40
+    PM", "Thu 11:50 AM-1:10 PM", "Thu 3:02 PM - Fri 9:01 AM"; one time when they are the same
+    minute."""
+    start, day, clock, half = said_parts(first)
+    end, day2, clock2, half2 = said_parts(last)
+    if (day, clock, half) == (day2, clock2, half2):
+        return f"{day}{clock} {half}"
+    if start.date() == end.date():
+        if half == half2:
+            return f"{day}{clock}{DASH}{clock2} {half}"
+        return f"{day}{clock} {half}{DASH}{clock2} {half2}"
+    return f"{day}{clock} {half} {DASH} {day2}{clock2} {half2}"
+
+
 def counters(totals: Any) -> dict[str, int]:
     """An agent's cumulative token counts (Codex's `tokenUsage.total`), as the ledger keeps
     them; `tokens`: what counts toward a limit (input and output)."""
@@ -7237,8 +7270,10 @@ class Runtime:
         text: str,
         *,
         forwarded_to: str = "",
+        cleanup: bool = False,
     ) -> dict:
-        """Keep a queued message in history but remove the prompt so it can never arrive."""
+        """Keep a queued message in history but remove the prompt so it can never arrive;
+        `cleanup`: as Chief of Staff started (E125)."""
         meta = {
             key: value
             for key, value in message["meta"].items()
@@ -7252,6 +7287,7 @@ class Runtime:
                 "session_id": message["session_id"],
             },
             **({"forwarded_to": forwarded_to} if forwarded_to else {}),
+            **({"cleanup": True} if cleanup else {}),
         }
         self.store.update_message_meta(message["id"], meta)
         updated = self.store.message(message["id"])
@@ -7426,14 +7462,19 @@ class Runtime:
             if message["kind"] == "owner" and not message["meta"].get("dropped")
         ]
 
-    async def settle_held_chat(self, row: dict, closing: bool) -> list[str]:
+    async def settle_held_chat(self, row: dict, closing: bool, cleanup: bool = False) -> list[str]:
         """What the owner wrote a worker held for its folder's settings, as the hold ends some
         other way than its going on with all of it (E124): each message still waiting stays
         unless the task it names is over (cancelled, failed, replaced, set aside) or another's,
         or the worker is `closing`; then it goes to the task that replaced the one it names,
         when that is another worker's and open (replacedby proves it); else it is dropped,
-        never delivered later. The lines Home says of what moved or was dropped, said there too."""
-        said = []
+        never delivered later. What became of them is said in one line for each worker they
+        went to, and one for those dropped (E125), with when they were written and what became
+        of their task: in the Router's chat, or, for a cleanup as Chief of Staff starts
+        (`cleanup`: release_unguarded), under Handled for you, the messages marked so. The
+        lines said."""
+        moved: dict[str, list[dict]] = {}
+        dropped: list[tuple[dict, str]] = []
         for message in self.unsent_owner_chat(row["id"]):
             named = self.tasks.find(message["meta"].get("task_id") or "")
             if not closing and (
@@ -7451,7 +7492,6 @@ class Runtime:
                 if (named and named["session_id"] == row["id"])
                 else None
             )
-            quoted = clip_words(message["text"], 100)
             if (
                 named
                 and instead
@@ -7462,22 +7502,85 @@ class Runtime:
                 there = self.display_title(self.store.session(instead["session_id"]))
                 self.drop_held_owner_message(
                     message, "forwarded", f"Sent to “{there}”, which took over its task.",
-                    forwarded_to=instead["session_id"],
+                    forwarded_to=instead["session_id"], cleanup=cleanup,
                 )  # fmt: skip
-                said.append(f"Your message “{quoted}” went to “{there}”, which took over its task.")
+                moved.setdefault(instead["session_id"], []).append(message)
             else:
+                outcome = self.held_outcome(row, named)
                 self.drop_held_owner_message(
-                    message, "dropped", "Not sent: its task is over. It won't be sent later."
+                    message, "dropped", f"Not sent: {outcome}.", cleanup=cleanup
                 )
-                said.append(
-                    f"Your message “{quoted}” to “{self.display_title(row)}” was not sent: its "
-                    "task is over. It won't be sent later."
+                dropped.append((message, outcome))
+        title = clip_words(self.display_title(row), 80)
+        said: list[tuple[list[dict], str]] = []
+        for session_id, messages in moved.items():
+            there = clip_words(self.display_title(self.store.session(session_id)), 80)
+            said.append(
+                (messages, f"to “{title}”{{when}} went to “{there}”, which took over its task.")
+            )
+        if dropped:
+            messages = [message for message, _ in dropped]
+            outcome = "; ".join(dict.fromkeys(outcome for _, outcome in dropped))
+            one = len(messages) == 1
+            later = "" if cleanup else f" {'It' if one else 'They'} won't be sent later."
+            verb = "was" if one else "were"
+            said.append((messages, f"to “{title}”{{when}} {verb} not sent: {outcome}.{later}"))
+        lines = []
+        for messages, line in said:
+            first, last = messages[0]["created_at"], messages[-1]["created_at"]
+            whose = (
+                f"Your message “{clip_words(messages[0]['text'], 100)}”"
+                if len(messages) == 1
+                else f"Your {len(messages)} messages"
+            )
+            # (Under Handled for you, the time beside it says when they were written.)
+            when = "" if cleanup else f" ({said_between(first, last)})"
+            text = f"{whose} {line.format(when=when)}"
+            lines.append(text)
+            if cleanup:
+                self.handled.record(
+                    "cleanup", text, session_id=row["id"], ref=row["id"],
+                    data={"at": [first, last], "messages": [m["id"] for m in messages]},
+                )  # fmt: skip
+                continue
+            with suppress(RuntimeError):
+                meta = {"session_id": row["id"], "at": [first, last]}
+                self.add_message(self.router_id(), "notice", text, meta)
+        return lines
+
+    def held_outcome(self, row: dict, named: dict | None) -> str:
+        """What became of the task a message held for a worker named, in a few words (E125):
+        where it moved and how it went there, or how it ended."""
+        if not named:
+            return "it has no task open"
+        if instead := self.tasks.find(self.store.get(f"replacedby:{named['id']}") or ""):
+            worker = self.store.find_session(instead["session_id"])
+            there = clip_words(self.display_title(worker), 80) if worker else instead["title"]
+            moved = f"its task moved to “{there}”"
+            if instead["status"] in {"review", "done"}:
+                finished = (
+                    self.store.value(
+                        "SELECT max(ended_at) FROM runs WHERE task_id=?", (instead["id"],)
+                    )
+                    or instead["ended_at"]
+                    or instead["updated_at"]
                 )
-        with suppress(RuntimeError):
-            router = self.router_id()
-            for line in said:
-                self.add_message(router, "notice", line, {"session_id": row["id"]})
-        return said
+                return f"{moved}, which finished it {said_at(finished)}"
+            if instead["status"] == "failed":
+                return f"{moved}, where it failed"
+            if instead["status"] == "cancelled":
+                return f"{moved}, where it was cancelled"
+            return moved
+        if named["session_id"] != row["id"]:
+            return "its task is another worker's"
+        if self.store.get(f"setaside:{named['id']}"):
+            return "its task was set aside"
+        return {
+            "cancelled": "its task was cancelled",
+            "failed": "its task failed",
+            "review": "its task was finished",
+            "done": "its task was finished",
+        }.get(named["status"], "its task is over")
 
     async def forwarded_held_chat(self, message: dict, old: dict, new: dict) -> bool:
         """A held message the owner wrote about a task, to the worker of the task replacing it;
@@ -7541,7 +7644,7 @@ class Runtime:
         """Workers held for their folder's settings (or a .git they could write) that are not
         guarded now (settings_guarded: the sandbox is off, after an update or turned off in
         Settings) go on: what the owner wrote them goes out, but for a task that is over or
-        another's, which is dropped (settle_held_chat)."""
+        another's, which is dropped (settle_held_chat: a cleanup, under Handled for you)."""
         for row in self.store.open_sessions(WORKER):
             if self.settings_guarded(row):
                 continue
@@ -7566,7 +7669,7 @@ class Runtime:
                 for path in await self.settings_thread(self.git_replaced, row):
                     identity = identity_of(path)
                     self.git_record(path, identity + self.git_served(path, identity))
-                await self.settle_held_chat(row, closing=False)
+                await self.settle_held_chat(row, closing=False, cleanup=True)
             except Exception:
                 # (It stays held: tried again at the next start or sandbox change.)
                 logger.warning("Could not let %s go on.", row["id"], exc_info=True)

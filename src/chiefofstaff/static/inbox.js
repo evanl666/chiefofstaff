@@ -324,8 +324,9 @@ function handledLine(needs) {
     return el(
       "li",
       { class: entry.status === "done" ? "" : "undone", "data-id": entry.id },
-      el("span", { class: "handled-text", text: entry.status === "undone" ? `${entry.text} (undone)` : entry.text, title: clock(entry.created_at) }),
-      el("time", { text: ago(entry.created_at) }),
+      el("span", { class: "handled-text", text: entry.status === "undone" ? `${entry.text} (undone)` : entry.text, title: `Handled ${clock(entry.created_at)}` }),
+      // About something written before (messages left from before a start, E125): when.
+      entry.at ? el("time", { text: writtenAt(entry.at), title: `Handled ${clock(entry.created_at)}` }) : el("time", { text: ago(entry.created_at) }),
       undo,
     );
   });
@@ -333,6 +334,24 @@ function handledLine(needs) {
   fresh.dataset.key = key;
   if (node) node.replaceWith(fresh);
   else needs.append(fresh);
+}
+// When what a row is about was written, from its first to its last: "Thu 3:02 PM–5:40 PM".
+function writtenAt([first, last]) {
+  const time = (date) => date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const day = (date) => {
+    const days = Math.round((new Date(new Date().toDateString()) - new Date(date.toDateString())) / 86400000);
+    if (days === 0) return "";
+    return days < 7 ? `${date.toLocaleDateString([], { weekday: "short" })} ` : `${date.toLocaleDateString([], { month: "short", day: "numeric" })}, `;
+  };
+  const [start, end] = [new Date(first), new Date(last || first)];
+  if (time(start) === time(end) && start.toDateString() === end.toDateString()) return `${day(start)}${time(start)}`;
+  if (start.toDateString() === end.toDateString()) {
+    // "3:02–5:40 PM": the half of the day once when both are in it.
+    const [from, to] = [time(start), time(end)].map((said) => said.match(/^(.+?)\s?(AM|PM)$/i));
+    const once = from && to && from[2] === to[2];
+    return `${day(start)}${once ? from[1] : time(start)}–${time(end)}`;
+  }
+  return `${day(start)}${time(start)} – ${day(end)}${time(end)}`;
 }
 const ago = (iso) => {
   const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
