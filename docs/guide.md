@@ -372,7 +372,8 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   such a copy too, on your files as they are, never in its worktree (its own branch, which may
   be behind yours).
   Ask in so many words for the work to be done directly in your folder (no worktree), and that
-  worker may change it.
+  worker may change it: a worker of its own, started for it, never one you have that works in a
+  copy of that folder or only reads it (it couldn't).
 - Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
   are removed if they hold nothing uncommitted (in such a copy, your changes copied in are
   yours, not its work; the branches stay); reopening it brings them
