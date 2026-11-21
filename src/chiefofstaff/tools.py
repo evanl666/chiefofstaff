@@ -235,6 +235,15 @@ ACK_CJK = re.compile(
 )
 # Chinese, Japanese or Korean writing.
 CJK_TEXT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+# The owner asking for work done directly in their own folder (in place, not a copy): only a
+# worker started for it with in_place=true can (one they have works in a copy, or reads it).
+IN_PLACE_ASK = re.compile(
+    r"\bdirectly in (?:my|our|the|your|their) (?:own )?(?:project )?"
+    r"(?:folder|checkout|repo|repository|project|directory|tree)\b"
+    r"|\b(?:work|working|change|edit|do (?:it|this|that|the work))(?: it)? in[- ]place\b"
+    r"|\bnot (?:in )?a copy\b|\b(?:no|without a) worktree\b",
+    re.IGNORECASE,
+)
 
 
 def acknowledgement(text: str) -> bool:
@@ -1859,6 +1868,11 @@ class Tools:
                 # candidates for this one.
                 exclude=[task["session_id"] for task in after] + [row["id"] for row in peers],
             )
+            if related and params.in_place:
+                # Work in the owner's own folder: only a worker in place there could take it.
+                related = [
+                    found for found in related if self.works_in_place(found["session_id"], project)
+                ]
             if related:
                 # Routing to the worker that already knows the subject matters: decide explicitly.
                 raise ValueError(
@@ -2256,6 +2270,20 @@ class Tools:
             raise ValueError(
                 f"Its task {task['id']} was cancelled. For new work in this worker use "
                 "task='new' with a title; to only tell it something, task='note'."
+            )
+        if (
+            target["role"] == WORKER
+            and params.task in {"new", "continue"}
+            and IN_PLACE_ASK.search(self.runtime.owner_words_now())
+            and not self.works_in_place(target["id"])
+        ):
+            # A worker given the owner's folder to read, or one in a copy, cannot do it (live
+            # r76 E5: given to one, it declined, and the task was replaced).
+            raise ValueError(
+                "Not sent: the owner asked for this to be done directly in their own folder (in "
+                "place, not a copy), and this worker works in a copy of it or only reads it: it "
+                "can't. Start a worker for it with spawn_worker in_place=true (context_from this "
+                "worker's task when its work helps), why_new quoting the owner's words."
             )
         if task and params.task == "continue" and task["status"] == "done":
             raise ValueError(
@@ -3179,6 +3207,19 @@ class Tools:
         elif task["progress"]:
             brief["progress"] = task["progress"][:300]
         return brief
+
+    def works_in_place(self, session_id: str, project: str = "") -> bool:
+        """Whether a worker was started to change the owner's own folder itself (in_place): in
+        `project`, when one is named."""
+        row = self.store.find_session(session_id)
+        if not row:
+            return False
+        wanted = Path(project).expanduser().resolve() if project else None
+        return any(
+            checkout.get("in_place")
+            and (wanted is None or Path(checkout["path"]).resolve() == wanted)
+            for checkout in self.runtime.workspaces.checkouts(row)
+        )
 
     def related_workers(self, text: str, project: str, exclude: list[str]) -> list[dict]:
         """Workers that may already own this subject: the same project, or a similar task."""

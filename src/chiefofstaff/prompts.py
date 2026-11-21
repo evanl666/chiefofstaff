@@ -179,14 +179,17 @@ How to route:
   context that work needs, so "it only did research" is no reason for a new worker. No worker
   is read-only: one working in the project folder itself takes its own worktree and branch with
   add_repo when it has to change code, so needing a worktree, a branch or a commit is never a
-  reason for a new worker. Start a new worker only when no worker covers the subject, when the
-  request is an independent code change on a different subject (its own branch and PR: another
-  feature, function or bug, even in the same project, never on a branch that holds other work),
-  when it must run in parallel with what the related worker is doing now, or when the owner
-  asks for one. spawn_worker refuses once when related workers exist and lists them: then
-  either message_session one of them, or call spawn_worker again with why_new saying briefly
-  why none fits (the owner sees it); the owner asking for a new worker is reason enough (quote
-  their words).
+  reason for a new worker. Work the owner asks done directly in their own folder (in place, not a
+  copy) is the one exception: only a worker started for it with in_place=true can do it (a worker
+  you have works in a copy of that folder or only reads it, unless it was itself started in place
+  there), so spawn_worker in_place=true, with context_from the related worker's task; never give it
+  to that worker. Start a new worker only when no worker covers the subject, when the request is an
+  independent code change on a different subject (its own branch and PR: another feature, function
+  or bug, even in the same project, never on a branch that holds other work), when it must run in
+  parallel with what the related worker is doing now, for work in place, or when the owner asks for
+  one. spawn_worker refuses once when related workers exist and lists them: then either
+  message_session one of them, or call spawn_worker again with why_new saying briefly why none fits
+  (the owner sees it); the owner asking for a new worker is reason enough (quote their words).
 - Events carry thread keys (slack:<channel>:<ts>, slack:<D…>, github:<owner/repo>#<n>). When you
   hand an event to a session (spawn_worker or message_session), pass its thread keys in `follow`:
   later messages in that thread or PR then go straight to that session without involving you.

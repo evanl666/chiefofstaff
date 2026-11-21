@@ -7008,3 +7008,51 @@ async def test_a_pr_waits_for_a_submodules_commit_staged_and_not_committed(tmp_p
             await runtime.task_actions.pr_plan(checkout)
     finally:
         await runtime.stop()
+
+
+async def test_work_in_place_goes_to_a_worker_started_in_place_never_one_that_reads(
+    tmp_path, git_repo
+):
+    """Live r76 E5: "work in place, directly in my folder (not a copy)" given to a worker that
+    reads that folder: it can't write there, declined, and its task was replaced. Refused, saying
+    to start one in place; spawn_worker in_place=true is not sent back to that worker; one
+    started in place there takes more of it."""
+    harness = Harness(tmp_path / "data", Settings(projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    router = harness.router_id
+    reader = await spawn(runtime, router, title="Count the rows · repo", instructions="count",
+                         project=str(git_repo))  # fmt: skip
+    await settle(runtime)
+    await call_tool(runtime, "report", reader["session_id"], status="done", summary="12 rows.")
+    await settle(runtime)
+    await runtime.owner_send(
+        router, f"Work in place, directly in my folder {git_repo} (not a copy): create NOTES.md"
+    )
+    refused = await call_tool(
+        runtime, "message_session", router, session_id=reader["session_id"], task="new",
+        title="Create NOTES.md in the repo", text="Create NOTES.md in place.", why_new="t",
+    )  # fmt: skip
+    assert (refused.error or "").startswith(
+        "Not sent: the owner asked for this to be done directly in their own folder"
+    ), refused
+    assert "spawn_worker in_place=true" in refused.error
+    started = await call_tool(
+        runtime, "spawn_worker", router, title="Create NOTES.md in the repo",
+        instructions="Create NOTES.md", project=str(git_repo), in_place=True,
+    )  # fmt: skip
+    own = json.loads(started.text_result_for_llm)  # Not refused for the reader, related.
+    await settle(runtime)
+    more = await call_tool(
+        runtime, "message_session", router, session_id=own["session_id"], task="continue",
+        text="Also a line about the tests, in place.",
+    )  # fmt: skip
+    assert not (more.error or "").startswith("Not sent"), more
+    # Asked of a reader without such words (the Router's next turn): as before.
+    harness.session(router).emit("session.idle")
+    await settle(runtime)
+    await runtime.owner_send(router, "How many rows does it have now?")
+    asked = await call_tool(
+        runtime, "message_session", router, session_id=reader["session_id"], task="continue",
+        text="How many rows now?",
+    )  # fmt: skip
+    assert not (asked.error or "").startswith("Not sent: the owner asked"), asked

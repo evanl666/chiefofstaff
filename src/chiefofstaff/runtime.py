@@ -2210,6 +2210,19 @@ class Runtime:
         row = {"id": "", "role": WORKER, "slack": 0, "yolo": "", "closed_at": None, "cwd": ""}
         return self.blocked_on(name, row)
 
+    def owner_words_now(self) -> str:
+        """What the owner wrote the Router since its last turn ended (the messages its turn now
+        answers; not those addressed to one worker)."""
+        router = self.store.get("router_id")
+        if not router:
+            return ""
+        since = int(self.store.get(f"idle:{router}") or 0)
+        return "\n".join(
+            message["text"]
+            for message in self.store.messages(router, after=since, limit=20)
+            if message["kind"] == "owner" and not (message["meta"] or {}).get("to")
+        )
+
     def chosen_agents(self) -> list[str]:
         """The agents the owner chose in the composer for what the Router does now: one
         (@codex), or several to compare (@codex @claude); those on only."""
