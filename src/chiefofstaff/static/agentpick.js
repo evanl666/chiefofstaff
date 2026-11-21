@@ -7,8 +7,11 @@ import { state } from "./state.js";
 
 export const AGENT_NAMES = { copilot: "Copilot", codex: "Codex", claude: "Claude" };
 export const agentName = (name) => AGENT_NAMES[name] || state.snapshot?.agents?.names?.[name] || name;
-// The agents new work can run on now: Copilot and each one on.
-export const agentsOn = () => (state.snapshot?.agents ? ["copilot", ...state.snapshot.agents.on] : []);
+// The agents new work can run on now: Copilot and each one on, in the one order every list
+// has (Copilot, Codex, Claude), whichever was turned on first.
+const ORDER = Object.keys(AGENT_NAMES);
+const rank = (name) => (ORDER.includes(name) ? ORDER.indexOf(name) : ORDER.length);
+export const agentsOn = () => (state.snapshot?.agents ? ["copilot", ...[...state.snapshot.agents.on].sort((a, b) => rank(a) - rank(b))] : []);
 // Marks only where they tell something: more than one agent on.
 export const marksShown = () => agentsOn().length > 1;
 export const statuses = () => state.snapshot?.agents_status || [];
@@ -40,6 +43,17 @@ export function statusText(status) {
   return [status.said, ready(status) ? status.pays : ""].filter(Boolean).join(" · ");
 }
 
+// The command that makes an agent ready, copied, said by one toast: one an earlier copy left
+// (the @ list's, the popover's) goes.
+export async function copyFix(fix) {
+  try {
+    await navigator.clipboard.writeText(fix.command);
+    for (const earlier of document.querySelectorAll("#toasts .toast.copied-fix")) earlier.remove();
+    toast(`Copied: run ${fix.command} in a terminal${fix.then ? `, ${fix.then}` : ""}.`, "copied-fix");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
 // The command that makes it ready, to run in a terminal, with a Copy button.
 export function fixLine(fix) {
   if (!fix?.command) return null;
@@ -49,14 +63,9 @@ export function fixLine(fix) {
     text: "Copy",
     "aria-label": `Copy ${fix.command}`,
     onmousedown: (event) => event.preventDefault(),
-    onclick: async (event) => {
+    onclick: (event) => {
       event.stopPropagation();
-      try {
-        await navigator.clipboard.writeText(fix.command);
-        toast(`Copied: run ${fix.command} in a terminal${fix.then ? `, ${fix.then}` : ""}.`);
-      } catch (error) {
-        toast(error.message, "error");
-      }
+      copyFix(fix);
     },
   });
   return el("span", { class: "agent-fix" }, "Run ", el("code", { text: fix.command }), fix.then ? ` ${fix.then}` : "", " in a terminal ", copy);

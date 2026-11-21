@@ -9,7 +9,7 @@ import { byId, closedWorkers, DELIVERY_WORDS, latestDelivery, loadState, ownerQu
 import { renderSidebar } from "./sidebar.js";
 import { continueWith, refreshChips, select } from "./session.js";
 import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
-import { agentName, markOf, ready, statusOf } from "./agentpick.js";
+import { agentName, agentsOn, markOf, ready, statusOf } from "./agentpick.js";
 import { showChanges } from "./diff.js";
 // Chief of Staff's own helpers (learning how the owner works, checks, the profile): their
 // results come as cards to approve; the work itself is not the owner's.
@@ -21,7 +21,7 @@ function elsewhereItems(task, named = false) {
   const on = state.snapshot.agents;
   const session = byId(task.session_id);
   if (task.stopped !== PLAN_STOP || !on || !session) return [];
-  return ["copilot", ...on.on]
+  return agentsOn()
     .filter((name) => name !== (session.agent || "copilot") && (name === "copilot" || ready(statusOf(name) || { status: "ready" })))
     .map((name) => ({ text: named ? agentName(name) : `Continue with ${agentName(name)}…`, onclick: () => continueWith(session, name) }));
 }

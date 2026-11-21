@@ -8,7 +8,7 @@ import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
-import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, marksShown, modelLabel, ready, statusOf } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, marksShown, modelLabel, ready, statuses, statusOf } from "./agentpick.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
@@ -19,7 +19,8 @@ const earlier = { session: "", first: null, more: false, count: null, busy: fals
 // A worker's state in the header, as its sidebar dot and Home have it.
 // The four places, as the sidebar dot and Home say them.
 const SHORT_STATE = { waiting: "Needs you", working: "Running", watching: "Monitoring", idle: "Nothing open" };
-const ROUTER_PLACEHOLDER = "Ask for anything… (@ to message one worker)";
+// With another coding agent installed, @ picks an agent too (its status in the @ list).
+const routerPlaceholder = () => (statuses().length ? "Ask anything… type @ to pick an agent or a worker" : "Ask for anything… (@ to message one worker)");
 // Every view but Home has "← Home" at the top left.
 function backHome(shown) {
   $("#back-home").hidden = !shown;
@@ -44,7 +45,7 @@ export function renderHeader() {
     sessionMenu(router);
     $("#composer").hidden = false;
     const waiting = !router && state.snapshot.runtime.state !== "ready";
-    setComposer(router?.elsewhere ? { locked: IN_TERMINAL } : waiting ? { locked: "You can ask once Copilot is connected." } : { placeholder: ROUTER_PLACEHOLDER });
+    setComposer(router?.elsewhere ? { locked: IN_TERMINAL } : waiting ? { locked: "You can ask once Copilot is connected." } : { placeholder: routerPlaceholder() });
     return;
   }
   const session = current();
@@ -162,7 +163,7 @@ export function renderHeader() {
   const idle = !["working", "queued", "starting"].includes(session.status) && !session.background && !session.elsewhere;
   if (session.role === "worker" && !session.closed_at && !session.helper && idle && state.snapshot.agents) {
     const names = { copilot: "Copilot", ...state.snapshot.agents.names };
-    const others = ["copilot", ...state.snapshot.agents.on].filter((name) => name !== (session.agent || "copilot"));
+    const others = agentsOn().filter((name) => name !== (session.agent || "copilot"));
     items.push(el("hr"), ...others.map((name) => menuButton(`Continue with ${names[name]}…`, () => continueWith(session, name))));
   }
   if (session.role === "worker" && !session.closed_at) {
@@ -181,7 +182,7 @@ export function renderHeader() {
   }
   sessionMenu(session, items);
   const placeholders = {
-    router: ROUTER_PLACEHOLDER,
+    router: routerPlaceholder(),
     slack: "Message the Slack session…",
     watchdog: "Message the Watchdog…",
   };

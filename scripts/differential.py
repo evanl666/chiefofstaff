@@ -533,6 +533,12 @@ INSTALLED = [
     ),
     Allow("the first-run card published: one more state event", data=r"^steps\.\w+\.bus\.state$",
           more=1),
+    Allow(
+        "the Router's composer: @ picks an agent too (\"Ask anything… type @ to pick an agent or a "
+        "worker\")",
+        element="#composer-input",
+        views=r"^(home|sidebar-\d)",
+    ),
     *(
         Allow(f"the glance at startup: {run}", data=r"^agent_clis\[\d+\]$", value=run)
         for run in ("codex --version", "claude --version", "claude auth status --json")

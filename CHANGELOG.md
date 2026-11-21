@@ -40,10 +40,12 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   and header names its agent (Copilot too) and model.
 - **The agent picker.** `@` lists every agent with its status (*Ready*, *Sign-in needed*, *Not
   installed*; one not ready dimmed, with the command that makes it ready and *Copy*: Chief of
-  Staff never signs in for you); the chip it makes opens one popover: the agent, its models and
-  effort, and whose plan or key it uses ("Uses your ChatGPT sign-in"). Settings' rows say the
-  same, and *Available for workers* waits until the agent is ready; *New workers start on* adds
-  *Last used*; the Router and Watchdog choices are under *System agents*, folded. Each worker
+  Staff never signs in for you), and the message box says so (*type @ to pick an agent or a
+  worker*); every list of agents has them in one order (Copilot, Codex, Claude), and a command
+  copied again says so in one note, not two; the chip it makes opens one popover: the agent, its
+  models and effort, and whose plan or key it uses ("Uses your ChatGPT sign-in"). Settings' rows
+  say the same, and *Available for workers* waits until the agent is ready; *New workers start on*
+  adds *Last used*; the Router and Watchdog choices are under *System agents*, folded. Each worker
   shows its agent's mark (one colour per agent, its model on hover) on its row, tasks, header and
   start line. Before its first step, a worker's agent chip offers *Restart on* another agent;
   after it, *Continue with…* shows what it sends in one line and leaves the worker open, the new

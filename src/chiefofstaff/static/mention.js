@@ -5,7 +5,7 @@
 // its models and effort); two picked, the task runs on each, side by side (Compare).
 import { $, api, el, toast } from "./dom.js";
 import { byId, HOME, sessions, state, workerTitle } from "./state.js";
-import { agentMark, agentName, agentPopover, closeAgentPopover, EFFORT_WORDS, modelLabel, ready, refreshStatuses, statuses, statusText } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, closeAgentPopover, copyFix, EFFORT_WORDS, modelLabel, ready, refreshStatuses, statuses, statusText } from "./agentpick.js";
 
 export const mention = { to: null, agent: null, agents: [], options: [], active: 0, dismissed: -1 };
 // Agents on at once for one task, at most (Compare).
@@ -89,12 +89,7 @@ function agentOption(option) {
 async function pickUnready(option) {
   const status = option.status;
   if (status?.fix?.command) {
-    try {
-      await navigator.clipboard.writeText(status.fix.command);
-      toast(`Copied: run ${status.fix.command} in a terminal${status.fix.then ? `, ${status.fix.then}` : ""}.`);
-    } catch (error) {
-      toast(error.message, "error");
-    }
+    await copyFix(status.fix);
     return;
   }
   if (!(ready(status) && !status.on)) return;
