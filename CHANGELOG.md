@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Slack searches ask the way Slack's search takes them now.** Slack's search lists its words
+  and its modifiers (*to:me*, *hasmy::robot_face:*, *from:me*) apart since November 2026, and no
+  longer lists the single query Chief of Staff gave it (still taken, for now). Chief of Staff's own
+  searches (new DMs and mentions, your delegate emoji, finding a reply you sent) use the new way,
+  so they keep working once the old one goes.
+- **A DM with yourself reads as *your notes to yourself*.** A thread there showed as *Slack thread
+  in D0…*: with nobody else in it, there was no one to name it after.
+
 ## 0.1.53 (2026-11-22)
 
 Workers can run on Claude Code too, with your own sign-in; choosing an agent is simpler (a card
