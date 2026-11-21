@@ -45,6 +45,7 @@ from .models import (
     SkillUpload,
     SlackToken,
     TaskNote,
+    TeamNudge,
     Unfollow,
     UpdateRequest,
 )
@@ -703,6 +704,21 @@ def create_app(
     @app.post("/api/sessions/{session_id}/yolo")
     async def session_yolo(session_id: str, payload: SessionYolo):
         return await runtime.set_session_yolo(session_id, payload.mode)
+
+    @app.post("/api/sessions/{session_id}/label")
+    async def session_label(session_id: str, payload: TaskNote):
+        """A worker's short name, the owner's ("" gives it back its own)."""
+        return {"label": runtime.teams.set_label(session_id, payload.text)}
+
+    @app.get("/api/teams/{team_id}/thread")
+    async def team_thread(team_id: str):
+        """What a team's workers told and asked each other, each question with its answer."""
+        return runtime.teams.thread_view(team_id)
+
+    @app.post("/api/teams/{team_id}/nudge")
+    async def team_nudge(team_id: str, payload: TeamNudge):
+        """The owner's Nudge: the worker asked hears its teammate waits for the answer."""
+        return {"said": await runtime.teams.nudge(team_id, payload.question_id)}
 
     @app.post("/api/sessions/{session_id}/agent-settings")
     async def use_agent_settings(session_id: str, payload: AgentSettings):

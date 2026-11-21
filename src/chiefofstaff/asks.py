@@ -783,7 +783,8 @@ class Asks:
     def peer_waiting(self) -> list[dict]:
         """Open questions one worker asked another, oldest first: who waits on whom since when."""
         rows = self.store.all(
-            """SELECT q.id, q.asker, q.target, q.asked FROM questions q
+            """SELECT q.id, q.asker, q.target, q.asked, substr(q.text, 1, 300) AS text
+            FROM questions q
             JOIN sessions a ON a.id = q.asker JOIN sessions t ON t.id = q.target
             WHERE q.status='open' AND a.role='worker' AND t.role='worker' ORDER BY q.asked"""
         )
@@ -876,6 +877,7 @@ class Asks:
             {"target": target["id"], "title": title, "question_id": question_id},
         )
         if target["role"] == "worker":
+            self.runtime.peers.talked(caller, target["id"])
             self.runtime.peers.copy_to_router(
                 f"“{asker['title']}” asked {title}: {clip(params.question, 600)}",
                 {

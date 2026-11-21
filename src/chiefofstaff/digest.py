@@ -212,6 +212,12 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
                 {"kind": "question", "question": question, "session_id": question["session_id"]}
             )
     router = store.get("router_id") or ""
+    # A question between workers holding its asker's task up for half an hour: a line per team
+    # (Home: Nudge, Open thread).
+    for team, question in runtime.teams.held_up():
+        found.items.append(
+            {"kind": "team", "team": team, "question": question, "session_id": question["asker"]}
+        )
     for note in runtime.owner_updates():
         found.items.append({"kind": "note", "note": note, "session_id": router})
     return found
@@ -265,7 +271,7 @@ def waiting_parts(found: Needs) -> list[str]:
     stopped, blocked = found.tasks("stopped"), found.tasks("blocked")
     stalled_, unchecked = found.tasks("stalled"), found.tasks("check-failed")
     unknown = found.tasks("runs-unknown")
-    sends, notes = found.of("send"), found.of("note")
+    sends, notes, held = found.of("send"), found.of("note"), found.of("team")
     parts = [
         (review, plural(len(review), "result") + " to review"),
         (update, plural(len(update), "update") + " on finished work"),
@@ -278,6 +284,7 @@ def waiting_parts(found: Needs) -> list[str]:
         (approvals, plural(approvals, "draft") + " to approve"),
         (others, plural(others.total(), "card") + f" to answer ({', '.join(sorted(others))})"),
         (batched, f"Your OK on {plural(len(batched), 'thing')} ({', '.join(ok_words)})"),
+        (held, plural(len(held), "worker") + " waiting on another one's answer"),
         (sends, plural(len(sends), "send") + " to check"),
         (notes, plural(len(notes), "note") + " of mine to act on"),
     ]

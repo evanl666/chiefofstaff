@@ -280,6 +280,34 @@ FIXES: list[Allow] = [
         "the Usage view's By task and spend (Per accepted result's place)",
         data=r"/api/usage\?since=[^.]*\.(by_task|spend|outcomes)$",
     ),
+    # E129 (team threads), phases 2-4: the Router is given a digest of what workers tell each
+    # other, not a copy of each message, and reads a team's thread when it must (its rule, one
+    # more tool, so its tool search defers one later); workers have a short name and a team,
+    # the state lists the teams; a worker's tabs (none on Home: hidden there).
+    Allow(
+        "the Router's rule: a team digest, read_team_thread when it must",
+        data=r"^backend\.sessions\.router:.*\.system_message\.content$",
+        lines=r"^  (straight to each other \(no need to relay it\); (a copy reaches you|your next "
+        r"turn gets)|riding along with your next turn|on or retell\. What a task|change course "
+        r"reports a question to you\. Pass the owner|worker needs \(links, constraints|\(type="
+        r'"team-digest"|exchanges \(read_team_thread\)|task up, and never pass on|does what stay '
+        r"with you|the owner's request faithfully|project\)\. When the task is one of the owner's)",
+    ),
+    Allow(
+        "the Router's read_team_thread",
+        data=r"^backend\.sessions\.router:.*\.options\.(tools|available_tools)\[\d+\]$",
+    ),
+    Allow(
+        "the Router's tool search, one tool more",
+        data=r"^backend\.sessions\.router:.*\.options\.tool_search\.defer_threshold$",
+        value=49,
+    ),
+    Allow("teams in the state", data=r"/api/state\.teams$"),
+    Allow(
+        "workers' short names and teams",
+        data=r"(/api/state\.sessions\[\d+\]|/api/sessions/[^.]+)\.(label|team)$",
+    ),
+    Allow("a worker's tabs, none on Home", element="#worker-tabs", views=r"^home"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

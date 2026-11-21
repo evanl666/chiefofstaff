@@ -705,6 +705,10 @@ class TaskNote(StrictModel):
     text: str = Field(default="", max_length=20000)
 
 
+class TeamNudge(StrictModel):
+    question_id: str = Field(max_length=40)
+
+
 class Unfollow(StrictModel):
     text: str = Field(max_length=500)  # The thread: slack:… or github:owner/repo#n.
     task_id: str = Field(default="", max_length=20)  # For this task only (else for all).

@@ -447,6 +447,13 @@ class Delivery:
             self.runtime.background(self.runtime.settings_stop(session_id))
             return False
         prompts = [self.runtime.told_prompt(message) for message in pending]
+        # What workers that work together told each other since: who and how often, with what
+        # still waits (Teams.digest), riding along with this turn of the Router's.
+        team_digest, digest_upto = (
+            self.runtime.teams.digest() if worker["role"] == ROUTER else ("", 0)
+        )
+        if team_digest:
+            prompts.insert(0, team_digest)
         if preamble := self.store.get(f"preamble:{session_id}"):
             prompts.insert(0, preamble)  # A new Router's handover, before what is new.
         text = "\n\n".join(prompts)
@@ -553,6 +560,8 @@ class Delivery:
             )
         self.store.set(f"prevsent:{session_id}", str(mark))  # To send again after a failure.
         self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))
+        if digest_upto:
+            self.store.set("teamdigest:upto", str(digest_upto))
         self.store.delete(f"sending:{session_id}")
         self.store.delete(f"fresh:{self.runtime.copilot_id(session_id)}")
         if preamble:

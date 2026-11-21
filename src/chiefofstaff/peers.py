@@ -7,10 +7,11 @@ each is told about the others. They tell each other what the other needs (`tell_
 ask (`ask_session`) without a Router turn in between: the exact words, at once, at no cost to
 the Router's context.
 
-The Router still knows: a copy of each message rides along with its next turn (it does not
-start one), and Home shows it in a line. Information is not work: what a worker should do
-differently than its task says still goes through the Router, which decides (and asks the
-owner when it is theirs). When one of them finishes, the others still at it get its result.
+The Router still knows who talks to whom: its next turn gets a digest of it (it does not start
+one; teams.py), never the words, and Home shows each message in a line, a run of them folded.
+Information is not work: what a worker should do differently than its task says still goes
+through the Router, which decides (and asks the owner when it is theirs). When one of them
+finishes, the others still at it get its result.
 """
 
 from __future__ import annotations
@@ -75,6 +76,15 @@ class Peers:
                 known = self.of(one)
                 if two not in known:
                     self.store.set(f"peers:{one}", json.dumps([*known, two]))
+
+    def talked(self, one: str, other: str):
+        """Two workers that told or asked each other something: their team's (teams.py), also
+        when they were not started to work together. Nothing else follows from it (not their
+        results, as for the ones they work with)."""
+        for first, second in ((one, other), (other, one)):
+            known = json.loads(self.store.get(f"talks:{first}") or "[]")
+            if second not in known:
+                self.store.set(f"talks:{first}", json.dumps([*known, second]))
 
     def resolve(self, references: list[str]) -> tuple[list[dict], list[str]]:
         """Workers named by a task id, a worker id or its short id; and the titles of the other
@@ -210,18 +220,12 @@ class Peers:
         ]
 
     def copy_to_router(self, text: str, meta: dict):
-        """The Router keeps the picture without a turn of its own: this rides along with its
-        next one."""
+        """A line in the Router's chat (Home folds a run of them). Not given to the Router: its
+        next turn gets a digest of who told or asked whom instead, never the words (Teams.digest,
+        E129)."""
         router = self.runtime.router_id()
-        if not router:
-            return
-        self.delivery.hold(
-            router,
-            wrap("system", "peer-message", text),
-            kind="peer",
-            display=text,
-            meta=meta,
-        )
+        if router:
+            self.runtime.add_message(router, "peer", text, meta)
 
     async def t_tell_session(self, params: TellSession, caller: str):
         teller = self.runtime.toolset.caller(caller, WORKER)
@@ -275,6 +279,7 @@ class Peers:
         self.runtime.add_message(
             caller, "tell", text, {"target": target["id"], "title": target["title"]}
         )
+        self.talked(caller, target["id"])
         self.copy_to_router(
             f"“{self.runtime.display_title(teller)}” told "
             f"“{self.runtime.display_title(target)}”: {clip(text, ROUTER_COPY_CHARS)}",

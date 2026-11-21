@@ -786,3 +786,54 @@ async def test_no_event_can_end_the_tabs_live_updates():
     payload.encode("utf-8")  # As the stream sends it.
     sent = {"type": "message", "data": {**data, "text": "Done ?"}}
     assert payload == json.dumps(sent, ensure_ascii=False), "the rest exactly as before"
+
+
+def test_a_teams_thread_a_workers_short_name_and_a_nudge_from_the_page(app_client):
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+
+    def spawn(title, **extra):
+        result = app_client.portal.call(
+            lambda: call_tool(
+                runtime,
+                "spawn_worker",
+                router,
+                title=title,
+                instructions=title,
+                why_new="test",
+                **extra,
+            )
+        )
+        return json.loads(result.text_result_for_llm)
+
+    scout = spawn("Token scout")
+    writer = spawn("Token writer", works_with=[scout["task_id"]])["session_id"]
+    asked = app_client.portal.call(
+        lambda: call_tool(
+            runtime, "ask_session", writer, session_id=scout["session_id"], question="Scope?"
+        )
+    )
+    question = asked.text_result_for_llm.split("(")[1].split(")")[0]
+    team = f"team-{scout['session_id'][:8]}"
+    thread = app_client.get(f"/api/teams/{team}/thread").json()
+    assert thread["team"]["name"] == "Token scout & Token writer"
+    assert [(item["kind"], item["status"]) for item in thread["items"]] == [("ask", "open")]
+    assert app_client.get("/api/teams/team-nobody00/thread").status_code == 404
+    named = app_client.post(
+        f"/api/sessions/{writer}/label", json={"text": "Client"}, headers=ORIGIN
+    )
+    assert named.json() == {"label": "Client"}
+    assert (
+        app_client.get(f"/api/teams/{team}/thread").json()["team"]["name"] == "Token scout & Client"
+    )
+    refused = app_client.post(f"/api/sessions/{router}/label", json={"text": "x"}, headers=ORIGIN)
+    assert refused.status_code == 400
+    nudged = app_client.post(
+        f"/api/teams/{team}/nudge", json={"question_id": question}, headers=ORIGIN
+    )
+    assert nudged.status_code == 200 and nudged.json()["said"].startswith("Nudged “Token scout”")
+    again = app_client.post(
+        f"/api/teams/{team}/nudge", json={"question_id": question}, headers=ORIGIN
+    )
+    assert again.status_code == 400 and "Nudged already" in again.json()["detail"]

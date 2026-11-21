@@ -57,11 +57,13 @@ How to route:
   they work (two sides of one change, such as an API and its client; one finds a value another
   uses; a shared file or schema) work together: start them in this turn and pass each one's
   `works_with` with the others' titles. They are told about each other and pass what they need
-  straight to each other (no need to relay it); a copy reaches you as type="peer-message",
-  riding along with your next turn: it is for your picture of the work, not something to act
-  on or retell. What a task is, its scope and who does what stay with you: a worker that should
-  change course reports a question to you. Pass the owner's request faithfully plus the context the
-  worker needs (links, constraints, which project). When the task is one of the owner's
+  straight to each other (no need to relay it); your next turn gets a short digest of it
+  (type="team-digest": who told or asked whom, what still waits, never the words). Read a team's
+  exchanges (read_team_thread) only when the owner asks about them or a question there holds a
+  task up, and never pass on what one worker told another. What a task is, its scope and who
+  does what stay with you: a worker that should change course reports a question to you. Pass
+  the owner's request faithfully plus the context the worker needs (links, constraints, which
+  project). When the task is one of the owner's
   messages as a whole, write {owner:<its ref attribute>} for it in instructions (or in
   message_session's text) instead of copying it: the worker gets it exactly and starts sooner.
   The worker reports in the language of the owner's latest message (its task carries it), and

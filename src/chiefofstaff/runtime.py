@@ -139,6 +139,7 @@ from .tasks import (
     settle_followups,
 )
 from .tasks import migrate as migrate_tasks
+from .teams import Teams
 from .tools import SpawnWorker, Tools
 from .watchdog import WatchConfig, Watchdog
 from .workers import SETTINGS_STOP, SETTINGS_WAIT, Workers
@@ -267,6 +268,7 @@ ROUTER_TOOLS = [
     "split_task",
     "record_decision",
     "check_prs",
+    "read_team_thread",
 ]
 # Files opened from a report or message show at most this much.
 MAX_FILE_SHOWN = 1_000_000
@@ -823,6 +825,7 @@ class Runtime:
         self.accounts = Accounts(self)
         self.decisions = Decisions(self)
         self.peers = Peers(self)
+        self.teams = Teams(self)
         self.learning = Learning(self)
         self.habits = Habits(self)
         self.checks = Checks(self)
@@ -9555,6 +9558,12 @@ class Runtime:
             # Where the owner's next message in its chat goes, unless they look at a task there.
             "chat_task": self.chat_view(row),
             "display_title": self.display_title(row),
+            # A worker's short name and its team (E129): the same everywhere.
+            **(
+                {"label": self.teams.label(row), "team": self.teams.team_of(row["id"])}
+                if row["role"] == WORKER
+                else {}
+            ),
             "elsewhere": bool(self.is_elsewhere(row)) and not row["closed_at"],
             "terminal": self.terminal.get(row["id"]),
             **(self.progress(row) if row["role"] == WORKER else {}),
@@ -10101,6 +10110,8 @@ class Runtime:
             ],
             # Questions workers wait on each other for (Home: "1 waiting 9 min").
             "peer_waiting": self.asks.peer_waiting(),
+            # Workers that work together, a team each (Home's Teams, a team's thread).
+            "teams": self.teams.view(),
             "updates": self.owner_updates(),
             "tasks": [
                 self.task_actions.view(task)

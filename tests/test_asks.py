@@ -211,11 +211,17 @@ async def test_sessions_ask_each_other(harness):
 
     await call_tool(runtime, "ask_session", asker, session_id=router, question="Who owns billing?")
     sent = harness.session(router).sent[-1]
-    # What the two workers said to each other rides along with the Router's next turn.
-    assert sent.startswith('<message from="system" type="peer-message">')
-    assert "“Invoice bug” asked “Billing research”: Which table holds invoices?" in sent
-    assert "“Billing research” answered “Invoice bug”: billing.inv" in sent
+    # Who of the two workers asked and answered whom rides along with the Router's next turn,
+    # not their words (E129: a team-digest; Home has a line each).
+    assert sent.startswith('<message from="system" type="team-digest">')
+    assert "1 answered, 1 asked." in sent
+    assert "Which table holds invoices?" not in sent and "billing.inv" not in sent
     assert f'<message from="worker:{asker[:8]}" type="question"' in sent
+    lines = [m["text"] for m in harness.store.messages(router) if m["kind"] == "peer"]
+    assert lines == [
+        "“Invoice bug” asked “Billing research”: Which table holds invoices?",
+        "“Billing research” answered “Invoice bug”: billing.inv",
+    ]
     reader = await spawn(runtime, router, "Slack reader", slack=True)
     harness.store.execute("UPDATE sessions SET slack=1 WHERE id=?", (reader,))
     refused = await call_tool(runtime, "ask_session", asker, session_id=reader, question="?")
@@ -397,7 +403,8 @@ async def test_workers_that_work_together_tell_each_other(harness):
     )  # fmt: skip
     assert harness.store.messages(scout)[-1]["kind"] == "tell"
     copy = harness.store.messages(router)[-1]
-    assert copy["kind"] == "peer" and copy["meta"]["deferred"], "rides along, no Router turn"
+    # A line on Home; the Router's next turn gets who told whom, not the words (E129).
+    assert copy["kind"] == "peer" and not copy["meta"].get("prompt"), "a line, no Router turn"
     assert copy["text"] == "“Token scout” told “Token writer”: The token is 48d6e521."
     assert not runtime.delivery.has_unsent(router)
 

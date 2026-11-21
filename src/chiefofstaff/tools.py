@@ -53,6 +53,7 @@ from .task_actions import (
     style_note,
 )
 from .tasks import ADOPTED, OPEN
+from .teams import ReadTeamThread
 from .watchdog import RESTART_PROMPT, last_instruction
 from .workers import router_message, router_note
 from .workspaces import resolve_project
@@ -1296,6 +1297,14 @@ class Tools:
                 "it to answer about PRs instead of asking a worker or going by earlier reports.",
                 CheckPrs,
                 self.t_check_prs,
+            ),
+            (
+                "read_team_thread",
+                "What the workers of a team (workers that work together) told and asked each "
+                "other, each question with its answer or how long it has waited. Only when the "
+                "owner asks about it or a question there holds a task up.",
+                ReadTeamThread,
+                self.runtime.teams.t_read_team_thread,
             ),
             (
                 "read_session",
