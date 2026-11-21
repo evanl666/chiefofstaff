@@ -1,18 +1,21 @@
 import asyncio
 import json
+import signal
 import socket
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import uvicorn
 from conftest import FakeClient, FakeSession, FakeSlackMcp, FakeTokens, call_tool, env, said
 from fastapi.testclient import TestClient
 
-from chiefofstaff.__main__ import LAUNCH_FILE, running_instance
+from chiefofstaff.__main__ import LAUNCH_FILE, Server, running_instance
 from chiefofstaff.bus import Bus
 from chiefofstaff.runtime import Runtime
 from chiefofstaff.sources.slack import SlackSource
+from chiefofstaff.store import Store
 from chiefofstaff.updates import installed
 from chiefofstaff.web import create_app
 
@@ -575,6 +578,25 @@ async def test_closing_the_bus_ends_every_event_stream():
         assert await open_tab.get() is None, "Ctrl+C does not wait for open tabs"
     async with bus.subscribe() as reconnecting:
         assert reconnecting.get_nowait() is None
+
+
+async def test_after_ctrl_c_writes_wait_for_the_disk_no_more_and_closing_keeps_them(tmp_path):
+    """Each write waited for the disk until the stop: a Ctrl+C while Chief of Staff was busy
+    waited for dozens of them (seconds on a Linux CI runner's disk). From Ctrl+C on they don't;
+    closing still writes them all to the disk (SQLite's last checkpoint syncs)."""
+    store, bus = Store(tmp_path), Bus()
+    bus.bind(asyncio.get_running_loop())
+    server = Server(uvicorn.Config(app=None), bus, store)
+    full, normal = 2, 1  # PRAGMA synchronous: a sync at each commit, or at checkpoints only.
+    assert store.value("PRAGMA synchronous") == full
+    async with bus.subscribe() as open_tab:
+        server.handle_exit(signal.SIGINT, None)
+        assert await open_tab.get() is None, "Ctrl+C does not wait for open tabs"
+    assert server.should_exit and store.value("PRAGMA synchronous") == normal
+    store.set("uptime", "its run's end")
+    store.close()
+    server.stopping()  # Ctrl+C again as it ends: the store is closed, nothing to do.
+    assert Store(tmp_path).get("uptime") == "its run's end"
 
 
 def test_a_second_start_finds_only_an_instance_that_answers(tmp_path):

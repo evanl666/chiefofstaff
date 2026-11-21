@@ -349,6 +349,14 @@ class Store:
             return
         self.save_settings(settings)
 
+    def stopping(self):
+        """Chief of Staff stops: what it still writes no longer waits for the disk at each write
+        (on Linux each did, and a Ctrl+C while it was busy waited for dozens of them, seconds on a
+        slow disk). Closing still writes it all to the disk: SQLite's last checkpoint syncs its
+        log, then the database. Closed already (Ctrl+C again, as it ends): nothing left to do."""
+        with self.lock, suppress(sqlite3.ProgrammingError):
+            self.db.execute("PRAGMA synchronous=NORMAL")
+
     def close(self):
         with self.lock:
             self.db.close()

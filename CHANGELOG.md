@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Ctrl+C stops at once on Linux, even while Chief of Staff is busy.** Each thing it saved
+  waited for the disk to confirm it. Pressed while workers were starting, Ctrl+C waited for
+  dozens of those saves, which took seconds on a slow or busy disk. From Ctrl+C on, saves no
+  longer wait one by one, and closing still writes everything to the disk once.
+
 ## 0.1.51 (2026-11-20)
 
 - **When you ask for a new worker, you get one.** "A new worker, a question only…", "Start one

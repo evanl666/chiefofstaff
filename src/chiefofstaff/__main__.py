@@ -74,24 +74,30 @@ def open_when_ready(port: int, url: str):
 
 
 class Server(uvicorn.Server):
-    def __init__(self, config: uvicorn.Config, bus):
+    def __init__(self, config: uvicorn.Config, bus, store):
         super().__init__(config)
         self.bus = bus
+        self.store = store
         # How to start again once stopped, to update (Runtime.update_when_idle).
         self.launch: Launch | None = None
 
     def restart(self, launch: Launch):
         """Stop as on Ctrl+C, to start again updated (restart_into); on the server's loop."""
         self.launch = launch
-        self.bus.close()
+        self.stopping()
         self.should_exit = True
 
     def handle_exit(self, sig, frame):
-        # Open browser tabs keep an event stream open; ending them now lets the server stop at
-        # once instead of cancelling them after a timeout.
         if self.bus.loop and not self.bus.loop.is_closed():
-            self.bus.loop.call_soon_threadsafe(self.bus.close)
+            self.bus.loop.call_soon_threadsafe(self.stopping)
         super().handle_exit(sig, frame)
+
+    def stopping(self):
+        """What the stop changes at once, so that it waits for nothing: open browser tabs' event
+        streams end (else the server cancels them after a timeout), and what is still written
+        until it stops no longer waits for the disk at each write (Store.stopping)."""
+        self.bus.close()
+        self.store.stopping()
 
 
 def launch_token() -> tuple[str, bool]:
@@ -292,7 +298,7 @@ def main():
     config = uvicorn.Config(
         app, host="127.0.0.1", port=args.port, access_log=False, timeout_graceful_shutdown=3
     )
-    server = Server(config, app.state.bus)
+    server = Server(config, app.state.bus, app.state.store)
     app.state.runtime.restarter = server.restart
     try:
         server.run(sockets=[listener])

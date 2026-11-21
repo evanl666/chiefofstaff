@@ -160,7 +160,7 @@ def test_a_demo_starts_a_second_start_finds_it_and_ctrl_c_stops_it_at_once(tmp_p
     finally:
         took, output = stop(process)
     assert process.returncode == 0, output
-    assert took < 2.5, f"Ctrl+C took {took:.1f} s"
+    assert took < 2.5, f"Ctrl+C took {took:.1f} s:\n{output}"
     assert not (data / "launch-url").exists()
 
 
@@ -187,7 +187,7 @@ def test_a_demo_with_send_to_chief_on_serves_the_command_and_ctrl_c_removes_the_
         took, output = stop(process)
     idle.close()
     assert process.returncode == 0, output
-    assert took < 2.5, f"Ctrl+C took {took:.1f} s with the socket open"
+    assert took < 2.5, f"Ctrl+C took {took:.1f} s with the socket open:\n{output}"
     assert not path.exists() and (data / "send").is_dir()
 
 
