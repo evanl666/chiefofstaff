@@ -3475,8 +3475,10 @@ async def round_qa(runtime, browser, failures: list[str]):
     assert parts == ["needs", "tasks-running", "tasks-monitoring", "tasks-recent",
                      "tasks-artifacts"], parts  # fmt: skip
     assert not await page.locator("#panel .area .area, #panel .area details.panel-section").count()
+    # (Teams, a line per team above Running when there are any, is spaced as a part: E129.)
     gaps = await page.evaluate("""() => {
-      const areas = [...document.querySelectorAll('#panel .area')].filter((n) => n.offsetHeight);
+      const areas = [...document.querySelectorAll('#panel .area, #teams-strip')]
+        .filter((n) => n.offsetHeight);
       return areas.slice(1).map((n, i) => Math.round(n.getBoundingClientRect().top
         - areas[i].getBoundingClientRect().bottom));
     }""")
@@ -5213,7 +5215,10 @@ async def teams_views_checked(runtime, browser, failures, seeded, shots):
         if width >= 1100:
             line = page.locator("#session-list .team-line", has_text="Token Scout & Column Maker")
             await expect(line).to_be_visible()
-            await expect(page.locator("#session-list .item.in-team")).to_have_count(2)
+            members = page.locator("#session-list .item.in-team").filter(
+                has_text=re.compile("Token Scout|Column Maker")
+            )
+            await expect(members).to_have_count(2)
             await page.locator("#sidebar").screenshot(path=shots / f"sidebar-{width}-{scheme}.png")
         # Open thread: the team's view.
         await held.get_by_role("button", name="Open thread").click()
@@ -5285,7 +5290,8 @@ async def teams_views_checked(runtime, browser, failures, seeded, shots):
     await expect(page.locator(".toast", has_text="Its short name: Client.")).to_be_visible()
     assert runtime.view(runtime.store.session(writer))["label"] == "Client"
     await page.locator("#back-home").click()
-    await expect(page.locator("#teams-strip .team-row .name")).to_have_text("Token Scout & Client")
+    named = page.locator(f'#teams-strip .team-row[data-team="team-{scout[:8]}"] .name')
+    await expect(named).to_have_text("Token Scout & Client")
     await call_tool(runtime, "answer_session", scout, question_id=question, answer="EU first.")
     await expect(held).to_have_count(0, timeout=10000)
     runtime.teams.set_label(writer, "")
