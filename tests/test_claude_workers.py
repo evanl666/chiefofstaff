@@ -1171,6 +1171,43 @@ async def test_an_unsandboxed_claude_worker_is_never_held_for_its_folders_settin
 
 
 @pytest.mark.usefixtures("sandbox_holds")
+async def test_a_follow_up_after_the_sandbox_went_on_mid_turn_runs_in_a_sandboxed_claude(
+    tmp_path, claude_on_path
+):
+    """Live H4: the worker sandbox turned on while a Claude worker runs a command; the owner's
+    follow-up, sent before that turn is over, was steered into it, in its process started
+    unsandboxed (its `touch` outside its folders ran). It waits for that turn's end now and
+    runs in its next process, sandboxed."""
+    _, runs = claude_on_path
+    harness, runtime = await started(tmp_path)
+    runtime.sandbox_host = True
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")
+        result = await spawn_on(
+            harness, runtime, title="Wait", agent="claude",
+            instructions="Run the shell command `sleep 3` then Report done: first",
+        )  # fmt: skip
+        worker = result["session_id"]
+        await until(lambda: runtime.states[worker].steps, 20)
+        old = harness.store.settings()
+        new = old.model_copy(update={"worker_sandbox": True})
+        harness.store.save_settings(new)
+        await runtime.settings_changed(old, new)
+        (task,) = runtime.tasks.for_session(worker)
+        await runtime.task_actions.follow_up(task["id"], "Report done: second")
+        await until(lambda: ("report", "second") in harness.kinds(worker), 30)
+        started_as = [
+            json.loads(argv[argv.index("--settings") + 1])["sandbox"]["enabled"]
+            for argv in map(json.loads, runs.read_text().splitlines())
+            if "--input-format" in argv
+        ]
+        assert started_as == [False, True], "the follow-up in a process of its own, sandboxed"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.usefixtures("sandbox_holds")
 async def test_a_folder_handed_to_an_unsandboxed_claude_worker_is_kept_as_handed_out(
     tmp_path, claude_on_path
 ):

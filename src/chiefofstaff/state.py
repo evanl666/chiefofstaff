@@ -33,6 +33,9 @@ class SessionState:
     retuned: bool = False
     # Reconnect once this turn ends, so new instructions apply.
     stale: bool = False
+    # The worker sandbox went on during this turn, which ends as it began: nothing more goes
+    # into it (what it is sent meanwhile waits for its new, sandboxed session).
+    confined: bool = False
     # Said to it in a new turn once it is reattached (after its sandbox changed).
     after_refresh: str = ""
     # Close once this turn ends (its pull request was merged or closed).
@@ -179,6 +182,7 @@ class SessionStates:
             state.busy = False
             state.retuned = False
             state.stale = False
+            state.confined = False
             state.after_refresh = ""
             state.awaiting = None
             state.held = False

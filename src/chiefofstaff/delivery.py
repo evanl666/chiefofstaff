@@ -163,6 +163,10 @@ class Delivery:
             if EVENT_DEBOUNCE > 0:
                 self.schedule_flush(session_id)
                 return message
+        if row["role"] == WORKER and self.states[session_id].confined:
+            # Its sandbox went on during the turn it is in: kept for its sandboxed session,
+            # which opens once that turn is over (Runtime.reattach).
+            return message
         claimed = not self.states[session_id].busy
         if row["role"] == WORKER and not await self.runtime.workers.claim_slot(session_id):
             return message
@@ -436,6 +440,8 @@ class Delivery:
         if not pending:
             return False
         worker = self.store.session(session_id)
+        if worker["role"] == WORKER and self.states[session_id].confined:
+            return False  # Kept for its sandboxed session (see deliver).
         if worker["role"] == WORKER and await self.runtime.settings_refusal(worker):
             # No turn starts while its folder's agent settings are changed (see deliver).
             self.runtime.background(self.runtime.settings_stop(session_id))

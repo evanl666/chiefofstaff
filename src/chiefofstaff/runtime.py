@@ -5363,10 +5363,15 @@ class Runtime:
                 await self.refresh_session(row)
 
     async def reattach(self, session_id: str):
-        """After a turn: reconnect with current options, and go on if it was told it would."""
+        """After a turn: reconnect with current options, and go on if it was told it would;
+        what waited for its new session (sent while its sandbox went on) goes to it there."""
         note, self.states[session_id].after_refresh = self.states[session_id].after_refresh, ""
+        waited = self.states[session_id].confined
         await self.detach(session_id)
-        if note and (row := self.store.find_session(session_id)) and not row["closed_at"]:
+        row = self.store.find_session(session_id)
+        if waited and not note and row and not row["closed_at"]:
+            self.background(self.delivery.resume(session_id))
+        if note and row and not row["closed_at"]:
             try:
                 await self.delivery.deliver(
                     session_id, wrap("system", "context", note), kind="notice", display=note
@@ -5383,6 +5388,7 @@ class Runtime:
         """Disconnect; the caller holds the session's lifecycle lock."""
         state = self.states[session_id]
         state.stale = False
+        state.confined = False  # Its next connection is sandboxed from the start.
         state.after_refresh = ""  # The next connection has the new options from the start.
         state.steps.clear()  # A disconnected session is in no step.
         state.mcp_calls.clear()
@@ -10112,6 +10118,17 @@ class Runtime:
             # Other agents' workers do not run sandboxed, and act on their own or ask first only
             # where their version's check allows it: stopped at once, with their commands.
             stopped = await self.stop_ineligible()
+        if new.worker_sandbox and not old.worker_sandbox and self.sandbox_host:
+            # A worker at work ends its turn as it began: nothing more goes into that turn,
+            # unsandboxed; what it is sent meanwhile waits for its sandboxed session (live H4: a
+            # follow-up steered into it wrote outside its folders).
+            for row in self.store.open_sessions(WORKER):
+                state = self.states[row["id"]]
+                if row["status"] in {"working", "starting"} or state.busy or state.held:
+                    state.confined = True
+        elif old.worker_sandbox and not new.worker_sandbox:
+            for row in self.store.open_sessions(WORKER):
+                self.states[row["id"]].confined = False  # As its turn began again: unsandboxed.
         if self.agents and old.worker_yolo != new.worker_yolo:
             # Those following the default switched between acting on their own and Ask first,
             # which their agent takes up in a new process (agent_mode_changed).

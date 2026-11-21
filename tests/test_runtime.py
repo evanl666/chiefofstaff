@@ -1912,6 +1912,34 @@ async def test_owner_messages_reach_a_working_session_in_its_turn(harness):
     assert worker.modes[-1] == "immediate"
 
 
+async def test_a_message_after_the_sandbox_went_on_mid_turn_waits_for_its_sandboxed_session(
+    harness,
+):
+    """The worker sandbox turned on while a worker works: its turn ends as it began, and what
+    the owner sends before it is over (steered, as a follow-up is) is not taken into that turn,
+    unsandboxed: it waits, and goes to its new session, sandboxed (live H4)."""
+    runtime = await harness.connect()
+    result = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title="A", instructions="a"
+    )
+    worker_id = json.loads(result.text_result_for_llm)["session_id"]
+    first = harness.session(worker_id)
+    assert not first.options.get("sandbox_config")
+    old = harness.store.settings()
+    new = old.model_copy(update={"worker_sandbox": True})
+    harness.store.save_settings(new)
+    await runtime.settings_changed(old, new)
+    before = len(first.modes)
+    await runtime.owner_send(worker_id, "Also clear the cache")
+    assert len(first.modes) == before, "not into the turn that began unsandboxed"
+    first.emit("session.idle")
+    await settle(runtime)
+    now = harness.session(worker_id)
+    assert now is not first and now.options.get("sandbox_config"), "its new session, sandboxed"
+    assert now.modes and "Also clear the cache" in now.sent[-1]
+    assert not runtime.states[worker_id].confined
+
+
 async def test_events_for_the_router_are_batched(harness, monkeypatch):
     runtime = await harness.connect()
     router = harness.session(harness.router_id)
