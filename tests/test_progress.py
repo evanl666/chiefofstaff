@@ -2439,6 +2439,45 @@ def test_the_language_of_a_message_when_it_is_clear(text, spoken):
     assert language(text) == spoken
 
 
+async def test_what_the_routers_tools_answer_names_the_language_the_owner_switched_to(harness):
+    """Live M1 (r70, r75, r75b): after a question and answer in English and one in Chinese,
+    the owner asked for work in English; the Router started a worker, and its line saying so
+    came in Chinese. Its turn began saying the owner wrote in English, but it writes that line
+    after its tools answer, and the conversation pulled it back: what each tool answers it in
+    that turn names the language too. Not in a turn without a switch, nor for a worker."""
+    runtime = await harness.connect()
+    router = harness.session(harness.router_id)
+    for text, answer in (("Which workers are open right now?", "None are open."),
+                         ("现在有哪些 worker 开着?", "现在没有开着的 worker。")):  # fmt: skip
+        await runtime.owner_send(harness.router_id, text)
+        router.emit("user.message", content=router.sent[-1])
+        router.emit("assistant.message", content=answer)
+        router.emit("session.idle")
+        await settle(runtime)
+    await runtime.owner_send(harness.router_id, "In the svc project, count the .py files.")
+    assert "answer in English, not Chinese" in router.sent[-1]
+    router.emit("user.message", content=router.sent[-1])
+    await settle(runtime)
+
+    started = await call_tool(runtime, "spawn_worker", harness.router_id, title="Count files",
+                              instructions="Count the .py files.", why_new="test")  # fmt: skip
+    worker = json.loads(started.text_result_for_llm)["session_id"]
+    told = await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                           task="note", text="Only under src.")  # fmt: skip
+
+    assert json.loads(started.text_result_for_llm)["tell_the_owner_in"] == "English"
+    assert told.text_result_for_llm.endswith("Tell the owner in English: they wrote in English.")
+    reported = await call_tool(runtime, "report", worker, status="progress", summary="Counting.")
+    assert "English" not in reported.text_result_for_llm, "a worker's tools: as they were"
+    router.emit("session.idle")
+    await settle(runtime)
+    await runtime.owner_send(harness.router_id, "And how many are queued?")
+    router.emit("user.message", content=router.sent[-1])
+    await settle(runtime)
+    again = await call_tool(runtime, "list_sessions", harness.router_id)
+    assert "tell_the_owner_in" not in json.loads(again.text_result_for_llm), "no switch: as it was"
+
+
 async def test_answers_follow_the_language_the_owner_just_wrote_in(harness):
     runtime = await harness.connect()
     router = harness.session(harness.router_id)

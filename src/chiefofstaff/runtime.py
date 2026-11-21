@@ -84,6 +84,7 @@ from .envelope import (
     language,
     sender,
     short,
+    switched_note,
     task_named,
     tasks_named,
     wrap,
@@ -8731,7 +8732,7 @@ class Runtime:
         before = language(last["text"]) if last else ""
         if not spoken or not before or before == spoken:
             return ""
-        return f"The owner wrote this in {spoken}: answer in {spoken}, not {before}."
+        return switched_note(spoken, before)
 
     def busy_note(self, session_id: str) -> str:
         """For a message to a worker deep in a step: it steers in at once (Copilot moves a

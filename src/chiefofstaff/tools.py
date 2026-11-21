@@ -1613,12 +1613,20 @@ class Tools:
 
     def handler(self, handler):
         async def run(params, invocation):
+            caller = self.runtime.row_id(invocation.session_id)
             try:
-                result = await handler(params, self.runtime.row_id(invocation.session_id))
+                result = await handler(params, caller)
             except (ValueError, LookupError, RuntimeError) as exc:
                 return ToolResult(
                     text_result_for_llm=f"Error: {exc}", result_type="failure", error=str(exc)
                 )
+            if spoken := self.states[caller].reply_in:
+                # The owner switched language in the message this Router turn answers: said
+                # again where it reads last before its line to them (live M1).
+                if isinstance(result, dict):
+                    result = {**result, "tell_the_owner_in": spoken}
+                elif isinstance(result, str):
+                    result += f"\n\nTell the owner in {spoken}: they wrote in {spoken}."
             return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
         return run

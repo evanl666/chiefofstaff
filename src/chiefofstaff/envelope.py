@@ -116,6 +116,15 @@ def language(text: str) -> str:
     return "English" if english else ""
 
 
+def switched_note(spoken: str, before: str) -> str:
+    """What a session is told when the owner writes in another language than it answered in."""
+    return f"The owner wrote this in {spoken}: answer in {spoken}, not {before}."
+
+
+# That note in what a session received: the language the owner switched to.
+SWITCHED = re.compile(r"The owner wrote this in ([A-Z][a-z]+): answer in \1, not [A-Z][a-z]+\.")
+
+
 def sender(row: dict) -> str:
     """How a session is named as a sender."""
     if row["role"] == "worker":

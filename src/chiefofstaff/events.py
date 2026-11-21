@@ -21,7 +21,7 @@ from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecis
 from . import agents, prompts, receipts, settings_guard, threads
 from .backend import COPILOT_AGENT, running_background, stop_background
 from .delivery import digest
-from .envelope import from_owner, news_tasks, tasks_named, wrap
+from .envelope import SWITCHED, from_owner, news_tasks, tasks_named, wrap
 from .policy import (
     OWNERS_CHECKOUT,
     OWNERS_CHECKOUT_ASK,
@@ -495,10 +495,15 @@ class Events:
             state.unseen.pop(seen if seen in state.unseen else next(iter(state.unseen)))
         if not stopped:
             state.after_abort = False  # A turn on what it was sent now: its steps are work again.
-        owner = from_owner(getattr(event.data, "content", "") or "") or state.owner_turn
+        content = getattr(event.data, "content", "") or ""
+        owner = from_owner(content) or state.owner_turn
         state.owner_turn = False
         state.event_turn = not owner
         state.owner_reply = bool(owner)
+        # Live M1: told at its turn's start that the owner switched language, the Router still
+        # wrote its line after a tool in the conversation's language (Tools.handler).
+        switched = SWITCHED.findall(content) if row["role"] == ROUTER and owner else []
+        state.reply_in = switched[-1] if switched else ""
         state.turn_decisions, state.turn_tasks = [], []
         state.turn_check_backs = set()
         state.turn_runs = {}

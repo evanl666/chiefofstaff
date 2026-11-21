@@ -122,6 +122,10 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   waits (*↔ 5 team messages · TS CM · 1 waiting 9 min*); click it to see the last three. A line
   alone names the workers by a short name (*Column Maker told Token Scout: …*), not by their
   whole task titles. The Router's routing lines in a row fold the same way (*4 routing updates*).
+- **The Router's line after starting a worker comes in the language you just wrote in.** After
+  a question in English and one in Chinese, a request in English got its worker, and the
+  Router's line saying so in Chinese: the conversation pulled it back once its tools had
+  answered. When you switch language, what its tools answer in that turn says it again.
 
 ## 0.1.52 (2026-11-20)
 

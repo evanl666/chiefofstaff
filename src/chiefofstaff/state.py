@@ -45,6 +45,9 @@ class SessionState:
     owner_turn: bool = False
     # The Router's current turn answers the owner: its reply is what the owner reads.
     owner_reply: bool = False
+    # The language the owner switched to in the message the Router's current turn answers:
+    # what its tools answer in that turn says it again (see Tools.handler).
+    reply_in: str = ""
     # Decisions the Router recorded and tasks it gave out in its current turn: what one owner
     # message decided and asked for together belongs together.
     turn_decisions: list[str] = field(default_factory=list)
