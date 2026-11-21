@@ -1174,7 +1174,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .glyph { flex: none; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .glyph.waits .shaft { stroke-dasharray: 2.2 2; }
 .rel-summary { display: flex; flex-wrap: wrap; gap: 6px; }
-.rel-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 13px; background: none; color: var(--soft); font-size: var(--small); font-weight: 500; }
+.rel-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 14px; background: none; color: var(--soft); font-size: var(--small); font-weight: 500; }
 .rel-chip:hover { background: var(--hover); color: var(--text); opacity: 1; }
 .rel-chip[aria-pressed="true"] { background: var(--active); color: var(--text); border-color: transparent; }
 .rel-chip.anchor { font-variant-numeric: tabular-nums; }
@@ -1184,7 +1184,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .team-tasks { display: grid; gap: 4px; min-width: 0; }
 .team-tasks > .title { display: flex; align-items: center; gap: 6px; margin: 0 0 2px; font-size: var(--small); font-weight: 600; color: var(--muted); }
 .team-tasks > .title .count { font-weight: 500; font-variant-numeric: tabular-nums; }
-.team-tasks .earlier-rows { justify-self: start; margin: 0; padding: 0 6px; font-size: var(--small); color: var(--muted); }
+.team-tasks .earlier-rows { justify-self: start; min-height: 28px; margin: 0; padding: 0 6px; font-size: var(--small); color: var(--muted); }
 .team-tasks .rows { display: grid; gap: 2px; }
 .trow { display: flex; align-items: center; gap: 8px; min-width: 0; padding-right: 8px; border-radius: var(--radius); transition: background 0.15s; }
 .trow:hover, .trow.lit { background: var(--hover); }
@@ -1192,7 +1192,9 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .trow .main:hover { opacity: 1; }
 .trow .main[aria-expanded="true"] .title { font-weight: 600; }
 .trow .title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.trow.over .title, .trow.over .avatar, .lnode.over { opacity: 0.55; }
+/* Over (done instead by another, the side not picked): quieter, its words still readable. */
+.trow.over .title, .lnode.over .name { color: var(--muted); }
+.trow.over .avatar, .lnode.over .avatar { filter: saturate(0.25); }
 .trow .rel { display: inline-flex; align-items: center; gap: 5px; flex: none; max-width: 46%; min-width: 0; font-size: var(--small); color: var(--muted); white-space: nowrap; }
 .trow .rel .words { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* A wait is the waiting pill, one element: amber while it waits, green the moment it clears. */
@@ -1241,7 +1243,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .lineage .peek .who { flex: none; color: var(--soft); font-weight: 600; }
 .lineage .peek .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .lineage .peek .state { flex: none; white-space: nowrap; }
-.lineage .peek .link { margin-left: auto; flex: none; min-height: 26px; }
+.lineage .peek .link { margin-left: auto; flex: none; min-height: 28px; }
 @media (max-width: 900px) { .lnode { max-width: 150px; } }
 /* A worker's Team tab: its task's lineage first. */
 #timeline > .team-lineage > .lineage { margin: 0 0 4px; }
