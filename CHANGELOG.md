@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Connections you made for Copilot (Glean, Atlassian…) work in Chief of Staff's workers too
+  (E137).** Copilot tells a remote MCP server which app calls it, and some servers keep your
+  connections per app: Chief of Staff's sessions called themselves *chiefofstaff*, an app of
+  their own with none of your connections, so Glean worked in your terminal but answered "the
+  user has not connected their glean account" in every worker and in Watch for you (which
+  stopped seeing Slack through it). Its sessions now call themselves *copilot-cli/chiefofstaff*:
+  a Copilot CLI client, still told apart from your own sessions under Other Copilot sessions.
+  Your keychain or a server may ask you to sign in once more, once.
 - **Ctrl+C stops at once on Linux, even while Chief of Staff is busy.** Each thing it saved
   waited for the disk to confirm it. Pressed while workers were starting, Ctrl+C waited for
   dozens of those saves, which took seconds on a slow or busy disk. From Ctrl+C on, saves no

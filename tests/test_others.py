@@ -989,6 +989,16 @@ def listed(
         ("sdk", "sdk", "program"),
         ("sdk", "github/cli", "owner"),  # Continued in a terminal.
         ("sdk", "chiefofstaff", "another"),
+        # As Chief of Staff names itself since E137 (a Copilot CLI client), and only that name:
+        # another client of that family is not it.
+        ("copilot-cli/chiefofstaff", "", "ours"),
+        ("copilot-cli/chiefofstaff", "chiefofstaff", "ours"),
+        ("chiefofstaff", "copilot-cli/chiefofstaff", "ours"),
+        ("github/cli", "copilot-cli/chiefofstaff", "another"),
+        ("copilot-cli/chiefofstaff", "github/cli", "owner"),
+        ("copilot-cli", "", "owner"),
+        ("copilot-cli/1.0.114", "copilot-cli/1.0.114", "owner"),
+        ("github/cli", "copilot-cli/1.0.114", "owner"),
     ],
 )
 def test_whose_session_it_is(made, last, expected):

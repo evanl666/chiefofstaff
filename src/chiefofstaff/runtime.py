@@ -49,6 +49,7 @@ from .abilities import Abilities
 from .accounts import Accounts
 from .asks import Asks
 from .backend import (
+    CLIENT_NAME,
     COPILOT_AGENT,
     OLDEST_CLI,
     REFUSED_CLI,
@@ -2888,7 +2889,7 @@ class Runtime:
             "tools": tools,
             "system_message": {"mode": "append", "content": prompt},
             "working_directory": row["cwd"] or str(self.role_dir("scratch")),
-            "client_name": "chiefofstaff",
+            "client_name": CLIENT_NAME,
             # Commits made for the owner are theirs: no Copilot co-author line in them.
             "coauthor_enabled": False,
             "on_mcp_auth_request": self.asks.on_mcp_auth,
@@ -2971,7 +2972,7 @@ class Runtime:
             "disabled_mcp_servers": [GITHUB_MCP],
             "system_message": {"mode": "append", "content": prompts.HELPER},
             "working_directory": str(self.role_dir("scratch")),
-            "client_name": "chiefofstaff",
+            "client_name": CLIENT_NAME,
             "tool_search": self.tool_search(row, len(tools)),
         }
         if model := self.model_for(row):

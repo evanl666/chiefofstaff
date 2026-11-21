@@ -145,6 +145,10 @@ Workers can also run on Codex (off by default; Settings → Models). For such a 
   that sign-in, and every later session can use the server with your identity. Sign in only to
   servers you want all your workers to use. Remove a sign-in with `copilot` (`/mcp`) or in your
   OS keychain (`copilot-mcp-oauth`).
+- **To MCP servers, workers are Copilot CLI clients.** Copilot names the app calling a remote MCP
+  server (its User-Agent): Chief of Staff's sessions are `copilot-cli/chiefofstaff`, so a server
+  that keeps your connections per app gives them those you made for Copilot. They act as you,
+  as your own Copilot CLI does; the name is no permission of its own.
 - **An MCP tool's error is untrusted.** One that says an account must be connected becomes a card
   only for a failed call of an MCP tool whose server the backend names (never one its text
   names), and only for a narrow authorization-required message. Its text and link show as plain

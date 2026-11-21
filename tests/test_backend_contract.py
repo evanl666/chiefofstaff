@@ -1069,6 +1069,81 @@ async def test_the_agent_chooses_its_sessions_ids_or_takes_ours(backend, tmp_pat
 ACME_AUTH = Path(__file__).resolve().parent.parent / "scripts" / "acme_auth_result_mcp.py"
 
 
+async def test_a_workers_remote_mcp_requests_say_it_is_a_copilot_cli_client(tmp_path, monkeypatch):
+    """E137: Copilot sends a session's client name as the User-Agent of the remote MCP servers
+    it calls. A server that keeps the owner's connections per app takes its part before the
+    slash for the app: as "chiefofstaff", workers had none of those the owner made for Copilot.
+    A worker as it opens now reaches a local HTTP MCP listener as a copilot-cli/ client, on the
+    owner's Copilot (through the adapter when it is newer than this SDK) and on Copilot's own
+    runtime FALLBACK_CLI. A Copilot home of the test's own (none of the owner's servers)."""
+    if not REAL:
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 to check the real Copilot backend.")
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    from conftest import Harness
+    from test_progress import spawn
+
+    from chiefofstaff.backend import fallback_runtime
+    from chiefofstaff.models import Settings
+
+    agents: list[str] = []
+
+    class Listener(BaseHTTPRequestHandler):
+        def answer(self):
+            agents.append(self.headers.get("User-Agent") or "")
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_GET = do_POST = do_DELETE = answer  # noqa: N815
+
+        def log_message(self, format, *args):  # noqa: A002
+            return
+
+    listener = ThreadingHTTPServer(("127.0.0.1", 0), Listener)
+    Thread(target=listener.serve_forever, daemon=True).start()
+    home = tmp_path / "copilot-home"
+    home.mkdir()
+    monkeypatch.setenv("COPILOT_HOME", str(home))
+    server = {"type": "http", "url": f"http://127.0.0.1:{listener.server_port}/mcp", "tools": ["*"]}
+    harness = Harness(tmp_path / "data", Settings(mcp_servers={"probe": server}))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Say ok")
+    options = runtime.options(harness.store.session(worker))
+    options |= {"model": MODEL, "working_directory": str(tmp_path)}
+    options.pop("sandbox_config", None)  # (The stand-in backend's: not Copilot's.)
+    await runtime.stop()
+    assert options["mcp_servers"]["probe"] == server
+    seen = {}
+    try:
+        for cli in dict.fromkeys([COPILOT_CLI, fallback_runtime() or COPILOT_CLI]):
+            agents.clear()
+            backend = copilot_backend(cli)
+            await backend.start()
+            session_id = str(uuid4())
+            try:
+                session = await backend.create_session(
+                    session_id=session_id, name="contract test", **options
+                )
+                turn = Turn(session)
+                await session.send("Reply with just: ok")
+                await turn.wait(240)
+                version = (await backend.client.get_status()).version
+                seen[version] = sorted(set(agents))
+            finally:
+                with contextlib.suppress(Exception):
+                    await backend.client.delete_session(session_id)
+                await backend.stop()
+    finally:
+        listener.shutdown()
+        listener.server_close()
+    logging.getLogger(__name__).info("User-Agents the MCP listener saw: %s", seen)
+    assert seen and all(seen.values()), seen
+    for version, names in seen.items():
+        assert all(name.startswith("copilot-cli/") for name in names), (version, names)
+
+
 async def test_an_mcp_tools_error_result_is_a_failed_call_naming_its_server_and_tool(
     backend, tmp_path
 ):

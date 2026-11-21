@@ -300,85 +300,101 @@ async def every_role(machine) -> dict[str, str]:
 
 
 SESSION_OPTIONS: dict[str, tuple[int, str]] = {
-    "checker, created": (687, "bd0430074b294726f0ff9a8836a483e17f0a26dd0c9287f4e7728498eadba4f9"),
-    "checker, resumed": (651, "7c3c21f2c42c6055ad5e96959ef34900287de88433fa543be99c9e1913e72b50"),
+    "checker, created": (699, "a089fbe5e42c13409b02b96f0c7e30ccde7de55b97d784adb7fd7779bbb5daa5"),
+    "checker, resumed": (663, "0fd3f07f25e389254270de251c11b316daef1c8069bf8da005aefd41033ea8e1"),
     "connector, created": (
-        3301,
-        "79be7bb285cfef27852115b450348aec546922e8f5834a2e46970321b3041a7e",
+        3313,
+        "201f64ae0bb06e335c934eef7207e9c9ee9404fff0537dd1f647acb179e5807b",
     ),
     "connector, resumed": (
-        3264,
-        "4df73869b2dae13f0c13102ea0964554acb846342671e08bbb3f9c85ab3ed1a4",
+        3276,
+        "314a438a3b11c4d4b0a6a2f3a5b462721de773ba57102cfcd0804ab14ec9127b",
     ),
-    "distill, created": (19079, "db1dde87ec9c3206f767d69d699b2ab9f77f2133bfbda6f849267e37047df63e"),
-    "distill, resumed": (19042, "a3915787a3fd479a6016b0b1b0f78b3b9b0b9c41817b4d0432a1ad26451087ea"),
-    "learner, created": (731, "91982fd00db66c9f3230d5c596dd31a401298730e43d30595f7d819572d6f061"),
-    "learner, resumed": (696, "469981aa96e8edf4f853edc4c8599332cc702b9ce2a0f1b2fd2cbfe6caa640c1"),
+    "distill, created": (19091, "7d382be86a83932736baa6d948d0eef369b90fc2575eccfc13143c37046b09de"),
+    "distill, resumed": (19054, "6c5416d3f0a328b25a937eeaff51cffa43379d7c012e6998e039386d3a4da88f"),
+    "learner, created": (743, "c8c7011e0f947dbb621bede81229c7741b269a4c37fa0b4bac17554a39a14942"),
+    "learner, resumed": (708, "233136f29a15280fd994348d0ed269f8bfe808ea696d2f4f5380009c5f99e499"),
     "messenger, created": (
-        3219,
-        "f43af845b8b494cb3d97e3fc7e52c7ab155592123e31fa362cc83c9b21901de3",
+        3231,
+        "91032d88604f76022ca53dfa80d44fb33a0fdadc9b6f316abfae9a36b1b5a699",
     ),
     "messenger, resumed": (
-        3183,
-        "60428d28aad3cdca34c2a973a8a0127a5179e4491c78c21c199de155615032f3",
+        3195,
+        "191b56edb83b3a16d25742a53b3a83a1af3d0f2f178d0ce510c61cdf892b3c3f",
     ),
     "router with Slack, created": (
-        28570,
-        "1175752617f4b45bfb23044386d3080d2efa4b21c7a122fe4ae567651a2a18dc",
+        28582,
+        "33cfa9313a7834617c901405e4cc9eea63296f85e59590b1ad95768dc59bd53f",
     ),
     "router with Slack, resumed": (
-        28534,
-        "a7b3e8afe6bbce3c9337a91ef6bfd795c80c2cb16a408f84795facc1cc956fa9",
+        28546,
+        "8c7f56d25f411f4b0ed7a542116ccf85d0d8c7213fffd70f4cf2b135a4d00b16",
     ),
-    "router, created": (28570, "554e548623b2e9d096739f4a642faf2eba5efe64117269e7323f0c73f6ffc297"),
-    "router, resumed": (28534, "1c293fc0ed27ddac2933e32bd930f6be6e3ce3bb026acfef98bd65ad1c2e0a9e"),
-    "slack, created": (4566, "6a2c958151166b3dbf3d0d6789f7e8e62a9bc6a609ef88e4d25f6338ff3c5894"),
-    "slack, resumed": (4531, "0201a125d8919e539c5289acf88a3cb2509f79ba4a136793af02ad83a85535a6"),
+    "router, created": (28582, "d6cd23d60787d60ab54c06049513e28e0905b483d72612bb5be0ec0a8cee601c"),
+    "router, resumed": (28546, "329ee6ea9f2e6dd7a1d69ffe8c42a8d7916005e6944658ed3306443ecd07692f"),
+    "slack, created": (4578, "3d45670714bf7658ea75562a107c8346bcabd31cd069e9004c826b9393b44aff"),
+    "slack, resumed": (4543, "c0c487327a52e28940eeb43ddc3e2008c029a728052b6d5637170b9aee11aca1"),
     "the Copilot sandbox of a worker asking first": (
         946,
         "4e17ae9d8664283969ddf98e0c9637579ce9d568ecee2eb460504e64cab83e41",
     ),
-    "watchdog, created": (3382, "e3ae732c64bc3796a98d0ee8015e8485f26b7b4695757da463dfea17e52fd1c5"),
-    "watchdog, resumed": (3344, "ba4828117ea24e74adedd35a373d08e7375e550c3f143742141d4f822dcd5e24"),
+    "watchdog, created": (3394, "ad51e26759a6cd9c032d0796f27f9362eac3f70229460d796dfefb59a39ea9b6"),
+    "watchdog, resumed": (3356, "974bb9283d6789ec129405c0cbe99963017200b522ec142cfcdb65a58c5f1463"),
     "worker asking first, sandboxed, created": (
-        22032,
-        "3357ebbc948fdc18ea49c67088775cf7e10e704e1033daacc57e8fdb31109360",
+        22044,
+        "4cf28ef887955cfb77bbdfd296b9f91d3202a96872910aa19c84040f8fb34e33",
     ),
     "worker asking first, sandboxed, resumed": (
-        21987,
-        "16e4be109d244a00e138c80b9814c08c73ff648d62f74c39a5e5879073e83523",
+        21999,
+        "784ac55a3a3d9294dfe011a01e2c9be29fb29440f8f6a4e28a56eb69bc65a9e4",
     ),
     "worker in a trusted worktree, created": (
-        19647,
-        "69c80ed962e29872b989f1c272feef0cf23d41c088147c5cbecc71b0249481d3",
+        19659,
+        "39c62f0c1b1ac848b053fd441205dd0c23d6b8464df2059f209f14c44286984b",
     ),
     "worker in a trusted worktree, resumed": (
-        19571,
-        "de20cbb646dfccd9672449f763196acd3f44123f20b741327764d1edadf4ae1d",
+        19583,
+        "3f5ff502ccbbd1ba0e1290015e54fd6cb3cf5023d5306f30d1fd5f26f232964e",
     ),
     "worker that reads Slack, created": (
-        22271,
-        "4e48b88e7d6e789b0463d25c9d7e460e64bf35eea12413714cc45405a755ee1c",
+        22283,
+        "8b82e4c076bb5d99e4e0cfb9f86e60fa02bec640ad06ada8ab446e3dfd0afb45",
     ),
     "worker that reads Slack, resumed": (
-        22224,
-        "673eb17fbc82e875a1b33c5e3b6e244687fb18f5e7b4fe46be5434ccd4e5a4d4",
+        22236,
+        "034decc4d6d81859aa73fa957fce44a08fd0ee3e905523106e73a4f4a5e08ba8",
     ),
     "worker with its model, created": (
-        19181,
-        "9a0f6686738368d7f542e5d5439bf29df1187fd26a0bcfd394adbc7150a697ec",
+        19193,
+        "3d044a9d473e389e0d7c7dcbbe087cae6f527da77bc14584e90d28499099d587",
     ),
     "worker with its model, resumed": (
-        19134,
-        "c22e4c1e85fb9d296a86c0a996b82fc3412bd2464bd0ad6156ad12539f1683dc",
+        19146,
+        "1c0976e56b2d8de398a56c5a2ef606e7ca8e58fbf6f31a9f5e9d5ad13e6d155d",
     ),
-    "worker, created": (19131, "065c1e46bc81f644e1f298ebcdef1830b333d3a34f2cf47da87fcab943e026ab"),
-    "worker, resumed": (19083, "31dad0b440c4b20e13b9fc3fc496c67a311dd77da7dca9b3678d6075e9c51eb8"),
+    "worker, created": (19143, "4a156bff6093f48f91d9f0b43127f7e73e29db82e722ffcda3a4d4941c72dacd"),
+    "worker, resumed": (19095, "73263fb91d76114dbdfceca019384d3d7e8cf0899cb4b3370ed254513fe5889c"),
 }
 
 
 async def test_what_each_copilot_session_is_created_and_resumed_with(machine):
     check(await every_role(machine), SESSION_OPTIONS)
+
+
+async def test_every_copilot_session_is_a_copilot_cli_client(machine):
+    """E137: Copilot sends a session's client name as the User-Agent of the remote MCP servers it
+    calls, and a server that keeps the owner's connections per app takes its part before the
+    slash for the app: every kind of session, created or resumed, is a Copilot CLI client."""
+    found = await every_role(machine)
+    names = {
+        kind: json.loads(options)["client_name"]
+        for kind, options in found.items()
+        if kind.endswith((", created", ", resumed"))
+    }
+    kinds = {kind.rsplit(", ", 1)[0] for kind in names}
+    every = {"router", "router with Slack", "worker", "worker that reads Slack", "slack"}
+    assert every | {"watchdog", "connector", "learner", "checker", "distill", "messenger"} <= kinds
+    assert set(names.values()) == {"copilot-cli/chiefofstaff"}, names
 
 
 TOOL_SCHEMAS: dict[str, tuple[int, str]] = {

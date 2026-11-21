@@ -414,9 +414,17 @@ async def cli_version(command: str) -> str:
     return found.group(1) if found else ""
 
 
-# What Chief of Staff calls itself to Copilot (work-buddy: its earlier name), which the CLI keeps
-# with each session as the client that made it and the one that last resumed it.
-OWN_CLIENTS = frozenset({"chiefofstaff", "work-buddy"})
+# What Chief of Staff calls itself to Copilot, which the CLI keeps with each session as the
+# client that made it and the one that last resumed it. Copilot also sends it as the User-Agent
+# of the remote MCP servers a session calls, and a server that keeps each user's connections per
+# app takes its part before the slash for the app (E137): as "chiefofstaff" its workers were an
+# app of their own, with none of the connections the owner made for Copilot (Glean said "not
+# connected" in every one). It is a Copilot CLI client; the rest tells its sessions apart from
+# the owner's own (github/cli).
+CLIENT_NAME = "copilot-cli/chiefofstaff"
+# Its names, this one and those its sessions were made with before (chiefofstaff; work-buddy,
+# its earlier name). Only these exactly: never anything else that starts copilot-cli/.
+OWN_CLIENTS = frozenset({CLIENT_NAME, "chiefofstaff", "work-buddy"})
 # What the CLI records as the maker of a session a program made through Copilot's SDK without
 # naming itself: a script's (a batch job, an eval), often one of many.
 SDK_CLIENT = "sdk"

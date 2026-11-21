@@ -96,7 +96,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import live_e2e
 from live_e2e import App, log
 
-from chiefofstaff.backend import copilot_backend
+from chiefofstaff.backend import CLIENT_NAME, OWN_CLIENTS, copilot_backend
 from chiefofstaff.others import FRESH as BEHIND
 from chiefofstaff.others import SHOWN
 
@@ -1394,7 +1394,7 @@ async def o2_provenance(ctx: Ctx, first: str) -> str:
     external = await ctx.app.get("/api/external?refresh=true")
     assert router not in {item["id"] for item in external}
     made = workspace(ctx.home, router)
-    assert made.get("client_name") == "chiefofstaff", made
+    assert made.get("client_name") == CLIENT_NAME, made
     watch.assert_right("O2b")
     log(f"O2b passed: the other's Router ({made.get('client_name')}) is not listed, and 404")
 
@@ -1443,7 +1443,7 @@ async def o2_provenance(ctx: Ctx, first: str) -> str:
     log(f"the other Chief of Staff continued A: {said!r}")
     await other.stop()
     made = workspace(ctx.home, first)
-    assert made.get("last_client_name") == "chiefofstaff", made
+    assert made.get("last_client_name") == CLIENT_NAME, made
     row = await watch.until(
         "closed, no status: another Chief of Staff ran it last",
         first,
@@ -1461,7 +1461,7 @@ async def o2_provenance(ctx: Ctx, first: str) -> str:
     state = await truth.until("its turn ends", lambda s: s.turn == "ended", 120)
     await term.exit()
     made = workspace(ctx.home, first)
-    assert made.get("last_client_name") not in {"chiefofstaff", "work-buddy"}, made
+    assert made.get("last_client_name") not in OWN_CLIENTS, made
     row = await watch.until(
         "closed, finished: the owner's again",
         first,
@@ -1497,7 +1497,7 @@ async def o2_provenance(ctx: Ctx, first: str) -> str:
     await other.stop()
     stopped = wall()
     made = workspace(ctx.home, router)
-    assert made.get("last_client_name") == "chiefofstaff", made
+    assert made.get("last_client_name") == CLIENT_NAME, made
     await watch.until("left out again (at a listing)", router, lambda r: r is None, LISTING)
     ctx.banned.add(router)
     log(f"O2g passed: {made.get('client_name')} → {made.get('last_client_name')}: left out "
