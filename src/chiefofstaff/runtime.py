@@ -5257,6 +5257,10 @@ class Runtime:
             self.glanced[name] = (time.monotonic(), said)
             if agents.status_of(name, said)["status"] in agents.HELD:
                 self.glance_failures.pop(name, None)
+                failed = self.agent_failed.get(name)
+                if failed and agents.status_of(name, failed)["status"] in agents.HELD:
+                    # Why its last start failed (not installed, say) is past: this look's now.
+                    self.agent_failed[name] = f"{agents.display(name)} could not start: {said}"
             else:
                 self.glance_failures[name] = self.glance_failures.get(name, 0) + 1
             self.agent_down(name)

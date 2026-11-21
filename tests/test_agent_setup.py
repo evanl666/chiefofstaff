@@ -233,7 +233,9 @@ async def test_install_runs_the_official_installer_finds_it_and_goes_on_to_sign_
 ):
     """The installer puts `codex` in ~/.local/bin, which is not on the PATH Chief of Staff
     started with: found there, put on its PATH (after the owner's own: a `git` beside it is not
-    the one workers run), kept for next time; signed out, Sign in follows at once."""
+    the one workers run), kept for next time; signed out, it says Sign-in needed (no longer Not
+    installed, as the start that held work found it) and Sign in follows at once; signed in,
+    the work held goes on, once."""
     import shutil
 
     from conftest import fake_codex
@@ -258,8 +260,17 @@ async def test_install_runs_the_official_installer_finds_it_and_goes_on_to_sign_
         status = runtime.agent_status("codex")
         assert status["status"] == agents.MISSING
         assert status["install"] == [{"method": "script", "command": script}], "word for word"
+        await saved(runtime, {"codex": {"enabled": True}})
+        refused = await spawn_on(harness, runtime, title="Count the rows · data",
+                                 instructions="Report done: 42 rows.", agent="codex")  # fmt: skip
+        assert "it starts there by itself" in refused.text_result_for_llm
+        (card,) = [
+            m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
+        ]
+        assert card["meta"]["status"] == agents.MISSING
         await runtime.setups.install("codex")
         await until(lambda: runtime.setups.runs["codex"].kind == "signin", 20)
+        assert runtime.agent_status("codex")["status"] == agents.SIGN_IN
         assert str(bin_dir) in os.environ["PATH"].split(os.pathsep)
         assert shutil.which("git") == git, "the owner's own, first on their PATH"
         assert harness.store.get("agentpath:codex") == str(bin_dir)
@@ -267,6 +278,9 @@ async def test_install_runs_the_official_installer_finds_it_and_goes_on_to_sign_
         await until(lambda: runtime.setups.view()["codex"].get("url"))
         approve()
         await until(lambda: runtime.agent_status("codex")["status"] == agents.READY)
+        await until(lambda: harness.store.open_sessions(WORKER), 10)
+        assert harness.store.message(card["id"])["meta"]["resumed"] == "Resumed once installed"
+        assert len(harness.store.open_sessions(WORKER)) == 1
     finally:
         await runtime.stop()
 
