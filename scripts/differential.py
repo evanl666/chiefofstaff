@@ -229,6 +229,32 @@ EXAMPLE = Feature(
 # settings kept only for sandboxed workers, Handled for you, E115's answers, a new worker when
 # the owner asks for one, a task's result being done, E116's account to connect, sessions'
 # client name, every session's context size) are the baseline's own behaviour.
+# 0.1.54 (live r76 E5): work the owner asks done directly in their own folder goes to a worker
+# started in place, never to one that reads it or works in a copy: the Router's reuse rule names
+# it as its one exception (its paragraph wrapped again), these lines and no others.
+IN_PLACE_RULE_BEFORE = (
+    "reason for a new worker. Start a new worker only when no worker covers the subject, when the",
+    "request is an independent code change on a different subject (its own branch and PR: another",
+    "feature, function or bug, even in the same project, never on a branch that holds other work),",
+    "when it must run in parallel with what the related worker is doing now, or when the owner",
+    "asks for one. spawn_worker refuses once when related workers exist and lists them: then",
+    "either message_session one of them, or call spawn_worker again with why_new saying briefly",
+    "why none fits (the owner sees it); the owner asking for a new worker is reason enough (quote",
+    "their words).",
+)
+IN_PLACE_RULE_AFTER = (
+    "reason for a new worker. Work the owner asks done directly in their own folder (in place, not a",
+    "copy) is the one exception: only a worker started for it with in_place=true can do it (a worker",
+    "you have works in a copy of that folder or only reads it, unless it was itself started in place",
+    "there), so spawn_worker in_place=true, with context_from the related worker's task; never give it",
+    "to that worker. Start a new worker only when no worker covers the subject, when the request is an",
+    "independent code change on a different subject (its own branch and PR: another feature, function",
+    "or bug, even in the same project, never on a branch that holds other work), when it must run in",
+    "parallel with what the related worker is doing now, for work in place, or when the owner asks for",
+    "one. spawn_worker refuses once when related workers exist and lists them: then either",
+    "message_session one of them, or call spawn_worker again with why_new saying briefly why none fits",
+    "(the owner sees it); the owner asking for a new worker is reason enough (quote their words).",
+)
 FIXES: list[Allow] = [
     # E126: tasks replaced before their replacedby: link was kept get it once, read back from
     # their progress words; the mark that this ran is in the store. Nothing is shown.
@@ -308,6 +334,13 @@ FIXES: list[Allow] = [
         data=r"(/api/state\.sessions\[\d+\]|/api/sessions/[^.]+)\.(label|team)$",
     ),
     Allow("a worker's tabs, none on Home", element="#worker-tabs", views=r"^home"),
+    Allow(
+        "the Router's rule for work in place",
+        data=r"\.system_message\.content$",
+        lines=r"^  (?:"
+        + "|".join(map(re.escape, IN_PLACE_RULE_BEFORE + IN_PLACE_RULE_AFTER))
+        + ")$",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
@@ -536,6 +569,11 @@ FEATURES["codex_on_claude_never"] = Feature(
             "the Router's rule for agents says when to use continue_worker",
             data=r"\.system_message\.content$",
             lines=r"^- Workers can run on Codex as well as Copilot: ",
+        ),
+        Allow(
+            "the agents' view names the agent the Router runs on (the @ list marks it)",
+            data=r"\./api/state\.agents\.router_on$",
+            value="copilot",
         ),
         Allow(
             "the Coding agents tab is not photographed (INSTALLED), so it does not look",
