@@ -1823,8 +1823,11 @@ async def round_six(runtime, browser, failures: list[str]):
                      "ts": "1712345699.000300", "at": datetime.now(UTC).isoformat()},
     }, "I'll look now.")  # fmt: skip
     store.update_draft(moved["id"], outcome="Not sent: Bob wrote since: “never mind, fixed it”")
+    # As a card made before 0.1.53 kept it: what Slack answered, an email address in it.
     unread = store.create_draft(asker, "slack", {
-        "channel_id": "C0DEPLOYS2", "latest_error": "channel_not_found"}, "On it.")  # fmt: skip
+        "channel_id": "C0DEPLOYS2", "to": "Bob (#deploys)",
+        "latest_error": 'Slack showed no message there ({"messages":"=== THREAD PARENT MESSAGE '
+        '===\\nFrom: Bob <bob@example.com> (U0BOB0001)…).'}, "On it.")  # fmt: skip
     gone = store.create_draft(asker, "slack", {"channel_id": "C0DEPLOYS3"}, "Thanks!")
     runtime.add_message(
         router, "draft", "Thanks!", {"draft_id": gone["id"], "label": "Slack reply"}
@@ -2129,7 +2132,13 @@ async def round_six(runtime, browser, failures: list[str]):
     # Checked again on the way: held again only if someone wrote after the message shown.
     assert posted_anyway == [{"action": "send", "text": "I'll look now."}], posted_anyway
     unread_card = needs.locator(f'.card.draft[data-id="{unread["id"]}"]')
-    await expect(unread_card).to_contain_text("Could not read the conversation: channel_not_found")
+    # One plain line, never what Slack answered.
+    await expect(unread_card).to_contain_text(
+        "Couldn't read this conversation from Slack just now; the reply still goes to Bob "
+        "(#deploys)."
+    )
+    await expect(unread_card).not_to_contain_text("example.com")
+    await expect(unread_card).not_to_contain_text("THREAD PARENT")
     # Withdrawn by its worker: off Needs you, and its line in the chat says so.
     store.update_draft(gone["id"], status="rejected", outcome="Withdrawn: the thread was solved")
     runtime.bus.publish("draft", store.draft(gone["id"]))

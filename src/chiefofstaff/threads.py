@@ -90,7 +90,10 @@ def made_links(text: str) -> list[str]:
     return found
 
 
-PERMALINK = re.compile(r"/archives/([A-Z0-9]+)/p(\d{10})(\d{6})(?:\?thread_ts=(\d{10}\.\d{6}))?")
+# Also as a JSON answer escapes it ("\/archives\/C0DEPLOYS\/p…").
+PERMALINK = re.compile(
+    r"\\?/archives\\?/([A-Z0-9]+)\\?/p(\d{10})(\d{6})(?:\?thread_ts=(\d{10}\.\d{6}))?"
+)
 
 
 GOOGLE_DOC = re.compile(r"^https://docs\.google\.com/.*?/d/(?:e/)?([\w-]{6,})")

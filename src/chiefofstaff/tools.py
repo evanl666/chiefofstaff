@@ -40,6 +40,7 @@ from .peers import TellSession
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
+from .sources.slack import unread_line
 from .store import ago_minutes, now
 from .task_actions import (
     RUN_GOING,
@@ -4275,7 +4276,9 @@ class Tools:
             "latest_ts": place.get("ts", ""),
         }
         if place.get("error"):
-            target["latest_error"] = place["error"]
+            # In plain words for the owner: what Slack answered (anyone's messages, people's
+            # email addresses) stays in the log.
+            target["latest_error"] = unread_line(target["to"])
         if found := self.runtime.draft_task(caller, target):
             target["task_id"] = found  # The task it answers for, not merely its newest.
         draft = self.store.create_draft(caller, "slack", target, params.text, params.note)
@@ -4304,8 +4307,8 @@ class Tools:
         result += self.runtime.drafts.beside_note(draft)
         if place.get("error"):
             result += (
-                f" Slack showed no message there ({place['error']}): check channel_id and "
-                "thread_ts, and withdraw_draft it if they are wrong."
+                f" Slack could not be read there just now ({place['error']}): check channel_id "
+                "and thread_ts, and withdraw_draft it if they are wrong."
             )
         return result
 

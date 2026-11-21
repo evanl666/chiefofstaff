@@ -2,7 +2,9 @@
 
 It exposes the same tool names, parameters and read-only annotations as
 https://mcp.slack.com/mcp, backed by an in-memory workspace, and requires
-`Authorization: Bearer <token>` like the real server.
+`Authorization: Bearer <token>` like the real server. It answers as the real server does
+since November 2026 (JSON: {"messages": "<sections>", "pagination_info": "…"}); `--format old`
+(or Workspace(fmt="old"), or CHIEFOFSTAFF_FAKE_SLACK_FORMAT=old) answers in its earlier lines.
 
     uv run python scripts/fake_slack_mcp.py --port 18900 --token xoxp-demo
     CHIEFOFSTAFF_SLACK_MCP_URL=http://127.0.0.1:18900/mcp \\
@@ -10,6 +12,8 @@ https://mcp.slack.com/mcp, backed by an in-memory workspace, and requires
 """
 
 import argparse
+import json
+import os
 import threading
 import time
 
@@ -22,12 +26,27 @@ from starlette.responses import JSONResponse
 OWNER = "U0OWNER1"
 NAMES = {OWNER: "Owner", "U0ALICE1": "Alice Chen", "U0BOB001": "Bob Li"}
 CHANNELS = {"C0DEPLOYS": "deploys", "D0ALICE01": "DM with Alice", "D0BOB0001": "DM with Bob"}
+DM_WITH = {"D0ALICE01": "U0ALICE1", "D0BOB0001": "U0BOB001"}
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 
 
+def answer(fields: dict) -> str:
+    """A JSON answer as Slack's server writes it: non-ASCII and "/" escaped."""
+    return json.dumps(fields).replace("/", "\\/")
+
+
+def email(user: str) -> str:
+    return f"{NAMES.get(user, user).split()[0].lower()}@example.com"
+
+
+def when(stamp: str) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(float(stamp)))
+
+
 class Workspace:
-    def __init__(self):
+    def __init__(self, fmt: str = ""):
+        self.fmt = fmt or os.environ.get("CHIEFOFSTAFF_FAKE_SLACK_FORMAT", "") or "new"
         self.messages: list[dict] = []
         self.sent: list[dict] = []
         self.calls: list[tuple[str, dict]] = []
@@ -61,6 +80,97 @@ class Workspace:
         if message["thread_ts"] and message["thread_ts"] != message["ts"]:
             link += f"?thread_ts={message['thread_ts']}&cid={message['channel']}"
         return link
+
+    def replies(self, message: dict) -> list[dict]:
+        return [
+            m
+            for m in self.messages
+            if m["channel"] == message["channel"]
+            and m["thread_ts"] == message["ts"]
+            and m["ts"] != message["ts"]
+        ]
+
+    @staticmethod
+    def reactions(message: dict) -> str:
+        said = ", ".join(f"{name} ({len(users)})" for name, users in message["reactions"].items())
+        return f"\nReactions: {said}" if said else ""
+
+    @staticmethod
+    def person(user: str, ids: bool = False) -> str:
+        return f"{NAMES.get(user, user)} <{email(user)}> ({'ID: ' if ids else ''}{user})"
+
+    @staticmethod
+    def where(channel: str) -> str:
+        if channel.startswith("D"):
+            return "DM"
+        return f"#{CHANNELS.get(channel, channel)}"
+
+    def thread_answer(self, thread: list[dict]) -> str:
+        parent, replies = thread[0], thread[1:]
+        lines = (
+            f"=== THREAD PARENT MESSAGE ===\nFrom: {self.person(parent['user'])}\n"
+            f"Time: {when(parent['ts'])}\nMessage TS: {parent['ts']}\n{parent['text']}"
+            + self.reactions(parent)
+            + "\n\n"
+        )
+        if not replies:
+            lines += "No thread messsages\n"
+        else:
+            lines += f"=== THREAD REPLIES ({len(replies)} total) ===\n"
+            for number, reply in enumerate(replies, start=1):
+                lines += (
+                    f"\n--- Reply {number} of {len(replies)} ---\n"
+                    f"From: {self.person(reply['user'])}\nTime: {when(reply['ts'])}\n"
+                    f"Message TS: {reply['ts']}\n{reply['text']}{self.reactions(reply)}\n"
+                )
+        return answer(
+            {"messages": lines, "pagination_info": "There are no more messages in this thread.\n"}
+        )
+
+    def channel_answer(self, channel: str, found: list[dict]) -> str:
+        lines = f"Channel: {self.where(channel)} ({channel})\n"
+        for message in found:
+            replies = self.replies(message)
+            thread = (
+                f"\nThread: {len(replies)} replies (latest: {when(replies[-1]['ts'])})"
+                if replies
+                else ""
+            )
+            lines += (
+                f"\n=== Message from {self.person(message['user'])} at {when(message['ts'])} === "
+                f"\nMessage TS: {message['ts']}\n{message['text']}{thread}"
+                f"{self.reactions(message)}\n"
+            )
+        return answer({"messages": lines, "pagination_info": "There are no more messages.\n"})
+
+    def search_answer(self, query: str, found: list[dict]) -> str:
+        lines = f"# Search Results for: {query}\n\n"
+        if not found:
+            lines += "No results found.\n"
+        else:
+            lines += f"## Messages ({len(found)} results)\n"
+            for number, message in enumerate(found, start=1):
+                channel = message["channel"]
+                other = DM_WITH.get(channel, message["user"])
+                people = (
+                    f"Participants: {NAMES[OWNER]} (ID: {OWNER}), "
+                    f"{NAMES.get(other, other)} (ID: {other})\n"
+                    if channel.startswith("D")
+                    else ""
+                )
+                count = len(self.replies(message))
+                lines += (
+                    f"### Result {number} of {len(found)}\n"
+                    f"Channel: {self.where(channel)} (ID: {channel})\n{people}"
+                    f"From: {self.person(message['user'], ids=True)} \n"
+                    f"Time: {when(message['ts'])}\nMessage_ts: {message['ts']}\n"
+                    + (f"Reply count: {count}\n" if count else "")
+                    + f"Permalink: [link]({self.permalink(message)})\nText: \n{message['text']}"
+                    "\n\n---\n\n"
+                )
+        return answer(
+            {"results": lines, "pagination_info": "End of results - No more pages available.\\n"}
+        )
 
     def render(self, message: dict) -> str:
         channel = message["channel"]
@@ -104,7 +214,7 @@ def matches(message: dict, query: str) -> bool:
     return True
 
 
-def build_app(workspace: Workspace, token: str):
+def build_server(workspace: Workspace) -> FastMCP:
     server = FastMCP("fake-slack", stateless_http=True, json_response=True, log_level="WARNING")
 
     def record(name: str, arguments: dict):
@@ -120,7 +230,10 @@ def build_app(workspace: Workspace, token: str):
         annotations=READ,
     )
     def search(
-        query: str,
+        query: str = "",
+        keywords: list[str] | None = None,
+        filters: str = "",
+        natural_language_query: str = "",
         after: str = "",
         before: str = "",
         sort: str = "score",
@@ -135,6 +248,8 @@ def build_app(workspace: Workspace, token: str):
         max_context_length: int = 0,
         context_channel_id: str = "",
     ) -> str:
+        # Its earlier `query`, or the fields it takes now (keywords and filters).
+        query = " ".join([query, *(keywords or []), filters]).strip()
         record("slack_search_public_and_private", {"query": query, "after": after})
         found = [
             message
@@ -143,6 +258,8 @@ def build_app(workspace: Workspace, token: str):
         ]
         if sort_dir == "desc":
             found.reverse()
+        if workspace.fmt != "old":
+            return workspace.search_answer(query, found[:limit])
         return "\n\n".join(workspace.render(m) for m in found[:limit]) or "No results found."
 
     @server.tool(
@@ -182,6 +299,14 @@ def build_app(workspace: Workspace, token: str):
             and message_ts in (m["ts"], m["thread_ts"])
             and (not oldest or m["ts"] == message_ts or float(m["ts"]) >= float(oldest))
         ]
+        if workspace.fmt != "old":
+            # As Slack reads it now: a reply's ts reads that reply alone, as a thread's first.
+            here = next((m for m in thread if m["ts"] == message_ts), None)
+            if not here:
+                raise ValueError("thread_not_found")
+            if here["thread_ts"] and here["thread_ts"] != here["ts"]:
+                return workspace.thread_answer([here])
+            return workspace.thread_answer([here, *(m for m in thread if m is not here)])
         return "\n\n".join(workspace.render(m) for m in thread) or "Thread not found."
 
     @server.tool(
@@ -205,7 +330,30 @@ def build_app(workspace: Workspace, token: str):
             and not m["thread_ts"]
             and (not oldest or float(m["ts"]) >= float(oldest))
         ][-limit:]
+        if workspace.fmt != "old":
+            return workspace.channel_answer(channel_id, list(reversed(found)))
         return "\n\n".join(workspace.render(m) for m in reversed(found)) or "No messages."
+
+    @server.tool(
+        name="slack_get_reactions",
+        description="Retrieves all reactions (emoji) on a specific Slack message.",
+        annotations=READ,
+    )
+    def get_reactions(channel_id: str, message_ts: str) -> str:
+        record("slack_get_reactions", {"channel_id": channel_id, "message_ts": message_ts})
+        here = next(
+            (m for m in workspace.messages if (m["channel"], m["ts"]) == (channel_id, message_ts)),
+            None,
+        )
+        if not here:
+            raise ValueError("message_not_found")
+        lines = [
+            f":{name}: \u00d7 {len(users)} \u2014 "  # As Slack writes it.
+            + ", ".join(f"{NAMES.get(user, user)} ({user})" for user in sorted(users))
+            for name, users in here["reactions"].items()
+        ]
+        said = "Reactions on message:\n\n" + "\n".join(lines) if lines else "No reactions."
+        return answer({"result": said})
 
     @server.tool(
         name="slack_read_user_profile",
@@ -216,6 +364,15 @@ def build_app(workspace: Workspace, token: str):
         user_id: str = OWNER, include_locale: bool = False, response_format: str = "detailed"
     ) -> str:
         record("slack_read_user_profile", {"user_id": user_id})
+        if workspace.fmt != "old":
+            name = NAMES.get(user_id, "Unknown")
+            return answer(
+                {
+                    "result": f"User ID: {user_id}\nUsername: {name.split()[0].lower()}\n"
+                    f"Display Name: \nReal Name: {name}\nTitle: \nEmail: {email(user_id)}\n"
+                    "Timezone: America/Los_Angeles\nBot: No\n"
+                }
+            )
         return f"User {user_id}: {NAMES.get(user_id, 'Unknown')}, timezone America/Los_Angeles"
 
     @server.tool(
@@ -234,6 +391,13 @@ def build_app(workspace: Workspace, token: str):
         posted = workspace.post(channel_id, OWNER, message, thread_ts)
         with workspace.lock:
             workspace.sent.append(posted)
+        if workspace.fmt != "old":
+            return answer(
+                {
+                    "message_link": workspace.permalink(posted),
+                    "message_details": {"message_ts": posted["ts"], "channel_id": channel_id},
+                }
+            )
         return f"Message sent: {workspace.permalink(posted)}"
 
     @server.tool(
@@ -244,6 +408,12 @@ def build_app(workspace: Workspace, token: str):
     def schedule_message(channel_id: str, message: str, post_at: int, thread_ts: str = "") -> str:
         record("slack_schedule_message", {"channel_id": channel_id})
         return "Scheduled."
+
+    return server
+
+
+def build_app(workspace: Workspace, token: str):
+    server = build_server(workspace)
 
     class RequireToken(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
@@ -274,8 +444,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=18900)
     parser.add_argument("--token", default="xoxp-demo")
+    parser.add_argument("--format", choices=["new", "old"], default="new")
     args = parser.parse_args()
-    workspace = Workspace()
+    workspace = Workspace(args.format)
     serve_in_thread(workspace, args.token, args.port)
     print(f"Fake Slack MCP on http://127.0.0.1:{args.port}/mcp. Type a DM from Alice:")
     try:

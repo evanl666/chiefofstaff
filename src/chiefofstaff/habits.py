@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from .provenance import NOT_THEIRS, OWNER, managed, said_by_them, whose
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import github_time, posted_text, worker_commits
-from .sources.slack import SEARCH_TOOL
+from .sources.slack import SEARCH_TOOL, messages
 from .store import now
 from .workspaces import git
 
@@ -81,12 +81,6 @@ SLACK_PAGE = 20
 # Shorter messages to a session say little about the owner ("progress?").
 MIN_INSTRUCTION = 12
 HISTORY_READS = 20
-# One message in Slack's search results (the official MCP server's format).
-SLACK_ENTRY = re.compile(
-    r"Channel: <#(?P<channel>[A-Z0-9]+)>[^\n]*?\| From: <@(?P<user>[A-Z0-9]+)>[^\n]*?"
-    r"\| ts: (?P<ts>\d+\.\d+)[^\n]*\nText: (?P<text>.*?)\nPermalink: (?P<link>\S+)",
-    re.DOTALL,
-)
 # `git commit` prints "[branch abc1234] subject": the commits workers made.
 # A style never names a language: each answer is in the language of the message it answers.
 LANGUAGE_NAMES = re.compile(
@@ -158,7 +152,18 @@ def url_id(url: str) -> str:
 
 
 def slack_entries(text: str) -> list[dict]:
-    return [match.groupdict() for match in SLACK_ENTRY.finditer(text or "")]
+    """The messages of Slack's search results (in either of its formats), as written."""
+    return [
+        {
+            "channel": e["channel"],
+            "user": e["user"],
+            "ts": e["ts"],
+            "text": e["said"],
+            "link": e["link"],
+        }
+        for e in messages(text)
+        if e["ts"] and e["channel"]
+    ]
 
 
 def shown(text: str, limit: int = SHOWN_CHARS) -> str:
@@ -443,6 +448,7 @@ class Habits:
                     "sort": "timestamp",
                     "sort_dir": "asc",
                     "include_context": False,
+                    "content_types": "messages",
                     "limit": SLACK_PAGE,
                 },
             )

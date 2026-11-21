@@ -56,8 +56,9 @@ MAX_PAGES = 10
 MAX_FOLLOW_FAILURES = 5
 MAX_RESULT_CHARS = 6000
 LATEST_CHARS = 400
-PERMALINK = re.compile(r"/archives/[A-Z0-9]+/p(\d{10})(\d{6})")
-PERMALINK_CHANNEL = re.compile(r"/archives/([A-Z0-9]+)/p\d")
+# Also as a JSON answer escapes them ("\/archives\/C0DEPLOYS\/p…").
+PERMALINK = re.compile(r"\\?/archives\\?/[A-Z0-9]+\\?/p(\d{10})(\d{6})")
+PERMALINK_CHANNEL = re.compile(r"\\?/archives\\?/([A-Z0-9]+)\\?/p\d")
 TIMESTAMP = re.compile(r"(?<![\d.])(\d{10}\.\d{6})(?![\d])")
 THREAD_TS = re.compile(r"thread_ts\W{0,4}\d{10}\.\d{6}")
 USER_ID = re.compile(r"user_id is (U[A-Z0-9]{6,})")
@@ -98,7 +99,7 @@ def describe(error: BaseException) -> str:
 def message_keys(text: str) -> list[str]:
     """Stable per-message keys (Slack ts values) found in a search result."""
     # A thread_ts names the thread's root, not a message in this result.
-    text = THREAD_TS.sub("", text)
+    text = THREAD_TS.sub("", plain(text))
     stamps = [f"{seconds}.{micros}" for seconds, micros in PERMALINK.findall(text)]
     stamps += TIMESTAMP.findall(text)
     return [f"slack:{stamp}" for stamp in dict.fromkeys(stamps)]
@@ -225,7 +226,9 @@ MENTIONED = re.compile(r"<([@#])([UWCDG][A-Z0-9]{2,})(?:\|([^>\n]{1,80}))?>")
 MENTION = re.compile(r"<@([UW][A-Z0-9]{2,})(?:\|[^>\n]*)?>")
 PROFILE_TOOL = "slack_read_user_profile"
 PROFILE_NAME = re.compile(
-    r"^[\s*\-]*(real[ _]name|full[ _]name|display[ _]name|name)\W{0,3}[:=]\s*\"?([^\"\n]{1,80})",
+    # Within its line: an empty "Display Name: " is not followed by the next line's text.
+    r"^[ \t*\-]*(real[ _]name|full[ _]name|display[ _]name|name)\W{0,3}[:=][ \t]*"
+    r"\"?([^\"\n]{1,80})",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -244,6 +247,8 @@ def profile_name(profile: str) -> str:
             for key in ("real_name", "display_name", "name"):
                 if isinstance(holder, dict) and (value := str(holder.get(key) or "").strip()):
                     return value[:80]
+    if inner := unwrapped(profile):
+        profile = inner[0]
     lines = {
         key.lower().replace("_", " "): value.strip() for key, value in PROFILE_NAME.findall(profile)
     }
@@ -266,25 +271,517 @@ def entities(text: str) -> str:
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
+# Since November 2026 Slack's MCP server answers in JSON: a listing in one field ("messages": a
+# thread or a channel's history, "results": a search, "result": a profile or reactions) and
+# what else it says in others ("pagination_info"). Before, it answered in lines.
+LISTING_FIELDS = ("messages", "results", "result")
+EMAIL = re.compile(r" ?<[^<>\s@|]+@[^<>\s|]+>")
+
+
+def unwrapped(listed: str) -> tuple[str, str] | None:
+    """The listing in what Slack's MCP server answered as JSON, and the field it was in; None
+    when the answer is not such JSON (Slack's earlier format, an error)."""
+    text = (listed or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        found = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(found, dict):
+        for field in LISTING_FIELDS:
+            if isinstance(found.get(field), str):
+                return found[field], field
+    return None
+
+
+def plain(listed: str) -> str:
+    """What Slack answered, as text to look for links and ids in: a JSON answer's values one
+    per line (its links unescaped: "https:\\/\\/…" is "https://…"), else as it is."""
+    text = (listed or "").strip()
+    if not text.startswith(("{", "[")):
+        return listed or ""
+    try:
+        found = json.loads(text)
+    except ValueError:
+        return listed
+
+    def lines(value, key: str = "") -> list[str]:
+        if isinstance(value, dict):
+            return [line for name, item in value.items() for line in lines(item, str(name))]
+        if isinstance(value, list):
+            return [line for item in value for line in lines(item, key)]
+        if key in LISTING_FIELDS:
+            return [str(value)]
+        return [f"{key}: {value}" if key else str(value)]
+
+    return "\n".join(lines(found))
+
+
+def scrubbed(text: str) -> str:
+    """Slack's text without the email addresses its lines give people ("Bob <bob@acme.com>")."""
+    return EMAIL.sub("", text or "")
+
+
+PERSON = r"(?P<name>[^\n]*?)(?: <(?P<email>[^<>\n]*)>)? \((?:ID: )?(?P<user>[UWB][A-Z0-9]{2,})\)"
+FROM_LINE = re.compile(rf"From: {PERSON} ?")
+TIME_LINE = re.compile(r"Time: \S[^\n]*")
+TS_LINE = re.compile(r"Message[ _]TS: (?P<ts>\d{10}\.\d{6}) ?", re.IGNORECASE)
+STAMP_LINES = re.compile(r"^Message[ _]TS: (\d{10}\.\d{6}) ?$", re.IGNORECASE | re.MULTILINE)
+PARENT_LINE = re.compile(r"=== THREAD PARENT MESSAGE ===")
+REPLIES_LINE = re.compile(r"=== THREAD REPLIES \((?P<total>\d+)\b[^()\n]*\) ===")
+REPLY_LINE = re.compile(r"--- Reply (?P<number>\d+) of (?P<total>\d+) ---")
+NO_REPLIES = re.compile(r"No thread mes+ages?\.?", re.IGNORECASE)
+CHANNEL_LINE = re.compile(
+    r"Channel: (?P<where>[^\n]*?) \((?:ID: )?(?P<channel>[CDG][A-Z0-9]{2,})\) ?"
+)
+CHANNEL_MESSAGE = re.compile(rf"=== Message from {PERSON} at (?P<time>[^\n]+?) === ?")
+SEARCH_LINE = re.compile(r"# Search Results for:[^\n]*")
+SEARCH_MESSAGES = re.compile(r"## Messages \((?P<total>\d+) results?\)")
+SEARCH_SECTION = re.compile(r"## \w[\w ]* \(\d+ results?\)")
+RESULT_LINE = re.compile(r"### Result (?P<number>\d+) of (?P<total>\d+)")
+PARTICIPANTS_LINE = re.compile(r"Participants: (?P<people>[^\n]*)")
+PARTICIPANT = re.compile(r"([^,()\n][^()\n]*?) \((?:ID: )?([UWB][A-Z0-9]{2,})\)")
+REPLY_COUNT_LINE = re.compile(r"Reply count: \d+")
+PERMALINK_FIELD = re.compile(r"Permalink: (?:\[[^\]\n]*\]\((?P<url>[^)\s]+)\)|(?P<bare>\S+))")
+TEXT_LINE = re.compile(r"Text: ?(?P<first>[^\n]*)")
+REACTIONS_LINE = re.compile(r"Reactions: (?P<reactions>[^\n]*)")
+THREAD_INFO_LINE = re.compile(r"Thread: \d+ repl(?:y|ies)\b[^\n]*")
+REACTION = re.compile(r"([\w+\-']+(?:::[\w\-]+)?) \((\d+)\)")
+# A line in a message's text written to look like one of Slack's lines around a message.
+SECTION_LOOKALIKE = re.compile(
+    r"^\s*(?:=== THREAD |=== Message from |--- Reply \d|### Result \d|## Messages \(|"
+    r"Message[ _]TS: |From: [^\n]*\((?:ID: )?[UWB][A-Z0-9]{2,}\))",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def header_at(lines: list[str], start: int, *patterns: re.Pattern) -> list[re.Match] | None:
+    """These of Slack's lines, in this order, from line `start` on; None unless all match."""
+    found = []
+    for offset, pattern in enumerate(patterns):
+        line = lines[start + offset] if start + offset < len(lines) else None
+        if line is None or not (match := pattern.fullmatch(line)):
+            return None
+        found.append(match)
+    return found
+
+
+def body_of(lines: list[str], start: int, stop: int) -> tuple[str, list[str], bool]:
+    """A message's text between its header and the next one's (or the end), without the blank
+    lines around it; its reactions ("robot_face"), and whether Slack says it starts a thread.
+    Slack writes "Reactions: …" (and in a channel "Thread: 2 replies …") after the text."""
+    kept = lines[start:stop]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    reactions: list[str] = []
+    replied = False
+    while kept and (
+        (found := REACTIONS_LINE.fullmatch(kept[-1])) or THREAD_INFO_LINE.fullmatch(kept[-1])
+    ):
+        if found:
+            reactions = [name for name, _count in REACTION.findall(found["reactions"])]
+        else:
+            replied = True
+        kept.pop()
+    while kept and not kept[0].strip():
+        kept.pop(0)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return "\n".join(kept), reactions, replied
+
+
+def section_entry(
+    person: re.Match,
+    stamp: str,
+    text: str,
+    *,
+    channel: str = "",
+    where: str = "",
+    thread_ts: str = "",
+    link: str = "",
+    reactions: list[str] | None = None,
+    people: list[tuple[str, str]] | None = None,
+) -> dict:
+    """One message of Slack's JSON answers, in the fields `parse` gives (`head`: Slack's
+    line on who wrote it where, as its earlier format wrote it; never an email address)."""
+    name = " ".join((person["name"] or "").split())
+    where = where.strip().lstrip("#")
+    where = "" if where.upper() in {"DM", "GROUP DM"} else where
+    shown = f"<#{channel}>" + (f" ({where})" if where else "") if channel else ""
+    head = " | ".join(
+        part
+        for part in (
+            f"Channel: {shown}" if shown else "",
+            f"From: <@{person['user']}>" + (f" ({name})" if name else ""),
+            f"ts: {stamp}",
+            f"thread_ts: {thread_ts}" if thread_ts else "",
+        )
+        if part
+    )
+    return {
+        "channel": channel,
+        "where": where,
+        "user": person["user"],
+        "name": name,
+        "ts": stamp,
+        "thread_ts": thread_ts,
+        "text": entities(" ".join(text.split())),
+        "said": entities("\n".join(line.rstrip() for line in text.splitlines())),
+        "link": link,
+        "head": head,
+        "raw": text,
+        "reactions": reactions or [],
+        "people": people or [],
+        "sections": True,  # Read from Slack's JSON answers.
+    }
+
+
+def numbered(numbers: dict[int, int]) -> dict[int, int]:
+    """Where each numbered header block of Slack's is ("--- Reply 2 of 3 ---" and the lines
+    after it; line -> its number): number -> line, for the numbers only one block claims."""
+    places: dict[int, list[int]] = {}
+    for index, number in numbers.items():
+        places.setdefault(number, []).append(index)
+    return {number: where[0] for number, where in places.items() if len(where) == 1}
+
+
+# Which lines of a JSON answer are Slack's own, and which a message's text, when anyone can
+# write lines like Slack's in a message ("Message TS: …", "=== THREAD PARENT MESSAGE ===", a
+# whole "--- Reply 2 of 3 ---" block)? Messages are told apart by Slack's section structure
+# only, never by a line alone:
+# - the listing is the JSON field's string, so nothing in a message reaches past it (the
+#   pagination note is another field);
+# - a message starts only at Slack's full header block (its separator line, then From, Time
+#   and Message TS lines, in that order, after a blank line), and only the block expected next:
+#   the thread's first message at the very top, replies and search results by their numbers
+#   ("Reply k of N": k counts up from 1, N is the total Slack gave first), a channel's
+#   messages newest first (each block an older ts than the one before). Past the last number,
+#   nothing starts a message: what follows is the last message's text;
+# - a number (or in a channel a ts) that two full blocks claim is nobody's: one of them was
+#   written in a message's text, and which one cannot be told, so neither starts a message
+#   (the text stays with the message before them). So in a thread or a search, text never
+#   makes a message by someone else: a forged block either is not the one expected next, or
+#   claims a number Slack's own block claims too; at worst what one person wrote after it
+#   stays in their message. A channel's history has no numbers: there a whole block with an
+#   older ts than the message it is written in, and a ts of its own, cannot be told from
+#   Slack's (it can only sit below the newest message, so the newest is always Slack's).
+# Any full block left in a message's text marks the listing as made to mislead (`parse`'s
+# second value): callers say so to sessions and learn no names from it.
+def thread_listing(lines: list[str], channel: str) -> tuple[list[dict], bool] | None:
+    top = header_at(lines, 0, PARENT_LINE, FROM_LINE, TIME_LINE, TS_LINE)
+    if not top:
+        return None
+    _, person, _, stamp = top
+    root = stamp["ts"]
+
+    def reply_block(index: int) -> list[re.Match] | None:
+        if index < 1 or lines[index - 1].strip():
+            return None
+        return header_at(lines, index, REPLY_LINE, FROM_LINE, TIME_LINE, TS_LINE)
+
+    headers = {index: found for index in range(len(lines)) if (found := reply_block(index))}
+    unique = numbered({index: int(found[0]["number"]) for index, found in headers.items()})
+    heading = next(
+        (
+            (index, int(found["total"]))
+            for index, line in enumerate(lines)
+            if index > 4
+            and not lines[index - 1].strip()
+            and (found := REPLIES_LINE.fullmatch(line))
+            and (first := unique.get(1)) is not None
+            and first > index
+            and not any(item.strip() for item in lines[index + 1 : first])
+            and int(headers[first][0]["total"]) == int(found["total"])
+        ),
+        None,
+    )
+    accepted: list[int] = []  # Where each reply's header block is.
+    if heading:
+        index, total = heading
+        previous, place_before = float(root), index
+        for number in range(1, total + 1):
+            place = unique.get(number)
+            header = headers.get(place) if place is not None else None
+            if (
+                place is None
+                or header is None
+                or place <= place_before
+                or int(header[0]["total"]) != total
+                or float(header[3]["ts"]) <= previous
+            ):
+                break  # Not the one expected next: what follows is the message before's text.
+            accepted.append(place)
+            previous, place_before = float(header[3]["ts"]), place
+    # The first message runs to the replies' heading, else to the end, where "No thread
+    # messsages" closes the listing, not its text.
+    tail = lines[4 : heading[0]] if heading and accepted else lines[4:]
+    if not accepted:
+        while tail and not tail[-1].strip():
+            tail.pop()
+        if len(tail) >= 2 and NO_REPLIES.fullmatch(tail[-1].strip()) and not tail[-2].strip():
+            tail = tail[:-1]
+    text, reactions, _ = body_of(tail, 0, len(tail))
+    found = [
+        section_entry(
+            person,
+            root,
+            text,
+            channel=channel,
+            thread_ts=root if accepted else "",
+            reactions=reactions,
+        )
+    ]
+    for position, place in enumerate(accepted):
+        header = headers[place]
+        stop = accepted[position + 1] if position + 1 < len(accepted) else len(lines)
+        text, reactions, _ = body_of(lines, place + 4, stop)
+        found.append(
+            section_entry(
+                header[1],
+                header[3]["ts"],
+                text,
+                channel=channel,
+                thread_ts=root,
+                reactions=reactions,
+            )
+        )
+    parents = [
+        index
+        for index in range(1, len(lines))
+        if header_at(lines, index, PARENT_LINE, FROM_LINE, TIME_LINE, TS_LINE)
+    ]
+    return found, bool(set(headers) - set(accepted)) or bool(parents)
+
+
+def channel_listing(lines: list[str]) -> tuple[list[dict], bool] | None:
+    top = CHANNEL_LINE.fullmatch(lines[0]) if lines else None
+    if not top:
+        return None
+    channel, where = top["channel"], top["where"]
+
+    def block(index: int) -> list[re.Match] | None:
+        if index < 1 or lines[index - 1].strip():
+            return None
+        return header_at(lines, index, CHANNEL_MESSAGE, TS_LINE)
+
+    headers = {index: found for index in range(1, len(lines)) if (found := block(index))}
+    claimed: dict[str, int] = {}
+    for header in headers.values():
+        claimed[header[1]["ts"]] = claimed.get(header[1]["ts"], 0) + 1
+    accepted: list[int] = []
+    newer = float("inf")
+    first = next((index for index, line in enumerate(lines) if index and line.strip()), None)
+    for index, header in headers.items():
+        stamp = float(header[1]["ts"])
+        if not accepted and index != first:
+            break  # The first message comes right after the channel's line.
+        if claimed[header[1]["ts"]] > 1 or stamp >= newer:
+            continue  # Not one of Slack's: the text of the message it is in.
+        accepted.append(index)
+        newer = stamp
+    found = []
+    for position, place in enumerate(accepted):
+        header = headers[place]
+        stop = accepted[position + 1] if position + 1 < len(accepted) else len(lines)
+        text, reactions, replied = body_of(lines, place + 2, stop)
+        stamp = header[1]["ts"]
+        found.append(
+            section_entry(
+                header[0],
+                stamp,
+                text,
+                channel=channel,
+                where=where,
+                thread_ts=stamp if replied else "",
+                reactions=reactions,
+            )
+        )
+    return found, bool(set(headers) - set(accepted))
+
+
+def search_listing(lines: list[str]) -> tuple[list[dict], bool] | None:
+    if not lines or not SEARCH_LINE.fullmatch(lines[0]):
+        return None
+    heading = next(
+        (
+            (index, int(found["total"]))
+            for index, line in enumerate(lines[:6])
+            if (found := SEARCH_MESSAGES.fullmatch(line))
+        ),
+        None,
+    )
+    if not heading:
+        return [], False  # "No results found."
+
+    def fields(index: int) -> dict | None:
+        """A result's header block from its "### Result k of N" line: its matches by field,
+        and the line its text starts on."""
+        numbered_as = RESULT_LINE.fullmatch(lines[index])
+        if index + 1 >= len(lines) or not numbered_as:
+            return None
+        before = lines[index - 1] if index else ""
+        if not (
+            SEARCH_MESSAGES.fullmatch(before)
+            or (not before.strip() and index >= 3 and lines[index - 2].strip() == "---")
+        ):
+            return None
+        place = index + 1
+        got: dict = {"number": int(numbered_as["number"]), "total": int(numbered_as["total"])}
+        order = [
+            ("channel", CHANNEL_LINE, True),
+            ("people", PARTICIPANTS_LINE, False),
+            ("from", FROM_LINE, True),
+            ("time", TIME_LINE, True),
+            ("ts", TS_LINE, True),
+            ("count", REPLY_COUNT_LINE, False),
+            ("link", PERMALINK_FIELD, False),
+            ("text", TEXT_LINE, True),
+        ]
+        for name, pattern, required in order:
+            match = pattern.fullmatch(lines[place]) if place < len(lines) else None
+            if match:
+                got[name] = match
+                place += 1
+            elif required:
+                return None
+        got["start"] = place
+        return got
+
+    headers = {index: got for index in range(len(lines)) if (got := fields(index))}
+    unique = numbered({index: int(got["number"]) for index, got in headers.items()})
+    start, total = heading
+    accepted: list[int] = []
+    previous = start
+    for number in range(1, total + 1):
+        place = unique.get(number)
+        if place is None or place <= previous or headers[place]["total"] != total:
+            break
+        accepted.append(place)
+        previous = place
+    found = []
+    for position, place in enumerate(accepted):
+        got = headers[place]
+        last = position + 1 == len(accepted)
+        stop = accepted[position + 1] if not last else len(lines)
+        body = lines[got["start"] : stop]
+        if last:
+            # After the last result: other sections ("## Files (2 results)") are not its text.
+            cut = next(
+                (
+                    index
+                    for index, line in enumerate(body)
+                    if SEARCH_SECTION.fullmatch(line) and index and not body[index - 1].strip()
+                ),
+                None,
+            )
+            body = body[:cut] if cut is not None else body
+        while body and not body[-1].strip():
+            body.pop()
+        if body and body[-1].strip() == "---":
+            body.pop()  # The line Slack ends each result with.
+        first = got["text"]["first"].strip()
+        body = ([first] if first else []) + body
+        text, reactions, _ = body_of(body, 0, len(body))
+        link = (got["link"]["url"] or got["link"]["bare"]) if "link" in got else ""
+        root = threads.PERMALINK.search(link or "")
+        stamp = got["ts"]["ts"]
+        thread_ts = root.group(4) if root and root.group(4) else ""
+        if not thread_ts and "count" in got:
+            thread_ts = stamp  # A thread's first message.
+        people = PARTICIPANT.findall(got["people"]["people"]) if "people" in got else []
+        found.append(
+            section_entry(
+                got["from"],
+                stamp,
+                text,
+                channel=got["channel"]["channel"],
+                where=got["channel"]["where"],
+                thread_ts=thread_ts,
+                link=link,
+                reactions=reactions,
+                people=[(user, " ".join(name.split())) for name, user in people],
+            )
+        )
+    return found, bool(set(headers) - set(accepted))
+
+
+def sectioned(listed: str, channel: str = "") -> tuple[list[dict], bool] | None:
+    """The messages of one of Slack's JSON answers (a thread, a channel's history, a search)
+    and whether text in it was made to look like Slack's own lines; None when it is not one.
+
+    Slack's lines around a message in its JSON answers. A thread:
+      === THREAD PARENT MESSAGE ===
+      From: Bob Li <bob@acme.com> (U0BOB001)
+      Time: 2026-11-21 09:16:40 PST
+      Message TS: 1795201000.100100
+      <text>
+      Reactions: robot_face (1)
+
+      === THREAD REPLIES (2 total) ===            (or: "No thread messsages", Slack's spelling)
+
+      --- Reply 1 of 2 ---
+      From: … / Time: … / Message TS: … / <text>
+    A channel's history (newest first):
+      Channel: #deploys (C0DEPLOYS)
+
+      === Message from Bob Li <bob@acme.com> (U0BOB001) at 2026-11-21 09:16:40 PST ===
+      Message TS: 1795201000.100100
+      <text>
+      Thread: 2 replies (latest: 2026-11-21 09:33:20 PST)
+      Reactions: robot_face (1)
+    A search:
+      # Search Results for: <query>
+
+      ## Messages (2 results)
+      ### Result 1 of 2
+      Channel: DM (ID: D0BOB0001)                  (or "#deploys (ID: C0DEPLOYS)")
+      Participants: Bob Li (ID: U0BOB001), Owner (ID: U0OWNER1)
+      From: Bob Li <bob@acme.com> (ID: U0BOB001)
+      Time: 2026-11-20 18:03:20 PST
+      Message_ts: 1795199000.400400
+      Reply count: 1                                (a thread's first message)
+      Permalink: [link](https://acme.slack.com/archives/D0BOB0001/p1795199000400400)
+      Text:
+      <text>
+
+      ---
+
+      ### Result 2 of 2 …
+    """
+    found = unwrapped(listed)
+    if not found:
+        return None
+    lines = found[0].replace("\r\n", "\n").split("\n")
+    return thread_listing(lines, channel) or channel_listing(lines) or search_listing(lines)
+
+
 PERMALINK_LINE = re.compile(r"^Permalink: (\S+)", re.MULTILINE)
 # A line in a message's text made to look like Slack's own lines around a message.
 LOOKALIKE = re.compile(r"^\s*(?:Channel: <#|From: <@|Text: |Permalink: )|\| From: <@", re.MULTILINE)
+LOOKALIKES = (LOOKALIKE, SECTION_LOOKALIKE)
+UNREADABLE = "New in Slack, in a form Chief of Staff could not read here: open Slack to see it."
 FORGED_NOTE = (
     "Some message text here is made to look like Slack's own lines (another sender, place or "
     "permalink), so who wrote what below may not be right."
 )
 
 
-def parse(listed: str) -> tuple[list[dict], bool]:
+def parse(listed: str, channel: str = "") -> tuple[list[dict], bool]:
     """The messages of what Slack listed (a thread, a channel's history, a search), in the
     listing's order (channel, where (its name), user, name, ts, thread_ts, text: on one line,
     said: as written, link, head: Slack's own line(s) before the text, raw: the text as
-    listed), and whether text in it was made to look like Slack's own lines in a way that can
-    mislead (a permalink line that ends no message, a message closed by another's permalink,
-    two messages with one ts).
+    listed, reactions: their names, people: a DM's participants as (id, name)), and whether
+    text in it was made to look like Slack's own lines in a way that can mislead (a permalink
+    line that ends no message, a message closed by another's permalink, two messages with one
+    ts; in Slack's JSON answers, a header block of Slack's left in a message's text).
 
-    When the listing gives a message its permalink, the message goes on to it: a "From: …" or
+    Slack's JSON answers are read by their sections (see thread_listing); `channel`: where a
+    thread read there is (Slack's thread listing does not say). In its earlier line format,
+    when the listing gives a message its permalink, the message goes on to it: a "From: …" or
     "Channel: …" line before that is its text (anyone can write one), not another message."""
+    if (sections := sectioned(listed, channel)) is not None:
+        return sections
     listed = listed or ""
     ends = []  # Where each permalink line naming a message is, and that message's ts.
     for line in PERMALINK_LINE.finditer(listed):
@@ -314,6 +811,8 @@ def parse(listed: str) -> tuple[list[dict], bool]:
             "link": link,
             "head": head.rstrip(" |\n"),
             "raw": raw.strip("\n"),
+            "reactions": [],
+            "people": [],
         }
 
     while match := MESSAGE.search(listed, place):
@@ -353,14 +852,29 @@ def parse(listed: str) -> tuple[list[dict], bool]:
     return found, misled or astray or len(stamps) != len(set(stamps))
 
 
-def messages(listed: str) -> list[dict]:
+def messages(listed: str, channel: str = "") -> list[dict]:
     """The messages of what Slack listed, in the listing's order (see `parse`)."""
-    return parse(listed)[0]
+    return parse(listed, channel)[0]
+
+
+def known(listed: str) -> bool:
+    """Whether Slack's answer is a listing in a form read here (Slack's JSON answers by their
+    sections; its earlier lines when they give a message), even one with no message in it."""
+    return sectioned(listed) is not None or bool(parse(listed)[0])
 
 
 def listing_keys(listed: str) -> list[str]:
     """Keys ("slack:<ts>") of the messages Slack listed: the messages read in it when each has
-    a ts (a ts in a message's text is not a message), else every ts in it."""
+    a ts (a ts in a message's text is not a message), else every ts in it (in a form not read
+    here; never in Slack's JSON answers, which are read by their sections)."""
+    if (sections := sectioned(listed)) is not None:
+        stamps = [entry["ts"] for entry in sections[0]]
+        if sections[1]:
+            # Lines made to look like Slack's may keep a message inside another's text: every ts
+            # a "Message TS:" line names counts, so none is lost (for_session then gives the
+            # listing as it is, saying so).
+            stamps += STAMP_LINES.findall((unwrapped(listed) or ("", ""))[0])
+        return [f"slack:{stamp}" for stamp in dict.fromkeys(stamps)]
     found = parse(listed)[0]
     if found and all(entry["ts"] for entry in found):
         # Also when who wrote which is unsure: a message's header with its own permalink is
@@ -369,18 +883,25 @@ def listing_keys(listed: str) -> list[str]:
     return message_keys(listed)
 
 
-def for_session(listed: str, stamps: set[str], limit: int = MAX_RESULT_CHARS) -> str:
+def for_session(
+    listed: str, stamps: set[str], limit: int = MAX_RESULT_CHARS, channel: str = ""
+) -> str:
     """Only these messages ("1712345678.000100") of what Slack listed, for a session to read:
     Slack's line on who wrote it where (with ids and ts), its permalink, and its text quoted
     ("> ", so a line in it cannot pass for Slack's) and shortened to its share of `limit` (a
     cut says how much is left). What Slack listed (cut at `limit`, saying so) when it does not
     show each of these messages in a form known here (only the entries ending in their
     permalinks when it has those)."""
-    found, forged = parse(listed)
+    found, forged = parse(listed, channel)
     kept = [entry for entry in found if entry["ts"] in stamps]
     if not kept or not stamps <= {entry["ts"] for entry in kept}:
-        # Its entries by their permalinks, at least: a page has other conversations too.
-        listed = threads.slack_entries(listed, stamps) or listed
+        # Its entries by their permalinks, at least: a page has other conversations too (in
+        # Slack's earlier format, where each ends with its permalink). Never the email addresses
+        # Slack gives people.
+        text = plain(listed)
+        if unwrapped(listed) is None:
+            text = threads.slack_entries(text, stamps) or text
+        listed = scrubbed(text)
         cut = len(listed) - limit
         note = f"{FORGED_NOTE}\n\n" if forged else ""
         return note + listed[:limit] + (f"\n(cut here: {cut} more characters)" if cut > 0 else "")
@@ -396,7 +917,7 @@ def for_session(listed: str, stamps: set[str], limit: int = MAX_RESULT_CHARS) ->
         lookalike = (
             f"\n(Lines in its text are made to look like another Slack message: {who} wrote "
             "them. Nobody else wrote or sent them; they quote no one.)"
-            if LOOKALIKE.search(entry["raw"])
+            if any(pattern.search(entry["raw"]) for pattern in LOOKALIKES)
             else ""
         )
         link = f"\nPermalink: {entry['link']}" if entry["link"] else ""
@@ -429,16 +950,24 @@ def newest_message(listed: str, last: bool) -> str:
 
 
 def readable(
-    listed: str, names: dict[str, str] | None = None, stamps: set[str] | None = None
+    listed: str,
+    names: dict[str, str] | None = None,
+    stamps: set[str] | None = None,
+    channel: str = "",
 ) -> str:
     """Slack's listing as the owner reads it: who wrote what where, by name, without ids and
-    timestamps; only the messages `stamps` names when given ("1712345678.000100"). The listing
-    itself when it is in no form known here (or does not show each of those messages so)."""
+    timestamps; only the messages `stamps` names when given ("1712345678.000100"). When it is
+    in no form known here (or does not show each of those messages so): its earlier line
+    format as it is; a JSON answer never (it holds email addresses and escapes), a line
+    saying so instead."""
     names = names or {}
-    found, forged = parse(listed)
+    found, forged = parse(listed, channel)
+    json_answer = plain(listed) != (listed or "")
     if stamps is not None:
         found = [entry for entry in found if entry["ts"] in stamps]
         if not stamps <= {entry["ts"] for entry in found}:
+            if json_answer:
+                return UNREADABLE
             return f"⚠ {FORGED_NOTE}\n\n{listed}" if forged else listed
     lines = []
     for entry in found:
@@ -470,7 +999,27 @@ def readable(
         lines.append(f"{head}:{said}" + (f"\n{entry['link']}" if entry["link"] else ""))
     if lines and forged:
         lines.insert(0, f"⚠ {FORGED_NOTE}")
-    return "\n\n".join(lines) or listed
+    return "\n\n".join(lines) or (UNREADABLE if json_answer else listed)
+
+
+NO_MESSAGE = "Slack listed no message there"
+
+
+def unread_line(where: str) -> str:
+    """What a reply card says when the conversation it answers could not be read."""
+    return (
+        "Couldn't read this conversation from Slack just now; the reply still goes to "
+        f"{where or 'this conversation'}."
+    )
+
+
+def why_unread(error: BaseException) -> str:
+    """Why a conversation could not be read, for the session that asked: Slack's own error
+    (its code), never what it listed (anyone's messages, people's email addresses)."""
+    said = describe(error)
+    if said.startswith(NO_MESSAGE) or "form not read here" in said:
+        return NO_MESSAGE
+    return " ".join(scrubbed(said).split())[:200]
 
 
 class SlackSource:
@@ -658,6 +1207,7 @@ class SlackSource:
                         "sort": "timestamp",
                         "sort_dir": "asc",
                         "include_context": False,
+                        "content_types": "messages",
                         "limit": PAGE_SIZE,
                     },
                 )
@@ -788,6 +1338,7 @@ class SlackSource:
                 "sort": "timestamp",
                 "sort_dir": "desc",
                 "include_context": False,
+                "content_types": "messages",
                 "limit": PAGE_SIZE,
             },
         )
@@ -843,20 +1394,30 @@ class SlackSource:
                 self.store.set(f"slackskip:{thread}", "0")
             try:
                 text = await self.mcp.call(tool, {**arguments, "oldest": str(oldest), "limit": 50})
+                found = self.listed_messages(text, channel)
             except Exception as exc:
                 # One unreadable thread must not stop the others or the DM/mention search.
                 self.store.set(f"slackfail:{thread}", str(failures + 1))
                 logger.warning("Could not read followed %s (%s): %s", thread, failures + 1, exc)
                 continue
             self.store.set(f"slackfail:{thread}", "0")
-            self.learn_names(text)
+            self.learn_names(text, channel)
+            seen_to = float(self.store.get(f"slackhw:{thread}") or 0)
+            first = float(match.group(2)) if match else 0.0
             fresh = [
                 key
-                for key in listing_keys(text)
-                if float(key.removeprefix("slack:")) >= oldest and not self.seen(key)
+                for entry in found
+                if (key := f"slack:{entry['ts']}")
+                and float(entry["ts"]) >= oldest
+                # News is a message new since the follower last saw the thread: not the
+                # thread's first message (what it follows), not one delivered before, not
+                # Chief of Staff's own (seen when sent), not a bot's. A reaction is no message.
+                and float(entry["ts"]) > max(seen_to, first)
+                and not entry["user"].startswith("B")
+                and not self.seen(key)
             ]
             if fresh:
-                await self.learn_mentions(text)
+                await self.learn_mentions(" ".join(e["text"] for e in found))
                 newest = max(float(key.removeprefix("slack:")) for key in fresh)
                 stamps = {key.removeprefix("slack:") for key in fresh}
                 await self.host.on_thread(
@@ -865,10 +1426,28 @@ class SlackSource:
                     fresh,
                     f"New messages in a Slack {kind} you follow ({thread}; new ts: "
                     f"{', '.join(sorted(stamps))}). Each one's text is quoted under its Slack "
-                    f"line; read the {kind} for what came before.\n\n" + for_session(text, stamps),
-                    readable(text, self.display_names(), stamps),
+                    f"line; read the {kind} for what came before.\n\n"
+                    + for_session(text, stamps, channel=channel),
+                    readable(text, self.display_names(), stamps, channel=channel),
                 )
                 self.store.set(f"slackhw:{thread}", str(newest))
+
+    @staticmethod
+    def listed_messages(text: str, channel: str) -> list[dict]:
+        """The messages of a thread or DM Slack listed; raises when they cannot be read in
+        it (an answer in a form not read here): it is read again later, and none of it goes
+        to a session as it is."""
+        if (sections := sectioned(text, channel)) is not None:
+            return sections[0]
+        found = messages(text, channel)
+        if (
+            unwrapped(text) is not None
+            or plain(text) != (text or "")
+            or (not found and message_keys(text))
+        ):
+            said = " ".join(scrubbed(plain(text)).split())[:200]
+            raise SlackError(f"Slack answered in a form not read here ({said or 'nothing'})")
+        return found
 
     async def find_sent(self, target: dict, text: str, since: float) -> str:
         """A permalink to the owner's message with this text in the target conversation, sent
@@ -884,9 +1463,11 @@ class SlackSource:
                 "sort": "timestamp",
                 "sort_dir": "desc",
                 "include_context": False,
+                "content_types": "messages",
                 "limit": 20,
             },
         )
+        result = plain(result)
         for stamp, keys in threads.slack_messages(result).items():
             if float(stamp) < since - CLOCK_SKEW:
                 continue
@@ -894,7 +1475,9 @@ class SlackSource:
                 return next(
                     (
                         link
-                        for link in re.findall(r"https://\S+/archives/\S+", result)
+                        for link in re.findall(
+                            r"https://[^\s()\[\]]+/archives/[^\s()\[\]]+", result
+                        )
                         if stamp.replace(".", "") in link
                     ),
                     f"slack:{stamp}",
@@ -912,13 +1495,19 @@ class SlackSource:
         else:
             tool, arguments = "slack_read_channel", {"channel_id": channel_id, "limit": 1}
         text = await asyncio.wait_for(self.mcp.call(tool, arguments), 20)
-        self.learn_names(text)
-        if found := messages(text):
+        self.learn_names(text, channel_id)
+        if found := messages(text, channel_id):
             # Who its messages mention, by name on the card that quotes them.
             await self.learn_mentions(" ".join(entry["text"] for entry in found))
             return found
-        said = " ".join((text or "").split())[:200]
-        raise SlackError(f"Slack showed no message there ({said or 'nothing'}).")
+        # What Slack answered stays in the log: it can hold anyone's messages and emails.
+        logger.info(
+            "Slack listed no message in %s %s: %s",
+            channel_id,
+            thread_ts,
+            " ".join(scrubbed(plain(text)).split())[:300] or "nothing",
+        )
+        raise SlackError(NO_MESSAGE)
 
     async def latest_message(self, channel_id: str, thread_ts: str = "") -> dict:
         """The newest message where a reply would go, as Slack shows it: what the owner checks
@@ -928,12 +1517,12 @@ class SlackSource:
             found = await self.read_conversation(channel_id, thread_ts)
         except Exception as exc:
             logger.info("Could not read %s for a draft: %s", channel_id, describe(exc))
-            return {"error": describe(exc)[:300]}
+            return {"error": why_unread(exc)}
         return self.described(newest_entry(found, last=bool(thread_ts)))
 
     def described(self, entry: dict | None) -> dict:
         if not entry:
-            return {"error": "Slack showed no message there."}
+            return {"error": NO_MESSAGE}
         name = entry["name"] or self.display_names().get(entry["user"], "")
         return {
             "quote": quote({**entry, "name": name}),
@@ -958,9 +1547,13 @@ class SlackSource:
             found = await self.read_conversation(channel_id, thread_ts)
         except Exception as exc:
             logger.info("Could not read %s for a draft: %s", channel_id, describe(exc))
-            return {"thread_ts": thread_ts, "error": describe(exc)[:300]}
+            return {"thread_ts": thread_ts, "error": why_unread(exc)}
         here = next((entry for entry in found if entry["ts"] == thread_ts), None)
         root = here["thread_ts"] if here else ""
+        if here and not root and len(found) == 1 and here.get("sections"):
+            # Slack's JSON thread read of a reply shows that reply alone, as a thread's first
+            # message: its search says which thread it is in.
+            root = await self.thread_root(channel_id, thread_ts)
         if root and root != thread_ts:
             return {"thread_ts": root} | await self.latest_message(channel_id, root)
         alone = here is not None and all(entry["ts"] == thread_ts for entry in found)
@@ -968,17 +1561,67 @@ class SlackSource:
             return {"thread_ts": ""} | await self.latest_message(channel_id)
         return {"thread_ts": thread_ts} | self.described(newest_entry(found, last=True))
 
+    async def thread_root(self, channel_id: str, stamp: str) -> str:
+        """The first message of the thread a message is a reply in, as Slack's search links
+        it ("" when it is in none, or that cannot be told now)."""
+        second = int(float(stamp))
+        try:
+            text = await asyncio.wait_for(
+                self.mcp.call(
+                    SEARCH_TOOL,
+                    {
+                        "query": f"in:<#{channel_id}>",
+                        "after": str(second),
+                        "before": str(second + 1),
+                        "include_context": False,
+                        "content_types": "messages",
+                        "limit": PAGE_SIZE,
+                    },
+                ),
+                20,
+            )
+        except Exception as exc:
+            logger.info("Could not look up the thread of %s: %s", stamp, describe(exc))
+            return ""
+        here = next((entry for entry in messages(text) if entry["ts"] == stamp), None)
+        return here["thread_ts"] if here and here["thread_ts"] != stamp else ""
+
     # Names: who a user id is and what a conversation id is called, as Slack listed them.
 
-    def learn_names(self, listed: str):
+    def learn_names(self, listed: str, channel: str = ""):
         """Names from Slack's own lines on who wrote a message where: not from its text, where
         anyone can write "<@U0BOB001> (Alice Chen)"; none from a listing whose text was made to
-        look like those lines."""
+        look like those lines. Never an email address (Slack's JSON answers give them)."""
+        if (sections := sectioned(listed, channel)) is not None:
+            if not sections[1]:
+                self.remember_names(self.section_names(sections[0]))
+            return
         entries, forged = parse(listed)
         if not forged:
             self.remember_names(
                 names_in("\n".join(entry["head"] for entry in entries if entry["head"]))
             )
+
+    def section_names(self, entries: list[dict]) -> dict[str, str]:
+        """Who is who in messages read from Slack's JSON answers: each sender, the people of a
+        DM, a channel by its name; a DM by the one person in it besides the owner."""
+        owner = self.status.get("user_id") or ""
+        found: dict[str, str] = {}
+        others: dict[str, dict[str, str]] = {}
+        for entry in entries:
+            people = [(entry["user"], entry["name"]), *entry.get("people", [])]
+            found |= {user: name for user, name in people if user and name}
+            channel = entry["channel"]
+            if channel.startswith("D"):
+                if owner:
+                    found_here = others.setdefault(channel, {})
+                    found_here |= {u: n for u, n in people if u and n and u != owner}
+            elif channel and entry["where"]:
+                found[channel] = entry["where"]
+        for channel, people in others.items():
+            if len(people) == 1:
+                found[channel] = next(iter(people.values()))
+        return found
 
     def remember_names(self, found: dict[str, str]):
         known = self.display_names()

@@ -753,9 +753,10 @@ function messageCard(draft) {
 }
 // The newest message where a Slack reply goes, as Slack writes it (its links and names
 // readable); one written since the draft, marked new (the reply waits for the owner to send it
-// anyway); or why it could not be read.
+// anyway); or one plain line when it could not be read (never what Slack answered: a card made
+// before 0.1.53 kept that).
 function latestQuote(target) {
-  if (target.latest_error) return el("div", { class: "note warn-note", text: `Could not read the conversation: ${target.latest_error}` });
+  if (target.latest_error) return el("div", { class: "note warn-note", text: `Couldn't read this conversation from Slack just now; the reply still goes to ${target.to ? slackText(target.to) : "this conversation"}.` });
   const moved = target.moved_on;
   // Its quote, else what the server kept of it.
   const said = target.latest || (moved ? moved.text || "" : "");
