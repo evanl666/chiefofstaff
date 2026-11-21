@@ -716,10 +716,15 @@ async def this_round(runtime, browser, failures: list[str]):
     # cards in their timelines.
     await expect(page.locator("#timeline .event", has_text="Filter opt-outs told Opt-out "
                               "client")).to_be_visible(timeout=5000)  # fmt: skip
+    # In a worker's chat (E130): a line in its Work, the card on its Team tab.
     await page.locator("#session-list .item", has_text="Opt-out client").click()
-    await expect(page.locator("#timeline .card", has_text="From “Filter opt-outs”")).to_be_visible()
+    await expect(page.locator("#timeline .peer-msg > .event", has_text="Filter opt-outs:"))\
+        .to_be_visible()  # fmt: skip
+    await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
+    await expect(page.locator("#timeline .card", has_text="From Filter opt-outs")).to_be_visible()
     await page.locator("#session-list .item", has_text="Filter opt-outs").click()
-    await expect(page.locator("#timeline .card", has_text="Told “Opt-out client”")).to_be_visible()
+    await expect(page.locator("#timeline .peer-msg > .event", has_text="Told Opt-out client:"))\
+        .to_be_visible()  # fmt: skip
     await page.locator("#back-home").click()
     log("workers that work together: who told whom, in the chat and in their timelines")
 
@@ -5146,6 +5151,148 @@ async def teams_seeded(runtime) -> dict:
     return {"scout": scout, "writer": writer, "open": second}
 
 
+# A question held up half an hour, the minutes as they pass while the round runs.
+WAITING_WORDS = re.compile(r"^2 workers · 8 messages · 1 waiting 3\d min$")
+
+
+async def teams_held_up(runtime, seeded: dict) -> str:
+    """A third question, open 34 minutes, its asker at rest with its task open: held up."""
+    asked = await call_tool(runtime, "ask_session", seeded["writer"], session_id=seeded["scout"],
+                            question="Which region rotates first?")  # fmt: skip
+    question = asked.text_result_for_llm.split("(")[1].split(")")[0]
+    runtime.store.execute(
+        "UPDATE questions SET asked=? WHERE id=?", (time.time() - 34 * 60, question)
+    )
+    # It ends its turn to wait for the answer: its task waits on it.
+    waiting = runtime.states.handle(seeded["writer"])
+    waiting.emit("assistant.message", content="Waiting for Token Scout's answer.")
+    waiting.emit("session.idle")
+    await settle(runtime)
+    runtime.publish_state()
+    return question
+
+
+async def teams_views_checked(runtime, browser, failures, seeded, shots):
+    """E129/E130, phases 2-4: the Teams strip above Running, the sidebar's team, a question held
+    up half an hour under Needs you (Nudge, Open thread), the team's own view (who talks to
+    whom, the thread a question with its answer, filters) and a worker's tabs."""
+    from chiefofstaff.digest import needs_you
+
+    question = await teams_held_up(runtime, seeded)
+    scout, writer = seeded["scout"], seeded["writer"]
+    team = f"team-{scout[:8]}"
+    for width, scheme in itertools.product((1440, 1280, 800), ("light", "dark")):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 1000}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        row = page.locator(f'#teams-strip .team-row[data-team="{team}"]')
+        await expect(row.locator(".name")).to_have_text("Token Scout & Column Maker")
+        await expect(row.locator(".words")).to_have_text(WAITING_WORDS)
+        await expect(row).to_have_class(re.compile(r"\bwaiting\b"))
+        # Above Running, its words whole or cut with an ellipsis, never past the panel.
+        assert await page.locator("#tasks > :first-child").get_attribute("id") == "teams-strip"
+        found = await page.locator("#teams-strip").evaluate(OVERFLOWS)
+        assert not found, (width, found)
+        await page.locator("#panel").screenshot(path=shots / f"strip-{width}-{scheme}.png")
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        held = page.locator(f'#needs .card.team-wait[data-id="teamwait:{question}"]')
+        await expect(held.locator(".label")).to_have_text(
+            re.compile(r"^Column Maker has waited 3\d min for Token Scout$")
+        )
+        await expect(held.locator(".asked")).to_have_text("Which region rotates first?")
+        await expect(page.locator(".home-item .badge")).to_have_text(str(needs_you(runtime)))
+        await page.locator("#needs").screenshot(path=shots / f"needs-{width}-{scheme}.png")
+        if width >= 1100:
+            line = page.locator("#session-list .team-line", has_text="Token Scout & Column Maker")
+            await expect(line).to_be_visible()
+            await expect(page.locator("#session-list .item.in-team")).to_have_count(2)
+            await page.locator("#sidebar").screenshot(path=shots / f"sidebar-{width}-{scheme}.png")
+        # Open thread: the team's view.
+        await held.get_by_role("button", name="Open thread").click()
+        await expect(page.locator("#session-title")).to_have_text(
+            "Team · Token Scout & Column Maker"
+        )
+        await expect(page.locator("#session-meta")).to_have_text(WAITING_WORDS)
+        view = page.locator("#timeline .team-view")
+        await expect(view.locator(".team-graph .node")).to_have_count(2)
+        await expect(view.locator(".team-graph .edge.open")).to_have_count(1)
+        await expect(view.locator(".team-thread > .team-item")).to_have_count(6)
+        await expect(view.locator(".team-item.ask .pill.answered")).to_have_count(2)
+        await expect(view.locator(".team-item.ask .pill.waiting")).to_have_text(
+            [re.compile(r"^waiting 3\d min$")]
+        )
+        await expect(view.locator(".team-item.ask .answer", has_text="Read only.")).to_have_count(1)
+        await expect(page.locator("#composer")).to_be_hidden()
+        found = await page.locator("#timeline").evaluate(OVERFLOWS)
+        assert not found, (width, found)
+        await page.locator("#main").screenshot(path=shots / f"team-{width}-{scheme}.png")
+        await view.get_by_role("button", name=re.compile("^Waiting")).click()
+        await expect(view.locator(".team-thread > .team-item")).to_have_count(1)
+        await expect(view.locator(".team-item")).to_contain_text("Which region rotates first?")
+        # A worker's tabs: its work with what its team told it in a line each; Team in full.
+        await view.locator(".team-members .member", has_text="Column Maker").click()
+        tabs = page.locator("#worker-tabs")
+        await expect(tabs.get_by_role("tab")).to_have_text(
+            ["Work", re.compile(r"^Team\d+$"), "Tools", "Reports"]
+        )
+        timeline = page.locator("#timeline")
+        await expect(timeline.locator(".peer-msg > .event").first).to_be_visible()
+        await expect(timeline.locator(".peer-msg > .card").first).to_be_hidden()
+        await page.locator("#main").screenshot(path=shots / f"worker-work-{width}-{scheme}.png")
+        await tabs.get_by_role("tab", name=re.compile("^Team")).click()
+        await expect(timeline.locator(".peer-msg > .card").first).to_be_visible()
+        await expect(timeline.locator(".peer-msg > .event").first).to_be_hidden()
+        await expect(timeline.locator(":scope > :not(.peer-msg):visible")).to_have_count(0)
+        await page.locator("#main").screenshot(path=shots / f"worker-team-{width}-{scheme}.png")
+        await tabs.get_by_role("tab", name="Reports").click()
+        await expect(timeline.locator(".tab-empty")).to_have_text("No reports yet.")
+        await tabs.get_by_role("button", name="Team thread").click()
+        await expect(page.locator("#session-title")).to_have_text(
+            "Team · Token Scout & Column Maker"
+        )
+        await expect(page.locator(".team-members .member.focus")).to_contain_text("Column Maker")
+        assert not errors, errors
+        await context.close()
+    log("Teams: a line above Running, the sidebar's team, the team's view, a worker's tabs")
+
+    # Nudge: the one asked hears its teammate waits; the line says it was nudged.
+    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    held = page.locator(f'#needs .card.team-wait[data-id="teamwait:{question}"]')
+    await held.get_by_role("button", name="Nudge").click()
+    await expect(page.locator(".toast", has_text="Nudged “Token Scout”")).to_be_visible()
+    await expect(held.get_by_role("button", name=re.compile("^Nudged"))).to_be_disabled()
+    notes = [m["text"] for m in runtime.store.messages(scout) if m["meta"].get("nudge")]
+    assert len(notes) == 1 and re.fullmatch(
+        r"Nudged by the owner: “Column Maker” waits for your answer \(3\d min\)\.", notes[0]
+    ), notes
+    # A short name of the owner's: the lines, the strip and the thread say it.
+    await page.locator("#session-list .item.in-team", has_text="Column Maker").first.click()
+    await page.locator("#session-more-button").click()
+    name = page.get_by_label("Short name")
+    await name.fill("Client")
+    await name.press("Enter")
+    await expect(page.locator(".toast", has_text="Its short name: Client.")).to_be_visible()
+    assert runtime.view(runtime.store.session(writer))["label"] == "Client"
+    await page.locator("#back-home").click()
+    await expect(page.locator("#teams-strip .team-row .name")).to_have_text("Token Scout & Client")
+    await call_tool(runtime, "answer_session", scout, question_id=question, answer="EU first.")
+    await expect(held).to_have_count(0, timeout=10000)
+    runtime.teams.set_label(writer, "")
+    await context.close()
+    log("Teams: Nudge tells the one asked; a short name of the owner's shows everywhere")
+
+
 async def round_teams(runtime, browser, failures: list[str]):
     """E129, phase 1: on Home, a run of what workers told each other is one line (how many, who,
     what waits), open to its last three; a run of routing receipts is one line too; one alone
@@ -5205,6 +5352,7 @@ async def round_teams(runtime, browser, failures: list[str]):
     await expect(team.locator(".fold-line .waiting")).to_have_count(0, timeout=10000)
     await context.close()
     log("Home: an answered question no longer waits")
+    await teams_views_checked(runtime, browser, failures, seeded, shots)
 
     # A run longer than a page: Load earlier brings the rest into the same fold.
     router = runtime.store.get("router_id")

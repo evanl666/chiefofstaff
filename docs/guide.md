@@ -168,15 +168,27 @@ together; each is told about the others. They pass what the other needs straight
 (`tell_session`, or `ask_session` for a question), in their exact words and at once, without a
 Router turn in between. A worker waiting for another one's message waits quietly (its card
 says *waiting for “…”*) and goes on when it arrives; when the other one finishes, its result
-reaches the ones still at work. The Router keeps the picture without being in the way: a copy
-of each message rides along with its next turn, and Home shows it in a line by the workers'
-short names (*↔ Token Scout told Token Writer: …*), so "what did the scout pass on?" is answered
-at once. Several in a row are one line: how many, the workers' initials in their colors, and
-what still waits (*↔ 5 team messages · TS TW · 1 waiting 9 min*); click it for the last three,
-*Open* for the worker it went to last. What workers
-tell each other is information, never new work: when one should change course (scope, another
-approach, overlapping work), it asks the Router, which decides or asks you. Independent tasks
-started together are not linked.
+reaches the ones still at work. What workers tell each other is information, never new work:
+when one should change course (scope, another approach, overlapping work), it asks the Router,
+which decides or asks you. Independent tasks started together are not linked.
+
+**Teams.** Workers that work together are a team: each has a short name (from its first task,
+*Token Scout*; yours in its **⋯** → *Short name*) and a color, the same everywhere. Home shows
+each message in a line by those names (*↔ Token Scout told Token Writer: …*); several in a row
+are one line, how many, who and what still waits (*↔ 5 team messages · TS TW · 1 waiting 9
+min*), opening to the last three, its *Open* to their thread. *Teams*, above *Running*, has a
+line per team (*2 workers · 8 messages · 1 waiting 9 min*, or *all answered*), and the sidebar
+lists a team's workers together under its name. A team's thread shows who talks to whom (wider
+lines for more messages, amber while a question waits) and everything they told and asked each
+other, each question with its answer (*answered in 3 min*) or how long it has waited (*waiting
+9 min*), with *All*, *Waiting*, *Questions* and *Told*. In a worker's chat, *Work* shows what
+its team told it in a line each; *Team* shows those in full (and *Team thread*), *Tools* its
+steps and *Reports* its reports. A question that holds its asker's task up for half an hour
+comes under *Needs you*, one line per team: *Nudge* tells the one asked that its teammate waits
+(once every half hour), *Open thread* shows it. The Router is not handed the messages: its next
+turn gets a short digest (who told or asked whom, what waits), and it reads a team's thread
+only when you ask about it or a question there holds a task up, so it never passes on what one
+worker handed another.
 
 **Routing to the right worker** matters most. Your message reaches the Router together with
 the workers whose record matches it (title, task, files, branches, reports; keyword search,

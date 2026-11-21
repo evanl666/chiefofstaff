@@ -38,6 +38,20 @@
   from macOS. That line is dropped wherever Chief of Staff reads what Copilot, Codex, Claude
   Code and what they start write on stderr; all else they write goes where it did (an error
   still shows), and a Claude worker that can't start no longer gives that line as its reason.
+- **Teams: one thread for what workers that work together say (E129, E130).** Each team has a
+  line above *Running* (*2 workers · 8 messages · 1 waiting 9 min*) and a view of its own: who
+  talks to whom, and everything they told and asked each other, each question with its answer
+  (*answered in 3 min*) or how long it has waited, with filters. The sidebar lists a team's
+  workers together; a worker's chat has tabs (*Work*, *Team*, *Tools*, *Reports*), what its team
+  told it a line in *Work* and in full in *Team*. Each worker has a short name and a color (its
+  **⋯** → *Short name* to give your own).
+- **A question between workers that holds a task up comes to you.** Open half an hour while its
+  asker's task waits on it, it is one line under *Needs you* per team: *Nudge* tells the worker
+  asked that its teammate waits, *Open thread* shows the exchange.
+- **The Router's context no longer carries what workers tell each other.** Each message rode
+  along with its next turn (up to 600 characters each, about 80,000 a day in a busy QA run);
+  now it gets a short digest of who told or asked whom and what still waits, and reads a team's
+  thread only when you ask about it or a question there holds a task up.
 
 ## 0.1.53 (2026-11-22)
 

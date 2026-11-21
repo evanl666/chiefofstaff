@@ -6,6 +6,7 @@ import { renderOthers, renderSidebar } from "./sidebar.js";
 import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, select, showDeliveries, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { scheduleHome } from "./inbox.js";
 import { upsertTask } from "./tasks.js";
+import { isTeamView, scheduleTeam } from "./team.js";
 import { refreshUsageLink, renderConnections, renderLearning } from "./settings.js";
 // Home: the Router's conversation, with what needs the owner and every task beside it.
 export const HOME = "home";
@@ -126,7 +127,7 @@ export async function loadState(again = false) {
   // the one shown.
   if (othersOn() && (first || again)) await syncOthers();
   let known =
-    state.selected === HOME || current() || closedWorkers().some((item) => item.id === state.selected) || state.external.some((item) => item.id === state.selected);
+    state.selected === HOME || current() || closedWorkers().some((item) => item.id === state.selected) || state.external.some((item) => item.id === state.selected) || isTeamView();
   // One of them in neither list (closed for long, the group never unfolded): asked for by its
   // id before it is given up for Home.
   if (!known && othersOn()) known = otherItem(state.selected) || (await findOther(state.selected));
@@ -141,6 +142,7 @@ export async function loadState(again = false) {
   scheduleHome();
   updateDraftRecords();
   refreshChips();
+  scheduleTeam();
   if ($("#settings-dialog").open) {
     renderLearning();
     renderConnections();
@@ -245,10 +247,18 @@ function notify({ text = "", session_id: sessionId, needs_action: needsAction, u
 // as their rows reach the Router, without reading the whole state again.
 function notePeer(message) {
   const meta = message.meta || {};
-  if (!state.snapshot || message.amended || message.kind !== "peer" || !meta.question_id || message.session_id !== routerId()) return;
+  if (!state.snapshot || message.amended || message.kind !== "peer" || message.session_id !== routerId()) return;
+  scheduleTeam();
+  if (!meta.question_id) return;
   const others = (state.snapshot.peer_waiting || []).filter((item) => item.id !== meta.question_id);
   const asked = meta.peer_kind === "asked" ? [{ id: meta.question_id, asker: meta.peer_from, target: meta.peer_to, asked: message.created_at }] : [];
   state.snapshot.peer_waiting = [...others, ...asked];
+  if (meta.peer_kind === "answered") {
+    // Answered: its team waits on it no more (Teams, Needs you).
+    for (const team of state.snapshot.teams || []) team.waiting = (team.waiting || []).filter((item) => item.id !== meta.question_id);
+    renderSidebar();
+    scheduleHome();
+  }
 }
 // A note of the Router's that needs the owner waits under Needs you; what the owner writes to
 // the Router after it answers it (as the server counts it; not what they told one worker).

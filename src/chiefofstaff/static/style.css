@@ -18,6 +18,15 @@
   --accent-soft: #eaf0fd;
   --red: #b42f27;
   --red-soft: #fbeaea;
+  /* Workers' colors (avatars, a team's graph), from their ids. */
+  --c0: #2f68c9;
+  --c1: #1d7a50;
+  --c2: #a5581a;
+  --c3: #8344a3;
+  --c4: #b23a30;
+  --c5: #13757e;
+  --c6: #9c3f86;
+  --c7: #586776;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
   /* Three sizes: small (meta, labels), body, and titles. */
   --small: 12px;
@@ -1101,14 +1110,84 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .fold-line .waiting { flex: none; color: var(--amber); }
 /* A worker's avatar: its initials in its color, the same everywhere. */
 .avatar { display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; font-size: var(--small); font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: #fff; background: var(--muted); }
-.avatar.c0 { background: #2f68c9; }
-.avatar.c1 { background: #1d7a50; }
-.avatar.c2 { background: #a5581a; }
-.avatar.c3 { background: #8344a3; }
-.avatar.c4 { background: #b23a30; }
-.avatar.c5 { background: #13757e; }
-.avatar.c6 { background: #9c3f86; }
-.avatar.c7 { background: #586776; }
+.c0 { --color: var(--c0); }
+.c1 { --color: var(--c1); }
+.c2 { --color: var(--c2); }
+.c3 { --color: var(--c3); }
+.c4 { --color: var(--c4); }
+.c5 { --color: var(--c5); }
+.c6 { --color: var(--c6); }
+.c7 { --color: var(--c7); }
+.avatar[class*=" c"] { background: var(--color); }
+/* A worker's tabs (E130): parts of its one chat. */
+#worker-tabs { display: flex; align-items: center; gap: 4px; padding: 6px 20px; border-bottom: 1px solid var(--line); }
+#worker-tabs .tabs { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; }
+#worker-tabs button[role="tab"] { background: none; color: var(--soft); min-height: 32px; padding: 0 12px; font-weight: 400; display: flex; gap: 6px; align-items: center; }
+#worker-tabs button[role="tab"]:not(:disabled):hover { color: var(--text); background: var(--hover); opacity: 1; }
+#worker-tabs button[aria-selected="true"] { color: var(--text); background: var(--active); font-weight: 600; }
+#worker-tabs .count { font-size: var(--small); font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+#worker-tabs .team-link { margin-left: auto; min-height: 32px; font-size: var(--small); }
+#worker-tabs .team-link:hover { color: var(--accent); }
+#timeline[data-tab="team"] > :not(.peer-msg, .earlier, .tab-empty) { display: none; }
+#timeline[data-tab="tools"] > :not(details.steps, .earlier, .tab-empty, .working-line) { display: none; }
+#timeline[data-tab="reports"] > :not([data-kind="report"], .earlier, .tab-empty) { display: none; }
+#timeline:not([data-tab="team"]) .peer-msg > .card { display: none; }
+#timeline[data-tab="team"] .peer-msg > .event { display: none; }
+#timeline:not([data-tab]) :is(.peer-msg, .event) + .peer-msg, #timeline:not([data-tab]) .peer-msg + .event { margin-top: -8px; }
+.tab-empty { margin: 24px 0; text-align: center; }
+/* A team's view (E130): its workers, who talks to whom, and its thread. */
+.team-view { display: grid; gap: 16px; }
+.team-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; }
+.team-members { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.team-members .member { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 10px 0 4px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); color: var(--text); font-weight: 400; }
+.team-members .member:hover { background: var(--hover); opacity: 1; }
+.team-members .member.focus { border-color: var(--accent); }
+.team-members .member.closed { color: var(--muted); }
+.team-members .member.closed .avatar { opacity: 0.55; }
+.team-graph { flex: none; max-width: 100%; height: auto; }
+.team-graph .edge { stroke: var(--muted); stroke-opacity: 0.45; stroke-linecap: round; }
+.team-graph .edge.open { stroke: var(--amber); stroke-opacity: 1; stroke-dasharray: 6 5; }
+.team-graph .node circle { fill: var(--color); stroke: var(--bg); stroke-width: 2; }
+.team-graph .node text { fill: #fff; font-size: var(--small); font-weight: 600; pointer-events: none; }
+.team-filters { display: flex; flex-wrap: wrap; gap: 4px; }
+.team-filters .filter { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 12px; background: none; color: var(--soft); border-radius: 15px; font-weight: 400; }
+.team-filters .filter:hover { background: var(--hover); color: var(--text); opacity: 1; }
+.team-filters .filter[aria-pressed="true"] { background: var(--active); color: var(--text); font-weight: 600; }
+.team-filters .count { font-size: var(--small); color: var(--muted); font-variant-numeric: tabular-nums; }
+.team-thread { display: grid; gap: 10px; }
+.team-item { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); min-width: 0; }
+.team-item.mine { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.team-item .head { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--small); color: var(--muted); }
+.team-item .who { color: var(--soft); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-item time { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
+.team-item .said { margin: 6px 0 0 30px; font-size: var(--body); color: var(--text); }
+.team-item .answer { margin: 10px 0 0 30px; padding-left: 12px; border-left: 2px solid var(--line); }
+.pill { flex: none; padding: 1px 8px; border-radius: 10px; font-size: var(--small); line-height: 18px; white-space: nowrap; }
+.pill.waiting { color: var(--amber); background: var(--amber-soft); }
+.pill.answered { color: var(--green); background: var(--green-soft); }
+.pill.ended { color: var(--muted); background: var(--bubble); }
+/* Home: a line per team, above Running. */
+#teams-strip { display: grid; gap: 2px; }
+#teams-strip > .title { margin: 0 0 4px; font-size: var(--small); font-weight: 600; color: var(--muted); }
+.team-row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 10px; width: 100%; min-width: 0; padding: 6px 8px; background: none; color: var(--text); font-weight: 400; text-align: left; border-radius: var(--radius); }
+.team-row:hover { background: var(--hover); opacity: 1; }
+.team-row .avatars { display: inline-flex; gap: 2px; grid-row: span 2; }
+.team-row .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.team-row .words { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--small); color: var(--muted); }
+.team-row.waiting .words { color: var(--amber); }
+/* The sidebar: a team's workers together, under its line. */
+#session-list .team-line { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 26px; margin-top: 4px; padding: 0 12px 0 14px; background: none; color: var(--muted); font-size: var(--small); font-weight: 500; text-align: left; }
+#session-list .team-line:hover { color: var(--text); opacity: 1; }
+#session-list .team-line .swatch { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--color); }
+#session-list .team-line .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#session-list .item.in-team { position: relative; }
+#session-list .item.in-team::before { content: ""; position: absolute; left: 2px; top: 7px; bottom: 7px; width: 2px; border-radius: 1px; background: var(--color); }
+#session-list .team-line.selected { color: var(--text); background: var(--active); }
+/* Needs you: a question between workers holding a task up (E129). */
+.card.team-wait .head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.card.team-wait .head .label { font-weight: 600; min-width: 0; }
+.card.team-wait .asked { margin: 4px 0 0 30px; color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.team-wait .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 0 30px; }
 
 /* Home: the conversation, and the panel with Needs you and Tasks */
 

@@ -1009,14 +1009,17 @@ async def approvals_views(runtime, browser, quality: Quality):
 
 
 async def teams_views(runtime, browser, quality: Quality):
-    """E129: Home's chat with what workers told each other folded (one line: how many, who,
-    what waits) and the routing receipts folded, open; 800 to 1440 px, light and dark
+    """E129, E130: Home's chat with what workers told each other folded (one line: how many,
+    who, what waits) and the routing receipts folded, open; the Teams strip and a question held
+    up under Needs you; a team's view; a worker's Team tab; 800 to 1440 px, light and dark
     (browser-shots/teams/)."""
-    from ui_edges import teams_seeded
+    from ui_edges import teams_held_up, teams_seeded
 
     folder = SHOTS / "teams"
     folder.mkdir(exist_ok=True)
-    await teams_seeded(runtime)
+    seeded = await teams_seeded(runtime)
+    await teams_held_up(runtime, seeded)
+    team = f"team-{seeded['scout'][:8]}"
     for scheme in ("light", "dark"):
         context = await browser.new_context(
             viewport={"width": 1440, "height": 1000}, color_scheme=scheme, bypass_csp=True
@@ -1026,9 +1029,9 @@ async def teams_views(runtime, browser, quality: Quality):
         page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
         await page.goto(f"{BASE}/#token={TOKEN}")
         timeline = page.locator("#timeline")
-        team = timeline.locator(":scope > .fold.team", has_text="5 team messages")
-        await expect(team).to_be_visible(timeout=15000)
-        await team.locator(".fold-line button.line").click()
+        fold = timeline.locator(":scope > .fold.team", has_text="5 team messages")
+        await expect(fold).to_be_visible(timeout=15000)
+        await fold.locator(".fold-line button.line").click()
         routing = timeline.locator(":scope > .fold.routing").last
         await routing.locator(".fold-line button.line").click()
         for width in WIDTHS:
@@ -1037,6 +1040,40 @@ async def teams_views(runtime, browser, quality: Quality):
             await timeline.screenshot(path=folder / f"quality-{width}-{scheme}-chat.png")
             await quality.check(page, f"teams chat {width} {scheme}", "#timeline")
         await quality.contrast(page, f"teams chat {scheme}", "#timeline")
+        await expect(page.locator(f'#teams-strip .team-row[data-team="{team}"]')).to_be_visible()
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1000})
+            await page.wait_for_timeout(150)
+            for tab, part in (("needs", "#needs"), ("tasks", "#teams-strip")):
+                if width < 1100:
+                    await page.locator(f"#home-tabs [data-tab={tab}]").click()
+                    await page.wait_for_timeout(150)
+                await page.locator(part).screenshot(
+                    path=folder / f"quality-{width}-{scheme}-{tab}.png"
+                )
+                await quality.check(page, f"teams {tab} {width} {scheme}", part, KNOWN_ROW_FINDINGS)
+        await quality.contrast(page, f"teams needs {scheme}", "#needs")
+        await quality.contrast(page, f"teams strip {scheme}", "#teams-strip")
+        await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
+        await expect(page.locator("#timeline .team-view .team-item")).to_have_count(6)
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1000})
+            await page.wait_for_timeout(150)
+            await page.locator("#main").screenshot(
+                path=folder / f"quality-{width}-{scheme}-team.png"
+            )
+            await quality.check(page, f"team view {width} {scheme}", "#main")
+        await quality.contrast(page, f"team view {scheme}", "#main")
+        await page.locator(".team-members .member", has_text="Column Maker").click()
+        await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1000})
+            await page.wait_for_timeout(150)
+            await page.locator("#main").screenshot(
+                path=folder / f"quality-{width}-{scheme}-worker-team.png"
+            )
+            await quality.check(page, f"worker team tab {width} {scheme}", "#main")
+        await quality.contrast(page, f"worker team tab {scheme}", "#main")
         quality.failures += [f"page error {scheme}: {error}" for error in errors]
         await context.close()
 

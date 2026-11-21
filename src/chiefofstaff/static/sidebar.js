@@ -10,6 +10,7 @@ import { openSettings, watchGaps } from "./settings.js";
 import { ownTasks } from "./tasks.js";
 import { duck, setMood } from "./mascot.js";
 import { agentName, markOf } from "./agentpick.js";
+import { colorOf, showTeam, teamOf, teamWords } from "./team.js";
 // The captain beside the name says how Home stands, as the dots do: it salutes when something
 // needs the owner, steers while the Router or a worker is at work, keeps watch while tasks wait
 // on something, and is quiet otherwise; it cheers a moment when a task is done (and nothing
@@ -106,7 +107,7 @@ export function renderSidebar() {
     const idle = (worker) => (worker.compare ? workers.filter((other) => other.compare?.id === worker.compare.id) : [worker]).every(alone);
     const busy = workers.filter((worker) => !idle(worker));
     const resting = workers.filter(idle);
-    nodes.push(...workerRows(busy, where));
+    nodes.push(...grouped(busy, where));
     if (resting.length) {
       const fold = el("details", { class: "idle-workers", open: Boolean(state.idleOpen) }, el("summary", { text: `Nothing open · ${resting.length}`, title: "Workers whose tasks are all finished" }), ...workerRows(resting, where));
       fold.addEventListener("toggle", () => {
@@ -128,6 +129,35 @@ export function renderSidebar() {
   renderClosed();
   renderExternal();
   renderStatusLine();
+}
+// Workers of a team (E129) together, under its line (it opens their thread), when two or more
+// of them are here; the others as they come.
+function grouped(workers, where) {
+  const nodes = [];
+  const placed = new Set();
+  for (const worker of workers) {
+    if (placed.has(worker.id)) continue;
+    const team = teamOf(worker.id);
+    const together = team ? workers.filter((other) => team.members.includes(other.id)) : [];
+    if (together.length < 2) {
+      // A Compare's workers stay together (workerRows), a team or not.
+      const group = worker.compare ? workers.filter((other) => other.compare?.id === worker.compare.id && !placed.has(other.id)) : [worker];
+      for (const other of group) placed.add(other.id);
+      nodes.push(...workerRows(group, where));
+      continue;
+    }
+    for (const member of together) placed.add(member.id);
+    // A team that is one Compare and nothing more: its Compare line says it.
+    const compare = together[0].compare?.id;
+    const onlyCompare = compare && together.every((member) => member.compare?.id === compare);
+    const color = `c${colorOf(team.id)}`;
+    if (!onlyCompare) nodes.push(el("button", { type: "button", class: `team-line ${color}${state.selected === `team:${team.id}` ? " selected" : ""}`, title: `${team.name}: ${teamWords(team)}`, onclick: () => showTeam(team.id) }, el("span", { class: "swatch" }), el("span", { class: "name", text: team.name })));
+    for (const node of workerRows(together, where)) {
+      if (!onlyCompare && node.classList.contains("item")) node.classList.add("in-team", color);
+      nodes.push(node);
+    }
+  }
+  return nodes;
 }
 // On a narrow window the sidebar folds away behind a button at the start of the header: it
 // opens over the page, and closes once one of its items is picked, on Escape (the focus back on

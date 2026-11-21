@@ -12,7 +12,7 @@ import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLin
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
-import { avatar, peerOf, peerLine, waitingWords } from "./team.js";
+import { avatar, labelOf, peerOf, peerLine, showTeam, TEAM, teamOf, waitingWords } from "./team.js";
 // A chat loads a page of its messages at a time: its latest, then earlier ones when asked.
 export const PAGE = 400;
 // The chat shown: its first message loaded, and how many come before it (null: not known).
@@ -41,6 +41,7 @@ const menuButton = (text, onclick, className = "") => el("button", { type: "butt
 export function renderHeader() {
   if (state.selected === HOME) {
     backHome(false);
+    $("#worker-tabs").hidden = true;
     renderHomeHeader();
     const router = byId(routerId());
     sessionMenu(router);
@@ -53,6 +54,7 @@ export function renderHeader() {
   const actions = $("#session-actions");
   if (!session) return;
   backHome(true);
+  renderWorkerTabs(session);
   delete actions.dataset.key;
   $("#composer").hidden = Boolean(session.closed_at) && session.role !== "worker";
   let meta = [];
@@ -134,6 +136,20 @@ export function renderHeader() {
       }
     };
     items.push(el("label", {}, el("span", { text: "Permission checks" }), checks, reason));
+    // Its short name in its team's lines and thread (E129): the owner's, or its own back ("").
+    if (teamOf(session.id)) {
+      const name = el("input", { type: "text", value: session.label || "", maxlength: "24", "aria-label": "Short name", title: "How its team's lines and thread name it (empty: from its first task)" });
+      name.addEventListener("change", async () => {
+        try {
+          const { label } = await api(`/api/sessions/${session.id}/label`, { method: "POST", body: { text: name.value } });
+          name.value = label;
+          toast(`Its short name: ${label}.`);
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      });
+      items.push(el("label", {}, el("span", { text: "Short name" }), name));
+    }
   }
   if (session.role === "worker" && session.cwd) {
     const where = { finder: /Windows/.test(navigator.userAgent) ? "File Explorer" : "Finder", vscode: "VS Code" };
@@ -482,6 +498,8 @@ async function post(path, done = "", undo = null) {
 // Home has the Router's conversation and a panel beside it; a session, its timeline alone.
 export function setLayout(home) {
   $("#main").classList.toggle("home", home);
+  // A worker's tab is its own: any other view shows all it holds.
+  delete $("#timeline").dataset.tab;
   $("#panel").hidden = !home;
   $("#home-tabs").hidden = !home;
   $("#notices").hidden = !home || !$("#notices").children.length;
@@ -492,6 +510,11 @@ export function setLayout(home) {
 // its end: the worker may have gone on to other work since.
 export async function select(sessionId, { task = "" } = {}) {
   if (!sessionId) return;
+  // A team's view (E130): what its workers told and asked each other.
+  if (String(sessionId).startsWith(TEAM)) {
+    await showTeam(sessionId.slice(TEAM.length));
+    return;
+  }
   openedAt = { session: task ? sessionId : "", task };
   // The Router's chat and the inbox of earlier versions are Home.
   if (sessionId === "inbox" || sessionId === routerId()) sessionId = HOME;
@@ -522,6 +545,8 @@ export async function select(sessionId, { task = "" } = {}) {
   const timeline = $("#timeline");
   timeline.replaceChildren();
   state.lastId = 0;
+  // Opened, a chat shows its work.
+  setWorkerTab(sessionId, "work");
   const viewed = viewedId();
   let messages = [];
   // Messages that come by event while the history loads are added after it.
@@ -654,6 +679,7 @@ function prependMessages(messages) {
   if (control) control.after(...box.children);
   else timeline.prepend(...box.children);
   updateDraftRecords();
+  updateWorkerTabs();
 }
 // What you typed and did not send, per chat: back after a reload, or after signing in again.
 const DRAFT = "cos.draft.";
@@ -868,7 +894,7 @@ function homeEntry(message) {
       // What workers that work together told each other: the Router's copy, in a line by their
       // short names (a run of them folds: see foldInto).
       const peer = peerOf(message);
-      return eventLine({ mark: "↔", text: peerLine(peer), time, body: peer.text, view: () => select(peer.to), viewText: "Open" });
+      return eventLine({ mark: "↔", text: peerLine(peer), time, body: peer.text, view: () => openThread(peer.to), viewText: "Open" });
     }
     case "watchdog": {
       const verdict = { stuck: "looks stuck", looping: "looks like it is looping", off_track: "looks off track" }[meta.verdict];
@@ -954,7 +980,102 @@ function sentEntry(meta, text, time) {
   }
   return node;
 }
+// A worker's chat has tabs (E130): Work (all of it, what it and the workers it works with tell
+// each other in a line each), Team (those in full, with a way to their team's thread), Tools
+// (its steps) and Reports. They show parts of the same chat.
+const WORKER_TABS = { work: "Work", team: "Team", tools: "Tools", reports: "Reports" };
+const TAB_PARTS = { team: ".peer-msg", tools: "details.steps", reports: '[data-kind="report"]' };
+const TAB_EMPTY = { team: "Nothing told or asked between it and the workers it works with yet.", tools: "No steps yet.", reports: "No reports yet." };
+let workerTab = { session: "", tab: "work", opened: [] };
+function setWorkerTab(sessionId, tab) {
+  const timeline = $("#timeline");
+  // Its steps open on Tools; as they were on leaving it.
+  if (workerTab.tab === "tools" && tab !== "tools") for (const group of workerTab.opened) group.open = false;
+  workerTab = { session: sessionId, tab, opened: [] };
+  if (tab === "work") delete timeline.dataset.tab;
+  else timeline.dataset.tab = tab;
+  if (tab === "tools") {
+    workerTab.opened = [...timeline.querySelectorAll(":scope > details.steps:not([open])")];
+    for (const group of workerTab.opened) group.open = true;
+  }
+  updateWorkerTabs();
+}
+function renderWorkerTabs(session) {
+  const nav = $("#worker-tabs");
+  if (session?.role !== "worker") {
+    nav.hidden = true;
+    return;
+  }
+  nav.hidden = false;
+  updateWorkerTabs();
+}
+// Its tab bar as the chat is now: Team (N) with N what is there, its team's thread beside it.
+function updateWorkerTabs() {
+  const nav = $("#worker-tabs");
+  const session = current();
+  if (nav.hidden || session?.role !== "worker") return;
+  const timeline = $("#timeline");
+  const told = timeline.querySelectorAll(":scope > .peer-msg").length;
+  const team = teamOf(session.id);
+  const tabs = Object.entries(WORKER_TABS).filter(([tab]) => tab !== "team" || team || told);
+  const key = JSON.stringify([session.id, workerTab.tab, told, team?.id || "", tabs.length]);
+  if (nav.dataset.key !== key) {
+    nav.dataset.key = key;
+    nav.replaceChildren(
+      el(
+        "div",
+        { class: "tabs", role: "tablist", "aria-label": "Parts of its chat" },
+        ...tabs.map(([tab, label]) =>
+          el("button", { type: "button", role: "tab", "data-tab": tab, "aria-selected": String(workerTab.tab === tab), onclick: () => setWorkerTab(session.id, tab) }, label, tab === "team" && told ? el("span", { class: "count", text: String(told) }) : null),
+        ),
+      ),
+      team ? el("button", { type: "button", class: "link team-link", text: "Team thread", title: `What ${team.name} told and asked each other`, onclick: () => showTeam(team.id, { focus: session.id }) }) : null,
+    );
+  }
+  // What a tab with nothing there says.
+  timeline.querySelector(":scope > .tab-empty")?.remove();
+  const part = TAB_PARTS[workerTab.tab];
+  if (part && !timeline.querySelector(`:scope > ${part}`)) timeline.append(el("p", { class: "tab-empty empty-hint", text: TAB_EMPTY[workerTab.tab] }));
+}
+// What it and a worker it works with told or asked each other: a line in its work (it opens to
+// the words), the card in full on its Team tab.
+function peerLineOf(message) {
+  const meta = message.meta || {};
+  const text = message.text || "";
+  const worker = (id) => byId(id)?.role === "worker" || closedWorker(id);
+  if (message.kind === "tell") return { id: meta.target, mark: "↔", words: `Told ${labelOf(meta.target)}`, card: `Told ${labelOf(meta.target)}`, text };
+  if (message.kind === "ask" && worker(meta.target)) return { id: meta.target, mark: "?", words: `Asked ${labelOf(meta.target)}`, card: `Asked ${labelOf(meta.target)}`, text };
+  if (message.kind !== "inbound") return null;
+  if (meta.told_by) {
+    // A result it finished: its first line names the task, the rest is the result.
+    const body = meta.finished ? text.split("\n").slice(1).join("\n") || text : text;
+    const name = labelOf(meta.told_by);
+    return { id: meta.told_by, mark: meta.finished ? "✓" : "↔", words: `${name}${meta.finished ? " finished" : ""}`, card: meta.finished ? `${name} finished` : `From ${name}`, text: body };
+  }
+  if (meta.asked_by && worker(meta.asked_by)) return { id: meta.asked_by, mark: "?", words: `${labelOf(meta.asked_by)} asks`, card: `Question from ${labelOf(meta.asked_by)}`, text };
+  if (meta.answered_by && worker(meta.answered_by)) return { id: meta.answered_by, mark: "↩", words: `${labelOf(meta.answered_by)} answered`, card: `Answer from ${labelOf(meta.answered_by)}`, text };
+  return null;
+}
+const closedWorker = (id) => (state.snapshot?.closed || []).some((item) => item.id === id);
+function peerMessage(message, full) {
+  const found = peerLineOf(message);
+  if (!found) return full;
+  const line = eventLine({ mark: found.mark, text: `${found.words}: ${firstLine(found.text)}`, time: message.created_at, body: found.text });
+  line.querySelector(".what").before(avatar(found.id));
+  // Its card by the same short name, with the worker's avatar (its whole title on hover).
+  const label = full.querySelector(":scope > .head .label");
+  if (label) {
+    label.title = label.textContent;
+    label.textContent = found.card;
+    label.before(avatar(found.id));
+  }
+  return el("div", { class: "peer-msg" }, line, full);
+}
 function renderMessage(original) {
+  const node = renderOne(original);
+  return state.selected !== HOME && current()?.role === "worker" ? peerMessage(asShown(original), node) : node;
+}
+function renderOne(original) {
   const message = asShown(original);
   const meta = message.meta || {};
   const time = message.created_at;
@@ -1376,6 +1497,7 @@ export function appendMessages(messages) {
   const timeline = $("#timeline");
   timeline.querySelector(".empty")?.remove();
   timeline.querySelector(".working-line")?.remove();
+  timeline.querySelector(":scope > .tab-empty")?.remove();
   const shown = state.selected === HOME ? byId(routerId()) : current();
   const viewed = viewedId();
   messages.forEach((message, index) => {
@@ -1389,6 +1511,7 @@ export function appendMessages(messages) {
   updateDraftRecords();
   showDeliveries();
   refreshFolds();
+  updateWorkerTabs();
   scrollToBottom();
   followAnchor();
 }
@@ -1465,8 +1588,14 @@ function summarizeFold(group) {
   const open = group.classList.contains("open");
   const toggle = el("button", { type: "button", class: "line", "aria-expanded": String(open), onclick: () => toggleFold(group) }, ...parts);
   const last = items.at(-1).peer?.to;
-  const view = kind === "team" && last ? el("button", { type: "button", class: "link", text: "Open", title: "The worker it went to last", onclick: (event) => { event.stopPropagation(); select(last); } }) : null;
+  const view = kind === "team" && last ? el("button", { type: "button", class: "link", text: "Open", title: "Their whole thread", onclick: (event) => { event.stopPropagation(); openThread(last); } }) : null;
   line.replaceChildren(el("div", { class: "row" }, toggle, view, items.at(-1).querySelector("time")?.cloneNode(true) || null));
+}
+// A worker's team thread, or its chat when it is in no team (any more).
+function openThread(sessionId) {
+  const team = teamOf(sessionId);
+  if (team) showTeam(team.id);
+  else select(sessionId);
 }
 function toggleFold(group, open = !group.classList.contains("open")) {
   group.classList.toggle("open", open);
