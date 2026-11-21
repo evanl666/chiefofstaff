@@ -819,6 +819,10 @@ def test_a_teams_thread_a_workers_short_name_and_a_nudge_from_the_page(app_clien
     thread = app_client.get(f"/api/teams/{team}/thread").json()
     assert thread["team"]["name"] == "Token scout & Token writer"
     assert [(item["kind"], item["status"]) for item in thread["items"]] == [("ask", "open")]
+    # Its tasks and how they are related (E130): two parts of one request.
+    assert [row["relation"]["kind"] for row in thread["tasks"]] == ["parts", "parts"]
+    assert [group["total"] for group in thread["groups"]] == [2]
+    assert thread["team"]["cue"] == {"parts": [0, 2], "waiting": 0}
     assert app_client.get("/api/teams/team-nobody00/thread").status_code == 404
     named = app_client.post(
         f"/api/sessions/{writer}/label", json={"text": "Client"}, headers=ORIGIN
