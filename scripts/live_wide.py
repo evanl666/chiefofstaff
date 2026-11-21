@@ -74,12 +74,14 @@ W61 two jobs at once: both running, their workers at work; "progress?" names bot
 W62 Alice asks in Slack for a number: a reply card, redone on request by the same session
 
 Shard E, workers that work together and test results as they are now:
-E1  two workers at once: one finds a token and tells the other itself; the Router has a copy,
-    relays nothing, and the one waiting reports no "waiting"
-E2  "what token did the scout pass on?": the Router answers from its copy, no worker
+E1  two workers at once: one finds a token and tells the other itself; Home has a line of it,
+    the Router only a digest (who told whom, never the token), relays nothing, and the one
+    waiting reports no "waiting"; their team's thread has the token
+E2  "what token did the scout pass on?": the Router answers from the team's thread, no worker
 E3  a contract between two parallel workers (a column name), asked for in Chinese
 E4  a worker that tells no one: the one waiting gets its result when it finishes
-E5  a worker asks another; the Router has a copy of the question and of the answer
+E5  a worker asks another; Home has a line of the question and of the answer, their team's
+    thread pairs them
 E6  two unrelated tasks at once are not linked
 E7  one worker's value goes to two others
 E8  a test run left running in the background: shown running, then passed
@@ -147,6 +149,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -2288,8 +2291,9 @@ async def show(ctx: Ctx, *workers: str):
 
 
 async def peers_ok(ctx: Ctx, since: str, giver: dict, takers: list[dict], value: str):
-    """The value went straight from the giver to each taker, the Router has a copy and did not
-    relay it, and no taker reported that it was waiting."""
+    """The value went straight from the giver to each taker, Home has a line of it, the Router
+    was given only a digest (who told whom, never the value) and did not relay it, and no taker
+    reported that it was waiting. Their team's thread has it (E129)."""
     router = (await state(ctx))["router_id"]
     given = await messages(ctx, giver["session_id"])
     told = {m["meta"].get("target") for m in given if m["kind"] == "tell"}
@@ -2315,9 +2319,22 @@ async def peers_ok(ctx: Ctx, since: str, giver: dict, takers: list[dict], value:
     assert told >= {t["session_id"] for t in takers}, "told with tell_session"
     assert not asked, "no question used to hand something over"
     assert all(linked), "the Router said they work together (works_with)"
-    copies = [m for m in await messages(ctx, router) if m["kind"] == "peer" and value in m["text"]]
-    assert copies, "the Router has a copy"
+    rows = await messages(ctx, router)
+    copies = [m for m in rows if m["kind"] == "peer" and value in m["text"]]
+    assert copies, "Home has a line of it"
     assert all(m["created_at"] > since for m in copies)
+    # The Router is not given the words: a digest rode along with its next turn instead.
+    assert not any(m["meta"].get("prompt") for m in copies), "a line, not given to the Router"
+    assert value not in prompts_of(rows), "never in what the Router was given"
+    digested = sqlite3.connect(f"file:{ctx.app.data / 'chiefofstaff.db'}?mode=ro", uri=True)
+    upto = digested.execute("SELECT value FROM kv WHERE key='teamdigest:upto'").fetchone()
+    digested.close()
+    log(f"  team digest up to {upto and upto[0]}; lines {[m['id'] for m in copies]}")
+    assert upto and int(upto[0]) >= max(m["id"] for m in copies), "the digest covered them"
+    team = (await session(ctx, giver["session_id"]))["team"]
+    thread = await ctx.app.get(f"/api/teams/{team}/thread")
+    told_there = [i for i in thread["items"] if i["kind"] == "tell" and value in i["text"]]
+    assert told_there and told_there[0]["from"] == giver["session_id"], thread["items"]
 
 
 async def e1_parallel_handoff(ctx: Ctx):
@@ -2344,12 +2361,16 @@ async def e1_parallel_handoff(ctx: Ctx):
 
 
 async def e2_router_knows(ctx: Ctx):
-    """The Router knows what workers told each other, without a worker to ask."""
+    """The Router knows what workers told each other, without a worker to ask: asked, it reads
+    their team's thread (read_team_thread; it was never given the token)."""
     since = now()
     reply = await ask(ctx, "What token did the Token Scout give the Token Writer? Only the token.")
     log(f"E2: {reply!r}")
     assert ctx.notes["e1_token"] in reply
     assert not await tasks_since(ctx, since), "answered from what it has"
+    router = (await state(ctx))["router_id"]
+    given = prompts_of(await messages(ctx, router))
+    assert ctx.notes["e1_token"] not in given, "read when asked, not given beforehand"
     log("E2 passed")
 
 
@@ -2435,6 +2456,13 @@ async def e5_ask_a_peer(ctx: Ctx):
     assert any("asked" in c and "Keeper" in c for c in copies)
     assert any("answered" in c and word in c for c in copies)
     assert keeper["session_id"] != seeker["session_id"]
+    # They talked: a team of their own, its thread the question with its answer (E129).
+    team = (await session(ctx, seeker["session_id"]))["team"]
+    assert team, "the Seeker and the Keeper are a team"
+    asked = [i for i in (await ctx.app.get(f"/api/teams/{team}/thread"))["items"]
+             if i["kind"] == "ask" and i["from"] == seeker["session_id"]]  # fmt: skip
+    log(f"E5: thread {[(i['status'], i['answer'][:60]) for i in asked]}")
+    assert any(i["status"] == "answered" and word in i["answer"] for i in asked)
     log("E5 passed")
 
 
@@ -2677,6 +2705,23 @@ async def e15_browser(ctx: Ctx):
         await card.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-ci-card.png")
         lines = page.locator("#timeline .event", has_text="told")
         assert await lines.count() >= 1, "who told whom, in the chat"
+        # Their teams (E129, E130): a line each above Running; a team's thread, a question
+        # with its answer; a worker's Team tab with what its team told it.
+        rows = page.locator("#teams-strip .team-row")
+        assert await rows.count() >= 1, "a line per team"
+        # The Seeker's (E5), while one of them is open; else the latest.
+        seeker = page.locator("#teams-strip .team-row", has_text="Seeker")
+        found = await seeker.count()
+        await (seeker if found else rows).first.click()
+        items = page.locator("#timeline .team-view .team-item")
+        await expect(items.first).to_be_visible(timeout=10000)
+        if found:
+            await expect(items.filter(has=page.locator(".pill.answered"))).to_have_count(1)
+        await page.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-team.png")
+        await page.locator(".team-members .member").first.click()
+        await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
+        await expect(page.locator("#timeline .peer-msg > .card").first).to_be_visible()
+        await page.locator("#back-home").click()
         handle, panel = page.locator("#panel-resizer"), page.locator("#panel")
         before = (await panel.bounding_box())["width"]
         box = await handle.bounding_box()
