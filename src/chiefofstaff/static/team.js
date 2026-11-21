@@ -3,10 +3,11 @@
 
 import { $, api, el, foldable } from "./dom.js";
 import { clock, firstLine, markdown } from "./text.js";
-import { byId, closedWorkers, state } from "./state.js";
+import { byId, closedWorkers, current, state } from "./state.js";
 import { select, setLayout } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
 import { closeMentions, setRecipient } from "./mention.js";
+import { cueNode, light, lineageOf, summaryChips, taskList } from "./relations.js";
 
 // A color per worker (and per team), from its id: the same on every page and after a reload.
 // In a team, its workers' colors differ: each, in the order they joined, takes the first color
@@ -96,12 +97,13 @@ export const TEAM = "team:";
 export const isTeamView = () => String(state.selected || "").startsWith(TEAM);
 const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
 const minutes = (count) => (count < 60 ? `${count} min` : count < 1440 ? `${Math.floor(count / 60)} h` : `${Math.floor(count / 1440)} d`);
-// "3 workers · 12 messages · 1 waiting 9 min" (or "all answered").
+// "3 workers · 12 messages · 1 waiting 9 min" (or "all answered"); a team its tasks' relations
+// join, which never talked: "3 workers".
 export function teamWords(team) {
   const messages = (team.told || 0) + (team.asked || 0) + (team.answered || 0);
   const waiting = team.waiting || [];
   const wait = waiting.length ? `${waiting.length} waiting ${minutes(Math.max(...waiting.map((item) => item.minutes)))}` : team.asked ? "all answered" : "";
-  return [plural(team.members.length, "worker"), plural(messages, "message"), wait].filter(Boolean).join(" · ");
+  return [plural(team.members.length, "worker"), messages ? plural(messages, "message") : "", wait].filter(Boolean).join(" · ");
 }
 export function avatars(ids, most = 5) {
   const shown = ids.slice(0, most);
@@ -129,7 +131,9 @@ export async function showTeam(teamId, { focus = "" } = {}) {
   delete actions.dataset.key;
   actions.replaceChildren();
   $("#composer").hidden = true;
-  shown = { id: teamId, data: null, filter: "all", focus };
+  // Its tasks' rows: the one open (its lineage), the task peeked in it, the chip lighting rows,
+  // and the waits seen pending (one that clears while it is shown draws itself solid).
+  shown = { id: teamId, data: null, filter: "all", focus, open: "", peek: "", lit: "", litTasks: [], allRows: false, seen: new Map(), cleared: new Set() };
   teamHeader(teamById(teamId));
   $("#timeline").replaceChildren(el("div", { class: "line note", text: "Loading its thread…" }));
   await refreshTeam();
@@ -147,16 +151,76 @@ export async function refreshTeam() {
   }
   if (state.selected !== TEAM + view.id) return;
   view.data = data;
+  takeRelations(view, data);
   teamHeader(data.team);
   renderTeam();
 }
+// A team's relations as read now, for its rows: a wait seen pending that has cleared since is
+// "just cleared" (drawn solid once, its worker's avatar ringed once); the row settles to a
+// muted "✓ after …" once the server no longer says it just cleared.
+const SETTLE_MS = 90_000;
+function takeRelations(view, data) {
+  Object.assign(view, { tasks: data.tasks || [], relations: data.relations || [], groups: data.groups || [], anchors: data.anchors || [], summary: data.summary || {}, earlier: data.earlier || 0, byTask: null });
+  const cleared = new Set();
+  for (const edge of view.relations) {
+    if (edge.kind !== "after") continue;
+    if (view.seen.get(edge.id) === "pending" && edge.state === "resolved") cleared.add(edge.to_task);
+    view.seen.set(edge.id, edge.state);
+  }
+  view.cleared = cleared;
+  // Back to its settled words once the moment is past (the server says when).
+  const just = view.tasks.filter((row) => row.relation?.just).map((row) => SETTLE_MS - (Date.now() - new Date(row.relation.resolved_at)));
+  clearTimeout(view.settle);
+  if (just.length) view.settle = setTimeout(() => scheduleTeam(), Math.max(1000, Math.min(...just) + 500));
+}
 let refreshing = 0;
 export function scheduleTeam() {
-  if (!isTeamView() || refreshing) return;
+  if (refreshing) return;
+  if (!isTeamView()) {
+    if (worker.session && worker.session === current()?.id) refreshing = setTimeout(() => { refreshing = 0; workerLineage(worker.session); }, 300);
+    return;
+  }
   refreshing = setTimeout(() => {
     refreshing = 0;
     refreshTeam();
   }, 300);
+}
+// A worker's Team tab: its current task's lineage at the top, as its team's view has it.
+const worker = { session: "", view: null };
+export async function workerLineage(sessionId) {
+  const timeline = $("#timeline");
+  const session = current();
+  const team = teamOf(sessionId);
+  const taskId = session?.id === sessionId ? session.task?.task_id : "";
+  worker.session = team && taskId ? sessionId : "";
+  if (!worker.session) {
+    timeline.querySelector(":scope > .team-lineage")?.remove();
+    return;
+  }
+  let data;
+  try {
+    data = await api(`/api/teams/${encodeURIComponent(team.id)}/thread`);
+  } catch {
+    return;
+  }
+  if (current()?.id !== sessionId) return;
+  const view = worker.view?.session === sessionId ? worker.view : { session: sessionId, open: taskId, peek: "", lit: "", litTasks: [], seen: new Map(), cleared: new Set() };
+  worker.view = view;
+  takeRelations(view, data);
+  const row = view.tasks.find((item) => item.id === taskId);
+  const old = timeline.querySelector(":scope > .team-lineage");
+  if (!row || (!row.lineage && !row.relation)) {
+    old?.remove();
+    return;
+  }
+  const draw = () => {
+    const node = el("section", { class: "team-lineage", "aria-label": "Its task's lineage" }, lineageOf(view, row, draw));
+    view.root = node;
+    const there = timeline.querySelector(":scope > .team-lineage");
+    if (there) there.replaceWith(node);
+    else timeline.prepend(node);
+  };
+  draw();
 }
 function teamHeader(team) {
   $("#session-title").textContent = team ? `Team · ${team.name}` : "Team";
@@ -165,7 +229,8 @@ function teamHeader(team) {
   $("#session-meta").title = "";
 }
 function renderTeam() {
-  const { data, filter, focus } = shown;
+  const view = shown;
+  const { data, filter, focus } = view;
   const { team, items } = data;
   const [, keep] = FILTERS[filter];
   const listed = items.filter(keep);
@@ -179,16 +244,25 @@ function renderTeam() {
   const empty = { all: "Nothing told or asked between them yet.", waiting: "No question waits for an answer.", questions: "No questions between them.", told: "Nothing told yet." }[filter];
   const scroller = $("#scroller");
   const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160;
-  $("#timeline").replaceChildren(
-    el(
-      "div",
-      { class: "team-view" },
-      el("div", { class: "team-top" }, members(team, focus), graph(team, items)),
-      filters,
-      listed.length ? el("div", { class: "team-thread" }, ...listed.map((item) => teamItem(item, focus))) : el("p", { class: "empty-hint", text: empty }),
-    ),
+  const pick = (key, tasks) => {
+    view.lit = key;
+    view.litTasks = key ? tasks : [];
+    renderTeam();
+  };
+  const root = el(
+    "div",
+    { class: "team-view" },
+    el("div", { class: "team-top" }, el("div", { class: "team-head" }, members(team, focus), summaryChips(view, pick)), graph(team, items)),
+    taskList(view, renderTeam),
+    // Nothing said between them at all: no filters to choose from.
+    items.length ? filters : null,
+    listed.length ? el("div", { class: "team-thread" }, ...listed.map((item) => teamItem(item, focus))) : el("p", { class: "empty-hint", text: empty }),
   );
-  if (atEnd) scroller.scrollTop = scroller.scrollHeight;
+  view.root = root;
+  $("#timeline").replaceChildren(root);
+  // A chip's rows stay lit as the view is drawn again.
+  if (view.litTasks.length) light(view, view.litTasks, true);
+  if (atEnd && !view.open) scroller.scrollTop = scroller.scrollHeight;
 }
 function members(team, focus) {
   const open = new Set(team.open || []);
@@ -210,7 +284,11 @@ function svg(tag, attributes = {}, ...children) {
   return node;
 }
 function graph(team, items) {
-  const ids = team.members;
+  // Messages only: the workers that told or asked each other anything (a team its tasks'
+  // relations joined may hold others), at most 7 of them, the latest to talk.
+  const talked = [];
+  for (const item of [...items].reverse()) for (const id of [item.from, item.to]) if (team.members.includes(id) && !talked.includes(id)) talked.push(id);
+  const ids = team.members.filter((id) => talked.slice(0, 7).includes(id));
   if (ids.length < 2) return null;
   const width = 240;
   const height = ids.length === 2 ? 72 : 168;
@@ -240,7 +318,7 @@ function graph(team, items) {
   });
   const nodes = ids.map((id) => {
     const [x, y] = at.get(id);
-    return svg("g", { class: `node c${colorOf(id)}` }, svg("title", {}, label(id)), svg("circle", { cx: x, cy: y, r: 16 }), svg("text", { x, y, dy: "0.35em", "text-anchor": "middle" }, initials(label(id))));
+    return svg("g", { class: `node c${colorOf(id)}`, "data-session": id }, svg("title", {}, label(id)), svg("circle", { cx: x, cy: y, r: 16 }), svg("text", { x, y, dy: "0.35em", "text-anchor": "middle" }, initials(label(id))));
   });
   return svg("svg", { class: "team-graph", viewBox: `0 0 ${width} ${height}`, width, height, role: "img", "aria-label": `Who talks to whom: ${pairs.size ? [...pairs].map(([key, pair]) => `${key.split(" ").map(label).join(" and ")}, ${plural(pair.count, "message")}`).join("; ") : "nothing yet"}` }, ...edges, ...nodes);
 }
@@ -273,17 +351,22 @@ function teamItem(item, focus) {
 }
 
 // Home: a line per team with a worker open, above Running: its workers, its name, what waits.
+// Its words, then one cue of its tasks (a fan landing, or tasks waiting on another's) unless a
+// question between them waits.
 export function teamRows() {
   return teams().map((team) => ({
-    key: JSON.stringify(["team", team.id, team.name, teamWords(team), team.labels]),
-    build: () =>
-      el(
+    key: JSON.stringify(["team", team.id, team.name, teamWords(team), team.labels, team.cue]),
+    build: () => {
+      const cue = team.waiting?.length ? null : cueNode(team);
+      const words = cue ? teamWords(team).replace(/ · all answered$/, "") : teamWords(team);
+      return el(
         "button",
-        { type: "button", class: `team-row${team.waiting?.length ? " waiting" : ""}`, "data-team": team.id, title: "Open what they told and asked each other", onclick: () => showTeam(team.id) },
+        { type: "button", class: `team-row${team.waiting?.length ? " waiting" : ""}`, "data-team": team.id, title: "Open what they told and asked each other, and how their tasks are related", onclick: () => showTeam(team.id) },
         avatars(team.members),
         el("span", { class: "name", text: team.name }),
-        el("span", { class: "words", text: teamWords(team) }),
-      ),
+        el("span", { class: "words" }, words, cue ? " · " : null, cue),
+      );
+    },
   }));
 }
 // Needs you (phase 4): a question held up 30 minutes or more, its asker's task waiting on it:

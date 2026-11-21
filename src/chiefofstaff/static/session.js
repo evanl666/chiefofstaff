@@ -12,7 +12,7 @@ import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLin
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
-import { avatar, labelOf, peerOf, peerLine, showTeam, TEAM, teamOf, waitingWords } from "./team.js";
+import { avatar, labelOf, peerOf, peerLine, showTeam, TEAM, teamOf, waitingWords, workerLineage } from "./team.js";
 // A chat loads a page of its messages at a time: its latest, then earlier ones when asked.
 export const PAGE = 400;
 // The chat shown: its first message loaded, and how many come before it (null: not known).
@@ -998,6 +998,8 @@ function setWorkerTab(sessionId, tab) {
     workerTab.opened = [...timeline.querySelectorAll(":scope > details.steps:not([open])")];
     for (const group of workerTab.opened) group.open = true;
   }
+  // Team: its current task's lineage at the top (E130).
+  if (tab === "team") workerLineage(sessionId);
   updateWorkerTabs();
 }
 function renderWorkerTabs(session) {

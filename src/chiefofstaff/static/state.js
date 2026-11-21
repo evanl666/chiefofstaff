@@ -217,6 +217,8 @@ function handleEvent({ type, data }) {
     else if (data.session_id === viewedId()) appendMessages([data]);
   } else if (type === "task") {
     upsertTask(data);
+    // A team's view (or a worker's Team tab) shows its tasks and how they are related.
+    scheduleTeam();
   } else if (type === "focus_summary") {
     state.focusSummary = data.text;
     scheduleHome();
