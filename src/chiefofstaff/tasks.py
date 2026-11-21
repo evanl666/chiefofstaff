@@ -22,6 +22,7 @@ worker reports on, each with its evidence, so the review card can tell verified 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
@@ -497,3 +498,32 @@ def migrate(store: Store):
                     "INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES (?,?)",
                     (identifier, by_session[dependency]),
                 )
+
+
+# How versions before the replacedby record (Tools.replace) said a task was replaced, in its
+# progress: "Cancelled by the Router: Replaced by t1a2b3c4 “Its title”." for one still open,
+# "Replaced by t1a2b3c4 “Its title”." for a failed one.
+REPLACED_BY = re.compile(r"\bReplaced by (t[0-9a-f]{6,12})\b")
+
+
+def migrate_replacedby(store: Store):
+    """A task replaced by an earlier version keeps its link only in those words: the
+    replacedby record it would have had now is kept for it, once (E126: a held message about
+    it could only be dropped, never sent to the worker that took it over). One kept already
+    stays; a task named that is not there is no link."""
+    if store.get("migrated:replacedby"):
+        return
+    for row in store.all(
+        "SELECT id, progress FROM tasks WHERE status='cancelled' AND progress LIKE ?",
+        ("%Replaced by t%",),
+    ):
+        found = REPLACED_BY.search(row["progress"])
+        if (
+            not found
+            or found.group(1) == row["id"]
+            or store.get(f"replacedby:{row['id']}") is not None
+            or not store.one("SELECT id FROM tasks WHERE id=?", (found.group(1),))
+        ):
+            continue
+        store.set(f"replacedby:{row['id']}", found.group(1))
+    store.set("migrated:replacedby", "1")

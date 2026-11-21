@@ -225,7 +225,11 @@ EXAMPLE = Feature(
 # settings kept only for sandboxed workers, Handled for you, E115's answers, a new worker when
 # the owner asks for one, a task's result being done, E116's account to connect, sessions'
 # client name, every session's context size) are the baseline's own behaviour.
-FIXES: list[Allow] = []
+FIXES: list[Allow] = [
+    # E126: tasks replaced before their replacedby: link was kept get it once, read back from
+    # their progress words; the mark that this ran is in the store. Nothing is shown.
+    Allow("replaced tasks' links, read back once", data=r"\.db\.kv\.migrated:replacedby$"),
+]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
 # by default (the owner agreed), so it is compared switched off against the baseline. On, the

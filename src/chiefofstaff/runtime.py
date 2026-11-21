@@ -130,6 +130,7 @@ from .tasks import (
     HELPER_KINDS,
     OPEN,
     TaskBook,
+    migrate_replacedby,
     settle_adopted,
     settle_decision_changes,
     settle_followups,
@@ -769,6 +770,7 @@ class Runtime:
         self.workspaces.github_token = lambda repo: self.github.token_for(repo)
         self.tasks = TaskBook(store, on_change=self.task_changed)
         migrate_tasks(store)
+        migrate_replacedby(store)  # (Before release_unguarded reads them: E126.)
         settle_adopted(store)
         settle_followups(store)
         settle_decision_changes(store)

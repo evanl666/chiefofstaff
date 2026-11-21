@@ -23,6 +23,7 @@ from chiefofstaff import events as events_module
 from chiefofstaff import policy as policy_module
 from chiefofstaff import privategit, settings_guard
 from chiefofstaff import runtime as runtime_module
+from chiefofstaff import tasks as tasks_module
 from chiefofstaff import workers as workers_module
 from chiefofstaff import workspaces as workspaces_module
 from chiefofstaff.models import Settings
@@ -31,6 +32,7 @@ from chiefofstaff.processes import running
 from chiefofstaff.runtime import GITHUB_HOSTS, home_shown
 from chiefofstaff.store import Store
 from chiefofstaff.task_actions import MayHoldWorkError, moved
+from chiefofstaff.tasks import TaskBook
 
 # Root reads any file and lists any folder, whatever its mode (Linux CI's containers).
 AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -1264,6 +1266,35 @@ async def test_workers_held_for_their_settings_go_on_once_the_sandbox_is_off(
         )
     finally:
         await runtime.stop()
+
+
+def test_tasks_replaced_before_their_link_was_kept_get_it_once(tmp_path):
+    """E126: versions before the replacedby record kept a replaced task's link only in its
+    progress, as they wrote it ("Cancelled by the Router: Replaced by t… “…”." for one still
+    open, "Replaced by t… “…”." for a failed one): read back once, before anything settles what
+    was written about it. A link kept already stays; a task named that is not there is no link."""
+    store = Store(tmp_path / "data")
+    book = TaskBook(store)
+    old, failed, kept, gone, other = (
+        book.create("w1", title, "g", status="queued")
+        for title in ("Old", "Failed", "Kept", "Gone", "Other")
+    )
+    new = book.create("w2", "Fix the login timeout (2)", "g", status="queued")
+    replaced = f"Replaced by {new['id']} “{new['title']}”."
+    book.move(old["id"], "cancelled", progress=f"Cancelled by the Router: {replaced}")
+    book.move(failed["id"], "cancelled", progress=f"Replaced by {new['id']} “{new['title']}”.")
+    book.move(kept["id"], "cancelled", progress=f"Replaced by {new['id']} “{new['title']}”.")
+    store.set(f"replacedby:{kept['id']}", other["id"])
+    book.move(
+        gone["id"], "cancelled", progress="Cancelled by the Router: Replaced by t0000000 “x”."
+    )
+    for _ in range(2):
+        tasks_module.migrate_replacedby(store)
+        assert store.get(f"replacedby:{old['id']}") == new["id"]
+        assert store.get(f"replacedby:{failed['id']}") == new["id"]
+        assert store.get(f"replacedby:{kept['id']}") == other["id"]
+        assert store.get(f"replacedby:{gone['id']}") is None
+        assert store.get(f"replacedby:{other['id']}") is None
 
 
 async def test_a_worker_held_a_quarter_hour_in_its_own_worktree_goes_on_in_a_fresh_one(
