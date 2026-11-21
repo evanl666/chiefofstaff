@@ -19,6 +19,11 @@
   waited for the disk to confirm it. Pressed while workers were starting, Ctrl+C waited for
   dozens of those saves, which took seconds on a slow or busy disk. From Ctrl+C on, saves no
   longer wait one by one, and closing still writes everything to the disk once.
+- **Watch for you starts a fresh conversation again (E133).** Its conversation was meant to
+  start afresh once it held 120k tokens, but its size was kept for the Router only, so every
+  scan went on in the conversation it began weeks ago: about 500k tokens a call, and about 16%
+  of all credits. Now each scan after it grows that long starts a fresh one, given each watch's
+  window as before.
 
 ## 0.1.51 (2026-11-20)
 

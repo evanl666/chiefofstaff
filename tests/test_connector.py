@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from conftest import Harness, call_tool, settle
 
-from chiefofstaff.connector import OwnerReply, after_hours, in_hours
+from chiefofstaff.connector import FRESH_AFTER, OwnerReply, after_hours, in_hours, watch_key
 from chiefofstaff.models import DraftDecision, Settings, Watch
 from chiefofstaff.runtime import CONNECTOR_TOOLS
 from chiefofstaff.store import now
@@ -1067,3 +1067,47 @@ async def test_away_the_owner_is_reached_in_their_own_slack_dm(tmp_path):
     worker = await spawn(runtime, harness.router_id, "Other work")
     refused = await call_tool(runtime, "send_owner_slack_dm", worker, version="A")
     assert refused.result_type == "failure", "only the messenger"
+
+
+# E133: the Watch's context was kept for the Router only, so it never started afresh.
+
+
+async def test_a_long_watch_conversation_gives_way_to_a_fresh_one_with_each_window(tmp_path):
+    """Each scan went to the conversation the Watch had started weeks before (about 500k tokens
+    a call). Its size kept as the Router's is, the scan after it grew past FRESH_AFTER starts a
+    fresh conversation, given each watch's window as any scan; the fresh one goes on until it is
+    long too. A worker's long conversation rotates no Router."""
+    watch = Watch(what="Slack DMs and mentions of me", how="Slack search")
+    harness = Harness(tmp_path / "data", Settings(watches=[watch], watch_after_hours_minutes=5))
+    runtime = await harness.connect()
+    connector = runtime.connector
+    await connector.scan()
+    await settle(runtime)
+    row = connector.session()
+    first = harness.session(row["id"])
+    first.emit("assistant.usage", model="m", input_tokens=FRESH_AFTER + 10_000)
+    await call_tool(runtime, "report_found", row["id"], items=[])
+    first.emit("session.idle")
+    await settle(runtime)
+    assert int(harness.store.get(f"context:{row['id']}")) == FRESH_AFTER + 10_000
+    assert harness.store.get(f"watchdone:{watch_key(watch.what)}"), "covered in full"
+    window = connector.watch_since(watch.what)
+    harness.store.set("watch_scanned_at", "0")
+    await connector.scan()
+    await settle(runtime)
+    fresh = harness.session(row["id"])
+    assert fresh is not first and connector.session()["id"] == row["id"], "same Watch, fresh"
+    assert len(first.sent) == 1 and len(fresh.sent) == 1
+    since = datetime.fromtimestamp(window).astimezone().isoformat(timespec="minutes")
+    assert f"new since {since}" in fresh.sent[0], "from where the last scan covered it"
+    assert harness.store.get(f"context:{row['id']}") == "0"
+    fresh.emit("assistant.usage", model="m", input_tokens=20_000)
+    await call_tool(runtime, "report_found", row["id"], items=[])
+    fresh.emit("session.idle")
+    await settle(runtime)
+    harness.store.set("watch_scanned_at", "0")
+    await connector.scan()
+    await settle(runtime)
+    assert harness.session(row["id"]) is fresh and len(fresh.sent) == 2, "short: it goes on"
+    router = harness.router_id
+    assert harness.store.get(f"copilot:{router}") in (None, router), "no Router rotated"

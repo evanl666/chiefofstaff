@@ -3879,9 +3879,9 @@ class Runtime:
                 self.update_session(session_id, activity=before)
         self.store.set(f"copilot:{session_id}", new)
         self.store.set(f"continued:{session_id}", new)
+        self.store.set(f"context:{session_id}", "0")
         if row["role"] == ROUTER:
             self.store.delete(f"rotated:{session_id}")  # Nothing to go back to.
-            self.store.set(f"context:{session_id}", "0")
             preamble = self.handover("that could not be resumed", upto_sent=True)
         else:
             preamble = self.continuation(row)

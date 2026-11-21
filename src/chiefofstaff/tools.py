@@ -1545,6 +1545,7 @@ class Tools:
             self.store.set(f"alias:{fresh}", session_id)
             self.store.set(f"copilot:{session_id}", fresh)
             self.store.delete(f"created:{session_id}")
+            self.store.set(f"context:{session_id}", "0")  # The fresh conversation holds nothing.
             for key in ("style_refused", "lessons_done", "learned_styles"):
                 self.store.delete(f"{key}:{session_id}")
             workspace = self.store.get(f"workspace:{session_id}") or row["cwd"]

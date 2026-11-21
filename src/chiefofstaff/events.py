@@ -653,10 +653,11 @@ class Events:
         own = not getattr(event, "agent_id", None) and not getattr(
             data, "parent_tool_call_id", None
         )
-        if own and row["role"] == ROUTER:
-            # How much the conversation holds: Copilot's input count includes what came from
-            # the cache (19,334 with 7,694 read and 11,636 written); a count without it (the
-            # model's own API) is added to it.
+        if own:
+            # How much the conversation holds (every session's: the Router's rotates, the Watch
+            # starts a fresh one; bug E133, kept for the Router only, the Watch's grew for
+            # weeks): Copilot's input count includes what came from the cache (19,334 with
+            # 7,694 read and 11,636 written); a count without it (the model's own API) is added.
             given = getattr(data, "input_tokens", 0) or 0
             cached = sum(
                 getattr(data, name, 0) or 0 for name in ("cache_read_tokens", "cache_write_tokens")
