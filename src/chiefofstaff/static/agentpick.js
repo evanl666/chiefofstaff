@@ -82,10 +82,11 @@ export function fixLine(fix) {
 }
 
 // Each agent's status asked again (glanced at where it was not lately) when the picker opens:
-// at most every 15 seconds.
+// at most every 15 seconds, every 5 while one is not ready (signed in meanwhile: Ready now).
 let asked = 0;
 export async function refreshStatuses(after) {
-  if (!statuses().length || Date.now() - asked < 15000) return;
+  const unready = statuses().some((status) => status.status === "signin" || status.status === "missing");
+  if (!statuses().length || Date.now() - asked < (unready ? 5000 : 15000)) return;
   asked = Date.now();
   try {
     const { agents_status: found } = await api("/api/agents/status", { method: "POST" });
