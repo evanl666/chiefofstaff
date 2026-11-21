@@ -1244,7 +1244,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .lineage .peek .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .lineage .peek .state { flex: none; white-space: nowrap; }
 .lineage .peek .link { margin-left: auto; flex: none; min-height: 28px; }
-@media (max-width: 900px) { .lnode { max-width: 150px; } }
+@media (max-width: 900px) { .lnode { max-width: 170px; } }
 /* A worker's Team tab: its task's lineage first. */
 #timeline > .team-lineage > .lineage { margin: 0 0 4px; }
 /* Home: a line per team, above Running. */
