@@ -252,7 +252,7 @@ function renderTeam() {
   const root = el(
     "div",
     { class: "team-view" },
-    el("div", { class: "team-top" }, el("div", { class: "team-head" }, members(team, focus), summaryChips(view, pick)), graph(team, items)),
+    el("div", { class: "team-top" }, el("div", { class: "team-head" }, members(team, focus, view), summaryChips(view, pick)), graph(team, items)),
     taskList(view, renderTeam),
     // Nothing said between them at all: no filters to choose from.
     items.length ? filters : null,
@@ -264,12 +264,18 @@ function renderTeam() {
   if (view.litTasks.length) light(view, view.litTasks, true);
   if (atEnd && !view.open) scroller.scrollTop = scroller.scrollHeight;
 }
-function members(team, focus) {
+// Its workers, the latest MEMBERS of a large team (and the one in focus) with "+N earlier".
+const MEMBERS = 6;
+function members(team, focus, view) {
   const open = new Set(team.open || []);
+  const latest = new Set(team.members.slice(-MEMBERS));
+  const shown = view?.allMembers || team.members.length <= MEMBERS + 1 ? team.members : team.members.filter((id) => latest.has(id) || id === focus);
+  const hidden = team.members.length - shown.length;
   return el(
     "div",
     { class: "team-members" },
-    ...team.members.map((id) =>
+    hidden ? el("button", { type: "button", class: "member earlier", text: `+${hidden} earlier`, title: "Its workers that joined first", onclick: () => { view.allMembers = true; renderTeam(); } }) : null,
+    ...shown.map((id) =>
       el("button", { type: "button", class: `member${id === focus ? " focus" : ""}${open.has(id) ? "" : " closed"}`, title: open.has(id) ? "Open its chat" : "Closed: open its chat", onclick: () => select(id) }, avatar(id, team.labels?.[id] || ""), el("span", { text: team.labels?.[id] || labelOf(id) })),
     ),
   );

@@ -5611,6 +5611,36 @@ async def round_relations(runtime, browser, failures: list[str]):
     await context.close()
     log("Relations: less motion asked, nothing moves; a worker's Team tab shows its lineage")
 
+    # A large team: its latest workers and tasks, the earlier ones "+N earlier" until asked.
+    router = runtime.store.get("router_id")
+    for name in ("Docs Site", "Changelog Bot", "Status Page"):
+        await call_tool(runtime, "spawn_worker", router, title=f"{name}: checkout v2",
+                        instructions=name, why_new="test",
+                        context_from=[seeded["api_task"]])  # fmt: skip
+    for number in range(4):
+        runtime.tasks.create(seeded["e2e"], f"E2E Runner: flaky case {number}", "More.",
+                             status="done")  # fmt: skip
+    await settle(runtime)
+    runtime.publish_state()
+    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
+    view = page.locator("#timeline .team-view")
+    chips = view.locator(".team-members .member")
+    await expect(chips.filter(has_not_text="earlier")).to_have_count(6)
+    await expect(view.locator(".team-members .member.earlier")).to_have_text("+2 earlier")
+    await expect(view.locator(".team-tasks .trow")).to_have_count(8)
+    await expect(view.locator(".team-tasks .earlier-rows")).to_have_text("+5 earlier")
+    await page.locator("#main").screenshot(path=shots / "large-1280-light.png")
+    await view.locator(".team-members .member.earlier").click()
+    await expect(chips).to_have_count(8)
+    await view.locator(".team-tasks .earlier-rows").click()
+    await expect(view.locator(".team-tasks .trow")).to_have_count(13)
+    await context.close()
+    log("Relations: a large team shows its latest workers and tasks, the rest on asking")
+
 
 async def main():
     from chiefofstaff import machine

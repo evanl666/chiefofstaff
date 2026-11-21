@@ -1145,6 +1145,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .team-members .member.focus { border-color: var(--accent); }
 .team-members .member.closed { color: var(--muted); }
 .team-members .member.closed .avatar { opacity: 0.55; }
+.team-members .member.earlier { padding: 0 10px; color: var(--muted); font-size: var(--small); }
 .team-graph { flex: none; max-width: 100%; height: auto; }
 .team-graph .edge { stroke: var(--muted); stroke-opacity: 0.45; stroke-linecap: round; }
 .team-graph .edge.open { stroke: var(--amber); stroke-opacity: 1; stroke-dasharray: 6 5; }
