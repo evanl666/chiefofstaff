@@ -10,6 +10,11 @@
   stopped seeing Slack through it). Its sessions now call themselves *copilot-cli/chiefofstaff*:
   a Copilot CLI client, still told apart from your own sessions under Other Copilot sessions.
   Your keychain or a server may ask you to sign in once more, once.
+- **That error is now a Connection needed card (E138).** Its words ("the user has not connected
+  their glean account") were not read as an account to connect, so no card appeared and each
+  session met the error alone. And when a retry after *I've done it* fails the same way, the
+  card says the account is connected but still can't be used from Chief of Staff, and what to
+  check, with *Try again*, instead of asking you to connect it again.
 - **Ctrl+C stops at once on Linux, even while Chief of Staff is busy.** Each thing it saved
   waited for the disk to confirm it. Pressed while workers were starting, Ctrl+C waited for
   dozens of those saves, which took seconds on a slow or busy disk. From Ctrl+C on, saves no

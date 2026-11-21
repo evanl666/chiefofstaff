@@ -255,7 +255,9 @@ function connectionCard(draft) {
     draft,
     "request connection",
     "Connection needed",
-    el("div", { class: "body", text: `${target.server} needs you to connect ${target.source || "your account"}` }),
+    el("div", { class: "body", text: target.still_failing ? `${target.server} still can't use ${target.source || "your account"} from Chief of Staff` : `${target.server} needs you to connect ${target.source || "your account"}` }),
+    // Retried after "I've done it" and failed the same way (E138): said so, not asked again.
+    target.still_failing ? el("div", { class: "note", text: "You connected it, and a retry still failed the same way: the server may keep your connection for another app. Check that it works in Copilot CLI in your terminal (connect it there if not), then try again." }) : null,
     el("div", { class: "note", text: `${count} ${count === 1 ? "session" : "sessions"} waiting${target.last_failed_at ? ` · last failed ${clock(target.last_failed_at)}` : ""}` }),
     lastError ? el("div", { class: "connection-error", text: lastError, title: target.last_error }) : null,
     target.url ? el("div", { class: "connection-link" }, el("code", { text: target.url }), el("small", { text: target.known_origin ? `${target.server}'s own address` : `${target.url_note}: check it before opening` })) : null,
@@ -270,13 +272,13 @@ function connectionCard(draft) {
       error,
       el("button", { type: "button", class: "text", text: "Not now", onclick: () => decide({ action: "reject" }, "Not now.") }),
       open,
-      el("button", { type: "button", text: "I've done it", onclick: () => decide({ action: "answer" }, "Each session retries once.") }),
+      el("button", { type: "button", text: target.still_failing ? "Try again" : "I've done it", onclick: () => decide({ action: "answer" }, "Each session retries once.") }),
     ),
   );
   return node;
 }
 // Cards change as workers join a decision or confirm a changed one.
-export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? draft.target.askers.length : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : draft.kind === "lessons" ? draft.target.lessons.map((lesson) => lesson.id).join(",") : draft.kind === "connection" ? `${draft.target.affected_sessions}:${draft.target.last_failed_at}:${draft.target.retrying}:${draft.target.source}:${draft.target.url}` : ""}:${draft.outcome || ""}`;
+export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? draft.target.askers.length : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : draft.kind === "lessons" ? draft.target.lessons.map((lesson) => lesson.id).join(",") : draft.kind === "connection" ? `${draft.target.affected_sessions}:${draft.target.last_failed_at}:${draft.target.retrying}:${draft.target.still_failing}:${draft.target.source}:${draft.target.url}` : ""}:${draft.outcome || ""}`;
 // What the owner typed on a card, by card and field: a card drawn again (another worker joins
 // a decision, a lesson is added) keeps it.
 const typed = new Map();

@@ -47,7 +47,10 @@ AUTH_NEEDED = re.compile(
     r"|\b(?:connect|reconnect|authori[sz]e|link|re-?authenticate)\s+(?:your|the|an?)\s+"
     r"(?:[\w.-]+\s+){0,4}?account\b"
     r"|\baccount\s+(?:is\s+|has\s+)?(?:not|never)\s+(?:been\s+)?(?:yet\s+)?"
-    r"(?:connected|authori[sz]ed|linked)\b",
+    r"(?:connected|authori[sz]ed|linked)\b"
+    # "the user has not connected their glean account" (an agent platform's words: E138).
+    r"|\b(?:has|have)(?:\s+not|n[\u2019']t)\s+(?:yet\s+)?(?:connected|authori[sz]ed|linked)\s+"
+    r"(?:their|your|the|an?)\s+(?:[\w.-]+\s+){0,4}?account\b",
     re.IGNORECASE,
 )
 # Up to four capitalized words ("Acme Search", "Acme.io Docs"): a name, not the sentence on.
@@ -60,6 +63,10 @@ SOURCE = re.compile(
     rf"(?P<named>{NAME})"
     r"|(?i:\b(?:connect|reconnect|authori[sz]e|link)\s+(?:your|the)\s+)"
     rf"(?P<owned>{NAME})[ ](?i:account)\b"
+    # "has not connected their glean account": the words before "account", whatever their case.
+    r"|(?i:\b(?:has|have)(?:\s+not|n[\u2019']t)\s+(?:yet\s+)?(?:connected|authori[sz]ed|linked)\s+"
+    r"(?:their|your|the|an?)\s+)(?P<theirs>[\w-]+(?:\.[\w-]+)*(?:[ ][\w-]+(?:\.[\w-]+)*){0,2})"
+    r"[ ](?i:account)\b"
 )
 LINK = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
 # Any other kind of address (javascript:, data:, a custom scheme): not a result to trust.
@@ -121,8 +128,11 @@ def needs_connection(text: str) -> tuple[str, list[tuple[str, str]]] | None:
             links.append(link)
     source = ""
     if found := SOURCE.search(text):
-        source = (found.group("named") or found.group("owned") or "")[:60]
-    return source, links
+        source = found.group("named") or found.group("owned") or ""
+        if theirs := found.group("theirs"):
+            # Written as a name ("glean" -> "Glean"), as it is in its other words.
+            source = " ".join(word[:1].upper() + word[1:] for word in theirs.split())
+    return source[:60], links
 
 
 def record_key(server: str, identity: str) -> str:
@@ -224,6 +234,9 @@ class Accounts:
             "last_failed_at": record.get("last_failed_at", ""),
             "affected_sessions": count,
             "retrying": record.get("status") == "retrying",
+            # Its sessions retried after the owner's "I've done it" and failed the same way
+            # (E138): connected, but not for Chief of Staff. Said so, not asked for again.
+            "still_failing": bool(record.get("after_done")),
         }
 
     def card(self, record: dict) -> dict | None:
@@ -300,6 +313,8 @@ class Accounts:
             record["tools"].append(tool)
         record["last_error"], record["last_failed_at"] = error, now()
         quiet = record["status"] == "not_now" and time.time() < record.get("quiet_until", 0)
+        if record["status"] == "retrying":
+            record["after_done"] = int(record.get("after_done") or 0) + 1
         if not quiet:
             record["status"] = "needed"  # A retry that failed: the card says so again.
         entry = record["sessions"].setdefault(session_id, {})

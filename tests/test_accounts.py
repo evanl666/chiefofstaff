@@ -189,6 +189,64 @@ async def test_known_links_unknown_links_and_separate_servers_and_sources(tmp_pa
     assert len(alerts(harness)) == 3
 
 
+# E138: an agent platform's own words (its server's reply to glean_search, and the same for
+# Atlassian), link line and all: no card was ever made for them.
+PLATFORM = (
+    "MCP server 'acme-platform': [ACTION REQUIRED] {tool} cannot run: the user has not "
+    "connected their {account} account.\n"
+    "Open https://agents.acme.test/mcp/connections and authorize access there.\n"
+    "Do not retry this tool or work around it. Only after the user confirms they have "
+    "authorized access, retry this tool."
+)
+
+
+@pytest.mark.parametrize(
+    ("tool", "account", "source"),
+    [("glean_search", "glean", "Glean"), ("atlassian_search", "atlassian", "Atlassian")],
+)
+async def test_an_agent_platforms_not_connected_reply_is_a_card(tmp_path, tool, account, source):
+    harness, runtime = await start(tmp_path)
+    first = await spawn(runtime, harness.router_id, "Search one")
+    second = await spawn(runtime, harness.router_id, "Search two")
+    text = PLATFORM.format(tool=tool, account=account)
+    mcp_call(harness, first, "p1", tool=tool, text=text)
+    mcp_call(harness, second, "p2", tool=tool, text=text)
+    await settle(runtime)
+    [card] = cards(harness)
+    assert card["text"] == f"acme-platform needs you to connect {source}"
+    assert card["target"]["url"] == "https://agents.acme.test/mcp/connections"
+    assert card["target"]["affected_sessions"] == 2
+    assert len(alerts(harness)) == 1
+
+
+async def test_a_retry_that_fails_the_same_after_done_says_so_instead_of_asking_again(tmp_path):
+    """E138's guard: connected for another app (E137), a retry after "I've done it" failed the
+    same way. The card says it is connected but still can't be used, without another alert, and
+    stays one card; the owner may try again, and a call that works closes it."""
+    harness, runtime = await start(tmp_path)
+    worker = await spawn(runtime, harness.router_id, "Search")
+    text = PLATFORM.format(tool="glean_search", account="glean")
+    mcp_call(harness, worker, "g1", tool="glean_search", text=text)
+    await settle(runtime)
+    [card] = cards(harness)
+    assert card["target"]["still_failing"] is False
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer"))
+    mcp_call(harness, worker, "g2", tool="glean_search", text=text)
+    await settle(runtime)
+    [card] = cards(harness)
+    assert card["target"]["still_failing"] is True and card["target"]["retrying"] is False
+    assert len(alerts(harness)) == 1, "said on the same card, not asked for again"
+    mcp_call(harness, worker, "g3", tool="glean_search", text=text)  # Watch's next scan, say.
+    await settle(runtime)
+    assert [c["id"] for c in cards(harness)] == [card["id"]] and len(alerts(harness)) == 1
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer"))  # Try again.
+    await settle(runtime)
+    assert told(harness, worker, "Retry your failed glean_search call once") == 2
+    mcp_call(harness, worker, "g4", tool="glean_search", success=True, text="[]")
+    await settle(runtime)
+    assert harness.store.draft(card["id"])["status"] == "answered" and not cards(harness)
+
+
 def test_a_link_is_shown_as_it_opens():
     from chiefofstaff.accounts import web_link
 

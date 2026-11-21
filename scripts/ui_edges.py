@@ -5596,6 +5596,28 @@ async def round_qa8_auth(runtime, browser, failures: list[str]):
     await card.get_by_role("button", name="I've done it").click()
     await expect(card).to_contain_text("Each session retries once")
     await expect(card).to_be_visible()
+    # E138: its retry fails the same way: connected, but not for Chief of Staff. Said on the same
+    # card, with what to do, not asked for again.
+    session = runtime.states.handle(workers[0])
+    session.emit(
+        "tool.execution_start", tool_call_id="qa8-again", tool_name="acme-platform-search",
+        mcp_config_server_name="acme-platform", mcp_tool_name="search",
+    )  # fmt: skip
+    session.emit(
+        "tool.execution_complete", tool_call_id="qa8-again", success=False,
+        result=SimpleNamespace(content=error), error=SimpleNamespace(message=error),
+    )  # fmt: skip
+    await settle(runtime)
+    await expect(card).to_contain_text(
+        "acme-platform still can't use Acme Search from Chief of Staff"
+    )
+    await expect(card).to_contain_text("Check that it works in Copilot CLI in your terminal")
+    await expect(card.get_by_role("button", name="Try again")).to_be_visible()
+    assert not await card.evaluate(OVERFLOWS)
+    shots = Path(os.environ.get("HOTFIX_SHOTS", SHOTS / "hotfix-0152"))
+    shots.mkdir(parents=True, exist_ok=True)
+    await card.scroll_into_view_if_needed()
+    await page.screenshot(path=shots / "connection-still-failing-1280-light.png")
     await page.close()
     store.update_draft(draft["id"], status="rejected", outcome="UI check over", resolved_at="now")
     for record in runtime.accounts.records():
@@ -5605,7 +5627,8 @@ async def round_qa8_auth(runtime, browser, failures: list[str]):
     store.save_settings(before)
     await settle(runtime)
     runtime.publish_state()
-    log("E116: one connection card for three sessions, plain text, a link only on a click")
+    log("E116: one connection card for three sessions, plain text, a link only on a click; "
+        "E138: a retry after I've done it that fails the same says so on it")  # fmt: skip
 
 
 async def round_layout(runtime, browser, failures: list[str]):

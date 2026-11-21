@@ -652,10 +652,13 @@ notification:
   browser". Every session it stops, Watch for you included, shares one card: the last error, how
   many sessions wait, and its link (*Open link* only when you click it; *Link supplied by …*
   when it is not the server's own address). Connect, then *I've done it*: each session retries
-  once, and the card closes when a retry works (another failure updates it). Watch for you
+  once, and the card closes when a retry works (another failure updates it; one that fails the
+  same way after *I've done it* says the account is connected but still can't be used from Chief
+  of Staff: check that it works in Copilot CLI in your terminal, then *Try again*). Watch for you
   scans again at once, from where each watch was last covered; until then it still tries every
   watch once a scan, and Settings says *connection needed*. A tool failure while Copilot's own
-  sign-in card for that server is open joins that card.
+  sign-in card for that server is open joins that card. Workers reach MCP servers as a Copilot
+  CLI client (*copilot-cli/chiefofstaff*), so connections you made for Copilot apply to them.
 - **A folder**: the Router is not sure where a task belongs. When the one folder it offers is a
   configured project, that is your choice already: it is picked, the Router's chat says so with
   *Change*, and no card comes.
