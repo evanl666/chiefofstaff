@@ -397,36 +397,6 @@ async def test_a_check_cannot_reach_the_network_or_write(tmp_path):
     assert output.strip().splitlines()[-1] != "0", "no network"
 
 
-async def test_what_accepted_results_cost_by_model(harness):
-    runtime = await harness.connect()
-    store = harness.store
-    for task, status, session, model, credits_used in [
-        ("t1", "done", "w1", "smart", 4.0),
-        ("t2", "review", "w2", "smart", 2.0),
-        ("t3", "done", "w3", "fast", 1.0),
-        ("t4", "done", "helper", "fast", 9.0),
-    ]:
-        store.execute(
-            "INSERT INTO tasks(id, session_id, title, status, created_at, updated_at) "
-            "VALUES (?,?,?,?,'now','now')",
-            (task, session, task, status),
-        )
-        store.execute(
-            "INSERT INTO runs(id, task_id, session_id, status, started_at) "
-            "VALUES (?,?,?,'done','now')",
-            ("r" + task, task, session),
-        )
-        store.record_usage(session, "worker", model, credits_used, 0, 1, 1, run_id="r" + task)
-    store.record_usage("w1", "worker", "tiny", 0.1, 0, 1, 1, run_id="rt1")  # Naming it, say.
-    store.set("learner:helper", "1")
-    found = {row["model"]: row for row in store.usage(0, 2e10)["outcomes"]}
-    assert set(found) == {"smart", "fast"}, "by the model that did most; no helpers"
-    assert (found["smart"]["tasks"], found["smart"]["accepted"]) == (2, 1)
-    assert found["smart"]["per_accepted"] == pytest.approx(6.1)
-    assert found["fast"]["per_accepted"] == pytest.approx(1.0)
-    del runtime
-
-
 async def test_with_learning_from_work_off_nothing_read_before_is_sent(harness):
     runtime = await harness.connect()
     for index in range(30):

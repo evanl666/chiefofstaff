@@ -259,9 +259,9 @@ async def memory(runtime, browser, failures: list[str]):
     await page.locator("#usage-button").click()
     await page.locator('#usage-dialog [data-range="30"]').click()
     usage = page.locator("#usage-tables")
-    await expect(usage).to_contain_text("Per accepted result")
+    await expect(usage).to_contain_text("Finished and accepted")
     await expect(usage).to_contain_text("2.5 credits each")
-    log("usage: what an accepted result cost, by model")
+    log("usage: what an accepted result cost")
     await context.close()
 
 
@@ -5583,7 +5583,8 @@ async def main():
                           round_picker_ux, round_agent_parity, round_qa6, round_qa7_life,
                           round_qa8_report,
                           round_layout, round_fresh_start, round_qa8_auth,
-                          round_qa8_approvals, round_e125, round_teams):  # fmt: skip
+                          round_qa8_approvals, round_e125, round_teams,
+                          round_usage):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -5592,6 +5593,99 @@ async def main():
         if failures:
             raise AssertionError(f"browser errors: {failures}")
     print("UI EDGE CASES PASSED")
+
+
+def usage_seeded(runtime) -> dict:
+    """E131-E136, a range's spend as Usage shows it: premium requests as Copilot counts them (a
+    user message's call, not the agent's next ones; an older call apart), a compaction, the
+    prompt cache's tokens, a worker with three tasks (two accepted, one in progress), and what
+    no task spent (the Router's turns, the Watch's scans)."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.create_session("wuse", "worker", "Fix the login timeout", "idle", cwd="/tmp")
+    store.create_session("wwatch", "worker", "Watch for you", "idle", cwd="/tmp")
+    store.set("connector:wwatch", "1")
+    tasks = [
+        ("tuse1", "wuse", "Fix the login timeout", "done"),
+        ("tuse2", "wuse", "Add a retry to the token refresh", "done"),
+        ("tuse3", "wuse", "Write the release notes", "running"),
+        ("tscan", "wwatch", "Watch for you", "done"),
+    ]
+    for task, session, title, status in tasks:
+        store.execute(
+            "INSERT INTO tasks(id, session_id, title, status, created_at, updated_at) "
+            "VALUES (?,?,?,?,'now','now')",
+            (task, session, title, status),
+        )
+        store.execute(
+            "INSERT INTO runs(id, task_id, session_id, status, started_at) "
+            "VALUES (?,?,?,'running','now')",
+            ("r" + task, task, session),
+        )
+    calls = [  # session, run, initiator, credits, input, cache read, cache write
+        ("wuse", "rtuse1", "user", 3.1, 48_000, 40_000, 7_900),
+        ("wuse", "rtuse1", "agent", 0.6, 49_000, 47_900, 1_000),
+        ("wuse", "rtuse2", "user", 1.4, 52_000, 49_000, 2_900),
+        ("wuse", "rtuse3", "user", 0.9, 30_000, 28_000, 1_900),
+        ("wwatch", "rtscan", "user", 2.2, 120_000, 118_000, 1_900),
+        (router, "", "user", 1.8, 60_000, 50_000, 9_900),
+        (router, "", "agent", 0.4, 61_000, 59_900, 1_000),
+    ]
+    for session, run, initiator, spent, tokens_in, read, written in calls:
+        role = "router" if session == router else "worker"
+        store.record_usage(session, role, "smart-model", spent, 1.0, tokens_in, 900,
+                           run_id=run, initiator=initiator, cache_read_tokens=read,
+                           cache_write_tokens=written)  # fmt: skip
+    store.record_usage("wuse", "worker", "smart-model", 0.7, 0, 70_000, 2_000, run_id="rtuse3",
+                       initiator="compaction", cache_read_tokens=65_000,
+                       cache_write_tokens=4_900, kind="compaction")  # fmt: skip
+    store.record_usage(router, "router", "smart-model", 0.3, 1.0, 20_000, 300, initiator="")
+    runtime.bus.publish("state")
+    return {"worker": "wuse", "tasks": [task[2] for task in tasks[:3]]}
+
+
+async def round_usage(runtime, browser, failures: list[str]):
+    """E131-E136: premium requests as Copilot counts them, compactions and the cache's tokens
+    in the totals, what the spend went to, By task, and a worker's tasks under it."""
+    seeded = usage_seeded(runtime)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await page.locator("#usage-button").click()
+    dialog = page.locator("#usage-dialog")
+    await dialog.locator('[data-range="30"]').click()
+    total = dialog.locator("#usage-total")
+    await expect(total).to_contain_text("premium requests (as Copilot counts them)")
+    await expect(total).to_contain_text("up to 1 more from older calls")
+    await expect(total).to_contain_text("of them to compact")
+    await expect(total).to_contain_text("cache reads")
+    await expect(total).to_contain_text("context a call on average")
+    tables = dialog.locator("#usage-tables")
+    by_task = tables.locator("div", has=page.locator("h3", has_text="By task"))
+    for title in seeded["tasks"]:
+        await expect(by_task).to_contain_text(title)
+    await expect(by_task.locator("tr").last).to_contain_text("No task")
+    spend = tables.locator("table.spend")
+    accepted = runtime.store.usage(time.time() - 30 * 86400, time.time() + 1)["spend"]["accepted"]
+    await expect(spend.locator("tr", has_text="Finished and accepted")).to_contain_text(
+        f"{accepted['tasks']} tasks{accepted['each']:.1f} credits each"
+    )
+    await expect(spend.locator("tr", has_text="In progress")).to_contain_text("so far")
+    await expect(spend.locator("tr", has_text="Not tied to a task")).to_contain_text(
+        "Watch for you"
+    )
+    worker = tables.locator("tr.link", has=page.locator("button", has_text="worker · 3 tasks"))
+    toggle = worker.locator("button", has_text="worker · 3 tasks")
+    sub = tables.locator("tr.sub", has_text="Add a retry to the token refresh")
+    await expect(sub).to_be_hidden()
+    await toggle.click()
+    await expect(dialog).to_be_visible()  # Its tasks unfold: the dialog stays.
+    await expect(sub).to_be_visible()
+    await expect(toggle).to_have_attribute("aria-expanded", "true")
+    log("usage: premium as Copilot counts it, compactions, cache tokens, spend, by task")
+    await page.keyboard.press("Escape")
+    await context.close()
 
 
 async def round_qa8_report(runtime, browser, failures: list[str]):

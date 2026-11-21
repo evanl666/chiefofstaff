@@ -174,7 +174,8 @@ class AgentBackend(Protocol):
 
     async def read_usage(self, session_id: str, offset: int) -> tuple[list[dict], int]:
         """The usage records in a session's log after `offset` (all of them from 0), and the
-        offset to read from next time."""
+        offset to read from next time: its model calls (session.usage_record) and its
+        compactions (session.compaction_complete), whose calls have no record of their own."""
         ...
 
     def session_log(self, session_id: str) -> Path | None:
@@ -773,7 +774,7 @@ class CopilotBackend:
         if not SESSION_ID.fullmatch(session_id):
             raise ValueError("Not a Copilot session id.")
         log = copilot_home() / "session-state" / session_id / "events.jsonl"
-        return await asyncio.to_thread(scan_log, log, offset, USAGE_RECORD)
+        return await asyncio.to_thread(scan_log, log, offset, USAGE_RECORD, COMPACTION_RECORD)
 
     def session_log(self, session_id: str) -> Path | None:
         if not SESSION_ID.fullmatch(session_id):
@@ -1237,11 +1238,13 @@ LOG_CHUNK = 8_000_000
 
 
 USAGE_RECORD = b'"session.usage_record"'
+COMPACTION_RECORD = b'"session.compaction_complete"'
 
 
-def scan_log(log: Path, offset: int, marker: bytes) -> tuple[list[dict], int]:
-    """The events in a log after `offset` whose line holds `marker`, and where the complete
-    lines end. Lines are only parsed when they match, so a long log is quick to go through."""
+def scan_log(log: Path, offset: int, *markers: bytes) -> tuple[list[dict], int]:
+    """The events in a log after `offset` whose line holds one of `markers`, and where the
+    complete lines end. Lines are only parsed when they match, so a long log is quick to go
+    through."""
     try:
         size = log.stat().st_size
     except OSError:
@@ -1258,7 +1261,7 @@ def scan_log(log: Path, offset: int, marker: bytes) -> tuple[list[dict], int]:
             rest = lines.pop()  # Unfinished: read with the next chunk, or next time.
             for line in lines:
                 position += len(line) + 1
-                if marker in line:
+                if any(marker in line for marker in markers):
                     with suppress(ValueError):
                         if isinstance(event := json.loads(line), dict):
                             found.append(event)

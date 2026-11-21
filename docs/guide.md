@@ -1234,10 +1234,16 @@ Settings sets a default model and one per role, and a default thinking effort pe
 applies to Copilot's default model too; *Auto*, which picks a model each turn, takes none). A
 session's **⋯** (top right; on Home, the Router's) switches its model, effort and context window
 (where the model has a long-context tier). The Router may choose a stronger or cheaper model or effort for one task.
-**Usage** (the chart icon, bottom left, with today's credits) totals credits by session, model
-and role for any date range; every task shows its own credits (hover its time). It includes what a worker used while you had it open in a terminal,
-read from Copilot's log (also from before Chief of Staff was running). An optional credit
-limit per worker stops runaway workers.
+**Usage** (the chart icon, bottom left, with today's credits) totals credits by session, task,
+model and role for any date range; every task shows its own credits (hover its time). Premium
+requests are counted as Copilot counts them: one for each message a session is sent, at its
+model's multiplier, not for the calls the model makes on its own after it. The totals also show
+compactions (Copilot summing up a long conversation) and how many tokens were fresh, read from
+the prompt cache or written to it. *Tasks with spend in this range* says what the credits went
+to: tasks finished and accepted (what each cost), tasks in progress, and what no task spent (the
+Router, Watch for you, …). A worker's row unfolds to the tasks its credits went to. It includes
+what a worker used while you had it open in a terminal, read from Copilot's log (also from
+before Chief of Staff was running). An optional credit limit per worker stops runaway workers.
 
 ## Workers on other coding agents
 

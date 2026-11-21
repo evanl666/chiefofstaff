@@ -388,8 +388,8 @@ async def m2_a_mistake_becomes_a_check(app: App, project: Path):
 
 async def m3_cost_per_result(app: App, since: float):
     usage = await app.get(f"/api/usage?since={since}")
-    log(f"outcomes: {usage['outcomes']}")
-    assert any(row["accepted"] for row in usage["outcomes"]), "accepted results are counted"
+    log(f"spend: {usage['spend']}")
+    assert usage["spend"]["accepted"]["tasks"], "accepted results are counted"
     log("M3 passed")
 
 

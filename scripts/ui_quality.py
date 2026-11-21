@@ -1041,6 +1041,48 @@ async def teams_views(runtime, browser, quality: Quality):
         await context.close()
 
 
+async def usage_views(runtime, browser, quality: Quality):
+    """E131-E136, Usage: the totals as Copilot counts them, By session with a worker's tasks
+    unfolded, By task and what the spend went to; 800 and 1280 px, light and dark
+    (browser-shots/usage/)."""
+    from ui_edges import usage_seeded
+
+    folder = SHOTS / "usage"
+    folder.mkdir(exist_ok=True)
+    usage_seeded(runtime)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await page.locator("#usage-button").click()
+        dialog = page.locator("#usage-dialog")
+        await dialog.locator('[data-range="30"]').click()
+        toggle = dialog.locator("button", has_text="worker · 3 tasks")
+        await toggle.click()
+        await expect(toggle).to_have_attribute("aria-expanded", "true")
+        # The dialog scrolls (its form, in some layouts): its top, then its end.
+        scroll = (
+            "(dialog, top) => { for (const box of [dialog, dialog.querySelector('form')]) "
+            "box.scrollTo(0, top ? 0 : box.scrollHeight); }"
+        )
+        for width in (1280, 800):
+            await page.set_viewport_size({"width": width, "height": 900})
+            await dialog.evaluate(scroll, True)
+            await page.wait_for_timeout(150)
+            await page.screenshot(path=folder / f"quality-{width}-{scheme}.png")
+            await dialog.evaluate(scroll, False)
+            await page.wait_for_timeout(150)
+            await page.screenshot(path=folder / f"quality-{width}-{scheme}-end.png")
+            await quality.check(page, f"usage {width} {scheme}", "#usage-dialog")
+        await quality.contrast(page, f"usage {scheme}", "#usage-dialog")
+        quality.failures += [f"page error {scheme}: {error}" for error in errors]
+        await context.close()
+
+
 async def signed_out(route):
     codex = {
         "name": "codex", "label": "Codex", "enabled": False, "model": "", "limit": 0,
@@ -1237,6 +1279,8 @@ async def main():
             log("Your OK and Handled for you (qa8-approvals/)")
             await teams_views(runtime, browser, quality)
             log("what workers told each other, folded on Home (teams/)")
+            await usage_views(runtime, browser, quality)
+            log("Usage: as Copilot counts it, by task, a worker's tasks (usage/)")
             await browser.close()
         server.should_exit = True
         await serving

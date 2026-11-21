@@ -366,6 +366,15 @@ async def test_send_returns_at_once_and_the_turn_reports_its_progress(backend, t
     assert "done" in turn.said().lower()
     # Usage in Copilot's credits comes from Copilot only: another agent's is in its own unit.
     assert ("assistant.usage" in kinds) == (not agent_like(backend))
+    # What started each call (E131): the message's first call ("user", or none said), then the
+    # model's own next ones ("agent"): a premium request only for the first.
+    started = [
+        getattr(e.data, "initiator", None) or "user"
+        for e in turn.events
+        if e.type.value == "assistant.usage" and not getattr(e.data, "parent_tool_call_id", None)
+    ]
+    if started and not isinstance(backend, ScriptedBackend):
+        assert started[0] == "user" and set(started[1:]) <= {"agent"}, started
 
 
 # What the real agents' own tools are called in what their model is offered: none of them may

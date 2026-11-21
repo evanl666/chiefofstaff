@@ -230,7 +230,7 @@ function usageTable(title, rows, label, onclick) {
           "tr",
           { class: onclick ? "link" : "", onclick: onclick ? () => onclick(row) : undefined },
           el("td", { text: label(row) }),
-          el("td", { class: "num", text: `${row.calls} calls` }),
+          el("td", { class: "num", text: plural(row.calls, "call") }),
           el("td", { class: "num", text: `${row.credits.toFixed(1)} credits` }),
         ),
       ),
@@ -257,27 +257,95 @@ function agentUsage(part) {
     ...part.unknown.map((row) => el("small", { class: "unknown", text: `Unknown: ${row.title || "a deleted worker"} — ${part.name} crashed at ${clock(row.at)}` })),
   );
 }
-// What a result the owner accepted cost, by the model that did most of a task's work.
-function outcomesTable(rows) {
+// Tokens in a few digits: 812, 45k, 3.2M.
+function tokens(count) {
+  if (count >= 1e6) return `${(count / 1e6).toFixed(1)}M`;
+  return count >= 1e3 ? `${Math.round(count / 1e3)}k` : `${count}`;
+}
+const credits = (value) => `${value.toFixed(1)} credits`;
+// The sessions that spent the most. A worker by its name, with the tasks its spend went to
+// under it, folded (its name is its current work's: the whole spend is not that task's).
+function sessionTable(rows) {
   if (!rows.length) return null;
+  const open = (row) => {
+    $("#usage-dialog").close();
+    select(row.session_id);
+  };
+  const table = el("table", {});
+  for (const row of rows) {
+    const tasks = row.tasks || [];
+    const label = el("td", {}, el("span", { text: `${row.title || "Deleted session"}${row.closed_at ? " (closed)" : ""}` }));
+    const subrows = tasks.map((task) =>
+      el("tr", { class: "sub", hidden: true }, el("td", { text: task.title }), el("td", { class: "num", text: plural(task.calls, "call") }), el("td", { class: "num", text: credits(task.credits) })),
+    );
+    if (row.worker) {
+      const what = tasks.length ? `worker · ${plural(tasks.length, "task")}` : "worker";
+      const toggle = el("button", {
+        type: "button",
+        class: "link quiet",
+        "aria-expanded": "false",
+        text: what,
+        onclick: (event) => {
+          event.stopPropagation();
+          const shown = toggle.getAttribute("aria-expanded") !== "true";
+          toggle.setAttribute("aria-expanded", String(shown));
+          for (const sub of subrows) sub.hidden = !shown;
+        },
+      });
+      label.append(tasks.length ? toggle : el("small", { class: "muted", text: what }));
+    }
+    table.append(el("tr", { class: "link", onclick: () => open(row) }, label, el("td", { class: "num", text: plural(row.calls, "call") }), el("td", { class: "num", text: credits(row.credits) })), ...subrows);
+  }
+  return el("div", {}, el("h3", { text: "By session" }), table);
+}
+// The tasks that spent the most; last, what no task spent.
+function taskTable(rows, untasked) {
+  const tasks = rows.filter((row) => row.task_id).slice(0, 50);
+  const none = rows.find((row) => !row.task_id);
+  if (!tasks.length) return null;
+  const who = untasked.by.map((part) => part.who);
   return el(
     "div",
     {},
-    el("h3", { text: "Per accepted result" }),
+    el("h3", { text: "By task" }),
     el(
       "table",
       {},
-      ...rows.map((row) =>
+      ...tasks.map((row) =>
         el(
           "tr",
-          {},
-          el("td", { text: row.model || "unknown" }),
-          el("td", { class: "num", text: `${row.accepted} of ${row.tasks} accepted` }),
-          el("td", { class: "num", text: row.per_accepted === null ? "–" : `${row.per_accepted.toFixed(1)} credits each` }),
+          {
+            class: "link",
+            onclick: () => {
+              $("#usage-dialog").close();
+              select(row.session_id);
+            },
+          },
+          el("td", { text: row.title }),
+          el("td", { class: "num", text: plural(row.calls, "call") }),
+          el("td", { class: "num", text: credits(row.credits) }),
         ),
       ),
+      none ? el("tr", {}, el("td", {}, el("span", { text: "No task" }), el("small", { class: "muted", text: names(who) })), el("td", { class: "num", text: plural(none.calls, "call") }), el("td", { class: "num", text: credits(none.credits) })) : "",
     ),
   );
+}
+// "Router, Watch for you, and 2 more".
+function names(list) {
+  return list.length > 3 ? `${list.slice(0, 3).join(", ")} and ${list.length - 3} more` : list.join(", ");
+}
+// What the range's credits went to: each task with spend in it counted once, with what it
+// spent in the range; and what no task spent, by whom.
+function spendTable(spend) {
+  const rows = [];
+  const line = (label, count, amount) => rows.push(el("tr", {}, el("td", { text: label }), el("td", { class: "num", text: count }), el("td", { class: "num", text: amount })));
+  const { accepted, in_progress: going, stopped, untasked } = spend;
+  if (accepted.tasks) line("Finished and accepted", plural(accepted.tasks, "task"), `${credits(accepted.each)} each`);
+  if (going.tasks) line("In progress", plural(going.tasks, "task"), `${credits(going.credits)} so far`);
+  if (stopped.tasks) line("Failed or cancelled", plural(stopped.tasks, "task"), credits(stopped.credits));
+  if (untasked.credits >= 0.05) line("Not tied to a task", names(untasked.by.map((part) => part.who)), credits(untasked.credits));
+  if (!rows.length) return null;
+  return el("div", {}, el("h3", { text: "Tasks with spend in this range" }), el("table", { class: "spend" }, ...rows));
 }
 export async function showUsage(range) {
   const form = $("#usage-dialog form");
@@ -299,20 +367,22 @@ export async function showUsage(range) {
   try {
     const usage = await api(`/api/usage?since=${since}&until=${until}`);
     const total = usage.total;
+    // Premium requests as Copilot counts them: a call a user message started, at its model's
+    // multiplier (not the agent's next calls); calls kept before that was known, apart.
+    const unread = Math.round(total.premium_unread);
+    const compacting = total.compactions ? `, ${total.compactions} of them to compact` : "";
     $("#usage-total").replaceChildren(
-      el("strong", { text: `${total.credits.toFixed(1)} credits` }),
-      el("span", { text: `${total.premium.toFixed(0)} premium requests` }),
-      el("span", { text: `${total.calls} model calls` }),
-      el("span", { text: `${Math.round((total.input_tokens + total.output_tokens) / 1000)}k tokens` }),
+      el("strong", { text: credits(total.credits) }),
+      el("span", { text: `${Math.round(total.premium).toLocaleString()} premium requests (as Copilot counts them)${unread ? `, up to ${unread.toLocaleString()} more from older calls` : ""}` }),
+      el("span", { text: `${total.calls.toLocaleString()} model calls${compacting}` }),
+      el("span", { class: "tokens", text: `Tokens: ${tokens(total.output_tokens)} output, ${tokens(total.fresh_input_tokens)} fresh input, ${tokens(total.cache_read_tokens)} cache reads, ${tokens(total.cache_write_tokens)} cache writes; ${tokens(total.context_per_call)} context a call on average` }),
     );
     const roles = { router: "Router", slack: "Slack", worker: "Workers", watchdog: "Watchdog" };
     $("#usage-tables").replaceChildren(
       ...[
-        usageTable("By session", usage.by_session, (row) => `${row.title || "Deleted session"}${row.closed_at ? " (closed)" : ""}`, (row) => {
-          $("#usage-dialog").close();
-          select(row.session_id);
-        }),
-        outcomesTable(usage.outcomes || []),
+        sessionTable(usage.by_session),
+        taskTable(usage.by_task, usage.spend.untasked),
+        spendTable(usage.spend),
         usageTable("By model", usage.by_model, (row) => row.model || "unknown"),
         usageTable("By role", usage.by_role, (row) => roles[row.role] || row.role),
       ].filter(Boolean),

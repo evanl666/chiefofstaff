@@ -12,6 +12,7 @@ import re
 import time
 from collections.abc import Collection
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -117,6 +118,35 @@ def terminal_timeline(events: list[dict], ours: Collection[str] = ()) -> list[En
             if name not in PLUMBING_TOOLS and name not in ours:
                 shown.append(("tool", describe_tool(name, data.get("arguments")), at))
     return [(kind, sendable(text), at) for kind, text, at in shown]
+
+
+def logged_call(event: dict) -> dict | None:
+    """A model call of a Copilot session's log (session.usage_record), or a compaction's
+    (session.compaction_complete, with how many requests it took); None for anything else."""
+    data = event.get("data") or {}
+    kind = event.get("type")
+    if kind == "session.usage_record":
+        usage = data.get("usage") or {}
+    elif kind == "session.compaction_complete" and data.get("success") is not False:
+        usage = data.get("compactionTokensUsed") or {}
+    else:
+        return None
+    if not isinstance(usage, dict) or not usage:
+        return None
+    compaction = kind == "session.compaction_complete"
+    return {
+        "kind": "compaction" if compaction else "call",
+        "model": str(usage.get("model") or ""),
+        "input": int(usage.get("inputTokens") or 0),
+        "output": int(usage.get("outputTokens") or 0),
+        "cache_read": int(usage.get("cacheReadTokens") or 0),
+        "cache_write": int(usage.get("cacheWriteTokens") or 0),
+        "credits": ((usage.get("copilotUsage") or {}).get("totalNanoAiu") or 0) / 1e9,
+        "premium": 0.0 if compaction else float(usage.get("cost") or 0),
+        # Copilot leaves it out for a call a user message started.
+        "initiator": "compaction" if compaction else str(usage.get("initiator") or "user"),
+        "calls": int(usage.get("requestCount") or 1) if compaction else 1,
+    }
 
 
 def moment(iso: str) -> float | None:
@@ -1623,28 +1653,121 @@ class Workers:
         since = timestamp(row["created_at"])  # Before it was managed it was not ours.
         for event in records:
             when = moment(str(event.get("timestamp") or "")) or time.time()
-            if when < since:
+            if when < since or not (call := logged_call(event)):
                 continue
-            usage = (event.get("data") or {}).get("usage") or {}
-            model = str(usage.get("model") or "")
-            tokens = (int(usage.get("inputTokens") or 0), int(usage.get("outputTokens") or 0))
             if self.store.one(
                 """SELECT id FROM usage WHERE session_id=? AND model=? AND input_tokens=?
-                AND output_tokens=? LIMIT 1""",
-                (row["id"], model, *tokens),
+                AND output_tokens=? AND kind=? LIMIT 1""",
+                (row["id"], call["model"], call["input"], call["output"], call["kind"]),
             ):
                 continue
-            nano = (usage.get("copilotUsage") or {}).get("totalNanoAiu") or 0
             self.store.record_usage(
                 row["id"],
                 WORKER,
-                model,
-                nano / 1e9,
-                float(usage.get("cost") or 0),
-                *tokens,
+                call["model"],
+                call["credits"],
+                call["premium"],
+                call["input"],
+                call["output"],
                 at=when,
+                initiator=call["initiator"],
+                cache_read_tokens=call["cache_read"],
+                cache_write_tokens=call["cache_write"],
+                kind=call["kind"],
+                calls=call["calls"],
             )
         self.store.set(key, str(end))
+
+    async def read_back(self):
+        """Once for each call kept before what started it was (bug E131): what started it and
+        its cache tokens, read back from its session's logs while they are there (a Router's
+        every conversation); and the compactions none of them counted (E132). Calls whose log
+        is gone stay unread ("")."""
+        backend = self.runtime.backend
+        if not backend:
+            return
+        for found in self.store.all(
+            "SELECT session_id, max(id) AS last FROM usage WHERE initiator='' GROUP BY session_id"
+        ):
+            session_id = found["session_id"]
+            key = f"usage_read_back:{session_id}"
+            if int(self.store.get(key) or 0) >= found["last"]:
+                continue  # Read already: what its logs had is in.
+            row = self.store.find_session(session_id)
+            if row and self.runtime.on_copilot(session_id):
+                await self.read_back_one(backend, row)
+            self.store.set(key, str(found["last"]))
+
+    async def read_back_one(self, backend, row: dict):
+        session_id = row["id"]
+        conversations = {session_id, self.runtime.copilot_id(session_id)}
+        conversations |= {
+            copilot for copilot, value in self.store.items("alias:").items() if value == session_id
+        }
+        calls: dict[tuple, list[dict]] = {}
+        compactions = []
+        since = timestamp(row["created_at"])
+        for copilot in sorted(conversations):
+            try:
+                records, _ = await backend.read_usage(copilot, 0)
+            except ValueError:
+                continue  # Not a Copilot session id (a missing log reads as empty).
+            for event in records:
+                if not (call := logged_call(event)):
+                    continue
+                if call["kind"] == "compaction":
+                    when = moment(str(event.get("timestamp") or "")) or 0
+                    if when >= since:
+                        compactions.append((when, call))
+                else:
+                    key = (call["model"], call["input"], call["output"])
+                    calls.setdefault(key, []).append(call)
+        updates = []
+        for kept in self.store.all(
+            """SELECT id, model, input_tokens, output_tokens FROM usage
+            WHERE session_id=? AND initiator='' AND kind='call' ORDER BY id""",
+            (session_id,),
+        ):
+            key = (kept["model"], kept["input_tokens"], kept["output_tokens"])
+            if logged := calls.get(key):
+                call = logged.pop(0)
+                updates.append(
+                    (call["initiator"], call["cache_read"], call["cache_write"], kept["id"])
+                )
+        if updates:
+            self.store.execute_many(
+                "UPDATE usage SET initiator=?, cache_read_tokens=?, cache_write_tokens=? "
+                "WHERE id=?",
+                updates,
+            )
+        for when, call in compactions:
+            if self.store.one(
+                """SELECT id FROM usage WHERE session_id=? AND model=? AND input_tokens=?
+                AND output_tokens=? AND kind='compaction' LIMIT 1""",
+                (session_id, call["model"], call["input"], call["output"]),
+            ):
+                continue
+            run = self.store.one(
+                """SELECT id FROM runs WHERE session_id=? AND started_at<=?
+                AND (ended_at IS NULL OR ended_at>=?) ORDER BY started_at DESC LIMIT 1""",
+                (session_id, *[datetime.fromtimestamp(when, UTC).isoformat()] * 2),
+            )
+            self.store.record_usage(
+                session_id,
+                row["role"],
+                call["model"],
+                call["credits"],
+                0,
+                call["input"],
+                call["output"],
+                at=when,
+                run_id=run["id"] if run else "",
+                initiator="compaction",
+                cache_read_tokens=call["cache_read"],
+                cache_write_tokens=call["cache_write"],
+                kind="compaction",
+                calls=call["calls"],
+            )
 
     async def mirror_loop(self):
         rounds = 0
@@ -1654,6 +1777,7 @@ class Workers:
                 if not self.usage_synced and self.runtime.backend:
                     self.usage_synced = True
                     await self.sync_all_usage()
+                    await self.read_back()
                 if rounds % ELSEWHERE_EVERY == 0:
                     await self.refresh_elsewhere()
                 await self.mirror()

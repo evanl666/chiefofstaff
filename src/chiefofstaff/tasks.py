@@ -27,7 +27,8 @@ from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
-from .store import Store, hours_ago, now
+from .store import HELPER_KINDS as HELPER_KINDS
+from .store import HELPERS, Store, hours_ago, now
 
 STATUSES = ("queued", "running", "waiting", "review", "done", "failed", "cancelled")
 OPEN = frozenset({"queued", "running", "waiting"})
@@ -50,16 +51,6 @@ TASK_FIELDS = {"title", "goal", "acceptance", "status", "result", "progress", "w
 
 def task_id() -> str:
     return "t" + uuid4().hex[:7]
-
-
-# Chief of Staff's own helper workers (learning, checks, profile, connector, messenger): not the
-# owner's tasks, never listed with them.
-HELPER_KINDS = ("learner", "checker", "distill", "connector", "messenger")
-# Constant SQL, made of the constant kinds above.
-HELPERS = " UNION ".join(
-    f"SELECT substr(key, {len(kind) + 2}) FROM kv WHERE key >= '{kind}:' AND key < '{kind}:\uffff'"  # noqa: S608
-    for kind in HELPER_KINDS
-)
 
 
 class TaskBook:

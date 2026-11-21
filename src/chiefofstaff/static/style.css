@@ -1052,6 +1052,11 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .usage-tables .agent-usage h3 .num { font-weight: 400; font-variant-numeric: tabular-nums; }
 .usage-tables .agent-usage small.unknown { display: block; margin-top: 6px; color: var(--muted); font-size: var(--small); }
 .usage-tables tr.link { cursor: pointer; }
+.usage-total span.tokens { flex-basis: 100%; }
+.usage-tables td small.muted { margin-left: 8px; color: var(--muted); font-size: var(--small); }
+.usage-tables td button.link.quiet { margin-left: 4px; }
+.usage-tables tr.sub td { padding: 4px 0; color: var(--soft); font-size: var(--small); }
+.usage-tables tr.sub td:first-child { padding-left: 16px; }
 .usage-tables tr.link:hover td { color: var(--text); }
 .draft-banner { margin: 0; font-size: var(--small); color: var(--soft); background: var(--amber-soft); padding: 4px 12px; border-radius: var(--radius); }
 

@@ -9,6 +9,25 @@
   so they keep working once the old one goes.
 - **A DM with yourself reads as *your notes to yourself*.** A thread there showed as *Slack thread
   in D0…*: with nobody else in it, there was no one to name it after.
+- **Usage counts premium requests as Copilot does (E131).** Each model call counted as a
+  premium request, the model's own next calls in a turn too: 56,255 in a day where Copilot
+  counted 8,460. Now only a call a message started counts, at its model's multiplier, labelled
+  *premium requests (as Copilot counts them)*. Calls kept by an earlier version are read back
+  from their session's log; those whose log is gone are said apart (*up to N more from older
+  calls*).
+- **Compactions are counted (E132).** When Copilot sums up a long conversation, its model calls
+  cost credits but came with no usage event. They count now, as calls and credits, also read
+  back from logs for the days before.
+- **Usage shows what the tokens were (E134).** Output, fresh input, prompt-cache reads and
+  cache writes, apart, and the context a call sent on average: most input is the conversation
+  sent again.
+- **What the spend went to (E135).** *Per accepted result* divided what running tasks spent by
+  the finished ones, and left out what no task spent. Now *Tasks with spend in this range* says:
+  finished and accepted (what each cost), in progress (so far), failed or cancelled, and not
+  tied to a task (the Router, Watch for you, …).
+- **By task, and each worker's tasks (E136).** A new *By task* table, with what no task spent
+  last. In *By session* a worker was named after its current task, as if all it spent was that
+  task's; now it says it is a worker and how many tasks it had, and unfolds to them.
 
 ## 0.1.53 (2026-11-22)
 

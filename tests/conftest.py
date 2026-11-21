@@ -316,7 +316,8 @@ class FakeClient:
 
     async def read_usage(self, session_id, offset):
         events = self.logs.get(session_id, [])
-        found = [e for e in events[offset:] if e.get("type") == "session.usage_record"]
+        kinds = ("session.usage_record", "session.compaction_complete")
+        found = [e for e in events[offset:] if e.get("type") in kinds]
         return found, len(events)
 
     def session_log(self, session_id):

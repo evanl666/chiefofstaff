@@ -50,6 +50,39 @@ MESSAGES_SHOWN = 400
 LAST_ID = 2**63 - 1
 
 
+# Chief of Staff's own helper workers (learning, checks, profile, connector, messenger): not the
+# owner's tasks, never listed with them.
+HELPER_KINDS = ("learner", "checker", "distill", "connector", "messenger")
+# Constant SQL, made of the constant kinds above.
+HELPERS = " UNION ".join(
+    f"SELECT substr(key, {len(kind) + 2}) FROM kv WHERE key >= '{kind}:' AND key < '{kind}:\uffff'"  # noqa: S608
+    for kind in HELPER_KINDS
+)
+# What a range's calls add up to (constant SQL, over `usage u`): credits; premium requests as
+# Copilot counts them (a call a user message started, its model's multiplier) and those of calls
+# kept before that was known ("unread": their log is gone); calls, compactions among them; and
+# tokens. Copilot's input count holds what the prompt cache read and wrote; a count without it
+# (another provider's) is all fresh input. The context a call sent: its whole input.
+CACHED = "u.cache_read_tokens + u.cache_write_tokens"
+USAGE_TOTALS = f"""sum(u.credits) AS credits,
+    sum(CASE WHEN u.initiator='user' THEN u.premium ELSE 0 END) AS premium,
+    sum(CASE WHEN u.initiator='' THEN u.premium ELSE 0 END) AS premium_unread,
+    sum(u.calls) AS calls,
+    sum(CASE WHEN u.kind='compaction' THEN u.calls ELSE 0 END) AS compactions,
+    sum(u.input_tokens) AS input_tokens, sum(u.output_tokens) AS output_tokens,
+    sum(u.cache_read_tokens) AS cache_read_tokens,
+    sum(u.cache_write_tokens) AS cache_write_tokens,
+    sum(CASE WHEN u.input_tokens >= {CACHED} THEN u.input_tokens - ({CACHED})
+        ELSE u.input_tokens END) AS fresh_input_tokens,
+    sum(CASE WHEN u.kind!='call' THEN 0 WHEN u.input_tokens >= {CACHED} THEN u.input_tokens
+        ELSE u.input_tokens + {CACHED} END) AS context_tokens,
+    sum(CASE WHEN u.kind='call' THEN u.calls ELSE 0 END) AS model_calls"""
+# A row's task: none for a call outside a task's run, or of a helper's (the Watch's scans).
+TASK_OF = f"""LEFT JOIN runs r ON r.id=u.run_id AND u.run_id!=''
+    LEFT JOIN tasks t ON t.id=r.task_id AND t.session_id NOT IN ({HELPERS})"""
+# Who spent what no task did, as the Usage view names them.
+UNTASKED = {"router": "Router", "slack": "Slack", "watchdog": "Watchdog"}
+
 AGENT_USAGE_COLUMNS = (
     "agent", "session_id", "run_id", "model", "input_tokens", "cached_input_tokens",
     "cache_write_tokens", "output_tokens", "tokens", "least", "usd", "kind", "accepted", "at",
@@ -290,6 +323,20 @@ class Store:
         usage_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(usage)")}
         if "run_id" not in usage_columns:
             self.db.execute("ALTER TABLE usage ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")
+        if "initiator" not in usage_columns:
+            # What started each call: Copilot counts a premium request only for a call a user
+            # message started ("user"), not the agent's own next calls ("agent"), a sub-agent's
+            # or a compaction's; "" for a call kept before this was (read back from its log
+            # where it still is, Workers.read_back). A compaction is a kind of call of its own,
+            # some of them several requests; the tokens read from and written to the prompt
+            # cache apart.
+            self.db.executescript("""
+            ALTER TABLE usage ADD COLUMN initiator TEXT NOT NULL DEFAULT '';
+            ALTER TABLE usage ADD COLUMN kind TEXT NOT NULL DEFAULT 'call';
+            ALTER TABLE usage ADD COLUMN calls INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+            """)
         if "project" not in columns:
             self.db.execute("ALTER TABLE sessions ADD COLUMN project TEXT NOT NULL DEFAULT ''")
         if "effort" not in columns:
@@ -795,10 +842,18 @@ class Store:
         output_tokens: int,
         at: float | None = None,
         run_id: str = "",
+        initiator: str = "user",
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        kind: str = "call",
+        calls: int = 1,
     ):
+        """One model call (or a compaction's `calls`): `premium` is its model's multiplier,
+        a premium request only when a user message started it (`initiator` "user")."""
         self.execute(
             "INSERT INTO usage(session_id,role,model,credits,premium,input_tokens,output_tokens,at,"
-            "run_id) VALUES(?,?,?,?,?,?,?,?,?)",
+            "run_id,initiator,cache_read_tokens,cache_write_tokens,kind,calls) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 session_id,
                 role,
@@ -809,6 +864,11 @@ class Store:
                 output_tokens,
                 time.time() if at is None else at,
                 run_id,
+                initiator,
+                cache_read_tokens,
+                cache_write_tokens,
+                kind,
+                calls,
             ),
         )
 
@@ -936,22 +996,23 @@ class Store:
 
     def usage(self, since: float, until: float) -> dict:
         # Constant SQL: the queries below put no outside value in their text.
-        totals = """sum(credits) AS credits, sum(premium) AS premium, count(*) AS calls,
-            sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens"""
-        window = (since, until)
-        total = self.row(f"SELECT {totals} FROM usage WHERE at>=? AND at<?", window)  # noqa: S608
+        totals, window = USAGE_TOTALS, (since, until)
+        found = self.row(f"SELECT {totals} FROM usage u WHERE u.at>=? AND u.at<?", window)  # noqa: S608
+        total = {key: value or 0 for key, value in found.items()}
+        calls = total["model_calls"]
+        total["context_per_call"] = round(total["context_tokens"] / calls) if calls else 0
         return {
             "since": since,
             "until": until,
-            "total": {key: value or 0 for key, value in total.items()},
+            "total": total,
             "by_role": self.all(
-                f"SELECT role, {totals} FROM usage WHERE at>=? AND at<? GROUP BY role"  # noqa: S608
+                f"SELECT u.role, {totals} FROM usage u WHERE u.at>=? AND u.at<? GROUP BY u.role"  # noqa: S608
                 " ORDER BY credits DESC",
                 window,
             ),
             "by_model": self.all(
-                f"SELECT model, {totals} FROM usage WHERE at>=? AND at<? GROUP BY model"  # noqa: S608
-                " ORDER BY credits DESC",
+                f"SELECT u.model, {totals} FROM usage u WHERE u.at>=? AND u.at<?"  # noqa: S608
+                " GROUP BY u.model ORDER BY credits DESC",
                 window,
             ),
             "by_session": self.all(
@@ -960,42 +1021,73 @@ class Store:
                 WHERE u.at>=? AND u.at<? GROUP BY u.session_id ORDER BY credits DESC LIMIT 50""",  # noqa: S608
                 window,
             ),
-            "outcomes": self.outcomes(since, until),
+            "by_task": self.by_task(since, until),
+            "spend": self.spend(since, until),
         }
 
-    def outcomes(self, since: float, until: float) -> list[dict]:
-        """What the owner's tasks cost per result they accepted, by the model that did most of
-        the work: the measure that counts, more than the cheapest call."""
-        helpers = {
-            key.split(":", 1)[1]
-            for prefix in ("learner:", "checker:", "distill:")
-            for key in self.keys(prefix)
+    def by_task(self, since: float, until: float) -> list[dict]:
+        """A range's spend by the owner's task it went to (its runs' calls), the most first
+        (the view shows the first 50); last, what went to none (task_id ""): the Router, the
+        Watch, a worker between tasks."""
+        totals, window = USAGE_TOTALS, (since, until)
+        tasks = self.all(
+            f"""SELECT t.id AS task_id, t.title, t.status, t.session_id, {totals}
+            FROM usage u {TASK_OF} WHERE u.at>=? AND u.at<? AND t.id IS NOT NULL
+            GROUP BY t.id ORDER BY credits DESC""",  # noqa: S608
+            window,
+        )
+        none = self.row(
+            f"""SELECT {totals} FROM usage u {TASK_OF}
+            WHERE u.at>=? AND u.at<? AND t.id IS NULL""",  # noqa: S608
+            window,
+        )
+        if none["calls"]:
+            tasks.append({"task_id": "", "title": "", "status": "", "session_id": "", **none})
+        return tasks
+
+    def spend(self, since: float, until: float) -> dict:
+        """What a range's credits went to, each task counted once with what it spent in the
+        range (the tasks with spend in it): finished and accepted, in progress (queued to
+        waiting for the owner's review), failed or cancelled; and what went to no task, by
+        whom (the Router, the Watch, a worker between tasks), the most first."""
+        window = (since, until)
+        groups = {
+            "accepted": ("done",),
+            "in_progress": ("queued", "running", "waiting", "review"),
+            "stopped": ("failed", "cancelled"),
         }
-        tasks: dict[str, dict] = {}
+        found: dict[str, dict] = {name: {"tasks": 0, "credits": 0.0} for name in groups}
         for row in self.all(
-            """SELECT t.id, t.status, t.session_id, u.model, sum(u.credits) AS credits
-            FROM usage u JOIN runs r ON r.id=u.run_id JOIN tasks t ON t.id=r.task_id
-            WHERE u.at>=? AND u.at<? AND u.run_id!='' GROUP BY t.id, u.model""",
-            (since, until),
+            f"""SELECT t.status, count(DISTINCT t.id) AS tasks, sum(u.credits) AS credits
+            FROM usage u {TASK_OF} WHERE u.at>=? AND u.at<? AND t.id IS NOT NULL
+            GROUP BY t.status""",  # noqa: S608
+            window,
         ):
-            if row["session_id"] in helpers:
-                continue
-            task = tasks.setdefault(row["id"], {"status": row["status"], "models": {}})
-            task["models"][row["model"]] = row["credits"] or 0
-        found: dict[str, dict] = {}
-        for task in tasks.values():
-            model = max(task["models"], key=task["models"].get)
-            entry = found.setdefault(
-                model, {"model": model, "tasks": 0, "accepted": 0, "credits": 0.0}
-            )
-            entry["tasks"] += 1
-            entry["accepted"] += task["status"] == "done"
-            entry["credits"] += sum(task["models"].values())
-        for entry in found.values():
-            entry["per_accepted"] = (
-                entry["credits"] / entry["accepted"] if entry["accepted"] else None
-            )
-        return sorted(found.values(), key=lambda entry: -entry["tasks"])
+            name = next((name for name, kinds in groups.items() if row["status"] in kinds), "")
+            if name:
+                found[name]["tasks"] += row["tasks"]
+                found[name]["credits"] += row["credits"] or 0
+        accepted = found["accepted"]
+        accepted["each"] = accepted["credits"] / accepted["tasks"] if accepted["tasks"] else None
+        untasked: dict[str, float] = {}
+        for row in self.all(
+            f"""SELECT u.role, CASE WHEN u.session_id IN ({HELPERS})
+                THEN coalesce(s.title, 'Helpers') ELSE '' END AS helper,
+            sum(u.credits) AS credits FROM usage u {TASK_OF}
+            LEFT JOIN sessions s ON s.id=u.session_id
+            WHERE u.at>=? AND u.at<? AND t.id IS NULL GROUP BY u.role, helper""",  # noqa: S608
+            window,
+        ):
+            who = UNTASKED.get(row["role"]) or row["helper"] or "Workers between tasks"
+            untasked[who] = untasked.get(who, 0.0) + (row["credits"] or 0)
+        found["untasked"] = {
+            "credits": sum(untasked.values()),
+            "by": [
+                {"who": who, "credits": spent}
+                for who, spent in sorted(untasked.items(), key=lambda item: -item[1])
+            ],
+        }
+        return found
 
     def session_credits(self) -> dict[str, float]:
         return {

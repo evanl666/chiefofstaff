@@ -8853,12 +8853,31 @@ class Runtime:
                 self.delivery.publish_delivery(copy["session_id"], [copy])
 
     def usage(self, since: float, until: float) -> dict:
-        """What was spent in a range; each worker by the name it has everywhere (its work's,
-        not its first prompt's)."""
+        """What was spent in a range. A worker's session by the name it has everywhere, with
+        the tasks its spend went to (its name is its current work's: bug E136, the whole spend
+        read as that task's); each task with its worker's name."""
         found = self.store.usage(since, until)
+        names: dict[str, str] = {}
+
+        def name(session_id: str) -> str:
+            if session_id not in names:
+                row = self.store.find_session(session_id)
+                names[session_id] = self.display_title(row) if row else ""
+            return names[session_id]
+
+        tasks: dict[str, list[dict]] = {}
+        for task in found["by_task"]:
+            if task["task_id"]:
+                task["worker"] = name(task["session_id"])
+                tasks.setdefault(task["session_id"], []).append(task)
         for item in found["by_session"]:
             if item.get("role") == WORKER and (row := self.store.find_session(item["session_id"])):
-                item["title"] = self.display_title(row)
+                item["title"] = name(row["id"])
+                item["worker"] = not self.special(row)
+                item["tasks"] = [
+                    {key: task[key] for key in ("task_id", "title", "calls", "credits")}
+                    for task in tasks.get(row["id"], [])
+                ]
         if self.agents and (parts := self.agent_usage_parts(since, until)):
             found["agents"] = parts  # Only where another agent has rows in the range.
         return found

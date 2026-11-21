@@ -259,6 +259,7 @@ class Events:
             "session.mcp_server_status_changed": self.mcp_status,
             "session.mcp_server_tools_loaded": self.mcp_status,
             "session.usage_checkpoint": self.checkpoint,
+            "session.compaction_complete": self.compaction,
             "session.warning": self.warning,
             "session.idle": self.idle,
             "assistant.idle": self.loop_idle,
@@ -704,6 +705,37 @@ class Events:
             getattr(data, "input_tokens", 0) or 0,
             getattr(data, "output_tokens", 0) or 0,
             run_id=run["id"] if run else "",
+            # "user", "agent" (its next call in the turn), "sub-agent", …; Copilot leaves it
+            # out for a call a user message started.
+            initiator=getattr(data, "initiator", None) or "user",
+            cache_read_tokens=getattr(data, "cache_read_tokens", 0) or 0,
+            cache_write_tokens=getattr(data, "cache_write_tokens", 0) or 0,
+        )
+
+    def compaction(self, row: dict, event: Any):
+        """Copilot summed up a conversation grown too long (session.compaction_complete): its
+        model calls come with no assistant.usage, and are credits all the same (bug E132)."""
+        data = event.data
+        used = getattr(data, "compaction_tokens_used", None)
+        if not used or not getattr(data, "success", True):
+            return
+        # (The SDK keeps its cost as a private field.)
+        cost = getattr(used, "_copilot_usage", None) or getattr(used, "copilot_usage", None)
+        run = self.tasks.run(row["id"]) if row["role"] == WORKER else None
+        self.store.record_usage(
+            row["id"],
+            row["role"],
+            getattr(used, "model", None) or getattr(data, "model", None) or "",
+            (getattr(cost, "total_nano_aiu", 0) or 0) / 1e9,
+            0,
+            getattr(used, "input_tokens", 0) or 0,
+            getattr(used, "output_tokens", 0) or 0,
+            run_id=run["id"] if run else "",
+            initiator="compaction",
+            cache_read_tokens=getattr(used, "cache_read_tokens", 0) or 0,
+            cache_write_tokens=getattr(used, "cache_write_tokens", 0) or 0,
+            kind="compaction",
+            calls=getattr(used, "request_count", None) or 1,
         )
 
     def mcp_status(self, row: dict, event: Any):

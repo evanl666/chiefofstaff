@@ -251,6 +251,35 @@ FIXES: list[Allow] = [
         '[title^="New task"], [title^="Continued"], [title^="Told"]))',
         views=r"^home",
     ),
+    # E131-E136 (usage as Copilot counts it): each call keeps what started it (a premium
+    # request only for a user message's call), its kind (a compaction's calls too) and its
+    # cache tokens. The Usage view's totals and rows say more (fresh input, cache reads and
+    # writes, context a call; older calls unread), By task, what the spend went to (in place of
+    # Per accepted result) and a worker's tasks under its row. Not in the screenshots.
+    Allow(
+        "usage rows: what started each call, its kind, calls and cache tokens",
+        data=r"\.db\.usage\[\d+\]\.(initiator|kind|calls|cache_read_tokens|cache_write_tokens)$",
+    ),
+    Allow(
+        "usage's new columns",
+        data=r"\.db\._schema\.usage$",
+        lines=r"^\s*, run_id TEXT NOT NULL DEFAULT ''(, initiator TEXT NOT NULL DEFAULT '', .*"
+        r"cache_write_tokens INTEGER NOT NULL DEFAULT 0)?\)$",
+    ),
+    Allow(
+        "the Usage view's totals and rows: tokens by kind, compactions, older calls unread",
+        data=r"/api/usage\?since=[^.]*\.(total|by_role\[\d+\]|by_model\[\d+\]|by_session\[\d+\])"
+        r"\.(premium_unread|compactions|cache_read_tokens|cache_write_tokens|fresh_input_tokens"
+        r"|context_tokens|context_per_call|model_calls)$",
+    ),
+    Allow(
+        "the Usage view's worker rows: a worker, its tasks",
+        data=r"/api/usage\?since=[^.]*\.by_session\[\d+\]\.(worker|tasks)$",
+    ),
+    Allow(
+        "the Usage view's By task and spend (Per accepted result's place)",
+        data=r"/api/usage\?since=[^.]*\.(by_task|spend|outcomes)$",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
