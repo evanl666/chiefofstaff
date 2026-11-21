@@ -594,7 +594,7 @@ class Drafts:
         name = names.get(channel, "")
         name = "" if channel in name else name
         if channel.startswith("D"):
-            place = f"your {threads.dm_with(name)}" if name else "a DM"
+            place = threads.your_dm(name) if name else "a DM"
         else:
             place = f"#{name.lstrip('#')}" if name else "a channel"
         link = next(
@@ -1918,8 +1918,10 @@ class Drafts:
             if channel and channel in name:
                 name = ""  # A raw id is no name: never shown to the owner.
             # A DM: its id (D…), or the id of the user it goes to (U… or W…).
+            if name == threads.SELF_DM:
+                return f"your reply in {threads.SELF_DM}" + (", in a thread" if ts else "")
             if channel.startswith(("D", "U", "W")):
-                place = f"your {threads.dm_with(name)}" if name else "a DM"
+                place = threads.your_dm(name) if name else "a DM"
                 # "to Alice Chen (DM)" says where already.
                 said = bool(to) and re.search(r"\bDM\b|direct", to, re.IGNORECASE) is not None
                 where = "" if said else "a DM" if to else place

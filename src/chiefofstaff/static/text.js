@@ -541,7 +541,8 @@ export function threadLabel(key) {
 function slackName(mark, id, said = "") {
   const name = String(state.snapshot?.slack_names?.[id] || said || "").trim();
   if (mark === "@") return `@${name.replace(/^@/, "") || id}`;
-  if (id.startsWith("D")) return !name ? "DM" : /\bDM\b|direct/i.test(name) ? name : `DM with ${name.replace(/^@/, "")}`;
+  // The owner's DM with themself: "your notes to yourself" (threads.SELF_DM).
+  if (id.startsWith("D")) return !name ? "DM" : /\bDM\b|direct|^your notes to yourself$/i.test(name) ? name : `DM with ${name.replace(/^@/, "")}`;
   return `#${name.replace(/^#/, "") || id}`;
 }
 // A Slack id written bare (by a session, from Slack's tools): a user's (U…, W…), a channel's

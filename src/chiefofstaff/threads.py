@@ -135,11 +135,21 @@ def normalize(key: str) -> str:
     )
 
 
+# The owner's DM with themself, by the name it is known by (Slack lists only them in it).
+SELF_DM = "your notes to yourself"
+
+
 def dm_with(name: str) -> str:
-    """A DM by its name: "DM with Bob"; a name that already says DM ("DM with Bob") as it is."""
-    return (
-        name if re.search(r"\bDM\b|direct", name, re.IGNORECASE) else f"DM with {name.lstrip('@')}"
-    )
+    """A DM by its name: "DM with Bob"; a name that already says DM ("DM with Bob") as it is,
+    and the owner's own DM as their notes to themself."""
+    if name == SELF_DM or re.search(r"\bDM\b|direct", name, re.IGNORECASE):
+        return name
+    return f"DM with {name.lstrip('@')}"
+
+
+def your_dm(name: str) -> str:
+    """A DM of the owner's by its name: "your DM with Bob", "your notes to yourself"."""
+    return name if name == SELF_DM else f"your {dm_with(name)}"
 
 
 def label(key: str, names: dict[str, str] | None = None) -> str:
@@ -152,7 +162,9 @@ def label(key: str, names: dict[str, str] | None = None) -> str:
             return f"Slack thread in {where}"
         return f"Slack thread in {channel}"
     if match := SLACK_CONVERSATION.fullmatch(key):
-        if name := names.get(match.group(1)):
+        if (name := names.get(match.group(1))) == SELF_DM:
+            return f"your Slack {SELF_DM.removeprefix('your ')}"
+        if name:
             return f"Slack {dm_with(name)}"
         return f"Slack DM {match.group(1)}"
     if match := GITHUB_PR.fullmatch(key):

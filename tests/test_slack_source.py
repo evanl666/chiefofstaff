@@ -1019,3 +1019,40 @@ async def test_searches_use_the_fields_slacks_search_takes_now(tmp_path):
         m["kind"] == "inbound" and "lunch?" in m["text"]
         for m in harness.store.messages(harness.router_id)
     ), "what it finds still reaches the Router"
+
+
+def test_the_owners_notes_to_themself_read_as_such():
+    """A DM with yourself (Slack's own place for notes) read "Slack thread in D0…" (no other
+    person to name it after)."""
+    names = {"D0SELF001": threads.SELF_DM}
+    assert threads.label("slack:D0SELF001:1795201000.100100", names) == (
+        "Slack thread in your notes to yourself"
+    )
+    assert threads.label("slack:D0SELF001", names) == "your Slack notes to yourself"
+    assert threads.your_dm(threads.SELF_DM) == "your notes to yourself"
+    assert threads.your_dm("Bob Li") == "your DM with Bob Li"
+
+
+async def test_a_dm_with_yourself_is_named_as_your_notes(source):
+    await source.discover()
+    source.learn_names(
+        answer(
+            "results",
+            "# Search Results for: x\n\n## Messages (1 results)\n### Result 1 of 1\n"
+            "Channel: DM (ID: D0SELF001)\n"
+            "Participants: Owner (ID: U0OWNER1), Owner (ID: U0OWNER1)\n"
+            "From: Owner <owner@example.com> (ID: U0OWNER1) \nTime: x\n"
+            "Message_ts: 1795201000.100100\nText: \nremember the milk\n\n---\n\n",
+        )
+    )
+    assert source.display_names()["D0SELF001"] == threads.SELF_DM
+
+
+async def test_a_reply_in_your_notes_reads_as_such(tmp_path):
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    runtime.slack.remember_names({"D0SELF001": threads.SELF_DM})
+    target = {"channel_id": "D0SELF001", "thread_ts": ROOT[2], "to": threads.SELF_DM}
+    shown = runtime.drafts.shown({"kind": "slack", "target": target})
+    assert shown == "your reply in your notes to yourself, in a thread"
+    assert runtime.drafts.recipient("D0SELF001", {}) == "your notes to yourself"

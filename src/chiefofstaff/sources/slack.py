@@ -1713,7 +1713,8 @@ class SlackSource:
 
     def section_names(self, entries: list[dict]) -> dict[str, str]:
         """Who is who in messages read from Slack's JSON answers: each sender, the people of a
-        DM, a channel by its name; a DM by the one person in it besides the owner."""
+        DM, a channel by its name; a DM by the one person in it besides the owner, the owner's
+        DM with themself (only they are in it) as their notes to themself."""
         owner = self.status.get("user_id") or ""
         found: dict[str, str] = {}
         others: dict[str, dict[str, str]] = {}
@@ -1721,6 +1722,16 @@ class SlackSource:
             people = [(entry["user"], entry["name"]), *entry.get("people", [])]
             found |= {user: name for user, name in people if user and name}
             channel = entry["channel"]
+            people_here = entry.get("people") or []
+            if (
+                channel.startswith("D")
+                and owner
+                and people_here
+                and all(user == owner for user, _name in people_here)
+            ):
+                # Slack lists only the owner in it: their own DM, their notes to themself.
+                found[channel] = threads.SELF_DM
+                continue
             if channel.startswith("D"):
                 if owner:
                     found_here = others.setdefault(channel, {})
