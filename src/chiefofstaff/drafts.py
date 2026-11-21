@@ -543,8 +543,12 @@ class Drafts:
             return False, "it may hold a secret (a token, key or password)"
         if LOCAL_PATH.search(draft["text"]):
             return False, "it names a file on your computer"
+        # Slack's own word that the owner reacted: its reactions API, by user id (never what a
+        # message's text says); a reaction it cannot confirm is not taken for theirs.
         reacted = await slack.reacted_by(channel, handed["ts"], emoji)
-        if not owner or (reacted is not None and owner not in reacted):
+        if not owner or reacted is None:
+            return False, f"Slack couldn't confirm the :{emoji}: is yours"
+        if owner not in reacted:
             return False, f"the :{emoji}: on that message isn't yours"
         try:
             found = await slack.read_conversation(channel, root)

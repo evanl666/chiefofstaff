@@ -143,10 +143,11 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   Slack message with your delegate emoji (*:robot_face:* unless you changed it), the worker that
   takes it on replies in that message's thread directly, as you: no card to approve. It's told
   the reply goes straight to the people there, so it writes it for them (no file paths, no notes
-  about its work). Only your own reaction counts, and only that one reply in that thread: anything
-  else it sends, anywhere else, still waits for your OK. It falls back to the usual card, with one
-  line saying why, when someone else wrote in the thread since, when the reply looks like it holds
-  a secret or names a file on your computer, or when the check before sending holds it. Each reply
+  about its work). Only your own reaction counts (Slack confirms whose it is), and only that one
+  reply in that thread: anything else it sends, anywhere else, still waits for your OK. It falls
+  back to the usual card, with one line saying why, when Slack can't confirm the reaction is
+  yours, when someone else wrote in the thread since, when the reply looks like it holds a
+  secret or names a file on your computer, or when the check before sending holds it. Each reply
   sent this way is one line under *Handled for you* (*Replied in the thread in #deploys for you
   (you reacted :robot_face:)*, with *Open in Slack*) and one quiet line in the Router's chat; it
   doesn't count as something that needs you. Slack's MCP server can't delete messages, so there's

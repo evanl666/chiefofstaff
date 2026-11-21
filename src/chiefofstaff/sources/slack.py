@@ -1005,7 +1005,7 @@ def readable(
 
 NO_MESSAGE = "Slack listed no message there"
 # Slack's reactions on a message: the emoji, its count, then who ("Alice Chen (U0ALICE1), …").
-REACTED = re.compile(r"^\s*:([\w+\-']+(?:::[\w\-]+)?):\s*\S\s*\d+\s*\S\s*(.*)$", re.MULTILINE)
+REACTED = re.compile(r"^\s*:([\w+\-']+(?:::[\w\-]+)?):\s*\S\s*(\d+)\s*\S\s*(.*)$", re.MULTILINE)
 REACTOR = re.compile(r"\(([UW][A-Z0-9]{2,})\)")
 
 
@@ -1377,18 +1377,27 @@ class SlackSource:
 
     def handed_over(self, listed: str, stamps: list[str], emoji: str):
         """Which thread each message the owner handed over is in: a reply there by the task it
-        went to may go out at once (see Drafts.handed_over)."""
-        found = {entry["ts"]: entry for entry in parse(listed)[0]}
-        links = threads.slack_messages(plain(listed))
+        went to may go out at once (see Drafts.handed_over). Only the messages Slack's own
+        `hasmy::` search listed, read by Slack's own lines: none from a listing whose text was
+        made to look like them (a ts, a channel or a permalink written in a message), and
+        nothing from what a message says."""
         for key, value in self.store.items("delegated:").items():
             with suppress(ValueError, TypeError):
                 if time.time() - float(json.loads(value).get("at") or 0) > 8 * 86400:
                     self.store.delete(key)  # Answered at once for a week only (Drafts).
+        entries, forged = parse(listed)
+        if forged:
+            return  # Its replies wait for the owner, as any other.
+        found = {entry["ts"]: entry for entry in entries if entry["ts"]}
         for stamp in stamps:
-            entry = found.get(stamp) or {}
-            keys = [key.split(":") for key in links.get(stamp, []) if key.count(":") == 2]
-            channel = entry.get("channel") or (keys[0][1] if keys else "")
-            root = entry.get("thread_ts") or (keys[0][2] if keys else "") or stamp
+            entry = found.get(stamp)
+            if not entry:
+                continue
+            # Its own permalink (Slack's line, not its text) names its thread when it is a reply.
+            keys = [key.split(":") for key in threads.slack_messages(entry["link"]).get(stamp, [])]
+            keys = [key for key in keys if len(key) == 3]
+            channel = entry["channel"] or (keys[0][1] if keys else "")
+            root = entry["thread_ts"] or (keys[0][2] if keys else "") or stamp
             if channel:
                 handed = {"channel": channel, "ts": stamp, "root": root, "emoji": emoji}
                 self.store.set(
@@ -1396,8 +1405,9 @@ class SlackSource:
                 )
 
     async def reacted_by(self, channel_id: str, stamp: str, emoji: str) -> set[str] | None:
-        """Who reacted to a message with this emoji (their user ids), as Slack lists its
-        reactions; None when that cannot be read here (no such tool, an error)."""
+        """Who reacted to a message with this emoji (their user ids), as Slack's reactions API
+        lists them; None when that cannot be read here (no such tool, an error). A name may hold
+        "(U0…)" of its own: a line naming more people than its count says confirms nobody."""
         if REACTIONS_TOOL not in self.read_tools:
             return None
         try:
@@ -1408,12 +1418,12 @@ class SlackSource:
             logger.info("Could not read the reactions on %s: %s", stamp, describe(exc))
             return None
         listed = (unwrapped(text) or (text, ""))[0]
-        return {
-            user
-            for name, people in REACTED.findall(listed)
-            if name == emoji
-            for user in REACTOR.findall(people)
-        }
+        users: set[str] = set()
+        for name, count, people in REACTED.findall(listed):
+            named = REACTOR.findall(people)
+            if name == emoji and len(named) == int(count) == len(set(named)):
+                users |= set(named)
+        return users
 
     async def poll_followed(self):
         """Read every followed thread and DM; new messages go straight to their followers."""
