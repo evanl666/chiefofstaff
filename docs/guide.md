@@ -709,7 +709,11 @@ means something (it says so when things moved on since):
 - the one configured project a task fits, picked (*Change* brings its card back);
 - with the sandbox on, a server that changed in a worker's folder, kept off for it (*Turn on*);
 - on Linux with the sandbox on, git files that appeared in a worktree folder of Chief of Staff's
-  own, moved aside (*Put back*).
+  own, moved aside (*Put back*);
+- what a start cleaned up: messages of yours that waited for a worker held for its folder's
+  settings and can no longer go (their task moved to another worker or was cancelled), one line
+  for each worker with what became of the task, timed when you wrote them, not when Chief of
+  Staff started. A worker left with nothing open closes.
 
 Folder settings that wait for your word (with the sandbox on) are not on *Your OK*: each is its
 worker's own row under *Needs you*, with *Use these settings*.

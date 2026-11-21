@@ -97,6 +97,23 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   the link the server gave; once connected and still failing, it says to check the account in
   that app, not in Copilot CLI. Copilot's own sign-in to that server doesn't take their
   failures in.
+- **What a start cleans up is one line under Handled for you, timed when you wrote it** (E125).
+  After an update, a worker that waited for its folder's settings let go of messages of yours
+  whose task had moved on, and the Router's chat got one line per message, stamped with the
+  start's time: "Your message … was not sent: its task is over", among the workers' news, as if
+  it had just failed. Now those messages are one line for each worker, under *Handled for you*,
+  saying what became of their task ("its task moved to “…”, which finished it Thu 9:56 PM", or
+  "was cancelled"), with the time you wrote them beside it. When a held worker's task ends while
+  Chief of Staff runs, its messages are one line in the Router's chat too, with when you wrote
+  them.
+- **Messages to a task an earlier version replaced follow it** (E126). Before 0.1.51 a replaced
+  task kept the task that replaced it only in its words ("Replaced by t… “…”"): a message held
+  for it could only be dropped. That link is read back once, as this version starts.
+- **A worker is named after the work it did** (E127), not after a task it never ran: with nothing
+  open, a message of yours that never reached it (dropped, sent on to another worker, or still
+  waiting) no longer gives it that task's name; its own turns come first.
+- **A worker let go of at a start with nothing open and nothing left for it closes** (E128),
+  instead of staying open under the name of a cancelled task.
 
 ## 0.1.52 (2026-11-20)
 
