@@ -1298,8 +1298,9 @@ async def test_a_claude_workers_mcp_tool_that_needs_an_account_connected_has_one
         )  # fmt: skip
         await until(lambda: [d for d in harness.store.drafts() if d["kind"] == "connection"], 30)
         (card,) = [d for d in harness.store.drafts() if d["kind"] == "connection"]
-        assert card["text"] == "acme needs you to connect Acme Search"
+        assert card["text"] == "acme needs you to connect Acme Search for Claude Code"
         assert card["target"]["url"] == "https://auth.acme.test/connect"
+        assert card["target"]["app"] == "Claude Code"
     finally:
         await runtime.stop()
 

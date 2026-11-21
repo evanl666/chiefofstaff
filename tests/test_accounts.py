@@ -247,6 +247,39 @@ async def test_a_retry_that_fails_the_same_after_done_says_so_instead_of_asking_
     assert harness.store.draft(card["id"])["status"] == "answered" and not cards(harness)
 
 
+@pytest.mark.parametrize(("agent", "app"), [("claude", "Claude Code"), ("codex", "Codex")])
+async def test_another_agents_worker_has_its_own_card_naming_its_app(tmp_path, agent, app):
+    """A server that keeps connections per app (E137) has one for Copilot and another for Claude
+    Code or Codex: a worker on another agent has a card of its own that names its app, with the
+    link its error gave. Copilot's sign-in to that server, and a Copilot worker's call that works,
+    are not its connection."""
+    harness, runtime = await start(tmp_path)
+    copilot = await spawn(runtime, harness.router_id, "Search on Copilot")
+    other = await spawn(runtime, harness.router_id, f"Search on {app}")
+    runtime.set_agent(other, agent)
+    text = PLATFORM.format(tool="glean_search", account="glean")
+    runtime.asks.signin_pending["acme-platform"] = asyncio.Event()  # Copilot's sign-in, open.
+    mcp_call(harness, other, "o1", tool="glean_search", text=text)
+    await settle(runtime)
+    runtime.asks.signin_pending.pop("acme-platform")
+    mcp_call(harness, copilot, "c1", tool="glean_search", text=text)
+    await settle(runtime)
+    by_text = {card["text"]: card for card in cards(harness)}
+    assert sorted(by_text) == [
+        "acme-platform needs you to connect Glean",
+        f"acme-platform needs you to connect Glean for {app}",
+    ]
+    theirs = by_text[f"acme-platform needs you to connect Glean for {app}"]
+    assert theirs["target"]["app"] == app
+    assert theirs["target"]["url"] == "https://agents.acme.test/mcp/connections"
+    assert theirs["target"]["affected_sessions"] == 1
+    assert "app" not in by_text["acme-platform needs you to connect Glean"]["target"]
+    assert told(harness, other, f"acme-platform needs the owner to connect Glean for {app}") == 1
+    mcp_call(harness, copilot, "c2", tool="glean_search", success=True, text="[]")
+    await settle(runtime)
+    assert [card["text"] for card in cards(harness)] == [theirs["text"]]
+
+
 def test_a_link_is_shown_as_it_opens():
     from chiefofstaff.accounts import web_link
 

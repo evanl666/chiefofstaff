@@ -244,10 +244,24 @@ function requestCard(draft) {
   }
   return node;
 }
+// What a connection card says: for the app the server keeps the connection for (Copilot CLI's
+// unnamed; a Claude Code or Codex worker's named, E137), and once connected but still failing
+// (E138), where to check it works: that app, never another one.
+export function connectionWords(target) {
+  const what = target.source || "your account";
+  const app = target.app || "";
+  if (!target.still_failing) return { body: `${target.server} needs you to connect ${what}${app ? ` for ${app}` : ""}`, note: "", button: "I've done it" };
+  return {
+    body: app ? `${target.server} still can't use ${what} for ${app}` : `${target.server} still can't use ${what} from Chief of Staff`,
+    note: `You connected it, and a retry still failed the same way: the server may keep your connection for another app. Check that it works in ${app || "Copilot CLI"} in your terminal (connect it there if not), then try again.`,
+    button: "Try again",
+  };
+}
 // An account an MCP tool needs connected (accounts.py): one card for every session it stops.
 // The tool's error and link are untrusted: plain text, and the link opens only on a click.
 function connectionCard(draft) {
   const target = draft.target;
+  const words = connectionWords(target);
   const error = el("span", { class: "error" });
   const count = target.affected_sessions;
   const lastError = target.last_error.length > 400 ? `${target.last_error.slice(0, 400)}…` : target.last_error;
@@ -255,9 +269,9 @@ function connectionCard(draft) {
     draft,
     "request connection",
     "Connection needed",
-    el("div", { class: "body", text: target.still_failing ? `${target.server} still can't use ${target.source || "your account"} from Chief of Staff` : `${target.server} needs you to connect ${target.source || "your account"}` }),
+    el("div", { class: "body", text: words.body }),
     // Retried after "I've done it" and failed the same way (E138): said so, not asked again.
-    target.still_failing ? el("div", { class: "note", text: "You connected it, and a retry still failed the same way: the server may keep your connection for another app. Check that it works in Copilot CLI in your terminal (connect it there if not), then try again." }) : null,
+    words.note ? el("div", { class: "note", text: words.note }) : null,
     el("div", { class: "note", text: `${count} ${count === 1 ? "session" : "sessions"} waiting${target.last_failed_at ? ` · last failed ${clock(target.last_failed_at)}` : ""}` }),
     lastError ? el("div", { class: "connection-error", text: lastError, title: target.last_error }) : null,
     target.url ? el("div", { class: "connection-link" }, el("code", { text: target.url }), el("small", { text: target.known_origin ? `${target.server}'s own address` : `${target.url_note}: check it before opening` })) : null,
@@ -272,7 +286,7 @@ function connectionCard(draft) {
       error,
       el("button", { type: "button", class: "text", text: "Not now", onclick: () => decide({ action: "reject" }, "Not now.") }),
       open,
-      el("button", { type: "button", text: target.still_failing ? "Try again" : "I've done it", onclick: () => decide({ action: "answer" }, "Each session retries once.") }),
+      el("button", { type: "button", text: words.button, onclick: () => decide({ action: "answer" }, "Each session retries once.") }),
     ),
   );
   return node;

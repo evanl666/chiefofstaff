@@ -88,6 +88,13 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   `chiefofstaff/` folder there would have run as it. It now runs with `python -I`, in a folder
   of Chief of Staff's own, and Chief of Staff records a hash of its processes' command lines
   rather than the command lines.
+- **A Claude Code or Codex worker's account to connect is named for its app.** Those workers
+  reach MCP servers as Claude Code and Codex do, not as Copilot CLI, and a server that keeps
+  connections per app needs one for that app: connecting for Copilot doesn't help them. Their
+  *Connection needed* card is their own (*… needs you to connect Glean for Claude Code*), with
+  the link the server gave; once connected and still failing, it says to check the account in
+  that app, not in Copilot CLI. Copilot's own sign-in to that server doesn't take their
+  failures in.
 
 ## 0.1.52 (2026-11-20)
 

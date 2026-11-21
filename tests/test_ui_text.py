@@ -1013,6 +1013,26 @@ def test_the_diff_reads_names_git_quotes_and_says_large_new_files():
     assert found[1:] == ["New file, 21 MB, not shown", "New file, 300 KB, not shown"]
 
 
+def test_a_connection_card_names_the_app_that_needs_it():
+    """A Claude Code or Codex worker's card says the account is to be connected for that app,
+    and, connected but still failing, sends the owner to that app, never to Copilot CLI."""
+    found = run_js(
+        f"const d = await import({json.dumps((STATIC / 'drafts.js').as_uri())});\n"
+        "const t = (app, still_failing) => d.connectionWords({ server: 'glean', source: 'Glean', "
+        "app, still_failing });\n"
+        "return [t('', false), t('', true), t('Claude Code', false), t('Claude Code', true)];"
+    )
+    copilot, copilot_failing, claude, claude_failing = found
+    assert copilot["body"] == "glean needs you to connect Glean"
+    assert copilot_failing["body"] == "glean still can't use Glean from Chief of Staff"
+    assert "in Copilot CLI in your terminal" in copilot_failing["note"]
+    assert claude["body"] == "glean needs you to connect Glean for Claude Code"
+    assert not claude["note"] and claude["button"] == "I've done it"
+    assert claude_failing["body"] == "glean still can't use Glean for Claude Code"
+    assert "in Claude Code in your terminal" in claude_failing["note"]
+    assert "Copilot" not in claude_failing["note"] and claude_failing["button"] == "Try again"
+
+
 def test_a_draft_on_the_owners_own_pr_is_a_reply_not_a_review():
     """S16: comments answering the reviewer on the owner's own PR read "Review of …#58"."""
     found = run_js(

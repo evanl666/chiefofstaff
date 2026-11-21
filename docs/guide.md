@@ -659,6 +659,11 @@ notification:
   watch once a scan, and Settings says *connection needed*. A tool failure while Copilot's own
   sign-in card for that server is open joins that card. Workers reach MCP servers as a Copilot
   CLI client (*copilot-cli/chiefofstaff*), so connections you made for Copilot apply to them.
+  Workers on Claude Code or Codex reach them as that app (*claude-code/…*,
+  *codex-mcp-client/…*), as your own Claude Code and Codex do: a server that keeps connections
+  per app needs one for that app. Their card is their own and says so (*… needs you to connect
+  Glean for Claude Code*), with the link the server gave; still failing once connected, it says
+  to check that it works in that app in your terminal, not in Copilot CLI.
 - **A folder**: the Router is not sure where a task belongs. When the one folder it offers is a
   configured project, that is your choice already: it is picked, the Router's chat says so with
   *Change*, and no card comes.

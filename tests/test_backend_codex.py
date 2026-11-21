@@ -3001,7 +3001,8 @@ async def test_a_codex_workers_mcp_tool_that_needs_an_account_connected_has_one_
         await spawn(runtime, harness, "Call the MCP tool locked_search of acme. Report done: x.")
         await until(lambda: [d for d in harness.store.drafts() if d["kind"] == "connection"], 30)
         (card,) = harness.store.drafts()
-        assert card["text"] == "acme needs you to connect Acme Search"
+        assert card["text"] == "acme needs you to connect Acme Search for Codex"
+        assert card["target"]["app"] == "Codex"
         assert card["target"]["url"] == "https://auth.acme.test/connect"
         assert card["target"]["url_note"] == "Link supplied by acme"
     finally:

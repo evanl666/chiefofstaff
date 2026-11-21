@@ -12,6 +12,11 @@ call of an MCP tool, its server named by the backend's tool metadata (never by w
 says), reading as a narrow authorization-required error; a link only as a normalized http(s)
 address, shown as it is opened and labelled unless it is one of the server's known addresses.
 Anything less certain stays an ordinary error. Nothing opens a link but the owner.
+
+A server may keep each connection for the app that made it (E137): Copilot's workers reach it as
+Copilot CLI, a Claude Code or Codex worker as that app. Such a worker's failures are a record and
+card of their own, naming its app ("… for Claude Code"); Copilot's sign-in to the server, or a
+Copilot session's call that works, is never its connection.
 """
 
 from __future__ import annotations
@@ -38,6 +43,8 @@ PREFIX = "connection:"
 QUIET = 600
 # "I've done it" again this soon while its sessions retry starts no second round of retries.
 RETRY_GAP = 120
+# The app each other agent's workers reach MCP servers as (Copilot's: none named).
+APPS = {"claude": "Claude Code", "codex": "Codex"}
 MAX_TEXT = 6000
 # An error that says an account must be connected or authorized; not any failure that mentions
 # signing in or accounts.
@@ -135,8 +142,9 @@ def needs_connection(text: str) -> tuple[str, list[tuple[str, str]]] | None:
     return source[:60], links
 
 
-def record_key(server: str, identity: str) -> str:
-    digest = hashlib.sha256(f"{server}\0{identity.casefold()}".encode()).hexdigest()[:24]
+def record_key(server: str, identity: str, app: str = "") -> str:
+    named = f"{server}\0{identity.casefold()}" + (f"\0{app}" if app else "")
+    digest = hashlib.sha256(named.encode()).hexdigest()[:24]
     return PREFIX + digest
 
 
@@ -176,11 +184,15 @@ class Accounts:
         self.store.delete(record["key"])
         self.servers_ = None
 
-    def find(self, server: str, source: str, origin: str) -> dict | None:
-        """Its record: by server and source (or the link's origin when it names none). One that
-        names no source is the same as one of that server's on the same origin."""
-        key = record_key(server, source or origin)
-        records = self.records(server)
+    def app(self, session_id: str) -> str:
+        """The app a session reaches MCP servers as, when it is not Copilot CLI."""
+        return APPS.get(self.runtime.agent(session_id), "")
+
+    def find(self, server: str, source: str, origin: str, app: str = "") -> dict | None:
+        """Its record: by app, server and source (or the link's origin when it names none). One
+        that names no source is the same as one of that server's on the same origin."""
+        key = record_key(server, source or origin, app)
+        records = [record for record in self.records(server) if record.get("app", "") == app]
         if found := next((record for record in records if record["key"] == key), None):
             return found
         if origin:
@@ -227,6 +239,7 @@ class Accounts:
             "connection_key": record["key"],
             "server": record["server"],
             "source": record["source"],
+            **({"app": app} if (app := record.get("app")) else {}),
             "url": url,
             "known_origin": known,
             "url_note": "" if known or not url else f"Link supplied by {record['server']}",
@@ -277,9 +290,11 @@ class Accounts:
             if len({o for _, o in links}) > 1:
                 return  # Links to several unknown places: not clear which is the server's.
             url, origin = links[0]
-        if self.join_signin(session_id, server, tool, origin):
-            return
-        self.need(session_id, server, tool, source, url, origin, " ".join(text.split())[:1000])
+        app = self.app(session_id)
+        if not app and self.join_signin(session_id, server, tool, origin):
+            return  # (Copilot's sign-in: not another app's connection.)
+        error = " ".join(text.split())[:1000]
+        self.need(session_id, server, tool, source, url, origin, error, app)
 
     def need(
         self,
@@ -290,14 +305,16 @@ class Accounts:
         url: str,
         origin: str,
         error: str,
+        app: str = "",
     ):
-        record = self.find(server, source, origin)
+        record = self.find(server, source, origin, app)
         known = self.known_origins(server)
         if record is None:
             record = {
-                "key": record_key(server, source or origin),
+                "key": record_key(server, source or origin, app),
                 "server": server,
                 "source": source,
+                **({"app": app} if app else {}),
                 "origin": origin,
                 "url": url,
                 "tools": [],
@@ -331,6 +348,8 @@ class Accounts:
 
     def open_card(self, session_id: str, record: dict):
         text = f"{record['server']} needs you to connect {record['source'] or 'your account'}"
+        if app := record.get("app"):
+            text += f" for {app}"
         draft = self.store.create_draft(session_id, "connection", {}, text)
         record["draft_id"] = draft["id"]
         record.pop("quiet_until", None)
@@ -346,6 +365,8 @@ class Accounts:
 
     def tell(self, session_id: str, record: dict, quiet: bool):
         what = f"{record['server']} needs the owner to connect {record['source'] or 'an account'}"
+        if app := record.get("app"):
+            what += f" for {app}"
         if quiet:
             note = f"{what}; they chose not to for now. Go on without it; do not ask them."
         elif self.watching(session_id):
@@ -538,7 +559,7 @@ class Accounts:
         if origin not in known:
             self.store.set(f"signinorigin:{server}", json.dumps(sorted(known | {origin})))
         for record in self.records(server):
-            if record.get("origin") in {origin, ""}:
+            if record.get("origin") in {origin, ""} and not record.get("app"):
                 self.close_card(record, "expired", f"Now {server}'s sign-in card.")
                 self.drop(record)
                 joined = self.joined.setdefault(server, {})
