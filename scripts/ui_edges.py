@@ -9605,8 +9605,8 @@ async def cleanup_seeded(runtime) -> dict:
 
 async def round_e125(runtime, browser, failures: list[str]):
     """E125: what an update's start cleaned up is one line under Handled for you, with when the
-    messages were written (not the start's time) and what became of their task; nothing new in
-    the Router's chat, the worker closed (E128). Light and dark, 800 and 1280 px."""
+    messages were written (not the start's time) and what became of their task, and that the
+    worker closed (E128); nothing of it in the Router's chat. Light and dark, 800 and 1280 px."""
     from chiefofstaff.runtime import said_at
 
     store = runtime.store
@@ -9614,12 +9614,14 @@ async def round_e125(runtime, browser, failures: list[str]):
     before = len(store.messages(router))
     seeded = await cleanup_seeded(runtime)
     assert store.session(seeded["held"])["closed_at"], "nothing open, nothing left: closed"
-    assert not [m for m in store.messages(router)[before:] if "not sent" in m["text"]]
+    said = [m["text"] for m in store.messages(router)[before:]]
+    assert not [t for t in said if "not sent" in t or t.startswith("Closed “QA9 tidy")], said
     for message_id in seeded["written"]:
         assert store.message(message_id)["meta"]["cleanup"]
     expected = (
         "Your 4 messages to “QA9 tidy the export script” were not sent: its task moved to “QA9 "
-        f"rewrite the export script”, which finished it {said_at(seeded['finished'])}."
+        f"rewrite the export script”, which finished it {said_at(seeded['finished'])}. Closed the "
+        "worker too: nothing was left for it."
     )
     shots = Path(os.environ.get("E125_SHOTS", SHOTS / "e125"))
     shots.mkdir(parents=True, exist_ok=True)

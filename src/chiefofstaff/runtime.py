@@ -7462,7 +7462,9 @@ class Runtime:
             if message["kind"] == "owner" and not message["meta"].get("dropped")
         ]
 
-    async def settle_held_chat(self, row: dict, closing: bool, cleanup: bool = False) -> list[str]:
+    async def settle_held_chat(
+        self, row: dict, closing: bool, cleanup: bool = False
+    ) -> list[tuple[str, dict]]:
         """What the owner wrote a worker held for its folder's settings, as the hold ends some
         other way than its going on with all of it (E124): each message still waiting stays
         unless the task it names is over (cancelled, failed, replaced, set aside) or another's,
@@ -7470,9 +7472,9 @@ class Runtime:
         when that is another worker's and open (replacedby proves it); else it is dropped,
         never delivered later. What became of them is said in one line for each worker they
         went to, and one for those dropped (E125), with when they were written and what became
-        of their task: in the Router's chat, or, for a cleanup as Chief of Staff starts
-        (`cleanup`: release_unguarded), under Handled for you, the messages marked so. The
-        lines said."""
+        of their task, in the Router's chat. For a cleanup as Chief of Staff starts (`cleanup`:
+        release_unguarded) the messages are marked so and the lines are only returned, with
+        what Handled for you keeps of them, for the caller to say there (cleaned_up)."""
         moved: dict[str, list[dict]] = {}
         dropped: list[tuple[dict, str]] = []
         for message in self.unsent_owner_chat(row["id"]):
@@ -7536,17 +7538,30 @@ class Runtime:
             # (Under Handled for you, the time beside it says when they were written.)
             when = "" if cleanup else f" ({said_between(first, last)})"
             text = f"{whose} {line.format(when=when)}"
-            lines.append(text)
+            lines.append((text, {"at": [first, last], "messages": [m["id"] for m in messages]}))
             if cleanup:
-                self.handled.record(
-                    "cleanup", text, session_id=row["id"], ref=row["id"],
-                    data={"at": [first, last], "messages": [m["id"] for m in messages]},
-                )  # fmt: skip
                 continue
             with suppress(RuntimeError):
                 meta = {"session_id": row["id"], "at": [first, last]}
                 self.add_message(self.router_id(), "notice", text, meta)
         return lines
+
+    def cleaned_up(self, row: dict, lines: list[tuple[str, dict]], closed: bool = False):
+        """What a start's cleanup did for a worker (release_unguarded), under Handled for you,
+        not in the Router's chat (E125): its messages' lines (settle_held_chat), the last of them
+        saying it `closed` too (E128), or that alone."""
+        if closed:
+            said = " Closed the worker too: nothing was left for it."
+            if lines:
+                lines = [*lines[:-1], (lines[-1][0] + said, lines[-1][1])]
+            else:
+                title = clip_words(self.display_title(row), 80)
+                text = f"Closed “{title}”, which waited for its folder's settings: nothing was"
+                lines = [(f"{text} left for it.", {})]
+        for text, data in lines:
+            self.handled.record(
+                "cleanup", text, session_id=row["id"], ref=row["id"], data=data or None
+            )
 
     def held_outcome(self, row: dict, named: dict | None) -> str:
         """What became of the task a message held for a worker named, in a few words (E125):
@@ -7670,7 +7685,7 @@ class Runtime:
                 for path in await self.settings_thread(self.git_replaced, row):
                     identity = identity_of(path)
                     self.git_record(path, identity + self.git_served(path, identity))
-                await self.settle_held_chat(row, closing=False, cleanup=True)
+                lines = await self.settle_held_chat(row, closing=False, cleanup=True)
             except Exception:
                 # (It stays held: tried again at the next start or sandbox change.)
                 logger.warning("Could not let %s go on.", row["id"], exc_info=True)
@@ -7678,16 +7693,19 @@ class Runtime:
             if any(task["status"] in OPEN for task in self.tasks.for_session(row["id"])) or (
                 self.unsent_owner_chat(row["id"])
             ):
+                self.cleaned_up(row, lines)
                 self.settings_unsaid(row["id"])  # (It goes on: settings_go_on.)
                 continue
-            # Nothing open, nothing left for it (E128): closed, as when its task ends held.
+            # Nothing open, nothing left for it (E128): closed, as when its task ends held, said
+            # with its messages' line under Handled for you (not in the Router's chat).
+            self.cleaned_up(row, lines, closed=True)
             self.settings_held.discard(row["id"])
             self.settings_reasons.pop(row["id"], None)
             for key in (f"settingssaid:{row['id']}", f"settingsheldat:{row['id']}"):
                 self.store.delete(key)
             if row["activity"] == SETTINGS_WAIT:
                 self.update_session(row["id"], activity="")
-            await self.workers.close(row["id"])
+            await self.workers.close(row["id"], quiet=True)
 
     def carried_theirs(self, row: dict, top: Path, now: dict[str, dict]):
         """Settings carried into a worker's worktree from the owner's checkout that the owner

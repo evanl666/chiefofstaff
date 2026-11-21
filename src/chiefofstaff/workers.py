@@ -845,9 +845,11 @@ class Workers:
             return False
         return not self.runtime.asks.session_questions(session_id)
 
-    async def close(self, session_id: str, by: str = ""):
+    async def close(self, session_id: str, by: str = "", quiet: bool = False):
         """`by`: who closed it ("you": the owner; "the Router"; "" for Chief of Staff, once
-        nothing of it is open). The Router hears of open work closed with it."""
+        nothing of it is open). The Router hears of open work closed with it. `quiet`: with
+        nothing open, its closing is said elsewhere (a start's cleanup, under Handled for you),
+        not in the Router's chat."""
         row = self.store.session(session_id)
         if row["role"] == ROUTER:
             raise ValueError("The Router cannot be closed.")
@@ -952,7 +954,7 @@ class Workers:
                         display=display,
                         meta=meta,
                     )
-                else:
+                elif not quiet:
                     self.runtime.add_message(router, "notice", display, meta)
         self.runtime.background(self.pump())
         if row["role"] == WORKER:

@@ -113,7 +113,8 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   open, a message of yours that never reached it (dropped, sent on to another worker, or still
   waiting) no longer gives it that task's name; its own turns come first.
 - **A worker let go of at a start with nothing open and nothing left for it closes** (E128),
-  instead of staying open under the name of a cancelled task.
+  instead of staying open under the name of a cancelled task. Its line under *Handled for you*
+  says so ("Closed the worker too"), not a *Closed* line in the chat stamped at the start.
 - **What workers tell each other no longer fills Home's chat (E129).** Workers that work
   together pass values and questions straight to each other, and each message was a line of its
   own in your chat with the Router (139 in a day in one QA run, against 84 of yours). Now two or

@@ -719,7 +719,7 @@ means something (it says so when things moved on since):
 - what a start cleaned up: messages of yours that waited for a worker held for its folder's
   settings and can no longer go (their task moved to another worker or was cancelled), one line
   for each worker with what became of the task, timed when you wrote them, not when Chief of
-  Staff started. A worker left with nothing open closes.
+  Staff started. A worker left with nothing open closes, said in the same line, not in the chat.
 
 Folder settings that wait for your word (with the sandbox on) are not on *Your OK*: each is its
 worker's own row under *Needs you*, with *Use these settings*.

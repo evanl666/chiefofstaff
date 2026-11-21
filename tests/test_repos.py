@@ -1268,11 +1268,15 @@ async def test_workers_held_for_their_settings_go_on_once_the_sandbox_is_off(
         assert not [t for k, t in again.kinds(again.router_id) if "not sent" in t]
         (entry,) = [e for e in runtime.handled.view() if e["kind"] == "cleanup"]
         assert entry["text"].startswith("Your message “And this” to “")
-        assert entry["text"].endswith("was not sent: its task was cancelled.")
         assert entry["at"] == [dropped["created_at"], dropped["created_at"]]
-        # E128: with no open task and nothing left for it, it closes.
+        # E128: with no open task and nothing left for it, it closes; said in the same line, not
+        # in the Router's chat (a start's cleanup).
         assert again.store.session(ended)["closed_at"]
         assert not again.store.session(going)["closed_at"]
+        assert entry["text"].endswith(
+            "was not sent: its task was cancelled. Closed the worker too: nothing was left for it."
+        )
+        assert not [t for k, t in again.kinds(again.router_id) if t.startswith("Closed “")]
     finally:
         await runtime.stop()
 
@@ -1358,7 +1362,8 @@ async def test_a_held_workers_messages_whose_task_moved_on_are_one_handled_line_
         title = runtime.display_title(again.store.session(worker))
         assert entry["text"] == (
             f"Your 4 messages to “{title}” were not sent: its task moved to “{there}”, which "
-            f"finished it {runtime_module.said_at(finished)}."
+            f"finished it {runtime_module.said_at(finished)}. Closed the worker too: nothing was "
+            "left for it."
         )
         assert entry["at"] == [times[0], times[-1]] and entry["session_id"] == worker
         assert not entry["undo"]
@@ -1366,6 +1371,49 @@ async def test_a_held_workers_messages_whose_task_moved_on_are_one_handled_line_
             meta = again.store.message(message["id"])["meta"]
             assert meta["dropped"] and meta["cleanup"] and "prompt" not in meta
         assert again.store.session(worker)["closed_at"]
+        assert not [t for k, t in again.kinds(again.router_id) if t.startswith("Closed “")]
+    finally:
+        await runtime.stop()
+
+
+async def test_a_held_worker_closed_at_start_with_nothing_written_is_a_handled_line(
+    tmp_path, git_repo, monkeypatch
+):
+    """E128 with E125: a worker held for its folder's settings whose task ended while Chief of
+    Staff was stopped, nothing of the owner's waiting for it: at the start without the sandbox
+    it closes, said in one line under Handled for you, not in the Router's chat."""
+    trusting(tmp_path, monkeypatch, git_repo)
+    harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, projects=[str(git_repo)]))
+    runtime = await harness.connect()
+    try:
+        worker, cwd = await isolated(runtime, harness, git_repo)
+        await at_rest(runtime, harness, worker)
+        plant(cwd, ".mcp.json")
+        await runtime.owner_send(worker, "Go on")
+        assert worker in runtime.settings_held
+    finally:
+        await runtime.stop()
+    harness.store.execute("UPDATE tasks SET status='cancelled' WHERE session_id=?", (worker,))
+    harness.store.execute(
+        "UPDATE messages SET meta=json_set(meta, '$.dropped', 1) WHERE session_id=? AND kind="
+        "'owner' AND text='Go on'",
+        (worker,),
+    )
+    again = Harness(
+        tmp_path / "data", Settings(worker_sandbox=False, projects=[str(git_repo)]),
+        client=harness.client,
+    )  # fmt: skip
+    runtime = await again.connect()
+    try:
+        await settle(runtime)
+        assert again.store.session(worker)["closed_at"]
+        title = runtime.display_title(again.store.session(worker))
+        (entry,) = [e for e in runtime.handled.view() if e["kind"] == "cleanup"]
+        assert entry["text"] == (
+            f"Closed “{title}”, which waited for its folder's settings: nothing was left for it."
+        )
+        assert entry["session_id"] == worker and not entry["undo"] and entry["at"] is None
+        assert not [t for k, t in again.kinds(again.router_id) if t.startswith("Closed “")]
     finally:
         await runtime.stop()
 
