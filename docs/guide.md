@@ -480,21 +480,25 @@ git in the worker's repository for this). Their other settings there, and all of
 sandbox, their commands can change: the same lines then ask you. In your home folder, agent
 homes (`~/.codex`, `~/.claude`, `~/.copilot`) are yours and are never read as its settings.
 
-With the **sandbox** on (Settings; always for workers that read Slack), workers' shell commands can write only to their
+With the **sandbox** off (the default), a worker's commands run as you, on any agent (Copilot,
+Codex or Claude): they can change or delete any file you can, outside its folders too (Chief of
+Staff refuses only a few commands outright, such as `rm -r` of your home or the root, a push to
+the default branch or `sudo`). Turn the sandbox on to prevent that. With the **sandbox** on
+(Settings; always for workers that read Slack), workers' shell commands can write only to their
 workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
-`HEAD` and index, nor files git would read in their place, such as `.git/commondir`), never see your
-GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot
-sandbox ca trust` once so `gh` works inside the sandbox; Settings tells you when it is needed.
-The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed.
-On Linux the sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for
-the git files that change what git runs (a `.git/commondir`, a `hooks/` folder where there was
-none, a `config.worktree` where the repository reads one) after each of a worker's turns and
-before it runs git itself. If one appeared, the worker waits, Chief of Staff runs no git in that
-repository, and the timeline says "A git file appeared in .git (commondir). If you made it, use
-it." **Use it** lets the worker go on. One in the private folder of a worktree Chief of Staff
-made is moved aside into Chief of Staff's data folder by itself, and the worker goes on: its
-timeline says so, and [Handled for you](#your-ok-and-handled-for-you) has *Put back*. Nothing is
-moved out of your own repository.
+`HEAD` and index, nor files git would read in their place, such as `.git/commondir`), never see
+your GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot
+sandbox ca trust` once so `gh` works inside the sandbox; Settings tells you when it is needed. The
+sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed. On Linux the
+sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for the git files that
+change what git runs (a `.git/commondir`, a `hooks/` folder where there was none, a
+`config.worktree` where the repository reads one) after each of a worker's turns and before it
+runs git itself. If one appeared, the worker waits, Chief of Staff runs no git in that repository,
+and the timeline says "A git file appeared in .git (commondir). If you made it, use it." **Use
+it** lets the worker go on. One in the private folder of a worktree Chief of Staff made is moved
+aside into Chief of Staff's data folder by itself, and the worker goes on: its timeline says so,
+and [Handled for you](#your-ok-and-handled-for-you) has *Put back*. Nothing is moved out of your
+own repository.
 
 The sandbox holds paths, so a worker that moves a whole folder into place (its own `.git` in
 your checkout, say) gets past it: Chief of Staff remembers each such `.git` folder as it first
@@ -1407,44 +1411,45 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   their **⋯** says why *Ask first* is off. Codex takes up a switch to *Ask first* only in a new
   process: a worker at work then stops (with what it left running), and *Go on* continues,
   asking first.
-- **Sandbox:** Claude workers run in Claude's own sandbox, set as Chief of Staff's is for a
-  Copilot worker (writes only in its folders, your secrets unreadable, the network as Settings
-  says; your checkout given to read stays read-only even as the folder its commands run in),
-  on a version whose check showed it holding. Codex workers can't run while Settings →
-  *Workers* sandboxes workers (Codex's sandbox has not passed Chief of Staff's checks yet); with
-  it off they run as Copilot workers do then, with your caches, tools and network
-  (`danger-full-access`), and every edit and every command that writes still asks Chief of
-  Staff, so your own checkouts stay read-only to them. Your own Codex `sandbox_mode` and Claude `sandbox` settings are not applied:
-  Chief of Staff sets each of Claude's sandbox switches itself, and while the sandbox is on, a
-  Claude worker does not start where your Claude settings (yours, a trusted project's, managed
-  ones) add to its sandbox's lists (`excludedCommands`, `allowedDomains`, `allowWrite`, …) or set
-  a proxy port, allow edits by an absolute path (`Edit(//…)`, `Edit(~/…)`) or add directories
-  (`additionalDirectories`), or, for a worker whose network is limited, allow web domains
-  (`WebFetch(domain:…)`): Claude would merge them with Chief of Staff's. One line says which
-  setting, in which file, and what it would let workers do, on Claude's row in Settings → *Coding
-  agents* and where such a worker would have started ("Your Claude settings let workers write
-  outside their folder (permissions.additionalDirectories in ~/.claude/settings.json), so
-  sandboxed Claude workers can't start."). Those files are read as Claude reads them (with a
-  byte-order mark, at any size; a sandboxed worker doesn't start where one is over 16 MB).
-  A sandboxed Claude worker runs no hooks, yours included: Claude runs them outside its sandbox
-  (a trusted repository's, its skills' and subagents', a plugin's) and can only turn them all
-  off. Claude's row says so in one line ("Sandboxed Claude workers don't run hooks."), and the
-  worker's name's tooltip too.
-  Claude Code itself, at a sandboxed worker's first command in a git repository, adds one line,
+- **Sandbox:** as for a Copilot worker, with the sandbox off a worker's commands run as you and
+  can delete any file you can; the sandbox on prevents that. Claude workers run in Claude's own
+  sandbox, set as Chief of Staff's is for a Copilot worker (writes only in its folders, your
+  secrets unreadable, the network as Settings says; your checkout given to read stays read-only
+  even as the folder its commands run in), on a version whose check showed it holding. Codex
+  workers can't run while Settings → *Workers* sandboxes workers (Codex's sandbox has not passed
+  Chief of Staff's checks yet); with it off they run as Copilot workers do then, with your caches,
+  tools and network (`danger-full-access`), and every edit and every command that writes still
+  asks Chief of Staff, so your own checkouts stay read-only to them. Your own Codex `sandbox_mode`
+  and Claude `sandbox` settings are not applied: Chief of Staff sets each of Claude's sandbox
+  switches itself, and while the sandbox is on, a Claude worker does not start where your Claude
+  settings (yours, a trusted project's, managed ones) add to its sandbox's lists
+  (`excludedCommands`, `allowedDomains`, `allowWrite`, …) or set a proxy port, allow edits by an
+  absolute path (`Edit(//…)`, `Edit(~/…)`) or add directories (`additionalDirectories`), or, for a
+  worker whose network is limited, allow web domains (`WebFetch(domain:…)`): Claude would merge
+  them with Chief of Staff's. One line says which setting, in which file, and what it would let
+  workers do, on Claude's row in Settings → *Coding agents* and where such a worker would have
+  started ("Your Claude settings let workers write outside their folder
+  (permissions.additionalDirectories in ~/.claude/settings.json), so sandboxed Claude workers
+  can't start."). Those files are read as Claude reads them (with a byte-order mark, at any size;
+  a sandboxed worker doesn't start where one is over 16 MB). A sandboxed Claude worker runs no
+  hooks, yours included: Claude runs them outside its sandbox (a trusted repository's, its skills'
+  and subagents', a plugin's) and can only turn them all off. Claude's row says so in one line
+  ("Sandboxed Claude workers don't run hooks."), and the worker's name's tooltip too. Claude Code
+  itself, at a sandboxed worker's first command in a git repository, adds one line,
   `**/.claude/.cc-writes/`, to your global git ignore file (`core.excludesFile`, else
   `~/.config/git/ignore`), unless git already ignores that folder. It also makes an empty
   `.claude/.cc-writes/` folder, where it stages whole-file writes, in the worker's folder and in
-  the repository's main checkout; git shows neither. No setting of Claude Code 2.1.322 turns
-  this off. Nor does a worker's process update anything (`DISABLE_AUTOUPDATER`: Claude itself,
-  your plugins, their marketplaces); your own sessions keep those. What any session of a
-  signed-in Claude keeps up to date, a worker's does too: in `~/.claude.json`, the time
-  Anthropic's server last confirmed your Consumer Terms answer (`groveChoiceSeenAt`, an hour's
-  cache; a session without a terminal never marks their notice as seen, it only says to run
-  `claude`), and, with skills synced from claude.ai, each sync round's mark in
-  `~/.claude/skills/synced/` (turning that off for workers would hide those skills from them).
-  Codex's commands run without a login shell, with the environment and `PATH` a Copilot worker's
-  commands get; Codex puts its own helpers first on `PATH` and sets a few variables of its own
-  (such as `LANG` and `LC_ALL` to `C.UTF-8`, `TERM=dumb`, `PAGER=cat`).
+  the repository's main checkout; git shows neither. No setting of Claude Code 2.1.322 turns this
+  off. Nor does a worker's process update anything (`DISABLE_AUTOUPDATER`: Claude itself, your
+  plugins, their marketplaces); your own sessions keep those. What any session of a signed-in
+  Claude keeps up to date, a worker's does too: in `~/.claude.json`, the time Anthropic's server
+  last confirmed your Consumer Terms answer (`groveChoiceSeenAt`, an hour's cache; a session
+  without a terminal never marks their notice as seen, it only says to run `claude`), and, with
+  skills synced from claude.ai, each sync round's mark in `~/.claude/skills/synced/` (turning that
+  off for workers would hide those skills from them). Codex's commands run without a login shell,
+  with the environment and `PATH` a Copilot worker's commands get; Codex puts its own helpers
+  first on `PATH` and sets a few variables of its own (such as `LANG` and `LC_ALL` to `C.UTF-8`,
+  `TERM=dumb`, `PAGER=cat`).
 - **Workers that read Slack** run on Copilot, and say why: not on Codex, and not on Claude yet.
 - **Memory:** Codex's memories and Claude's auto memory are off in Chief of Staff's workers
   (Codex's run commands nobody is asked about; Claude's folder is shared with your own sessions).
