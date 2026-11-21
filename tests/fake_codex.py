@@ -60,6 +60,8 @@ class Server:
         # Threads that start a turn of their own once their current one ends.
         self.on_its_own: set[str] = set()
         self.strangers: set[str] = set()
+        # Threads this process archived or closed: gone from the store too.
+        self.dropped: set[str] = set()
 
     # Storage, so another process resumes threads
 
@@ -71,10 +73,13 @@ class Server:
 
     def save(self):
         # Whole at any time: a process killed mid-write (as a test kills it) leaves the threads
-        # as they were, as Codex's rollouts are.
+        # as they were, as Codex's rollouts are. Another process's threads are kept (a check's
+        # or a look's process saving after workers' threads were made), as Codex keeps each
+        # thread's rollout in a file of its own.
         HOME.mkdir(parents=True, exist_ok=True)
+        kept = {key: thread for key, thread in self.load().items() if key not in self.dropped}
         part = HOME / f".threads.json.{os.getpid()}"
-        part.write_text(json.dumps(self.threads))
+        part.write_text(json.dumps(kept | self.threads))
         part.replace(HOME / "threads.json")
 
     def write_lock(self, thread_id: str):
@@ -413,6 +418,7 @@ class Server:
 
     async def on_thread_archive(self, params):
         self.threads.pop(params["threadId"], None)
+        self.dropped.add(params["threadId"])
         self.save()
         return {}
 
@@ -1141,6 +1147,7 @@ class Server:
         if found := re.search(r"then close it( quietly)?", prompt):
             # As close_agent: Codex no longer has the thread (said, or not).
             self.threads.pop(child, None)
+            self.dropped.add(child)
             if not found.group(1):
                 self.notify("thread/closed", {"threadId": child})
 
