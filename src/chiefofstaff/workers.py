@@ -961,10 +961,15 @@ class Workers:
             self.runtime.background(self.release(session_id))
 
     async def release(self, session_id: str):
-        """A closed worker's clean worktrees go; its branches stay (see Workspaces.release)."""
+        """A closed worker's clean worktrees go; its branches stay (see Workspaces.release).
+        On an agent that runs a process of its own per worker (Claude's), that process, in its
+        worktree, has ended first: else the worktree stays as one a program runs in (live E16)."""
         async with self.states[session_id].checkouts:
             row = self.store.session(session_id)
             if row["closed_at"]:
+                if not self.runtime.on_copilot(session_id):
+                    with suppress(Exception):
+                        await self.runtime.worker_gone(session_id, self.runtime.agent(session_id))
                 await self.workspaces.release(row)
                 # Its own temporary folder (caches.worker_temp) and init script: made again if
                 # it is reopened.

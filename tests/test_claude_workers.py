@@ -1115,6 +1115,22 @@ async def test_a_claude_workers_changed_mcp_server_is_off_for_it_not_a_wait(
         await runtime.stop()
 
 
+async def test_a_closed_claude_workers_worktree_goes_once_its_process_has_ended(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Closed, a Claude worker's own process (in its worktree) ends with it; its worktree goes
+    then, not kept as one "a program runs in it" (live E16: Chief of Staff looked while that
+    process was still ending, and kept the worktree until it looked again)."""
+    monkeypatch.setenv("FAKE_CLAUDE_EXIT_DELAY", "1")  # As Claude takes a moment to end.
+    harness, runtime, worker, cwd = await claude_in_worktree(tmp_path)
+    assert cwd.is_dir()
+    await runtime.workers.close(worker, by="you")
+    await until(lambda: not cwd.exists(), 20)
+    kept = json.loads(harness.store.get(f"storage:kept:{worker}") or '{"trees": []}')
+    assert kept["trees"] == [], kept
+    await runtime.stop()
+
+
 async def test_an_unsandboxed_claude_worker_is_never_held_for_its_folders_settings(
     tmp_path, claude_on_path, monkeypatch
 ):
