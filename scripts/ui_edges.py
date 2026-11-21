@@ -5349,6 +5349,8 @@ async def round_teams(runtime, browser, failures: list[str]):
         await expect(team.locator(".fold-items")).to_be_hidden()
         routing = timeline.locator(":scope > .fold.routing").last
         await expect(routing.locator(".fold-line .what")).to_have_text("2 routing updates")
+        # With Copilot alone, no agent marks.
+        await expect(routing.locator(".fold-line .agent-mark")).to_have_count(0)
         # One alone after the owner's message: a line by the workers' short names.
         alone = timeline.locator(':scope > .event[data-kind="peer"]').last
         await expect(alone.locator(".what")).to_have_text(
@@ -9820,6 +9822,12 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             chips = fold.locator(".fold-items .event.started .agent-chip")
             await expect(chips).to_have_count(3)
             await expect(chips.first).to_be_hidden()
+            # Its line: each started worker's agent mark, its agent (and model) on hover.
+            marks = fold.locator(".fold-line .marks .agent-mark")
+            await expect(marks).to_have_count(3)
+            marked = [await mark.get_attribute("data-agent") for mark in await marks.all()]
+            assert marked == ["copilot", "codex", "copilot"], marked
+            await expect(marks.nth(1)).to_have_attribute("aria-label", re.compile(r"^Codex"))
             await ux_shoot(page, "start-chips-folded", scheme, focus=fold)
             line = await start_line(page, "Draft the release notes")
             await expect(fold.locator(".fold-items .agent-chip:visible")).to_have_count(3)

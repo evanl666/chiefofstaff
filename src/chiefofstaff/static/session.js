@@ -8,7 +8,7 @@ import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
-import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, marksShown, modelLabel, ready, statuses, statusOf } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, markOf, marksShown, modelLabel, ready, statuses, statusOf } from "./agentpick.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
@@ -1486,7 +1486,7 @@ export function replaceMessage(message) {
   if (!node?.dataset) return;
   Object.assign(node.dataset, { ...old.dataset, id: message.id });
   // A line of a fold on Home (or one that may start one) stays what it was.
-  Object.assign(node, { foldKind: old.foldKind, peer: old.peer });
+  Object.assign(node, { foldKind: old.foldKind, peer: old.peer, started: old.started });
   if (message.kind === "owner") {
     if (DELIVERY_WORDS[message.delivery]) node.dataset.delivery = message.delivery;
     else delete node.dataset.delivery;
@@ -1546,9 +1546,12 @@ function foldOf(message) {
 // A line that may start a fold says its kind (not in the page: a line alone is as it was);
 // a fold says it in data-fold.
 const foldKind = (node) => node?.dataset?.fold || node?.foldKind || "";
+// A start line in a run of routing receipts: the worker it started (its mark on the fold's line).
+const STARTS = /^(Started|Queued|Restarted)\b/;
 function foldInto(container, kind, node, message) {
   node.foldKind = kind;
   if (kind === "team") node.peer = peerOf(message);
+  if (kind === "routing" && message.meta?.session_id && STARTS.test(message.text || "")) node.started = message.meta.session_id;
   const last = container.lastElementChild;
   if (foldKind(last) !== kind) {
     container.append(node);
@@ -1576,7 +1579,11 @@ function summarizeFold(group) {
   const peers = items.map((node) => node.peer).filter(Boolean);
   const ids = [...new Set(peers.flatMap((peer) => [peer.from, peer.to]).filter(Boolean))];
   const waiting = kind === "team" ? waitingWords(new Set(peers.filter((peer) => peer.kind === "asked").map((peer) => peer.question).filter(Boolean))) : "";
-  const key = `${items.length}|${ids.join()}|${waiting}`;
+  // The workers a run of start lines started: each one's agent mark, where marks show (more
+  // than one agent on), its agent and model on hover.
+  const started = [...new Set(items.map((node) => node.started).filter(Boolean))].map((id) => byId(id) || (state.snapshot?.closed || []).find((item) => item.id === id)).filter(Boolean);
+  const marks = started.map((worker) => markOf(worker)).filter(Boolean);
+  const key = `${items.length}|${ids.join()}|${waiting}|${marks.map((mark) => mark.title).join()}`;
   if (line.dataset.key === key) return;
   line.dataset.key = key;
   const titles = new Map(peers.flatMap((peer) => [[peer.from, peer.fromTitle], [peer.to, peer.toTitle]]));
@@ -1584,6 +1591,7 @@ function summarizeFold(group) {
   const parts = [
     el("span", { class: "mark", text: mark }),
     el("span", { class: "what", text: `${items.length} ${noun}s` }),
+    marks.length ? el("span", { class: "marks" }, ...marks) : null,
     ids.length ? el("span", { class: "avatars" }, ...shown.map((id) => avatar(id, titles.get(id) || "")), ids.length > shown.length ? el("span", { class: "more", text: `+${ids.length - shown.length}` }) : null) : null,
     waiting ? el("span", { class: "waiting", text: waiting }) : null,
   ];
@@ -1605,7 +1613,7 @@ function toggleFold(group, open = !group.classList.contains("open")) {
 }
 // What still waits changes as questions are answered: the folds say it as it is now.
 function refreshFolds() {
-  for (const group of document.querySelectorAll("#timeline .fold.team")) summarizeFold(group);
+  for (const group of document.querySelectorAll("#timeline .fold.team, #timeline .fold.routing")) summarizeFold(group);
 }
 export function updateWorkingLine() {
   const timeline = $("#timeline");

@@ -1108,6 +1108,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .fold-line .avatars { display: inline-flex; align-items: center; gap: 2px; flex: none; }
 .fold-line .avatars .more { margin-left: 4px; font-size: var(--small); color: var(--muted); }
 .fold-line .waiting { flex: none; color: var(--amber); }
+.fold-line .marks { display: inline-flex; align-items: center; flex: none; }
 /* A worker's avatar: its initials in its color, the same everywhere. */
 .avatar { display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; font-size: var(--small); font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: #fff; background: var(--muted); }
 .c0 { --color: var(--c0); }
