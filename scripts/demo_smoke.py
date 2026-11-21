@@ -94,8 +94,16 @@ async def run(scheme: str):
             started = page.locator(
                 "#timeline .event", has_text="Started “Fix the flaky login test”"
             )
+            # A run of the Router's routing receipts is one line in the chat (E129): open, a
+            # line each.
+            fold = page.locator(
+                "#timeline > .fold.routing",
+                has=page.locator(".event", has_text="Started “Fix the flaky login test”"),
+            )
+            if await fold.count():
+                await fold.locator(".fold-line button.line").click()
             await expect(started).to_be_visible()
-            log("three tasks on the board as they start, a line each in the chat; one waits")
+            log("three tasks on the board as they start, routing lines in the chat; one waits")
             dots = page.locator("#session-list .item .dot")
             assert all([await dot.get_attribute("title") for dot in await dots.all()]), "dot help"
             await page.screenshot(path=SHOTS / f"demo-{scheme}-1-running{OFF}.png")

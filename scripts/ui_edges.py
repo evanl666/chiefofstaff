@@ -712,9 +712,10 @@ async def this_round(runtime, browser, failures: list[str]):
     await card.screenshot(path=SHOTS / "ui-edges-receipts-now.png")
     log("a task card: the PR in a few words, a local failure CI passed after, a run in progress")
 
-    # What workers told each other: a line in the Router's chat, cards in their timelines.
-    await expect(page.locator("#timeline .event", has_text="“Filter opt-outs” told “Opt-out "
-                              "client”")).to_be_visible(timeout=5000)  # fmt: skip
+    # What workers told each other: a line in the Router's chat by their short names (E129),
+    # cards in their timelines.
+    await expect(page.locator("#timeline .event", has_text="Filter opt-outs told Opt-out "
+                              "client")).to_be_visible(timeout=5000)  # fmt: skip
     await page.locator("#session-list .item", has_text="Opt-out client").click()
     await expect(page.locator("#timeline .card", has_text="From “Filter opt-outs”")).to_be_visible()
     await page.locator("#session-list .item", has_text="Filter opt-outs").click()
@@ -1646,6 +1647,7 @@ async def round_five(runtime, browser, failures: list[str]):
     log("a worker's answer to the owner's @ from Home is on Home")
 
     told = timeline.locator(".event", has_text="Write the second plan").first
+    await open_fold(told)
     await told.get_by_role("button", name="View", exact=True).click()
     flashed = page.locator(f'#panel .card.task.flash[data-id="{second["id"]}"]')
     await expect(flashed).to_have_count(1, timeout=5000)
@@ -5081,6 +5083,13 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
     for draft in store.drafts():
         store.update_draft(draft["id"], status="expired", outcome="End of the round.")
     runtime.publish_state()
+
+
+async def open_fold(line):
+    """A line in a run Home folds in one (E129: routing receipts, team messages): its fold open."""
+    group = line.locator("xpath=ancestor::div[contains(concat(' ', @class, ' '), ' fold ')][1]")
+    if await group.count() and "open" not in (await group.get_attribute("class") or "").split():
+        await group.locator(":scope > .fold-line button.line").click()
 
 
 async def teams_seeded(runtime) -> dict:
