@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.51 (2026-11-20)
 
 - **When you ask for a new worker, you get one.** "A new worker, a question only…", "Start one
   worker for exactly this…", 新开一个 worker: asked for in so many words, in any language, the
