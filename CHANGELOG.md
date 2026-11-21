@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.52 (2026-11-20)
 
 - **Connections you made for Copilot (Glean, Atlassian…) work in Chief of Staff's workers too
   (E137).** Copilot tells a remote MCP server which app calls it, and some servers keep your
