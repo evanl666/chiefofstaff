@@ -9110,9 +9110,12 @@ async def round_roles(runtime, browser, failures: list[str]):
             await expect(group.locator("select[name=role_router]")).to_be_hidden()
             await system.locator("summary").click()
             shown = group.locator("#agents-roles .agents-role:not([hidden])")
-            await expect(shown.locator("label > span")).to_have_text(
+            await expect(shown.locator("label:not(.agents-unavailable) > span")).to_have_text(
                 ["The Router runs on", "The Watchdog runs on"]
             )
+            # If unavailable: only once one runs on another agent (round_agent_smooth).
+            for fallback in await shown.locator(".agents-unavailable").all():
+                await expect(fallback).to_be_hidden()
             assert "Slack runs on" not in await group.inner_text()
             assert "Watch for you runs on" not in await group.inner_text()
             choose = group.locator("select[name=role_router]")
@@ -10121,7 +10124,7 @@ async def round_agent_parity(runtime, browser, failures: list[str]):
         system = tab.locator("#agents-system")
         await system.locator("summary").click()
         for role in ("router", "watchdog"):
-            await expect(system.locator(f".agents-role[data-role={role}] option")).to_have_text(
+            await expect(system.locator(f"select[name=role_{role}] option")).to_have_text(
                 ["Copilot", "Codex", "Claude"]
             )
         await expect(system.locator(".agents-role[data-role=connector]")).to_have_count(0)
@@ -10486,6 +10489,8 @@ async def round_agent_smooth(runtime, browser, failures: list[str]):
             with contextlib.suppress(Exception):
                 await runtime.setups.cancel(name)
         runtime.setups.runs.clear()
+        # (Its Handled for you line, for the rounds after: they count theirs.)
+        store.execute("DELETE FROM handled WHERE kind='resumed'")
         for session_id in made:
             await runtime.workers.close(session_id, by="you")
         await agents_saved(runtime, {"codex": {"enabled": False}, "claude": {"enabled": False}})
