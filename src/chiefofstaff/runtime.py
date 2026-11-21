@@ -10020,6 +10020,8 @@ class Runtime:
                 }
                 for question in self.asks.owner_questions()
             ],
+            # Questions workers wait on each other for (Home: "1 waiting 9 min").
+            "peer_waiting": self.asks.peer_waiting(),
             "updates": self.owner_updates(),
             "tasks": [
                 self.task_actions.view(task)

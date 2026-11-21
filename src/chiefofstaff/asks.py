@@ -17,6 +17,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -779,6 +780,17 @@ class Asks:
             "SELECT * FROM questions WHERE asker=? AND status='open' ORDER BY asked", (asker,)
         )
 
+    def peer_waiting(self) -> list[dict]:
+        """Open questions one worker asked another, oldest first: who waits on whom since when."""
+        rows = self.store.all(
+            """SELECT q.id, q.asker, q.target, q.asked FROM questions q
+            JOIN sessions a ON a.id = q.asker JOIN sessions t ON t.id = q.target
+            WHERE q.status='open' AND a.role='worker' AND t.role='worker' ORDER BY q.asked"""
+        )
+        return [
+            {**row, "asked": datetime.fromtimestamp(row["asked"], UTC).isoformat()} for row in rows
+        ]
+
     def close_question(self, question: dict, status: str, answer: str = ""):
         self.store.execute(
             "UPDATE questions SET status=?, answer=?, closed=? WHERE id=?",
@@ -866,7 +878,12 @@ class Asks:
         if target["role"] == "worker":
             self.runtime.peers.copy_to_router(
                 f"“{asker['title']}” asked {title}: {clip(params.question, 600)}",
-                {"peer_from": caller, "peer_to": target["id"]},
+                {
+                    "peer_from": caller,
+                    "peer_to": target["id"],
+                    "peer_kind": "asked",
+                    "question_id": question_id,
+                },
             )
         return (
             f'Asked {title} ({question_id}). The answer arrives as a type="answer" message; go on '
@@ -902,6 +919,11 @@ class Asks:
             self.runtime.peers.copy_to_router(
                 f"“{self.runtime.display_title(row)}” answered "
                 f"“{self.runtime.display_title(asker)}”: {clip(params.answer, 600)}",
-                {"peer_from": caller, "peer_to": asker["id"]},
+                {
+                    "peer_from": caller,
+                    "peer_to": asker["id"],
+                    "peer_kind": "answered",
+                    "question_id": params.question_id,
+                },
             )
         return "Delivered."
