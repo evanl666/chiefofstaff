@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 SLACK_MCP_URL = os.environ.get("CHIEFOFSTAFF_SLACK_MCP_URL", "https://mcp.slack.com/mcp")
 SEARCH_TOOL = "slack_search_public_and_private"
 SEND_TOOL = "slack_send_message"
+REACTIONS_TOOL = "slack_get_reactions"
 KNOWN_READ_TOOLS = [
     "slack_get_reactions",
     "slack_list_channel_members",
@@ -1003,6 +1004,9 @@ def readable(
 
 
 NO_MESSAGE = "Slack listed no message there"
+# Slack's reactions on a message: the emoji, its count, then who ("Alice Chen (U0ALICE1), …").
+REACTED = re.compile(r"^\s*:([\w+\-']+(?:::[\w\-]+)?):\s*\S\s*\d+\s*\S\s*(.*)$", re.MULTILINE)
+REACTOR = re.compile(r"\(([UW][A-Z0-9]{2,})\)")
 
 
 def unread_line(where: str) -> str:
@@ -1357,7 +1361,7 @@ class SlackSource:
         links = threads.slack_messages(text)
         thread_keys = list(dict.fromkeys(key for stamp in fresh for key in links.get(stamp, [])))
         keys_line = f"Thread keys: {', '.join(thread_keys)}\n" if thread_keys else ""
-        await self.host.on_trigger(
+        handed = await self.host.on_trigger(
             "slack",
             [f"{DELEGATED}{stamp}" for stamp in fresh],
             f"The owner reacted with :{emoji}: to {len(fresh)} Slack message(s), handing them to "
@@ -1368,6 +1372,48 @@ class SlackSource:
             readable(text, self.display_names(), set(fresh)),
             kind="delegated",
         )
+        if handed:
+            self.handed_over(text, fresh, emoji)
+
+    def handed_over(self, listed: str, stamps: list[str], emoji: str):
+        """Which thread each message the owner handed over is in: a reply there by the task it
+        went to may go out at once (see Drafts.handed_over)."""
+        found = {entry["ts"]: entry for entry in parse(listed)[0]}
+        links = threads.slack_messages(plain(listed))
+        for key, value in self.store.items("delegated:").items():
+            with suppress(ValueError, TypeError):
+                if time.time() - float(json.loads(value).get("at") or 0) > 8 * 86400:
+                    self.store.delete(key)  # Answered at once for a week only (Drafts).
+        for stamp in stamps:
+            entry = found.get(stamp) or {}
+            keys = [key.split(":") for key in links.get(stamp, []) if key.count(":") == 2]
+            channel = entry.get("channel") or (keys[0][1] if keys else "")
+            root = entry.get("thread_ts") or (keys[0][2] if keys else "") or stamp
+            if channel:
+                handed = {"channel": channel, "ts": stamp, "root": root, "emoji": emoji}
+                self.store.set(
+                    f"delegated:{channel}:{root}", json.dumps(handed | {"at": time.time()})
+                )
+
+    async def reacted_by(self, channel_id: str, stamp: str, emoji: str) -> set[str] | None:
+        """Who reacted to a message with this emoji (their user ids), as Slack lists its
+        reactions; None when that cannot be read here (no such tool, an error)."""
+        if REACTIONS_TOOL not in self.read_tools:
+            return None
+        try:
+            text = await asyncio.wait_for(
+                self.mcp.call(REACTIONS_TOOL, {"channel_id": channel_id, "message_ts": stamp}), 20
+            )
+        except Exception as exc:
+            logger.info("Could not read the reactions on %s: %s", stamp, describe(exc))
+            return None
+        listed = (unwrapped(text) or (text, ""))[0]
+        return {
+            user
+            for name, people in REACTED.findall(listed)
+            if name == emoji
+            for user in REACTOR.findall(people)
+        }
 
     async def poll_followed(self):
         """Read every followed thread and DM; new messages go straight to their followers."""

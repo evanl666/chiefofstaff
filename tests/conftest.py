@@ -410,6 +410,7 @@ class FakeSlackMcp:
         self.calls: list[tuple[str, dict]] = []
         self.results: dict[str, str] = {}
         self.reads: dict[str, str] = {}
+        self.reactions: dict[str, str] = {}  # By message ts: what slack_get_reactions answers.
         self.sent_link = "https://acme.slack.com/archives/C1/p1712345678000200"
         self.fail_send = False
         self.tools = [
@@ -432,6 +433,8 @@ class FakeSlackMcp:
             return f"Message sent: {self.sent_link}"
         if name in {"slack_read_thread", "slack_read_channel"}:
             return self.reads.get(arguments["channel_id"], "")
+        if name == "slack_get_reactions":
+            return self.reactions.get(arguments["message_ts"], "")
         return self.results.get(arguments.get("query", ""), "")
 
 

@@ -1964,6 +1964,9 @@ class Tools:
             task_id=task["id"],
             asked=follow,
         )
+        if slack:
+            self.runtime.drafts.mark_named(task["id"], params.instructions)
+        handed = self.runtime.drafts.handed_to(task["id"])
         spoken, note = self.report_language(caller, params.instructions)
         prompt = wrap(
             "router",
@@ -1980,6 +1983,8 @@ class Tools:
             prompt += "\n\n" + wrap("system", "peers", introduction)
         if note:
             prompt += "\n\n" + wrap("system", "context", note)
+        if handed:
+            prompt += "\n\n" + wrap("system", "context", self.runtime.drafts.handed_note(handed))
         meta: dict[str, Any] = {"prompt": prompt, "task_id": task["id"]}
         if images := self.runtime.attachments_in(params.instructions):
             meta["attachments"] = images  # The owner's images it names come with it.
@@ -2362,12 +2367,12 @@ class Tools:
         to_follow = list(dict.fromkeys(params.follow + pulls))
         if target["role"] != WORKER:
             self.runtime.follow(target["id"], to_follow, asked=params.follow)
-            await self.delivery.deliver(
-                target["id"],
-                wrap("router", "message", params.text),
-                kind="router",
-                display=params.text,
-            )
+            prompt = wrap("router", "message", params.text)
+            if target["role"] == SLACK and (handed := self.handed_in(to_follow)):
+                prompt += "\n\n" + wrap(
+                    "system", "context", self.runtime.drafts.handed_note(handed)
+                )
+            await self.delivery.deliver(target["id"], prompt, kind="router", display=params.text)
             return "Delivered."
         # The worker as the owner knows it now, before a new task renames it.
         worker_name = self.runtime.display_title(target)
@@ -2445,6 +2450,8 @@ class Tools:
         self.runtime.follow(
             target["id"], to_follow, task_id=task["id"] if task else "", asked=params.follow
         )
+        if task and (handed := self.runtime.drafts.handed_to(task["id"])):
+            prompt += "\n\n" + wrap("system", "context", self.runtime.drafts.handed_note(handed))
         # More on a task it has taken up reaches it within its turn; a new task waits, and so
         # does more on one it has not seen yet (bug E94: read before the task itself).
         unseen = bool(
@@ -2486,6 +2493,24 @@ class Tools:
         if not task:
             return "Delivered."
         return f"Delivered (task {task['id']})." + (f" {moved}" if moved else "")
+
+    def handed_in(self, keys: list[str]) -> list[dict]:
+        """The messages the owner handed over in these Slack threads, while replies there go
+        out at once (the Slack session answers them: see Drafts.handed_over)."""
+        settings = self.store.settings()
+        if not (settings.slack_delegate_reply and settings.slack_delegate_emoji):
+            return []
+        found = []
+        for key in keys:
+            if not key.startswith("slack:"):
+                continue
+            with suppress(ValueError):
+                handed = json.loads(
+                    self.store.get(f"delegated:{key.removeprefix('slack:')}") or "{}"
+                )
+                if handed.get("emoji") == settings.slack_delegate_emoji:
+                    found.append(handed)
+        return found
 
     def unnamed_task(self, worker: str, how: str) -> dict | None:
         """The task a continue or note naming none is about (bug E86: the task given last, done
@@ -4284,6 +4309,23 @@ class Tools:
         draft = self.store.create_draft(caller, "slack", target, params.text, params.note)
         replaced = await self.runtime.drafts.supersede(draft)
         self.runtime.add_message(caller, "draft", params.text, {"draft_id": draft["id"]})
+        held = ""
+        if handed := self.runtime.drafts.handed_over(draft, row):
+            # The owner handed this message over with their own reaction: the reply in its
+            # thread goes out at once (their decision, Settings), unless a check holds it.
+            sent, held = await self.runtime.drafts.send_handed(draft, handed)
+            if sent:
+                result = (
+                    f"Draft {draft['id']} was sent at once in the thread, as the owner: they "
+                    f"handed this message over with :{handed['emoji']}:, so it needed no OK. It "
+                    "is your reply there: do not send it again."
+                )
+                if replaced:
+                    result += f" It replaces your earlier draft {', '.join(replaced)} there."
+                return result
+            draft = self.store.draft(draft["id"])
+            if held:
+                draft = self.store.update_draft(draft["id"], outcome=f"Not sent for you: {held}.")
         self.bus.publish("draft", draft)
         self.runtime.alert(
             params.note or params.text,
@@ -4295,6 +4337,8 @@ class Tools:
             f"Draft {draft['id']} is waiting for the owner's approval. You will be told if "
             "they edit or reject it. Do not send it any other way."
         )
+        if held:
+            result += f" It was not sent at once for the owner: {held}."
         if place["thread_ts"] != params.thread_ts:
             result += (
                 f" It goes in the thread of {place['thread_ts']} (that message is a reply in it)."

@@ -21,7 +21,7 @@ from .models import DraftDecision, OkItem
 from .peers import clip
 from .roles import ROUTER, SLACK, WORKER
 from .sources.github import REVIEW_EVENTS, merge_refusal
-from .sources.slack import describe, message_keys
+from .sources.slack import describe, message_keys, plain
 from .store import hours_ago, now
 from .tasks import OPEN
 
@@ -48,6 +48,20 @@ DRAFT_DECISION = re.compile(
 # that drafted it: it is about that draft ("I drafted an approval for you to send"), whatever its
 # words.
 SAME_TURN_SECONDS = 60
+
+# A reply that goes out without the owner's OK must not carry a secret: a Slack, GitHub, cloud or
+# model API token or key, a private key, a password or key given by name.
+SECRET = re.compile(
+    r"\bxox[abposre]-[A-Za-z0-9-]{10,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}"
+    r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}|\bAIza[0-9A-Za-z_-]{35}\b"
+    r"|\beyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,}"
+    r"|(?i:\b(?:password|passwd|secret|api[_ -]?key|access[_ -]?key|token)\b\s*[:=]\s*\S{6,})"
+)
+# Nor a file on this computer ("~/work/notes.md", "/Users/…", "C:\Users\…"): its readers have none.
+LOCAL_PATH = re.compile(r"(?:^|[\s(`'\"])(?:~/|/Users/|/home/|[A-Za-z]:\\Users\\)\S")
+# A message the owner handed over with their delegate emoji is answered at once for a week.
+HANDED_DAYS = 7
 
 # Cards for the owner, in words (for the Router).
 CARD_WORDS = {
@@ -107,13 +121,17 @@ class Drafts:
             + "\n</owner_edits>"
         )
 
-    async def resolve(self, draft_id: str, decision: DraftDecision) -> dict:
+    async def resolve(
+        self, draft_id: str, decision: DraftDecision, handed: dict | None = None
+    ) -> dict:
+        """`handed`: a reply sent for the owner, in the thread of a message they handed over
+        with their delegate emoji (see send_handed), not by their decision."""
         async with self.draft_lock:
             draft = self.store.draft(draft_id)
             try:
                 if draft["status"] == "uncertain":
                     return await self.settle_uncertain(draft, decision)
-                return await self.decide(draft_id, decision)
+                return await self.decide(draft_id, decision, handed)
             finally:
                 if draft["kind"] == "github":
                     self.link_reviews()  # Replies that waited for it may go now.
@@ -157,8 +175,11 @@ class Drafts:
                 left += len(kept)
         return {"approved": approved, "left": left}
 
-    async def decide(self, draft_id: str, decision: DraftDecision) -> dict:
-        """The owner's decision on a pending draft; the caller holds draft_lock."""
+    async def decide(
+        self, draft_id: str, decision: DraftDecision, handed: dict | None = None
+    ) -> dict:
+        """The owner's decision on a pending draft; the caller holds draft_lock. `handed`: sent
+        for them, in the thread of a message they handed over (resolve)."""
         draft = self.store.draft(draft_id)
         if draft["status"] != "pending":
             raise ValueError("This draft was already handled.")
@@ -333,6 +354,12 @@ class Drafts:
         await self.settle_others(draft, sent=True)
         await self.settle_reviews(draft)
         self.settle_question(draft)
+        if handed:
+            # Not the owner's decision: nothing is learned from it, its session was told in its
+            # tool's answer, and the owner finds it under Handled for you.
+            await self.settle_task(draft)
+            self.handed_sent(draft, handed, outcome or "")
+            return draft
         if comments_edited and (task := self.task_of(draft)):
             # Its line comments or verdict changed: not accepted as it was.
             self.store.set(f"draft_edited:{task['id']}", "1")
@@ -424,6 +451,166 @@ class Drafts:
         target["comments"] = kept
         draft = self.store.update_draft_target(draft["id"], target)
         return draft, "Line comments the owner changed:\n" + "\n".join(changes)
+
+    def handed_over(self, draft: dict, row: dict) -> dict | None:
+        """The message the owner handed over with their delegate emoji that this Slack reply
+        answers in its thread (the thread it is in, or a new one under it): when the reply is by
+        the task it went to (or by the Slack session), is the first one there, and the owner lets
+        such replies go out at once (Settings). None for any other reply: it waits for them."""
+        settings = self.store.settings()
+        target = draft["target"]
+        channel, root = target.get("channel_id") or "", target.get("thread_ts") or ""
+        if not (draft["kind"] == "slack" and channel and root):
+            return None
+        if not (settings.slack_delegate_reply and settings.slack_delegate_emoji):
+            return None
+        try:
+            handed = json.loads(self.store.get(f"delegated:{channel}:{root}") or "{}")
+        except ValueError:
+            return None
+        if (
+            not handed
+            or handed.get("emoji") != settings.slack_delegate_emoji
+            or handed.get("replied")
+            or time.time() - float(handed.get("at") or 0) > HANDED_DAYS * 86400
+        ):
+            return None
+        task = target.get("task_id") or ""
+        given = bool(task) and bool(self.store.get(f"delegatedtask:{task}:slack:{channel}:{root}"))
+        return handed if given or row["role"] == SLACK else None
+
+    def handed_to(self, task_id: str) -> list[dict]:
+        """The messages the owner handed over whose threads this task follows (see handed_over),
+        while such replies go out at once."""
+        settings = self.store.settings()
+        if not (settings.slack_delegate_reply and settings.slack_delegate_emoji):
+            return []
+        found = []
+        for value in self.store.items(f"delegatedtask:{task_id}:").values():
+            try:
+                handed = json.loads(value)
+            except ValueError:
+                continue
+            if handed.get("emoji") == settings.slack_delegate_emoji:
+                found.append(handed)
+        return found
+
+    def mark_named(self, task_id: str, text: str):
+        """A task whose instructions name a message the owner handed over (its ts, or its
+        thread's key) is that message's, as one that follows its thread (Runtime.follow)."""
+        for value in self.store.items("delegated:").values():
+            try:
+                handed = json.loads(value)
+            except ValueError:
+                continue
+            thread = f"slack:{handed.get('channel')}:{handed.get('root')}"
+            if time.time() - float(handed.get("at") or 0) > HANDED_DAYS * 86400:
+                continue
+            if handed.get("ts") in text or thread in text:
+                self.store.set(f"delegatedtask:{task_id}:{thread}", value)
+
+    @staticmethod
+    def handed_note(handed: list[dict]) -> str:
+        """What a session answering messages the owner handed over is told: its reply there
+        goes out at once, as the owner, to the people in that thread."""
+        places = "; ".join(
+            f"channel_id={one['channel']}, thread_ts={one['root']}"
+            + (", in_thread=true" if one["channel"].startswith("D") else "")
+            for one in handed
+        )
+        emoji = handed[0]["emoji"]
+        return (
+            f"The owner handed this Slack message over by reacting :{emoji}:. Your reply in its "
+            f"thread (draft_slack_reply with {places}) is sent at once, as the owner, without "
+            "waiting for their OK: write it for the people in that thread, in its tone and "
+            "language, with what they asked for. No file paths on this computer, no notes on "
+            "your work, your tools or Chief of Staff. One reply there; anything else you send "
+            "still waits for the owner."
+        )
+
+    async def send_handed(self, draft: dict, handed: dict) -> tuple[bool, str]:
+        """Send a reply in the thread of a message the owner handed over, at once, as they
+        asked by reacting: whether it was sent, and if not why it waits on its card for their
+        OK, in a few plain words ("" when its card says so already: someone wrote since it was
+        drafted, sending failed): their reaction is not theirs, someone else wrote there since
+        its session last read it, it may hold a secret or name a file on this computer."""
+        slack = self.runtime.slack
+        target = draft["target"]
+        channel, root = target["channel_id"], target["thread_ts"]
+        owner = slack.status.get("user_id") or ""
+        emoji = handed["emoji"]
+        if SECRET.search(draft["text"]):
+            return False, "it may hold a secret (a token, key or password)"
+        if LOCAL_PATH.search(draft["text"]):
+            return False, "it names a file on your computer"
+        reacted = await slack.reacted_by(channel, handed["ts"], emoji)
+        if not owner or (reacted is not None and owner not in reacted):
+            return False, f"the :{emoji}: on that message isn't yours"
+        try:
+            found = await slack.read_conversation(channel, root)
+        except Exception:
+            return False, "the thread couldn't be read from Slack just now"
+        # Since the message was handed over, and since its session was last told of the thread.
+        seen = max(
+            float(handed["ts"]), float(self.store.get(f"slackhw:slack:{channel}:{root}") or 0)
+        )
+        others = [
+            entry
+            for entry in found
+            if entry["ts"]
+            and float(entry["ts"]) > seen
+            and entry["user"] != owner
+            and not self.store.one(
+                "SELECT id FROM triggers WHERE key=? AND source='slack-sent'",
+                (f"slack:{entry['ts']}",),
+            )
+        ]
+        if others:
+            who = others[-1]["name"] or slack.display_names().get(others[-1]["user"], "")
+            return False, f"{who or 'someone'} wrote in the thread since"
+        try:
+            await self.resolve(draft["id"], DraftDecision(action="send"), handed)
+        except ValueError as exc:
+            # Held by the send-time check: its card says who wrote since, or what goes first.
+            held = self.store.draft(draft["id"])
+            said = str(exc).removeprefix("Not sent yet: ").rstrip(".")
+            return False, "" if held["target"].get("moved_on") else said
+        except RuntimeError:
+            return False, ""  # Sending failed: its card says so, to send again.
+        return True, ""
+
+    def handed_sent(self, draft: dict, handed: dict, outcome: str):
+        """After a reply went out for the owner: once per message handed over, one line under
+        Handled for you (with the message in Slack), one quiet line in the Router's chat."""
+        target = draft["target"]
+        key = f"delegated:{target['channel_id']}:{target['thread_ts']}"
+        self.store.set(key, json.dumps({**handed, "replied": draft["id"]}))
+        names = self.runtime.slack.display_names()
+        channel = target["channel_id"]
+        name = names.get(channel, "")
+        name = "" if channel in name else name
+        if channel.startswith("D"):
+            place = f"your {threads.dm_with(name)}" if name else "a DM"
+        else:
+            place = f"#{name.lstrip('#')}" if name else "a channel"
+        link = next(
+            (url.rstrip(").,") for url in re.findall(r"https://\S+/archives/\S+", plain(outcome))),
+            "",
+        )
+        said = f"Replied in the thread in {place} for you (you reacted :{handed['emoji']}:)"
+        self.runtime.handled.record(
+            "slack-reply",
+            said,
+            session_id=draft["session_id"],
+            ref=draft["id"],
+            data={"link": link, "channel": channel, "ts": handed["ts"]},
+        )
+        self.tell_router(
+            draft,
+            f"Sent for the owner without a card: they handed this message over with "
+            f":{handed['emoji']}:.",
+            display=f"Replied for you (you reacted :{handed['emoji']}:)",
+        )
 
     async def check_conversation(self, draft: dict):
         """Before a Slack reply goes out: has someone else written there since the message its

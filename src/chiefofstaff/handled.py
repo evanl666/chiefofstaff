@@ -6,7 +6,8 @@ task fits, a server kept off for the worker whose folder changed it, git files m
 of Staff's own worktree folders. Each is listed for a week, in one quiet line under Needs you,
 with Undo where undoing it still means something; Undo looks again at how things stand now and
 refuses what moved on since. Nothing that speaks as the owner, merges, spends or signs in is ever
-handled here.
+handled here, but for one thing the owner asked for: a reply in the thread of a Slack message they
+reacted to with their delegate emoji goes out at once, and is listed here with its link.
 """
 
 from __future__ import annotations
@@ -83,12 +84,14 @@ class Handled:
         about was written ([first, last]), where that is not when it was handled (E125)."""
         rows = self.store.all(
             """SELECT id, kind, text, session_id, ref, undo, status, created_at, undone_at,
-            json_extract(data, '$.at') AS at
+            json_extract(data, '$.at') AS at, json_extract(data, '$.link') AS link
             FROM handled WHERE created_at>=? ORDER BY created_at DESC LIMIT ?""",
             (hours_ago(SHOWN_DAYS * 24), SHOWN_MAX),
         )
         for row in rows:
             row["at"] = json.loads(row["at"]) if row["at"] else None
+            if not row["link"]:
+                del row["link"]  # Only a reply sent for the owner has one (in Slack).
         return rows
 
     async def undo(self, entry_id: str) -> str:

@@ -327,6 +327,8 @@ function handledLine(needs) {
       el("span", { class: "handled-text", text: entry.status === "undone" ? `${entry.text} (undone)` : entry.text, title: `Handled ${clock(entry.created_at)}` }),
       // About something written before (messages left from before a start, E125): when.
       entry.at ? el("time", { text: writtenAt(entry.at), title: `Handled ${clock(entry.created_at)}` }) : el("time", { text: ago(entry.created_at) }),
+      // What it is about, where it is (a reply sent for the owner: in Slack).
+      /^https:\/\//.test(entry.link || "") ? el("a", { class: "link quiet", href: entry.link, target: "_blank", rel: "noreferrer", text: "Open in Slack ↗" }) : null,
       undo,
     );
   });

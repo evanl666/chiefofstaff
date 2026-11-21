@@ -347,6 +347,9 @@ class Settings(StrictModel):
     slack_poll_seconds: int = Field(default=60, ge=20, le=900)
     # Reacting with this emoji to any Slack message hands it to Chief of Staff; empty turns it off.
     slack_delegate_emoji: str = Field(default="robot_face", max_length=60)
+    # A reply in the thread of a message the owner reacted to with it goes out at once (their
+    # own reaction only; any other send still waits for their OK).
+    slack_delegate_reply: bool = True
     github_enabled: bool = False
     github_repos: list[Repository] = Field(default_factory=list, max_length=10)
     # More for workers than Copilot finds by itself (the owner's plugins, skills and MCP

@@ -9099,6 +9099,12 @@ class Runtime:
                 bound = self.store.follow_tasks(session_id, key)
                 if task_id not in bound:
                     self.store.set(f"followtask:{session_id}:{key}", json.dumps([*bound, task_id]))
+                if key.startswith("slack:") and (
+                    handed := self.store.get(f"delegated:{key.removeprefix('slack:')}")
+                ):
+                    # The thread of a message the owner handed over with their delegate emoji:
+                    # this task's reply there may go out at once (Drafts.handed_over).
+                    self.store.set(f"delegatedtask:{task_id}:{key}", handed)
             if key.startswith("slack:"):
                 for prefix in ("slackfail", "slackskip"):
                     self.store.set(f"{prefix}:{key}", "0")

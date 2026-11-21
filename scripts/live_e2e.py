@@ -6,6 +6,7 @@ Slack's official server) and drives it through the HTTP API, exactly like the UI
 A. owner -> Router -> isolated worker -> commit -> its report reaches the owner
 B. Slack DM -> watcher -> Router -> Slack session reads Slack -> draft -> owner edits+sends
 E. Slack thread: a reply without a mention goes straight to the session that answered
+F. the owner reacts :robot_face: to Bob's request: done, and answered in his thread at once
 C. restart -> Router resumes with its memory
 D. other Copilot sessions are listed
 G. watchdog reviews a worker stuck on a hung command and acts on it
@@ -548,23 +549,32 @@ async def scenario_delegate(app: App, workspace: Workspace):
     delegated = [m for m in messages if m["kind"] == "inbound" and m["meta"].get("delegated")]
     assert len(delegated) == 1, messages
 
-    async def reply():
-        drafts = (await app.get("/api/state"))["drafts"]
+    # The owner's own reaction asked for no OK (0.1.53): the reply goes out at once, in Bob's
+    # thread, with no card; one line under Handled for you says so.
+    async def replied():
         return next(
             (
-                d
-                for d in drafts
-                if d["kind"] == "slack" and d["target"]["channel_id"] == "C0DEPLOYS"
+                m
+                for m in workspace.sent
+                if m["channel"] == "C0DEPLOYS" and m["thread_ts"] == request["ts"]
             ),
             None,
         )
 
-    draft = await wait_for("a reply to Bob in his thread", reply, 600, app)
-    assert draft["target"]["thread_ts"] == request["ts"], draft["target"]
-    assert "391" in draft["text"], draft["text"]
-    await app.post(f"/api/drafts/{draft['id']}", {"action": "send"})
-    assert workspace.sent[-1]["thread_ts"] == request["ts"]
-    log(f"delegated by reaction, done and answered in the thread: {draft['text']!r}")
+    sent = await wait_for("the reply to Bob, sent at once in his thread", replied, 600, app)
+    assert "391" in sent["text"], sent["text"]
+    assert "/Users/" not in sent["text"] and "~/" not in sent["text"], sent["text"]
+    state = await app.get("/api/state")
+    cards = [
+        d
+        for d in state["drafts"]
+        if d["kind"] == "slack" and d["status"] == "pending"
+        and d["target"].get("channel_id") == "C0DEPLOYS"
+    ]  # fmt: skip
+    assert not cards, cards
+    handled = [h for h in state["handled"] if "you reacted :robot_face:" in h["text"]]
+    assert handled and handled[0]["text"].startswith("Replied in the thread in #deploys"), handled
+    log(f"delegated by reaction, done and answered in the thread at once: {sent['text']!r}")
 
 
 async def scenario_watchdog(app: App, project: Path):

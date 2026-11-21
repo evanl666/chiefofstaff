@@ -60,7 +60,7 @@ SETTINGS_FIELDS = {
 SETTINGS_FIELDS |= {
     "skill_folders", "plugins", "mcp_servers", "watches", "watch_hours", "watch_minutes",
     "watch_after_hours_minutes", "away_notify", "away_minutes", "away_how", "other_sessions",
-    "send_to_chief", "update_notice",
+    "send_to_chief", "update_notice", "slack_delegate_reply",
 }  # fmt: skip
 # (With Copilot alone, as here: Coding agents' fields are made only where an agent is installed.)
 FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours"} | {
@@ -5087,6 +5087,16 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
     await back.locator(":scope > .head .title").click()
     await expect(back.locator(".report")).to_have_count(1)
     await expect(back.locator(".report .settles")).to_have_count(0)
+    # A reply sent for the owner (their delegate emoji): its line opens it in Slack; no Undo.
+    link = "https://acme.slack.com/archives/C0DEPLOYS/p1795203000300300?thread_ts=1795201000.100100"
+    runtime.handled.record(
+        "slack-reply",
+        "Replied in the thread in #deploys for you (you reacted :robot_face:)",
+        data={"link": link},
+    )
+    sent = handled.locator("li", has_text="Replied in the thread in #deploys for you")
+    await expect(sent.get_by_role("link", name="Open in Slack ↗")).to_have_attribute("href", link)
+    await expect(sent.get_by_role("button")).to_have_count(0)
     log("Handled for you: one quiet line; Undo puts a result back to accept")
     await context.close()
     for draft in store.drafts():

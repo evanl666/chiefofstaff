@@ -373,6 +373,8 @@ export function fillSettings() {
   form.slack_token.value = "";
   form.slack_poll_seconds.value = settings.slack_poll_seconds;
   form.slack_delegate_emoji.value = settings.slack_delegate_emoji ? `:${settings.slack_delegate_emoji}:` : "";
+  form.slack_delegate_reply.checked = settings.slack_delegate_reply !== false;
+  document.getElementById("slack-delegate-reply").textContent = `Reply directly when you react with :${settings.slack_delegate_emoji || "robot_face"}:`;
   form.github_enabled.checked = settings.github_enabled;
   form.github_repos.value = settings.github_repos.join("\n");
   form.copilot_command.value = settings.copilot_command;
@@ -873,6 +875,7 @@ export function settingsBody() {
     slack_enabled: form.slack_enabled.checked,
     slack_poll_seconds: number("slack_poll_seconds"),
     slack_delegate_emoji: form.slack_delegate_emoji.value.trim(),
+    slack_delegate_reply: form.slack_delegate_reply.checked,
     github_enabled: form.github_enabled.checked,
     github_repos: lines(form.github_repos.value),
     copilot_command: form.copilot_command.value.trim(),

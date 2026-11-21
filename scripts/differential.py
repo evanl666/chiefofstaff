@@ -385,6 +385,38 @@ FEATURES["update_notice"] = Feature(
     ],
 )
 
+# A reply in the thread of a Slack message the owner reacted to with their delegate emoji goes out
+# at once (drafts.py, Drafts.handed_over): on by default (the owner asked for it), so compared
+# switched off against the baseline. The Router's rule on delegated messages says either way;
+# the script hands no message over, so on, only its switch line is checked.
+FEATURES["delegate_reply"] = Feature(
+    off={"slack_delegate_reply": False},
+    on={"slack_delegate_reply": True},
+    allow_off=[
+        Allow("its setting, off", setting="slack_delegate_reply", value=False),
+        Allow(
+            "its switch line under the delegate emoji in Settings → Connections",
+            element="#settings-dialog label:has(> input[name=slack_delegate_reply])",
+            views=r"^settings-connections-",
+        ),
+        Allow(
+            "the Router's rule on delegated messages: the reply written for the people there",
+            data=r"\.system_message\.content$",
+            lines=r"^(  author waits for an answer, pass slack=true and its thread keys in "
+            r"`follow`, and ask the|  worker to draft a reply in that thread with the outcome "
+            r"when done(, written for the people| \(the owner approves it\)\.)|  there \(the "
+            r"owner approves it, or it goes out at once when they let it\)\.)$",
+        ),
+    ],
+    allow_on=[
+        Allow(
+            "its switch line under the delegate emoji in Settings → Connections, checked",
+            element="#settings-dialog label:has(> input[name=slack_delegate_reply])",
+            views=r"^settings-connections-",
+        ),
+    ],
+)
+
 # Claude workers (more-agents.md 5.12): the same tab, one more row. Off and never used, as
 # more_agents: only INSTALLED's look at `claude` (never the Agent SDK). Its "on" mode
 # turns Claude on and then off again before the script (5.11), leaving what Codex's does.
