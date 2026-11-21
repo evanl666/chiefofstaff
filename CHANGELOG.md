@@ -128,6 +128,17 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   a question in English and one in Chinese, a request in English got its worker, and the
   Router's line saying so in Chinese: the conversation pulled it back once its tools had
   answered. When you switch language, what its tools answer in that turn says it again.
+- **Slack's new reply format is read again.** On 2026-11-21 Slack's MCP server began answering in
+  a new format, and Chief of Staff read none of it: a Slack reply card said *Could not read the
+  conversation* followed by Slack's whole answer (someone's email address in it), and a thread
+  you handed over with your delegate emoji woke its worker with that answer, though nothing new
+  was there, which then showed up as an *Update*. Both formats are read now: reply cards quote
+  the conversation again, names show again, and a followed thread wakes its worker only for
+  replies new since it last read it (not its first message, not a reaction, not Chief of
+  Staff's own message). Nothing Slack answers is shown as it is any more: what can't be read
+  is one plain line (*Couldn't read this conversation from Slack just now; the reply still goes
+  to …*), the details go to the log, email addresses are never kept, and a message can't pass
+  off its own text as someone else's message in the new format either.
 
 ## 0.1.52 (2026-11-20)
 
