@@ -395,11 +395,12 @@ class FakeTokens:
         self.token = ""
 
 
-def slack_tool(name, read_only=True, description=""):
+def slack_tool(name, read_only=True, description="", schema=None):
     return SimpleNamespace(
         name=name,
         description=description,
         annotations=SimpleNamespace(readOnlyHint=read_only),
+        inputSchema=schema or {"type": "object"},
     )
 
 
@@ -435,7 +436,12 @@ class FakeSlackMcp:
             return self.reads.get(arguments["channel_id"], "")
         if name == "slack_get_reactions":
             return self.reactions.get(arguments["message_ts"], "")
-        return self.results.get(arguments.get("query", ""), "")
+        # Searched by its earlier `query`, or by the fields Slack's search takes now.
+        query = (
+            arguments.get("query")
+            or " ".join([*arguments.get("keywords", []), arguments.get("filters", "")]).strip()
+        )
+        return self.results.get(query, "")
 
 
 def task_of(harness, session_id: str) -> str:

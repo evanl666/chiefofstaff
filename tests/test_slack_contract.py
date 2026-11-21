@@ -51,7 +51,10 @@ async def test_a_search_a_thread_and_a_channel_are_read_message_by_message():
     searched = await slack.call(
         SEARCH_TOOL,
         {
-            "query": "is:thread",
+            # As Chief of Staff asks it (SlackSource.search_arguments): Slack's modifiers apart.
+            "keywords": [],
+            "filters": "is:thread",
+            "natural_language_query": "",
             "sort": "timestamp",
             "sort_dir": "desc",
             "include_context": False,

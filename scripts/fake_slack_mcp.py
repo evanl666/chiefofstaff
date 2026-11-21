@@ -221,7 +221,20 @@ def build_server(workspace: Workspace) -> FastMCP:
         with workspace.lock:
             workspace.calls.append((name, arguments))
 
-    @server.tool(
+    def searched(query: str, after: str, sort_dir: str, limit: int) -> str:
+        record("slack_search_public_and_private", {"query": query, "after": after})
+        found = [
+            message
+            for message in workspace.messages
+            if not (after and float(message["ts"]) < float(after)) and matches(message, query)
+        ]
+        if sort_dir == "desc":
+            found.reverse()
+        if workspace.fmt != "old":
+            return workspace.search_answer(query, found[:limit])
+        return "\n\n".join(workspace.render(m) for m in found[:limit]) or "No results found."
+
+    search_tool = server.tool(
         name="slack_search_public_and_private",
         description=(
             "Searches for messages, files in ALL Slack channels, including public channels, "
@@ -229,8 +242,10 @@ def build_server(workspace: Workspace) -> FastMCP:
         ),
         annotations=READ,
     )
-    def search(
-        query: str = "",
+
+    # As Slack's server takes a search now: words (`keywords`) apart from Slack's modifiers
+    # (`filters`), no `query`; its earlier `query` with the earlier format.
+    def search_now(
         keywords: list[str] | None = None,
         filters: str = "",
         natural_language_query: str = "",
@@ -247,20 +262,33 @@ def build_server(workspace: Workspace) -> FastMCP:
         include_bots: bool = False,
         max_context_length: int = 0,
         context_channel_id: str = "",
+        only_my_channels: bool = False,
     ) -> str:
-        # Its earlier `query`, or the fields it takes now (keywords and filters).
-        query = " ".join([query, *(keywords or []), filters]).strip()
-        record("slack_search_public_and_private", {"query": query, "after": after})
-        found = [
-            message
-            for message in workspace.messages
-            if not (after and float(message["ts"]) < float(after)) and matches(message, query)
-        ]
-        if sort_dir == "desc":
-            found.reverse()
-        if workspace.fmt != "old":
-            return workspace.search_answer(query, found[:limit])
-        return "\n\n".join(workspace.render(m) for m in found[:limit]) or "No results found."
+        if not (keywords or filters.strip()):
+            raise ValueError(
+                "parameter_validation_failed: Require at least one of `keywords` or `filters`."
+            )
+        return searched(" ".join([*(keywords or []), filters]).strip(), after, sort_dir, limit)
+
+    def search_then(
+        query: str,
+        after: str = "",
+        before: str = "",
+        sort: str = "score",
+        sort_dir: str = "desc",
+        include_context: bool = True,
+        limit: int = 20,
+        channel_types: str = "",
+        content_types: str = "",
+        response_format: str = "detailed",
+        cursor: str = "",
+        include_bots: bool = False,
+        max_context_length: int = 0,
+        context_channel_id: str = "",
+    ) -> str:
+        return searched(query, after, sort_dir, limit)
+
+    search_tool(search_then if workspace.fmt == "old" else search_now)
 
     @server.tool(
         name="slack_search_channels",

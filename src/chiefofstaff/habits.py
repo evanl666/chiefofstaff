@@ -443,7 +443,7 @@ class Habits:
             text = await slack.mcp.call(
                 SEARCH_TOOL,
                 {
-                    "query": "from:me",
+                    **slack.search_arguments("from:me"),
                     "after": str(after),
                     "sort": "timestamp",
                     "sort_dir": "asc",

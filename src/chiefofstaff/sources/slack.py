@@ -1194,6 +1194,17 @@ class SlackSource:
         )
         self.status.update(user_id=user_id, can_send=self.can_send)
 
+    def search_arguments(self, filters: str, keywords: list[str] | None = None) -> dict:
+        """How Slack's search takes what to look for: since November 2026 its words (`keywords`,
+        each a word or a "quoted phrase") apart from Slack's modifiers (`filters`: to:me, an
+        @mention, hasmy::emoji:, in:, from:), as its schema says; a server whose schema has no
+        `filters` (Slack's earlier one, stand-ins) takes them as one `query`."""
+        schema = (self.read_specs.get(SEARCH_TOOL) or {}).get("input_schema") or {}
+        fields = schema.get("properties") or {}
+        if "filters" in fields and "query" not in fields:
+            return {"keywords": keywords or [], "filters": filters, "natural_language_query": ""}
+        return {"query": " ".join([*(keywords or []), filters]).strip()}
+
     def queries(self) -> list[str]:
         queries = ["to:me"]
         if self.status["user_id"]:
@@ -1245,7 +1256,7 @@ class SlackSource:
                 text = await self.mcp.call(
                     SEARCH_TOOL,
                     {
-                        "query": query,
+                        **self.search_arguments(query),
                         "after": str(after),
                         "sort": "timestamp",
                         "sort_dir": "asc",
@@ -1377,7 +1388,7 @@ class SlackSource:
         text = await self.mcp.call(
             SEARCH_TOOL,
             {
-                "query": f"hasmy::{emoji}:",
+                **self.search_arguments(f"hasmy::{emoji}:"),
                 "sort": "timestamp",
                 "sort_dir": "desc",
                 "include_context": False,
@@ -1556,7 +1567,7 @@ class SlackSource:
         result = await self.mcp.call(
             SEARCH_TOOL,
             {
-                "query": f'"{words}" from:me',
+                **self.search_arguments("from:me", [f'"{words}"']),
                 "after": str(int(since) - 86400),
                 "sort": "timestamp",
                 "sort_dir": "desc",
@@ -1668,7 +1679,7 @@ class SlackSource:
                 self.mcp.call(
                     SEARCH_TOOL,
                     {
-                        "query": f"in:<#{channel_id}>",
+                        **self.search_arguments(f"in:<#{channel_id}>"),
                         "after": str(second),
                         "before": str(second + 1),
                         "include_context": False,

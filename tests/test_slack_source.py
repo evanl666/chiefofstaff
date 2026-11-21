@@ -855,6 +855,9 @@ async def test_the_fake_slack_answers_in_either_format_and_both_are_read(fmt, tm
     server = fake.build_server(workspace)
 
     class Mcp(FakeSlackMcp):
+        async def list_tools(self):
+            return await server.list_tools()
+
         async def call(self, name, arguments):
             self.calls.append((name, arguments))
             result = await server.call_tool(name, arguments)
@@ -870,9 +873,14 @@ async def test_the_fake_slack_answers_in_either_format_and_both_are_read(fmt, tm
         ("U0OWNER1", reply["ts"], "On it.", root["ts"]),
     ]
     assert (await source.latest_message("D0ALICE01"))["ts"] == root["ts"]
+    await source.discover()
     searched = await source.mcp.call(
-        "slack_search_public_and_private", {"query": "hasmy::robot_face:", "limit": 20}
+        "slack_search_public_and_private",
+        {**source.search_arguments("hasmy::robot_face:"), "limit": 20},
     )
+    [search] = [t for t in await server.list_tools() if t.name == "slack_search_public_and_private"]
+    schema = search.inputSchema["properties"]
+    assert ("query" in schema) == (fmt == "old") and ("filters" in schema) == (fmt == "new")
     assert listing_keys(searched) == [f"slack:{root['ts']}"]
     assert source.display_names()["U0ALICE1"] == "Alice Chen"
     place = await source.reply_place("D0ALICE01", reply["ts"])
@@ -957,3 +965,57 @@ async def test_when_who_wrote_what_is_unsure_it_says_so_and_names_no_one_else(so
     assert FORGED_NOTE in text and "real one" in text and "Bob Li wrote them" in text
     assert "Alice Chen in" not in display and "could not read" not in display
     assert display.startswith(f"\u26a0 {FORGED_NOTE}\n\nBob Li in a DM:"), display
+
+
+# Slack's search as it takes its query since November 2026: words and Slack's modifiers apart.
+SEARCH_NOW = {
+    "type": "object",
+    "properties": {
+        "keywords": {"type": "array", "items": {"type": "string"}},
+        "filters": {"type": "string"},
+        "natural_language_query": {"type": "string"},
+        "after": {"type": "string"},
+    },
+}
+
+
+async def test_searches_use_the_fields_slacks_search_takes_now(tmp_path):
+    """Slack's search lists `keywords` and `filters` now (`query` is no longer in its schema):
+    Chief of Staff's own searches use those, so they keep working once `query` is gone."""
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    harness.mcp.tools[0] = slack_tool(
+        "slack_search_public_and_private",
+        description="Current user's user_id is U0OWNER1.",
+        schema=SEARCH_NOW,
+    )
+    runtime = await harness.connect()
+    slack = runtime.slack
+    await slack.poll_once()
+    harness.mcp.results["to:me"] = search_answer(
+        "to:me", ("D0ALICE01", "DM", "U0ALICE1", "Alice", ROOT[2], "lunch?", "")
+    )
+    await slack.poll_once()
+    await slack.find_sent({"channel_id": "D0ALICE01"}, "Thanks for the fix", 1795200000)
+    await slack.thread_root("C0DEPLOYS", "1795202000.200200")
+    harness.mcp.results["from:me"] = search_answer(
+        "from:me", ("D0ALICE01", "DM", "U0OWNER1", "Owner", ROOT[2], "on it!", "")
+    )
+    await runtime.habits.collect_slack()
+    searches = [a for tool, a in harness.mcp.calls if tool == "slack_search_public_and_private"]
+    assert searches and not [a for a in searches if "query" in a], searches
+    assert [a["filters"] for a in searches] == [
+        "hasmy::robot_face:",
+        "to:me",
+        "<@U0OWNER1>",
+        "hasmy::robot_face:",
+        "from:me",
+        "in:<#C0DEPLOYS>",
+        "from:me",
+    ]
+    sent = searches[4]
+    assert sent["keywords"] == ['"Thanks for the fix"'] and sent["natural_language_query"] == ""
+    assert all(a["keywords"] == [] for a in searches if a is not sent)
+    assert any(
+        m["kind"] == "inbound" and "lunch?" in m["text"]
+        for m in harness.store.messages(harness.router_id)
+    ), "what it finds still reaches the Router"
