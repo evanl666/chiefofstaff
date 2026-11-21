@@ -1078,6 +1078,65 @@ async def teams_views(runtime, browser, quality: Quality):
         await context.close()
 
 
+async def relations_views(runtime, browser, quality: Quality):
+    """E130: a team its tasks' relations make: Home's line with its cue, the team's view (the
+    counts, a row per task with one relation) and a task's lineage open, a worker's Team tab
+    with its task's lineage; 800 to 1440 px, light and dark (browser-shots/relations/)."""
+    from ui_edges import relations_seeded
+
+    folder = SHOTS / "relations"
+    folder.mkdir(exist_ok=True)
+    seeded = await relations_seeded(runtime)
+    team = f"team-{seeded['api'][:8]}"
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 1000}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        row = page.locator(f'#teams-strip .team-row[data-team="{team}"]')
+        await expect(row).to_be_visible(timeout=15000)
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1000})
+            await page.wait_for_timeout(150)
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=tasks]").click()
+                await page.wait_for_timeout(150)
+            await page.locator("#teams-strip").screenshot(
+                path=folder / f"quality-{width}-{scheme}-strip.png"
+            )
+            await quality.check(page, f"relations strip {width} {scheme}", "#teams-strip")
+        await quality.contrast(page, f"relations strip {scheme}", "#teams-strip")
+        await row.click()
+        view = page.locator("#timeline .team-view")
+        await expect(view.locator(".team-tasks .trow")).to_have_count(6)
+        await view.locator(f'.trow[data-task="{seeded["ui_task"]}"] .main').click()
+        await expect(view.locator(".lineage .lnode.self")).to_have_count(1)
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1000})
+            await page.wait_for_timeout(150)
+            await page.locator("#main").screenshot(
+                path=folder / f"quality-{width}-{scheme}-team.png"
+            )
+            await quality.check(page, f"relations team view {width} {scheme}", "#main")
+        await quality.contrast(page, f"relations team view {scheme}", "#main")
+        await page.locator("#session-list .item", has_text="Release Notes").first.click()
+        await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
+        await expect(page.locator("#timeline > .team-lineage .lnode.self")).to_be_visible()
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1000})
+            await page.wait_for_timeout(150)
+            await page.locator("#main").screenshot(
+                path=folder / f"quality-{width}-{scheme}-worker-team.png"
+            )
+            await quality.check(page, f"relations worker team tab {width} {scheme}", "#main")
+        await quality.contrast(page, f"relations worker team tab {scheme}", "#main")
+        quality.failures += [f"page error {scheme}: {error}" for error in errors]
+        await context.close()
+
+
 async def usage_views(runtime, browser, quality: Quality):
     """E131-E136, Usage: the totals as Copilot counts them, By session with a worker's tasks
     unfolded, By task and what the spend went to; 800 and 1280 px, light and dark
@@ -1318,6 +1377,8 @@ async def main():
             log("what workers told each other, folded on Home (teams/)")
             await usage_views(runtime, browser, quality)
             log("Usage: as Copilot counts it, by task, a worker's tasks (usage/)")
+            await relations_views(runtime, browser, quality)
+            log("how a team's tasks are related (relations/)")
             await browser.close()
         server.should_exit = True
         await serving
