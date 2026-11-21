@@ -358,6 +358,44 @@ async def test_the_router_runs_on_claude_with_nothing_but_its_tools(
         await runtime.stop()
 
 
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+async def test_the_router_on_another_agent_is_given_its_whole_role(
+    tmp_path, monkeypatch, request, agent
+):
+    """The Router on Codex or Claude is given its role as on Copilot, word for word, 0.1.51's
+    rules too: a new worker when the owner asks for one in so many words (spawn_worker's why_new
+    says so too), and a new task's result is report(status="done"), never an answer."""
+    starts = tmp_path / "claude-starts.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
+    read = request.getfixturevalue("codex_log" if agent == "codex" else "claude_on_path")
+    harness, runtime = await started(tmp_path)
+    router = harness.router_id
+    try:
+        await saved(runtime, {agent: {"enabled": True}, "roles": {"router": agent}})
+        assert runtime.agent(router) == agent
+        role = runtime.session_prompt(harness.store.session(router), None)
+        if agent == "codex":
+            (start,) = [
+                p for p in read("thread/start") if p["cwd"] == str(runtime.role_dir(ROUTER))
+            ]
+            given = start["developerInstructions"]
+            (tool,) = [t for t in start["dynamicTools"] if t["name"] == "spawn_worker"]
+            why_new = tool["inputSchema"]["properties"]["why_new"]["description"]
+            assert "At once when the owner asked for a new worker in so many words" in why_new
+        else:
+            (start,) = [json.loads(line) for line in starts.read_text().splitlines()]
+            given = start["appended"]
+        assert given == role
+        for rule in (
+            "When the owner asks for a new worker in so many words",
+            'A new task\'s instructions (spawn_worker,\n  or message_session task="new") never '
+            'ask for status="answer"',
+        ):
+            assert rule in given, rule
+    finally:
+        await runtime.stop()
+
+
 # The Watchdog
 
 
