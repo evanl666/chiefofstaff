@@ -37,11 +37,12 @@ P3  Restart on Codex, the worker queued for a slot (no step yet): its task runs 
     first one closed
 P4  Continue with Codex from a Copilot worker with an uncommitted file: the preview says so in
     one line; the new worker reads that file in its copy; the first stays open
-P5  Codex signed out, named for a task: one line with the command (codex login), nothing started
-    elsewhere; Run on Copilot instead starts it there
+P5  Codex signed out, named for a task: its card says the message is saved (it starts on Codex
+    once signed in; Sign in, codex login), nothing started elsewhere; the owner's Continue with
+    Copilot starts it there
 P6  Codex signed out, work for a Codex worker the owner has (P1's): the same card, for that
-    worker, nothing started elsewhere; Continue with Copilot goes on with its work there, with
-    what it was given, and answers
+    worker (it gets it once signed in), nothing started elsewhere; Continue with Copilot goes on
+    with its work there, with what it was given, and answers
 
     env LIVE_AGENTS_ROOT=<tree>/.cos-live \
         uv run --extra claude --with playwright python scripts/live_roles.py R|S|W|F [R1 R3 …]
@@ -502,9 +503,14 @@ async def p5_named_not_ready(ctx: Ctx):
         log(f"P5: {found['text']!r} {found['meta'].get('fix')}")
         # For a Codex worker it had (P6's case), not a new one: not this check's case either.
         assert not found["meta"].get("worker"), f"given to a worker it had: {found['text']!r}"
+        # Saved for Codex (it starts there once signed in), with Sign in and Continue with
+        # Copilot on its card: nothing starts elsewhere until the owner says so.
+        assert found["text"].startswith("Codex needs you to sign in. Your message is saved: “")
+        assert found["text"].endswith("” starts on Codex once you have."), found["text"]
         assert found["meta"]["fix"]["command"] == "codex login", found["meta"]
         now = {s["id"] for s in (await la.state(ctx))["sessions"] if s["role"] == "worker"}
         assert now <= before, "nothing started elsewhere"
+        # The owner's Continue with Copilot on its card (the one way it moves there).
         await ctx.app.post(
             f"/api/agent-refusals/{found['meta']['agent_refused']}", {"action": "copilot"}
         )
@@ -548,10 +554,13 @@ async def p6_worker_signed_out(ctx: Ctx):
 
         found = await wait_for("the card for its worker", card, 300, ctx.app)
         log(f"P6: {found['text']!r} {found['meta'].get('fix')}")
-        assert "did not get this on Codex" in found["text"], found["text"]
+        # Saved for the worker (it gets it once Codex is signed in again: 0.1.54's card).
+        assert found["text"].startswith("Codex needs you to sign in. Your message is saved: “")
+        assert found["text"].endswith("” gets it on Codex once you have."), found["text"]
         assert found["meta"]["fix"]["command"] == "codex login", found["meta"]
         now = {s["id"] for s in (await la.state(ctx))["sessions"] if s["role"] == "worker"}
         assert now <= before, "nothing started elsewhere"
+        # The owner's Continue with Copilot on its card: its work goes on there, with this.
         await ctx.app.post(
             f"/api/agent-refusals/{found['meta']['agent_refused']}", {"action": "copilot"}
         )
