@@ -1368,11 +1368,19 @@ picks that agent's model and effort. Once it has begun, *Continue with…* is wh
   was given. One that can't run for another reason (too old, turned off) says why, with *Wait* or
   *Run on Copilot instead*, and nothing starts elsewhere.
 - The agent new workers use cannot run: they start on Copilot, and their name says why.
-- A plan's usage limit, or a rate limit the agent gave up on, reached in the middle of a task:
-  the worker pauses under *Needs you*, saying when the limit resets when the agent says it. *Go
-  on at* that time (it goes on by itself then, unless you or another worker have told it
-  something since), *Go on* once it has, or *Continue with* the other agent (a menu of them,
-  where there are several). Nothing switches by itself.
+- A plan's usage limit used up, or a rate limit the agent gave up on, in the middle of a task:
+  the worker pauses, saying which limit and until when ("Codex's weekly limit is used up · resets
+  tomorrow 11:11 AM", in your local time; Codex's limits are read when it doesn't say them first).
+  Where the agent said when, it goes on by itself then, once (under *Monitoring* until then; at
+  that time Codex is asked again, and a limit not reset after all is waited for again), unless you
+  or another worker have told it something since; it is listed under *Handled for you*. *Continue
+  with Copilot* (or another agent that can run it) moves it over now; *Go on now* is in its **⋯**.
+  Where the agent didn't say when (a rate limit, or Claude without its reset), its card says so
+  plainly and waits under *Needs you* for *Go on* or *Continue with*. Until the limit resets, the
+  `@` list, the chip's popover and the chip say so ("Weekly limit used up · resets tomorrow 11:11
+  AM"); you can still pick that agent: work you name it for is saved with its card ("Your message
+  is saved: … starts on Codex once it resets"), with *Continue with Copilot* and *Don't run it*,
+  and starts there by itself, once, after the reset. Nothing switches by itself.
 
 **The Router and the Watchdog on another agent.** Once Codex or Claude is available, the same tab
 has *System agents*, folded: *The Router runs on* and *The Watchdog runs on* (Copilot by default;

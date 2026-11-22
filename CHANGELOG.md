@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-Choosing and using another coding agent is smoother: sign in to it and install it from the
-page, and what waited for it goes on by itself.
+Workers that work together are a team you can follow in one thread, with how their tasks
+are related; usage counts as Copilot counts it; and choosing and using another coding agent
+is smoother: sign in to it and install it from the page, and what waited for it goes on by
+itself.
 
 - **Sign in and Install without a terminal.** Wherever Codex or Claude Code says *Sign-in
   needed* (the `@` list, the chip's popover, a card, Settings, *System agents*), *Sign in* runs
@@ -19,44 +21,14 @@ page, and what waited for it goes on by itself.
   agent the Router runs on and says when Claude's sign-in ends, a week before. A key or token in
   the environment an agent's workers use over its sign-in is named in its status
   (`ANTHROPIC_API_KEY` for Claude, `CODEX_ACCESS_TOKEN` for Codex), never shown.
+- **A plan's limit says until when, and work waits for it by itself.** A worker paused for its
+  plan's limit says which one and when it resets ("Codex's weekly limit is used up · resets
+  tomorrow 11:11 AM"; Codex's limits are read when it didn't say them first), as do the `@` list
+  and the chip; it goes on by itself then, once, and work you name the agent for meanwhile is saved
+  and starts there after the reset, both under *Handled for you*. *Continue with Copilot* moves
+  either over now. Where the agent didn't say when (Claude, at times), it says so plainly.
 - **With the sandbox off, a worker on any agent can delete files you can.** Its commands run as
   you; the guide now says so plainly, and that turning the sandbox on prevents it.
-- **Slack searches ask the way Slack's search takes them now.** Slack's search lists its words
-  and its modifiers (*to:me*, *hasmy::robot_face:*, *from:me*) apart since November 2026, and no
-  longer lists the single query Chief of Staff gave it (still taken, for now). Chief of Staff's own
-  searches (new DMs and mentions, your delegate emoji, finding a reply you sent) use the new way,
-  so they keep working once the old one goes.
-- **A DM with yourself reads as *your notes to yourself*.** A thread there showed as *Slack thread
-  in D0…*: with nobody else in it, there was no one to name it after.
-- **Usage counts premium requests as Copilot does (E131).** Each model call counted as a
-  premium request, the model's own next calls in a turn too: 56,255 in a day where Copilot
-  counted 8,460. Now only a call a message started counts, at its model's multiplier, labelled
-  *premium requests (as Copilot counts them)*. Calls kept by an earlier version are read back
-  from their session's log; those whose log is gone are said apart (*up to N more from older
-  calls*).
-- **Compactions are counted (E132).** When Copilot sums up a long conversation, its model calls
-  cost credits but came with no usage event. They count now, as calls and credits, also read
-  back from logs for the days before.
-- **Usage shows what the tokens were (E134).** Output, fresh input, prompt-cache reads and
-  cache writes, apart, and the context a call sent on average: most input is the conversation
-  sent again.
-- **What the spend went to (E135).** *Per accepted result* divided what running tasks spent by
-  the finished ones, and left out what no task spent. Now *Tasks with spend in this range* says:
-  finished and accepted (what each cost), in progress (so far), failed or cancelled, and not
-  tied to a task (the Router, Watch for you, …).
-- **By task, and each worker's tasks (E136).** A new *By task* table, with what no task spent
-  last. In *By session* a worker was named after its current task, as if all it spent was that
-  task's; now it says it is a worker and how many tasks it had, and unfolds to them.
-- **A worker's answer to a note keeps its name.** Given a second task while on its first, a
-  worker finished both and was named after the second; told something about the first since
-  (*the spec is approved*), its answer named it after the first again. What a worker says about
-  one task while it works on another no longer renames it.
-- **No more *MallocStackLogging* lines in the terminal (macOS).** Each time Copilot started an
-  MCP server (a Python one, say), the terminal Chief of Staff runs in got a line *python3(12345)
-  MallocStackLogging: can't turn off malloc stack logging because it was not enabled*: harmless,
-  from macOS. That line is dropped wherever Chief of Staff reads what Copilot, Codex, Claude
-  Code and what they start write on stderr; all else they write goes where it did (an error
-  still shows), and a Claude worker that can't start no longer gives that line as its reason.
 - **Teams: one thread for what workers that work together say (E129, E130).** Each team has a
   line above *Running* (*2 workers · 8 messages · 1 waiting 9 min*) and a view of its own: who
   talks to whom, and everything they told and asked each other, each question with its answer
@@ -87,6 +59,42 @@ page, and what waited for it goes on by itself.
   along with its next turn (up to 600 characters each, about 80,000 a day in a busy QA run);
   now it gets a short digest of who told or asked whom and what still waits, and reads a team's
   thread only when you ask about it or a question there holds a task up.
+- **Usage counts premium requests as Copilot does (E131).** Each model call counted as a
+  premium request, the model's own next calls in a turn too: 56,255 in a day where Copilot
+  counted 8,460. Now only a call a message started counts, at its model's multiplier, labelled
+  *premium requests (as Copilot counts them)*. Calls kept by an earlier version are read back
+  from their session's log; those whose log is gone are said apart (*up to N more from older
+  calls*).
+- **Compactions are counted (E132).** When Copilot sums up a long conversation, its model calls
+  cost credits but came with no usage event. They count now, as calls and credits, also read
+  back from logs for the days before.
+- **Usage shows what the tokens were (E134).** Output, fresh input, prompt-cache reads and
+  cache writes, apart, and the context a call sent on average: most input is the conversation
+  sent again.
+- **What the spend went to (E135).** *Per accepted result* divided what running tasks spent by
+  the finished ones, and left out what no task spent. Now *Tasks with spend in this range* says:
+  finished and accepted (what each cost), in progress (so far), failed or cancelled, and not
+  tied to a task (the Router, Watch for you, …).
+- **By task, and each worker's tasks (E136).** A new *By task* table, with what no task spent
+  last. In *By session* a worker was named after its current task, as if all it spent was that
+  task's; now it says it is a worker and how many tasks it had, and unfolds to them.
+- **Slack searches ask the way Slack's search takes them now.** Slack's search lists its words
+  and its modifiers (*to:me*, *hasmy::robot_face:*, *from:me*) apart since November 2026, and no
+  longer lists the single query Chief of Staff gave it (still taken, for now). Chief of Staff's own
+  searches (new DMs and mentions, your delegate emoji, finding a reply you sent) use the new way,
+  so they keep working once the old one goes.
+- **A DM with yourself reads as *your notes to yourself*.** A thread there showed as *Slack thread
+  in D0…*: with nobody else in it, there was no one to name it after.
+- **A worker's answer to a note keeps its name.** Given a second task while on its first, a
+  worker finished both and was named after the second; told something about the first since
+  (*the spec is approved*), its answer named it after the first again. What a worker says about
+  one task while it works on another no longer renames it.
+- **No more *MallocStackLogging* lines in the terminal (macOS).** Each time Copilot started an
+  MCP server (a Python one, say), the terminal Chief of Staff runs in got a line *python3(12345)
+  MallocStackLogging: can't turn off malloc stack logging because it was not enabled*: harmless,
+  from macOS. That line is dropped wherever Chief of Staff reads what Copilot, Codex, Claude
+  Code and what they start write on stderr; all else they write goes where it did (an error
+  still shows), and a Claude worker that can't start no longer gives that line as its reason.
 - **Fixes:** a Codex signed in with an API key ("API key configured") read as signed out; an
   agent signed out while its workers ran still said *Ready*, and a new task or message for it
   went to it and failed there (it is saved with its card now); work you asked done directly in
