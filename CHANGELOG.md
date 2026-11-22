@@ -140,7 +140,8 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   Staff's own message). Nothing Slack answers is shown as it is any more: what can't be read
   is one plain line (*Couldn't read this conversation from Slack just now; the reply still goes
   to …*), the details go to the log, email addresses are never kept, and a message can't pass
-  off its own text as someone else's message in the new format either.
+  off its own text as someone else's message in the new format either: it's shown whole, as its
+  sender's, with a note that lines in it only look like other messages.
 - **React with your delegate emoji, and the reply goes out without asking.** When you react to a
   Slack message with your delegate emoji (*:robot_face:* unless you changed it), the worker that
   takes it on replies in that message's thread directly, as you: no card to approve. It's told
