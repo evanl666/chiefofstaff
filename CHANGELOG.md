@@ -86,7 +86,9 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   held read-only there), and its commands are checked in the folder its shell is in, after a
   `cd` too; with the worker sandbox turned on while a worker works, what you send it before
   that turn is over waits for its next turn, sandboxed (a follow-up went into the turn that
-  began unsandboxed).
+  began unsandboxed); a Codex worker whose process stopped by itself goes on in a new one once
+  its old Codex has ended (that one could still hold its conversation, then "open in another
+  Codex window").
 - **Codex workers' supervisor starts isolated.** It ran with the folder Chief of Staff was
   started in first on Python's import path: started inside a repository, a `typing.py` or a
   `chiefofstaff/` folder there would have run as it. It now runs with `python -I`, in a folder

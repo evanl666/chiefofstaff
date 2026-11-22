@@ -2921,6 +2921,30 @@ async def test_each_codex_worker_has_its_own_process_and_its_crash_is_its_own(
         await runtime.stop()
 
 
+async def test_a_codex_worker_whose_process_stopped_by_itself_goes_on_once_its_codex_has_ended(
+    tmp_path, monkeypatch
+):
+    """Its supervisor killed, the worker's Codex ends at the end of its input, a moment later
+    (CI: killing its command first), holding its thread's writer lock until then: the worker
+    goes on in a new process once it has, never "open in another Codex window"."""
+    harness, runtime = await brief(tmp_path, monkeypatch, FAKE_CODEX_ENDING="1")
+    wire = tmp_path / "fake" / "wire.jsonl"  # Every message either way (fake_codex).
+    try:
+        worker = await spawn(runtime, harness, "Wait 30 s.")
+        backend, _ = runtime.connection("codex")
+        await until(lambda: worker in backend.workers, 30)
+        await until(lambda: harness.store.session(worker)["status"] == "working", 30)
+        mine = backend.workers[worker]
+        os.kill(mine.process.pid, signal.SIGKILL)
+        await until(lambda: backend.workers.get(worker) not in {None, mine}, 30)
+        await until(lambda: (new := backend.workers.get(worker)) and new.sessions, 30)
+        assert "active writer" not in wire.read_text(), "its thread was never refused to it"
+        assert "another Codex window" not in str(harness.kinds(worker))
+        assert harness.store.session(worker)["status"] == "working"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_codex_worker_that_reaches_another_thread_is_stopped_alone(tmp_path, monkeypatch):
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:

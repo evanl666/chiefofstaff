@@ -1039,6 +1039,13 @@ class CodexBackend:
             with suppress(OSError):
                 os.close(self.lifeline)
             self.lifeline = None
+        reader = self.reader
+        if self.by_itself and reader and not reader.done() and reader is not asyncio.current_task():
+            # Its supervisor ended by itself (killed) before Codex: Codex ends at the end of its
+            # input and holds its threads' writer locks until then, so its end is waited for (a
+            # grace at most) before the worker's next process opens them ("already has an
+            # active writer": its conversation would be "open in another Codex window").
+            await asyncio.wait({reader}, timeout=STOP_GRACE)
         for task in (self.reader, self.errors, *self.tasks):
             if task and task is not asyncio.current_task():
                 task.cancel()

@@ -150,6 +150,8 @@ class Server:
                 task.add_done_callback(self.serving.discard)
         for _, process, *_rest in list(self.terminals.values()):
             await kill_group(process.pid)
+        # As Codex takes a moment to end (writing its threads down): its locks held until then.
+        await asyncio.sleep(float(os.environ.get("FAKE_CODEX_ENDING") or 0))
         self.release_locks()
 
     async def serve(self, message: dict):
