@@ -193,7 +193,8 @@ worker handed another.
 **How a team's tasks are related.** Workers whose tasks are related are a team too, even if
 they never message: one that waits on another's result, does a task instead of another (*handed
 to E2E Runner*), builds on what another found (*picks up from Token Scout*) or was split off,
-the parts of one request, and a Compare's sides (*vs Codex*; the one you accept *picked*, the
+the parts of one request worked on side by side (a task that waits on another follows it, and
+is told so: no part), and a Compare's sides (*vs Codex*; the one you accept *picked*, the
 other dimmed: in the sidebar, a team that is only a Compare keeps its *Compare* line). A team's
 view says it in counts first (*⇉ 3 parts ●●○ · ⇢ 1 waiting · ⑂ 1 split · #482*; click one to
 light the tasks it counts), then *Tasks*, a row per
@@ -208,9 +209,9 @@ Beside a worker's avatar, a title leaves out the worker's own name (*The v2 page
 *Checkout UI: the v2 pages*; all of it on hover). When a wait clears while you look, its
 line draws itself solid and the row says *Checkout UI delivered · unblocked*, then *✓ after
 Checkout UI*. A PR or project the tasks share is a chip, never a link that makes a team. On
-Home, a team's line adds one cue (*●●○ 2 of 3 parts* or *⇢ 1 waiting*); a worker's *Team* tab
-starts with its task's lineage. With *Reduce motion* on in your system, nothing moves; the words
-say it.
+Home, a team's line adds one cue (*⇢ 1 waiting* first, else *●●○ 2 of 3 parts*); a worker's
+*Team* tab starts with its task's lineage. With *Reduce motion* on in your system, nothing
+moves; the words say it.
 
 **Routing to the right worker** matters most. Your message reaches the Router together with
 the workers whose record matches it (title, task, files, branches, reports; keyword search,

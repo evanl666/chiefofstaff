@@ -5478,8 +5478,9 @@ async def round_relations(runtime, browser, failures: list[str]):
         if width < 1100:
             await page.locator("#home-tabs [data-tab=tasks]").click()
         row = page.locator(f'#teams-strip .team-row[data-team="{team}"]')
-        await expect(row.locator(".words")).to_have_text("5 workers · 1 of 3 parts")
-        await expect(row.locator(".cue .dots > span.on")).to_have_count(1)
+        # One cue: a task waiting on another's first (live R2), before the fan's parts.
+        await expect(row.locator(".words")).to_have_text("5 workers · 1 waiting")
+        await expect(row.locator(".cue .glyph.waits")).to_have_count(1)
         found = await page.locator("#teams-strip").evaluate(OVERFLOWS)
         assert not found, (width, found)
         await page.locator("#teams-strip").screenshot(path=shots / f"strip-{width}-{scheme}.png")

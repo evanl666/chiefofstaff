@@ -387,11 +387,11 @@ function fanWords(view, group) {
   return `${workers} workers, one request · ready when ${group.total} of ${group.total} land${failed}`;
 }
 
-// Home's line of a team: one word-sized cue of its tasks (a fan landing, or tasks waiting on
-// another's), or nothing.
+// Home's line of a team: one word-sized cue of its tasks, as a row's relation is chosen: tasks
+// waiting on another's first, else a fan landing; or nothing.
 export function cueNode(team) {
   const cue = team.cue || {};
-  if (cue.parts) return el("span", { class: "cue" }, dots(cue.parts[0], cue.parts[1]), `${cue.parts[0]} of ${cue.parts[1]} parts`);
   if (cue.waiting) return el("span", { class: "cue" }, glyph("waits"), `${cue.waiting} waiting`);
+  if (cue.parts) return el("span", { class: "cue" }, dots(cue.parts[0], cue.parts[1]), `${cue.parts[0]} of ${cue.parts[1]} parts`);
   return null;
 }

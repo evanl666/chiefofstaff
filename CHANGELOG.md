@@ -41,9 +41,9 @@ itself.
   asked that its teammate waits, *Open thread* shows the exchange.
 - **How a team's tasks are related, at a glance (E130).** Tasks are related in ways Chief of
   Staff already kept but never showed together: one waits on another's result, does a task
-  instead of another, builds on what another found, was split off, is one part of a request, or
-  is the same task on another agent (a Compare: *vs Codex*; the one you accept *picked*, the
-  other dimmed).
+  instead of another, builds on what another found, was split off, is one part of a request
+  worked on side by side (one that waits on another follows it: no part), or is the same task on
+  another agent (a Compare: *vs Codex*; the one you accept *picked*, the other dimmed).
   A team's view now has a *Tasks* section: a row per task with its status and the one relation
   that matters most (*waits on Checkout UI · 9 min*, *handed to E2E Runner*, *3 parts · 1 landed*,
   *split from …*), counts above it (*⇉ 3 parts ●●○ · ⇢ 1 waiting · #482*, a click lights their
@@ -51,7 +51,8 @@ itself.
   plain words (*3 workers, one request · ready when 3 of 3 land*; *All 3 parts landed · 42
   min*). A wait that clears while you look draws its line solid once (*Checkout UI delivered ·
   unblocked*). Workers whose tasks are related are one team even if they never messaged; a PR
-  they share is a chip, never a link. Home's line of a team adds one cue (*●●○ 2 of 3 parts*),
+  they share is a chip, never a link. Home's line of a team adds one cue (*⇢ 1 waiting* first,
+  else *●●○ 2 of 3 parts*),
   and a worker's *Team* tab starts with its task's lineage.
 - **A folded run of the Router's start lines shows each started worker's agent mark** (its
   agent and model on hover), when more than one coding agent is on (E129).
