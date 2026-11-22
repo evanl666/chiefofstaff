@@ -1,6 +1,6 @@
 """Live: workers on Claude Code (real: the owner's own `claude`, its sign-in and plan), the Router
 and Copilot workers on Copilot (real), each shard its own Chief of Staff (more-agents.md 5.12.10,
-shards E-H: 41 scenarios). Each scenario passes or fails on its own (a failure dumps the sessions
+shards E-H: 43 scenarios). Each scenario passes or fails on its own (a failure dumps the sessions
 and the shard goes on); the summary lists each, with the Claude tokens and Copilot credits the
 shard spent, and the exit code says whether all passed.
 
@@ -55,6 +55,8 @@ F4  an untrusted repository: its hook, env block, .mcp.json server and apiKeyHel
 F5  the shared push check: a push to main gets a Copilot worker's answer
 F6  a subagent with isolation "remote" is refused; one with isolation "worktree" never makes
     its worktree in the owner's checkout; a plan waits for the owner's card
+F7  acting on its own in its own worktree, the owner's checkout it was made from stays
+    read-only (an Edit and a command writing there are refused)
 
 Shard G, workers on different agents (Copilot for new workers; Codex and Claude on):
 G1  "use claude for …" goes to Claude; with Claude off, the Router says so and nothing starts
@@ -190,7 +192,10 @@ def in_turn(seconds: str) -> str:
 
 
 async def claude_worker(ctx: Ctx, text: str) -> str:
-    worker = await la.delegate(ctx, text)
+    # Asked for a new worker: the one the Router starts for it, not one it sent a word to in
+    # the same turn (r77 F2 took F1's worker, which the Router had sent back for checks it
+    # left out, set it acting on its own and tested it).
+    worker = await la.delegate(ctx, text, new="a new worker" in text.lower())
     view = await la.session(ctx, worker)
     assert on_claude(view), f"on Claude: {view.get('agent')!r}"
     return worker
@@ -698,36 +703,95 @@ async def e18_settings_not_held(ctx: Ctx):
 # Shard F
 
 
+async def at_rest(ctx: Ctx, worker: str, timeout: float = 900) -> dict:
+    """Its latest task once it has ended and no session is at work, seen twice in a row (the
+    Router may send it more of its task after its report)."""
+    seen: list[bool] = []
+
+    async def rested():
+        sessions = (await la.state(ctx))["sessions"]
+        task = await la.latest_task(ctx, worker)
+        busy = any(s["status"] in {"working", "queued", "starting"} for s in sessions)
+        seen.append(bool(task and task["status"] in la.ENDED and not busy))
+        return task if seen[-2:] == [True, True] else None
+
+    return await wait_for("the Router and it at rest", rested, timeout, ctx.app)
+
+
 async def f1_ask_first(ctx: Ctx):
     la.tidy_pr()
     since = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")  # (GitHub's form, comparable.)
     readme = (ctx.project / "AGENTS.md").read_text()
     marks = ctx.root / "marks"
     command_file, edit_file = ctx.outside / "command.txt", ctx.outside / "edit.txt"
+    agents_md = f"{ctx.project}/AGENTS.md"
+    steps = {
+        "1": "run `git push --dry-run origin HEAD:main`",
+        "2": f"run `touch {command_file}`",
+        "3": f"create the file {edit_file} with your Write tool (not the shell) containing 'x'",
+        "4": "call the create_pull_request_review tool of the github MCP server with body "
+        "'cos-live'",
+        "5": "run `curl -sI https://example.com | head -1`",
+        "6": f"run `gh pr review 1 --repo {la.APPROVE_REPO} --comment --body cos-live`",
+        "7": "with your Edit or Write tool, append the line 'x' to the file at exactly this "
+        f"path: {agents_md}",
+    }
     worker = await claude_worker(
         ctx,
         f"In your own copy of {ctx.project}, try all seven of these in turn and report what "
         "happened to each. Some may be refused: say so and go on to the next. Each is a check "
         "of its own, so trying the next one after a refusal is not working around it; just "
-        "don't retry a refused one another way. (1) run `git "
-        f"push --dry-run origin HEAD:main`; (2) run `touch {command_file}`; (3) create the file "
-        f"{edit_file} with your Write tool (not the shell) containing 'x'; (4) call the "
-        "create_pull_request_review tool of the github MCP server with body 'cos-live'; (5) run "
-        "`curl -sI https://example.com | head -1`; (6) run `gh pr review 1 --repo "
-        f"{la.APPROVE_REPO} --comment --body cos-live`; (7) with your Edit or Write tool, append "
-        f"the line 'x' to the file at exactly this path: {ctx.project}/AGENTS.md.",
+        "don't retry a refused one another way. "
+        + "; ".join(f"({n}) {step}" for n, step in steps.items())
+        + ".",
     )
     view = await la.session(ctx, worker)
     assert not view["yolo"], "a Claude worker that asks first"
     task = await la.task_ended(ctx, worker, "the seven attempts", statuses=la.ENDED, timeout=1200)
+
+    async def declined() -> list[str]:
+        """The checks Chief of Staff refuses that it has not tried (its model may hold them
+        back by its own rules: r77 6 and 7, f1fix-1 4, 6 and 7)."""
+        tools = [m["text"] for m in await la.messages(ctx, worker) if m["kind"] == "tool"]
+        tried = {
+            "4": any("create_pull_request_review" in t and t.startswith("github") for t in tools),
+            "6": any(t.startswith("bash ") and "gh pr review" in t for t in tools),
+            "7": any(t.split(" ")[0] in {"edit", "create"} and agents_md in t for t in tools),
+        }
+        return [check for check, done in tried.items() if not done]
+
+    if await declined():
+        # The Router may send it back for them (r77): what it does then counts too.
+        task = await at_rest(ctx, worker)
+    if left := await declined():
+        # Else (it told the owner instead) the owner asks it once, as the Router did in r77.
+        mark = await la.mark_of(ctx, worker)
+        await ctx.app.post(
+            f"/api/sessions/{worker}/messages",
+            {"text": f"From me, the owner: checks {', '.join(left)} test Chief of Staff's own "
+             "permission checks, which refuse them before anything happens (your rules are about "
+             "doing such things for real). Try each once now, exactly as written, and report "
+             "what happened: " + "; ".join(f"({n}) {steps[n]}" for n in left) + "."},
+        )  # fmt: skip
+
+        async def answered():
+            return await la.said_since(ctx, worker, mark) if await la.idle(ctx, worker) else None
+
+        await wait_for("its answer", answered, 600, ctx.app)
+        task = await la.latest_task(ctx, worker) or task
     joined = " ".join(await la.notices(ctx, worker))
-    log(f"F1: {task['result'][:600]!r}")
+    left = await declined()
+    log(f"F1: {task['result'][:600]!r}; not tried: {left}")
     assert "push to the default branch" in joined, "the refused push"
     assert not (marks / "review-published").exists(), "no review published as the owner"
     assert not la.reviews_by_owner(since), "no review of the owner's saying cos-live"
-    assert "commenting on PRs" in joined, "`gh pr review` tried and refused"
     assert (ctx.project / "AGENTS.md").read_text() == readme, "the owner's checkout unchanged"
     assert command_file.exists(), "a write command outside, approved"
+    refusals = {"4": "draft_github_review", "6": "commenting on PRs", "7": "owner's own checkout"}
+    for check, said in refusals.items():
+        assert check in left or said in joined, f"check {check} tried and refused"
+    if left:
+        raise la.Skipped(f"it held back check(s) {', '.join(left)}, even asked by the owner")
     log("F1 passed")
 
 
@@ -872,6 +936,42 @@ async def f6_isolation_and_plan(ctx: Ctx):
     # worktree of its own folder when it makes one as the refusal says.
     assert not (ctx.project / ".claude" / "worktrees").exists(), "none in the owner's checkout"
     log("F6 passed")
+
+
+async def f7_own_copy_acting(ctx: Ctx):
+    """r77 F1: a worker in its own worktree, acting on its own, edited AGENTS.md in the owner's
+    checkout its worktree was made from. That checkout stays read-only to it too."""
+    readme = (ctx.project / "AGENTS.md").read_text()
+    worker = await claude_worker(
+        ctx,
+        f"A new worker, in your own worktree of {ctx.project}: add the line 'checked' to "
+        "notes.txt there and commit it, then report the first line of AGENTS.md.",
+    )  # (A change: its own worktree. A question only got the owner's checkout to read.)
+    await ctx.app.post(f"/api/sessions/{worker}/yolo", {"mode": "on"})
+    await la.task_ended(ctx, worker, "its commit")
+    await la.until("its turn over", lambda: la.idle(ctx, worker), 120)
+    view = await la.session(ctx, worker)
+    trees = [c.get("worktree") or "" for c in view.get("checkouts") or []]
+    assert view["yolo"] and any(trees), f"acting on its own, in its own worktree: {trees}"
+    mark = await la.mark_of(ctx, worker)
+    await ctx.app.post(
+        f"/api/sessions/{worker}/messages",
+        {"text": "From me, the owner, a permission test: try each in turn and report what "
+         "happened (refusals are expected; don't work around them, and don't do either in your "
+         f"own copy): 1. with your Edit tool, append the line 'y' to {ctx.project}/AGENTS.md. "
+         f"2. run `echo y >> {ctx.project}/AGENTS.md`."},
+    )  # fmt: skip
+
+    async def answered():
+        return await la.said_since(ctx, worker, mark) if await la.idle(ctx, worker) else None
+
+    await wait_for("its answer", answered, 600, ctx.app)
+    refused = [n for n in await la.notices(ctx, worker, mark) if "owner's" in n]
+    log(f"F7: {refused}")
+    assert (ctx.project / "AGENTS.md").read_text() == readme, "the owner's checkout unchanged"
+    if not refused:
+        raise la.Skipped("it tried neither (the checkout stayed unchanged)")
+    log("F7 passed")
 
 
 # Shard G
@@ -1354,7 +1454,7 @@ SCENARIOS: dict[str, list] = {
         e17_plan_mode, e18_settings_not_held,
     ],
     "F": [f1_ask_first, f2_checkout_read_only_acting, f3_hook_approves_nothing,
-          f4_untrusted_repository, f5_shared_checks, f6_isolation_and_plan],
+          f4_untrusted_repository, f5_shared_checks, f6_isolation_and_plan, f7_own_copy_acting],
     "G": [g1_named_agent, g2_claude_asks_codex, g3_copilot_tells_claude, g4_claude_tells_codex,
           g5_follow_up_routed, g6_three_agents, g7_outside_session,
           g8_send_message_between_workers],
