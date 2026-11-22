@@ -5260,7 +5260,12 @@ async def teams_views_checked(runtime, browser, failures, seeded, shots):
         await tabs.get_by_role("tab", name=re.compile("^Team")).click()
         await expect(timeline.locator(".peer-msg > .card").first).to_be_visible()
         await expect(timeline.locator(".peer-msg > .event").first).to_be_hidden()
-        await expect(timeline.locator(":scope > :not(.peer-msg):visible")).to_have_count(0)
+        # Its task's lineage first (one of a request's two parts: E130), once the thread is read;
+        # then only what its team told it.
+        await expect(timeline.locator(":scope > .team-lineage")).to_be_visible()
+        await expect(
+            timeline.locator(":scope > :not(.peer-msg, .team-lineage):visible")
+        ).to_have_count(0)
         await page.locator("#main").screenshot(path=shots / f"worker-team-{width}-{scheme}.png")
         await tabs.get_by_role("tab", name="Reports").click()
         await expect(timeline.locator(".tab-empty")).to_have_text("No reports yet.")
