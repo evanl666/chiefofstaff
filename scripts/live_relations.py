@@ -185,9 +185,11 @@ async def r3_replaced(ctx: Ctx):
     await asyncio.sleep(20)
     await say(
         ctx,
-        "Change of plan for the 'Counter Script' task: have a new worker do it instead, in "
-        "Python this time (count.py printing 1 to 3, run once), and report; the current "
-        "worker must not go on with it.",
+        # (Said as a replacement: told only "instead", the Router may cancel the task and start
+        # a worker apart from it, and nothing says the new one does it instead: r81, run 2.)
+        "Change of plan for the 'Counter Script' task: replace it with a new worker that does "
+        "it instead, in Python this time (count.py printing 1 to 3, run once), and reports; "
+        "the current worker must not go on with it.",
     )
 
     async def replaced():
