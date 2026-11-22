@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.53 (2026-11-22)
 
 Workers can run on Claude Code too, with your own sign-in; choosing an agent is simpler (a card
 when one is ready, `@codex` and `@claude` in the message box, a *Coding agents* tab); workers on
