@@ -696,13 +696,16 @@ function taskCard(task, phase = phaseOf(task)) {
       // Its token limit used: nothing goes on until it is raised (Settings → Coding agents).
       more = [named, worker, cancel];
     } else if (task.status === "waiting" && task.stopped === PLAN_STOP) {
-      // Paused by its agent's limit: it goes on once that resets (by itself, asked here), or
-      // now; or another agent goes on with it. Never moved by itself.
+      // Paused by its agent's limit: it goes on by itself once that resets (where its agent
+      // said when), or now; or another agent goes on with it. Never moved by itself.
       const goOn = () => act(`/api/tasks/${task.id}/follow-up`, { text: "Go on where you stopped." }, "Sent to the worker.", true, true);
       const resets = (task.paused?.resets_at || 0) * 1000;
       const now = { text: "Go on now", onclick: goOn };
-      if (task.paused?.go_on_at) more = [now, ...elsewhereItems(task), named, worker, cancel];
-      else {
+      if (task.paused?.go_on_at) {
+        // It goes on by itself at its reset; Continue with another agent moves it over now.
+        shown = [elsewhereControl(task)];
+        more = [now, named, worker, cancel];
+      } else {
         const when = resetTime(resets);
         main = resets > Date.now() ? el("button", { type: "button", text: `Go on at ${when}`, "data-tip": "It goes on by itself once its limit resets", onclick: () => act(`/api/tasks/${task.id}/go-on-at-reset`, {}, `It goes on at ${when}.`) }) : el("button", { type: "button", text: "Go on", onclick: goOn });
         shown = [elsewhereControl(task)];

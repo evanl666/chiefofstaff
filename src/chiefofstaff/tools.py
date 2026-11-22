@@ -1825,11 +1825,14 @@ class Tools:
                     # card says why: the Router does not say it again.
                     self.runtime.agent_refused_card(named, str(exc), params.model_dump())
                     instead = agents.display(self.runtime.instead_of(named))
-                    held = agents.status_of(named, str(exc))["status"] in agents.HELD
+                    status = agents.status_of(named, str(exc))["status"]
                     can = (
-                        f"sign in or install it, and it starts there by itself; or run it on "
+                        f"it starts there by itself once its limit resets; or run it on "
                         f"{instead} instead"
-                        if held
+                        if status == agents.LIMITED
+                        else f"sign in or install it, and it starts there by itself; or run it on "
+                        f"{instead} instead"
+                        if status in agents.HELD
                         else f"run it on {instead} instead, or wait"
                     )
                     raise ValueError(
@@ -2380,10 +2383,14 @@ class Tools:
                 replay=params.model_dump(),
             )
             instead = agents.display(self.runtime.instead_of(agent))
-            held = agents.status_of(agent, why)["status"] in agents.HELD
+            status = agents.status_of(agent, why)["status"]
             can = (
-                f"sign in, and it gets this by itself; or continue its work on {instead}, with this"
-                if held
+                f"it gets this by itself once its limit resets; or continue its work on "
+                f"{instead}, with this"
+                if status == agents.LIMITED
+                else f"sign in, and it gets this by itself; or continue its work on {instead}, "
+                "with this"
+                if status in agents.HELD
                 else f"continue this worker's work on {instead}, with this, or wait"
             )
             raise ValueError(

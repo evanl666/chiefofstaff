@@ -226,18 +226,25 @@ export function workerContext(worker, list) {
 }
 // What another agent's worker paused for its plan's limit is stopped by (agents.PLAN_STOP).
 export const PLAN_STOP = "its plan's limit";
-// When a limit resets: its time, and its day when not today (a weekly limit).
+// When a limit resets, in local time (as agents.reset_words says it): "3:40 PM" today,
+// "tomorrow 11:11 AM", "Sat 11:11 AM" within a week, else "Nov 28 11:11 AM".
 export function resetTime(at, now = Date.now()) {
   const date = new Date(at);
   const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  return date.toDateString() === new Date(now).toDateString() ? time : `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  const day = (when) => new Date(when.getFullYear(), when.getMonth(), when.getDate());
+  const days = Math.round((day(date) - day(new Date(now))) / 86400000);
+  if (days <= 0) return time;
+  if (days === 1) return `tomorrow ${time}`;
+  if (days < 7) return `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
 }
-// A task its agent paused for a limit, its reset first: "Codex limit reached · resets 9:25 PM"
-// (as agents.pause_line says it).
+// A task its agent paused for a limit, its reset first: "Codex's weekly limit is used up ·
+// resets tomorrow 11:11 AM"; plainly when its agent did not say (as agents.pause_line says it).
 export function pauseLine(task, now = Date.now()) {
   const paused = task.paused || {};
-  const what = `${paused.agent_name || task.agent_name || "Its agent"} ${paused.rate ? "rate limit" : "limit"} reached`;
-  if (!paused.resets_at) return what;
+  const name = paused.agent_name || task.agent_name || "Its agent";
+  const what = paused.rate ? `${name} is refusing requests for a rate limit` : `${name}'s ${paused.window || "usage limit"} is used up`;
+  if (!paused.resets_at) return `${what}; it didn't say ${paused.rate ? "for how long" : "when it resets"}`;
   const at = paused.resets_at * 1000;
   return `${what} · ${at > now ? "resets" : "reset at"} ${resetTime(at, now)}`;
 }
@@ -258,7 +265,7 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   // (it waits under Monitoring for that) or to continue it on another agent.
   if (task.status === "waiting" && task.stopped === PLAN_STOP) {
     const goesOn = task.paused?.go_on_at;
-    if (goesOn) return { ...at("monitoring", "resets", `Goes on at ${resetTime(goesOn * 1000, now)}, once its ${task.paused.agent_name} limit resets`), word: "Paused" };
+    if (goesOn) return { ...at("monitoring", "resets", `${pauseLine(task, now)} · goes on by itself then`), word: "Paused" };
     return { ...at("needs", "stopped", pauseLine(task, now)), word: "Paused" };
   }
   if (task.status === "waiting" && task.stopped) return at("needs", "stopped", task.spend_why || `Stopped by ${task.stopped}: tell it to go on, or cancel it`);

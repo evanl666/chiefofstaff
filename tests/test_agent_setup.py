@@ -657,3 +657,143 @@ async def test_a_look_that_fails_otherwise_is_asked_for_later_each_time(
         assert runtime.agent_status("codex")["status"] == agents.READY
     finally:
         await runtime.stop()
+
+
+def codex_limit(minutes: int, seconds: float) -> int:
+    """The stand-in Codex's plan limit used up, its window (`minutes`) resetting in `seconds`,
+    its rate limits not said before a turn fails (read them), as live."""
+    resets = int(time.time() + seconds)
+    home = Path(os.environ["FAKE_CODEX_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "limit.json").write_text(json.dumps({"minutes": minutes, "resets_at": resets}))
+    return resets
+
+
+async def test_a_codex_limit_it_did_not_say_first_is_read_and_said_until_when(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """Codex refused a worker's turn for its plan's limit without saying its rate limits first:
+    they are read then; the worker's line, its paused task and the @ list say which window
+    holds it and until when; the task goes on by itself then."""
+    from test_agent_picker import limited
+
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        resets = codex_limit(7 * 24 * 60, 2 * 86400)
+        _worker, task, last = await limited(harness, runtime, "codex", "Report done: Fixed.")
+        assert last["text"].startswith("Paused: Codex's weekly limit is used up · resets ")
+        line = f"Codex's weekly limit is used up · resets {agents.reset_words(resets)}"
+        assert last["text"] == f"Paused: {line}"
+        view = runtime.task_actions.view(runtime.tasks.get(task))
+        assert view["paused"]["line"] == line
+        assert view["paused"]["go_on_at"] == resets, "it goes on by itself then"
+        status = runtime.agent_status("codex")
+        assert (status["status"], status["said"], status["resets_at"]) == (
+            agents.LIMITED,
+            "Weekly limit used up",
+            resets,
+        )
+    finally:
+        await runtime.stop()
+
+
+async def test_work_held_for_a_limit_goes_on_by_itself_once_it_resets_and_only_once(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """While Codex's plan limit is used up, work named for it is held (its card says until
+    when, and that the message is saved), as a worker it paused waits; once the limit resets
+    (its time, then Codex asked again), each goes on, once, under Handled for you."""
+    from test_agent_picker import limited
+
+    from chiefofstaff import task_actions
+
+    monkeypatch.setattr(runtime_module, "LIMIT_MARGIN", 0.2, raising=False)
+    monkeypatch.setattr(task_actions, "GO_ON_MARGIN", 0.2)
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        # (Long enough for the worker's turn to meet it on a slow machine.)
+        resets = codex_limit(300, 20)
+        paused, task, _ = await limited(harness, runtime, "codex", "Report done: Fixed.")
+        refused = await spawn_on(harness, runtime, title="Count the rows · data",
+                                 instructions="Report done: 42 rows.", agent="codex")  # fmt: skip
+        cards = [
+            m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
+        ]
+        assert len(cards) == 1, "held with its card, not started to be paused there"
+        assert "once its limit resets" in refused.text_result_for_llm
+        card = cards[0]
+        assert card["text"] == (
+            f"Codex's 5-hour limit is used up · resets {agents.reset_words(resets)}. Your message "
+            "is saved: “Count the rows · data” starts on Codex once it resets."
+        )
+        assert card["meta"]["status"] == agents.LIMITED
+        assert [r["id"] for r in harness.store.open_sessions(WORKER)] == [paused], "held"
+        await until(lambda: len(harness.store.open_sessions(WORKER)) == 2, 60)
+        (started_now,) = [r for r in harness.store.open_sessions(WORKER) if r["id"] != paused]
+        assert runtime.agent(started_now["id"]) == "codex"
+        assert (
+            harness.store.message(card["id"])["meta"]["resumed"] == "Resumed once its limit reset"
+        )
+        await until(lambda: runtime.tasks.get(task)["status"] != "waiting", 30)
+        await until(lambda: len(harness.store.all("SELECT id FROM handled")) == 2, 10)
+        said = sorted(row["text"] for row in harness.store.all("SELECT text FROM handled"))
+        assert said == [
+            "Started “Count the rows · data” on Codex once its limit reset",
+            "“Fix it” went on on Codex once its limit reset",
+        ]
+        assert runtime.agent_status("codex")["status"] == agents.READY
+        # Said over again (a look, a restart): nothing goes on twice.
+        await runtime.limit_over("codex")
+        await asyncio.sleep(0.6)
+        assert len(harness.store.open_sessions(WORKER)) == 2
+        goes = [
+            m for m in harness.store.messages(paused) if m["text"] == "Go on where you stopped."
+        ]
+        assert len(goes) == 1
+    finally:
+        await runtime.stop()
+
+
+async def test_continue_with_copilot_on_a_limits_card_moves_the_work_over_now(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    from test_agent_picker import limited
+
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        codex_limit(300, 3600)
+        await limited(harness, runtime, "codex", "Report done: Fixed.")
+        await spawn_on(harness, runtime, title="Count the rows · data",
+                       instructions="Report done: 42 rows.", agent="codex")  # fmt: skip
+        (card,) = [
+            m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
+        ]
+        await runtime.answer_refusal(card["meta"]["agent_refused"], "copilot")
+        moved = [r for r in harness.store.open_sessions(WORKER) if r["title"].startswith("Count")]
+        assert [runtime.agent(r["id"]) for r in moved] == ["copilot"]
+        assert harness.store.message(card["id"])["meta"]["resumed"] == "Started on Copilot instead"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_limit_without_a_reset_says_so_plainly_and_waits_for_the_owner(
+    tmp_path, claude_on_path, monkeypatch
+):
+    from test_agent_picker import limited
+
+    info = {"status": "rejected", "rateLimitType": "five_hour"}  # (No resetsAt.)
+    monkeypatch.setenv("FAKE_CLAUDE_LIMIT", json.dumps(info))
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        _worker, task, last = await limited(harness, runtime, "claude", "Hit the usage limit")
+        line = "Claude's 5-hour limit is used up; it didn't say when it resets"
+        assert last["text"] == f"Paused: {line}"
+        view = runtime.task_actions.view(runtime.tasks.get(task))
+        assert (view["paused"]["line"], view["paused"]["go_on_at"]) == (line, 0)
+        assert view["attention"] == "stopped", "the owner's: Go on, or Continue with…"
+    finally:
+        await runtime.stop()

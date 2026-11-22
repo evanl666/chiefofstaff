@@ -1212,7 +1212,8 @@ function refusalCard(text, meta, time) {
   // The agent it is offered on instead: the one new workers start on, else Copilot. For a worker
   // of theirs whose agent could not run, its work goes on there, with what it was given.
   const instead = agentName(meta.instead || "copilot");
-  const held = meta.status === "signin" || meta.status === "missing";
+  // Held for a sign-in, an install or a limit's reset: it goes on by itself after.
+  const held = meta.status === "signin" || meta.status === "missing" || meta.status === "limited";
   const copilot = el("button", {
     type: "button",
     class: "secondary",

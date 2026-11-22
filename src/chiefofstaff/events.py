@@ -994,10 +994,11 @@ class Events:
                 self.delivery.schedule_flush(session_id)
 
     def plan_limited(self, row: dict, message: str, limit: Any):
-        """Another agent's worker whose turn its plan's limit (or a rate limit) ended: paused
-        under Needs you with when it resets, if its agent said (Go on then, or Continue with
-        another agent), not failed nor tried again; never moved elsewhere by itself. Its plan's
-        limit, Settings says too."""
+        """Another agent's worker whose turn its plan's limit (or a rate limit) ended: paused,
+        saying until when if its agent said (it goes on by itself then, once; or Continue with
+        another agent now), plainly that it did not say else (under Needs you: Go on, or
+        Continue with…); not failed nor tried again; never moved elsewhere by itself. Its
+        plan's limit, Settings and the @ list say too."""
         agent = self.runtime.agent(row["id"])
         limit = dict(limit) if isinstance(limit, dict) else {}
         line = agents.limit_line(limit, name=agent) or (
@@ -1007,6 +1008,8 @@ class Events:
         self.runtime.workers.paused(row["id"], agents.PLAN_STOP, f"Paused: {line}", message)
         if agents.blocked(limit):
             self.runtime.plan_limit_seen(agent, limit)
+        # It said when that resets: it goes on by itself then, once (the owner may first).
+        self.runtime.task_actions.go_on_once_reset(row["id"])
 
     def retry_turn(self, row: dict, message: str) -> bool:
         """Copilot failed on its side (no answer, overloaded, a dropped connection): the turn is

@@ -3592,12 +3592,12 @@ class ClaudeAgent:
         return self.limit_refusal()
 
     def limit_refusal(self) -> str:
-        """While the plan's limit is reached (until its reset): why no worker runs. Nothing
-        tries again by itself."""
+        """While the plan's limit is used up (until its reset): why no worker runs (a worker it
+        paused goes on by itself then: TaskActions.go_on_once_reset)."""
         if not agents.blocked(self.limit):
             return ""
         line = agents.limit_line(self.limit)
-        return f"{line} Tell the worker to go on after that." if line else ""
+        return f"{line}." if line else ""
 
     def limit_seen(self, info: dict):
         """The plan's limit as a worker's stream said it (nothing about the account)."""

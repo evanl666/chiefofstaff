@@ -770,12 +770,12 @@ async def test_a_claude_plans_limit_mid_task_pauses_it_with_its_reset_not_failin
     try:
         await saved(runtime, {"claude": {"enabled": True}})
         worker, task, last = await limited(harness, runtime, "claude", "Hit the usage limit")
-        line = f"Your Claude plan's 5-hour limit is reached; it resets at {agents.clock(resets)}."
+        line = f"Claude's 5-hour limit is used up · resets {agents.reset_words(resets)}"
         paused_as_by_stop(harness, runtime, worker, task, last, line)
         assert last["meta"]["full"].startswith("API Error: Request rejected (429)")
         assert json.loads(harness.store.get("agentlimit:claude"))["status"] == "rejected"
         # Go on before it resets: refused at once, saying so; still paused, nothing sent.
-        with pytest.raises(Exception, match="5-hour limit is reached; it resets at"):
+        with pytest.raises(Exception, match="5-hour limit is used up · resets "):
             await runtime.task_actions.follow_up(task, "Go on where you stopped.")
         assert runtime.tasks.get(task)["status"] == "waiting"
         assert harness.store.get(f"stopped:{task}") == agents.PLAN_STOP
@@ -783,11 +783,12 @@ async def test_a_claude_plans_limit_mid_task_pauses_it_with_its_reset_not_failin
         await runtime.stop()
 
 
-async def test_a_paused_task_says_its_reset_first_and_goes_on_by_itself_then_once_asked(
+async def test_a_paused_task_says_its_reset_first_and_goes_on_by_itself_then(
     tmp_path, claude_on_path, monkeypatch
 ):
-    """Its row: "Claude limit reached · resets <time>" (Needs you). Go on at <time>: Monitoring
-    until then, nothing sent before; once it resets, it goes on as the owner's Go on would."""
+    """Its row: "Claude's 5-hour limit is used up · resets <time>", under Monitoring: it goes on
+    by itself then, unasked (Go on at <time> again for a reset said later); nothing sent
+    before; once it resets, it goes on as the owner's Go on would."""
     resets = int(time.time()) + 3600
     info = {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": resets}
     monkeypatch.setenv("FAKE_CLAUDE_LIMIT", json.dumps(info))
@@ -796,11 +797,12 @@ async def test_a_paused_task_says_its_reset_first_and_goes_on_by_itself_then_onc
     try:
         await saved(runtime, {"claude": {"enabled": True}})
         worker, task, _ = await limited(harness, runtime, "claude", "Hit the usage limit")
-        line = f"Claude limit reached · resets {agents.clock(resets)}"
-        paused = {"agent": "claude", "resets_at": resets, "rate": False, "agent_name": "Claude"}
+        line = f"Claude's 5-hour limit is used up · resets {agents.reset_words(resets)}"
+        paused = {"agent": "claude", "resets_at": resets, "rate": False, "agent_name": "Claude",
+                  "window": "5-hour limit"}  # fmt: skip
         view = runtime.task_actions.view(runtime.tasks.get(task))
-        assert view["paused"] == {**paused, "line": line, "go_on_at": 0}
-        assert (view["attention"], view["attention_why"]) == ("stopped", line)
+        assert view["paused"] == {**paused, "line": line, "go_on_at": resets}
+        assert view["attention"] == "", "it goes on by itself: not the owner's to do now"
         # Its reset near now (as its stream would say it later on).
         resets = int(time.time()) + 3
         runtime.agents["claude"].backend.limit["resets_at"] = resets
@@ -875,7 +877,9 @@ async def test_a_task_asked_to_go_on_at_its_reset_still_does_after_a_restart(
         await saved(runtime, {"claude": {"enabled": True}})
         _worker, task, _ = await limited(harness, runtime, "claude", "Hit the usage limit")
         view = runtime.task_actions.view(runtime.tasks.get(task))
-        assert view["paused"]["line"] == "Claude rate limit reached", "no reset said: none shown"
+        assert view["paused"]["line"] == (
+            "Claude is refusing requests for a rate limit; it didn't say for how long"
+        ), "no reset said: said plainly"
         # As one that was to go on while Chief of Staff was not running.
         harness.store.set(f"goonat:{task}", str(int(time.time()) - 60))
         runtime.task_actions.arm_scheduled()
@@ -892,7 +896,7 @@ async def test_a_rate_limit_with_an_api_key_pauses_a_claude_worker_and_is_not_re
     try:
         await saved(runtime, {"claude": {"enabled": True}})
         worker, task, last = await limited(harness, runtime, "claude", "Hit the usage limit")
-        line = "Claude is refusing requests for a rate limit."
+        line = "Claude is refusing requests for a rate limit; it didn't say for how long"
         paused_as_by_stop(harness, runtime, worker, task, last, line)
         await asyncio.sleep(0.5)  # Nothing tried again: one turn, the one refused.
         assert harness.store.get(f"retries:{worker}") is None
@@ -910,7 +914,7 @@ async def test_a_codex_plans_usage_limit_mid_task_pauses_it_with_its_reset(
         worker, task, last = await limited(harness, runtime, "codex", "Hit the usage limit")
         resets = json.loads(harness.store.get("agentlimit:codex"))["resets_at"]
         assert resets > time.time()
-        line = f"Your Codex plan's 5-hour limit is reached; it resets at {agents.clock(resets)}."
+        line = f"Codex's 5-hour limit is used up · resets {agents.reset_words(resets)}"
         paused_as_by_stop(harness, runtime, worker, task, last, line)
         assert last["meta"]["full"].startswith("You've hit your usage limit.")
         # Kept for Settings, in Codex's name.
@@ -927,7 +931,12 @@ async def test_a_rate_limit_codex_gave_up_on_pauses_its_worker_and_is_not_retrie
         await saved(runtime, {"codex": {"enabled": True}})
         worker, task, last = await limited(harness, runtime, "codex", "Hit the rate limit")
         paused_as_by_stop(
-            harness, runtime, worker, task, last, "Codex is refusing requests for a rate limit."
+            harness,
+            runtime,
+            worker,
+            task,
+            last,
+            "Codex is refusing requests for a rate limit; it didn't say for how long",
         )
         assert harness.store.get(f"retries:{worker}") is None
         assert harness.store.get("agentlimit:codex") is None
@@ -997,7 +1006,7 @@ async def test_each_plans_usage_is_in_its_row(tmp_path, codex_installed, claude_
         harness.store.set("agentlimit:claude", json.dumps(reached))
         claude = await runtime.look_for_agent("claude")
         assert "usage" not in claude and claude["limit_line"].startswith(
-            "Your Claude plan's weekly limit is reached; it resets at"
+            "Claude's weekly limit is used up · resets "
         ), "no percent known: in words"
     finally:
         await runtime.stop()

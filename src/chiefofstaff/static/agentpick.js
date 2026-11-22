@@ -5,6 +5,7 @@
 import { api, el, toast } from "./dom.js";
 import { state } from "./state.js";
 import { setupLine, setupWords } from "./agentsetup.js";
+import { resetTime } from "./board.js";
 
 export const AGENT_NAMES = { copilot: "Copilot", codex: "Codex", claude: "Claude" };
 export const agentName = (name) => AGENT_NAMES[name] || state.snapshot?.agents?.names?.[name] || name;
@@ -18,6 +19,10 @@ export const marksShown = () => agentsOn().length > 1;
 export const statuses = () => state.snapshot?.agents_status || [];
 export const statusOf = (name) => statuses().find((found) => found.name === name);
 export const ready = (status) => status?.status === "ready";
+// Its plan's limit used up until a time it said: work picked for it waits for that, by itself.
+export const limited = (status) => status?.status === "limited";
+// "Weekly limit used up · resets tomorrow 11:11 AM", in the page's own time.
+export const limitText = (status) => (status?.resets_at ? `${status.said} · resets ${resetTime(status.resets_at * 1000)}` : status?.said || "");
 
 // A dot of the agent's colour; its name (and model) on hover and for screen readers.
 export function agentMark(agent, detail = "") {
@@ -42,6 +47,7 @@ export function markOf(session) {
 export function statusText(status) {
   if (!status) return "";
   if (!ready(status) && setupWords(status.name)) return setupWords(status.name);
+  if (limited(status)) return limitText(status);
   if (ready(status) && !status.on) return ["Ready · off for workers", endsLine(status)].filter(Boolean).join(" · ");
   return [status.said, ready(status) ? status.pays : "", ready(status) ? endsLine(status) : ""].filter(Boolean).join(" · ");
 }
@@ -204,7 +210,8 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
         .map((name) => statusOf(name) || (name === "copilot" ? { name, status: "ready", on: true, said: "Ready" } : null))
         .filter(Boolean)
         .map((status) => {
-          const can = ready(status) && status.on;
+          // One whose limit is used up can be picked too: its work waits for the reset.
+          const can = (ready(status) || limited(status)) && status.on;
           const button = el(
             "button",
             {
@@ -218,7 +225,7 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
             },
             agentMark(status.name),
             el("span", { class: "name", text: agentName(status.name) }),
-            el("small", { class: "status", text: can ? "" : statusText(status) }),
+            el("small", { class: "status", text: can && !limited(status) ? "" : statusText(status) }),
           );
           // One not ready: Sign in (or Install) under it, else the command that makes it ready.
           return el("div", { class: "agent-pop-row" }, button, can ? "" : setupLine(status) || fixLine(status.fix) || "");

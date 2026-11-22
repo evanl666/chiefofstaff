@@ -5,7 +5,7 @@
 // its models and effort); two picked, the task runs on each, side by side (Compare).
 import { $, api, el, toast } from "./dom.js";
 import { byId, HOME, sessions, state, workerTitle } from "./state.js";
-import { agentMark, agentName, agentPopover, closeAgentPopover, copyFix, EFFORT_WORDS, modelLabel, ready, refreshStatuses, statuses, statusText } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, closeAgentPopover, copyFix, EFFORT_WORDS, limited, limitText, modelLabel, ready, refreshStatuses, statuses, statusOf, statusText } from "./agentpick.js";
 import { openSetup, setupKind, setupWords } from "./agentsetup.js";
 
 export const mention = { to: null, agent: null, agents: [], options: [], active: 0, dismissed: -1 };
@@ -82,11 +82,13 @@ function agentOption(option) {
       el("span", { text: status ? statusText(status) : `Run it on ${option.label}` }),
       setup && !setupWords(option.agent)
         ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: setup === "install" ? "Pick to install" : "Pick to sign in" }))
-        : fix?.command
-          ? el("span", { class: "fix agent-fix" }, "Run ", el("code", { text: fix.command }), fix.then ? ` ${fix.then}` : "", " in a terminal · ", el("span", { class: "hint", text: "pick to copy" }))
-          : off
-            ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: "Pick to turn it on for workers" }))
-            : "",
+        : limited(status) && status.on
+          ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: "Pick: it starts there once its limit resets" }))
+          : fix?.command
+            ? el("span", { class: "fix agent-fix" }, "Run ", el("code", { text: fix.command }), fix.then ? ` ${fix.then}` : "", " in a terminal · ", el("span", { class: "hint", text: "pick to copy" }))
+            : off
+              ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: "Pick to turn it on for workers" }))
+              : "",
     ),
   ];
 }
@@ -102,6 +104,11 @@ async function pickUnready(option) {
   }
   if (status?.fix?.command) {
     await copyFix(status.fix);
+    return;
+  }
+  if (limited(status) && status.on) {
+    // Its limit used up: picked all the same, what it is given waits for the reset.
+    setAgent(option);
     return;
   }
   if (!(ready(status) && !status.on)) return;
@@ -231,7 +238,9 @@ function showChip() {
 // The chosen agent as a button: its popover changes the agent, its model and its effort.
 function agentChip() {
   const chosen = mention.agent;
-  const detail = [modelLabel(chosen.name, chosen.model), EFFORT_WORDS[chosen.effort] || chosen.effort].filter(Boolean).join(" · ");
+  // Its limit used up: until when, on the chip itself.
+  const status = statusOf(chosen.name);
+  const detail = [modelLabel(chosen.name, chosen.model), EFFORT_WORDS[chosen.effort] || chosen.effort, limited(status) ? limitText(status) : ""].filter(Boolean).join(" · ");
   const button = el(
     "button",
     { type: "button", class: "agent-chip", "aria-haspopup": "dialog", title: "Agent, model and effort" },

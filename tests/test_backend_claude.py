@@ -1274,7 +1274,7 @@ async def test_a_plan_limit_reached_keeps_workers_from_running_until_it_resets(
     await session.send("Reply with just: ok")
     await turn.ended()
     assert limits == [{"status": "rejected", "window": "five_hour", "resets_at": resets}]
-    assert agent.acting_refused.startswith("Your Claude plan's 5-hour limit is reached; it resets")
+    assert agent.acting_refused.startswith("Claude's 5-hour limit is used up · resets ")
     agent.limit["resets_at"] = 1
     assert agent.acting_refused == "", "past its reset: it runs again"
 

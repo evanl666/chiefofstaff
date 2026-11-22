@@ -191,7 +191,7 @@ async def test_claudes_row_says_how_it_is_signed_in_and_the_plans_line(tmp_path,
         harness.store.set("agentlimit:claude", json.dumps(limit))
         entry = await runtime.look_for_agent("claude")
         assert entry["limit_line"] == (
-            f"Your Claude plan's 5-hour limit is reached; it resets at {agents.clock(resets)}."
+            f"Claude's 5-hour limit is used up · resets {agents.reset_words(resets)}"
         )
         harness.store.set("agentlimit:claude", json.dumps(limit | {"resets_at": 1}))
         assert "limit_line" not in await runtime.look_for_agent("claude"), "past its reset"
@@ -225,7 +225,7 @@ async def test_a_plan_limit_a_worker_hears_is_kept_for_settings_and_stops_new_tu
         kept = json.loads(harness.store.get("agentlimit:claude"))
         assert kept == {"status": "rejected", "window": "five_hour", "resets_at": resets}
         why = runtime.agent_block(harness.store.session(worker))
-        assert why.startswith("Your Claude plan's 5-hour limit is reached")
+        assert why.startswith("Claude's 5-hour limit is used up · resets ")
     finally:
         await runtime.stop()
 

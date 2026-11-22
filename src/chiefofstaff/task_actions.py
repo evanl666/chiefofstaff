@@ -3981,6 +3981,24 @@ class TaskActions:
         self.publish(task)
         return task
 
+    def go_on_once_reset(self, session_id: str):
+        """A worker its agent's plan limit paused, which said when that resets: each task it
+        paused goes on by itself then (as Go on at <reset>, unasked), once, unless the owner
+        says anything else to it first, or continues it on another agent."""
+        row = self.store.find_session(session_id)
+        for task in self.tasks.for_session(session_id):
+            if not (
+                row
+                and task["status"] == "waiting"
+                and self.store.get(f"stopped:{task['id']}") == agents.PLAN_STOP
+            ):
+                continue
+            at = int(self.runtime.pause_view(task, row)["resets_at"])
+            if at > time.time():
+                self.store.set(f"goonat:{task['id']}", str(at))
+                self.arm_go_on(task["id"], at)
+                self.publish(self.tasks.get(task["id"]))
+
     def arm_go_on(self, task_id: str, at: int):
         self.stop_going_on(task_id)
         self.going[task_id] = self.runtime.background(self.going_on_at(task_id, at))
@@ -4005,6 +4023,16 @@ class TaskActions:
         ):
             self.store.delete(f"goonat:{task_id}")
             return
+        agent = self.runtime.agent(task["session_id"])
+        fresh = await self.runtime.read_limit(agent)
+        if fresh and (later := agents.limit_status(fresh, agent)):
+            # Not reset after all (its agent says so now): it goes on at its new reset.
+            self.runtime.plan_limit_seen(agent, fresh)
+            self.runtime.record_pause(task["session_id"], agent, fresh)
+            self.store.set(f"goonat:{task_id}", str(later["resets_at"]))
+            self.arm_go_on(task_id, later["resets_at"])
+            self.publish(self.tasks.get(task_id))
+            return
         try:
             await self.follow_up(task_id, "Go on where you stopped.")
         except Exception:
@@ -4012,6 +4040,13 @@ class TaskActions:
             logger.warning("Going on with %s once its limit reset failed.", task_id, exc_info=True)
             if task := self.tasks.find(task_id):
                 self.publish(task)
+            return
+        self.runtime.handled.record(
+            "resumed",
+            f"“{task['title']}” went on on {agents.display(agent)} once its limit reset",
+            session_id=task["session_id"],
+            ref=task_id,
+        )
 
     def arm_scheduled(self):
         """At start: each task that goes on by itself once its limit resets (go_on_at) still

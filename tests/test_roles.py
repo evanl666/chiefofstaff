@@ -318,7 +318,9 @@ async def test_a_plan_limit_mid_turn_moves_the_router_to_copilot_with_the_messag
         assert "plan the release" in sent, "what that turn was given goes to Copilot"
         assert "from an earlier Router session on Codex" in sent
         said = notices(harness, router)[-1]
-        assert said.startswith("The Router runs on Copilot for now: Your Codex plan's"), said
+        assert said.startswith(
+            "The Router runs on Copilot for now: Codex's 5-hour limit is used up · resets "
+        ), said
         held = runtime.role_held(ROUTER)
         assert held["agent"] == "codex" and held["until"] > time.time() + 3000
         assert not [k for k, _ in harness.kinds(router) if k == "error"], "no error: it went on"

@@ -18,6 +18,8 @@ sign-in is kept in FAKE_CODEX_HOME (auth.json, signed-out), over SIGNED_OUT. A b
 sign-in waits until a file `approve` there says how it went ("ok", else its words: an error), as
 the owner finishing it in their browser would. `login status` takes STATUS_DELAY seconds. An
 access token in its environment (CODEX_ACCESS_TOKEN) signs it in over all that, as 0.167.2's.
+A limit.json in FAKE_CODEX_HOME ({minutes, resets_at}) is its plan's limit used up until then:
+each turn refused (usageLimitExceeded), the window at 100% in account/rateLimits/read.
 """
 
 import asyncio
@@ -217,8 +219,12 @@ class Server:
         given = json.loads(os.environ.get("FAKE_CODEX_LIMITS") or "{}")
         primary = {"usedPercent": given.get("used", 42), "windowDurationMins": 300,
                    "resetsAt": given.get("resets_at", int(time.time()) + 3600)}  # fmt: skip
-        snapshot = {"limitId": "codex", "limitName": None, "primary": primary, "secondary": None,
-                    "credits": None, "planType": "plus"}  # fmt: skip
+        secondary = None
+        if used_up := limit_now():
+            secondary = {"usedPercent": 100, "windowDurationMins": used_up["minutes"],
+                         "resetsAt": used_up["resets_at"]}  # fmt: skip
+        snapshot = {"limitId": "codex", "limitName": None, "primary": primary,
+                    "secondary": secondary, "credits": None, "planType": "plus"}  # fmt: skip
         return {"rateLimits": snapshot, "rateLimitsByLimitId": None}
 
     async def on_model_list(self, params):
@@ -693,6 +699,14 @@ class Server:
     async def think(self, thread_id, turn_id, prompt):
         """The scripted model: what the tests' prompts ask for, in order."""
         thread = self.threads[thread_id]
+        if limit_now():
+            # Its plan's limit used up (limit.json): every request refused until it resets, its
+            # rate limits not said first (read them: account/rateLimits/read), as live.
+            error = {"message": "You've hit your usage limit. Upgrade to Pro or try again later.",
+                     "codexErrorInfo": "usageLimitExceeded", "additionalDetails": None}  # fmt: skip
+            self.notify("error", {"error": error, "willRetry": False, "threadId": thread_id,
+                                  "turnId": turn_id})  # fmt: skip
+            raise LimitedError(error)
         if "Fail this turn" in prompt or (
             (failing := os.environ.get("FAKE_CODEX_FAILS_ON")) and failing in prompt
         ):
@@ -1316,6 +1330,16 @@ def text(items) -> str:
 
 AUTH = HOME / "auth.json"
 SIGNED_OUT_MARK = HOME / "signed-out"
+
+
+def limit_now() -> dict:
+    """Its plan's limit used up, until it resets: limit.json in its home ({minutes: the window,
+    resets_at}), while that is ahead; {} else."""
+    try:
+        limit = json.loads((HOME / "limit.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return limit if limit.get("resets_at", 0) > time.time() else {}
 
 
 def signed_out() -> bool:

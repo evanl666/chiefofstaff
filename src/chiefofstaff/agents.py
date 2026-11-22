@@ -8,6 +8,7 @@ they were. An agent's backend module is imported only when it starts.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import re
@@ -353,6 +354,10 @@ SIGN_IN_FIX = {
 READY, SIGN_IN, MISSING, PROBLEM, CHECKING = "ready", "signin", "missing", "problem", "checking"
 # Why work for an agent is held for it (its card's Sign in, Install), to go on by itself after.
 HELD = frozenset({SIGN_IN, MISSING})
+# An agent whose plan's limit is used up until a time it said: work for it is held too, and goes
+# on by itself once that limit resets (Runtime.limit_reset).
+LIMITED = "limited"
+WAITS = HELD | {LIMITED}
 STATUS_WORDS = {
     READY: "Ready",
     SIGN_IN: "Sign-in needed",
@@ -365,6 +370,8 @@ NEEDS_SIGN_IN = re.compile(
     r"|login (?:expired|reached its time limit)|refresh token|(?:sign|log) ?in again",
     re.IGNORECASE,
 )
+# How limit_line says a limit holds an agent's work (status_of: LIMITED).
+LIMIT_SAID = re.compile(r"limit is used up|refusing requests for a rate limit")
 
 
 # A key in the environment Chief of Staff started in, which an agent's workers use over its
@@ -395,6 +402,8 @@ def status_of(name: str, why: str) -> dict[str, Any]:
         return {"status": SIGN_IN, "said": STATUS_WORDS[SIGN_IN], "fix": SIGN_IN_FIX[name]}
     if re.search(r"not found|not installed", why, re.IGNORECASE):
         return {"status": MISSING, "said": STATUS_WORDS[MISSING], "fix": INSTALL_FIX[name]}
+    if LIMIT_SAID.search(why):
+        return {"status": LIMITED, "said": why}
     return {"status": PROBLEM, "said": why}
 
 
@@ -415,6 +424,22 @@ def clock(at: float) -> str:
     return f"{(stamp.tm_hour % 12) or 12}:{stamp.tm_min:02d} {'am' if stamp.tm_hour < 12 else 'pm'}"
 
 
+def reset_words(at: float, now: float | None = None) -> str:
+    """When a limit resets, in local time, as the page says it (board.js resetTime): "3:40 PM"
+    today, "tomorrow 11:11 AM", "Sat 11:11 AM" within a week, else "Nov 28 11:11 AM"."""
+    stamp = time.localtime(at)
+    hour = f"{(stamp.tm_hour % 12) or 12}:{stamp.tm_min:02d} {'AM' if stamp.tm_hour < 12 else 'PM'}"
+    today = time.localtime(time.time() if now is None else now)
+    days = (datetime.date(*stamp[:3]) - datetime.date(*today[:3])).days
+    if days <= 0:
+        return hour
+    if days == 1:
+        return f"tomorrow {hour}"
+    if days < 7:
+        return f"{time.strftime('%a', stamp)} {hour}"
+    return f"{time.strftime('%b', stamp)} {stamp.tm_mday} {hour}"
+
+
 def blocked(limit: Any) -> bool:
     """Whether a plan's limit, as last said, refuses its workers' requests: reached, and no
     extra usage carrying them on."""
@@ -423,15 +448,17 @@ def blocked(limit: Any) -> bool:
 
 def limit_line(limit: Any, now: float | None = None, name: str = "claude") -> str:
     """What a plan's limit, as agent `name`'s worker last said it, means now ("" once it reset,
-    or while nothing is near). Status "rejected": its plan's limit is reached; "limited": its
-    requests were refused for a rate limit (a plan's or an account's) with no plan's limit
-    said."""
+    or while nothing is near). Status "rejected": its plan's limit is used up (the window that
+    holds it, and when that resets: "Codex's weekly limit is used up · resets tomorrow 11:11
+    AM"; plainly when the agent did not say); "limited": its requests were refused for a rate
+    limit (a plan's or an account's) with no plan's limit said."""
     limit = limit if isinstance(limit, dict) else {}
+    now = time.time() if now is None else now
     resets = limit.get("resets_at") if isinstance(limit.get("resets_at"), int | float) else 0
-    if resets and resets <= (time.time() if now is None else now):
+    if resets and resets <= now:
         return ""
     window = WINDOWS.get(str(limit.get("window") or "")) or str(limit.get("label") or "usage limit")
-    when = f"; it resets at {clock(resets)}" if resets else ""
+    when = f" · resets {reset_words(resets, now)}" if resets else ""
     if limit.get("status") == "rejected" and limit.get("extra"):
         until = f" until it resets at {clock(resets)}" if resets else ""
         return (
@@ -439,12 +466,33 @@ def limit_line(limit: Any, now: float | None = None, name: str = "claude") -> st
             f"{until}."
         )
     if limit.get("status") == "rejected":
-        return f"Your {display(name)} plan's {window} is reached{when}."
+        return f"{display(name)}'s {window} is used up" + (when or "; it didn't say when it resets")
     if limit.get("status") == "allowed_warning":
-        return f"Your {display(name)} plan's {window} is close{when}."
+        at = f"; it resets at {clock(resets)}" if resets else ""
+        return f"Your {display(name)} plan's {window} is close{at}."
     if limit.get("status") == "limited":
-        return f"{display(name)} is refusing requests for a rate limit{when}."
+        return f"{display(name)} is refusing requests for a rate limit" + (
+            when or "; it didn't say for how long"
+        )
     return ""
+
+
+def limit_status(limit: Any, name: str, now: float | None = None) -> dict | None:
+    """An agent whose plan's limit is used up until a time it said, as the @ list says it
+    (status LIMITED: "Weekly limit used up", and when it resets); None while it can run (no
+    limit, extra usage on, its reset passed, or no reset said: then its next request finds
+    out)."""
+    limit = limit if isinstance(limit, dict) else {}
+    resets = limit.get("resets_at") if isinstance(limit.get("resets_at"), int | float) else 0
+    if not blocked(limit) or not resets or resets <= (time.time() if now is None else now):
+        return None
+    window = WINDOWS.get(str(limit.get("window") or "")) or str(limit.get("label") or "usage limit")
+    return {
+        "status": LIMITED,
+        "said": f"{window[:1].upper()}{window[1:]} used up",
+        "resets_at": int(resets),
+        "line": limit_line(limit, now, name),
+    }
 
 
 def pause_facts(limit: Any, name: str) -> dict:
@@ -453,23 +501,29 @@ def pause_facts(limit: Any, name: str) -> dict:
     its plan's."""
     limit = limit if isinstance(limit, dict) else {}
     resets = limit.get("resets_at")
+    window = WINDOWS.get(str(limit.get("window") or "")) or str(limit.get("label") or "")
     return {
         "agent": name,
         "resets_at": int(resets) if isinstance(resets, int | float) and resets > 0 else 0,
         "rate": limit.get("status") == "limited",
+        **({"window": window} if window and limit.get("status") != "limited" else {}),
     }
 
 
 def pause_line(facts: dict, now: float | None = None) -> str:
-    """A paused task's line, its reset first ("Codex limit reached · resets 9:25 pm"), as its row
-    on Home says it (board.js pauseLine)."""
-    kind = "rate limit" if facts.get("rate") else "limit"
-    what = f"{display(str(facts.get('agent') or ''))} {kind} reached"
+    """A paused task's line, its reset first ("Codex's weekly limit is used up · resets tomorrow
+    11:11 AM"), as its row on Home says it (board.js pauseLine)."""
+    name = display(str(facts.get("agent") or ""))
+    what = (
+        f"{name} is refusing requests for a rate limit"
+        if facts.get("rate")
+        else f"{name}'s {facts.get('window') or 'usage limit'} is used up"
+    )
     resets = int(facts.get("resets_at") or 0)
     if not resets:
-        return what
-    passed = resets <= (time.time() if now is None else now)
-    return f"{what} · {'reset at' if passed else 'resets'} {clock(resets)}"
+        return f"{what}; it didn't say {'for how long' if facts.get('rate') else 'when it resets'}"
+    now = time.time() if now is None else now
+    return f"{what} · {'reset at' if resets <= now else 'resets'} {reset_words(resets, now)}"
 
 
 def plan_usage(store: Store, name: str, facts: dict) -> list[dict]:

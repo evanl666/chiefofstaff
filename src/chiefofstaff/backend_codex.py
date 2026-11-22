@@ -193,6 +193,8 @@ CODEX_FOLLOWS = (
 # limit Codex gave up retrying (an HTTP 429 after its own retries).
 LIMIT_ERRORS = frozenset({"usageLimitExceeded", "rateLimitExceeded"})
 SCHEMA_SECONDS = 20.0
+# How long its rate limits may take to be read (a failed turn's, a limit's reset).
+RATE_LIMITS_SECONDS = 5.0
 # How long a stopping app-server has to end by itself at the end of its input (graceful: its
 # threads written down) before its supervisor is told to end its tree.
 STOP_GRACE = 5.0
@@ -353,20 +355,26 @@ def limit_windows(snapshot: dict) -> list[dict]:
 
 
 def limit_failure(error: dict, snapshot: dict) -> dict | None:
-    """A failed turn's limit, if a limit failed it: its plan's ("rejected", with the window used
-    up and when it resets, as Codex last said its rate limits) or a rate limit ("limited");
-    None for any other failure."""
+    """A failed turn's limit, if a limit failed it: its plan's ("rejected", with the window that
+    holds it and when that resets, as Codex last said its rate limits) or a rate limit
+    ("limited"); None for any other failure. The window that holds it: of those used up, the
+    one that resets last (nothing runs before both reset); none said used up, the most used."""
     info = error.get("codexErrorInfo")
     too_many = isinstance(info, dict) and any(
         mapping(detail).get("httpStatusCode") == 429 for detail in info.values()
     )
     if not too_many and not (isinstance(info, str) and info in LIMIT_ERRORS):
         return None
-    full = [entry for entry in limit_windows(snapshot) if entry["used"] >= 100]
+    status = "rejected" if info == "usageLimitExceeded" else "limited"
+    windows = limit_windows(snapshot)
+    full = [entry for entry in windows if entry["used"] >= 100]
+    if not full and status == "rejected" and windows:
+        full = [max(windows, key=lambda entry: entry["used"])]
+    holding = max(full, key=lambda entry: entry["resets_at"], default=None)
     return {
-        "status": "rejected" if info == "usageLimitExceeded" else "limited",
-        **({"label": full[0]["window"]} if full else {}),
-        "resets_at": max((entry["resets_at"] for entry in full), default=0),
+        "status": status,
+        **({"label": holding["window"]} if holding else {}),
+        "resets_at": holding["resets_at"] if holding else 0,
     }
 
 
@@ -1336,6 +1344,28 @@ class CodexBackend:
             return []  # Signed in with an API key: no plan, no limits.
         return limit_windows(mapping(answer.get("rateLimits")))
 
+    async def read_rate_limits(self) -> bool:
+        """Its plan's rate limits read now (account/rateLimits/read), kept as those it said
+        (account/rateLimits/updated); False when it can't say (signed in with an API key, say)."""
+        try:
+            answer = await asyncio.wait_for(
+                self.request("account/rateLimits/read", None), RATE_LIMITS_SECONDS
+            )
+        except Exception:
+            return False
+        update = mapping(answer.get("rateLimits"))
+        self.rate_limits |= {k: v for k, v in update.items() if v is not None}
+        return True
+
+    async def plan_limit(self) -> dict | None:
+        """Its plan's limit as Codex says it now (Runtime.limit_reset): used up (rejected, the
+        window holding it, when that resets), or {} when none is; None when it can't say."""
+        if not await self.read_rate_limits():
+            return None
+        if not any(entry["used"] >= 100 for entry in limit_windows(self.rate_limits)):
+            return {}
+        return limit_failure({"codexErrorInfo": "usageLimitExceeded"}, self.rate_limits)
+
     async def list_models(self) -> list[Any]:
         models, cursor = [], None
         for _ in range(20):
@@ -2114,6 +2144,9 @@ class CodexAgent:
 
     async def about(self) -> dict:
         return await self.any_process(lambda process: process.about())
+
+    async def plan_limit(self) -> dict | None:
+        return await self.any_process(lambda process: process.plan_limit())
 
     async def list_models(self) -> list[Any]:
         return await self.any_process(lambda process: process.list_models())
@@ -3104,6 +3137,10 @@ class CodexSession:
             error = mapping(turn.get("error"))
             said = str(error.get("message") or "Codex failed.")
             if (limit := limit_failure(error, self.backend.rate_limits)) is not None:
+                if limit["status"] == "rejected" and not limit["resets_at"]:
+                    # Its limits not said before the failure: read now, for when it resets.
+                    await self.backend.read_rate_limits()
+                    limit = limit_failure(error, self.backend.rate_limits) or limit
                 self.emit("session.error", message=said, error_type="plan_limit", limit=limit)
             else:
                 self.emit("session.error", message=said)

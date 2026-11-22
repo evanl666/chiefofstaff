@@ -357,6 +357,16 @@ PROBLEM_SECONDS = 60.0
 REFRESH_WAIT = 3.0
 # How long held work waits, "Resuming…" with Cancel, once its agent can run it (resume_held).
 RESUME_SECONDS = 5.0
+# What held work's card says once it went on, by why it was held.
+RESUMED = {
+    agents.SIGN_IN: "resumed after sign-in",
+    agents.MISSING: "resumed once installed",
+    agents.LIMITED: "resumed once its limit reset",
+}
+# How long past a plan limit's reset its agent is asked again (its clock and this one's), and
+# how long it may take to say.
+LIMIT_MARGIN = 5.0
+LOOK_LIMIT_SECONDS = 30.0
 # What a worker has done once it said any of these: a step, a report, an update (until then,
 # Restart on… starts its task on another agent instead; Runtime.restart_on).
 DOING = frozenset({"tool", "report", "update"})
@@ -734,6 +744,8 @@ class Runtime:
         # reason other than its sign-in or install (refresh_agent_status: looked at later).
         self.glancing: dict[str, asyncio.Task] = {}
         self.glance_failures: dict[str, int] = {}
+        # Each agent's wait for its plan limit's reset (arm_limit).
+        self.limit_waits: dict[str, asyncio.Task] = {}
         # Held work's cards resuming now (resume_held: once each); roles whose wait for the
         # owner ended, what they were sent meanwhile to go to them (role_waits).
         self.resuming: set[str] = set()
@@ -908,6 +920,8 @@ class Runtime:
         self.asks.expire_requests()
         self.accounts.restore()
         agentsetup.kept_paths(self.store)  # Agents installed from here, found as before.
+        for name in agents.NAMES:
+            self.arm_limit(name)  # A limit used up: its reset waited for again.
         self.task_actions.settle_reports()
         await self.connect()
         self.after_update()
@@ -2188,7 +2202,7 @@ class Runtime:
             # Signed out (in a terminal, a turn that lost it) while its process runs: held.
             how = "run" if chosen in self.lost_sign_in else "start"
             why = f"{agents.display(chosen)} could not {how}: {said}"
-        elif not (why := self.blocked_on(chosen, row)):
+        elif not (why := self.limit_held(chosen)) and not (why := self.blocked_on(chosen, row)):
             try:
                 await self.connect_agent(chosen)
                 await self.recheck_agent(chosen)
@@ -4145,13 +4159,12 @@ class Runtime:
             record |= {"worker": worker, "text": text, **({"replay": replay} if replay else {})}
         name = agents.display(agent)
         title = params.get("title") or "The task"
-        if found["status"] in agents.HELD:
-            needs = (
-                f"{name} needs you to sign in"
-                if found["status"] == agents.SIGN_IN
-                else f"{name} isn't installed"
-            )
-            once = "once you have" if found["status"] == agents.SIGN_IN else "once it is"
+        if found["status"] in agents.WAITS:
+            needs, once = {
+                agents.SIGN_IN: (f"{name} needs you to sign in", "once you have"),
+                agents.MISSING: (f"{name} isn't installed", "once it is"),
+                agents.LIMITED: (why, "once it resets"),
+            }[found["status"]]
             goes = f"gets it on {name}" if worker else f"starts on {name}"
             line = f"{needs}. Your message is saved: “{title}” {goes} {once}."
         else:
@@ -4190,7 +4203,7 @@ class Runtime:
             self.store.update_message_meta(message["id"], {**meta, **change})
             self.bus.publish("message", {**self.store.message(message["id"]), "amended": True})
 
-    async def resume_held(self, name: str):
+    async def resume_held(self, name: str, held: frozenset[str] = agents.HELD):
         """An agent that can run now (signed in, installed): each card of work it held for that
         (agent_refused_card) goes on by itself on it, once, after RESUME_SECONDS in which the
         owner can Cancel ("Resuming…"); a receipt says so, and it is listed under Handled for
@@ -4204,7 +4217,7 @@ class Runtime:
                 continue
             if (
                 found.get("agent") != name
-                or found.get("status") not in agents.HELD
+                or found.get("status") not in held
                 or found.get("kept")
                 or key in self.resuming
             ):
@@ -4227,12 +4240,7 @@ class Runtime:
             found = json.loads(raw)
             if found.get("resuming") != until:
                 return  # Cancelled meanwhile.
-            after = (
-                "resumed after sign-in"
-                if found.get("status") == agents.SIGN_IN
-                else "resumed once installed"
-            )
-            await self.resume_refused(key, found, after=after)
+            await self.resume_refused(key, found, after=RESUMED[found.get("status", "")])
         finally:
             self.resuming.discard(key)
 
@@ -4283,7 +4291,10 @@ class Runtime:
             logger.warning("Held work for %s did not resume.", agent, exc_info=True)
             self.refusal_said(found, {"resumed": f"Not resumed: {describe(exc)}"})
             return
-        once = "once you signed in" if found.get("status") == agents.SIGN_IN else "once installed"
+        once = {
+            agents.SIGN_IN: "once you signed in",
+            agents.LIMITED: "once its limit reset",
+        }.get(found.get("status", ""), "once installed")
         did = f"Gave “{title}” your message" if found.get("worker") else f"Started “{title}”"
         self.handled.record(
             "resumed",
@@ -4296,8 +4307,8 @@ class Runtime:
         """Why a worker on another agent cannot be given anything now: its agent does not
         start (signed out, not installed, …), tried now as its next message would; "" when
         it runs."""
-        if said := await self.looked_again(agent):
-            return said  # Signed out while its process runs.
+        if said := await self.looked_again(agent) or self.limit_held(agent):
+            return said  # Signed out while its process runs; its plan's limit used up.
         try:
             await self.connect_agent(agent)
         except Exception as exc:
@@ -4372,8 +4383,70 @@ class Runtime:
     def plan_limit_seen(self, agent: str, limit: dict):
         """An agent's plan limit as its worker last said it: Settings says it. A worker pauses
         only when its own request is refused (Events.plan_limited): a plan's limit reached with
-        extra usage on refuses nothing, and each other worker meets it on its next request."""
+        extra usage on refuses nothing, and each other worker meets it on its next request.
+        Used up until a time it said: the page says until when, new work for it is held, and
+        its reset is waited for (limit_reset); said to be over, what it held goes on."""
+        before = agents.live_limit(self.store, agent)
         self.store.set(f"agentlimit:{agent}", json.dumps(limit))
+        if agents.limit_status(limit, agent):
+            self.arm_limit(agent)
+            self.publish_state()
+        elif agents.limit_status(before, agent):
+            self.background(self.limit_over(agent))
+
+    def limit_held(self, agent: str) -> str:
+        """Why work for an agent waits now: its plan's limit used up until a time it said (the
+        line the page and its card say); "" else."""
+        entry = self.agents.get(agent)
+        live = agents.live_limit(self.store, agent, getattr(entry and entry.backend, "limit", None))
+        found = agents.limit_status(live, agent)
+        return found["line"] if found else ""
+
+    def arm_limit(self, agent: str):
+        """An agent's plan limit used up, its reset waited for (one wait per agent; a restart
+        arms it again, one whose time passed meanwhile at once)."""
+        limit = agents.live_limit(self.store, agent)
+        resets = limit.get("resets_at")
+        if not agents.blocked(limit) or not isinstance(resets, int | float) or resets <= 0:
+            return
+        if (waiting := self.limit_waits.get(agent)) and not waiting.done():
+            waiting.cancel()
+        self.limit_waits[agent] = self.background(self.limit_reset(agent, int(resets)))
+
+    async def limit_reset(self, agent: str, at: int):
+        """An agent's plan limit's time come: Codex asked again (its rate limits now; used up
+        still, its new reset waited for), then what it held goes on (limit_over)."""
+        await asyncio.sleep(max(0.0, at - time.time()) + LIMIT_MARGIN)
+        if agents.live_limit(self.store, agent).get("resets_at") != at:
+            return  # Said again meanwhile (its own wait armed then).
+        fresh = await self.read_limit(agent)
+        if fresh and agents.limit_status(fresh, agent):
+            self.plan_limit_seen(agent, fresh)  # Not over after all.
+            return
+        await self.limit_over(agent)
+
+    async def read_limit(self, agent: str) -> dict | None:
+        """An agent's plan limit as it says it now (Codex: its rate limits read), {} when none
+        is used up; None when it can't say (Claude says it only in a worker's turn)."""
+        entry = self.agents.get(agent)
+        backend = entry.backend if entry else None
+        reading: Callable[[], Awaitable[dict | None]] | None = getattr(backend, "plan_limit", None)
+        if not callable(reading):
+            return None
+        try:
+            return await asyncio.wait_for(reading(), LOOK_LIMIT_SECONDS)
+        except Exception:
+            logger.info("Could not read %s's plan limits.", agent, exc_info=True)
+            return None
+
+    async def limit_over(self, agent: str):
+        """An agent's plan limit reset: the page says it can run, and the work held for it
+        (agent_refused_card) goes on, once, as after a sign-in (resume_held)."""
+        found = agents.live_limit(self.store, agent)
+        if agents.blocked(found):
+            self.store.set(f"agentlimit:{agent}", json.dumps(found | {"status": "allowed"}))
+        self.publish_state()
+        await self.resume_held(agent, frozenset({agents.LIMITED}))
 
     def continue_checks(self, row: dict, agent: str):
         """Why a worker cannot continue on that agent now (raises), as Continue with… asks."""
@@ -5174,6 +5247,11 @@ class Runtime:
             return entry | self.unready(name, why)
         if not facts and not (backend and backend.alive()):
             return entry | {"status": agents.CHECKING, "said": agents.STATUS_WORDS["checking"]}
+        live = agents.live_limit(self.store, name, getattr(backend, "limit", None))
+        if limited := agents.limit_status(live, name):
+            # Its plan's limit used up: until when (the page says it in its own time).
+            pays = agents.pays(name, facts.get("account", ""), facts.get("key_env", ""))
+            return entry | limited | ({"pays": pays} if pays else {})
         return entry | {
             "status": agents.READY,
             "said": agents.STATUS_WORDS[agents.READY],
@@ -5228,7 +5306,7 @@ class Runtime:
     def look_every(self, name: str) -> float:
         """How long an agent's last look stands when the page asks (refresh_agent_status)."""
         status = self.agent_status(name)["status"]
-        if status in {agents.READY, agents.CHECKING}:
+        if status in {agents.READY, agents.CHECKING, agents.LIMITED}:
             return STATUS_SECONDS
         if status in agents.HELD:
             return UNREADY_SECONDS
