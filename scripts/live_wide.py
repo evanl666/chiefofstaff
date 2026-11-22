@@ -2280,6 +2280,50 @@ async def titled(ctx: Ctx, since: str, word: str, timeout=300) -> dict:
     return await wait_for(f"the task “{word}”", check, timeout, ctx.app)
 
 
+# A worker's own report to the Router, as an envelope (its words are its own: it may name a value
+# it handed on).
+WORKER_REPORT = re.compile(
+    r'<message from="worker:[^"]*" type="report"[^>]*>\n.*?\n</message>', re.DOTALL
+)
+TEAM_DIGEST = re.compile(
+    r'<message from="system" type="team-digest"[^>]*>\n(.*?)\n</message>', re.DOTALL
+)
+
+
+def stored(ctx: Ctx, key: str) -> str:
+    """A value Chief of Staff keeps (read-only, while it runs)."""
+    db = sqlite3.connect(f"file:{ctx.app.data / 'chiefofstaff.db'}?mode=ro", uri=True)
+    try:
+        row = db.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+    finally:
+        db.close()
+    return row[0] if row else ""
+
+
+def router_given(ctx: Ctx, router: str, rows: list[dict]) -> str:
+    """What the Router was given: as its Copilot session logged it (with what rides along when
+    a turn is sent: a team digest, a handover), else as Chief of Staff kept it (`rows`, the
+    Router's messages)."""
+    copilot = stored(ctx, f"copilot:{router}") or router
+    log_file = ctx.home / "session-state" / copilot / "events.jsonl"
+    sent = []
+    for line in log_file.read_text(errors="replace").splitlines() if log_file.exists() else []:
+        with contextlib.suppress(ValueError):
+            event = json.loads(line)
+            if event.get("type") == "user.message":
+                sent.append(str((event.get("data") or {}).get("content") or ""))
+    return "\n".join(sent) or prompts_of(rows)
+
+
+def handed_to_router(given: str, told: list[str], value: str) -> list[str]:
+    """Where the Router was given what one worker told another: a message's own words anywhere
+    but in the workers' reports (theirs to word: one may quote what it handed on), or the value
+    in a team digest (who told whom, never what). Its workers' reports and records (their
+    results) may name the value: they are what the workers say themselves."""
+    found = [f"told: {text[:60]}" for text in told if text.strip() in WORKER_REPORT.sub("", given)]
+    return found + [f"digest: {body[:200]}" for body in TEAM_DIGEST.findall(given) if value in body]
+
+
 def prompts_of(rows: list[dict]) -> str:
     return "\n".join(m["meta"].get("prompt", "") for m in rows)
 
@@ -2323,9 +2367,12 @@ async def peers_ok(ctx: Ctx, since: str, giver: dict, takers: list[dict], value:
     copies = [m for m in rows if m["kind"] == "peer" and value in m["text"]]
     assert copies, "Home has a line of it"
     assert all(m["created_at"] > since for m in copies)
-    # The Router is not given the words: a digest rode along with its next turn instead.
+    # The Router is not given the words: a digest rode along with its next turn instead. Its
+    # workers' own reports reach it as they wrote them (one may name the value: theirs to say).
     assert not any(m["meta"].get("prompt") for m in copies), "a line, not given to the Router"
-    assert value not in prompts_of(rows), "never in what the Router was given"
+    words = [m["text"] for m in given if m["kind"] == "tell"]
+    handed = handed_to_router(router_given(ctx, router, rows), words, value)
+    assert not handed, f"what workers told each other, given to the Router: {handed}"
     digested = sqlite3.connect(f"file:{ctx.app.data / 'chiefofstaff.db'}?mode=ro", uri=True)
     upto = digested.execute("SELECT value FROM kv WHERE key='teamdigest:upto'").fetchone()
     digested.close()
@@ -2357,6 +2404,9 @@ async def e1_parallel_handoff(ctx: Ctx):
     assert result.read_text().strip() == token
     await peers_ok(ctx, since, scout, [writer], token)
     ctx.notes["e1_token"] = token
+    ctx.notes["e1_told"] = [
+        m["text"] for m in await messages(ctx, scout["session_id"]) if m["kind"] == "tell"
+    ]
     log("E1 passed")
 
 
@@ -2369,8 +2419,10 @@ async def e2_router_knows(ctx: Ctx):
     assert ctx.notes["e1_token"] in reply
     assert not await tasks_since(ctx, since), "answered from what it has"
     router = (await state(ctx))["router_id"]
-    given = prompts_of(await messages(ctx, router))
-    assert ctx.notes["e1_token"] not in given, "read when asked, not given beforehand"
+    given = router_given(ctx, router, await messages(ctx, router))
+    # (The workers' own reports and records may name it: they are what the workers say.)
+    handed = handed_to_router(given, ctx.notes["e1_told"], ctx.notes["e1_token"])
+    assert not handed, f"read when asked, never handed the words: {handed}"
     log("E2 passed")
 
 
