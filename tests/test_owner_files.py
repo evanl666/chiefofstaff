@@ -130,3 +130,29 @@ def test_a_live_run_allows_claudes_own_caches_and_sync_marks_only(owner_files, t
         "claude plugins/known_marketplaces.json: changed",
         "claude skills/synced/org_skill/SKILL.md: changed",
     ]
+
+
+def test_a_live_run_allows_claudes_own_profile_refresh_and_no_other_account_change(
+    owner_files, tmp_path
+):
+    """f1fix-4: `oauthAccount` changed in the owner's .claude.json as the shard began: of its
+    fields, only `profileFetchedAt`, when Claude (2.1.322) last fetched the owner's profile,
+    which a plain `claude -p` refreshes on its own clock (F's calibration), with its
+    `passesEligibilityCache`. Those are allowed; any other field of the account still fails."""
+    state = tmp_path / "config" / ".claude.json"
+    account = {"emailAddress": "a@acme.test", "billingType": "x", "profileFetchedAt": 1}
+    state.write_text(
+        json.dumps({"oauthAccount": account, "passesEligibilityCache": {"a": 1}, "projects": {}})
+    )
+    before = owner_files.record()
+    root = str(tmp_path / "live")
+    changed(state, lambda d: d.update(passesEligibilityCache={"a": 2}))
+    changed(state, lambda d: d["oauthAccount"].update(profileFetchedAt=2))
+    assert owner_files.changes(before, [root]) == []
+    assert owner_files.changed_keys(before) == ["passesEligibilityCache"]
+    for field in ("emailAddress", "billingType", "organizationUuid"):
+        changed(state, lambda d, f=field: d["oauthAccount"].update({f: "other"}))
+        assert owner_files.changes(before, [root], {"oauthAccount"}) == [
+            "claude .claude.json: oauthAccount changed"
+        ], field
+        changed(state, lambda d: d.update(oauthAccount=dict(account, profileFetchedAt=3)))

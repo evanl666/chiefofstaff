@@ -13,7 +13,8 @@ state file (`.claude.json`, which every session of Claude's rewrites) key by key
 (more-agents.md 5.12.5): new `projects` entries for folders under ROOT, none of them trusted;
 top-level keys that a plain `claude -p` run changes on this machine (`changed-keys`, after one,
 gives them: the run passes them with --allow) or STATE_KEYS; nothing else (no trust, no other
-project, no MCP server, no account field). Only key names are printed, never a value. A live run
+project, no MCP server, no account field but when Claude last fetched the owner's profile:
+ACCOUNT_STAMPS). Only key names are printed, never a value. A live run
 also allows SYNC_MARKS: the mark Claude writes in the owner's synced claude.ai skills at each
 sync round (any session of the owner's signed-in Claude makes it; only hiding those skills from
 workers would stop it).
@@ -57,7 +58,15 @@ STATE_KEYS = {
     # options were last fetched and its client data slots; a plain `claude -p` run changes the
     # last two (F's calibration). Chief of Staff writes none of Claude's state.
     "groveConfigCache", "additionalModelOptionsAnsweredAt", "clientDataCacheSlots",
+    # Refreshed with the owner's profile (ACCOUNT_STAMPS), on the same clock (f1fix-4, r75, c1:
+    # F's calibration, a plain `claude -p`, changed both).
+    "passesEligibilityCache",
 }  # fmt: skip
+# Of the owner's account (`oauthAccount`, NEVER otherwise): when Claude last fetched their
+# profile, which any session of a signed-in Claude refreshes on its own clock (2.1.322; in
+# f1fix-4 F's calibration, a plain `claude -p`, did, and this was the only field that changed).
+# A stamp, not a credential nor the account: every other field of it must stay as it was.
+ACCOUNT_STAMPS = frozenset({"profileFetchedAt"})
 # Of the owner's synced claude.ai skills (~/.claude/skills/synced/<id>/): the mark Claude
 # (2.1.322) writes at the end of each sync round, about every ten minutes a session runs.
 SYNC_MARKS = (".last-complete-round",)
@@ -128,8 +137,9 @@ def state_file() -> Path:
 
 
 def state() -> dict | None:
-    """Claude's state file, key by key: each top-level key's value's digest, and each project's
-    (with whether it is trusted); None when it is not there or not an object."""
+    """Claude's state file, key by key: each top-level key's value's digest (the account's but
+    for its ACCOUNT_STAMPS), and each project's (with whether it is trusted); None when it is
+    not there or not an object."""
     try:
         data = json.loads(state_file().read_text())
     except (OSError, ValueError):
@@ -140,9 +150,14 @@ def state() -> dict | None:
     def value_digest(value) -> str:
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
+    def key_digest(key: str, value) -> str:
+        if key == "oauthAccount" and isinstance(value, dict):
+            value = {name: field for name, field in value.items() if name not in ACCOUNT_STAMPS}
+        return value_digest(value)
+
     projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
     return {
-        "keys": {key: value_digest(value) for key, value in data.items()},
+        "keys": {key: key_digest(key, value) for key, value in data.items()},
         "projects": {
             path: {
                 "digest": value_digest(entry),
