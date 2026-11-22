@@ -328,7 +328,6 @@ PERSON = r"(?P<name>[^\n]*?)(?: <(?P<email>[^<>\n]*)>)? \((?:ID: )?(?P<user>[UWB
 FROM_LINE = re.compile(rf"From: {PERSON} ?")
 TIME_LINE = re.compile(r"Time: \S[^\n]*")
 TS_LINE = re.compile(r"Message[ _]TS: (?P<ts>\d{10}\.\d{6}) ?", re.IGNORECASE)
-STAMP_LINES = re.compile(r"^Message[ _]TS: (\d{10}\.\d{6}) ?$", re.IGNORECASE | re.MULTILINE)
 PARENT_LINE = re.compile(r"=== THREAD PARENT MESSAGE ===")
 REPLIES_LINE = re.compile(r"=== THREAD REPLIES \((?P<total>\d+)\b[^()\n]*\) ===")
 REPLY_LINE = re.compile(r"--- Reply (?P<number>\d+) of (?P<total>\d+) ---")
@@ -467,9 +466,13 @@ def numbered(numbers: dict[int, int]) -> dict[int, int]:
 #   stays in their message. A channel's history has no numbers: there a whole block with an
 #   older ts than the message it is written in, and a ts of its own, cannot be told from
 #   Slack's (it can only sit below the newest message, so the newest is always Slack's).
-# Any full block left in a message's text marks the listing as made to mislead (`parse`'s
-# second value): callers say so to sessions and learn no names from it.
-def thread_listing(lines: list[str], channel: str) -> tuple[list[dict], bool] | None:
+# - a thread Slack closes with "No thread messsages" has no replies: blocks in its first
+#   message's text are its text, whatever they claim (nothing Slack wrote can compete there).
+# Any full block left in a message's text is that message's sender's text: shown as theirs,
+# said to look like other messages, never a message of whoever it names. When a real message
+# may be in another's text (a number two blocks claim, fewer messages than Slack counts), who
+# wrote what is unsure: callers say so plainly (the third value; `parse`'s second).
+def thread_listing(lines: list[str], channel: str) -> tuple[list[dict], bool, bool] | None:
     top = header_at(lines, 0, PARENT_LINE, FROM_LINE, TIME_LINE, TS_LINE)
     if not top:
         return None
@@ -482,20 +485,28 @@ def thread_listing(lines: list[str], channel: str) -> tuple[list[dict], bool] | 
         return header_at(lines, index, REPLY_LINE, FROM_LINE, TIME_LINE, TS_LINE)
 
     headers = {index: found for index in range(len(lines)) if (found := reply_block(index))}
-    unique = numbered({index: int(found[0]["number"]) for index, found in headers.items()})
-    heading = next(
-        (
-            (index, int(found["total"]))
-            for index, line in enumerate(lines)
-            if index > 4
-            and not lines[index - 1].strip()
-            and (found := REPLIES_LINE.fullmatch(line))
-            and (first := unique.get(1)) is not None
-            and first > index
-            and not any(item.strip() for item in lines[index + 1 : first])
-            and int(headers[first][0]["total"]) == int(found["total"])
-        ),
-        None,
+    numbers = {index: int(found[0]["number"]) for index, found in headers.items()}
+    unique = numbered(numbers)
+    claimed_twice = len(numbers) != len(set(numbers.values()))
+    closing = [line for line in lines if line.strip()][-1:]
+    alone = bool(closing) and NO_REPLIES.fullmatch(closing[0].strip()) is not None
+    heading = (
+        None
+        if alone
+        else next(
+            (
+                (index, int(found["total"]))
+                for index, line in enumerate(lines)
+                if index > 4
+                and not lines[index - 1].strip()
+                and (found := REPLIES_LINE.fullmatch(line))
+                and (first := unique.get(1)) is not None
+                and first > index
+                and not any(item.strip() for item in lines[index + 1 : first])
+                and int(headers[first][0]["total"]) == int(found["total"])
+            ),
+            None,
+        )
     )
     accepted: list[int] = []  # Where each reply's header block is.
     if heading:
@@ -552,10 +563,15 @@ def thread_listing(lines: list[str], channel: str) -> tuple[list[dict], bool] | 
         for index in range(1, len(lines))
         if header_at(lines, index, PARENT_LINE, FROM_LINE, TIME_LINE, TS_LINE)
     ]
-    return found, bool(set(headers) - set(accepted)) or bool(parents)
+    forged = bool(set(headers) - set(accepted)) or bool(parents)
+    # A real reply may be in another message's text: blocks Slack's numbers cannot tell apart.
+    unsure = bool(set(headers) - set(accepted)) and (
+        alone or claimed_twice or not heading or len(accepted) < heading[1]
+    )
+    return found, forged, unsure
 
 
-def channel_listing(lines: list[str]) -> tuple[list[dict], bool] | None:
+def channel_listing(lines: list[str]) -> tuple[list[dict], bool, bool] | None:
     top = CHANNEL_LINE.fullmatch(lines[0]) if lines else None
     if not top:
         return None
@@ -598,10 +614,12 @@ def channel_listing(lines: list[str]) -> tuple[list[dict], bool] | None:
                 reactions=reactions,
             )
         )
-    return found, bool(set(headers) - set(accepted))
+    forged = bool(set(headers) - set(accepted))
+    # Unnumbered: a block left out may be Slack's own, left in another message's text.
+    return found, forged, forged
 
 
-def search_listing(lines: list[str]) -> tuple[list[dict], bool] | None:
+def search_listing(lines: list[str]) -> tuple[list[dict], bool, bool] | None:
     if not lines or not SEARCH_LINE.fullmatch(lines[0]):
         return None
     heading = next(
@@ -613,7 +631,7 @@ def search_listing(lines: list[str]) -> tuple[list[dict], bool] | None:
         None,
     )
     if not heading:
-        return [], False  # "No results found."
+        return [], False, False  # "No results found."
 
     def fields(index: int) -> dict | None:
         """A result's header block from its "### Result k of N" line: its matches by field,
@@ -704,12 +722,15 @@ def search_listing(lines: list[str]) -> tuple[list[dict], bool] | None:
                 people=[(user, " ".join(name.split())) for name, user in people],
             )
         )
-    return found, bool(set(headers) - set(accepted))
+    numbers = [got["number"] for got in headers.values()]
+    unsure = len(numbers) != len(set(numbers)) or len(accepted) < total
+    return found, bool(set(headers) - set(accepted)), unsure
 
 
-def sectioned(listed: str, channel: str = "") -> tuple[list[dict], bool] | None:
-    """The messages of one of Slack's JSON answers (a thread, a channel's history, a search)
-    and whether text in it was made to look like Slack's own lines; None when it is not one.
+def sectioned(listed: str, channel: str = "") -> tuple[list[dict], bool, bool] | None:
+    """The messages of one of Slack's JSON answers (a thread, a channel's history, a search),
+    whether text in them was made to look like Slack's own lines, and whether a real message
+    may be in another's text (who wrote what is unsure); None when it is not one.
 
     Slack's lines around a message in its JSON answers. A thread:
       === THREAD PARENT MESSAGE ===
@@ -782,7 +803,7 @@ def parse(listed: str, channel: str = "") -> tuple[list[dict], bool]:
     when the listing gives a message its permalink, the message goes on to it: a "From: …" or
     "Channel: …" line before that is its text (anyone can write one), not another message."""
     if (sections := sectioned(listed, channel)) is not None:
-        return sections
+        return sections[0], sections[2]
     listed = listed or ""
     ends = []  # Where each permalink line naming a message is, and that message's ts.
     for line in PERMALINK_LINE.finditer(listed):
@@ -869,13 +890,9 @@ def listing_keys(listed: str) -> list[str]:
     a ts (a ts in a message's text is not a message), else every ts in it (in a form not read
     here; never in Slack's JSON answers, which are read by their sections)."""
     if (sections := sectioned(listed)) is not None:
-        stamps = [entry["ts"] for entry in sections[0]]
-        if sections[1]:
-            # Lines made to look like Slack's may keep a message inside another's text: every ts
-            # a "Message TS:" line names counts, so none is lost (for_session then gives the
-            # listing as it is, saying so).
-            stamps += STAMP_LINES.findall((unwrapped(listed) or ("", ""))[0])
-        return [f"slack:{stamp}" for stamp in dict.fromkeys(stamps)]
+        # Slack's own messages only: a ts written in a message's text is that message's text
+        # (it reaches its readers there, as its sender's), never a message of its own.
+        return [f"slack:{stamp}" for stamp in dict.fromkeys(e["ts"] for e in sections[0])]
     found = parse(listed)[0]
     if found and all(entry["ts"] for entry in found):
         # Also when who wrote which is unsure: a message's header with its own permalink is
@@ -890,12 +907,25 @@ def for_session(
     """Only these messages ("1712345678.000100") of what Slack listed, for a session to read:
     Slack's line on who wrote it where (with ids and ts), its permalink, and its text quoted
     ("> ", so a line in it cannot pass for Slack's) and shortened to its share of `limit` (a
-    cut says how much is left). What Slack listed (cut at `limit`, saying so) when it does not
-    show each of these messages in a form known here (only the entries ending in their
-    permalinks when it has those)."""
+    cut says how much is left). Its lines that look like another message stay its sender's,
+    said so; when who wrote what is unsure, that is said first. Slack's JSON answers are never
+    given as they are (a line written in a message there reads as Slack's own): what is not
+    read here is said to be so. Slack's earlier line format, when it does not show each of
+    these messages in a form known here: what Slack listed (cut at `limit`, saying so; only the
+    entries ending in their permalinks when it has those)."""
     found, forged = parse(listed, channel)
     kept = [entry for entry in found if entry["ts"] in stamps]
-    if not kept or not stamps <= {entry["ts"] for entry in kept}:
+    missing = stamps - {entry["ts"] for entry in kept}
+    if unwrapped(listed) is not None and (missing or not kept):
+        unread = (
+            f"({len(missing)} of these Slack messages ({', '.join(sorted(missing))}) came in a "
+            "form Chief of Staff cannot read: nothing of them is quoted here. Have them read with "
+            "Slack's tools to see who wrote what.)"
+        )
+        if not kept:
+            return unread
+        return f"{for_session(listed, stamps - missing, limit, channel)}\n\n{unread}"
+    if not kept or missing:
         # Its entries by their permalinks, at least: a page has other conversations too (in
         # Slack's earlier format, where each ends with its permalink). Never the email addresses
         # Slack gives people.
@@ -909,7 +939,9 @@ def for_session(
     share = max(600, limit // len(kept))
     blocks = [FORGED_NOTE] if forged else []
     for entry in kept:
-        text = entry["said"]
+        # An address written as Slack writes one beside a name ("Bob <bob@acme.com>") is not
+        # shown, in a message's text either: only a made-up line of Slack's has one so.
+        text = scrubbed(entry["said"])
         if len(text) > share:
             left = len(text) - share
             text = f"{text[:share].rstrip()} … ({left} more characters: read the message for all)"
@@ -957,19 +989,21 @@ def readable(
     channel: str = "",
 ) -> str:
     """Slack's listing as the owner reads it: who wrote what where, by name, without ids and
-    timestamps; only the messages `stamps` names when given ("1712345678.000100"). When it is
-    in no form known here (or does not show each of those messages so): its earlier line
-    format as it is; a JSON answer never (it holds email addresses and escapes), a line
-    saying so instead."""
+    timestamps; only the messages `stamps` names when given ("1712345678.000100"). Lines in a
+    message that look like another message stay in it, its sender's, said so; when who wrote
+    what is unsure, that is said first. When it is in no form known here (or does not show
+    each of those messages so): its earlier line format as it is; a JSON answer never (it
+    holds email addresses and escapes): what is read of it, and a line saying the rest is not."""
     names = names or {}
     found, forged = parse(listed, channel)
     json_answer = plain(listed) != (listed or "")
+    unread = ""
     if stamps is not None:
         found = [entry for entry in found if entry["ts"] in stamps]
         if not stamps <= {entry["ts"] for entry in found}:
-            if json_answer:
-                return UNREADABLE
-            return f"⚠ {FORGED_NOTE}\n\n{listed}" if forged else listed
+            if not json_answer:
+                return f"⚠ {FORGED_NOTE}\n\n{listed}" if forged else listed
+            unread = UNREADABLE
     lines = []
     for entry in found:
         who = entry["name"] or names.get(entry["user"]) or "Someone"
@@ -989,7 +1023,7 @@ def readable(
                 if (name := names.get(found[2]) or found[3])
                 else found[0]
             ),
-            entry["said"],
+            scrubbed(entry["said"]),
         )
         if "\n" in said:
             # Its lines as a quote under who wrote it: a list or code block reads as written,
@@ -997,9 +1031,14 @@ def readable(
             said = "\n" + "\n".join(f"> {line}" if line else ">" for line in said.splitlines())
         else:
             said = f" {said}"
+        if any(pattern.search(entry["raw"]) for pattern in LOOKALIKES):
+            # Its own text, though made to look like another message: whose it is, said.
+            said += f"\n({who} wrote all of this: lines in it only look like other Slack messages.)"
         lines.append(f"{head}:{said}" + (f"\n{entry['link']}" if entry["link"] else ""))
     if lines and forged:
         lines.insert(0, f"⚠ {FORGED_NOTE}")
+    if unread and lines:
+        lines.append(unread)
     return "\n\n".join(lines) or (UNREADABLE if json_answer else listed)
 
 
@@ -1385,7 +1424,10 @@ class SlackSource:
             with suppress(ValueError, TypeError):
                 if time.time() - float(json.loads(value).get("at") or 0) > 8 * 86400:
                     self.store.delete(key)  # Answered at once for a week only (Drafts).
-        entries, forged = parse(listed)
+        if (sections := sectioned(listed)) is not None:
+            entries, forged = sections[0], sections[1] or sections[2]
+        else:
+            entries, forged = parse(listed)
         if forged:
             return  # Its replies wait for the owner, as any other.
         found = {entry["ts"]: entry for entry in entries if entry["ts"]}
