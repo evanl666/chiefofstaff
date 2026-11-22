@@ -5532,8 +5532,12 @@ async def test_a_copy_that_cannot_be_made_leaves_the_refusal_as_it_was_once(tmp_
     assert run("git", "worktree", "list", "--porcelain", cwd=app).count("worktree ") == 1
 
 
-async def test_a_worker_with_a_worktree_of_that_repository_is_sent_there(tmp_path):
-    """One that took a worktree of the project with add_repo already: sent there, no copy."""
+async def test_a_worker_with_a_worktree_of_that_repository_writes_there_runs_in_a_copy(
+    tmp_path,
+):
+    """One that took a worktree of the project with add_repo already: a line naming what it
+    writes in the owner's checkout is sent to that worktree; a test run there runs on the
+    owner's files, in a copy of them (its worktree is of origin's newer commit: live r78)."""
     app = to_read(tmp_path)
     harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
     runtime = await harness.connect()
@@ -5542,11 +5546,69 @@ async def test_a_worker_with_a_worktree_of_that_repository_is_sent_there(tmp_pat
     worker = info["session_id"]
     added = await call_tool(runtime, "add_repo", worker, repo=str(app))
     path = Path(json.loads(added.text_result_for_llm)["path"])
-    said = await decided(runtime, worker, "./run_tests.sh", str(app / "sub"))
+    said = await decided(runtime, worker, "touch notes.txt", str(app / "sub"))
     # (Its worktree is of origin's newer commit, without sub/: its top, then.)
     assert said == policy_module.OWN_WORKTREE.format(path=str(path))
     assert not copies(harness, worker)
-    assert run("git", "worktree", "list", "--porcelain", cwd=app).count("worktree ") == 2
+    said = await decided(runtime, worker, "./run_tests.sh", str(app / "sub"))
+    [copy] = copies(harness, worker)
+    assert said == policy_module.OWN_COPY.format(path=str(Path(copy["path"]) / "sub"), left_out="")
+    assert (Path(copy["path"]) / "notes" / "new.txt").read_text() == "new\n", "theirs, as is"
+    branches = [
+        c.get("branch") for c in runtime.workspaces.checkouts(harness.store.session(worker))
+    ]
+    assert len(set(branches)) == len(branches), "its copy on a branch of its own"
+    assert run("git", "worktree", "list", "--porcelain", cwd=app).count("worktree ") == 3
+
+
+async def test_a_worktree_workers_test_run_in_the_owners_checkout_runs_on_their_files(tmp_path):
+    """Live r78 e2e: a worker that made a change in its own worktree of the project was given a
+    new task by the Router that changes nothing, to run the owner's tests there. Its `cd
+    <project> && ./run_tests.sh` was sent to its worktree, on its branch from before the tests
+    were added, where there was no such script. Now what it runs there (a program not known, a
+    test run, a build) runs in a copy of the owner's checkout as it is, their uncommitted work
+    in, with nothing to ask; a line naming what it writes there is sent to its worktree, and
+    its edit there is refused, naming it."""
+    app = to_read(tmp_path)
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Add hello", instructions="add hello",
+                       project=str(app), isolate=True)  # fmt: skip
+    worker = info["session_id"]
+    (own,) = runtime.workspaces.checkouts(harness.store.session(worker))
+    tree = Path(own["path"])
+    (app / "check.sh").write_text("#!/bin/sh\necho checked\n")  # Only in the owner's, as is.
+    (app / "check.sh").chmod(0o755)
+    before = owner_bytes(app)
+    asked = f"In {app}, run ./check.sh and say whether it passes. Change nothing."
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    task="new", title="Run check.sh in app", why_new="another deliverable",
+                    text=asked)  # fmt: skip
+    said = await decided(runtime, worker, f"cd {app} && ls && ./check.sh", str(tree))
+    [copy] = copies(harness, worker)
+    there = Path(copy["path"])
+    assert said == policy_module.OWN_COPY.format(path=str(there), left_out=""), said
+    assert "ask the owner" not in said and there != tree
+    assert os.access(there / "check.sh", os.X_OK) and not (tree / "check.sh").exists()
+    assert (there / "README.md").read_text() == "# app, edited\n"
+    assert run("git", "rev-parse", "HEAD", cwd=there) == run("git", "rev-parse", "HEAD", cwd=app)
+    copied = policy_module.OWN_COPY.format(path=str(there), left_out="")
+    assert await decided(runtime, worker, "npm test", str(app)) == copied, "the same copy"
+    logged = f"cd {app} && ./check.sh > check.log 2>&1"  # (It runs there: all of it, in the copy.)
+    assert await decided(runtime, worker, logged, str(tree)) == copied
+    written = policy_module.OWN_WORKTREE.format(path=str(tree))
+    assert await decided(runtime, worker, f"echo y >> {app}/README.md", str(tree)) == written
+    request = SimpleNamespace(kind="write", file_name=str(app / "README.md"),
+                              resolved_path=str(app / "README.md"))  # fmt: skip
+    decision = await runtime.events.on_permission(request, {"session_id": worker})
+    assert str(tree) in decision.feedback and "owner's own checkout" in decision.feedback
+    for yolo in ("on", "off"):
+        harness.store.execute("UPDATE sessions SET yolo=? WHERE id=?", (yolo, worker))
+        assert (
+            await decided(runtime, worker, "./check.sh", str(there))
+            == "PermissionDecisionApproveOnce"
+        )
+    assert len(copies(harness, worker)) == 1 and owner_bytes(app) == before
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="links need privileges on Windows")

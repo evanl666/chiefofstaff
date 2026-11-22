@@ -28,8 +28,6 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .policy import (
-    CHECKOUT_ASKS,
-    CHECKOUT_WRITES,
     GLOB,
     MADE_UP,
     MOST_LINE,
@@ -888,19 +886,21 @@ def assigned(words: list[Word]) -> list[Word] | None:
     return None
 
 
-def windows_checkout_write(
+def windows_checkout_reading(
     command: str, cwd: str, kept: tuple[str, ...], shell: str, works_there: bool = True
-) -> str:
-    """policy.checkout_write on Windows: the line read as PowerShell reads it (cmd's, for a line
-    Codex runs in cmd); one a POSIX shell runs (Git Bash) is not read: run in a read-only
+) -> WindowsCheckout:
+    """policy.checkout_reading on Windows: the line read as PowerShell reads it (cmd's, for a
+    line Codex runs in cmd); one a POSIX shell runs (Git Bash) is not read: run in a read-only
     checkout, or naming one, it asks."""
     guard = WindowsCheckout(command, kept)
     guard.works_there = works_there
     if shell in POSIX_SHELLS:
-        return CHECKOUT_ASKS if guard.near(cwd or None) else ""
+        if guard.near(cwd or None):
+            guard.ask()
+        return guard
     pending = [(command, cwd or None, 0, "cmd" if shell == "cmd" else "ps")]
     try:
-        while pending and guard.found != CHECKOUT_WRITES:
+        while pending:
             text, folder, depth, dialect = pending.pop()
             if depth > MOST_NESTED:
                 raise TooComplexError
@@ -908,5 +908,5 @@ def windows_checkout_write(
                         for line, where, how in guard.read(text, folder, dialect)]  # fmt: skip
     except (ValueError, TooComplexError, IndexError):
         if guard.near(cwd or None):
-            return guard.found or CHECKOUT_ASKS
-    return guard.found
+            guard.ask()
+    return guard

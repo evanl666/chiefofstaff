@@ -4583,11 +4583,15 @@ class CheckoutWrites:
     """What a line does in a checkout of the owner's given only to read (`kept`), as
     checkout_write reads it: `found` is CHECKOUT_WRITES (it writes there), CHECKOUT_ASKS (a
     program not known runs there on its files, or what it writes could not be read in a line
-    that runs or names one there), or "". `works_there`: the worker works in them (one given
-    to read), so a folder not known (`cd "$dir"`) may be one; not the checkouts its own
-    worktrees were made from, where only a line run in one, or naming one, is about one."""
+    that runs or names one there), or "". `wrote`: it names what it writes there (a file, git's
+    work tree, index or branches); `ran`: it runs a program there that may write there (an
+    install, a build, a test run, a program not known), or what it does there can't be read.
+    `works_there`: the worker works in them (one given to read), so a folder not known (`cd
+    "$dir"`) may be one; not the checkouts its own worktrees were made from, where only a line
+    run in one, or naming one, is about one."""
 
     works_there = True
+    wrote = ran = False
 
     def __init__(self, text: str, kept: tuple[str, ...]):
         self.places = checkout_places(kept)
@@ -4621,7 +4625,10 @@ class CheckoutWrites:
         return self.mentioned or self.inside(folder, real=True)
 
     def ask(self):
-        self.found = self.found or CHECKOUT_ASKS
+        self.found, self.ran = self.found or CHECKOUT_ASKS, True
+
+    def write(self):
+        self.found, self.wrote = CHECKOUT_WRITES, True
 
     def place(self, word: str, folder: str | None) -> str | None:
         """Where a word names a file, from `folder` (None: not known, as a variable's)."""
@@ -4649,7 +4656,7 @@ class CheckoutWrites:
             if self.near(folder):
                 self.ask()
         elif self.inside(where, real=True):
-            self.found = CHECKOUT_WRITES
+            self.write()
 
     def runs_in(self, folder: str | None):
         """A program that writes in the folder it runs in (an install, a build, a test run)."""
@@ -4657,7 +4664,7 @@ class CheckoutWrites:
             if self.mentioned:
                 self.ask()
         elif self.inside(folder, real=True):
-            self.found = CHECKOUT_WRITES
+            self.found, self.ran = CHECKOUT_WRITES, True
 
     def unknown(self, name: str, arguments: list[str], folder: str | None):
         """A program not known: asked about when it is in a read-only checkout, or runs in one
@@ -4726,7 +4733,7 @@ class CheckoutWrites:
             # Its files come from its input: wherever the line runs or names.
             if base in CHECKOUT_MAKERS | CHECKOUT_MODES | CHECKOUT_COPIERS | {"sed", "perl"}:
                 if self.there(folder) or self.mentioned:
-                    self.found = CHECKOUT_WRITES
+                    self.write()
             elif self.there(folder):
                 self.ask()
         if base in CHECKOUT_READERS:
@@ -5081,7 +5088,7 @@ def checkout_find(guard: CheckoutWrites, rest: list[str], positional: list[str],
         return
     for at, word in enumerate(rest):
         if word in {"-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}:
-            guard.found = CHECKOUT_WRITES
+            guard.write()
         elif word in {"-exec", "-execdir", "-ok", "-okdir"}:
             run = list(itertools.takewhile(lambda part: part not in {";", "+"}, rest[at + 1 :]))
             name = run[0].rsplit("/", 1)[-1] if run else ""
@@ -5089,7 +5096,7 @@ def checkout_find(guard: CheckoutWrites, rest: list[str], positional: list[str],
                 part[:1] == "-" and part[:2] != "--" and "i" in part for part in run[1:]
             )
             if name in CHECKOUT_MAKERS | CHECKOUT_MODES | CHECKOUT_COPIERS or in_place:
-                guard.found = CHECKOUT_WRITES
+                guard.write()
             elif name not in CHECKOUT_READERS | {"sed"}:
                 guard.ask()
 
@@ -5157,7 +5164,7 @@ def checkout_git(guard: CheckoutWrites, rest: list[str], positional: list[str], 
     if command == "clean" and options & {"-n", "--dry-run"}:
         return
     if command in GIT_CHANGES:
-        guard.found = CHECKOUT_WRITES
+        guard.write()
     else:
         guard.ask()  # (An alias, or a command of its own: what it does is not read here.)
 
@@ -5189,25 +5196,33 @@ def checkout_write(
     past what is read here, run in one or naming one: CHECKOUT_ASKS. On Windows, as PowerShell
     reads it (cmd, for one `shell` says cmd runs): winshell.py. `works_there`: see
     CheckoutWrites (False: the checkouts its own worktrees were made from)."""
-    if not kept:
-        return ""
-    if WINDOWS_SHELLS:
-        from .winshell import windows_checkout_write
+    return checkout_reading(command, cwd, kept, shell, works_there).found
 
-        return windows_checkout_write(command, cwd, kept, shell, works_there)
+
+def checkout_reading(
+    command: str, cwd: str, kept: tuple[str, ...], shell: str = "", works_there: bool = True
+) -> CheckoutWrites:
+    """checkout_write's reading of a line, to its end: `found`, `wrote` and `ran` (a test run
+    there may come after a redirection there)."""
+    if not kept:
+        return CheckoutWrites("", ())
+    if WINDOWS_SHELLS:
+        from .winshell import windows_checkout_reading
+
+        return windows_checkout_reading(command, cwd, kept, shell, works_there)
     guard = CheckoutWrites(command, kept)
     guard.works_there = works_there
     pending: list[tuple[str, str | None, int]] = [(command, cwd or None, 0)]
     try:
-        while pending and guard.found != CHECKOUT_WRITES:
+        while pending:
             text, folder, depth = pending.pop()
             if depth > MOST_NESTED:
                 raise TooComplexError
             pending += [(line, where, depth + 1) for line, where in guard.line(text, folder)]
     except (ValueError, TooComplexError, IndexError):
         if guard.near(cwd or None):
-            return guard.found or CHECKOUT_ASKS
-    return guard.found
+            guard.ask()
+    return guard
 
 
 def owners_checkouts(row: dict, checkouts: list[dict]) -> tuple[list[str], dict[str, str]]:

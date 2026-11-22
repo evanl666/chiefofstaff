@@ -108,6 +108,7 @@ from .policy import (
     REPOSITORY_SETTINGS,
     SANDBOX_HELD,
     checkout_of,
+    checkout_reading,
     owners_checkouts,
     within,
 )
@@ -3369,9 +3370,10 @@ class Runtime:
         read, or one its own worktree was made from (policy.owners_checkout: it writes there, or
         runs what can't be read there): its own copy of that checkout, made as add_repo makes a
         worktree, from the owner's commit with their uncommitted work copied in
-        (Workspaces.make_checkout `copy`), or a worktree of that repository it has. What it
-        hears then (policy.OWN_COPY); None when it has none (one is tried once a repository:
-        one that could not be made is not tried again)."""
+        (Workspaces.make_checkout `copy`), or, for a line naming what it writes there, a
+        worktree of that repository it has. What it hears then (policy.OWN_COPY); None when it
+        has none (one is tried once a repository: one that could not be made is not tried
+        again)."""
         command = getattr(request, "full_command_text", "") or ""
         folder = str(
             getattr(request, "resolved_working_directory", None)
@@ -3379,17 +3381,18 @@ class Runtime:
             or row["cwd"]
             or ""
         )
+        shell = str(getattr(request, "shell", "") or "")
         try:
             async with self.states[row["id"]].checkouts:
-                return await self.copy_for(self.store.session(row["id"]), command, folder)
+                return await self.copy_for(self.store.session(row["id"]), command, folder, shell)
         except Exception:
             logger.warning("Could not make %s a copy of a checkout.", row["id"], exc_info=True)
             return None
 
-    async def copy_for(self, row: dict, command: str, folder: str) -> str | None:
+    async def copy_for(self, row: dict, command: str, folder: str, shell: str = "") -> str | None:
         """own_copy's work, its checkouts held (no add_repo meanwhile)."""
         checkouts = self.workspaces.checkouts(row)
-        # Given to read, or one its own worktree was made from (that worktree is its copy).
+        # Given to read, or one its own worktree was made from.
         _, behind = owners_checkouts(row, checkouts)
         kept = await asyncio.to_thread(checkout_of, command, folder, [
             *(c for c in checkouts
@@ -3401,7 +3404,15 @@ class Runtime:
         top = kept.get("top") or await git("-C", kept["path"], "rev-parse", "--show-toplevel")
         top = await asyncio.to_thread(os.path.realpath, top.strip())
         there = await asyncio.to_thread(os.path.realpath, kept["path"])
-        if own := await asyncio.to_thread(own_tree, checkouts, top, there):
+        # A line that only writes files there it names may write them where it works (a
+        # worktree of its own); one that runs a program there (a test run, a build, one not
+        # known) runs on the owner's files as they are: in a copy of them, never in a worktree
+        # of its own, on its branch and maybe behind them (live r78 e2e: its tests weren't there).
+        reading = await asyncio.to_thread(
+            checkout_reading, command, folder, (kept["path"],), shell, bool(kept.get("shared"))
+        )
+        copies = reading.ran or not reading.wrote
+        if own := await asyncio.to_thread(own_tree, checkouts, top, there, copies):
             line = OWN_COPY if own.get("copy") else OWN_WORKTREE
             at = await asyncio.to_thread(place_in, own["at"], there, folder)
             return line.format(path=at, left_out="")
@@ -3410,7 +3421,16 @@ class Runtime:
             return None
         state.copies_tried.add(top)
         workspace, slug = await self.checkout_place(row)
-        have = {c.get("repo", c["path"]) for c in checkouts if c.get("branch") or c.get("worktree")}
+        mine = await asyncio.to_thread(
+            lambda: [c for c in checkouts if os.path.realpath(c.get("repo") or c["path"]) == top]
+        )
+        if any(c.get("branch") == BRANCH_PREFIX + slug for c in mine):
+            slug += "-copy"  # (Its own worktree of it is on that branch.)
+        have = {
+            c.get("repo", c["path"])
+            for c in checkouts
+            if (c.get("branch") or c.get("worktree")) and c not in mine
+        }
         checkout = await self.workspaces.make_checkout(
             workspace, slug, kept["path"], True, have, carry=not row["slack"], copy=True
         )

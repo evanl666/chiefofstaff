@@ -1173,13 +1173,16 @@ def repoint(tree: Path, under: Path, admin: str, repository: Path) -> None:
         folder.write("gitdir", f"{(tree / '.git').as_posix()}\n")
 
 
-def own_tree(checkouts: list[dict], top: str, kept: str) -> dict | None:
+def own_tree(checkouts: list[dict], top: str, kept: str, copies: bool = False) -> dict | None:
     """A worker's own worktree of the repository whose checkout is at `top` (real paths), with
     "at": where the owner's checkout `kept` (a folder in it) is in it; {} when that folder is
-    not there (removed); None when it has none."""
+    not there (removed); None when it has none. `copies`: only a copy of the owner's checkout
+    (Workspaces.make_checkout `copy`)."""
     for checkout in checkouts:
         repo = checkout.get("repo") or ""
         if checkout.get("shared") or checkout.get("remote") or not repo:
+            continue
+        if copies and not checkout.get("copy"):
             continue
         if os.path.realpath(repo) == top:
             place = Path(checkout.get("worktree") or checkout["path"]) / os.path.relpath(kept, top)

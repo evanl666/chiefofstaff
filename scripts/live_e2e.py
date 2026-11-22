@@ -636,14 +636,16 @@ async def scenario_watchdog(app: App, project: Path):
     log(f"watchdog acted: {action}")
     # Given the project to read, its test run there is refused and it gets a copy of its own to
     # run it in (r66d: refused with no copy, it asked the owner which way to go, and no
-    # Watchdog review came). One already in a worktree of its own runs it there.
+    # Watchdog review came). One working in a worktree of its own gets one too, never sent to
+    # that worktree (r78: on its branch, from before run_tests.sh was committed, it had none).
     rows = await app.get(f"/api/sessions/{worker_id}/messages")
+    assert not [m for m in rows if m["kind"] == "notice" and "your own worktree of it" in m["text"]]
     copied = next((m for m in rows if m["kind"] == "notice"
                    and "your own copy of it" in m["text"]), None)  # fmt: skip
     if copied:
         found = re.search(r"is ready at (.+?); run it there", copied["text"])
         assert found, copied["text"]
-        slug = Path(found.group(1)).parent.name
+        slug = "/".join(Path(found.group(1)).parts[-2:])  # (Its folder and the copy's.)
         ran = [m["text"] for m in rows if m["id"] > copied["id"] and m["kind"] == "tool"
                and slug in m["text"]]  # fmt: skip
         log(f"watchdog's worker: in its own copy ({found.group(1)}): {ran[:2]}")

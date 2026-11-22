@@ -2101,23 +2101,28 @@ async def test_a_yolo_codex_workers_command_writing_in_the_owners_checkout_is_re
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the stand-in Codex runs commands in zsh")
+@pytest.mark.parametrize("isolate", [False, True])
 async def test_a_command_refused_in_the_owners_checkout_is_sent_to_a_copy_of_its_own(
-    backend, tmp_path, monkeypatch
+    backend, tmp_path, monkeypatch, isolate
 ):
     """What Chief of Staff relies on to send a worker's test run in the owner's checkout it
     was given to read to a copy of its own (Events.on_permission, Runtime.own_copy): the
     command's request reaches it with where it runs, and its refusal (where the copy is)
     reaches the turn; the copy has the owner's new script; run there, it runs. Live e2e r66d's
-    worker, refused with no copy, asked the owner which way to go."""
-    async with reading_the_owners_checkout(tmp_path, monkeypatch, backend) as it:
+    worker, refused with no copy, asked the owner which way to go. `isolate`: one working in
+    its own worktree runs it there too, in a copy of the owner's files as they are, never in
+    its worktree (live r78 e2e: its branch had no such script)."""
+    async with reading_the_owners_checkout(tmp_path, monkeypatch, backend, isolate=isolate) as it:
         app = it.app
         (app / "run_tests.sh").write_text("#!/bin/sh\necho ran > ran.txt\n")
         (app / "run_tests.sh").chmod(0o755)
-        await it.session.send("Run the shell command `./run_tests.sh`. Then reply with just: done")
+        run = f"cd {app} && ./run_tests.sh" if isolate else "./run_tests.sh"
+        await it.session.send(f"Run the shell command `{run}`. Then reply with just: done")
         await it.turn.wait()
         assert not (app / "ran.txt").exists(), "not run in the owner's checkout"
         [copy] = it.copies()
         tree = Path(copy["path"])
+        assert tree != it.tree and not (it.tree / "ran.txt").exists()
         assert OWN_COPY.format(path=copy["path"], left_out="") in it.notices(), it.notices()
         assert (tree / "run_tests.sh").read_text() == (app / "run_tests.sh").read_text()
         if isinstance(backend, ScriptedBackend):
