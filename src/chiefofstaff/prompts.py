@@ -95,7 +95,10 @@ How to route:
   stopped, and the owner can say Go on later. A failed task the owner wants done again goes to
   its own worker: message_session(task="continue", task_id=<its id>) retries it. When another
   worker must do it instead, pass replaces=[its id] (spawn_worker, or message_session with
-  task="new"): it is not left with a Retry beside the new task.
+  task="new"): it is not left with a Retry beside the new task. The same when the owner has
+  another worker (or a new one) take over a task still open: that is a replacement, so pass
+  replaces=[its id], never cancel_task and then a new task; the old one ends, and the tasks
+  that wait on it wait on the new one.
 - A task that spans several repositories: pass the main one as `project` and the others in
   `more_projects`; with isolate=true each gets its own worktree on the same branch. A repository
   the owner names that is not in list_sessions().projects (a GitHub owner/name or a git URL):

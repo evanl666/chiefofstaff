@@ -53,7 +53,9 @@ itself.
   unblocked*). Workers whose tasks are related are one team even if they never messaged; a PR
   they share is a chip, never a link. Home's line of a team adds one cue (*⇢ 1 waiting* first,
   else *●●○ 2 of 3 parts*),
-  and a worker's *Team* tab starts with its task's lineage.
+  and a worker's *Team* tab starts with its task's lineage. A task you have another worker do
+  instead is replaced (*handed to …*), not cancelled beside a new one, and what waited on it
+  waits on the new task, as it does on a worker's new task that supersedes its own.
 - **A folded run of the Router's start lines shows each started worker's agent mark** (its
   agent and model on hover), when more than one coding agent is on (E129).
 - **The Router's context no longer carries what workers tell each other.** Each message rode

@@ -45,7 +45,7 @@ COMMAND = Path(sys.executable).parent / "chiefofstaff"
 # worker when the owner asks for one; a digest of what workers tell each other, not a copy,
 # E129; work in place to a worker started in place): while Send to Chief is off it must not
 # change by a byte. (Change it here only with a deliberate change to the Router's prompt.)
-ROUTER_PROMPT = (27381, "24e113ea57ae2e4ca382f42d286e83baa51deea84d4531ecf40c60471eb24d6c")
+ROUTER_PROMPT = (27632, "d3544edb5eff3a32efbca4b8a5489a2fd2f42a0f0f7aff1bd25d6a34a039ee85")
 
 HELP = """\
 usage: chiefofstaff [-h] [--version] [--port PORT] [--data-dir DATA_DIR] [--no-browser] [--demo]

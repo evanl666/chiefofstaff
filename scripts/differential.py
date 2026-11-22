@@ -341,6 +341,16 @@ FIXES: list[Allow] = [
         + "|".join(map(re.escape, IN_PLACE_RULE_BEFORE + IN_PLACE_RULE_AFTER))
         + ")$",
     ),
+    # Task relationships: another worker taking over an open task replaces it (replaces=…), so
+    # the tasks that wait on it wait on the new one, rather than a cancel and a new task.
+    Allow(
+        "the Router's rule: another worker taking over an open task replaces it",
+        data=r"^backend\.sessions\.router:.*\.system_message\.content$",
+        lines=r'^  (task="new"\): it is not left with a Retry beside the new task\.( The same when '
+        r"the owner has)?|another worker \(or a new one\) take over a task still open: |"
+        r"replaces=\[its id\], never cancel_task and then a new task; |that wait on it wait on "
+        r"the new one\.$)",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
