@@ -35,9 +35,9 @@ you asked, its short answers, and one line for each thing that happened on the w
 go on says why, *Slack couldn't go on: …*). **View** brings up the
 task's card on the right instead of repeating its report in the chat; lines from Slack, the
 Watchdog and other sessions open in place, as does a report's line (to read all of it). Two or
-more such lines in a row of the same kind are one: the Router's routing (*4 routing updates*)
-and what workers that work together told each other (*↔ 5 team messages*, below); click it to
-see them.
+more such lines in a row of the same kind are one: the Router's routing (*4 routing updates*,
+with each started worker's agent mark when more than one coding agent is on) and what workers
+that work together told each other (*↔ 5 team messages*, below); click it to see them.
 
 On the right, everything has one place:
 
@@ -193,8 +193,10 @@ worker handed another.
 **How a team's tasks are related.** Workers whose tasks are related are a team too, even if
 they never message: one that waits on another's result, does a task instead of another (*handed
 to E2E Runner*), builds on what another found (*picks up from Token Scout*) or was split off,
-and the parts of one request. A team's view says it in counts first (*⇉ 3 parts ●●○ · ⇢ 1
-waiting · ⑂ 1 split · #482*; click one to light the tasks it counts), then *Tasks*, a row per
+the parts of one request, and a Compare's sides (*vs Codex*; the one you accept *picked*, the
+other dimmed: in the sidebar, a team that is only a Compare keeps its *Compare* line). A team's
+view says it in counts first (*⇉ 3 parts ●●○ · ⇢ 1 waiting · ⑂ 1 split · #482*; click one to
+light the tasks it counts), then *Tasks*, a row per
 task with its status and the one relation that matters most: what it waits on (*waits on
 Checkout UI · 9 min*, amber like a question waiting), the task that replaced it (its row
 dimmed), its part of a request (*3 parts · 1 landed*, the same on each part), where it

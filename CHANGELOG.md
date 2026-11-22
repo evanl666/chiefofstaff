@@ -50,7 +50,9 @@
   asked that its teammate waits, *Open thread* shows the exchange.
 - **How a team's tasks are related, at a glance (E130).** Tasks are related in ways Chief of
   Staff already kept but never showed together: one waits on another's result, does a task
-  instead of another, builds on what another found, was split off, or is one part of a request.
+  instead of another, builds on what another found, was split off, is one part of a request, or
+  is the same task on another agent (a Compare: *vs Codex*; the one you accept *picked*, the
+  other dimmed).
   A team's view now has a *Tasks* section: a row per task with its status and the one relation
   that matters most (*waits on Checkout UI · 9 min*, *handed to E2E Runner*, *3 parts · 1 landed*,
   *split from …*), counts above it (*⇉ 3 parts ●●○ · ⇢ 1 waiting · #482*, a click lights their
@@ -60,6 +62,8 @@
   unblocked*). Workers whose tasks are related are one team even if they never messaged; a PR
   they share is a chip, never a link. Home's line of a team adds one cue (*●●○ 2 of 3 parts*),
   and a worker's *Team* tab starts with its task's lineage.
+- **A folded run of the Router's start lines shows each started worker's agent mark** (its
+  agent and model on hover), when more than one coding agent is on (E129).
 - **The Router's context no longer carries what workers tell each other.** Each message rode
   along with its next turn (up to 600 characters each, about 80,000 a day in a busy QA run);
   now it gets a short digest of who told or asked whom and what still waits, and reads a team's
