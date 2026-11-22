@@ -169,6 +169,36 @@ async def test_the_router_gets_who_told_whom_never_the_words(harness):
     assert "never pass it on yourself" in text
 
 
+async def test_what_workers_tell_each_other_reaches_the_router_only_as_their_own_reports(harness):
+    """Live E1 (r81): the Router gets its workers' reports as they wrote them, and one may name
+    a value it handed on; what one worker told, asked or answered another it is given nowhere
+    (a turn, the team digest, a fresh Router's handover, the records its search shows)."""
+    from chiefofstaff.envelope import ENVELOPE
+
+    runtime, router, scout, writer = await team_of_two(harness)
+    await call_tool(runtime, "tell_session", scout, session_id=writer,
+                    text="Token 4a7c19e2, rotate at 18:00.")  # fmt: skip
+    asked = await call_tool(runtime, "ask_session", writer, session_id=scout,
+                            question="Staging too, or prod only?")  # fmt: skip
+    question = asked.text_result_for_llm.split("(")[1].split(")")[0]
+    await call_tool(runtime, "answer_session", scout, question_id=question, answer="Prod only.")
+    task = runtime.tasks.current(scout)["id"]
+    await call_tool(runtime, "report", scout, status="done", task_id=task,
+                    summary="Generated token 4a7c19e2 and sent it to the writer.")  # fmt: skip
+    await runtime.owner_send(router, "How is the token going?")
+    await settle(runtime)
+    sent = "\n".join(harness.session(router).sent)
+    reports = [body for head, body in ENVELOPE.findall(sent) if 'type="report"' in head]
+    assert any("4a7c19e2" in body for body in reports), "its own report, as it wrote it"
+    given = [
+        sent,
+        runtime.handover(),
+        json.dumps(runtime.workers.find("token rotate staging prod"), ensure_ascii=False),
+    ]
+    for words in ("rotate at 18:00", "Staging too, or prod only?", "Prod only."):
+        assert not any(words in text for text in given), words
+
+
 async def test_peer_rows_from_before_ride_along_themselves_not_in_a_digest(harness):
     runtime, router, scout, writer = await team_of_two(harness)
     runtime.delivery.hold(
