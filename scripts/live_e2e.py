@@ -1268,6 +1268,13 @@ async def scenario_owner_flow(app: App, root: Path):
             },
         )
         answer = await router_reply(app, router, mark, 180)
+        if "PELICAN" not in answer.upper():
+            # What Chief of Staff lists as open in a terminal now (r81r: the fake one missing).
+            session_id = line.split()[1]
+            listed = await app.get("/api/external")
+            shown = [(s["id"][:8], s["summary"][:40]) for s in listed if s["open"]]
+            log(f"open in a terminal: {shown}")
+            log(f"the fake one: {[s for s in listed if s['id'] == session_id]}")
         assert "PELICAN" in answer.upper(), answer
         mark = await router_mark(app, router)
         await app.post(

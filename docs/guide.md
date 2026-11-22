@@ -314,8 +314,8 @@ its timeline, and keeps working in its own folder, inside your code folder or no
 moved or copied. *Copy resume command* gives `copilot --resume <id>` to continue it in a
 terminal instead.
 
-The Router knows these sessions too: ask it what one open in a terminal is doing, and it reads
-it. It cannot type into it: give such a session instructions there, or exit it there. To
+The Router knows these sessions too, one you open while it runs as well: ask it what one open
+in a terminal is doing, and it reads it. It cannot type into it: give such a session instructions there, or exit it there. To
 continue one that is not open anywhere, the Router asks you first: a *Continue a session here?*
 card shows the session and what the Router wants to give it.
 

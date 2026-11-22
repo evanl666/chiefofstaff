@@ -833,6 +833,8 @@ class Runtime:
         self.elsewhere: dict[str, int] = {}
         # Other agents' conversations open in a terminal, by agent (agent_elsewhere).
         self.elsewhere_on: dict[str, dict[str, int]] = {}
+        # Those of them the Router was last given (terminals_note); None before its first look.
+        self.terminals_given: set[str] | None = None
         # What workers open in a terminal are doing, read from their logs (Workers.mirror).
         self.terminal: dict[str, dict] = {}
         self.mirror_job: asyncio.Task | None = None
@@ -9155,7 +9157,11 @@ class Runtime:
             # The Router hands this message on as {owner:<ref>} instead of copying it.
             meta["ref"] = "o" + uuid4().hex[:6]
             prompt = wrap("owner", "message", text, ref=meta["ref"], reply_in=spoken)
-            notes += [self.projects_note(), self.toolset.related_hint(text)]
+            notes += [
+                self.projects_note(),
+                self.toolset.related_hint(text),
+                await self.terminals_note(),
+            ]
             compared = list(dict.fromkeys(compare))
             if len(compared) > 1:
                 # Several chosen in the composer: the task on each, side by side.
@@ -9490,6 +9496,46 @@ class Runtime:
             return ""  # The Router's first look at projects is through list_sessions.
         listed = "\n".join(f"- {project}" for project in projects[:40]) or "- (none)"
         return f"The configured projects are now:\n{listed}"
+
+    def open_terminals(self) -> list[str]:
+        """The sessions open in another program now, as last looked (every agent's)."""
+        found = set(self.elsewhere)
+        for seen in self.elsewhere_on.values():
+            found |= set(seen)
+        return sorted(found)
+
+    def saw_terminals(self, listed: list[str]):
+        """The Router was given these sessions as open in the owner's terminal now."""
+        self.terminals_given = set(listed)
+
+    async def terminals_note(self) -> str:
+        """The owner's sessions opened in a terminal since the Router last looked at them, named
+        in the owner's next message (live e2e r81r: asked about one opened a minute after its
+        last list_sessions, the Router answered from that list and found it nowhere)."""
+        now = set(self.open_terminals())
+        given, self.terminals_given = self.terminals_given, now
+        opened = now - given if given is not None else set()
+        if not opened:
+            return ""  # The Router's first look at them is through list_sessions.
+        try:
+            items = await self.workers.external(agents_too=True)
+            if not opened <= {item["id"] for item in items}:
+                items = await self.workers.external(refresh=True, agents_too=True)
+        except Exception:
+            return ""
+        named = [
+            f"\u201c{item['summary']}\u201d (session {item['id']}"
+            + (f", in {item['cwd']}" if item["cwd"] else "")
+            + ")"
+            for item in items
+            if item["open"] and item["id"] in opened
+        ]
+        if not named:
+            return ""  # Chief of Staff's own, a program's: not the owner's to see.
+        return (
+            f"Opened in the owner's terminal since you last looked: {'; '.join(named[:5])}. "
+            "list_sessions().terminal_sessions has every session open there now."
+        )
 
     async def tell_router(
         self, row: dict, status: str, summary: str, task: dict | None = None, note: str = ""

@@ -98,6 +98,10 @@ itself.
   from macOS. That line is dropped wherever Chief of Staff reads what Copilot, Codex, Claude
   Code and what they start write on stderr; all else they write goes where it did (an error
   still shows), and a Claude worker that can't start no longer gives that line as its reason.
+- **A session you just opened in a terminal is one the Router knows about.** Asked about a
+  Copilot session opened a minute after it had last looked at your terminal sessions, the Router
+  answered from what it had seen then, and found it nowhere. Your next message names each one
+  opened since, once.
 - **Fixes:** a Codex signed in with an API key ("API key configured") read as signed out; an
   agent signed out while its workers ran still said *Ready*, and a new task or message for it
   went to it and failed there (it is saved with its card now); work you asked done directly in

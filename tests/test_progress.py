@@ -194,6 +194,45 @@ async def test_the_router_knows_sessions_open_in_a_terminal(harness, tmp_path):
     assert "Rerun the old eval" in harness.session("old-1").sent[-1]
 
 
+async def test_a_session_opened_in_a_terminal_since_the_router_looked_is_named(harness, tmp_path):
+    """Live e2e r81r: the Router had listed the owner's terminal sessions a minute before; the
+    owner opened another (a codeword in it) and asked about it, and the Router answered from its
+    earlier list: none was about a codeword. The owner's next message names the one opened since,
+    once; Chief of Staff's own sessions open elsewhere are not named."""
+    runtime = await harness.connect()
+    context = SimpleNamespace(working_directory=str(tmp_path), repository="", branch="")
+
+    def meta(identifier, summary, day, client="github/cli"):
+        found = SimpleNamespace(
+            session_id=identifier,
+            summary=summary,
+            is_remote=False,
+            modified_time=datetime(2026, 11, day, tzinfo=UTC),
+            context=context,
+        )
+        vars(found).update(client_name=client, last_client_name="", clients_listed=True)
+        return found
+
+    harness.client.metas = [meta("term-1", "Design the game", 3)]
+    harness.client.in_use = {"term-1": 4242}
+    await runtime.workers.refresh_elsewhere()
+    await call_tool(runtime, "list_sessions", harness.router_id)
+    router = harness.session(harness.router_id)
+    harness.client.metas += [
+        meta("term-2", "Remember the codeword PELICAN", 4),
+        meta("ours-1", "A worker of another Chief of Staff", 4, client="copilot-cli/chiefofstaff"),
+    ]
+    harness.client.in_use |= {"term-2": 4343, "ours-1": 4444}
+    await runtime.workers.refresh_elsewhere()
+    await runtime.owner_send(harness.router_id, "Which codeword does my terminal session hold?")
+    told = router.sent[-1]
+    assert "Opened in the owner's terminal since you last looked" in told
+    assert "Remember the codeword PELICAN" in told and "term-2" in told
+    assert "Design the game" not in told and "ours-1" not in told
+    await runtime.owner_send(harness.router_id, "And what else is open there?")
+    assert "since you last looked" not in router.sent[-1], "named once"
+
+
 async def test_a_plugin_hook_that_fails_does_not_fail_the_worker(harness):
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Explain the solution")

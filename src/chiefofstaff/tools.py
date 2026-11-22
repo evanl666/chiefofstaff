@@ -2935,6 +2935,7 @@ class Tools:
             listed = await self.runtime.workers.external(agents_too=True)
         except Exception:
             return []
+        self.runtime.saw_terminals([item["id"] for item in listed if item["open"]])
         return [
             {
                 "session_id": item["id"],
