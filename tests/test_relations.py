@@ -322,6 +322,9 @@ async def test_a_compare_is_one_team_its_sides_side_by_side_the_one_accepted_pic
         tasks = [worker["task_id"] for worker in found["workers"]]
         [team] = [members for members in runtime.teams.components() if made[0] in members]
         assert sorted(team) == sorted(made)
+        # Its two workers have one name: said once, with how many.
+        [view] = [t for t in runtime.teams.view() if made[0] in t["members"]]
+        assert view["name"] == "Fix the login test \u00d72"
         [group] = [g for g in runtime.relations.graph().groups if g["kind"] == "compare"]
         assert sorted(group["tasks"]) == sorted(tasks) and group["state"] == "pending"
         thread = runtime.teams.thread_view(runtime.teams.team_of(made[0]))

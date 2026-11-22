@@ -8,6 +8,7 @@ import { select, setLayout } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { cueNode, light, lineageOf, summaryChips, taskList } from "./relations.js";
+import { markOf } from "./agentpick.js";
 
 // A color per worker (and per team), from its id: the same on every page and after a reload.
 // In a team, its workers' colors differ: each, in the order they joined, takes the first color
@@ -276,7 +277,7 @@ function members(team, focus, view) {
     { class: "team-members" },
     hidden ? el("button", { type: "button", class: "member earlier", text: `+${hidden} earlier`, title: "Its workers that joined first", onclick: () => { view.allMembers = true; renderTeam(); } }) : null,
     ...shown.map((id) =>
-      el("button", { type: "button", class: `member${id === focus ? " focus" : ""}${open.has(id) ? "" : " closed"}`, title: open.has(id) ? "Open its chat" : "Closed: open its chat", onclick: () => select(id) }, avatar(id, team.labels?.[id] || ""), el("span", { text: team.labels?.[id] || labelOf(id) })),
+      el("button", { type: "button", class: `member${id === focus ? " focus" : ""}${open.has(id) ? "" : " closed"}`, title: open.has(id) ? "Open its chat" : "Closed: open its chat", onclick: () => select(id) }, avatar(id, team.labels?.[id] || ""), el("span", { text: team.labels?.[id] || labelOf(id) }), markOf(workerOf(id))),
     ),
   );
 }

@@ -283,7 +283,8 @@ export function lineageOf(view, row, rerender) {
       { class: "peek" },
       avatar(peeked.session_id),
       el("span", { class: "who", text: labelOf(peeked.session_id) }),
-      el("span", { class: "what", text: shownTitle(peeked), title: peeked.title }),
+      // (A title that is only its worker's name is said once.)
+      shownTitle(peeked) !== labelOf(peeked.session_id) ? el("span", { class: "what", text: shownTitle(peeked), title: peeked.title }) : null,
       el("span", { class: "state", text: `${statusWord(peeked)} · ${ago(ageOf(peeked))}` }),
       el("button", { type: "button", class: "link", text: "Open", title: "Its chat, at this task", onclick: () => select(peeked.session_id, { task: peeked.id }) }),
     ),

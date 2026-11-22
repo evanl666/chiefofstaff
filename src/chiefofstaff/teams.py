@@ -61,9 +61,15 @@ def short_label(title: str) -> str:
 
 
 def team_name(labels: list[str]) -> str:
-    if len(labels) <= 2:
-        return " & ".join(labels)
-    return f"{labels[0]}, {labels[1]} +{len(labels) - 2}"
+    """Its workers' names, earliest first; workers of one name (a Compare's sides) once, with
+    how many of them after a multiplication sign."""
+    names = [
+        f"{name} \u00d7{labels.count(name)}" if labels.count(name) > 1 else name
+        for name in dict.fromkeys(labels)
+    ]
+    if len(names) <= 2:
+        return " & ".join(names)
+    return f"{names[0]}, {names[1]} +{len(names) - 2}"
 
 
 def iso(seconds: float | None) -> str:

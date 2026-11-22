@@ -9857,8 +9857,14 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
         await at_home(page)
         if await page.locator("#home-tabs").is_visible():
             await page.locator("#home-tabs [data-tab=tasks]").click()
-        await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
+        row = page.locator(f'#teams-strip .team-row[data-team="{team}"]')
+        # One name for both sides, once; each of its workers by its agent's mark.
+        await expect(row.locator(".name")).to_have_text("Speed up the importer \u00d72")
+        await row.click()
         view = page.locator("#timeline .team-view")
+        marks = view.locator(".team-members .member .agent-mark")
+        await expect(marks).to_have_count(2)
+        await expect(marks.nth(1)).to_have_attribute("aria-label", re.compile(r"^Codex"))
         first, second = (view.locator(f'.trow[data-task="{task}"]') for task in sides)
         await expect(first.locator(".rel")).to_have_text("vs Codex")
         await expect(second.locator(".rel")).to_have_text("vs Copilot")
@@ -9869,6 +9875,8 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
         await expect(lineage.locator(".caption")).to_have_text(
             "The same task on Copilot and Codex · yours to pick"
         )
+        # Its peek names it once (its title is its worker's name).
+        await expect(lineage.locator(".peek .what")).to_have_count(0)
         runtime.tasks.move(sides[1], "done")  # The owner accepts Codex's.
         await expect(second.locator(".rel")).to_have_text("picked", timeout=10000)
         await expect(first.locator(".rel")).to_have_text("Codex picked")
