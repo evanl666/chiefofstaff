@@ -8131,7 +8131,7 @@ PLAN_NOTE = (
 )
 HOOKS_NOTE = "Sandboxed Claude workers don't run hooks."
 NO_EXTRA = "Needs Chief of Staff's Claude extra: `uv tool install 'chiefofstaff[claude]'`"
-LIMIT_LINE = "Your Claude plan's 5-hour limit is reached; it resets at 3:40 pm."
+LIMIT_LINE = "Claude's 5-hour limit is used up · resets 3:40 PM"
 
 
 def codex_on_path() -> tuple[Path, Path]:
@@ -9564,9 +9564,9 @@ async def picker_workers(runtime, browser):
             assert not store.session(worker)["closed_at"], "the first one stays open"
         assert not errors, errors
         await context.close()
-    # A task its plan's limit paused (its request refused): its reset first, on its row; Go on
-    # at that time (by itself then), or continue on another agent now. (The Copilot workers
-    # above, closed: room for it to start now.)
+    # A task its plan's limit paused (its request refused): which limit and until when, on its
+    # row; it goes on by itself then (under Monitoring), or continues on another agent now.
+    # (The Copilot workers above, closed: room for it to start now.)
     for row in store.open_sessions("worker"):
         if runtime.agent(row["id"]) == "copilot":
             await runtime.workers.close(row["id"], by="you")
@@ -9577,29 +9577,33 @@ async def picker_workers(runtime, browser):
     assert store.get(f"stopped:{task_id}") == "its plan's limit"
     resets = runtime.task_actions.view(runtime.tasks.get(task_id))["paused"]["resets_at"]
     assert resets > time.time()
+    assert store.get(f"goonat:{task_id}") == str(resets), "it goes on by itself then"
+    sent = len(store.messages(paused["session_id"]))
     selector = f'#panel .card.task[data-session="{paused["session_id"]}"]'
     for scheme in ("light", "dark"):
         context, page, errors, _ = await agents_page(browser, scheme)
         if await page.locator("#home-tabs").is_visible():
-            await page.locator("#home-tabs [data-tab=needs]").click()
+            await page.locator("#home-tabs [data-tab=tasks]").click()
         card = page.locator(selector)
-        # (Its day too, when that is not today: "Sun 12:43 AM".)
+        monitored = f'#tasks-monitoring .card.task[data-session="{paused["session_id"]}"]'
+        await expect(page.locator(monitored)).to_be_visible()
+        # ("tomorrow 1:12 AM", "Sun 12:43 AM": its day too, when that is not today.)
         when = await page.evaluate(
             "at => import('/static/board.js').then((m) => m.resetTime(at))", resets * 1000
         )
         line = card.locator(".row-line .why")
-        await expect(line).to_have_text(f"Codex limit reached · resets {when}")
+        said = f"Codex's 5-hour limit is used up · resets {when}"
+        await expect(line).to_have_text(f"{said} · goes on by itself then")
         await expect(line).to_have_attribute(
-            "data-tip", re.compile(r"^Codex limit reached · resets .*\nPaused: Your Codex plan's")
+            "data-tip", re.compile(r"^Codex's 5-hour limit is used up · resets .*\nPaused: Codex's")
         )
         await expect(card.locator(".row-line .latest")).to_have_count(0)
         await expect(card.locator(".head")).to_contain_text("Paused")
         assert (await card.inner_text()).count("Paused") == 1, "said once"
-        await expect(card.get_by_role("button", name=f"Go on at {when}")).to_be_visible()
-        # The one other agent that can run it: Continue with it (what it sends, then).
+        # The one other agent that can run it: Continue with it now (what it sends, then).
         elsewhere = card.get_by_role("button", name="Continue with Copilot…")
         await expect(elsewhere).to_be_visible()
-        await picker_shoot(page, "plan-limit-paused", scheme, "#main", focus=card, tab="needs")
+        await picker_shoot(page, "plan-limit-paused", scheme, "#main", focus=card, tab="tasks")
         await elsewhere.click()
         dialog = page.locator("dialog.continue-dialog")
         await expect(dialog.locator(".continue-line")).to_contain_text("to a new Copilot worker")
@@ -9607,28 +9611,12 @@ async def picker_workers(runtime, browser):
         await expect(dialog).to_have_count(0)
         assert not errors, errors
         await context.close()
-    # Go on at its reset: under Monitoring until then, saying when; nothing sent before.
-    sent = len(store.messages(paused["session_id"]))
-    for scheme in ("light", "dark"):
-        context, page, errors, _ = await agents_page(browser, scheme)
-        card = page.locator(selector)
-        if scheme == "light":
-            if await page.locator("#home-tabs").is_visible():
-                await page.locator("#home-tabs [data-tab=needs]").click()
-            await card.get_by_role("button", name=re.compile("^Go on at ")).click()
-            await until(lambda: store.get(f"goonat:{task_id}") == str(resets), 10)
-        elif await page.locator("#home-tabs").is_visible():
-            await page.locator("#home-tabs [data-tab=tasks]").click()
-        monitored = f'#tasks-monitoring .card.task[data-session="{paused["session_id"]}"]'
-        await expect(page.locator(monitored)).to_be_visible()
-        await expect(card.locator(".row-line .why")).to_have_text(
-            re.compile(r"^Goes on at .+, once its Codex limit resets$")
-        )
-        await picker_shoot(page, "plan-limit-scheduled", scheme, "#main", focus=card, tab="tasks")
-        assert not errors, errors
-        await context.close()
     assert runtime.tasks.get(task_id)["status"] == "waiting"
-    assert len(store.messages(paused["session_id"])) == sent
+    assert len(store.messages(paused["session_id"])) == sent, "nothing sent before its reset"
+    # (Codex's limit not kept for the rounds after: they have Codex as it is.)
+    store.delete("agentlimit:codex")
+    if waiting := runtime.limit_waits.pop("codex", None):
+        waiting.cancel()
     log("picker: badges, Continue with…, the recovery card, a paused task, the Router's pick")
 
 
@@ -10484,10 +10472,61 @@ async def round_agent_smooth(runtime, browser, failures: list[str]):
             await context.close()
         assert runtime.agent_status("claude")["status"] == agents.READY
         assert str(installed) in os.environ["PATH"].split(os.pathsep)
+        # Codex's weekly limit used up until tomorrow: the @ list says until when (picked all the
+        # same: the chip says it too), and work held for it says so, with Continue with Copilot.
+        codex_home.mkdir(parents=True, exist_ok=True)
+        (codex_home / "signed-out").unlink(missing_ok=True)
+        (codex_home / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt"}))
+        await fresh_status()
+        resets = int(time.time()) + 86400 + 60
+        runtime.plan_limit_seen("codex", {"status": "rejected", "label": "weekly limit",
+                                          "resets_at": resets})  # fmt: skip
+        assert runtime.agent_status("codex")["status"] == agents.LIMITED
+        runtime.agent_refused_card("codex", runtime.limit_held("codex"),
+                                   {"title": "Smooth limit count"})  # fmt: skip
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await at_home(page)
+            when = await page.evaluate(
+                "at => import('/static/board.js').then((m) => m.resetTime(at))", resets * 1000
+            )
+            box = page.locator("#composer-input")
+            await box.fill("@cod")
+            await box.press("End")
+            codex = page.locator("#mention-list li.agent.dim", has_text="Codex")
+            await expect(codex.locator(".status > span").first).to_have_text(
+                f"Weekly limit used up · resets {when}"
+            )
+            await expect(codex.locator(".agent-fix")).to_have_text(
+                "Pick: it starts there once its limit resets"
+            )
+            await ux_shoot(page, "smooth-limit-at", scheme, focus=page.locator("#composer"))
+            await codex.click()
+            await expect(page.locator("#composer-to .agent-chip .detail")).to_have_text(
+                f"Weekly limit used up · resets {when}"
+            )
+            await box.fill("")
+            card = page.locator("#timeline .card.agent-refused", has_text="Smooth limit count")
+            await expect(card.locator("p").first).to_have_text(
+                f"Codex's weekly limit is used up · resets {when}. Your message is saved: "
+                "“Smooth limit count” starts on Codex once it resets."
+            )
+            await expect(card.locator(".actions button")).to_have_text(
+                ["Don't run it", "Continue with Copilot"]
+            )
+            await ux_shoot(page, "smooth-limit-card", scheme, focus=card)
+            assert not errors, errors
+            await context.close()
+        for key in list(store.items("agentrefusal:")):
+            await runtime.answer_refusal(key, "wait")
+        store.delete("agentlimit:codex")
+        if waiting := runtime.limit_waits.pop("codex", None):
+            waiting.cancel()
         log(
             "agent smooth: Sign in from the @ list (keyboard), the popover, Settings, the held "
             "card and System agents; link, code, pasted code; Ready live; held work resumed "
-            "once; Install's command first; the Router's agent marked; a sign-in's end"
+            "once; Install's command first; the Router's agent marked; a sign-in's end; a "
+            "limit used up, until when, and the work it holds"
         )
     finally:
         agentsetup.INSTALLERS = installers

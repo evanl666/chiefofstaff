@@ -24,10 +24,14 @@ M5  Claude, live: signed out in a terminal, then in, the page's next ask says so
     pays, by name, their values nowhere
 M6  "work in place, directly in my folder (not a copy)" while a worker that read the project is
     idle: a new worker in place does it; the one that read it gets nothing
+M7  Codex's plan limit used up (the stand-in says nothing of its windows until asked): a worker's
+    turn pauses saying which limit and until when; the @ list says it; work named for Codex is
+    held with its card; once the limit resets (its time, then Codex asked again), each goes on,
+    once, under Handled for you
 
 Signs in to Copilot with COPILOT_GITHUB_TOKEN, else the gh CLI's token (a Copilot home of its own;
 ~/.copilot is not used). Uses a few premium requests (the Router: LIVE_SMOOTH_MODEL, else
-LIVE_COPILOT_MODEL, else claude-sonnet-5.5) and takes about 10 minutes. Ports: Chief of Staff on
+LIVE_COPILOT_MODEL, else claude-sonnet-5.5) and takes about 12 minutes. Ports: Chief of Staff on
 LIVE_SMOOTH_PORT (21410), its stand-in Slack on the next one. Its folders are made by `tempfile`
 (LIVE_AGENTS_ROOT to keep them elsewhere); kept for a look when a scenario fails.
 
@@ -501,7 +505,67 @@ async def m6_in_place(ctx: Ctx):
     log("M6 passed")
 
 
-SCENARIOS = [m1_install, m2_sign_in, m3_once, m4_no_replay, m5_claude_live, m6_in_place]
+async def m7_limit(ctx: Ctx):
+    worker = ctx.workers[1]
+    resets = int(time.time()) + 90
+    write(ctx.codex_state / "limit.json", json.dumps({"minutes": 300, "resets_at": resets}))
+    mark = max((m["id"] for m in await ctx.app.get(f"/api/sessions/{worker}/messages")), default=0)
+    await ctx.app.post(f"/api/sessions/{worker}/messages", {"text": "Report done: still here."})
+
+    async def paused():
+        found = await ctx.app.get(f"/api/sessions/{worker}/messages?after={mark}")
+        return next((m for m in found if m["text"].startswith("Paused: ")), None)
+
+    notice = await wait_for("its turn paused for the limit", paused, 60, ctx.app)
+    assert notice["text"].startswith("Paused: Codex's 5-hour limit is used up · resets "), notice
+    codex = await ctx.status("codex", ask=True)
+    assert (codex["status"], codex["said"], codex["resets_at"]) == (
+        "limited",
+        "5-hour limit used up",
+        resets,
+    ), codex
+    handled = len([e for e in (await ctx.state()).get("handled", []) if e["kind"] == "resumed"])
+    mark = await ctx.say(
+        f"In {ctx.project}, how many rows of data/sales.csv have region north? Give the worker "
+        "this line word for word: Report done: 1 north row.",
+        agent="codex",
+    )
+    held = await ctx.held_card(mark)
+    assert held["text"].startswith("Codex's 5-hour limit is used up · resets "), held["text"]
+    assert "Your message is saved" in held["text"] and held["meta"]["status"] == "limited"
+    before = {r["id"] for r in await ctx.workers_on("codex")}
+
+    async def resumed():
+        return (await ctx.card(held))["meta"].get("resumed")
+
+    said = await wait_for("held work goes on once the limit resets", resumed, 180, ctx.app)
+    assert said == "Resumed once its limit reset", said
+    assert time.time() >= resets, "not before its reset"
+
+    async def receipts():
+        found = [e for e in (await ctx.state()).get("handled", []) if e["kind"] == "resumed"]
+        return found if len(found) >= handled + 2 else None
+
+    receipts_now = len(await wait_for("a line each under Handled for you", receipts, 60))
+    # (Held as a new worker, or as a message for one the Router gave it to: either goes on.)
+    after = {r["id"] for r in await ctx.workers_on("codex")}
+    assert len(after - before) <= 1, (before, after)
+    assert (await ctx.status("codex", ask=True))["status"] == "ready"
+    await asyncio.sleep(15)
+    goes = [
+        m for m in await ctx.app.get(f"/api/sessions/{worker}/messages")
+        if m["text"] == "Go on where you stopped."
+    ]  # fmt: skip
+    assert len(goes) == 1, "the paused worker went on once"
+    assert {r["id"] for r in await ctx.workers_on("codex")} == after, "once"
+    again = [e for e in (await ctx.state()).get("handled", []) if e["kind"] == "resumed"]
+    assert len(again) == receipts_now, "nothing more went on"
+    log("M7 passed")
+
+
+SCENARIOS = [
+    m1_install, m2_sign_in, m3_once, m4_no_replay, m5_claude_live, m6_in_place, m7_limit,
+]  # fmt: skip
 
 
 def label(scenario) -> str:
