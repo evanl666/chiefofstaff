@@ -94,6 +94,15 @@ Codex and Claude can do what Copilot workers can; the Router and the Watchdog ca
   `chiefofstaff/` folder there would have run as it. It now runs with `python -I`, in a folder
   of Chief of Staff's own, and Chief of Staff records a hash of its processes' command lines
   rather than the command lines.
+- **Security: a worker in its own worktree can't write in your checkout it was made from.**
+  Acting on its own (the default), a worker working in its own worktree of your repository could
+  change your own checkout of it: with its edit tool (Copilot's, Codex's or Claude Code's), with
+  the sandbox on or off, and with a command when the sandbox was off. Only a checkout given to a
+  worker to read was held. Now its edits there and its commands that write there (an install or
+  a test run there too) are refused as in a checkout given to read, whatever its agent, acting
+  on its own or asking first, and it is told where its own worktree is. A command whose folder
+  can't be read (`cd "$dir"`) isn't taken for your checkout unless it names it, so nothing else
+  it runs is held up. The check takes about 0.03 ms a command and 0.04 ms an edit (the median).
 - **A Claude Code or Codex worker's account to connect is named for its app.** Those workers
   reach MCP servers as Claude Code and Codex do, not as Copilot CLI, and a server that keeps
   connections per app needs one for that app: connecting for Copilot doesn't help them. Their

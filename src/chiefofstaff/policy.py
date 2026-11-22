@@ -4456,6 +4456,11 @@ OWN_WORKTREE = (
     "{path}; run it there. That changes nothing of the owner's, so it is fine even for a task "
     "that says not to change any files."
 )
+# What a worker hears of an edit in the owner's checkout its own worktree was made from.
+OWNERS_CHECKOUT_TREE = (
+    "This file is in the owner's own checkout: nothing is written there. Your own worktree of "
+    "it is at {path}; change files there."
+)
 # What a shell command line does in a checkout of the owner's given only to read: see
 # checkout_write.
 CHECKOUT_WRITES, CHECKOUT_ASKS = "writes", "asks"
@@ -4578,7 +4583,11 @@ class CheckoutWrites:
     """What a line does in a checkout of the owner's given only to read (`kept`), as
     checkout_write reads it: `found` is CHECKOUT_WRITES (it writes there), CHECKOUT_ASKS (a
     program not known runs there on its files, or what it writes could not be read in a line
-    that runs or names one there), or ""."""
+    that runs or names one there), or "". `works_there`: the worker works in them (one given
+    to read), so a folder not known (`cd "$dir"`) may be one; not the checkouts its own
+    worktrees were made from, where only a line run in one, or naming one, is about one."""
+
+    works_there = True
 
     def __init__(self, text: str, kept: tuple[str, ...]):
         self.places = checkout_places(kept)
@@ -4606,8 +4615,10 @@ class CheckoutWrites:
 
     def near(self, folder: str | None) -> bool:
         """Whether what a line writes where it can't be read may be in a read-only checkout:
-        it runs in one (or where is not known), or names one."""
-        return self.mentioned or folder is None or self.inside(folder, real=True)
+        it runs in one (or where is not known, of those it works in), or names one."""
+        if folder is None:
+            return self.mentioned or self.works_there
+        return self.mentioned or self.inside(folder, real=True)
 
     def ask(self):
         self.found = self.found or CHECKOUT_ASKS
@@ -5165,7 +5176,9 @@ def checkout_guard(text: str, kept: tuple[str, ...]) -> CheckoutWrites:
     return CheckoutWrites(text, kept)
 
 
-def checkout_write(command: str, cwd: str, kept: tuple[str, ...], shell: str = "") -> str:
+def checkout_write(
+    command: str, cwd: str, kept: tuple[str, ...], shell: str = "", works_there: bool = True
+) -> str:
     """Whether a shell command line, run in `cwd`, writes in one of the owner's checkouts a
     worker was given only to read (`kept`): CHECKOUT_WRITES when it does, as far as can be
     read (a redirection or a program writing a file there; git changing its work tree, index
@@ -5174,14 +5187,16 @@ def checkout_write(command: str, cwd: str, kept: tuple[str, ...], shell: str = "
     one or names one; "" otherwise. Read as the shell reads it: `cd` in the line, subshells,
     `sh -c`, `eval`, substitutions, a shell's script on its input (MOST_NESTED deep). A line
     past what is read here, run in one or naming one: CHECKOUT_ASKS. On Windows, as PowerShell
-    reads it (cmd, for one `shell` says cmd runs): winshell.py."""
+    reads it (cmd, for one `shell` says cmd runs): winshell.py. `works_there`: see
+    CheckoutWrites (False: the checkouts its own worktrees were made from)."""
     if not kept:
         return ""
     if WINDOWS_SHELLS:
         from .winshell import windows_checkout_write
 
-        return windows_checkout_write(command, cwd, kept, shell)
+        return windows_checkout_write(command, cwd, kept, shell, works_there)
     guard = CheckoutWrites(command, kept)
+    guard.works_there = works_there
     pending: list[tuple[str, str | None, int]] = [(command, cwd or None, 0)]
     try:
         while pending and guard.found != CHECKOUT_WRITES:
@@ -5195,21 +5210,48 @@ def checkout_write(command: str, cwd: str, kept: tuple[str, ...], shell: str = "
     return guard.found
 
 
-def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | None:
-    """Why a worker may not write this file, or run this command line: it is in (it writes in)
-    a git checkout of the owner's it was given only to read (a task that changes no code, see
-    Workspaces.writes); a program not known, run there on its files, asks first. Also when it
-    acts without permission checks (yolo), and with no system sandbox (Codex always; Copilot
-    with the worker sandbox off): the owner's checkouts are never written."""
-    kind = getattr(request, "kind", "")
-    if row["role"] != WORKER or kind not in {"write", "shell"}:
-        return None
+def owners_checkouts(row: dict, checkouts: list[dict]) -> tuple[list[str], dict[str, str]]:
+    """The owner's git checkouts a worker never writes: those it was given only to read (a
+    task that changes no code, see Workspaces.writes), and those its own worktrees were made
+    from, each with that worktree (`behind`: live r77 F1, a worker in its own worktree, acting
+    on its own, edited AGENTS.md in the owner's checkout it was made from). Not one it was
+    given to change in place, nor one a folder of its own is in."""
     kept = [
         c["path"]
         for c in checkouts
         if c.get("shared") and c.get("git_dir") and not c.get("in_place")
     ]
-    if not kept:
+    own = [row["cwd"], *(c.get("path") for c in checkouts)]
+    own = tuple(folder for folder in own if folder and folder not in kept)
+    behind: dict[str, str] = {}
+    for checkout in checkouts:
+        repo = checkout.get("repo") or ""
+        if checkout.get("shared") or checkout.get("remote") or not repo or repo in behind:
+            continue  # (A clone of its own, or one it made in its folder: its own.)
+        if not holds_any(repo, own):
+            behind[repo] = checkout.get("worktree") or checkout["path"]
+    return kept, behind
+
+
+@functools.lru_cache(maxsize=1024)
+def holds_any(repo: str, folders: tuple[str, ...]) -> bool:
+    """Whether one of these folders is in `repo`, as their real paths were when first asked
+    (it is asked at each tool call; a link made later in one of them changes nothing)."""
+    return any(within(folder, repo) for folder in folders)
+
+
+def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | None:
+    """Why a worker may not write this file, or run this command line: it is in (it writes in)
+    a git checkout of the owner's it was given only to read (a task that changes no code, see
+    Workspaces.writes), or one its own worktree was made from; a program not known, run there
+    on its files, asks first. Also when it acts without permission checks (yolo), and with no
+    system sandbox (Codex always; Copilot with the worker sandbox off), whichever agent it
+    runs on: the owner's checkouts are never written (owners_checkouts)."""
+    kind = getattr(request, "kind", "")
+    if row["role"] != WORKER or kind not in {"write", "shell"}:
+        return None
+    kept, behind = owners_checkouts(row, checkouts)
+    if not kept and not behind:
         return None
     if kind == "shell":
         command = getattr(request, "full_command_text", "") or ""
@@ -5220,6 +5262,9 @@ def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | Non
         )
         shell = str(getattr(request, "shell", "") or "")
         found = checkout_write(command, str(folder or ""), tuple(kept), shell)
+        if found != CHECKOUT_WRITES and behind:
+            beside = checkout_write(command, str(folder or ""), tuple(behind), shell, False)
+            found = beside if beside == CHECKOUT_WRITES else found or beside
         if found == CHECKOUT_WRITES:
             return OWNERS_CHECKOUT
         return OWNERS_CHECKOUT_ASK if found == CHECKOUT_ASKS else None
@@ -5230,9 +5275,12 @@ def owners_checkout(row: dict, request: Any, checkouts: list[dict]) -> str | Non
         from .winshell import plain_path
 
         target = plain_path(target)  # (`\\?\C:\…` is C:\…; `app.` is `app`.)
-    if not any(within(target, folder) for folder in kept):
-        return None
-    return OWNERS_CHECKOUT
+    if any(within(target, folder) for folder in kept):
+        return OWNERS_CHECKOUT
+    for repo, tree in behind.items():
+        if within(target, repo):
+            return OWNERS_CHECKOUT_TREE.format(path=tree)
+    return None
 
 
 def checkout_of(command: str, folder: str, kept: list[dict]) -> dict | None:

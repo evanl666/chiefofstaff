@@ -494,6 +494,66 @@ async def test_a_worker_given_the_owners_checkout_to_read_cannot_write_there_by_
     assert notices and all(text.startswith(refused) for text in notices)
 
 
+@pytest.mark.parametrize("sandbox", [False, True])
+async def test_a_worker_in_its_own_worktree_never_writes_the_owners_checkout(tmp_path, sandbox):
+    """Live r77 F1: a worker in its own worktree of the owner's checkout, continued by the
+    Router, then acting on its own, appended to AGENTS.md in the owner's checkout with its Edit
+    tool, and then with `echo y >>`: only a checkout given to read was held, and acting on its
+    own skips the check of writes outside its folders. The checkout its worktree was made from
+    is the owner's too: an edit or a command writing there is refused in every mode, sandboxed
+    or not, saying where its own worktree is. There, and elsewhere, it writes as before."""
+    from types import SimpleNamespace
+
+    from conftest import Harness
+    from test_round7_split import published, spawn
+
+    app = published(tmp_path, "app")
+    (app / "AGENTS.md").write_text("Python 3.11+.\n")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)], worker_sandbox=sandbox))
+    runtime = await harness.connect()
+    info = await spawn(runtime, harness.router_id, title="Try", instructions="try the checks",
+                       project=str(app), isolate=True)  # fmt: skip
+    worker = info["session_id"]
+    (checkout,) = runtime.workspaces.checkouts(harness.store.session(worker))
+    tree = Path(checkout["path"])
+    assert real(checkout["repo"]) == real(app) and real(tree) != real(app)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    text="Try checks 6 and 7 too.")  # fmt: skip
+
+    async def decided(request) -> str:
+        decision = await runtime.events.on_permission(request, {"session_id": worker})
+        return getattr(decision, "feedback", "") or type(decision).__name__
+
+    def edit(path: Path):
+        return SimpleNamespace(kind="write", file_name=str(path), resolved_path=str(path))
+
+    def command(line: str, cwd: Path = tree):
+        return SimpleNamespace(kind="shell", full_command_text=line, cwd=str(cwd), commands=[],
+                               possible_paths=[], possible_urls=[], intention="",
+                               has_write_file_redirection=">" in line,
+                               can_offer_session_approval=False)  # fmt: skip
+
+    copy = tmp_path / "copy.txt"
+    allowed = "PermissionDecisionApproveOnce"
+    for yolo in ("on", "off"):
+        harness.store.execute("UPDATE sessions SET yolo=? WHERE id=?", (yolo, worker))
+        said = await decided(edit(app / "AGENTS.md"))
+        assert "owner's own checkout" in said and str(tree) in said, (yolo, said)
+        for line, cwd in [
+            (f"echo y >> {app}/AGENTS.md", tree),
+            (f"cp {app}/AGENTS.md {copy} && echo y >> {app}/AGENTS.md", tree),
+            ("touch notes.txt", app),
+            (f"git -C {app} commit -qam y", tree),
+        ]:
+            said = await decided(command(line, cwd))
+            assert "your own worktree of it is at" in said and str(tree) in said, (yolo, line)
+        assert await decided(edit(tree / "AGENTS.md")) == allowed, yolo
+        assert await decided(command("echo y >> AGENTS.md && git commit -qam y")) == allowed
+        assert await decided(command(f"head -1 {app}/AGENTS.md > {copy}")) == allowed, yolo
+        assert await decided(command('cd "$(mktemp -d)" && echo x > made.txt')) == allowed
+    assert (app / "AGENTS.md").read_text() == "Python 3.11+.\n"
+
+
 def test_the_folder_a_git_command_makes_is_read_from_its_arguments():
     """Code review: a substring test took "app" as made by `git worktree add ../app-docs`
     (and `… && cd ../app`), leaving the task's own "app" checkout out of its receipts."""

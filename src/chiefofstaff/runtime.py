@@ -108,6 +108,7 @@ from .policy import (
     REPOSITORY_SETTINGS,
     SANDBOX_HELD,
     checkout_of,
+    owners_checkouts,
     within,
 )
 from .provenance import ALIVE_EVERY, RUNS_KEPT, Provenance, log_of, runs_of
@@ -3365,11 +3366,12 @@ class Runtime:
 
     async def own_copy(self, row: dict, request: Any) -> str | None:
         """A worker's shell command refused in a checkout of the owner's it was given only to
-        read (policy.owners_checkout: it writes there, or runs what can't be read there): its
-        own copy of that checkout, made as add_repo makes a worktree, from the owner's commit
-        with their uncommitted work copied in (Workspaces.make_checkout `copy`), or a worktree
-        of that repository it has. What it hears then (policy.OWN_COPY); None when it has none
-        (one is tried once a repository: one that could not be made is not tried again)."""
+        read, or one its own worktree was made from (policy.owners_checkout: it writes there, or
+        runs what can't be read there): its own copy of that checkout, made as add_repo makes a
+        worktree, from the owner's commit with their uncommitted work copied in
+        (Workspaces.make_checkout `copy`), or a worktree of that repository it has. What it
+        hears then (policy.OWN_COPY); None when it has none (one is tried once a repository:
+        one that could not be made is not tried again)."""
         command = getattr(request, "full_command_text", "") or ""
         folder = str(
             getattr(request, "resolved_working_directory", None)
@@ -3387,8 +3389,12 @@ class Runtime:
     async def copy_for(self, row: dict, command: str, folder: str) -> str | None:
         """own_copy's work, its checkouts held (no add_repo meanwhile)."""
         checkouts = self.workspaces.checkouts(row)
+        # Given to read, or one its own worktree was made from (that worktree is its copy).
+        _, behind = owners_checkouts(row, checkouts)
         kept = await asyncio.to_thread(checkout_of, command, folder, [
-            c for c in checkouts if c.get("shared") and c.get("git_dir") and not c.get("in_place")
+            *(c for c in checkouts
+              if c.get("shared") and c.get("git_dir") and not c.get("in_place")),
+            *({"path": repo, "top": repo} for repo in behind),
         ])  # fmt: skip
         if not kept:
             return None

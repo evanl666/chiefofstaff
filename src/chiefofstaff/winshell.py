@@ -888,11 +888,14 @@ def assigned(words: list[Word]) -> list[Word] | None:
     return None
 
 
-def windows_checkout_write(command: str, cwd: str, kept: tuple[str, ...], shell: str) -> str:
+def windows_checkout_write(
+    command: str, cwd: str, kept: tuple[str, ...], shell: str, works_there: bool = True
+) -> str:
     """policy.checkout_write on Windows: the line read as PowerShell reads it (cmd's, for a line
     Codex runs in cmd); one a POSIX shell runs (Git Bash) is not read: run in a read-only
     checkout, or naming one, it asks."""
     guard = WindowsCheckout(command, kept)
+    guard.works_there = works_there
     if shell in POSIX_SHELLS:
         return CHECKOUT_ASKS if guard.near(cwd or None) else ""
     pending = [(command, cwd or None, 0, "cmd" if shell == "cmd" else "ps")]

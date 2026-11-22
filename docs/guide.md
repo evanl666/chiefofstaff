@@ -331,7 +331,10 @@ You set one **code folder**: where your repositories live, like `~/workspace`.
   changes copied in (never through a link; files over 20 MB, links that lead out of it and
   repositories in it are left out, and it is told which). It runs the command there, without
   asking you. On Windows its PowerShell and cmd lines are read the same way, and anything else
-  run in your checkout, or naming it, goes to the copy too.
+  run in your checkout, or naming it, goes to the copy too. A worker in its own worktree can't
+  write in your checkout it was made from either, whatever its agent: its edits there, and its
+  commands that write there (an install or a test run there too), are refused the same way, and
+  it is told where its worktree is.
   Ask in so many words for the work to be done directly in your folder (no worktree), and that
   worker may change it.
 - Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees

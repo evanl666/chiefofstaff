@@ -1970,13 +1970,14 @@ async def test_every_edit_asks_with_each_file_and_a_refused_one_is_not_written(b
 
 @contextlib.asynccontextmanager
 async def reading_the_owners_checkout(
-    tmp_path, monkeypatch, backend=None, yolo="on", start_own=False
+    tmp_path, monkeypatch, backend=None, yolo="on", start_own=False, isolate=False
 ):
     """A worker acting on its own (yolo; `yolo="off"`: asking first), given the owner's checkout
     to read, on `backend`, else on real Codex with the stand-in model: its session, answered by
     Chief of Staff's own permission check (Events.on_permission); with the checkout, its own
     folder, its turn, and the copies of the checkout made for it (Runtime.own_copy).
-    `start_own`: its session starts in its own folder, the checkout one of its folders."""
+    `start_own`: its session starts in its own folder, the checkout one of its folders.
+    `isolate`: given its own worktree of the checkout instead, where its session starts."""
     from conftest import Harness
     from test_round7_split import published, spawn
 
@@ -1986,11 +1987,14 @@ async def reading_the_owners_checkout(
     harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
     runtime = await harness.connect()
     info = await spawn(runtime, harness.router_id, title="Read", instructions="the first line",
-                       project=str(app))  # fmt: skip
+                       project=str(app), isolate=isolate)  # fmt: skip
     harness.store.execute("UPDATE sessions SET yolo=? WHERE id=?", (yolo, info["session_id"]))
     row = harness.store.session(info["session_id"])
     assert runtime.yolo(row) is (yolo == "on"), yolo
-    assert row["cwd"] == str(app.resolve()), "the owner's, to read"
+    if isolate:
+        assert row["cwd"] != str(app.resolve()), "its own worktree"
+    else:
+        assert row["cwd"] == str(app.resolve()), "the owner's, to read"
     own = runtime.workspaces.workspace(row)
     own.mkdir(parents=True, exist_ok=True)  # (Its own folder, where it may write.)
     folders = {}
@@ -2027,7 +2031,13 @@ async def reading_the_owners_checkout(
             return [checkout for checkout in checkouts if checkout.get("copy")]
 
         yield SimpleNamespace(
-            app=app, own=own, session=session, turn=turn, notices=notices, copies=copies
+            app=app,
+            own=own,
+            session=session,
+            turn=turn,
+            notices=notices,
+            copies=copies,
+            tree=Path(row["cwd"]),
         )
     finally:
         if model:
@@ -2118,6 +2128,59 @@ async def test_a_command_refused_in_the_owners_checkout_is_sent_to_a_copy_of_its
         await it.turn.wait()
         assert (tree / "ran.txt").read_text() == "ran\n", "run in its copy"
         assert not (app / "ran.txt").exists() and len(it.copies()) == 1
+
+
+def file_edit(backend, *paths: Path) -> str:
+    """Asking an agent to write these files with its own file editing tool (not the shell), in
+    words its model (or stand-in) takes: all at once (Codex), or the first only (the stand-in
+    Claude Code); "" where it has no such tool here."""
+    if isinstance(backend, CodexBackend):
+        named = " and ".join(f"the file `{path}`" for path in paths)
+        return f"Write {named} with your file editing tool (apply_patch), not the shell, each " \
+            "with the text 'x'."  # fmt: skip
+    if isinstance(backend, ClaudeAgent) and getattr(backend, "catcher", None) is not None:
+        return " ".join(
+            f'Use Claude\'s Write tool with {{"file_path": "{path}", "content": "x\\n"}}.'
+            for path in paths
+        )
+    if isinstance(backend, ClaudeAgent):
+        return f"Write the file `{paths[0]}`."
+    if REAL and not isinstance(backend, ScriptedBackend | AgentLikeBackend):
+        return " ".join(
+            f"Create the file `{path}` containing the line 'x' with your file creation tool "
+            "(not the shell)."
+            for path in paths
+        )
+    return ""
+
+
+@pytest.mark.parametrize("yolo", ["on", "off"])
+async def test_an_edit_in_the_owners_checkout_its_worktree_was_made_from_is_refused(
+    backend, tmp_path, monkeypatch, yolo
+):
+    """Live r77 F1 (Claude Code 2.1.322): a worker in its own worktree of the owner's checkout,
+    acting on its own, wrote AGENTS.md in that checkout with its Edit tool (only a checkout
+    given to read was held). Each agent's file edit there reaches Chief of Staff's check
+    (Events.on_permission, policy.owners_checkout) with its path, is refused saying where its
+    worktree is, and writes nothing, acting on its own or asking first; in its worktree the
+    same edit is written."""
+    if not file_edit(backend, tmp_path):
+        pytest.skip("An agent with a file editing tool, as its model takes it.")
+    async with reading_the_owners_checkout(
+        tmp_path, monkeypatch, backend, yolo=yolo, isolate=True
+    ) as it:
+        app, tree = it.app, it.tree
+        for folder in (app, tree):
+            await it.session.send(
+                file_edit(backend, folder / "AGENTS.md", folder / "NOTES.md")
+                + " Then reply with just: written"
+            )
+            await it.turn.wait()
+        assert not (app / "AGENTS.md").exists() and not (app / "NOTES.md").exists()
+        assert any("owner's own checkout" in text and str(tree) in text for text in it.notices()), (
+            it.notices()
+        )
+        assert (tree / "AGENTS.md").exists(), "its own: written"
 
 
 @pytest.mark.parametrize("yolo", ["on", "off"])

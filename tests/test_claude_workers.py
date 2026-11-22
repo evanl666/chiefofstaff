@@ -1325,6 +1325,53 @@ async def test_a_sandboxed_claude_worker_given_the_owners_checkout_to_read_canno
         await runtime.stop()
 
 
+@pytest.mark.parametrize("sandboxed", [False, True])
+async def test_a_claude_worker_in_its_worktree_never_writes_the_owners_checkout(
+    tmp_path, claude_on_path, monkeypatch, sandboxed
+):
+    """Live r77 F1 as it went: a Claude worker in its own worktree of the owner's checkout,
+    asking first, is told to write AGENTS.md there; the Router continues it to try again; the
+    owner lets it act on its own (its process starts anew) and asks once more. Each Write is
+    refused (the third went through: acting on its own, only a checkout given to read was
+    held), saying where its worktree is; there, the same Write goes through."""
+    if sandboxed:
+        monkeypatch.setitem(PASSED, "sandbox", "")
+    app = tmp_path / "app"
+    write = f"Write the file `{app / 'AGENTS.md'}`."
+    harness, runtime, worker, cwd = await claude_in_worktree(
+        tmp_path, Settings(worker_yolo=False), f"{write} Report done: first", sandboxed
+    )
+
+    def refused() -> list[str]:  # (Its report comes before its Write, in the stand-in.)
+        return [
+            text for kind, text in harness.kinds(worker)
+            if kind == "notice" and "owner's own checkout" in text and str(cwd) in text
+        ]  # fmt: skip
+
+    def tried(times: int) -> bool:  # Refused (0.1.52 said "Writing outside…", asking first).
+        notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+        said = [text for text in notices if "owner's own checkout" in text or "outside" in text]
+        return len(said) >= times or (app / "AGENTS.md").exists()
+
+    try:
+        assert not runtime.yolo(harness.store.session(worker))
+        await until(lambda: tried(1), 30)
+        (task,) = runtime.tasks.for_session(worker)
+        await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                        task_id=task["id"], text=f"{write} Report done: second")  # fmt: skip
+        await until(lambda: tried(2), 30)
+        await runtime.set_session_yolo(worker, "on")
+        await runtime.owner_send(worker, f"{write} Report done: third")
+        await until(lambda: tried(3), 30)
+        assert not (app / "AGENTS.md").exists(), "the owner's checkout: never written"
+        await runtime.owner_send(worker, "Write the file `AGENTS.md`. Report done: fourth")
+        await until(lambda: (cwd / "AGENTS.md").exists(), 30)  # Its own worktree: written.
+        assert len(refused()) == 3, harness.kinds(worker)
+        assert runtime.sandboxed(harness.store.session(worker)) is sandboxed
+    finally:
+        await runtime.stop()
+
+
 async def test_a_claude_workers_mcp_tool_that_needs_an_account_connected_has_one_card(
     tmp_path, claude_on_path
 ):

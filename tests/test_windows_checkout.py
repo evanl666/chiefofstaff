@@ -214,6 +214,27 @@ def test_plain_paths_are_as_windows_takes_them():
     assert path_key(r"C:\App\X") == path_key(r"c:\app\x")
 
 
+@pytest.mark.parametrize(
+    ("line", "where", "said"),
+    [
+        ("Set-Location $env:TEMP; Set-Content notes.txt y", "O", ""),
+        ("Set-Location $d; .\\build.ps1", "O", ""),
+        ("npm test", "O", ""),
+        (f"Set-Content {KEPT}\\notes.txt y", "O", "W"),
+        (f"Set-Location {KEPT}; echo y >> README.md", "O", "W"),
+        ("echo y >> README.md", "K", "W"),
+    ],
+)
+def test_the_checkout_a_workers_worktree_was_made_from_is_read_where_it_is_named(line, where, said):
+    """The owner's checkout a worker's own worktree was made from (live r77 F1): a line naming
+    it, or run in it, that writes there is refused as in one given to read; a folder not known
+    is not taken for it (the worker works in its worktree), where it is for one given to read."""
+    expected = {"W": policy.CHECKOUT_WRITES, "": ""}[said]
+    assert policy.checkout_write(line, place(where), (KEPT,), "", False) == expected, line
+    if where == "O" and not said and "$" in line:
+        assert policy.checkout_write(line, place(where), (KEPT,)) == policy.CHECKOUT_ASKS
+
+
 async def test_a_windows_workers_command_in_the_owners_checkout_runs_in_its_own_copy(tmp_path):
     """Through Chief of Staff's own permission check (Copilot's and Codex's alike): refused,
     a copy of its own made, and sent there; reads let through; the owner's checkout as it was."""
