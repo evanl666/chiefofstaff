@@ -378,3 +378,30 @@ async def test_of_a_requests_parts_only_those_at_work_side_by_side_are_its_fan(h
     runtime.relations.memo = None
     [group] = [g for g in runtime.relations.graph().groups if g["kind"] == "parts"]
     assert group["tasks"] == [api, ui]
+
+
+async def test_a_wait_moves_to_the_task_done_instead_of_the_one_it_waited_on(harness):
+    """A task that waits on another's result waits on the one that does it instead: replaced by
+    a new worker's task (replaces), or superseded by a new task of its own worker; never
+    blocked on the one that is over."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    harness.store.save_settings(harness.store.settings().model_copy(update={"max_workers": 100}))
+    _, build = await spawn(runtime, router, "Slow Builder")
+    _, note = await spawn(runtime, router, "Release Note", after=[build])
+    _, again = await spawn(runtime, router, "Fast Builder", replaces=[build])
+    assert [dep["id"] for dep in runtime.tasks.deps(note)] == [again]
+    assert edges(runtime, "after") == {("after", again, note, "pending")}
+    # Superseded in its own worker (message_session, task="new", earlier="superseded").
+    worker = runtime.tasks.get(again)["session_id"]
+    session = harness.session(worker)
+    session.emit("user.message", content=session.sent[-1])  # At work on it.
+    await settle(runtime)
+    await call_tool(runtime, "message_session", router, session_id=worker, task="new",
+                    why_new="test", earlier="superseded", title="Faster Builder",
+                    text="Build it with the cache on.")  # fmt: skip
+    await settle(runtime)
+    faster = runtime.tasks.current(worker)["id"]
+    assert faster != again and runtime.tasks.get(again)["status"] == "cancelled"
+    assert [dep["id"] for dep in runtime.tasks.deps(note)] == [faster]
+    assert not runtime.tasks.broken(runtime.tasks.get(note)), "never blocked on the one over"

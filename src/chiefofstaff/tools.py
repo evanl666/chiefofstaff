@@ -2554,13 +2554,22 @@ class Tools:
             # go on with a task it had not been given yet).
             moved = await self.replace(replaced, task)
             if params.earlier == "superseded":
+                waited = []
                 for old in earlier:
+                    # What waited for it waits for the new task now, never blocked on it.
+                    waited += self.move_dependents(old, task)
                     with suppress(ValueError):
                         await self.runtime.task_actions.cancel(
                             old["id"], f"Superseded by “{task['title']}”.", by="the Router"
                         )
                         # The new task instead of it (relations.py: "replaced by").
                         self.store.set(f"supersededby:{old['id']}", task["id"])
+                if waited:
+                    listed = "; ".join(f"{found['id']} “{found['title']}”" for found in waited)
+                    said = (
+                        f"Waiting for {task['id']} now instead of the task it supersedes: {listed}."
+                    )
+                    moved = f"{moved} {said}".strip()
         self.runtime.add_message(
             caller,
             "notice",
