@@ -48,6 +48,18 @@
 - **A question between workers that holds a task up comes to you.** Open half an hour while its
   asker's task waits on it, it is one line under *Needs you* per team: *Nudge* tells the worker
   asked that its teammate waits, *Open thread* shows the exchange.
+- **How a team's tasks are related, at a glance (E130).** Tasks are related in ways Chief of
+  Staff already kept but never showed together: one waits on another's result, does a task
+  instead of another, builds on what another found, was split off, or is one part of a request.
+  A team's view now has a *Tasks* section: a row per task with its status and the one relation
+  that matters most (*waits on Checkout UI · 9 min*, *handed to E2E Runner*, *2 of 3 parts*,
+  *split from …*), counts above it (*⇉ 3 parts ●●○ · ⇢ 1 waiting · #482*, a click lights their
+  rows), and a task's lineage on a click, in one line that never crosses, with a caption in
+  plain words (*3 workers, one request · ready when 3 of 3 land*; *All 3 parts landed · 42
+  min*). A wait that clears while you look draws its line solid once (*Checkout UI delivered ·
+  unblocked*). Workers whose tasks are related are one team even if they never messaged; a PR
+  they share is a chip, never a link. Home's line of a team adds one cue (*●●○ 2 of 3 parts*),
+  and a worker's *Team* tab starts with its task's lineage.
 - **The Router's context no longer carries what workers tell each other.** Each message rode
   along with its next turn (up to 600 characters each, about 80,000 a day in a busy QA run);
   now it gets a short digest of who told or asked whom and what still waits, and reads a team's

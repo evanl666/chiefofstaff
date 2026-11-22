@@ -190,6 +190,24 @@ turn gets a short digest (who told or asked whom, what waits), and it reads a te
 only when you ask about it or a question there holds a task up, so it never passes on what one
 worker handed another.
 
+**How a team's tasks are related.** Workers whose tasks are related are a team too, even if
+they never message: one that waits on another's result, does a task instead of another (*handed
+to E2E Runner*), builds on what another found (*picks up from Token Scout*) or was split off,
+and the parts of one request. A team's view says it in counts first (*⇉ 3 parts ●●○ · ⇢ 1
+waiting · ⑂ 1 split · #482*; click one to light the tasks it counts), then *Tasks*, a row per
+task with its status and the one relation that matters most: what it waits on (*waits on
+Checkout UI · 9 min*, amber like a question waiting), the task that replaced it (its row
+dimmed), its part of a request (*2 of 3 parts*), where it branched from, what it continues,
+*+2* for the rest. Click a task for its lineage: where it came from and what came of it, its
+other parts under it, in one line with a caption (*3 workers, one request · ready when 3 of 3
+land*, *All 3 parts landed · 42 min*, *Checkout tests handed this to E2E Runner*); click any
+task in it for its title, worker, status and *Open*. When a wait clears while you look, its
+line draws itself solid and the row says *Checkout UI delivered · unblocked*, then *✓ after
+Checkout UI*. A PR or project the tasks share is a chip, never a link that makes a team. On
+Home, a team's line adds one cue (*●●○ 2 of 3 parts* or *⇢ 1 waiting*); a worker's *Team* tab
+starts with its task's lineage. With *Reduce motion* on in your system, nothing moves; the words
+say it.
+
 **Routing to the right worker** matters most. Your message reaches the Router together with
 the workers whose record matches it (title, task, files, branches, reports; keyword search,
 Chinese included). For work on a subject a worker already knows, the Router either:
