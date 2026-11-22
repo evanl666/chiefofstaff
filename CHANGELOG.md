@@ -32,6 +32,12 @@
   worker finished both and was named after the second; told something about the first since
   (*the spec is approved*), its answer named it after the first again. What a worker says about
   one task while it works on another no longer renames it.
+- **No more *MallocStackLogging* lines in the terminal (macOS).** Each time Copilot started an
+  MCP server (a Python one, say), the terminal Chief of Staff runs in got a line *python3(12345)
+  MallocStackLogging: can't turn off malloc stack logging because it was not enabled*: harmless,
+  from macOS. That line is dropped wherever Chief of Staff reads what Copilot, Codex, Claude
+  Code and what they start write on stderr; all else they write goes where it did (an error
+  still shows), and a Claude worker that can't start no longer gives that line as its reason.
 
 ## 0.1.53 (2026-11-22)
 

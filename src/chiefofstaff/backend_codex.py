@@ -68,6 +68,7 @@ from .backend import (
     end_processes,
     image_type,
     isolated,
+    malloc_notice,
     process_table,
     resumed_elsewhere,
 )
@@ -1187,7 +1188,7 @@ class CodexBackend:
             return
         async for line in self.process.stderr:
             text = line.decode(errors="replace").rstrip()
-            if text:
+            if text and not malloc_notice(text):
                 logger.debug("codex: %s", text[:1000])
 
     def received(self, message: dict):

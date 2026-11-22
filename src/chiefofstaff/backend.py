@@ -344,6 +344,32 @@ class ExpectedRefusal(logging.Filter):
 logging.getLogger("copilot.client").addFilter(ExpectedRefusal())
 
 
+# What macOS's malloc writes on stderr in a process that turns off its stack logging without
+# having had it on (cf. copilot-cli#4375): a Copilot runtime, Codex, Claude Code, an MCP server
+# or a Python one of them starts, each time one starts. Harmless: dropped wherever Chief of
+# Staff reads its children's stderr, never in the terminal nor taken for their last words.
+MALLOC_NOTICE = re.compile(
+    r"(?:\[CLI\] )?[^\n]{1,200}?\(\d+\) MallocStackLogging: can't turn off malloc stack "
+    r"logging because it was not enabled\.?"
+)
+
+
+def malloc_notice(line: str) -> bool:
+    """Whether a line a child process wrote on stderr is macOS's malloc notice, and only that."""
+    return bool(MALLOC_NOTICE.fullmatch(line.strip()))
+
+
+class MallocNotice(logging.Filter):
+    """The Copilot runtime's stderr, which the SDK logs line by line as warnings ("[CLI] …": in
+    the terminal Chief of Staff runs in), less macOS's malloc notice. All else it says stays."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not malloc_notice(record.getMessage())
+
+
+logging.getLogger("copilot._jsonrpc").addFilter(MallocNotice())
+
+
 # A newer Copilot's events this SDK can't read are taken as unknown ones (compat.open_enum: a
 # session.shutdown's "destroy", which Copilot 1.0.112 sends when a session is deleted, failed with
 # a traceback in the log and the event was dropped).

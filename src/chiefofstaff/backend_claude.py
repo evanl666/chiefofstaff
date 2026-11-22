@@ -69,6 +69,7 @@ from .backend import (
     end_processes,
     image_type,
     isolated,
+    malloc_notice,
     process_table,
     resumed_elsewhere,
 )
@@ -1365,6 +1366,8 @@ class ClaudeWorker:
         )
 
     def on_stderr(self, line: str):
+        if malloc_notice(line):
+            return  # Not its last words (start_error).
         self.stderr = [*self.stderr[-19:], line[:500]]
         logger.debug("claude %s: %s", self.worker, line[:500])
 

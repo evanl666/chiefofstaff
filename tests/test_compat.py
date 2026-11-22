@@ -7,6 +7,7 @@ events it can't read."""
 import asyncio
 import json
 import logging
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import Harness, settle
+from copilot._jsonrpc import JsonRpcClient
 from copilot.generated.session_events import (
     SessionEventType,
     ShutdownType,
@@ -23,6 +25,7 @@ from test_runtime import FALLBACK_PATH, fake_copilot
 
 from chiefofstaff import backend as backend_module
 from chiefofstaff import compat
+from chiefofstaff.backend_claude import ClaudeWorker
 from chiefofstaff.delivery import FreshStartError
 from chiefofstaff.models import Settings
 from chiefofstaff.runtime import CONTINUED_AFRESH, CONTINUED_FRESH
@@ -479,6 +482,34 @@ def test_a_newer_copilots_events_are_taken_and_said_once(caplog):
     said = [r.getMessage() for r in caplog.records if r.name == "chiefofstaff.compat"]
     assert len(said) == 3 and all(r.levelno == logging.DEBUG for r in caplog.records)
     assert "session.hologram" in said[0] and "session.idle" in said[1] and "teleport" in said[2]
+
+
+MALLOC = "can't turn off malloc stack logging because it was not enabled."
+
+
+def test_macos_malloc_notice_from_children_is_dropped_and_their_errors_kept(caplog):
+    """The owner's terminal: a line of macOS's malloc (cf. copilot-cli#4375) each time a Python
+    of an MCP server started, as the SDK logs each line of the Copilot runtime's stderr as a
+    warning; Claude's stderr took it for its last words. Dropped, and only it: an error stays."""
+    notice = f"python3(12345) MallocStackLogging: {MALLOC}"
+    error = "Error: MCP server acme could not start: spawn uvx ENOENT"
+    written = f"copilot(4242) MallocStackLogging: {MALLOC}\n{notice}\n{error}\n"
+    process = subprocess.Popen(
+        [sys.executable, "-c", f"import sys; sys.stderr.write({written!r})"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )  # fmt: skip
+    caplog.set_level(logging.WARNING, logger="copilot._jsonrpc")
+    client = JsonRpcClient(process)
+    client._running = True  # As its thread reads the runtime's stderr once started.
+    client._stderr_loop()
+    process.wait()
+    assert [r.getMessage() for r in caplog.records] == [f"[CLI] {error}"]
+    assert error in client.get_stderr_output(), "a runtime that fails to start says why"
+    claude = SimpleNamespace(stderr=[], worker="w1")
+    for line in (error, notice):
+        ClaudeWorker.on_stderr(claude, line)  # type: ignore[arg-type]
+    assert claude.stderr == [error]
+    assert not backend_module.malloc_notice(f"python3(1) MallocStackLogging: {MALLOC} {error}")
 
 
 async def test_a_sessions_history_with_an_event_it_cant_read_is_read(tmp_path):
