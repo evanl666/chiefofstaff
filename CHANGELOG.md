@@ -102,6 +102,11 @@ itself.
   Copilot session opened a minute after it had last looked at your terminal sessions, the Router
   answered from what it had seen then, and found it nowhere. Your next message names each one
   opened since, once.
+- **A decision you give with new work goes to that work.** Told *Decision: snake_case keys.
+  Record that, then have a worker write api.md*, the Router could link the decision to a
+  finished task that had nothing to do with it, which a change of the decision then took up
+  again. The tasks it starts with your decision rely on it by themselves; it links a finished
+  one only on purpose (it is asked once), and it hears which tasks it linked.
 - **Fixes:** a Codex signed in with an API key ("API key configured") read as signed out; an
   agent signed out while its workers ran still said *Ready*, and a new task or message for it
   went to it and failed there (it is saved with its card now); work you asked done directly in

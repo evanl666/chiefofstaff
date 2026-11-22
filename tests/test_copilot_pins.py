@@ -431,7 +431,7 @@ TOOL_SCHEMAS: dict[str, tuple[int, str]] = {
     ),
     "read_session": (799, "2ddf8949fb6b53e21662e9b6e6e5ac27f7b43b04e421e48c6d44e74b1ec1bf5e"),
     "read_team_thread": (878, "b289c5d905bb9270c8bd7b97665dbb51885d7164e8e269005ff2364806cfb6a0"),
-    "record_decision": (1245, "730679b1cd74e5ebc59b7b6c42a1f541a1df7a25cc50a623f9d2f5e64803bdd5"),
+    "record_decision": (1350, "6bb2b66b7ffc77489af0d656deff47d74dc07cb9b87beb811d7f0c8a50d4ec41"),
     "record_setup": (822, "54b61514390daf8546f36c21eb89328e9db18d4b6bafe9b06f2f82e74fc815c5"),
     "rename_task": (677, "f53f147f83bb8cf3c1f82e207ffe1a90db2ba074f7db62c069caf2e006fc7feb"),
     "report": (5886, "5a0c96049013b9a595f5532e2fe398067d9227dd9d9372c3a40d1718ab59ab8c"),

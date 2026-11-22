@@ -781,7 +781,8 @@ Staff keeps them, each with the tasks that rely on it:
 
 - your answers on decision cards;
 - decisions you state to the Router ("SMS login is out for v1"), which it records and links to
-  the tasks they concern.
+  the tasks they concern: the work you ask for in the same message, and a finished task only
+  when what it delivered relies on it.
 
 **Change one and the work follows.** Tell the Router ("change of plan: SMS login is in after
 all"). It records the new decision in place of the old one, and Chief of Staff:

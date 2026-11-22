@@ -211,6 +211,37 @@ async def test_a_decision_and_a_task_from_one_message_are_linked_whatever_the_or
     assert notes["task_id"] not in runtime.decisions.linked(second["id"]), "a later message"
 
 
+async def test_a_decision_given_with_new_work_is_linked_to_a_finished_task_only_on_purpose(
+    harness,
+):
+    """Live e2e r81: "Decision: snake_case keys. Record that, then have a worker write api.md":
+    the Router linked the decision to the finished, unrelated VERSION task too, which the change
+    of it then reopened. Naming a finished task is asked once; the new task gets it by itself,
+    and the Router is told which tasks it is linked to."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    version = await spawn(runtime, router, "Add VERSION 1.4.2")
+    await call_tool(runtime, "report", version["session_id"], status="done", summary="Added.")
+    harness.session(router).emit("user.message", content=env("owner", "message", "Decide; go"))
+    await settle(runtime)
+    asked = await call_tool(runtime, "record_decision", router, decision="snake_case keys",
+                            tasks=[version["task_id"]])  # fmt: skip
+    assert asked.result_type == "failure" and not runtime.decisions.active()
+    said = asked.text_result_for_llm
+    assert version["task_id"] in said and "finished" in said, said
+    recorded = await call_tool(runtime, "record_decision", router, decision="snake_case keys")
+    api = await spawn(runtime, router, "Write api.md", why_new="other")
+    [decision] = runtime.decisions.active()
+    assert runtime.decisions.linked(decision["id"]) == [api["task_id"]]
+    assert "linked to 0 task(s)." in recorded.text_result_for_llm
+    again = await call_tool(runtime, "record_decision", router, decision="URLs start /v2",
+                            tasks=[version["task_id"]])  # fmt: skip
+    assert again.result_type == "failure"
+    linked = await call_tool(runtime, "record_decision", router, decision="URLs start /v2",
+                             tasks=[version["task_id"]])  # fmt: skip
+    assert f"{version['task_id']} “Add VERSION 1.4.2”" in linked.text_result_for_llm, "on purpose"
+
+
 async def test_a_changed_decision_that_changes_nothing_gives_the_result_back(harness):
     runtime = await harness.connect()
     api = await spawn(runtime, harness.router_id, "Login API")

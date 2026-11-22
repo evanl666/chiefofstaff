@@ -89,7 +89,9 @@ class RecordDecision(BaseModel):
     )
     tasks: list[str] = Field(
         default_factory=list,
-        description="Task ids (t…) or worker ids whose work relies on this decision",
+        description="Task ids (t…) or worker ids whose work already given relies on this "
+        "decision. Not the work you are about to give: tasks you start in this turn rely on it "
+        "by themselves",
     )
     replaces: list[str] = Field(
         default_factory=list,
@@ -475,8 +477,10 @@ class Decisions:
     async def t_record_decision(self, params: RecordDecision, caller: str):
         if self.store.session(caller)["role"] != ROUTER:
             raise ValueError("Only the Router records decisions.")
-        tasks = [self.runtime.task_actions.task_for(ref)["id"] for ref in params.tasks]
+        named = [self.runtime.task_actions.task_for(ref) for ref in params.tasks]
         state = self.runtime.states[caller]
+        self.check_finished(caller, params.decision, named)
+        tasks = [task["id"] for task in named]
         if not params.replaces:
             # Tasks it gave out in this turn came with this decision in the owner's message.
             tasks = list(dict.fromkeys(tasks + state.turn_tasks))
@@ -486,10 +490,10 @@ class Decisions:
         if result.get("same"):
             return (
                 f"Recorded {decision['id']} in the same words as before: nothing changed, no "
-                f"worker was told. Linked to {len(tasks)} more task(s)."
+                f"worker was told. Linked to {len(tasks)} more task(s){self.titles(tasks)}."
             )
         if not params.replaces:
-            return f"Recorded {decision['id']}, linked to {len(tasks)} task(s)."
+            return f"Recorded {decision['id']}, linked to {len(tasks)} task(s){self.titles(tasks)}."
         if not affected:
             return f"Recorded {decision['id']}. No open or finished task relied on what it changes."
         told = [item for item in affected if item["told"]]
@@ -503,6 +507,32 @@ class Decisions:
         if missed:
             text += f". Could not tell: {', '.join(missed)} (their results are marked out of date)"
         return text + ". The owner sees the impact on a card. Tell the owner in one line."
+
+    def check_finished(self, caller: str, text: str, named: list[dict]):
+        """Asked once of finished tasks the Router names for a decision (live e2e r81: told a
+        decision with the new task relying on it, it linked a finished, unrelated one too, which
+        a change of it then reopened): one relies on it only when its delivered work does."""
+        finished = [task for task in named if task["status"] in {"review", "done"}]
+        if not finished:
+            return
+        asked = json.dumps([clean(text, 500), sorted(task["id"] for task in finished)])
+        if self.store.get(f"decisionfinished:{caller}") == asked:
+            return
+        self.store.set(f"decisionfinished:{caller}", asked)
+        listed = "; ".join(f"{task['id']} \u201c{task['title']}\u201d" for task in finished)
+        raise ValueError(
+            f"Not recorded yet: {listed} {'is' if len(finished) == 1 else 'are'} finished. Link "
+            "a finished task only when the work it delivered relies on this decision (a change of "
+            "the decision reopens it): if so, call again with the same tasks. Otherwise "
+            "call again without it: the tasks you start in this turn rely on the decision by "
+            "themselves."
+        )
+
+    def titles(self, tasks: list[str]) -> str:
+        """Which tasks a decision is linked to, for the Router: ": t1 “Write api.md”; …"."""
+        found = [task for task_id in tasks if (task := self.tasks.find(task_id))]
+        listed = "; ".join(f"{task['id']} \u201c{task['title']}\u201d" for task in found)
+        return f": {listed}" if listed else ""
 
     async def record(self, text: str, tasks: list[str], replaces: list[str], source: str) -> dict:
         text = clean(text, 500)

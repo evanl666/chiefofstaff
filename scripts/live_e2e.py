@@ -1327,12 +1327,18 @@ async def scenario_decisions(app: App, project: Path):
     )
 
     async def recorded_and_done():
+        # The api.md task, whatever else the Router linked the decision to (r81: a finished
+        # VERSION task too, the first in the list).
         state = await app.get("/api/state")
         tasks = [t for t in state["tasks"] if t["decisions"] and t["status"] == "review"]
-        return tasks[0] if tasks else None
+        api = [t for t in tasks if re.search(r"\bapi\b", t["title"], re.IGNORECASE)]
+        return (api[0], tasks) if api else None
 
-    task = await wait_for("a task that relies on the decision is done", recorded_and_done, 600)
+    task, relying = await wait_for("the api.md task relying on the decision is done",
+                                   recorded_and_done, 600)  # fmt: skip
     log(f"“{task['title']}” relies on {[d['text'] for d in task['decisions']]}")
+    if others := [t["title"] for t in relying if t["id"] != task["id"]]:
+        log(f"the decision is linked to other tasks too: {others}")
     await app.post(
         f"/api/sessions/{router}/messages",
         {"text": "Change of plan: the API uses camelCase JSON keys instead of snake_case."},

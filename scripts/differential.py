@@ -351,6 +351,15 @@ FIXES: list[Allow] = [
         r"replaces=\[its id\], never cancel_task and then a new task; |that wait on it wait on "
         r"the new one\.$)",
     ),
+    # 0.1.54 (live e2e r81): record_decision's tasks are work already given; what the Router
+    # starts in the same turn relies on the decision by itself.
+    Allow(
+        "record_decision's tasks: work already given",
+        data=r"\.options\.tools\[\d+\]\.parameters\.properties\.tasks\.description$",
+        value="Task ids (t…) or worker ids whose work already given relies on this decision. "
+        "Not the work you are about to give: tasks you start in this turn rely on it by "
+        "themselves",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
