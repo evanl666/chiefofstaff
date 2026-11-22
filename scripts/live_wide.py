@@ -126,7 +126,8 @@ J1  a worker that needs the owner's key asks (question or blocked): under Needs 
 J2  a second task for a worker still on its first: the Router says what becomes of the first;
     the second is up next, then runs; a note about the first, reported, does not move the
     worker off the second: it stays under Running, no "following up" for the first, no
-    follow-up card; the worker is named by its latest task in the sidebar
+    follow-up card; the worker is named by its latest task in the sidebar, also once both are
+    reported and it answers a note about the first
 J3  a worker lists what its task made (a doc, a run) with their status: one list on Home,
     where each stands; one taken off and brought back
 J4  a new task that replaces the running one: the first is cancelled as superseded
@@ -3415,7 +3416,41 @@ async def j2_second_task_and_a_note(ctx: Ctx):
                  and m["meta"].get("from") == worker]  # fmt: skip
         log(f"J2: the Router heard {len(heard)} reports from the worker")
         row = await session(ctx, worker)
-        assert row["display_title"] == (await ctx.app.get(f"/api/tasks/{other['id']}"))["title"]
+        named = (await ctx.app.get(f"/api/tasks/{other['id']}"))["title"]
+        assert row["display_title"] == named, (row["display_title"], named, first["title"])
+
+        # Both reported: its answer to a note about the first keeps its name (it was named
+        # after the first again when it answered after its second's report).
+        async def its_words() -> int:
+            said = await messages(ctx, router)
+            return sum(
+                m["kind"] == "inbound"
+                and worker in (m["meta"].get("from"), m["meta"].get("answered_by"))
+                for m in said
+            )
+
+        before = await its_words()
+        mark = max(m["id"] for m in await messages(ctx, worker))
+        await ask(
+            ctx,
+            "Tell the Twin Spec worker, as a note about its first (spec) task only, no new "
+            "work: which file holds the spec? It answers you in one line.",
+        )
+
+        async def answered():
+            row = await session(ctx, worker)
+            return row if await its_words() > before and row["status"] != "working" else None
+
+        told = [m for m in await messages(ctx, worker) if m["id"] > mark and m["kind"] == "router"]
+        if told:
+            row = await wait_for("its answer about the first", answered, 300, ctx.app)
+            then = await ctx.app.get(f"/api/tasks/{first['id']}")
+            log(f"J2: after its answer, first {then['status']}, named {row['display_title']!r}")
+            if then["status"] in FINISHED:
+                assert row["display_title"] == named, (row["display_title"], named, first["title"])
+        else:
+            log("J2: the Router answered that itself, without the worker")
+            row = await session(ctx, worker)
         await page.reload()
         item = page.locator(f'#session-list .item[data-id="{worker}"] .label')
         await expect(item).to_have_text(row["display_title"], timeout=20000)

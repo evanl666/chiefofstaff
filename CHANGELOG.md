@@ -28,6 +28,10 @@
 - **By task, and each worker's tasks (E136).** A new *By task* table, with what no task spent
   last. In *By session* a worker was named after its current task, as if all it spent was that
   task's; now it says it is a worker and how many tasks it had, and unfolds to them.
+- **A worker's answer to a note keeps its name.** Given a second task while on its first, a
+  worker finished both and was named after the second; told something about the first since
+  (*the spec is approved*), its answer named it after the first again. What a worker says about
+  one task while it works on another no longer renames it.
 
 ## 0.1.53 (2026-11-22)
 

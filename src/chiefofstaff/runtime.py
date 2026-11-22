@@ -9871,14 +9871,17 @@ class Runtime:
         # turns first; else by what reached it about a task, never what Chief of Staff told it
         # (cancelled, closed: bug E88), nor what never reached it: a message dropped, sent on
         # to another worker, or past what it has seen (E127: a held worker was named after
-        # the cancelled task the owner had written to it about).
+        # the cancelled task the owner had written to it about). Not by what it said of a task
+        # while its turn was on another (live J2: its answer to the Router's note about its
+        # first task, after it reported its second, named it after the first again).
         seen = int(self.store.get(f"seen:{row['id']}") or self.store.get(f"sent:{row['id']}") or 0)
 
         def last_active(task: dict) -> tuple:
             split = json.loads(self.store.get(f"splitfrom:{task['id']}") or "null")
             found = self.store.one(
                 """SELECT max(CASE WHEN kind IN ('assistant', 'report', 'tool', 'update')
-                THEN id END) AS own, max(CASE WHEN ? OR kind!='notice' THEN id END) AS given
+                AND json_extract(meta, '$.off_turn') IS NULL THEN id END) AS own,
+                max(CASE WHEN ? OR kind!='notice' THEN id END) AS given
                 FROM messages WHERE session_id=? AND id>? AND json_extract(meta, '$.task_id')=?
                 AND json_extract(meta, '$.dropped') IS NULL
                 AND json_extract(meta, '$.forwarded_to') IS NULL

@@ -3326,6 +3326,18 @@ class Tools:
         await self.runtime.workers.close(row["id"], by="the Router")
         return "Closed."
 
+    def off_turn(self, caller: str, task: dict) -> bool:
+        """Whether a worker reports on a task other than the one its turn is on: an answer to
+        the Router's note about finished work, say (a note changes no task, so its turn stays on
+        what it works on). Not when its turn's task is gone (cancelled, failed) or not its own."""
+        turn = self.runtime.turn_task(caller)
+        found = self.tasks.find(turn) if turn and turn != task["id"] else None
+        return bool(
+            found
+            and found["session_id"] == caller
+            and found["status"] not in {"cancelled", "failed"}
+        )
+
     def checking_back(self, session_id: str, task: dict) -> bool:
         """Whether its turn is its check-back on this task: what it was given last is that
         (not the owner's chat, a thread's news or the Router since)."""
@@ -3699,6 +3711,8 @@ class Tools:
                 done=params.status == "done",
             )
         meta = {"status": params.status, "task_id": task["id"] if task else None}
+        if task and row["role"] == WORKER and self.off_turn(caller, task):
+            meta["off_turn"] = True  # Not work it did on it: it names no worker (display_title).
         drafts = {
             d["id"] for d in self.store.all("SELECT id FROM drafts WHERE session_id=?", (caller,))
         }

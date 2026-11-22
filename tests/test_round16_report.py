@@ -340,6 +340,33 @@ async def test_a_worker_is_named_after_its_own_turns_not_a_message_never_deliver
     assert runtime.display_title(harness.store.session(worker)) == "Fix the login"
 
 
+@pytest.mark.parametrize("status", ["answer", "progress"])
+async def test_an_answer_to_a_note_keeps_the_workers_name_and_task(harness, status):
+    """Live J2: given a second task while on its first, the worker reported both; then the
+    Router's note about the first ("the spec is approved") and its answer on the first, in a
+    turn still on the second (a note changes no task): with nothing open, it was named after
+    the first again."""
+    runtime = await harness.connect()
+    worker, session, a = await busy_worker(runtime, harness, "Write the spec")
+    given = {"task": "new", "why_new": "test", "earlier": "keep", "title": "Write the build file"}
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    text="Then write the build file.", **given)  # fmt: skip
+    b = runtime.tasks.current(worker)
+    await call_tool(runtime, "report", worker, status="done", task_id=a["id"], summary="Spec.")
+    await idle(runtime, session)
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="done", task_id=b["id"], summary="Built.")
+    await idle(runtime, session)
+    await router_says(runtime, harness, worker, a, "note", "The spec is approved as it is.")
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status=status, task_id=a["id"],
+                    summary="Noted: the spec is approved.")  # fmt: skip
+    await idle(runtime, session)
+    assert runtime.display_title(harness.store.session(worker)) == "Write the build file"
+    assert runtime.tasks.current(worker)["id"] == runtime.at_work(worker)["id"] == b["id"]
+    assert [runtime.tasks.get(t["id"])["status"] for t in (a, b)] == ["review", "review"]
+
+
 async def asking(harness):
     """A worker that asked the owner a question on its task: waiting, under Needs you."""
     runtime = await harness.connect()
