@@ -5,7 +5,8 @@ makes the relations, a team's thread has them (GET /api/teams/<id>/thread), the 
       that lands (2 of 2), each row's one relation its part.
   R2  A task that needs another's result before it starts (`after`): while the other runs its
       row waits on it (Home's line: "1 waiting"; the view: "waits on …"), the two workers one
-      team though they never message; once the other is done the wait is cleared.
+      team though they never message, a chain (no fan of parts; neither told the other works at
+      the same time); once the other is done the wait is cleared.
   R3  Another worker does an open task instead (`replaces`): an edge from the old task to the
       new, the old row "handed to …" in the page.
   R4  In the browser: R1's team (its parts, a lineage with its caption).
@@ -135,6 +136,15 @@ async def r2_waits_on(ctx: Ctx):
     assert not told, "one team by the wait alone"
     chip = row(thread, note["id"])["relation"]
     assert (chip["kind"], chip["side"], chip["state"]) == ("after", "to", "pending"), chip
+    # A chain, not a request's parts (r81): no fan of the two, and neither hears the other
+    # works at the same time (the builder may hear the note starts once it is done).
+    assert not [g for g in thread["groups"] if note["id"] in g["tasks"]], thread["groups"]
+    built, noted = [await messages(ctx, w["session_id"]) for w in (builder, note)]
+    heard = [m["meta"].get("prompt") or m["text"] for m in built
+             if m["kind"] == "notice" and "Release Note" in m["text"]]  # fmt: skip
+    first = [m["meta"].get("prompt") or "" for m in noted if m["kind"] == "router"][:1]
+    log(f"R2: the builder heard {heard}")
+    assert not any("at the same time" in text for text in heard + first), (heard, first)
     team = thread["team"]["id"]
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()

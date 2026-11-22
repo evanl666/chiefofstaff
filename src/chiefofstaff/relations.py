@@ -250,16 +250,23 @@ class Relations:
                 node = parent[node]
             return node
 
+        # A task of the request that waits on another of it is a chain, not a part: it starts
+        # once that one is done (as an earlier version kept it too).
+        waits = {(e["from_task"], e["to_task"]) for e in graph.edges if e["kind"] == "after"}
         for new, value in found["parts:"].items():
             for other in loads(value, []):
                 one, two = latest(new), latest(other)
+                if (one, two) in waits or (two, one) in waits:
+                    continue
                 if one in tasks and two in tasks and one != two:
                     parent[root(one)] = root(two)
         fans: dict[str, list[str]] = {}
         for node in parent:
             fans.setdefault(root(node), []).append(node)
         for members in fans.values():
-            self.group(graph, add, "parts", members, "")
+            fan = set(members)
+            following = {after for before, after in waits if before in fan and after in fan}
+            self.group(graph, add, "parts", [m for m in members if m not in following], "")
         compared: dict[str, list[str]] = {}
         for worker, value in found["compare:"].items():
             if group := loads(value, {}).get("id", ""):

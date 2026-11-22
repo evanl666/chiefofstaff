@@ -146,35 +146,64 @@ class Peers:
         what = f", on task {task['id']} “{task['title']}” ({task['status']})" if task else ""
         return f"- “{row['title']}” (worker:{short(row['id'])}){what}"
 
+    def waits_on(self, session_id: str) -> set[str]:
+        """The tasks its task waits on (after): those of a worker it follows, not works beside."""
+        task = self.tasks.current(session_id)
+        return {dependency["id"] for dependency in self.tasks.deps(task["id"])} if task else set()
+
     def introduction(self, session_id: str) -> str:
-        """For a new worker's first message: who it works with, and how."""
+        """For a new worker's first message: who it works with, and how: beside it at the same
+        time, or before it (its task waits on theirs: it starts once they are done)."""
         peers = self.open(session_id)
-        if not peers:
-            return ""
-        lines = "\n".join(self.line(row, row["task_row"]) for row in peers)
-        return (
-            f"You work at the same time as these workers, on parts of the same request:\n{lines}\n"
-            "Tell them what they need from your work as soon as you have it (a value, a name, "
-            "a changed interface or file format, a finding that affects them) with "
-            "tell_session; ask them with ask_session. What they tell you arrives as "
-            'from="worker:…" type="note". When your task waits for something from one of '
-            "them, end your turn without a report: their message starts your next turn."
-        )
+        waits = self.waits_on(session_id)
+        before = [row for row in peers if row["task_row"] and row["task_row"]["id"] in waits]
+        beside = [row for row in peers if row not in before]
+        said = []
+        if beside:
+            lines = "\n".join(self.line(row, row["task_row"]) for row in beside)
+            said.append(
+                f"You work at the same time as these workers, on parts of the same request:\n"
+                f"{lines}\nTell them what they need from your work as soon as you have it (a "
+                "value, a name, a changed interface or file format, a finding that affects them) "
+                "with tell_session; ask them with ask_session. What they tell you arrives as "
+                'from="worker:…" type="note". When your task waits for something from one of '
+                "them, end your turn without a report: their message starts your next turn."
+            )
+        if before:
+            lines = "\n".join(self.line(row, row["task_row"]) for row in before)
+            said.append(
+                f"You start once these workers are done (your task waits on theirs), and their "
+                f"results reach you then:\n{lines}\nIf you need more from one of them than its "
+                "result, ask it with ask_session; what one tells you arrives as "
+                'from="worker:…" type="note".'
+            )
+        return "\n\n".join(said)
 
     async def introduce(self, new: dict, others: list[dict]):
-        """Each worker it works with hears of the new one."""
+        """Each worker it works with hears of the new one: one that works beside it, or one
+        that starts once it is done (its task waits on that worker's)."""
         task = self.tasks.current(new["id"])
+        waits = self.waits_on(new["id"])
         for row in others:
-            text = (
-                f"“{new['title']}” (worker:{short(new['id'])}) now works at the same time as "
-                f"you, on another part of the same request"
-                + (f": {task['title']}" if task else "")
-                + ". Tell it what it needs from your work with tell_session (as soon as you "
-                "have it); it tells you what you need."
-            )
+            current = self.tasks.current(row["id"])
+            if current and current["id"] in waits:
+                text = (
+                    f"“{new['title']}” (worker:{short(new['id'])}) starts once you're done with "
+                    f"“{current['title']}”: its task"
+                    + (f" ({task['title']})" if task else "")
+                    + " waits on yours, and your result reaches it then. If it needs more from "
+                    "your work than your result, tell it with tell_session."
+                )
+            else:
+                text = (
+                    f"“{new['title']}” (worker:{short(new['id'])}) now works at the same time as "
+                    f"you, on another part of the same request"
+                    + (f": {task['title']}" if task else "")
+                    + ". Tell it what it needs from your work with tell_session (as soon as you "
+                    "have it); it tells you what you need."
+                )
             prompt = wrap("system", "peer", text, worker=short(new["id"]))
             meta = {"peer": new["id"], "title": new["title"], "session_id": new["id"]}
-            current = self.tasks.current(row["id"])
             if current and current["status"] in OPEN:
                 await self.delivery.deliver(
                     row["id"], prompt, kind="notice", display=text, meta=meta, steer=True

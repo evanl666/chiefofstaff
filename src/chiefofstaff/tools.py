@@ -1991,8 +1991,14 @@ class Tools:
                 if row["id"] not in known
             ]
         self.runtime.peers.link(session_id, [row["id"] for row in peers])
-        # Parts of one request, task by task (peers are workers): their tasks now.
-        parts = [found["id"] for row in peers if (found := self.tasks.current(row["id"]))]
+        # Parts of one request, task by task (peers are workers): their tasks now, but for one
+        # it waits on (that is a chain: it starts once that one is done).
+        waits_on = {dependency["id"] for dependency in after}
+        parts = [
+            found["id"]
+            for row in peers
+            if (found := self.tasks.current(row["id"])) and found["id"] not in waits_on
+        ]
         if parts:
             self.store.set(f"parts:{task['id']}", json.dumps(parts))
         if special:  # Its own tools: see Runtime.tool_names.

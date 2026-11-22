@@ -336,3 +336,45 @@ async def test_a_compare_is_one_team_its_sides_side_by_side_the_one_accepted_pic
         assert (group["state"], group["picked"]) == ("resolved", tasks[1])
     finally:
         await runtime.stop()
+
+
+async def test_a_task_that_waits_on_another_of_its_request_is_a_chain_not_a_part(harness):
+    """Live R2 (r81): "Slow Builder, and Release Note, which must not start before it is done":
+    the note waits on the builder (after) and was started beside it (works_with). They are a
+    chain: no fan of two parts, Home's line says one waits; the builder hears the note starts
+    once it is done, never that it works at the same time, and the note that it starts after."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    builder, build = await spawn(runtime, router, "Slow Builder")
+    note, write = await spawn(runtime, router, "Release Note", after=[build], works_with=[build])
+    assert json.loads(harness.store.get(f"parts:{write}") or "[]") == []
+    assert [g for g in runtime.relations.graph().groups if g["kind"] == "parts"] == []
+    [team] = runtime.snapshot()["teams"]
+    assert team["cue"] == {"parts": None, "waiting": 1}
+    rows = {row["id"]: row for row in runtime.teams.thread_view(team["id"])["tasks"]}
+    assert (rows[write]["relation"]["kind"], rows[write]["relation"]["state"]) == (
+        "after",
+        "pending",
+    )
+    told = harness.session(builder).sent[-1]
+    assert "starts once you're done" in told and "at the same time" not in told, told
+    first = harness.session(note).sent[0] if harness.client.sessions.get(note) else ""
+    first = first or harness.store.messages(note)[0]["meta"]["prompt"]
+    assert "You start once" in first and "work at the same time" not in first, first
+
+
+async def test_of_a_requests_parts_only_those_at_work_side_by_side_are_its_fan(harness):
+    """API, UI and a check that waits on the UI: the fan is the API and the UI; the check
+    follows the UI. Also as an earlier version kept it (the check among the parts)."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    harness.store.save_settings(harness.store.settings().model_copy(update={"max_workers": 100}))
+    _, api = await spawn(runtime, router, "Checkout API")
+    _, ui = await spawn(runtime, router, "Checkout UI", works_with=[api])
+    _, check = await spawn(runtime, router, "Checkout check", after=[ui], works_with=[api, ui])
+    [group] = [g for g in runtime.relations.graph().groups if g["kind"] == "parts"]
+    assert group["tasks"] == [api, ui]
+    harness.store.set(f"parts:{check}", json.dumps([api, ui]))
+    runtime.relations.memo = None
+    [group] = [g for g in runtime.relations.graph().groups if g["kind"] == "parts"]
+    assert group["tasks"] == [api, ui]
