@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Claude Code workers, and the Router and the Watchdog on Claude, run on a Mac's usual data
+  folder.** Chief of Staff's check of Claude Code put the paths of its own folder into shell
+  commands unquoted. In macOS's default data folder (`~/Library/Application Support`), whose
+  name has a space, one of its commands wrote a small file named `~/Library/Application` and
+  the check never finished, so workers that ask first, and the Router or the Watchdog put on
+  Claude, never ran there. Every path the check (and Codex's) writes into a command is quoted
+  now; that stray file, if the check left one, is removed; and the check runs again by itself
+  after the update.
+
 ## 0.1.54 (2026-11-23)
 
 Workers that work together are a team you can follow in one thread, with how their tasks

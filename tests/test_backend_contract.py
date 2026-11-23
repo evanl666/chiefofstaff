@@ -80,6 +80,9 @@ MODEL = os.environ.get("CHIEFOFSTAFF_TEST_MODEL", "claude-haiku-5.5")
 # cache), so that the contract runs on both protocols.
 COPILOT_CLI = os.environ.get("CHIEFOFSTAFF_TEST_COPILOT_CLI") or "copilot"
 REAL_CODEX = os.environ.get("CHIEFOFSTAFF_TEST_CODEX") == "1"
+# Where an agent's folders and checks go, as under macOS's data folder ("Application Support"):
+# a path with a space (and a quote) that every command Chief of Staff writes must keep whole.
+DATA_SPACE = Path("Application Support") / "it's here"
 REAL_CLAUDE_RUN = os.environ.get("CHIEFOFSTAFF_TEST_CLAUDE") == "1"
 # What could choose a provider or a credential for the real Claude Code: none reaches it here.
 CLAUDE_PROVIDERS = (
@@ -209,7 +212,10 @@ async def backend(request, tmp_path, monkeypatch):
     elif request.param == "fake-codex":
         backend = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
     elif request.param == "fake-claude":
-        backend = claude_backend(fake_claude(tmp_path / "fake", monkeypatch), tmp_path / "agent")
+        # Its folder's path has a space, as macOS's data folder's ("Application Support").
+        backend = claude_backend(
+            fake_claude(tmp_path / "fake", monkeypatch), tmp_path / DATA_SPACE / "agent"
+        )
     elif request.param == "claude":
         if not REAL_CLAUDE_RUN or not REAL_CLAUDE:
             pytest.skip("Set CHIEFOFSTAFF_TEST_CLAUDE=1 (with claude installed) to check it.")
@@ -237,7 +243,7 @@ async def backend(request, tmp_path, monkeypatch):
             monkeypatch.setenv(name.lower(), catcher.url)
         monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
         monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-        backend = claude_backend(REAL_CLAUDE, tmp_path / "agent")
+        backend = claude_backend(REAL_CLAUDE, tmp_path / DATA_SPACE / "agent")
         backend.model, backend.catcher = model, catcher
     elif request.param in PROFILES:
         backend = AgentLikeBackend(contract_brain, PROFILES[request.param])
@@ -2491,13 +2497,30 @@ async def test_codexs_check_of_a_tested_version_finds_nothing(tmp_path, monkeypa
     codex.needs_sign_in = False
     await codex.start()
     try:
-        assert await codex.check(tmp_path / "check") == {
+        assert await codex.check(tmp_path / DATA_SPACE / "codex-check") == {
             "ran": True,
             "ask_first": "",
             "acting": "",
         }
     finally:
         await codex.stop()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["Application Support", "codex-home"]
+
+
+@pytest.mark.claude
+@pytest.mark.parametrize("backend", ["claude"], indirect=True)
+async def test_claudes_check_of_a_tested_version_finds_nothing_under_a_data_folder_with_a_space(
+    backend, tmp_path
+):
+    """Chief of Staff's check of the Claude Code on this computer (its stand-in Messages API:
+    no model call), in a folder whose path has a space and a quote, as under macOS's data
+    folder: it runs to its end (0.1.54's never did: its interrupt step's pid file was written
+    to ~/Library/Application), and nothing is written outside its folder."""
+    before = {p.name for p in tmp_path.iterdir()}
+    found = await backend.check(tmp_path / DATA_SPACE / "claude-check")
+    assert found["ran"] is True, found
+    assert (found["acting"], found["ask_first"]) == ("", ""), found
+    assert {p.name for p in tmp_path.iterdir()} == before, "nothing beside its folders"
 
 
 @pytest.mark.codex

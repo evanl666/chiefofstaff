@@ -56,6 +56,8 @@ C1  put on Claude while its check could not run: the Router stays on Copilot, it
         uv run --extra claude --with playwright python scripts/live_roles.py R|S|W|F|P|C [R1 R3 …]
 
 (no shard: R, S, W, F, P and C, one after another; once Claude stops one, no Claude shard runs).
+LIVE_CLAUDE_TURNS=0 runs no turn of Claude's model: C without its last question, S and W not
+at all. Each shard's data folder has a space in its path, as macOS's ("Application Support").
 For one budget across suites, give each the same LIVE_CLAUDE_SPENT file. Ports 20500-20515.
 """
 
@@ -85,6 +87,10 @@ SHARDS = {
     "C": (20505, 20515),
 }
 CLAUDE_SHARDS = {"S", "W", "C"}
+# LIVE_CLAUDE_TURNS=0: no turn of Claude's model (the owner's plan used up, say): shard C only,
+# its check (offline: a stand-in model) and the Router's move, not its turn there; no calibrating
+# run of `claude -p` either. S and W, all Claude turns, do not run.
+CLAUDE_TURNS = os.environ.get("LIVE_CLAUDE_TURNS", "1") != "0"
 CODEX = shutil.which("codex") or "codex"
 CLAUDE = shutil.which("claude") or "claude"
 NOTICE_ON = "The {label} runs on {agent} now, with a summary of what it knew."
@@ -402,6 +408,9 @@ async def c1_check_tried_again(ctx: Ctx):
     looked = await ctx.app.get("/api/agents")
     router = next(role for role in looked["roles"] if role["role"] == "router")
     assert router["line"] == "", router["line"]
+    if not CLAUDE_TURNS:
+        log("C1: no turn on Claude (LIVE_CLAUDE_TURNS=0)")
+        return
     said = await ask(ctx, "What is 6 plus 7? One number.")
     assert "13" in said, said
     assert ctx.agent_tokens(view["id"]) > 0, "that turn ran on Claude"
@@ -696,8 +705,10 @@ async def run_shard(
     home, project, truth = setup(root)
     agent = "claude" if shard in CLAUDE_SHARDS else "codex"
     record, allowed = root / "owner-files.json", ""
-    if agent == "claude":
+    if agent == "claude" and CLAUDE_TURNS:
         allowed = await asyncio.to_thread(lc.calibrated, root, record)
+    elif agent == "claude":
+        await asyncio.to_thread(lc.owners_claude_files, "record", record)
     env = {
         "COPILOT_HOME": str(home),
         "CHIEFOFSTAFF_MIN_FREE_MEMORY": "0",
@@ -713,7 +724,7 @@ async def run_shard(
     if shard == "C":
         folder, flag = claude_wrapper(root)
         env["PATH"] = f"{folder}:{os.environ.get('PATH', '')}"
-    app = App(root / "data", root / "log", env, agents=True)
+    app = App(live_e2e.data_dir(root), root / "log", env, agents=True)
     await app.start()
     ctx = Ctx(shard, app, root, home, project, truth)
     ctx.agent, ctx.base_env = agent, env
@@ -767,7 +778,7 @@ async def run_shard(
                 with contextlib.suppress(Exception):
                     await la.archive_threads(ctx)
         with contextlib.suppress(Exception):
-            await cleanup(root / "data")
+            await cleanup(live_e2e.data_dir(root))
         with contextlib.suppress(Exception):
             git(project, "worktree", "prune")
         if agent == "claude":
@@ -813,6 +824,9 @@ async def main() -> int:
     for shard in shards:
         # (Once Claude stopped one, no Claude shard runs; the others do.)
         if shard in CLAUDE_SHARDS and stopped:
+            continue
+        if shard in {"S", "W"} and not CLAUDE_TURNS:
+            log(f"shard {shard} not run: it needs Claude's turns (LIVE_CLAUDE_TURNS=0)")
             continue
         if shard in CLAUDE_SHARDS and spent >= lc.BUDGET:
             stopped = f"the run's budget ({lc.BUDGET:,} Claude tokens) is spent: {shard} not run"

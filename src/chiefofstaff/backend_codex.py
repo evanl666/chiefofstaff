@@ -1723,7 +1723,7 @@ class CodexBackend:
 
         session.on(on_event)
         step[0] = "turn"
-        await session.send(codex_check.PROMPT.format(work=work))
+        await session.send(codex_check.PROMPT.format(marker=codex_check.marker(work)))
         await ended.wait()
         if failed or not said or said[-1] != codex_check.REPLY:
             # Its turn did not run to its end: what it found is not all there is.

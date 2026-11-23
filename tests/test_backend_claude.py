@@ -1430,6 +1430,43 @@ async def test_a_check_whose_step_keeps_running_over_says_which_and_holds_ask_fi
     assert not (tmp_path / "check").exists(), "its folder goes"
 
 
+async def test_the_check_holds_in_a_data_folder_whose_path_has_a_space_and_a_quote(
+    agent, tmp_path, monkeypatch, check_sees
+):
+    """macOS's data folder is ~/Library/Application Support/…: the check's commands quote each
+    path (0.1.54's interrupt step wrote its pid into ~/Library/Application instead, and never
+    finished). Nothing is written outside its folder."""
+    from chiefofstaff import claude_check
+
+    monkeypatch.setattr(claude_check, "STEP_SECONDS", 10.0)
+    folder = tmp_path / "Application Support" / "it's here" / "claude-check"
+    found = await agent.check(folder)
+    assert found["ran"] is True, found
+    assert (found["acting"], found["ask_first"], found["sandbox"]) == ("", "", "")
+    made = {p.name for p in tmp_path.iterdir()}
+    assert made == {"Application Support", "agents", "fake"}, "no ~/…/Application left"
+
+
+def test_the_file_an_unquoted_check_left_outside_its_folder_goes_and_nothing_else(tmp_path):
+    """What 0.1.53 and 0.1.54 left where the data folder's path has a space: the file named by
+    the path's first word, with the pid and the rest of the path in it. Only that, exactly."""
+    from chiefofstaff import claude_check
+
+    work = tmp_path / "Application Support" / "work-buddy" / "work" / "claude-check" / "work"
+    stray = tmp_path / "Application"
+    stray.write_text("66743 Support/work-buddy/work/claude-check/work/interrupt.pid\n")
+    claude_check.tidy_stray(work)
+    assert not stray.exists()
+    for kept in ("notes of mine\n", "66743 Support/work-buddy/other.pid\n"):
+        stray.write_text(kept)
+        claude_check.tidy_stray(work)
+        assert stray.read_text() == kept, "not the check's: left as it is"
+    stray.unlink()
+    stray.mkdir()
+    claude_check.tidy_stray(work)
+    assert stray.is_dir()
+
+
 @pytest.mark.parametrize(
     ("unasked", "acting", "ask_first"),
     [

@@ -8,6 +8,7 @@ for each kind of action a worker takes; and a stand-in MCP server
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,10 +27,11 @@ SERVER_MARK = "server.marker"
 # Codex lists an edit's files by path: the one refused (the last) comes last.
 ADDED = ("added-1.marker", "added-2.marker")
 MOVED_FROM, MOVED_TO = "from.txt", "moved.txt"
-# What the turn asks for, as a model would (and as the tests' stand-in for Codex reads it).
+# What the turn asks for, as a model would (and as the tests' stand-in for Codex reads it):
+# `marker`, the command's path, quoted (the data folder's name may have a space).
 PROMPT = (
-    f"Call the {TOOL} tool with text 'check'. Run the shell command `touch {{work}}/"
-    f"{COMMAND_MARK}`. Call the MCP tool {SERVER_TOOL} of {SERVER}. Write the file `{ADDED[0]}` "
+    f"Call the {TOOL} tool with text 'check'. Run the shell command `touch {{marker}}`. Call "
+    f"the MCP tool {SERVER_TOOL} of {SERVER}. Write the file `{ADDED[0]}` "
     f"and the file `{ADDED[1]}`. Move the file `{MOVED_FROM}` to `{MOVED_TO}`. Then reply with "
     "just: checked"
 )
@@ -95,6 +97,11 @@ def catalog() -> dict:
     }
 
 
+def marker(work: Path) -> str:
+    """The check's command's path, as its command line has it (quoted)."""
+    return shlex.quote(str(work / COMMAND_MARK))
+
+
 def steps(work: Path) -> list[dict]:
     """The model's answers, one per request: each action in turn, then its reply."""
     patch = "".join(f"*** Add File: {work / name}\n+x\n" for name in ADDED)
@@ -104,7 +111,7 @@ def steps(work: Path) -> list[dict]:
         {
             "type": "function_call",
             "name": "exec_command",
-            "arguments": json.dumps({"cmd": f"touch {work / COMMAND_MARK}"}),
+            "arguments": json.dumps({"cmd": f"touch {marker(work)}"}),
         },
         {
             "type": "function_call",

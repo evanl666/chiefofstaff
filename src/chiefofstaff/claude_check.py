@@ -14,10 +14,14 @@ which records and drops any connection: one fails the check, saying where it wen
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import re
+import shlex
 import shutil
 import socket
+import stat
 import sys
 import threading
 import time
@@ -35,7 +39,7 @@ if TYPE_CHECKING:
     from .backend_claude import ClaudeAgent, ClaudeWorker
 
 # Raised whenever what the check does changes: every version is checked again then.
-REVISION = 5
+REVISION = 6
 # The check's own user settings: each switch that would widen a sandbox, set as the owner's
 # could set it. Its sandbox step holds only if Chief of Staff's own settings win over these.
 HOSTILE_SETTINGS = {
@@ -199,11 +203,16 @@ def bash(command: str, **more: Any) -> dict:
 
 
 def script(work: Path, step: str, answered: int, after: str) -> tuple[list[dict], str]:
-    """The stand-in model's answer: the step's next call, then its words."""
+    """The stand-in model's answer: the step's next call, then its words. Each path in a
+    command quoted: the data folder's name may have a space (macOS's "Application Support")."""
+
+    def q(path: Path) -> str:
+        return shlex.quote(str(path))
+
     steps = {
         "actions": [
             call(f"mcp__chief__{TOOL}", {"text": "check"}),
-            bash(f"touch {work / COMMAND_MARK}"),
+            bash(f"touch {q(work / COMMAND_MARK)}"),
             call(f"mcp__{SERVER}__{SERVER_TOOL}", {}),
             call("Write", {"file_path": str(work / ALLOWED_FILE), "content": "x\n"}),
             call("Write", {"file_path": str(work / REFUSED_FILE), "content": "x\n"}),
@@ -211,15 +220,15 @@ def script(work: Path, step: str, answered: int, after: str) -> tuple[list[dict]
                 "Edit",
                 {"file_path": str(work / ALLOWED_FILE), "old_string": "x", "new_string": "y"},
             ),
-            bash(f"touch {work / RAISING_MARK}"),
+            bash(f"touch {q(work / RAISING_MARK)}"),
         ],
         "steer": [bash("sleep 3")],
         "background": [bash("sleep 1; echo done", run_in_background=True)],
-        "interrupt": [bash(f"echo $$ > {work / INTERRUPT_PID}; exec sleep 40")],
+        "interrupt": [bash(f"echo $$ > {q(work / INTERRUPT_PID)}; exec sleep 40")],
         "resumed": [],
         "sandbox": [
-            bash(f"touch {work.parent / 'sandbox-outside' / SANDBOX_MARK}"),
-            bash(f"cat {work.parent / 'sandbox-secret'} > {work / SANDBOX_READ}"),
+            bash(f"touch {q(work.parent / 'sandbox-outside' / SANDBOX_MARK)}"),
+            bash(f"cat {q(work.parent / 'sandbox-secret')} > {q(work / SANDBOX_READ)}"),
             bash(f"curl -sS -m 5 -o /dev/null http://{BLOCKED_HOST}/"),
             bash(f"curl -sS -m 5 -o /dev/null https://{ALLOWED_HOST}/"),
         ],
@@ -519,6 +528,7 @@ async def check(agent: ClaudeAgent, folder: Path) -> dict:
     run again once first."""
     said = f"Chief of Staff's check of Claude Code {agent.cli_version}"
     why = ""
+    await asyncio.to_thread(tidy_stray, folder / "work")
     for _ in range(2):
         facts = Facts()
         try:
@@ -538,6 +548,27 @@ async def check(agent: ClaudeAgent, folder: Path) -> dict:
         if ask_first_tested(agent.cli_version)
         else f"{why}: no worker runs on this newer version until it does.",
     }
+
+
+def tidy_stray(work: Path):
+    """0.1.53 and 0.1.54 ran the interrupt step's `echo $$ > <its pid file>` unquoted: where
+    the data folder's path has a space, the shell wrote "<pid> <the rest of the path>" into the
+    path's first word, a file outside Chief of Staff's folders (~/Library/Application, for
+    macOS's "Application Support"). That file, exactly so, goes; nothing else is touched."""
+    head, space, rest = str(work / INTERRUPT_PID).partition(" ")
+    stray = Path(head)
+    if not space or not stray.is_absolute():
+        return
+    try:
+        found = stray.lstat()
+        if not stat.S_ISREG(found.st_mode) or found.st_size > 4096:
+            return
+        text = stray.read_text(errors="replace")
+    except OSError:
+        return
+    if re.fullmatch(r"\d+ " + re.escape(" ".join(rest.split())) + r"\n?", text):
+        with contextlib.suppress(OSError):
+            stray.unlink()
 
 
 async def check_once(agent: ClaudeAgent, folder: Path, facts: Facts) -> dict:

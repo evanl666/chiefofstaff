@@ -158,7 +158,7 @@ class Ctx:
         self.outside.mkdir(exist_ok=True)
 
     def db(self) -> sqlite3.Connection:
-        database = self.root / "data" / "chiefofstaff.db"
+        database = live_e2e.data_dir(self.root) / "chiefofstaff.db"
         return sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=10)
 
     def rows(self, query: str, *args) -> list[tuple]:
@@ -1265,7 +1265,7 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
                   "env": {"MARKER_DIR": str(root / "marks"), "MARKER_NAME": "github"},
                   "tools": ["*"]}  # fmt: skip
         env["CHIEFOFSTAFF_WORKER_MCP"] = json.dumps({"github": github})
-    app = App(root / "data", root / "log", env, agents=True)
+    app = App(live_e2e.data_dir(root), root / "log", env, agents=True)
     await app.start()
     ctx = Ctx(shard, app, root, home, project, truth)
     results = []
@@ -1308,7 +1308,7 @@ async def run_shard(shard: str, wanted: set[str]) -> list[tuple[str, bool, float
         with contextlib.suppress(Exception):
             await archive_threads(ctx)
         with contextlib.suppress(Exception):
-            await cleanup(root / "data")
+            await cleanup(live_e2e.data_dir(root))
         with contextlib.suppress(Exception):
             git(project, "worktree", "prune")
         if results and all(ok for _, ok, _, _ in results):

@@ -456,11 +456,14 @@ async def test_a_check_that_could_not_run_is_tried_again_and_the_router_moves_by
         await runtime.stop()
 
 
+@pytest.mark.parametrize("kept", ["0.1.53", "0.1.54"])
 async def test_after_a_restart_a_check_that_could_not_run_is_tried_again(
-    tmp_path, claude_on_path, monkeypatch
+    tmp_path, claude_on_path, monkeypatch, kept
 ):
-    """What 0.1.53 kept of a check that could not run (its words only), the Router on Copilot
-    since: started again, Chief of Staff tries the check again and puts the Router on Claude."""
+    """What 0.1.53 kept of a check that could not run (its words only), or 0.1.54 (that it did
+    not run, and why: its interrupt step, which a data folder with a space in its path always
+    failed), the Router on Copilot since: started again (updated), Chief of Staff tries the
+    check again and puts the Router on Claude."""
     late_once(monkeypatch)
     harness, runtime = await started(tmp_path)
     router = harness.router_id
@@ -470,15 +473,21 @@ async def test_after_a_restart_a_check_that_could_not_run_is_tried_again(
     finally:
         await runtime.stop()
     refused = json.loads(harness.store.get("agentrefused:claude"))
-    said = (
-        "Chief of Staff's check of Claude Code 2.1.322 could not run (a step of the check did not "
-        "happen in time): workers that ask first do not run on it until it does."
-    )
-    harness.store.set(
-        "agentrefused:claude",
-        json.dumps({k: v for k, v in refused.items() if k not in {"ran", "unrun"}}
-                   | {"ask_first": said}),
-    )  # fmt: skip
+    if kept == "0.1.53":
+        said = (
+            "Chief of Staff's check of Claude Code 2.1.322 could not run (a step of the check "
+            "did not happen in time): workers that ask first do not run on it until it does."
+        )
+        refused = {k: v for k, v in refused.items() if k not in {"ran", "unrun"}}
+        refused["ask_first"] = said
+    else:
+        unrun = (
+            "Chief of Staff's check of Claude Code 2.1.322 could not finish (step 'interrupt' "
+            "took too long)"
+        )
+        said = f"{unrun}: workers that ask first do not run on it until it does."
+        refused |= {"ran": False, "unrun": unrun, "ask_first": said}
+    harness.store.set("agentrefused:claude", json.dumps(refused))
     again = Harness(harness.store.directory, client=harness.client)
     runtime = await again.connect()
     try:

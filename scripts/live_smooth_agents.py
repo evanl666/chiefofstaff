@@ -660,7 +660,7 @@ async def main() -> int:
     os.environ["COPILOT_HOME"] = env["COPILOT_HOME"]  # (cleanup's, as Chief of Staff's.)
     os.environ["COPILOT_GITHUB_TOKEN"] = token
     serve_in_thread(Workspace(), SLACK_TOKEN, live_e2e.SLACK_PORT)
-    app = App(root / "data", root / "log", env, agents=True)
+    app = App(live_e2e.data_dir(root), root / "log", env, agents=True)
     await app.start()
     ctx = Ctx(app, root, project)
     results: list[tuple[str, bool, float, str]] = []
@@ -689,7 +689,7 @@ async def main() -> int:
     finally:
         await app.stop()
         with contextlib.suppress(Exception):
-            await cleanup(root / "data")
+            await cleanup(live_e2e.data_dir(root))
         if results and all(ok for _, ok, _, _ in results):
             shutil.rmtree(root, ignore_errors=True)
         else:

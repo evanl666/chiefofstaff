@@ -1382,7 +1382,7 @@ async def h8_prepare_downgrade(ctx: Ctx):
     done = await asyncio.to_thread(
         subprocess.run,
         [sys.executable, "-m", "chiefofstaff", "--prepare-downgrade", "--data-dir",
-         str(ctx.root / "data")],
+         str(live_e2e.data_dir(ctx.root))],
         capture_output=True, text=True, timeout=120,
     )  # fmt: skip
     log(f"H8: {done.returncode} {done.stdout.strip()[-300:]!r} {done.stderr.strip()[-300:]!r}")
@@ -1505,7 +1505,7 @@ async def run_shard(shard: str, wanted: set[str], spent_before: int) -> tuple[li
                   "env": {"MARKER_DIR": str(root / "marks"), "MARKER_NAME": "github"},
                   "tools": ["*"]}  # fmt: skip
         env["CHIEFOFSTAFF_WORKER_MCP"] = json.dumps({"github": github})
-    app = App(root / "data", root / "log", dict(env), agents=True)
+    app = App(live_e2e.data_dir(root), root / "log", dict(env), agents=True)
     await app.start()
     ctx = Ctx(shard, app, root, home, project, truth)
     ctx.base_env = env
@@ -1557,7 +1557,7 @@ async def run_shard(shard: str, wanted: set[str], spent_before: int) -> tuple[li
         with contextlib.suppress(OSError):
             log_copy.write_text((root / "log").read_text())
         with contextlib.suppress(Exception):
-            await cleanup(root / "data")
+            await cleanup(live_e2e.data_dir(root))
         with contextlib.suppress(Exception):
             git(project, "worktree", "prune")
         try:

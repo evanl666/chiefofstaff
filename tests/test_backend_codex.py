@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import signal
 import sys
 import time
@@ -2739,6 +2740,24 @@ async def test_a_codex_check_whose_step_ran_over_its_time_runs_again_once(
         )
     finally:
         await runtime.stop()
+
+
+async def test_a_codex_check_in_a_data_folder_whose_path_has_a_space_and_a_quote(
+    tmp_path, monkeypatch
+):
+    """macOS's data folder is ~/Library/Application Support/…: the check's command quotes its
+    path, and what it finds there is what it finds anywhere."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        runtime.work_root = tmp_path / "Application Support" / "it's here" / "work"
+        await runtime.connect_agent("codex")
+        found = json.loads(harness.store.get("agentcheck:codex:0.167.2") or "{}")
+        assert found == {"ran": True, "ask_first": "", "acting": ""}
+    finally:
+        await runtime.stop()
+    work = runtime.work_root / "codex-check" / "work"
+    command = json.loads(backend_codex.codex_check.steps(work)[1]["arguments"])["cmd"]
+    assert shlex.split(command) == ["touch", str(work / "command.marker")], "one word"
 
 
 def protocol_schema(folder: Path, without: tuple[str, str] | None = None) -> Path:

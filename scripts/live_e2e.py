@@ -70,6 +70,13 @@ def log(text: str):
     print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
 
 
+def data_dir(root: Path) -> Path:
+    """A run's data folder, its path with a space as macOS's own is ("Application Support"):
+    every command Chief of Staff writes with a path in it must keep it whole (0.1.54's check
+    of Claude Code did not, and never finished there)."""
+    return root / "Application Support" / "data"
+
+
 class App:
     """Chief of Staff, run as the owner runs it. `agents`: with the owner's own coding agents
     (codex, claude) found on the PATH, for the suites about them; else not, so that no first-run
