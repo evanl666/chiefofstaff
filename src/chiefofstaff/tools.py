@@ -342,21 +342,22 @@ SAME_WORKER = (
     "For task='new' to a worker whose load says busy: true when that worker itself must do it "
     "after its current work (it goes on its branch or into its pull request, it needs what the "
     "worker is making now, or the owner wants that worker to do it once it is free). Otherwise, "
-    "while it is busy and a worker slot is free, a second worker with its conversation so far "
+    f"while it is busy and a worker slot is free, a second worker with {prompts.SECOND_CONTEXT}, "
     "takes the task at once"
 )
 PARALLEL = (
     "For task='new' to a worker at work: true when the owner wants it done now, in parallel "
-    "with what that worker is doing (meanwhile, at the same time): a second worker with its "
-    "conversation so far takes it at once. Without it, a worker at work whose load does not say "
-    "busy takes the task only after its current turn"
+    "with what that worker is doing (meanwhile, at the same time): a second worker with "
+    f"{prompts.SECOND_CONTEXT}, takes it at once. Without it, a worker at work whose load does "
+    "not say busy takes the task only after its current turn"
 )
 # spawn_worker's field while second workers are on (forks.py).
 FORK_OF = (
-    "The session id of a related worker whose conversation this new worker starts with (what it "
-    "read, found and was told so far): when the owner asks for a new worker for work that needs "
-    "what that worker knows. It runs on that worker's agent, in a folder and branch of its own, "
-    "and that worker goes on with its own work. Empty: a new worker with none of it"
+    "The session id of a related worker this new worker starts from, with "
+    f"{prompts.SECOND_CONTEXT} (what it read, found and was told): when the owner asks for a new "
+    "worker for work that needs what that worker knows. It runs on that worker's agent, in a "
+    "folder and branch of its own, and that worker goes on with its own work. Empty: a new "
+    "worker with none of it"
 )
 MessageSessionForks = create_model(
     "MessageSession",
@@ -2086,15 +2087,16 @@ class Tools:
                 # A busy one is no reason for a new worker either: its new task goes to a second
                 # worker with its context (forks.py).
                 busy = (
-                    " A busy one too (its load says busy): a second worker with its "
-                    "conversation so far takes the task at once."
+                    " A busy one too (its load says busy): a second worker with "
+                    f"{prompts.SECOND_CONTEXT}, takes the task at once."
                     if any(card.get("load", {}).get("busy") for card in related)
                     else ""
                 )
                 # With second workers on, the owner's new worker can start from one's context.
                 start = (
                     " (with fork_of the session_id of the one that knows the subject, when the "
-                    "work needs what it knows: the new worker starts with its conversation)"
+                    "work needs what it knows: the new worker starts with "
+                    f"{prompts.SECOND_CONTEXT})"
                     if self.store.settings().fork_busy
                     else ""
                 )

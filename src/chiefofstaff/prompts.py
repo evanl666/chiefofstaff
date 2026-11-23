@@ -1019,6 +1019,8 @@ SEND_RULE = (
     "outside this UI is only as surely the owner's as their computer is."
 )
 
+# What a second worker starts with (forks.py), as the Router is told it.
+SECOND_CONTEXT = "its conversation so far, or a brief of it where the conversation can't be copied"
 # A busy worker's new task (forks.py): the Router's last rule while the setting is on.
 FORK_RULE = (
     "- Each open worker's load (list_sessions, find_sessions, the related workers spawn_worker "
@@ -1026,19 +1028,18 @@ FORK_RULE = (
     "messages_waiting (sent to it, not taken up yet) and busy (why, when it is). A related "
     "worker whose load says busy is still the one to give the work to with message_session (not "
     "a reason for spawn_worker): while it is busy and a worker slot is free, a second worker "
-    "that has its conversation so far takes the new task at once, in a folder and branch of its "
-    "own (the result gives that worker's session_id: message it about that task from then on). "
+    f"with {SECOND_CONTEXT}, takes the new task at once, in a folder and branch of its own (the "
+    "result gives that worker's session_id: message it about that task from then on). "
     "One in a turn whose load does not say busy takes a new task only after that turn: work "
     "the owner wants done in parallel with what it is doing now (meanwhile, at the same time) "
-    "is message_session with parallel=true (a second worker with its conversation takes it at "
-    "once), or spawn_worker as above when it needs nothing of that worker's work. Pass "
+    "is message_session with parallel=true (a second worker takes it at once, as above), or "
+    "spawn_worker as above when it needs nothing of that worker's work. Pass "
     "same_worker=true only when that worker itself must do it after its current "
     "work: on its branch or in its pull request, with what it is making now, or because the "
     "owner wants that worker to do it once it is free. When the owner asks for a new worker "
     "(see above) for work a related worker knows (what it read, found or was told), "
-    "spawn_worker with fork_of=<that worker's session_id>: the new worker starts with its "
-    "conversation so far, in a folder and branch of its own (without fork_of it knows none of "
-    "it)."
+    f"spawn_worker with fork_of=<that worker's session_id>: the new worker starts with "
+    f"{SECOND_CONTEXT}, in a folder and branch of its own (without fork_of it knows none of it)."
 )
 
 

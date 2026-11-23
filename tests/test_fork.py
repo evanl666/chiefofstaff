@@ -385,6 +385,17 @@ async def test_the_router_has_same_worker_and_its_rule_only_while_it_is_on(harne
 
     fields, prompt = router()
     assert fields == (True, True) and prompts.FORK_RULE in prompt
+    # What a second worker gets, said as it is: on Codex or Claude Code, a brief.
+    options = runtime.options(harness.store.session(harness.router_id))
+    told = {t.name: t.parameters["properties"] for t in options["tools"]}
+    said = [
+        told["message_session"]["same_worker"]["description"],
+        told["message_session"]["parallel"]["description"],
+        told["spawn_worker"]["fork_of"]["description"],
+        " ".join(prompts.FORK_RULE.split()),
+    ]
+    brief = "its conversation so far, or a brief of it where the conversation can't be copied"
+    assert all(brief in text for text in said), said
     old, new = harness.store.settings(), Settings(fork_busy=False)
     harness.store.save_settings(new)
     await runtime.settings_changed(old, new)

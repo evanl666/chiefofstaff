@@ -869,7 +869,10 @@ FEATURES["worker_fork"] = Feature(
             data=r"^backend\.turns\.router:",
             without=r', "load": \{[^{}]*\}| \(with fork_of the session_id of the one that knows '
             r"the subject, when the work needs what it knows: the new worker starts with its "
-            r"conversation\)",
+            r"conversation so far, or a brief of it where the conversation can't be copied\)"
+            r"| A busy one too \(its load says busy\): a second worker with its conversation so "
+            r"far, or a brief of it where the conversation can't be copied, takes the task at "
+            r"once\.",
         ),
     ],
 )
