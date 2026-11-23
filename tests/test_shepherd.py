@@ -471,6 +471,19 @@ async def test_turned_on_the_router_gets_its_rule_and_field(world):
     assert "shepherd" in schemas["message_session"]["properties"]
 
 
+async def test_with_second_workers_on_too_the_routers_tools_take_both_fields(world):
+    """Second workers (forks.py, on by default) change the same two tools of the Router's:
+    with Prepared for you on as well, each has both's fields, its handler taking both."""
+    runtime = await claimed(world)
+    assert runtime.store.settings().fork_busy
+    router = runtime.store.session(runtime.router_id())
+    tools = {tool.name: tool for tool in runtime.options(router)["tools"]}
+    assert {"shepherd", "fork_of"} <= set(tools["spawn_worker"].parameters["properties"])
+    assert {"shepherd", "same_worker", "parallel"} <= set(
+        tools["message_session"].parameters["properties"]
+    )
+
+
 async def test_a_secret_in_the_commit_is_refused_and_the_step_told_why(world):
     runtime = await claimed(world)
     await runtime.shepherd.fix_it(TARGET)
