@@ -313,15 +313,19 @@ async def test_an_attempt_waits_for_a_busy_worker(world):
 # Where it can't run.
 
 
-async def test_on_a_codex_worker_it_is_refused_in_the_rows_words(world, monkeypatch):
+@pytest.mark.parametrize(("agent", "name"), [("codex", "Codex"), ("claude", "Claude")])
+async def test_on_another_agents_worker_it_is_refused_in_the_rows_words(
+    world, monkeypatch, agent, name
+):
+    """Its worker on Codex, or on Claude (0.1.53): each named as it is."""
     runtime = await claimed(world)
-    monkeypatch.setattr(runtime, "agent", lambda session_id: "codex")
+    monkeypatch.setattr(runtime, "agent", lambda session_id: agent)
     await runtime.shepherd.fix_it(TARGET)
     await settle(runtime)
     [step] = runtime.shepherd.control.steps(TARGET)
     assert step["state"] == "refused"
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
-    assert view["line"] == "Can't prepare fixes here: its worker runs on Codex, not Copilot."
+    assert view["line"] == f"Can't prepare fixes here: its worker runs on {name}, not Copilot."
     assert view["refused"] and view["action"] is None
 
 
