@@ -4488,6 +4488,19 @@ async def q1_an_away_send_in_any_words_is_sent(ctx: Ctx):
     since, before = now(), len(outbox(ctx))
     asked = f"Hi! How many data rows does data/sales.csv in {ctx.project} have?"
     draft = await reply_card(ctx, since, "D0ALICE01", "U0ALICE1", asked)
+    # r84, r85: told only 'Alice Chen asked on Slack (DM)', its worker had no channel to reply
+    # in; it is told where the message is when the Router does not say.
+    given = next(
+        (m["meta"].get("prompt", "") for m in await messages(ctx, draft["session_id"])
+         if m["kind"] == "router"),
+        "",
+    )  # fmt: skip
+    log(
+        f"Q1: a {draft['kind']} card to {draft['target'].get('channel_id', '-')}; its task named "
+        f"the DM: {'D0ALICE01' in given.split('</message>')[0]}, was told where: "
+        f"{'This task answers a Slack message' in given}"
+    )
+    assert draft["target"].get("channel_id") == "D0ALICE01", "its reply goes to Alice's DM"
     code = await told_away(ctx, before)
     sent_before = len(ctx.slack.sent)
     reply_away(ctx, f"{code} ship it")
