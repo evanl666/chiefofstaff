@@ -1320,11 +1320,14 @@ async def agents_views(runtime, browser, quality: Quality):
 # and Artifacts' known findings (KNOWN_ROW_FINDINGS, its 10 px kind label among the sizes): not
 # Prepared for you's; anything else found there fails.
 # Home as the views before leave it: also an owner's message sent to one worker in the
-# Router's chat, its "→ worker" line set 2px into its text (since 0.1.12, style.css .msg.owner .to).
+# Router's chat, its "→ worker" line set 2px into its text (since 0.1.12, style.css .msg.owner .to),
+# and the teams the teams views made: a team's line in the sidebar is 26px tall (since 0.1.54,
+# its team-line style in the session list; the teams views check Home's parts, not the sidebar).
 KNOWN_HOME_FINDINGS = re.compile(
     rf"{KNOWN_ROW_FINDINGS.pattern}|^a\.receipt\.pr\S* .* is 18px tall$"
     r'|^4 font sizes: .*10px \(span\.a-kind "[^"]+"(?:, span\.a-kind "[^"]+")*\)$'
     r'|^button\.to "→ [^"]*" overlaps div\.text "[^"]*"$'
+    r'|^button\.team-line\.c\d+ "[^"]*" is 26px tall$'
 )
 
 
