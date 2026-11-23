@@ -156,6 +156,40 @@ async def test_what_it_spent_is_settled_from_its_log_each_record_once(world):
     assert runtime.shepherd.control.spent_today()["clicked"] == pytest.approx(3.5)
 
 
+async def test_a_compaction_in_a_step_is_spend_too(world):
+    """0.1.54 counts a compaction's model calls (no usage record of their own, E132): so does a
+    step, as it runs (its permitted spend) and when its log is settled."""
+    from test_usage import compacted
+
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    session = world.session()
+    usage = SimpleNamespace(total_nano_aiu=(PERMITTED["fix-ci"] - 1.0) * 1e9)
+    session.emit("assistant.usage", model="m", copilot_usage=usage)
+    await settle(runtime)
+    assert runtime.shepherd.control.step(step["id"])["state"] == "running"
+    used = compacted()
+    used["compaction_tokens_used"]._copilot_usage.total_nano_aiu = 2e9
+    session.emit("session.compaction_complete", **used)
+    await settle(runtime)
+    ended = runtime.shepherd.control.step(step["id"])
+    assert ended["state"] == "interrupted" and "credits it may spend" in ended["why"], ended
+    record = {
+        "type": "session.usage_record", "id": "u1", "timestamp": ended["started_at"],
+        "data": {"usage": {"copilotUsage": {"totalNanoAiu": 3_000_000_000}}},
+    }  # fmt: skip
+    compaction = {
+        "type": "session.compaction_complete", "id": "c1", "timestamp": ended["started_at"],
+        "data": {"success": True, "compactionTokensUsed": {
+            "model": "m", "requestCount": 1, "copilotUsage": {"totalNanoAiu": 1_500_000_000}}},
+    }  # fmt: skip
+    runtime.backend.logs[runtime.copilot_id(world.worker)] = [record, compaction]
+    await runtime.shepherd.settle(step["id"])
+    assert runtime.shepherd.control.step(step["id"])["settled"] == pytest.approx(4.5)
+
+
 async def test_spend_past_the_limit_and_margin_raises_the_margin(world):
     runtime = await claimed(world)
     step, _ = await fixed(world, runtime)

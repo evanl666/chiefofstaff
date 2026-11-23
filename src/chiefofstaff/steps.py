@@ -26,6 +26,7 @@ from .backend import stop_background
 from .control import PREPARED, QUEUED, RUNNING
 from .envelope import UNTRUSTED, wrap
 from .store import now
+from .workers import logged_call
 from .workspaces import SAFE_GIT, admin_dir, checkout_git, command, git
 
 if TYPE_CHECKING:
@@ -659,13 +660,12 @@ class Steps:
         events = []
         for event in records:
             when = stamp(str(event.get("timestamp") or "")) or time.time()
-            if not start <= when <= end:
+            # Its model calls, and its compactions' (whose calls have no record of their own).
+            if not start <= when <= end or not (call := logged_call(event)):
                 continue
-            usage = (event.get("data") or {}).get("usage") or {}
-            nano = (usage.get("copilotUsage") or {}).get("totalNanoAiu") or 0
-            key = str(event.get("id") or f"{event.get('timestamp')}:{usage.get('model')}:"
-                      f"{usage.get('inputTokens')}:{usage.get('outputTokens')}")  # fmt: skip
-            events.append((key, nano / 1e9))
+            key = str(event.get("id") or f"{event.get('timestamp')}:{call['model']}:"
+                      f"{call['input']}:{call['output']}:{call['kind']}")  # fmt: skip
+            events.append((key, call["credits"]))
         spent = self.control.settle(step_id, events, final=True)
         over = spent - step["permitted"]
         if step["permitted"] and over > self.margin():
