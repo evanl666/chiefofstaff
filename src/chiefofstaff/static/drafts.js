@@ -560,7 +560,10 @@ function okLines(draft) {
   if (draft.kind === "adopt") return [{ kind: "Continue here?", text: `“${target.title}”: ${target.text || draft.text}`, main: { text: "Continue it here", body: { action: "answer" }, done: "Continuing it here." }, more: [{ text: "Not now", body: { action: "reject" }, done: "Left as it is." }] }];
   if (draft.kind === "workspace") return [{ kind: "Folder", text: target.picked ? `Where should “${target.title}” work? Picked ${target.picked.split("/").pop()} for you` : `Where should “${target.title}” work?`, main: details("Choose…"), more: [{ text: "Don't start it", body: { action: "reject" }, done: "Not started." }] }];
   if (draft.kind === "merge") {
-    return [{ kind: "Ready to merge", text: `${target.label.replace(/^[^/]+\//, "")}${target.title ? ` “${target.title}”` : ""} · ${target.checks === "none" ? "no checks" : "checks pass"}`, main: { text: "Merge", body: { action: "send" }, done: `Merging ${target.label}…` }, more: [{ text: "Open PR", href: target.url }, { text: "Not now", body: { action: "reject" }, done: "Not merged." }] }];
+    const what = `${target.label.replace(/^[^/]+\//, "")}${target.title ? ` “${target.title}”` : ""}`;
+    // GitHub merging its stack in the background: said in its line, the PR to look at.
+    if (merging(draft)) return [{ kind: "Merging", text: `${what} · ${draft.outcome.replace(/^Merging: /, "")}`, main: { text: "Open PR", href: target.url }, more: [{ text: "Not now", body: { action: "reject" }, done: "Not merged." }] }];
+    return [{ kind: "Ready to merge", text: `${what} · ${target.checks === "none" ? "no checks" : "checks pass"}${stackBelow(target)}`, main: { text: mergeButton(target), body: { action: "send" }, done: `Merging ${target.label}…` }, more: [{ text: "Open PR", href: target.url }, { text: "Not now", body: { action: "reject" }, done: "Not merged." }] }];
   }
   if (draft.kind === "signin") return [{ kind: "Sign-in", text: draft.text || `Sign in to ${target.server}`, main: target.url ? { text: "Sign in", href: target.url } : details("Details"), more: [{ text: "I signed in", body: { action: "answer" }, done: "Done." }, { text: "Not now", body: { action: "reject" }, done: "Declined." }] }];
   return [{ kind: "Link to open", text: draft.text, main: target.url ? { text: "Open link", href: target.url } : details("Details"), more: [{ text: "Done", body: { action: "answer" }, done: "Done." }, { text: "Decline", body: { action: "reject" }, done: "Declined." }] }];
@@ -660,6 +663,12 @@ export function draftCard(draft) {
   if (draft.kind === "github" && !draft.target.in_reply_to && !draft.target.reply_to_comment) return reviewCard(draft);
   return messageCard(draft);
 }
+// A PR in a stack on GitHub above open PRs (drafts.py: StackBelow): merging it merges them too,
+// said on its card and its button once it is known.
+const stackBelow = (target) => (target.stack_below?.length ? ` · with ${target.stack_below.map((pr) => `#${pr.number}`).join(", ")} below it` : "");
+const mergeButton = (target) => (target.stack_below?.length ? `Merge all ${target.stack_below.length + 1}` : "Merge");
+// GitHub merging its stack in the background (drafts.py MERGING, STILL_MERGING).
+const merging = (draft) => /^(Merging:|GitHub is still merging)/.test(draft.outcome || "");
 // A PR of the owner's that GitHub would merge now (checks pass, nothing blocking): merge it
 // from here, as it was when offered (anything pushed since stops the merge).
 function mergeCard(draft) {
@@ -679,9 +688,11 @@ function mergeCard(draft) {
   node.append(
     actionRow(
       error,
-      el("button", { type: "button", text: "Merge", onclick: () => decide({ action: "send" }, `Merging ${target.label}…`) }),
+      merging(draft)
+        ? el("button", { type: "button", text: "Open PR", onclick: () => window.open(target.url, "_blank", "noreferrer") })
+        : el("button", { type: "button", text: mergeButton(target), onclick: () => decide({ action: "send" }, `Merging ${target.label}…`) }),
       [
-        { text: "Open PR", onclick: () => window.open(target.url, "_blank", "noreferrer") },
+        ...(merging(draft) ? [] : [{ text: "Open PR", onclick: () => window.open(target.url, "_blank", "noreferrer") }]),
         { text: "Not now", onclick: () => decide({ action: "reject" }, "Not merged.") },
       ],
     ),

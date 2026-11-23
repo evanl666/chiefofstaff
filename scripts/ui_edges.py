@@ -6044,7 +6044,8 @@ async def main():
                           round_qa8_report,
                           round_layout, round_fresh_start, round_qa8_auth,
                           round_qa8_approvals, round_e125, round_teams,
-                          round_usage, round_relations, round_shepherd):  # fmt: skip
+                          round_usage, round_relations, round_shepherd,
+                          round_stacked_merge):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -10774,6 +10775,75 @@ async def round_e125(runtime, browser, failures: list[str]):
         assert not errors, errors
         await context.close()
     log("E125: an update's cleanup is one line under Handled for you, with when it was written")
+
+
+async def round_stacked_merge(runtime, browser, failures: list[str]):
+    """A PR in a stack on GitHub on its Ready to merge line (drafts.py, StackBelow and MERGING):
+    above open PRs of its stack, the line names them and its button merges all; while GitHub
+    merges a stack in the background, the line says so. Light and dark, 800 and 1280 px, nothing
+    overflowing."""
+    from chiefofstaff.drafts import MERGING
+
+    store = runtime.store
+    router = runtime.router_id()
+    above = store.create_draft(router, "merge", {
+        "label": "acme/app#12", "repo": "acme/app", "number": 12, "title": "Part three",
+        "url": "https://github.com/acme/app/pull/12", "head": "c" * 40,
+        "stack_below": [{"number": 10, "head": "a" * 40, "title": "Part one"},
+                        {"number": 11, "head": "b" * 40, "title": "Part two"}],
+    }, "Part three")  # fmt: skip
+    store.update_draft(above["id"], outcome="Not merged yet: acme/app#12 is in a stack above #10 "
+                       "and #11, and GitHub merges a stack from the bottom, so merging it merges "
+                       "them too. Merge all 3 from here, or merge #10 first.")  # fmt: skip
+    merging = store.create_draft(router, "merge", {
+        "label": "acme/app#20", "repo": "acme/app", "number": 20, "title": "Stacked fix",
+        "url": "https://github.com/acme/app/pull/20", "head": "d" * 40,
+    }, "Stacked fix")  # fmt: skip
+    store.update_draft(merging["id"], outcome=MERGING)
+    runtime.publish_state()
+    try:
+        for width, scheme in itertools.product((1280, 800), ("light", "dark")):
+            context = await browser.new_context(
+                viewport={"width": width, "height": 1400}, color_scheme=scheme
+            )
+            page = await context.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            ok = page.locator("#needs .card.your-ok")
+            row = ok.locator(f'.ok-row[data-id="{above["id"]}"]')
+            await expect(row).to_contain_text(
+                "#12 “Part three” · checks pass · with #10, #11 below it"
+            )
+            await expect(row.get_by_role("button", name="Merge all 3", exact=True)).to_be_visible()
+            busy = ok.locator(f'.ok-row[data-id="{merging["id"]}"]')
+            await expect(busy.locator(".ok-kind")).to_have_text("Merging")
+            await expect(busy.locator(".ok-text")).to_have_text(
+                "app#20 “Stacked fix” · GitHub merges its stack in the background; this card says "
+                "when it's done."
+            )
+            # Nothing to click again while GitHub is at it: the PR to look at.
+            await expect(busy.get_by_role("button", name="Merge", exact=True)).to_have_count(0)
+            await expect(busy.get_by_role("link", name="Open PR")).to_be_visible()
+            found = await page.locator("#needs").evaluate(OVERFLOWS)
+            assert not found, (width, scheme, found)
+            # Its whole card: the same button, what it said.
+            await row.locator(".more-button").click()
+            await row.get_by_role("menuitem", name="Details").click()
+            card = ok.locator(".ok-details .card.merge")
+            await expect(card).to_contain_text("GitHub merges a stack from the bottom")
+            await expect(card.get_by_role("button", name="Merge all 3")).to_be_visible()
+            await ok.screenshot(path=SHOTS / f"stacked-merge-{width}-{scheme}.png")
+            assert not errors, errors
+            await context.close()
+    finally:
+        for draft in (above, merging):
+            store.update_draft(draft["id"], status="rejected", outcome="Not now.")
+        runtime.publish_state()
+    log("stacked merge: a PR above open ones says so and merges all; one merging says so")
 
 
 async def round_shepherd(runtime, browser, failures: list[str]):

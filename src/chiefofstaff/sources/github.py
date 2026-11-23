@@ -9,13 +9,14 @@ import os
 import re
 import shutil
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
 from .. import threads
-from ..receipts import APPROVAL
+from ..receipts import APPROVAL, listed
 from ..store import Store, now
 from . import SourceHost
 
@@ -294,8 +295,29 @@ async def gh(*arguments: str, payload: dict | None = None, token: str = "") -> s
         await process.wait()
         raise RuntimeError("GitHub request timed out.") from exc
     if process.returncode:
-        raise RuntimeError("GitHub request failed: " + stderr.decode(errors="replace")[:1500])
+        raise GitHubError(
+            "GitHub request failed: " + stderr.decode(errors="replace")[:1500],
+            stdout.decode(errors="replace")[:20000],
+        )
     return stdout.decode(errors="replace")
+
+
+class GitHubError(RuntimeError):
+    """gh failed: its words, and what GitHub answered (`body`: an API call's JSON, if any; gh
+    prints it on its output, its error says only "HTTP 409")."""
+
+    def __init__(self, message: str, body: str = ""):
+        super().__init__(message)
+        self.body = body
+
+
+def answered(exc: BaseException) -> dict:
+    """What GitHub answered to a failed API call (its JSON object), or {}."""
+    try:
+        found = json.loads(getattr(exc, "body", "") or "null")
+    except ValueError:
+        return {}
+    return found if isinstance(found, dict) else {}
 
 
 # What gh says when the account it used cannot see a repository (another may).
@@ -333,11 +355,65 @@ MERGE_REFUSALS = (
 )
 
 
+# A PR in one of GitHub's stacks merges only through GitHub's asynchronous merge: gh's merge
+# (GraphQL's mergePullRequest) and the REST merge refuse it. That merge runs in the background,
+# and merges (or queues) the open PRs below it in its stack with it.
+STACKED = re.compile(r"part of a stack|merging stacked PRs", re.IGNORECASE)
+MERGE_REQUEST = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+STACK_STATE = re.compile(r"Invalid stack state:\s*(.*)", re.IGNORECASE | re.DOTALL)
+# How long the owner's click waits for a stack's merge (then it is followed in the background),
+# and how long it is followed at most, in seconds; the pauses between its reads.
+MERGE_WAIT = 12.0
+MERGE_FOLLOW = 600.0
+MERGE_PAUSES = (1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 15.0)
+# What gh's merge flag does, in words.
+MERGED_WORDS = {
+    "--squash": "squashed and merged",
+    "--merge": "merged",
+    "--rebase": "rebased and merged",
+}
+# A stacked PR whose stack merge can't be used (a GitHub without it, its stack unreadable).
+STACK_UNAVAILABLE = (
+    "It is in a stack on GitHub, and GitHub's merge for stacks couldn't be used from here "
+    "({why}): merge it on GitHub, from the PR's page."
+)
+
+
+class StackBelow(ValueError):  # noqa: N818 (not an error: the owner's word first)
+    """Merging a PR merges the open PRs below it in its stack too: said first. `below`: them,
+    bottom first, as they are now ({number, head, title})."""
+
+    def __init__(self, label: str, below: list[dict]):
+        self.below = below
+        numbers = [f"#{pr['number']}" for pr in below]
+        those = "it" if len(below) == 1 else "them"
+        super().__init__(
+            f"Not merged yet: {label} is in a stack above {listed(numbers, 5)}, and GitHub merges "
+            f"a stack from the bottom, so merging it merges {those} too. Merge all "
+            f"{len(below) + 1} from here, or merge {numbers[0]} first."
+        )
+
+
+class MergePending(Exception):  # noqa: N818 (a state, not an error: GitHub is at it)
+    """GitHub merges it in the background (a stack's merge): `follow()` follows it to its end,
+    its words then (None if it is still at it after MERGE_FOLLOW)."""
+
+    def __init__(self, follow: Callable[[], Awaitable[str | None]]):
+        super().__init__("GitHub is merging it in the background.")
+        self.follow = follow
+
+
 def merge_refusal(error: str) -> tuple[str, bool]:
     """Why a merge failed, in words, and whether it is that new commits came (the head the
     card shows is not the PR's any more)."""
     if HEAD_MOVED.search(error):
         return "New commits were pushed since: check them, then merge.", True
+    if found := STACK_STATE.search(error):
+        said = " ".join(found.group(1).split())[:200]
+        return (
+            f"Its stack on GitHub can't merge as it is ({said}): fix it there, then merge.",
+            False,
+        )
     for pattern, reason in MERGE_REFUSALS:
         if pattern.search(error):
             return reason, False
@@ -345,6 +421,21 @@ def merge_refusal(error: str) -> tuple[str, bool]:
         r"^(?:GitHub request failed:\s*)?(?:GraphQL:\s*)?|\s*\(mergePullRequest\)", "", error
     )
     return " ".join(plain.split())[:300] or "GitHub refused.", False
+
+
+def stack_words(label: str, result: dict, below: list[dict], method: str) -> str:
+    """What became of a stacked PR's merge, in words (a failure raised, GitHub's reason in it)."""
+    status = result.get("status")
+    message = " ".join(str((result.get("details") or {}).get("message") or "").split())
+    numbers = [f"#{pr['number']}" for pr in below]
+    where = f" with {listed(numbers, 5)} below it in its stack" if below else ""
+    if status == "merged":
+        return f"{label} {MERGED_WORDS.get(method, 'merged')}{where} (GitHub's stack merge)."
+    if status == "enqueued":
+        return (
+            f"{label}{where} is in its merge queue: GitHub merges it once the queue's checks pass."
+        )
+    raise RuntimeError(f"GitHub didn't merge it: {message[:300] or 'it gave no reason'}")
 
 
 class NoAccess:
@@ -1323,32 +1414,169 @@ class GitHubSource:
             arguments += ["-f", f"{name}={value}"]
         return json.loads(await self.as_account(owner, remembered, remembered, arguments, None))
 
-    async def merge(self, target: dict) -> str:
-        """Merge a PR, its head as it was shown (GitHub refuses if it moved), the way the
-        repository allows: squash, else a merge commit, else rebase."""
-        repo = json.loads(await self.gh("api", f"repos/{target['repo']}"))
-        method = next(
+    async def merge_method(self, repo: str) -> str:
+        """How the repository lets a PR merge (gh's flag): squash, else a merge commit, else
+        rebase."""
+        found = json.loads(await self.gh("api", f"repos/{repo}"))
+        return next(
             (
                 flag
                 for flag, allowed in (
-                    ("--squash", repo.get("allow_squash_merge", True)),
-                    ("--merge", repo.get("allow_merge_commit", True)),
-                    ("--rebase", repo.get("allow_rebase_merge", True)),
+                    ("--squash", found.get("allow_squash_merge", True)),
+                    ("--merge", found.get("allow_merge_commit", True)),
+                    ("--rebase", found.get("allow_rebase_merge", True)),
                 )
                 if allowed
             ),
             "--merge",
         )
-        await self.gh(
-            "pr", "merge", f"https://github.com/{target['repo']}/pull/{int(target['number'])}",
-            method, "--match-head-commit", target["head"],
-        )  # fmt: skip
-        word = {
-            "--squash": "squashed and merged",
-            "--merge": "merged",
-            "--rebase": "rebased and merged",
-        }
-        return f"{target['label']} {word[method]}."
+
+    async def merge(self, target: dict, wait: float = MERGE_WAIT) -> str:
+        """Merge a PR, its head as it was shown (GitHub refuses if it moved), the way the
+        repository allows: squash, else a merge commit, else rebase. One in a stack on GitHub
+        (gh's merge refuses it) through GitHub's asynchronous merge (merge_stacked)."""
+        method = await self.merge_method(target["repo"])
+        try:
+            await self.gh(
+                "pr", "merge", f"https://github.com/{target['repo']}/pull/{int(target['number'])}",
+                method, "--match-head-commit", target["head"],
+            )  # fmt: skip
+        except RuntimeError as exc:
+            if not STACKED.search(str(exc)):
+                raise
+            return await self.merge_stacked(target, method, wait)
+        return f"{target['label']} {MERGED_WORDS[method]}."
+
+    async def merge_stacked(self, target: dict, method: str, wait: float) -> str:
+        """A PR in a stack on GitHub, merged by GitHub's asynchronous merge at the head shown,
+        which merges the open PRs below it too: only those the owner was shown with it
+        (`target["stack_below"]`; StackBelow says them first). Followed for `wait` seconds, then
+        in the background (MergePending); a queue's base queues it."""
+        repo, number = target["repo"], int(target["number"])
+        found = await self.stack_of(repo, number)
+        if found is None:
+            raise RuntimeError(STACK_UNAVAILABLE.format(why="its stack couldn't be read"))
+        stack, below = found
+        shown = {(int(pr["number"]), pr.get("head")) for pr in target.get("stack_below") or []}
+        if any((pr["number"], pr["head"]) not in shown for pr in below):
+            raise StackBelow(target["label"], below)
+        base = (stack.get("base") or {}).get("ref") or ""
+        rules = await self.branch_rules(repo, base) if base else []
+        queue = any(rule.get("type") == "merge_queue" for rule in rules or [])
+        action = "merge_queue" if queue else "direct_merge"
+        request = await self.merge_async(repo, number, target["head"], method, action)
+
+        async def follow(seconds: float) -> str | None:
+            result = await self.follow_merge(repo, number, request, seconds)
+            return (
+                None
+                if result.get("status") == "pending"
+                else stack_words(target["label"], result, below, method)
+            )
+
+        if (words := await follow(wait)) is not None:
+            return words
+        raise MergePending(lambda: follow(MERGE_FOLLOW))
+
+    async def stack_of(self, repo: str, number: int) -> tuple[dict, list[dict]] | None:
+        """A PR's stack on GitHub (its `stack`: number, position, base; {} for none) and the open
+        PRs below it there, bottom first ({number, head, title}); None when unreadable."""
+        try:
+            stack = (await self.pull(repo, number)).get("stack") or {}
+            if not isinstance(stack, dict) or int(stack.get("position") or 1) <= 1:
+                return (stack if isinstance(stack, dict) else {}), []
+            detail = json.loads(await self.gh("api", f"repos/{repo}/stacks/{int(stack['number'])}"))
+            below = []
+            for pr in detail.get("pull_requests") or []:
+                if int(pr.get("number") or 0) == int(number):
+                    return stack, below
+                if pr.get("state") == "open" and not pr.get("merged_at"):
+                    head = str((pr.get("head") or {}).get("sha") or "")
+                    title = str(pr.get("title") or "")
+                    below.append({"number": int(pr["number"]), "head": head, "title": title})
+        except (RuntimeError, ValueError, TypeError, KeyError):
+            logger.info("Could not read the stack of %s#%s.", repo, number, exc_info=True)
+        return None
+
+    @staticmethod
+    def merge_async_call(
+        repo: str, number: int, head: str, method: str, action: str
+    ) -> tuple[list[str], dict]:
+        """GitHub's asynchronous merge of a PR at `head` (its gh command and body): `method`
+        gh's flag, only for a direct merge (a queue decides its own)."""
+        payload = {"sha": head, "merge_action": action}
+        if action == "direct_merge":
+            payload["merge_method"] = method.removeprefix("--")
+        path = f"repos/{repo}/pulls/{int(number)}/merge-async"
+        return ["gh", "api", path, "--method=PUT", "--input=-"], payload
+
+    async def merge_async(
+        self, repo: str, number: int, head: str, method: str, action: str, login: str = ""
+    ) -> dict:
+        """Ask GitHub to merge it in the background (as `login` when given, else the account
+        that reaches the repository): its answer ({status, details}). One it is at already for
+        this head is followed, not asked again (409); one of another head or way refuses."""
+        argv, payload = self.merge_async_call(repo, number, head, method, action)
+        try:
+            if login:
+                text = await self.bound(login, *argv[1:], payload=payload)
+            else:
+                text = await self.gh(*argv[1:], payload=payload)
+            found = json.loads(text or "{}")
+        except RuntimeError as exc:
+            found = answered(exc)
+            details = found.get("details") or {}
+            if found.get("status") == "pending" and details.get("expected_head_sha") != head:
+                raise RuntimeError(
+                    "Another merge of it, of another commit, is under way on GitHub: see the PR."
+                ) from exc
+            if found.get("status") not in {"pending", "failed"}:
+                if NOT_FOUND.search(str(exc)):
+                    why = "GitHub here has no asynchronous merge"
+                    raise RuntimeError(STACK_UNAVAILABLE.format(why=why)) from exc
+                raise
+        except ValueError as exc:
+            raise RuntimeError(
+                "GitHub's answer to the merge couldn't be read: see the PR."
+            ) from exc
+        if found.get("status") == "pending":
+            uuid = str((found.get("details") or {}).get("uuid") or "")
+            if not MERGE_REQUEST.fullmatch(uuid):
+                raise RuntimeError("GitHub took the merge with no request to follow: see the PR.")
+            self.store.set(f"mergeasync:{repo}#{int(number)}",
+                           json.dumps({"uuid": uuid, "head": head, "at": time.time()}))  # fmt: skip
+        return found
+
+    async def merge_result(self, repo: str, number: int, uuid: str) -> dict:
+        """Where GitHub is with a merge it took ({status, details}); one it no longer knows (its
+        result is kept a day) is read from the PR: merged or not."""
+        path = f"repos/{repo}/pulls/{int(number)}/merge-async/{uuid}"
+        try:
+            return json.loads(await self.gh("api", path))
+        except RuntimeError as exc:
+            if not NOT_FOUND.search(str(exc)):
+                raise
+        if (await self.pull(repo, number)).get("merged"):
+            return {"status": "merged", "details": {"message": "Pull request was merged."}}
+        return {"status": "failed", "details": {"message": "GitHub no longer has that merge."}}
+
+    async def follow_merge(self, repo: str, number: int, request: dict, seconds: float) -> dict:
+        """A merge GitHub took, read until it ends or `seconds` pass (its last answer)."""
+        found, key = request, f"mergeasync:{repo}#{int(number)}"
+        uuid = str((request.get("details") or {}).get("uuid") or "")
+        deadline = self.clock() + seconds
+        pauses = iter(MERGE_PAUSES)
+        while found.get("status") == "pending":
+            left = deadline - self.clock()
+            if left <= 0:
+                return found
+            await self.pause(min(next(pauses, MERGE_PAUSES[-1]), left))
+            found = await self.merge_result(repo, number, uuid)
+        self.store.delete(key)
+        return found
+
+    async def pause(self, seconds: float):
+        await asyncio.sleep(seconds)
 
     async def resolve_thread(self, target: dict) -> str:
         """Resolve the review thread the replied-to comment is in: "" when done, else why not."""
