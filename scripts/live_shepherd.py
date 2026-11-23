@@ -1807,21 +1807,26 @@ async def merge_card(ctx: Ctx, number: int, timeout: float = 900) -> dict:
     return await wait_for(f"the Ready to merge card of #{number}", found, timeout)
 
 
-async def merged_from_card(ctx: Ctx, card: dict, numbers: list[int]) -> dict:
-    """Merge clicked on the card: these PRs merged on GitHub, and the card done, saying so."""
+async def merged_from_card(ctx: Ctx, card: dict, numbers: list[int]) -> str:
+    """Merge clicked on the card: these PRs merged on GitHub, and the card sent, saying what
+    came of it (read in Chief of Staff's database: the page's state lists waiting cards only)."""
+    import sqlite3
+
     from live_e2e import wait_for
 
     await ctx.app.post(f"/api/drafts/{card['id']}", {"action": "send"})
     for number in numbers:
         await wait_for(f"#{number} merged", lambda n=number: _async(ctx.repo.pr(n)["merged"]), 600)
+    database = f"{(ctx.root / DATA / 'chiefofstaff.db').as_uri()}?mode=ro"  # (Its space, %20.)
 
-    async def done():
-        for draft in (await ctx.state())["drafts"]:
-            if draft["id"] == card["id"] and draft["status"] != "pending":
-                return draft
-        return None
+    async def sent():
+        with contextlib.closing(sqlite3.connect(database, uri=True)) as db:
+            found = db.execute(
+                "SELECT status, outcome FROM drafts WHERE id=?", (card["id"],)
+            ).fetchone()
+        return found[1] if found and found[0] == "sent" else None
 
-    return await wait_for("its card done", done, 300)
+    return await wait_for("its card sent", sent, 300)
 
 
 async def sx12_stack_bottom(ctx: Ctx):
@@ -1834,12 +1839,12 @@ async def sx12_stack_bottom(ctx: Ctx):
     ctx.repo.approve(number, head)
     card = await merge_card(ctx, number)
     assert card["target"]["head"] == head, card
-    done = await merged_from_card(ctx, card, [number])
-    assert done["status"] == "sent" and "GitHub's stack merge" in done["outcome"], done
+    outcome = await merged_from_card(ctx, card, [number])
+    assert "GitHub's stack merge" in outcome and f"#{number} " in outcome, outcome
     pr = ctx.repo.pr(number)
     assert pr["merged"] and pr["head"]["sha"] == head, "merged at the head the card showed"
     assert ctx.repo.pr(above)["state"] == "open", "the PR above it is not merged with it"
-    log(f"SX12: {done['outcome']}")
+    log(f"SX12: {outcome}")
 
 
 async def sx13_stack_above(ctx: Ctx):
@@ -1865,9 +1870,9 @@ async def sx13_stack_above(ctx: Ctx):
     assert not ctx.repo.pr(below)["merged"] and not ctx.repo.pr(number)["merged"]
     shown = next(d for d in (await ctx.state())["drafts"] if d["id"] == card["id"])
     assert [pr["number"] for pr in shown["target"]["stack_below"]] == [below], shown
-    done = await merged_from_card(ctx, shown, [below, number])
-    assert done["status"] == "sent" and f"with #{below} below it" in done["outcome"], done
-    log(f"SX13 ({target}): {done['outcome']}")
+    outcome = await merged_from_card(ctx, shown, [below, number])
+    assert f"with #{below} below it in its stack" in outcome, outcome
+    log(f"SX13 ({target}): {outcome}")
 
 
 # Shard Y: safety, cost, restarts.
