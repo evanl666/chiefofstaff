@@ -87,7 +87,9 @@ finished, it is a task of its own, named from your message (the box says which: 
 “…”*, *A new task for this worker…*; on Home, the *To* line: *as a new task*). Its worker is named for that task while it works on it; about finished work, its answer is an
 *Update* on the task, which keeps its result (whatever it adds in its chat), unless it changed
 code for you, or redid or corrected the work: then that is its new result (to review again when
-you had not accepted it), and the one before is under *Earlier reports* on its card. Its answer
+you had not accepted it), and the one before is under *Earlier reports* on its card. Either way
+it is a line in the Router's chat on Home too, once, so it stays in sight while its worker
+follows up on your next message (*Following up*, not under *Needs you*, then). Its answer
 to the Router's note about finished work never is. A message there that asks for something else ("New, separate task: add mod()
 on a new branch", another PR or question) is told apart by the worker that reads it, not by
 its words: it reports that work as a task of its own, with your message and what it ran for
