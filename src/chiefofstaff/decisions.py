@@ -44,7 +44,7 @@ def same_words(one: str, other: str) -> bool:
     """The same decision, written again (case, spacing and final punctuation aside)."""
 
     def plain(text: str) -> str:
-        return " ".join(text.lower().split()).rstrip(".!")
+        return " ".join(text.lower().split()).rstrip(".!?\u3002\uff01\uff1f")
 
     return plain(one) == plain(other)
 
@@ -74,6 +74,12 @@ class AskDecision(NestedArguments):
         default=False,
         description="After ask_decision listed the owner's earlier decisions on similar questions: "
         "true when none of them settles yours",
+    )
+    replaces: str = Field(
+        default="",
+        description="The id (dec…) of a decision in force that what you found since calls into "
+        "question: the owner reconsiders it, and their answer replaces it. Say in why what "
+        "changed",
     )
     task_id: str = Field(
         default="",
@@ -171,6 +177,23 @@ class Decisions:
             (task_id,),
         )
 
+    def current(self, identifier: str) -> dict:
+        """A decision as it stands now: the one that replaced it (and so on), if one did."""
+        found = self.get(identifier)
+        seen = {found["id"]}
+        while found["replaced_by"] and found["replaced_by"] not in seen:
+            found = self.get(found["replaced_by"])
+            seen.add(found["id"])
+        return found
+
+    def decided_for(self, task: dict | None, question: str) -> dict | None:
+        """The owner's answer to this question for this task, as it stands now (one that
+        replaced it since), when they gave one: asked again, it is that answer."""
+        for linked in reversed(self.for_task(task["id"]) if task else []):
+            if same_words(question, linked["text"].partition(" \u2192 ")[0]):
+                return self.current(linked["id"])
+        return None
+
     def similar(self, question: str, limit: int = 3) -> list[dict]:
         """The owner's decisions in force that are about something like this question."""
         rows = {
@@ -226,15 +249,57 @@ class Decisions:
             "title": task["title"] if task else row["title"],
         }
         cards = self.open_cards("decision")
-        precedents = [] if params.same_as.strip() else self.similar(question)
+        reconsidered = self.reconsidered(params, task)
+        if not (params.same_as.strip() or reconsidered):
+            # Asked again (owner report 0.1.53, item 1: a new card, the task waiting again).
+            mine = [
+                card
+                for card in cards
+                if any(self.asker_of(a, caller, task) for a in card["target"]["askers"])
+                and same_words(question, card["target"]["question"])
+            ]
+            if mine:
+                return (
+                    f"Asked already: card {mine[0]['id']} waits for the owner's decision. It "
+                    'arrives as a type="decision" message. End your turn now, unless parts of '
+                    "your task do not depend on it."
+                )
+            if decided := self.decided_for(task, question):
+                return (
+                    f"The owner decided this for your task already: {decided['text']} "
+                    f"({decided['id']}). Go on with it: do not ask again. If what you found since "
+                    f'calls it into question, ask again with replaces="{decided["id"]}" and say '
+                    "what changed in why."
+                )
+        precedents = [] if params.same_as.strip() or reconsidered else self.similar(question)
+        if task and not (params.same_as.strip() or reconsidered):
+            # The decisions its task relies on: one it asks about again may be one of them.
+            known = {p["id"] for p in precedents}
+            precedents += [
+                self.get(linked["id"])
+                for linked in reversed(self.for_task(task["id"]))
+                if linked["status"] == "active" and linked["id"] not in known
+            ]
         if precedents and not params.seen_precedents:
-            listed = "\n".join(f"- {p['text']} ({p['created_at'][:10]})" for p in precedents)
-            raise ValueError(
-                f"The owner decided similar questions before:\n{listed}\nIf one settles yours, "
-                "follow it without asking and say so in your report, unless your task asks you "
-                "to ask the owner this time (then ask anyway). Otherwise call ask_decision again "
-                "with seen_precedents=true: the card shows these to the owner."
+            listed = "\n".join(
+                f"- {p['id']}: {p['text']} ({p['created_at'][:10]})" for p in precedents
             )
+            raise ValueError(
+                f"The owner decided similar questions before, or ones your task relies on:\n"
+                f"{listed}\nIf one settles yours, follow it without asking and say so in your "
+                "report, unless your task asks you to ask the owner this time (then ask anyway). "
+                "If what you found since calls one of them into question, ask again with "
+                "replaces=<its id> and say what changed in why: the owner reconsiders it, and "
+                "their answer replaces it. Otherwise (yours is another question) call "
+                "ask_decision again with seen_precedents=true: the card shows these to the owner."
+            )
+        if reconsidered and (
+            joined := next(
+                (c for c in cards if c["target"].get("replaces") == reconsidered["id"]), None
+            )
+        ):
+            # Another worker asks the owner to reconsider it already: one card for it.
+            params = params.model_copy(update={"same_as": joined["id"]})
         if params.same_as.strip():
             card = next((c for c in cards if c["id"] == params.same_as.strip()), None)
             if not card:
@@ -256,7 +321,7 @@ class Decisions:
                 for card in cards
                 if caller not in {a["session_id"] for a in card["target"]["askers"]}
             ]
-            if others and not params.distinct:
+            if others and not params.distinct and not reconsidered:
                 raise ValueError(
                     "Other workers wait for these decisions. If yours is the same question, call "
                     "ask_decision with same_as=<its id>; otherwise call it again with "
@@ -275,6 +340,9 @@ class Decisions:
                 "askers": [asker],
                 "precedents": [p["text"] for p in precedents],
             }
+            if reconsidered:
+                # What it reconsiders, said on its card (why: what changed since).
+                target |= {"replaces": reconsidered["id"], "previous": reconsidered["text"]}
             card = self.store.create_draft(caller, "decision", target, question)
             self.runtime.add_message(
                 caller, "draft", question, {"draft_id": card["id"], "label": "Decision"}
@@ -290,6 +358,27 @@ class Decisions:
             f'Asked the owner (card {card["id"]}). The decision arrives as a type="decision" '
             "message. End your turn now, unless parts of your task do not depend on it."
         )
+
+    def reconsidered(self, params: AskDecision, task: dict | None) -> dict | None:
+        """The decision in force a question asks the owner to reconsider (as it stands now),
+        with why: what changed since."""
+        if not params.replaces.strip():
+            return None
+        if params.same_as.strip():
+            raise ValueError("A reconsideration is a card of its own: ask without same_as.")
+        try:
+            found = self.current(params.replaces)
+        except ValueError:
+            raise ValueError(
+                f"No decision {params.replaces.strip()}: replaces names one ask_decision listed "
+                "(dec…)."
+            ) from None
+        if not params.why.strip():
+            raise ValueError(
+                f"Say in why what changed since the owner decided “{found['text']}”: the card "
+                "shows it, for them to reconsider it."
+            )
+        return found
 
     async def answer(self, card: dict, decision: DraftDecision) -> dict:
         """The owner decided (or declined to): every worker waiting for it hears."""
@@ -319,7 +408,10 @@ class Decisions:
         if not choice:
             raise ValueError("Pick an option or write your decision.")
         tasks = [asker["task_id"] for asker in target["askers"] if asker["task_id"]]
-        recorded = await self.record(f"{question} → {choice}", tasks, [], f"card:{card['id']}")
+        replaces = [self.current(target["replaces"])["id"]] if target.get("replaces") else []
+        recorded = await self.record(
+            f"{question} → {choice}", tasks, replaces, f"card:{card['id']}"
+        )
         best = self.recommended(target)
         self.runtime.learning.record(
             "decision",
@@ -427,17 +519,36 @@ class Decisions:
             display=f"Its decision card closed: “{task['title']}” ended.",
         )
 
-    def answered_in_chat(self, session_id: str, task: dict | None, text: str) -> list[dict]:
+    async def answered_in_chat(self, session_id: str, task: dict | None, text: str) -> list[dict]:
         """The owner wrote to a worker that waits on its decision card: that is their answer to
-        it, for that worker (the card leaves once nobody else waits on it). The cards. Not a
-        question back ("before I pick: what does B change?"): the card stays (`asked_back`)."""
+        it, for that worker (the card leaves once nobody else waits on it), kept as their
+        decision for its task (asked again, it is the answer). The cards. Not a question back
+        ("before I pick: what does B change?"): the card stays (`asked_back`)."""
         if asks_back(text):
             return []
-        return self.drop_askers(
+        left = self.drop_askers(
             lambda asker: self.asker_of(asker, session_id, task),
             "answered",
             f"Answered in chat: {clean(text, 300)}",
         )
+        for card in left:
+            target = card["target"]
+            tasks = [
+                asker["task_id"]
+                for asker in target["askers"]
+                if self.asker_of(asker, session_id, task) and asker.get("task_id")
+            ]
+            try:
+                replaces = (
+                    [self.current(target["replaces"])["id"]] if target.get("replaces") else []
+                )
+                await self.record(
+                    f"{target['question']} → {text}", tasks, replaces, f"chat:{card['id']}"
+                )
+            except Exception:
+                # Their message reaches the worker whatever becomes of keeping it.
+                logger.warning("Could not keep the decision answered in chat.", exc_info=True)
+        return left
 
     def asked_back(self, session_id: str, task: dict | None, text: str) -> list[dict]:
         """The decision cards this worker waits on that the owner's message asks about instead
@@ -548,7 +659,19 @@ class Decisions:
             VALUES (?,?,?,?,?,?)""",
             (identifier, text, "active", json.dumps([r["id"] for r in old]), source, now()),
         )
-        relying = list(dict.fromkeys(tasks + [t for row in old for t in self.linked(row["id"])]))
+        # Reconsiderations of what this replaces that still wait (the owner decided another
+        # way: told the Router, answered another card or in a worker's chat): nothing is left
+        # for them to decide.
+        moot = [
+            card
+            for card in (self.open_cards("decision") if old else [])
+            if card["target"].get("replaces") in {row["id"] for row in old}
+            and source != f"card:{card['id']}"
+        ]
+        waited = [a["task_id"] for card in moot for a in card["target"]["askers"] if a["task_id"]]
+        relying = list(
+            dict.fromkeys(tasks + waited + [t for row in old for t in self.linked(row["id"])])
+        )
         for task_id in relying:
             self.store.execute(
                 "INSERT OR IGNORE INTO task_decisions(task_id, decision_id) VALUES (?,?)",
@@ -560,8 +683,15 @@ class Decisions:
                 (identifier, row["id"]),
             )
         decision = self.get(identifier)
+        for card in moot:
+            self.close(card["id"], "expired", f"Decided meanwhile: {text}")
+        short = text if len(text) <= 80 else text[:79].rstrip() + "\u2026"
+        for task_id in waited:
+            if (task := self.tasks.find(task_id)) and task["status"] == "waiting":
+                # Told of the change below, as every task that relied on it.
+                self.tasks.move(task_id, "running", reason="decision", progress=f"Decided: {short}")
         affected = []
-        if old and all(same_words(row["text"], text) for row in old):
+        if old and not moot and all(same_words(row["text"], text) for row in old):
             # Recorded again in the same words (to link more tasks, say): nothing changed, so
             # no worker is told to redo anything.
             for task_id in relying:
@@ -578,6 +708,8 @@ class Decisions:
                 task = self.tasks.get(task_id)
                 if task["status"] in {"failed", "cancelled"}:
                     continue
+                if source.startswith(("card:", "chat:")) and task_id in tasks:
+                    continue  # It asked: the owner's answer reaches it as such.
                 affected.append(await self.propagate(task, old, decision))
             if affected:
                 self.change_card(decision, old, affected)

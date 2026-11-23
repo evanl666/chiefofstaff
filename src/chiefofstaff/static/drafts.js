@@ -343,7 +343,9 @@ function decisionCard(draft) {
     const reason = best && lowered.startsWith(best.choice.toLowerCase()) ? target.recommendation.slice(best.choice.length).replace(/^[\s:,.;—–-]+/, "") : "";
     node.append(el("div", { class: "recommendation", html: inlineHtml(reason ? `Why ${best.choice.toLowerCase()}: ${reason}` : `Recommended: ${target.recommendation}`) }));
   }
-  if (target.precedents?.length) node.append(el("div", { class: "precedents", html: inlineHtml(`You decided before: ${target.precedents.join(" · ")}`) }));
+  // A reconsideration says which decision its answer replaces (its why: what changed since).
+  if (target.previous) node.append(el("div", { class: "precedents", html: inlineHtml(`Reconsiders what you decided: ${target.previous}`) }));
+  else if (target.precedents?.length) node.append(el("div", { class: "precedents", html: inlineHtml(`You decided before: ${target.precedents.join(" · ")}`) }));
   const field = () => {
     const input = keepTyped(el("input", { placeholder: "Your decision", autocomplete: "off", "aria-label": "Your decision" }), `${draft.id}:decision`);
     input.addEventListener("keydown", (event) => submits(event) && answer(input.value));

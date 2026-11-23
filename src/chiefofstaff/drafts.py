@@ -1926,6 +1926,9 @@ class Drafts:
         elif draft["kind"] == "decision":
             answers = target.get("question") or ""
         entry: dict = {"id": draft["id"], "kind": kind}
+        if target.get("replaces"):
+            # A reconsideration: the decision in force its answer replaces.
+            entry["reconsiders"] = f"{target['replaces']}: {target.get('previous', '')}"[:300]
         if to:
             entry["to"] = to[:200]
         if answers:

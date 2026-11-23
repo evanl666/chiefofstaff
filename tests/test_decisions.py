@@ -293,3 +293,117 @@ async def test_a_decision_recorded_while_the_task_relying_on_it_starts_is_linked
     task_id = json.loads((await spawning).text_result_for_llm)["task_id"]
     linked = harness.store.all("SELECT decision_id FROM task_decisions WHERE task_id=?", (task_id,))
     assert linked, said.text_result_for_llm
+
+
+async def test_a_decision_asked_again_on_its_task_gets_its_answer_not_a_card(harness):
+    """Owner report (0.1.53) item 1: answered, the same question asked again on its task (with
+    seen_precedents=true) was a new card, and the task waited again. Asked again, it gets the
+    card it waits on; answered (on the card or in its chat), the owner's answer."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Night Harbor")
+    sid, task = worker["session_id"], worker["task_id"]
+    question = "夜港：金币要留到下一晚吗？"  # noqa: RUF001
+    await call_tool(runtime, "ask_decision", sid, question=question)
+    [card] = harness.store.drafts()
+    waits = await call_tool(runtime, "ask_decision", sid, question=question, seen_precedents=True)
+    assert card["id"] in waits.text_result_for_llm and len(harness.store.drafts()) == 1
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="留到下一晚"))
+    await settle(runtime)
+    [decision] = runtime.decisions.active()
+    retry = await call_tool(runtime, "ask_decision", sid, question=question[:-1] + "?",
+                            seen_precedents=True)  # fmt: skip
+    said = retry.text_result_for_llm
+    assert retry.result_type == "success" and "留到下一晚" in said and decision["id"] in said
+    assert not harness.store.drafts() and runtime.tasks.get(task)["status"] == "running"
+
+    lighthouse = "Light the lighthouse at dusk?"
+    await call_tool(runtime, "ask_decision", sid, question=lighthouse, seen_precedents=True)
+    await runtime.owner_send(sid, "Yes, at dusk.")
+    again = await call_tool(runtime, "ask_decision", sid, question=lighthouse,
+                            seen_precedents=True)  # fmt: skip
+    assert "Yes, at dusk." in again.text_result_for_llm and not harness.store.drafts()
+
+
+async def test_new_evidence_reconsiders_a_decision_and_one_stays_in_force(harness):
+    """Item 1's field case: the second question was a genuine revision (simulations had shown
+    the first choice wrong), and both answers stayed in force. A reconsideration names the
+    decision it revisits and why: its card says both, and its answer replaces that decision for
+    every task that relied on it."""
+    runtime = await harness.connect()
+    harbor = await spawn(runtime, harness.router_id, "Night Harbor")
+    town = await spawn(runtime, harness.router_id, "Sly Town", why_new="separate")
+    sid = harbor["session_id"]
+    await call_tool(runtime, "ask_decision", sid, question="Carry the gold over to the next night?")
+    [card] = harness.store.drafts()
+    await call_tool(runtime, "ask_decision", town["session_id"], question="x", same_as=card["id"])
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Carry it over"))
+    await settle(runtime)
+    [old] = runtime.decisions.active()
+    revised = "Carry only half of the gold over to the next night?"
+    listed = await call_tool(runtime, "ask_decision", sid, question=revised)
+    assert listed.result_type == "failure" and old["id"] in listed.text_result_for_llm
+    assert "replaces=" in listed.text_result_for_llm and not harness.store.drafts()
+    unsaid = await call_tool(runtime, "ask_decision", sid, question=revised, replaces=old["id"])
+    assert unsaid.result_type == "failure" and not harness.store.drafts(), "it says why"
+    why = "Simulations: with all of it carried over, every night after the third is unwinnable."
+    await call_tool(runtime, "ask_decision", sid, question=revised, replaces=old["id"], why=why)
+    [card] = harness.store.drafts()
+    assert card["target"]["previous"] == old["text"] and card["target"]["why"] == why
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Half"))
+    await settle(runtime)
+    [new] = runtime.decisions.active()
+    assert new["text"] == f"{revised} → Half"
+    assert runtime.decisions.get(old["id"])["replaced_by"] == new["id"]
+    assert sorted(new["tasks"]) == sorted([harbor["task_id"], town["task_id"]])
+    assert "The owner decided: Half" in harness.session(sid).sent[-1]
+    assert not any('type="decision-changed"' in s for s in harness.session(sid).sent), (
+        "it asked: the answer is all it needs"
+    )
+    assert 'type="decision-changed"' in harness.session(town["session_id"]).sent[-1]
+
+
+async def test_a_reconsideration_decided_meanwhile_closes_and_its_task_goes_on(harness):
+    """The owner changed the decision another way (told the Router) while a reconsideration of
+    it waited: its card has nothing left to decide, and its task goes on under the new one."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Night Harbor")
+    sid = worker["session_id"]
+    await call_tool(runtime, "ask_decision", sid, question="Carry the gold over?")
+    [card] = harness.store.drafts()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Yes"))
+    [old] = runtime.decisions.active()
+    await call_tool(runtime, "ask_decision", sid, question="Carry half of it over?",
+                    replaces=old["id"], why="Late nights are unwinnable.")  # fmt: skip
+    [card] = harness.store.drafts()
+    assert runtime.tasks.get(worker["task_id"])["status"] == "waiting"
+    await call_tool(runtime, "record_decision", harness.router_id, decision="Gold: carry half",
+                    replaces=[old["id"]])  # fmt: skip
+    assert harness.store.draft(card["id"])["status"] != "pending"
+    assert runtime.tasks.get(worker["task_id"])["status"] == "running"
+    [new] = runtime.decisions.active()
+    assert new["text"] == "Gold: carry half" and worker["task_id"] in new["tasks"]
+    assert "Now: Gold: carry half" in harness.session(sid).sent[-1]
+
+
+async def test_two_reconsiderations_of_a_decision_are_one_card_and_one_answer(harness):
+    """Two workers that found the same decision wrong ask once; answered in one's chat, the
+    other's wait ends too, under the one decision now in force."""
+    runtime = await harness.connect()
+    harbor = await spawn(runtime, harness.router_id, "Night Harbor")
+    town = await spawn(runtime, harness.router_id, "Sly Town", why_new="separate")
+    await call_tool(runtime, "ask_decision", harbor["session_id"], question="Carry the gold over?")
+    [card] = harness.store.drafts()
+    await call_tool(runtime, "ask_decision", town["session_id"], question="x", same_as=card["id"])
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Yes"))
+    [old] = runtime.decisions.active()
+    for worker in (harbor, town):
+        await call_tool(runtime, "ask_decision", worker["session_id"], question="Carry half?",
+                        replaces=old["id"], why="Late nights are unwinnable.")  # fmt: skip
+    [card] = harness.store.drafts()
+    assert [a["title"] for a in card["target"]["askers"]] == ["Night Harbor", "Sly Town"]
+    await runtime.owner_send(harbor["session_id"], "Half, then.")
+    assert harness.store.draft(card["id"])["status"] != "pending"
+    [new] = runtime.decisions.active()
+    assert new["text"] == "Carry half? → Half, then." and new["replaces"] == f'["{old["id"]}"]'
+    assert runtime.tasks.get(town["task_id"])["status"] == "running"
+    assert "Now: Carry half? → Half, then." in harness.session(town["session_id"]).sent[-1]

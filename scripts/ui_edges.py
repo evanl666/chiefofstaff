@@ -3108,6 +3108,15 @@ async def round_ten(runtime, browser, failures: list[str]):
         "askers": [{"session_id": decider, "title": "Speed up r10 words"}], "precedents": [],
     }, "words() is currently `text.split()`. Keep it?")  # fmt: skip
     runtime.bus.publish("draft", store.draft(decision["id"]))
+    # Owner report (0.1.53) item 1: a decision asked again on new evidence says which.
+    revisit = store.create_draft(decider, "decision", {
+        "question": "Split on commas after all?", "why": "Profiling: half the input is CSV.",
+        "options": [], "recommendation": "",
+        "askers": [{"session_id": decider, "title": "Speed up r10 words"}],
+        "precedents": ["Keep `split()`?"], "replaces": "dec0r10a1",
+        "previous": "words(): keep `split()`? → Keep `split()`",
+    }, "Split on commas after all?")  # fmt: skip
+    runtime.bus.publish("draft", store.draft(revisit["id"]))
     await settle(runtime)
     runtime.publish_state()
     pr = {"label": "acme/r10#4", "own": True, "state": "OPEN", "review": "CHANGES_REQUESTED",
@@ -3149,6 +3158,12 @@ async def round_ten(runtime, browser, failures: list[str]):
     for part in (".question", ".why", ".recommendation", ".options"):
         assert "`" not in await asked.locator(part).inner_text(), part
     log("U7: a decision card shows `code` as code")
+    again = page.locator(f'#needs .card.draft[data-id="{revisit["id"]}"]')
+    await expect(again.locator(".precedents")).to_have_text(
+        "Reconsiders what you decided: words(): keep split()? → Keep split()"
+    )
+    await expect(again.locator(".why")).to_have_text("Profiling: half the input is CSV.")
+    log("Item 1: a reconsideration names the decision it revisits, and why")
 
     # U10: names a screen reader says.
     await expect(page.get_by_role("heading", name="Needs you", level=2)).to_be_visible()
