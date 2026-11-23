@@ -377,6 +377,13 @@ FIXES: list[Allow] = [
         data=r"\.system_message\.content$",
         lines=r"^   (?:" + "|".join(map(re.escape, SLACK_SAID_BEFORE + SLACK_SAID_AFTER)) + ")$",
     ),
+    # 0.1.56 (owner report, item 1): a worker asking the owner to reconsider a decision in
+    # force names it (replaces); the answer replaces it.
+    Allow(
+        "ask_decision's replaces: a decision to reconsider",
+        data=r"^backend\.sessions\.worker:.*\.options\.tools\[\d+\]\.parameters\.properties"
+        r"\.replaces$",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
