@@ -1702,12 +1702,21 @@ class Tools:
             f"“{row['title']}” goes on with a new worker on {agents.display(params.agent)} "
             f"(session {made['session_id']}, task {made['task_id']}); the old one is closed."
         )
+
     async def t_spawn_kept(self, params: Any, caller: str):
         """spawn_worker with `shepherd`: the new task keeps that PR moving (as Hand to a
         worker does), when it is the owner's own and eligible."""
         result = await self.t_spawn_worker(params, caller)
-        if kept := (getattr(params, "shepherd", "") or "").strip():
-            result["shepherd"] = await self.runtime.shepherd.take(kept, result["task_id"])
+        if not (kept := (getattr(params, "shepherd", "") or "").strip()):
+            return result
+        if "task_id" not in result:
+            # A Compare: a task on each agent, each in a worktree of its own.
+            result["shepherd"] = (
+                "Not kept moving: a compare's workers each work in a worktree of their own. Once "
+                "the owner keeps one, hand the PR to its worker (message_session with `shepherd`)."
+            )
+            return result
+        result["shepherd"] = await self.runtime.shepherd.take(kept, result["task_id"])
         return result
 
     async def t_message_kept(self, params: Any, caller: str):

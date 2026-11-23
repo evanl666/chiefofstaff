@@ -554,6 +554,49 @@ async def test_the_router_hands_a_pr_over_with_spawn_workers_field(world):
     assert TARGET in runtime.store.follows(task["session_id"])
 
 
+async def test_with_another_agent_on_the_routers_tools_have_both_fields(world, codex_installed):
+    """0.1.53's Router tools on any agent (Runtime.session_tools, also for a Router put on
+    Codex or Claude): spawn_worker names the agents and takes a PR to keep moving, message_session
+    takes one too, and continue_worker is there."""
+    from test_agents import router_options, saved, schema
+
+    runtime = await world.start(worker=False)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        options = router_options(world.harness, runtime)
+        assert {"agent", "compare_with", "shepherd"} <= set(schema(options)["properties"])
+        assert "shepherd" in schema(options, "message_session")["properties"]
+        assert "continue_worker" in {tool.name for tool in options["tools"]}
+        row = runtime.store.session(runtime.router_id())
+        assert [tool.name for tool in runtime.session_tools(row)] == [
+            tool.name for tool in options["tools"]
+        ]
+    finally:
+        await runtime.stop()
+
+
+async def test_a_compare_asked_to_keep_a_pr_moving_starts_and_keeps_none(world, codex_installed):
+    """0.1.53's Compare (the same task on several agents) with the `shepherd` field: its workers
+    start, and the PR is not kept by any of them (each side works in a worktree of its own);
+    the Router hears what to do instead, never an error after the workers started."""
+    from test_agents import saved, spawn_on
+
+    runtime = await world.start(worker=False)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        found = await spawn_on(
+            world.harness, runtime, title="Keep api#12 moving",
+            instructions="Keep acme/api#12 moving.", agent="codex", compare_with=["copilot"],
+            shepherd="acme/api#12",
+        )  # fmt: skip
+        assert not hasattr(found, "result_type"), found.text_result_for_llm
+        assert [worker["agent"] for worker in found["workers"]] == ["codex", "copilot"], found
+        assert found["shepherd"].startswith("Not kept moving: a compare"), found
+        assert not runtime.shepherd.control.claim(TARGET)
+    finally:
+        await runtime.stop()
+
+
 async def test_a_pr_already_kept_by_another_task_is_not_taken(world):
     runtime = await claimed(world)
     other = runtime.tasks.create(world.worker, "Something else", "Do it.")
