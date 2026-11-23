@@ -463,7 +463,9 @@ async def test_work_wanted_in_parallel_with_a_worker_at_work_goes_to_a_second_wo
         assert not harness.client.forks
     else:
         assert result.startswith("Error: Not sent: no second worker can take it"), result
-        assert "every worker slot is taken" in result and "spawn_worker" in result
+        # A new worker would wait for a slot too (live fork F3): not one for it, it waits here.
+        assert "every worker slot is taken" in result and "call again without parallel" in result
+        assert "A new worker would wait as well, so do not start one" in result, result
         assert tasks_of(harness, worker) == ["Run the tests"] and not harness.client.forks
         assert harness.session(worker).sent == before
     rule = " ".join(prompts.FORK_RULE.split())

@@ -26,7 +26,7 @@ from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .digest import NEEDS_WORDS, Needs, needs, task_words, waiting_parts
 from .envelope import clean_title, language, short, wrap
-from .forks import Second
+from .forks import EVERY_WORKER_WAITS, Second
 from .habits import UpdateStyle
 from .learning import ProposeLessons
 from .models import (
@@ -3028,11 +3028,19 @@ class Tools:
 
     @staticmethod
     def not_in_parallel(target: dict, why: str) -> str:
-        return (
+        said = (
             f"Not sent: no second worker can take it from worker {short(target['id'])} now "
-            f"({why}), so it would wait for that worker's current turn. For work in parallel, "
-            "spawn_worker with why_new saying so; to let it wait for that worker, call again "
-            "without parallel."
+            f"({why}), so it would wait for that worker's current turn."
+        )
+        if why in EVERY_WORKER_WAITS:
+            # A new worker would wait as well (live fork F3: it was queued beside the busy one).
+            return (
+                f"{said} A new worker would wait as well, so do not start one for it: call "
+                "again without parallel, and it waits for that worker."
+            )
+        return (
+            f"{said} For work in parallel, spawn_worker with why_new saying so; to let it wait "
+            "for that worker, call again without parallel."
         )
 
     async def fork_task(

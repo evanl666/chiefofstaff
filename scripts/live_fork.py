@@ -154,7 +154,7 @@ class Run:
             f"New task for the '{title}' worker: write the codename from the file it read "
             "earlier into codename.txt. I need it now: do not wait for what it is doing."
         )
-        return await self.notice(mark, SECOND, "New task", "Started")
+        return await self.notice(mark, SECOND, "New task", "Started", "Queued")
 
 
 async def f1_f4_a_busy_worker_hands_a_related_task_to_a_second_worker(run: Run) -> str:

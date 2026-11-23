@@ -45,6 +45,10 @@ PROGRESS_CHARS = 300
 # A brief without its conversation: the results of its latest finished tasks, at most.
 EARLIER_TASKS = 3
 DONE = {"review", "done"}
+# Why no second worker starts now that keeps any new worker from starting too.
+NO_SLOT = "every worker slot is taken"
+SHORT = "this computer is short of memory or disk"
+EVERY_WORKER_WAITS = frozenset({NO_SLOT, SHORT})
 
 
 @dataclass
@@ -149,9 +153,9 @@ class Forks:
         if self.in_place(target):
             return "it works in the owner's own folder"  # One worker writes there.
         if self.runtime.workers.running() >= self.store.settings().max_workers:
-            return "every worker slot is taken"  # It waits for this worker, as for a slot.
+            return NO_SLOT  # It waits for this worker, as for a slot.
         if machine.short_of_memory() is not None or machine.short_of_disk() is not None:
-            return "this computer is short of memory or disk"
+            return SHORT
         return ""
 
     def in_place(self, target: dict) -> bool:
