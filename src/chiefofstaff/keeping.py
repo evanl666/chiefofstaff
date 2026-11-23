@@ -230,9 +230,14 @@ class Keeping:
                 )
                 self.store.delete(f"acceptnote:{claim['target']}")
             else:
+                # Not in its receipts at all (GitHub didn't answer for it then): nothing of it
+                # was shown to review, rather than a head that moved since.
                 note = (
                     "Accepted, but the PR changed after what you reviewed: it won't merge by "
                     "itself."
+                    if pr
+                    else "Accepted, but its PR wasn't in what you reviewed (GitHub didn't answer "
+                    "for it then): it won't merge by itself; Accept this commit… in its ⋯ does."
                 )
                 self.store.set(f"acceptnote:{claim['target']}", note)
                 notes.append(note)

@@ -738,6 +738,23 @@ async def test_accept_of_a_head_that_is_not_what_was_reviewed_records_none(world
     )
 
 
+async def test_accept_of_a_result_whose_receipts_lack_its_pr_says_so(world):
+    """Live H-X2 SX2: GitHub didn't answer for the PR its worker had just opened, and its
+    result's receipts went without it; the Accept said the PR had changed since."""
+    runtime = await claimed(world)
+    run_id = runtime.store.value("SELECT id FROM runs WHERE task_id=?", (world.task,))
+    evidence = json.loads(runtime.store.value("SELECT evidence FROM runs WHERE id=?", (run_id,)))
+    evidence["prs"] = []
+    runtime.store.execute("UPDATE runs SET evidence=? WHERE id=?", (json.dumps(evidence), run_id))
+    runtime.task_actions.accept(world.task)
+    assert not runtime.shepherd.control.claim(TARGET)["accepted"].get("sha")
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["accept_note"] == (
+        "Accepted, but its PR wasn't in what you reviewed (GitHub didn't answer for it then): it "
+        "won't merge by itself; Accept this commit… in its ⋯ does."
+    )
+
+
 def green(world, head):
     world.github.checks[head] = [
         {"name": "ci / test", "status": "COMPLETED", "conclusion": "SUCCESS", "required": True}
