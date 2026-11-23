@@ -857,9 +857,16 @@ FEATURES["worker_fork"] = Feature(
             data=r"^backend\.sessions\.router:.*\.parameters\.properties\.parallel$",
         ),
         Allow(
-            "each open worker's load where the Router reads about workers (list_sessions)",
+            "fork_of on the Router's spawn_worker (a new worker from a related one's context)",
+            data=r"^backend\.sessions\.router:.*\.parameters\.properties\.fork_of$",
+        ),
+        Allow(
+            "each open worker's load where the Router reads about workers (list_sessions), and "
+            "fork_of where spawn_worker lists related workers",
             data=r"^backend\.turns\.router:",
-            without=r', "load": \{[^{}]*\}',
+            without=r', "load": \{[^{}]*\}| \(with fork_of the session_id of the one that knows '
+            r"the subject, when the work needs what it knows: the new worker starts with its "
+            r"conversation\)",
         ),
     ],
 )

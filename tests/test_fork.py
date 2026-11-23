@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import FakeClient, Harness, call_tool, settle
 from copilot.tools import ToolInvocation
+from test_agents import saved, spawn_on
 from test_backends import live, on, received, until
 from test_repos import commit, published
 
@@ -21,6 +22,7 @@ from chiefofstaff import prompts
 from chiefofstaff.backend import fork_point
 from chiefofstaff.models import Settings
 from chiefofstaff.scripted import Say, ScriptedBackend, Wait
+from chiefofstaff.store import Store
 
 
 async def spawn(runtime, router, title, **extra):
@@ -369,17 +371,47 @@ async def test_the_router_has_same_worker_and_its_rule_only_while_it_is_on(harne
     def router():
         options = runtime.options(harness.store.session(harness.router_id))
         tool = next(t for t in options["tools"] if t.name == "message_session")
+        spawn = next(t for t in options["tools"] if t.name == "spawn_worker")
         # Never behind Copilot's tool search, as Chief of Staff's own tools are (0.1.47).
-        assert tool.defer == "never"
-        return "same_worker" in json.dumps(tool.parameters), options["system_message"]["content"]
+        assert tool.defer == "never" and spawn.defer == "never"
+        fields = (
+            "same_worker" in json.dumps(tool.parameters),
+            "fork_of" in json.dumps(spawn.parameters),
+        )
+        return fields, options["system_message"]["content"]
 
-    field, prompt = router()
-    assert field and prompts.FORK_RULE in prompt
+    fields, prompt = router()
+    assert fields == (True, True) and prompts.FORK_RULE in prompt
     old, new = harness.store.settings(), Settings(fork_busy=False)
     harness.store.save_settings(new)
     await runtime.settings_changed(old, new)
-    field, prompt = router()
-    assert not field and prompts.FORK_RULE not in prompt
+    fields, prompt = router()
+    assert fields == (False, False) and prompts.FORK_RULE not in prompt
+
+
+async def test_the_owners_new_worker_can_start_from_a_related_ones_conversation_said_so(harness):
+    """0.1.51: the owner's "a new worker" wins over reuse (the prompt's rule, the related
+    workers' refusal). While second workers are on, both say how it starts from the related
+    worker's conversation (fork_of); off, they are as they were."""
+    runtime = await harness.connect()
+    await finished(runtime, harness, "Fix the login form", project="")
+    rule = " ".join(prompts.FORK_RULE.split())
+    assert "When the owner asks for a new worker (see above)" in rule
+    assert "spawn_worker with fork_of=<that worker's session_id>" in rule
+
+    async def refusal():
+        refused = await call_tool(runtime, "spawn_worker", harness.router_id,
+                                  title="Fix the login copy",
+                                  instructions="Fix the login form's copy.")  # fmt: skip
+        return " ".join(refused.text_result_for_llm.split())
+
+    said = await refusal()
+    assert "(with fork_of the session_id of the one that knows the subject" in said, said
+    old, new = harness.store.settings(), Settings(fork_busy=False)
+    harness.store.save_settings(new)
+    await runtime.settings_changed(old, new)
+    said = await refusal()
+    assert "fork_of" not in said and "quoting their words, and give it to none of them" in said
 
 
 async def test_a_fork_never_reaches_a_copilot_that_could_not_start(tmp_path, monkeypatch):
@@ -436,6 +468,124 @@ async def test_work_wanted_in_parallel_with_a_worker_at_work_goes_to_a_second_wo
         assert harness.session(worker).sent == before
     rule = " ".join(prompts.FORK_RULE.split())
     assert "is message_session with parallel=true" in rule
+
+
+async def spawn_from(runtime, harness, title, **extra):
+    """spawn_worker as the Router has it (with fork_of while the switch is on)."""
+    extra.setdefault("instructions", title)
+    extra.setdefault("why_new", "test")
+    router = harness.store.session(harness.router_id)
+    tool = next(t for t in runtime.session_tools(router) if t.name == "spawn_worker")
+    result = await tool.handler(
+        ToolInvocation(session_id=harness.router_id, tool_call_id="t1",
+                       tool_name="spawn_worker", arguments={"title": title, **extra})
+    )  # fmt: skip
+    text = result if isinstance(result, str) else result.text_result_for_llm
+    return json.loads(text) if text.startswith("{") else text
+
+
+async def finished(runtime, harness, title, **extra) -> str:
+    """A worker that did its task (a result to review) and is between turns."""
+    worker = (await spawn(runtime, harness.router_id, title, **extra))["session_id"]
+    runtime.tasks.update(tasks_of_ids(harness, worker)[0], status="review",
+                         result="The codename is HERON-7.")  # fmt: skip
+    runtime.states[worker].busy = False
+    runtime.update_session(worker, status="idle")
+    return worker
+
+
+async def test_a_new_worker_the_owner_asks_for_starts_from_a_related_workers_conversation(
+    tmp_path,
+):
+    """The owner's "a new worker for this" wins over reuse (0.1.51); with fork_of the Router
+    starts it from the related worker's conversation: a second worker of it, in a worktree of
+    its own from the project's base, the related worker untouched."""
+    _, api = published(tmp_path, "api")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(api)]))
+    runtime = await harness.connect()
+    source = await finished(runtime, harness, "Read the spec", project=str(api), isolate=True)
+    theirs = harness.store.session(source)
+    before = list(harness.session(source).sent)
+    result = await spawn_from(runtime, harness, "Write the codename file",
+                              instructions="Write the codename into codename.txt.",
+                              why_new="“a new worker for this”", fork_of=source[:8])  # fmt: skip
+    second = result["session_id"]
+    assert second != source and harness.client.forks == [(source, second)]
+    assert second in harness.client.resumed and second not in harness.client.created
+    sent = harness.session(second).sent
+    assert sent[: len(before)] == before and "Write the codename into codename.txt." in sent[-1]
+    assert harness.session(source).sent == before, "the related worker is not disturbed"
+    mine = harness.store.session(second)
+    assert mine["cwd"] != theirs["cwd"] and mine["branch"] not in {"", theirs["branch"]}
+    assert (Path(mine["cwd"]) / "LATEST.md").exists() and branch_of(mine["cwd"]) == mine["branch"]
+    name = runtime.display_title(theirs)
+    assert runtime.view(mine)["fork_of"] == {"id": source, "title": name}
+    notices = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
+    assert notices[-1].startswith(f"Started a second worker for “Write the codename file” "
+                                  f"(context from “{name}”)")  # fmt: skip
+    edges = [e for e in runtime.relations.graph().edges if e["kind"] == "fork"]
+    assert [(e["from_session"], e["to_session"]) for e in edges] == [(source, second)]
+
+
+@pytest.mark.parametrize("case", ["not forked", "fork fails", "agent down"])
+async def test_a_new_worker_from_a_related_one_that_cannot_be_forked_gets_its_work(harness, case):
+    """spawn_worker(fork_of) where that worker's conversation cannot be copied: a second worker
+    with a brief of its work; where its agent cannot run a worker now, a new worker given its
+    task as context_from."""
+    runtime = await harness.connect()
+    started = on(harness, "codex-like") if case == "agent down" else []
+    source = await finished(runtime, harness, "Read the spec")
+    if started:
+        harness.store.create_session = Store.create_session.__get__(harness.store)
+
+        async def down(agent):
+            return "Codex-like is signed out."
+
+        runtime.worker_agent_down = down  # type: ignore[method-assign]
+    if case == "not forked":
+        harness.client.capabilities = replace(FakeClient.capabilities, fork=False)
+    elif case == "fork fails":
+
+        async def refused(*args, **kwargs):
+            raise RuntimeError("no")
+
+        harness.client.fork_session = refused
+    result = await spawn_from(runtime, harness, "Write the codename file",
+                              instructions="Write the codename into codename.txt.",
+                              why_new="“a new worker for this”", fork_of=source)  # fmt: skip
+    second = result["session_id"]
+    task = tasks_of_ids(harness, second)[0]
+    assert (second != source and not harness.client.forks) or case == "fork fails"
+    if case in {"not forked", "fork fails"}:
+        assert runtime.forks.origin(second)["id"] == source
+        given = harness.session(second).sent[-1]
+        assert "its conversation is not copied to you" in given and "HERON-7" in given
+        assert not harness.store.get(f"contextfrom:{task}")
+    else:
+        assert runtime.forks.origin(second) is None and runtime.agent(second) == "copilot"
+        assert json.loads(harness.store.get(f"contextfrom:{task}")) == tasks_of_ids(harness, source)
+
+
+async def test_a_new_worker_from_a_related_one_on_another_agent_the_owner_named_gets_its_work(
+    tmp_path, codex_installed
+):
+    """The owner named another agent than the related worker's: a new worker there, given that
+    worker's task as context_from (a conversation is not carried across agents)."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    try:
+        source = await finished(runtime, harness, "Read the spec")
+        await saved(runtime, {"codex": {"enabled": True}})
+        result = await spawn_on(harness, runtime, title="Write the codename file",
+                                instructions="Report done: x", fork_of=source,
+                                agent="codex")  # fmt: skip
+        second = result["session_id"]
+        assert runtime.agent(second) == "codex" and not harness.client.forks
+        assert runtime.forks.origin(second) is None
+        task = tasks_of_ids(harness, second)[0]
+        assert json.loads(harness.store.get(f"contextfrom:{task}")) == tasks_of_ids(harness, source)
+    finally:
+        await runtime.stop()
 
 
 @pytest.mark.parametrize(

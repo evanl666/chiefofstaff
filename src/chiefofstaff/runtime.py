@@ -4097,24 +4097,26 @@ class Runtime:
     def session_tools(self, row: dict) -> list:
         """Chief of Staff's tools a session has, on whichever agent it runs."""
         tools = [self.tools[name] for name in self.tool_names(row)]
-        on = self.agents_on() if row["role"] == ROUTER else []
-        kept = row["role"] == ROUTER and self.shepherd.on()
-        if on or kept:
-            # Its spawn_worker names the agents on (as without them otherwise), and with
-            # Prepared for you on, spawn_worker and message_session take a PR to keep moving.
+        router = row["role"] == ROUTER
+        on = self.agents_on() if router else []
+        kept = router and self.shepherd.on()
+        forks = router and self.store.settings().fork_busy
+        if on or kept or forks:
+            # Its spawn_worker names the agents on (as without them otherwise); with Prepared
+            # for you on, spawn_worker and message_session take a PR to keep moving; with second
+            # workers on (forks.py), spawn_worker can start from a related worker's conversation
+            # (fork_of) and message_session can keep a new task for a busy worker.
             chooses = bool(on) and agents.router_chooses(self.store)
             variants = {
-                "spawn_worker": self.toolset.spawn_on(on, chooses=chooses, shepherd=kept),
-                "message_session": self.toolset.message_on(kept),
+                "spawn_worker": self.toolset.spawn_on(
+                    on, chooses=chooses, shepherd=kept, forks=forks
+                ),
+                "message_session": self.toolset.message_on(kept, forks=forks),
             }
             tools = [variants.get(tool.name) or tool for tool in tools]
         if on:
             # It can move a worker's work to another (continue_worker).
             tools.append(self.toolset.continue_on(on))
-        if row["role"] == ROUTER and self.store.settings().fork_busy:
-            # Its message_session can keep a new task for a busy worker (forks.py).
-            forks = self.toolset.message_forks
-            tools = [forks if tool.name == "message_session" else tool for tool in tools]
         return tools
 
     def role_options(self, row: dict) -> dict:

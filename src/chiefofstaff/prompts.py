@@ -1034,7 +1034,11 @@ FORK_RULE = (
     "once), or spawn_worker as above when it needs nothing of that worker's work. Pass "
     "same_worker=true only when that worker itself must do it after its current "
     "work: on its branch or in its pull request, with what it is making now, or because the "
-    "owner wants that worker to do it once it is free."
+    "owner wants that worker to do it once it is free. When the owner asks for a new worker "
+    "(see above) for work a related worker knows (what it read, found or was told), "
+    "spawn_worker with fork_of=<that worker's session_id>: the new worker starts with its "
+    "conversation so far, in a folder and branch of its own (without fork_of it knows none of "
+    "it)."
 )
 
 

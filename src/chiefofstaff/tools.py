@@ -351,6 +351,13 @@ PARALLEL = (
     "conversation so far takes it at once. Without it, a worker at work whose load does not say "
     "busy takes the task only after its current turn"
 )
+# spawn_worker's field while second workers are on (forks.py).
+FORK_OF = (
+    "The session id of a related worker whose conversation this new worker starts with (what it "
+    "read, found and was told so far): when the owner asks for a new worker for work that needs "
+    "what that worker knows. It runs on that worker's agent, in a folder and branch of its own, "
+    "and that worker goes on with its own work. Empty: a new worker with none of it"
+)
 MessageSessionForks = create_model(
     "MessageSession",
     __base__=MessageSession,
@@ -1644,53 +1651,32 @@ class Tools:
             "what it changed) and say which you would keep.",
         }
 
-    def spawn_on(self, names: Sequence[str], chooses: bool = False, shepherd: bool = False) -> Any:
+    def spawn_on(
+        self,
+        names: Sequence[str],
+        chooses: bool = False,
+        shepherd: bool = False,
+        forks: bool = False,
+    ) -> Any:
         """spawn_worker as the Router has it while other coding agents are on: with `agent`,
         set only when the owner named one (more-agents.md 5.9); `chooses` (the owner lets the
-        Router choose): for every worker, saying whether the owner named it (owner_named); and
-        while Prepared for you is on, with `shepherd`. Without them, the tool is as it always
-        was (definitions)."""
-        key = (*names, *(["chooses"] if chooses else []), *(["+shepherd"] if shepherd else []))
-        if not names and not shepherd:
+        Router choose): for every worker, saying whether the owner named it (owner_named); while
+        Prepared for you is on, with `shepherd`; `forks` (second workers are on, forks.py): with
+        fork_of. Without them, the tool is as it always was (definitions)."""
+        key = (
+            *names,
+            *(["chooses"] if chooses else []),
+            *(["+shepherd"] if shepherd else []),
+            *(["forks"] if forks else []),
+        )
+        if not names and not shepherd and not forks:
             return self.runtime.tools["spawn_worker"]
         if key not in self.spawn_tools:
-            fields: dict[str, Any] = {}
+            fields: dict[str, Any] = (
+                {"fork_of": (str, Field(default="", description=FORK_OF))} if forks else {}
+            )
             if names:
-                choices: Any = Literal.__getitem__(("", agents.COPILOT, *names))  # type: ignore[attr-defined]
-                named = ", ".join(agents.display(name) for name in (agents.COPILOT, *names))
-                fields["agent"] = (
-                    choices,
-                    Field(
-                        default="",
-                        description=(
-                            f"The coding agent it runs on ({named}): the one the owner named, "
-                            "else the one you choose among those list_sessions().agents."
-                            "available says can run now"
-                            if chooses
-                            else f"The coding agent it runs on ({named}): only when the "
-                            "owner named one for this task; empty for the one Settings chose"
-                        ),
-                    ),
-                )
-                others: Any = Literal.__getitem__((agents.COPILOT, *names))  # type: ignore[attr-defined]
-                fields["compare_with"] = (
-                    list[others],
-                    Field(
-                        default_factory=list,
-                        description="Compare, only when the owner asks for the same task on "
-                        'several agents ("do this with Codex and Claude"): the agents beside '
-                        "`agent` it also runs on, a worker each in a worktree of its own",
-                    ),
-                )
-                if chooses:
-                    fields["owner_named"] = (
-                        bool,
-                        Field(
-                            default=False,
-                            description="True when the owner named this agent for the task (one "
-                            "they named that can't run is never replaced; one you chose is)",
-                        ),
-                    )
+                fields |= self.agent_fields(names, chooses)
             if shepherd:
                 fields["shepherd"] = SHEPHERD_FIELD
             params = create_model("SpawnWorker", __base__=SpawnWorker, **fields)
@@ -1704,6 +1690,48 @@ class Tools:
                 defer="never",
             )
         return self.spawn_tools[key]
+
+    @staticmethod
+    def agent_fields(names: Sequence[str], chooses: bool) -> dict[str, Any]:
+        """spawn_worker's fields while other coding agents are on (spawn_on)."""
+        choices: Any = Literal.__getitem__(("", agents.COPILOT, *names))  # type: ignore[attr-defined]
+        named = ", ".join(agents.display(name) for name in (agents.COPILOT, *names))
+        fields: dict[str, Any] = {
+            "agent": (
+                choices,
+                Field(
+                    default="",
+                    description=(
+                        f"The coding agent it runs on ({named}): the one the owner named, "
+                        "else the one you choose among those list_sessions().agents."
+                        "available says can run now"
+                        if chooses
+                        else f"The coding agent it runs on ({named}): only when the "
+                        "owner named one for this task; empty for the one Settings chose"
+                    ),
+                ),
+            )
+        }
+        others: Any = Literal.__getitem__((agents.COPILOT, *names))  # type: ignore[attr-defined]
+        fields["compare_with"] = (
+            list[others],
+            Field(
+                default_factory=list,
+                description="Compare, only when the owner asks for the same task on several "
+                'agents ("do this with Codex and Claude"): the agents beside `agent` it also '
+                "runs on, a worker each in a worktree of its own",
+            ),
+        )
+        if chooses:
+            fields["owner_named"] = (
+                bool,
+                Field(
+                    default=False,
+                    description="True when the owner named this agent for the task (one "
+                    "they named that can't run is never replaced; one you chose is)",
+                ),
+            )
+        return fields
 
     def continue_on(self, names: Sequence[str]) -> Any:
         """continue_worker, the Router's while other coding agents are on: the owner's "hand
@@ -1763,16 +1791,18 @@ class Tools:
             return f"{result}\nPrepared for you: {words}"
         return result
 
-    def message_on(self, shepherd: bool) -> Any:
-        """message_session as the Router has it: with `shepherd` while Prepared for you is on."""
+    def message_on(self, shepherd: bool, forks: bool = False) -> Any:
+        """message_session as the Router has it: with `shepherd` while Prepared for you is on,
+        with `same_worker` while busy workers' new tasks go to second workers (forks.py)."""
         if not shepherd:
-            return self.runtime.tools["message_session"]
-        if ("message", "+shepherd") not in self.spawn_tools:
-            params = create_model("MessageSession", __base__=MessageSession,
-                                  shepherd=SHEPHERD_FIELD)  # fmt: skip
+            return self.message_forks if forks else self.runtime.tools["message_session"]
+        key = ("message", "+shepherd", *(["forks"] if forks else []))
+        if key not in self.spawn_tools:
+            base = MessageSessionForks if forks else MessageSession
+            params = create_model("MessageSession", __base__=base, shepherd=SHEPHERD_FIELD)
             params.__doc__ = MessageSession.__doc__
             description = self.runtime.tools["message_session"].description
-            self.spawn_tools[("message", "+shepherd")] = define_tool(
+            self.spawn_tools[key] = define_tool(
                 "message_session",
                 description=description,
                 params_type=leak_proof(params),
@@ -1780,7 +1810,7 @@ class Tools:
                 skip_permission=True,
                 defer="never",
             )
-        return self.spawn_tools[("message", "+shepherd")]
+        return self.spawn_tools[key]
 
     def step_tools(self) -> list:
         """A shepherd step's own tools (shepherd.py): shepherd_result, made on first use (no
@@ -1932,6 +1962,8 @@ class Tools:
         adds then (" on Copilot instead"). `fork`: a second worker of another (forks.py), on its
         agent: the session it runs on (a fork of that worker's, or a new one with a brief)."""
         self.caller(caller, ROUTER)
+        if (fork_of := getattr(params, "fork_of", "")) and not special and not fork:
+            return await self.spawn_fork_of(params, caller, fork_of)
         if not special and not agent and not fork and (compared := self.compared(params, caller)):
             return await self.spawn_compare(params, caller, compared)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
@@ -2059,12 +2091,19 @@ class Tools:
                     if any(card.get("load", {}).get("busy") for card in related)
                     else ""
                 )
+                # With second workers on, the owner's new worker can start from one's context.
+                start = (
+                    " (with fork_of the session_id of the one that knows the subject, when the "
+                    "work needs what it knows: the new worker starts with its conversation)"
+                    if self.store.settings().fork_busy
+                    else ""
+                )
                 # Routing to the worker that already knows the subject matters: decide explicitly.
                 raise ValueError(
                     "Related workers exist. If the owner asked for a new worker in so many words "
                     "(a new, fresh or separate one, one worker for exactly this, in any "
                     "language), that is reason enough: call spawn_worker again with why_new "
-                    "quoting their words, and give it to none of them. Otherwise, if "
+                    f"quoting their words{start}, and give it to none of them. Otherwise, if "
                     "this is about the same subject as one of them, send it there with "
                     "message_session instead (a closed one reopens with its context and files; "
                     "one without a branch takes its own worktree with add_repo to change code, "
@@ -3054,6 +3093,58 @@ class Tools:
                 raise
             logger.warning("Could not start a second worker of %s.", source["id"], exc_info=True)
             return None
+
+    async def spawn_fork_of(self, params: SpawnWorker, caller: str, fork_of: str) -> dict:
+        """spawn_worker(fork_of): a new worker that starts from a related worker's conversation
+        (forks.py), in a folder and branch of its own. On another agent than that worker's (the
+        owner named one), or none of its kind can be made now: a new worker given that worker's
+        task as context_from instead."""
+        try:
+            source = self.store.session(fork_of.strip().removeprefix("worker:"))
+        except LookupError:
+            source = None
+        if not source or source["role"] != WORKER or self.runtime.special(source):
+            raise ValueError(
+                f"Not started: fork_of takes the session id of one of the owner's workers (from "
+                f"list_sessions or the related workers listed), not {fork_of!r}."
+            )
+        params = params.model_copy(update={"fork_of": ""})
+        own = self.runtime.agent(source["id"])
+        named = (
+            getattr(params, "agent", "")
+            if getattr(params, "owner_named", None) is not False
+            else ""
+        )
+        if (
+            self.runtime.agents
+            and caller == self.runtime.router_id()
+            and (chip := self.runtime.chosen_agent())
+        ):
+            named = chip
+        title = deliverable_title(params.title)
+        if (
+            self.store.settings().fork_busy
+            and not (named and named != own)
+            and not getattr(params, "compare_with", [])
+            and not risky(params.instructions)
+        ):
+            self.check_title_style(title, "Not started")
+            # Its folder as the worker it comes from has its, unless the Router says another.
+            where = {} if params.project else self.second_workspace(source)
+            spawn = params.model_copy(update={
+                **where,
+                "model": params.model or source["model"],
+                "effort": params.effort or (
+                    source["effort"] if source["effort"] in SPAWN_EFFORTS else ""
+                ),
+            })  # fmt: skip
+            if made := await self.start_second(source, spawn, caller, title, refused=True):
+                return made
+        # A worker of its own, which builds on that worker's task (its current one).
+        context = list(dict.fromkeys([*params.context_from, source["id"]]))
+        return await self.t_spawn_worker(
+            params.model_copy(update={"context_from": context}), caller
+        )
 
     @staticmethod
     def settle_earlier(earlier: list[dict], how: str) -> list[str]:
