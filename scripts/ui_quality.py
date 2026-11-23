@@ -1321,10 +1321,6 @@ async def agents_views(runtime, browser, quality: Quality):
 # The owner's "Go on" to a task (task's-life round, 0.1.48), in the Router's chat: its task
 # link's box touches its text's (it looks right). Not the fork's line; told to the coordinator.
 OWNERS_TASK_MESSAGE = re.compile(r'^button\.to "→ [^"]*" overlaps div\.text "Go on where you')
-# The sidebar's team lines (0.1.54) are 26 px tall; their own views never check the sidebar (they
-# look at Home's strip and the team view). Left as they are where a second worker sits in a team.
-TEAM_LINES = r'|^button\.team-line\.c\d+ "[^"]*" is 26px tall$'
-FORK_KNOWN = re.compile(OWNERS_TASK_MESSAGE.pattern + TEAM_LINES)
 
 
 async def fork_views(runtime, browser, quality: Quality):
@@ -1382,7 +1378,9 @@ async def fork_views(runtime, browser, quality: Quality):
             # Its parts (the earlier rounds' rows elsewhere on Home are checked there; in the
             # Router's chat, the owner's message from the task's-life round is that round's).
             for scope in ("#sidebar", "#timeline"):
-                await quality.check(page, f"fork home {scope} {width} {scheme}", scope, FORK_KNOWN)
+                await quality.check(
+                    page, f"fork home {scope} {width} {scheme}", scope, OWNERS_TASK_MESSAGE
+                )
             if width < 1100:
                 await page.locator("#home-tabs [data-tab=tasks]").click()
                 await page.wait_for_timeout(150)
@@ -1400,7 +1398,7 @@ async def fork_views(runtime, browser, quality: Quality):
             await page.set_viewport_size({"width": width, "height": 900})
             await page.wait_for_timeout(150)
             await page.screenshot(path=folder / f"chat-{width}-{scheme}.png")
-            await quality.check(page, f"fork chat {width} {scheme}", known=FORK_KNOWN)
+            await quality.check(page, f"fork chat {width} {scheme}")
         await quality.contrast(page, f"fork chat {scheme}")
         await page.set_viewport_size({"width": 1280, "height": 900})
         await page.locator("#settings-button").click()
