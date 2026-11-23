@@ -28,7 +28,7 @@ M7  Codex's plan limit used up (the stand-in says nothing of its windows until a
     turn pauses saying which limit and until when; the @ list says it; work named for Codex is
     held with its card; once the limit resets (its time, then Codex asked again), each goes on,
     once, under Handled for you
-M8  Codex's limit used up again (after M7): a worker paused, set to go on at its reset; Continue
+M8  Codex's limit used up again (after M7): M7's worker paused, set to go on at its reset; Continue
     with Copilot clicked twice at once and once more from a stale card: one new worker (on
     Copilot, real), the paused task leaves Needs you, replaced by the new one's; a stale Go on
     at… points there; past the reset, nothing goes on in the paused worker
@@ -568,7 +568,9 @@ async def m7_limit(ctx: Ctx):
 
 
 async def m8_continued_once(ctx: Ctx):
-    worker = ctx.workers[0]
+    # (The worker M7 paused: its task reopens with this, and is paused again. The other one's
+    # task failed in M4: a message to it is not a task that pauses.)
+    worker = ctx.workers[1]
     resets = int(time.time()) + 75
     write(ctx.codex_state / "limit.json", json.dumps({"minutes": 300, "resets_at": resets}))
     mark = max((m["id"] for m in await ctx.app.get(f"/api/sessions/{worker}/messages")), default=0)
