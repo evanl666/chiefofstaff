@@ -818,8 +818,9 @@ then describes how you write in each place: answers and reports to you, Slack DM
 channels, PR reviews, commit messages (language, length, tone, greetings, formatting, a short
 quote or two). It never sets the language: answers are in the language of the message they
 answer (write in English and you are answered in English, in Chinese and you are answered in
-Chinese), and a Slack reply is in the language of the message it replies to, or in your words
-when you said what to answer. What you write to one worker changes only that worker's answers:
+Chinese), and a Slack reply is in the language of the message it replies to, or in yours
+when you said what to answer: what you said, the way you write (your exact words only where you
+quoted them). What you write to one worker changes only that worker's answers:
 the Router and new tasks' reports stay in the language you write to the Router in, and a task
 for a request that came without you (a Slack message) reports in that request's language.
 Each style applies at once to the sessions that write that way

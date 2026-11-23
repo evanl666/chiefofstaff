@@ -255,6 +255,17 @@ IN_PLACE_RULE_AFTER = (
     "message_session one of them, or call spawn_worker again with why_new saying briefly why none fits",
     "(the owner sees it); the owner asking for a new worker is reason enough (quote their words).",
 )
+# 0.1.54 (live memory M1): what the owner said to answer, the Slack session writes their way;
+# their exact words only where they quoted them. Its rule's lines, wrapped again.
+SLACK_SAID_BEFORE = (
+    "reply to; when the owner said what to answer, in their words and language. The owner",
+    "approves, edits or rejects it; you will get the outcome.",
+)
+SLACK_SAID_AFTER = (
+    "reply to; when the owner said what to answer, that, in their language and the way they write",
+    "(their exact words only where they quoted them). The owner approves, edits or rejects it;",
+    "you will get the outcome.",
+)
 FIXES: list[Allow] = [
     # E126: tasks replaced before their replacedby: link was kept get it once, read back from
     # their progress words; the mark that this ran is in the store. Nothing is shown.
@@ -359,6 +370,11 @@ FIXES: list[Allow] = [
         value="Task ids (t…) or worker ids whose work already given relies on this decision. "
         "Not the work you are about to give: tasks you start in this turn rely on it by "
         "themselves",
+    ),
+    Allow(
+        "the Slack session's rule for what the owner said to answer",
+        data=r"\.system_message\.content$",
+        lines=r"^   (?:" + "|".join(map(re.escape, SLACK_SAID_BEFORE + SLACK_SAID_AFTER)) + ")$",
     ),
 ]
 

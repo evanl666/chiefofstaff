@@ -332,8 +332,8 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     ),
     "router, created": (29510, "0fc496f0079c3d50fc2f37a95d57a158672da750465ed0b92e5d02470eda82da"),
     "router, resumed": (29474, "2b2d972a4d83f1cd8365c4e081c22e05235460c9b2456d82006964b54fbf3bd9"),
-    "slack, created": (4578, "3d45670714bf7658ea75562a107c8346bcabd31cd069e9004c826b9393b44aff"),
-    "slack, resumed": (4543, "c0c487327a52e28940eeb43ddc3e2008c029a728052b6d5637170b9aee11aca1"),
+    "slack, created": (4649, "cfc2802714c98894a53bc5a78caf731e99e920f6a736c2057e7aa87e9120529f"),
+    "slack, resumed": (4614, "11f01623ea397aaeed389c49a3a21790c68577cea19be7c921a6fb246e08189d"),
     "the Copilot sandbox of a worker asking first": (
         946,
         "4e17ae9d8664283969ddf98e0c9637579ce9d568ecee2eb460504e64cab83e41",

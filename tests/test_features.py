@@ -494,6 +494,33 @@ async def test_slack_edits_become_style_examples(tmp_path):
     assert "<owner_edits>" not in harness.session(worker).options["system_message"]["content"]
 
 
+async def test_what_the_owner_said_to_reply_reaches_the_slack_session_as_they_wrote_it(tmp_path):
+    """Live memory M1 (r79, r83): "Reply to Bob's DM for me: I'll review his billing PR this
+    afternoon." went to the Slack session as the Router's quotation ("draft …: \\"I'll review
+    your billing PR this afternoon.\\""), which it took for the exact words: the draft was not
+    in the owner's style. In the owner's turn, the Slack session gets their message as they
+    wrote it, said to be what to answer and not its words; in another turn, nothing of it."""
+    harness = Harness(tmp_path / "data", Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    slack_id = harness.store.open_sessions("slack")[0]["id"]
+    router = harness.session(harness.router_id)
+    asked = "Reply to Bob's DM for me: I'll review his billing PR this afternoon."
+    await runtime.owner_send(harness.router_id, asked)
+    router.emit("user.message", content=router.sent[-1])
+    await settle(runtime)
+    quoted = "Draft a reply in Bob's DM, in the owner's voice: \"I'll review your billing PR.\""
+    await call_tool(runtime, "message_session", harness.router_id, session_id=slack_id,
+                    text=quoted)  # fmt: skip
+    sent = harness.session(slack_id).sent[-1]
+    assert quoted in sent and f"\u201c{asked}\u201d" in sent
+    assert "the way the owner writes" in sent and "only where they quoted them" in sent
+    router.emit("user.message", content=env("system", "event", "Bob reacted in #deploys"))
+    await settle(runtime)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=slack_id,
+                    text="Bob reacted: nothing to answer.")  # fmt: skip
+    assert asked not in harness.session(slack_id).sent[-1], "not the owner's turn"
+
+
 async def test_a_broken_dependency_is_reported_and_the_router_can_release(harness):
     runtime = await harness.connect()
     first = (await spawn(runtime, harness.router_id, "A"))["session_id"]

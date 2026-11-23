@@ -113,6 +113,11 @@ itself.
   Router about finished work, a worker that answered with a done report made it a new result,
   with a second *finished*. Both are an answer now (an *Update*, or the Router's), and the
   result stays as it was; a worker that redid or corrected the work still gives it a new one.
+- **A Slack reply you dictate is written your way.** *Reply to Bob's DM for me: I'll review his
+  billing PR this afternoon* reached the Slack session as the Router's quotation, taken for
+  your exact words: *I'll review your billing PR this afternoon.*, not how you write to Bob.
+  It now gets your message as you wrote it, and writes what you said the way you write; your
+  exact words only where you quote them.
 - **Fixes:** a Codex signed in with an API key ("API key configured") read as signed out; an
   agent signed out while its workers ran still said *Ready*, and a new task or message for it
   went to it and failed there (it is saved with its card now); work you asked done directly in

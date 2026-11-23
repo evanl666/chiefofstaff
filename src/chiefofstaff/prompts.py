@@ -544,8 +544,9 @@ For each forwarded message:
    channel message you answer in its thread; a DM message that is in no thread is answered in
    the DM itself, with no thread_ts; text; and `to` naming the person or channel for the
    owner). Short, natural, in the tone of the conversation and the language of the message you
-   reply to; when the owner said what to answer, in their words and language. The owner
-   approves, edits or rejects it; you will get the outcome.
+   reply to; when the owner said what to answer, that, in their language and the way they write
+   (their exact words only where they quoted them). The owner approves, edits or rejects it;
+   you will get the outcome.
 3. If a correct reply needs facts you do not have (code investigation, data, a decision only the
    owner can make), do not guess: use report(status="question") to tell the Router exactly what is
    needed, and include the channel_id and thread_ts.

@@ -2443,6 +2443,8 @@ class Tools:
         if target["role"] != WORKER:
             self.runtime.follow(target["id"], to_follow, asked=params.follow)
             prompt = wrap("router", "message", params.text)
+            if target["role"] == SLACK and (said := self.owner_said(caller, quoted)):
+                prompt += "\n\n" + wrap("system", "context", said)
             if target["role"] == SLACK and (handed := self.handed_in(to_follow)):
                 prompt += "\n\n" + wrap(
                     "system", "context", self.runtime.drafts.handed_note(handed)
@@ -2579,6 +2581,29 @@ class Tools:
         if not task:
             return "Delivered."
         return f"Delivered (task {task['id']})." + (f" {moved}" if moved else "")
+
+    def owner_said(self, caller: str, quoted: bool) -> str:
+        """The owner's message the Router's turn answers, for the Slack session, as they wrote
+        it (live memory M1: "Reply to Bob's DM for me: I'll review his billing PR this
+        afternoon." reached it as the Router's quotation, "…: \"I'll review your billing PR this
+        afternoon.\"", taken for the exact words, and the draft was not in the owner's style).
+        Not when the Router passed it on itself ({owner:<ref>}), nor in a turn on an event."""
+        if quoted or not self.states[caller].owner_reply:
+            return ""
+        found = self.store.one(
+            "SELECT text FROM messages WHERE session_id=? AND kind='owner' ORDER BY id DESC "
+            "LIMIT 1",
+            (caller,),
+        )
+        text = (found or {}).get("text", "").strip()
+        if not text:
+            return ""
+        return (
+            f"The owner's message, as they wrote it: \u201c{text[:2000]}\u201d. Where it says "
+            "what to reply, that is what the reply says, written the way the owner writes "
+            "(owner_style) in the language they used: their exact words only where they quoted "
+            "them or asked for them word for word, never a quotation of them by the Router."
+        )
 
     def handed_in(self, keys: list[str]) -> list[dict]:
         """The messages the owner handed over in these Slack threads, while replies there go
