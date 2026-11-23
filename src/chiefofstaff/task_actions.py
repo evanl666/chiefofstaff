@@ -125,6 +125,9 @@ def moved(before: list[dict], now: list[dict]) -> str:
 # A recent task's open PRs are read again this often (seconds), and for this long (hours).
 PR_REFRESH = 180
 PR_HOURS = 72
+# A PR its task opened a moment ago that GitHub could not answer for yet (its answer lags a new
+# PR): read again after these pauses (seconds) before its result's receipts go without it.
+JUST_OPENED = (1.0, 2.0)
 # Those closed (not merged) this many times less often: one may be reopened.
 CLOSED_PR_PACE = 5
 # The rules a task's PRs' roles were read by (classify_prs): raised when they change, so that
@@ -1232,7 +1235,7 @@ class TaskActions:
         # Offered to merge only as read now: a PR GitHub could not answer for keeps its last
         # read (see read_prs), which may be of a head pushed over since.
         read = now()
-        prs = await self.read_prs(task, checkouts)
+        prs = await self.read_prs(task, checkouts, reported=ended)
         await self.offer_merge(task, prs, since=read)
         run = (
             self.store.one("SELECT id, evidence FROM runs WHERE id=?", (run_id,))
@@ -1806,7 +1809,11 @@ class TaskActions:
             self.store.set(f"touched:{task_id}", json.dumps(merged))
 
     async def read_prs(
-        self, task: dict, checkouts: list[dict] | None = None, again: bool = False
+        self,
+        task: dict,
+        checkouts: list[dict] | None = None,
+        again: bool = False,
+        reported: bool = False,
     ) -> list[dict]:
         """The task's PRs as GitHub has them now: open or merged, checks, review, and what each
         is to the task (`role`, see pr_roles). `checkouts`: its changes as just found (whose
@@ -1814,7 +1821,8 @@ class TaskActions:
         refresh, which reads only what the task made, changed or reviewed: a PR it only
         mentions keeps how it stood when its result was read, and so does one that cannot be
         read now. A PR GitHub said several times does not exist (an example in a report, a
-        typo) is not asked for again."""
+        typo) is not asked for again. `reported`: its result was just reported (a PR it opened
+        a moment ago is read again after a pause, JUST_OPENED)."""
         prs = []
         earlier = {pr["label"].lower(): pr for pr in self.previous_prs(task["id"])}
         opened = self.opened_prs(task["id"])
@@ -1826,17 +1834,11 @@ class TaskActions:
             if again and known and not followed_up(known) and label not in opened:
                 prs.append({key: value for key, value in known.items() if key != "role"})
                 continue
+            # One it opened a moment ago: GitHub's answer can lag a new PR (live H-X SX2: its
+            # result's receipts had none of it), read again after a pause before going without.
+            pauses = JUST_OPENED if reported and label in opened else ()
             try:
-                view = json.loads(
-                    await self.runtime.github.gh(
-                        "pr",
-                        "view",
-                        f"https://github.com/{repo}/pull/{number}",
-                        "--json",
-                        "number,url,state,statusCheckRollup,reviewDecision,title,isDraft,"
-                        "mergeStateStatus,headRefOid,headRefName,createdAt,author",
-                    )
-                )
+                view = await self.pr_view(repo, number, pauses)
             except Exception as exc:
                 logger.info("Could not read %s#%s for receipts.", repo, number, exc_info=True)
                 if NOT_FOUND.search(str(exc)):
@@ -1895,6 +1897,26 @@ class TaskActions:
                 (old.get("changed_at") or old.get("at") or pr["at"]) if same else pr["at"]
             )
         return prs
+
+    async def pr_view(self, repo: str, number: str, pauses: tuple[float, ...] = ()) -> dict:
+        """A PR as `gh pr view` has it, tried again after each pause while GitHub fails."""
+        for pause in (*pauses, None):
+            try:
+                return json.loads(
+                    await self.runtime.github.gh(
+                        "pr",
+                        "view",
+                        f"https://github.com/{repo}/pull/{number}",
+                        "--json",
+                        "number,url,state,statusCheckRollup,reviewDecision,title,isDraft,"
+                        "mergeStateStatus,headRefOid,headRefName,createdAt,author",
+                    )
+                )
+            except Exception:
+                if pause is None:
+                    raise
+                await asyncio.sleep(pause)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def previous_prs(self, task_id: str) -> list[dict]:
         found = self.store.one(

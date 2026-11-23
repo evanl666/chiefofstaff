@@ -3267,6 +3267,41 @@ async def test_the_owners_pr_ready_to_merge_comes_as_a_card_once(harness):
     assert merge and "--match-head-commit" in merge[0] and "abc1234" in merge[0]
 
 
+async def test_a_pr_it_just_opened_is_in_its_receipts_once_github_answers(harness, monkeypatch):
+    """Live H-X SX2: GitHub could not answer yet for the PR the worker had opened a moment
+    before its report, and the result's receipts went without it (no PR chip, no Merge card,
+    and an Accept that recorded no head). It is read again after a pause."""
+    monkeypatch.setattr("chiefofstaff.task_actions.JUST_OPENED", (0.0, 0.0), raising=False)
+    runtime = await harness.connect()
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "state": "success", "active": True}]}}
+    )
+    harness.gh_replies["pr view https://github.com/acme/app/pull/7"] = pr_view()
+    answer, failed = runtime.github.raw, []
+
+    async def lagging(*arguments, **kwargs):
+        if arguments[:2] == ("pr", "view") and not failed:
+            failed.append(arguments)
+            raise RuntimeError(
+                "GitHub request failed: GraphQL: Could not resolve to a PullRequest with the "
+                "number of 7. (repository.pullRequest)"
+            )
+        return await answer(*arguments, **kwargs)
+
+    runtime.github.raw = lagging
+    worker = await spawn(runtime, harness.router_id, "Fix login")
+    task = runtime.tasks.current(worker)
+    # Its `gh pr create` opened it (events.py: the PR its shell opened is its task's).
+    runtime.task_actions.record_opened(task["id"], ["https://github.com/acme/app/pull/7"])
+    await call_tool(runtime, "report", worker, status="done",
+                    summary="Opened https://github.com/acme/app/pull/7")  # fmt: skip
+    await settle(runtime)
+    assert failed, "the first read failed"
+    [pr] = runtime.task_actions.view(runtime.tasks.get(task["id"]))["receipts"]["prs"]
+    assert (pr["label"], pr["head"], pr["role"]) == ("acme/app#7", "abc1234", "created")
+    assert [d for d in harness.store.drafts() if d["kind"] == "merge"], "offered to merge"
+
+
 async def test_a_prs_time_is_when_it_last_changed_not_when_it_was_read(harness, monkeypatch):
     """Suspected in the bug bash: every refresh made each PR row "just now"."""
     clock = iter(f"2026-11-08T10:{minute:02d}:00+00:00" for minute in range(60))

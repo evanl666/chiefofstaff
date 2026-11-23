@@ -10,6 +10,9 @@
   from the bottom), and *Merge all 3* merges them as they were then; one GitHub can't merge
   says why in words, and what to do. *Merge when ready* merges a stacked PR the same way, and
   waits for any open PR below it to merge first.
+- **A PR a worker opens just before its report is in that result's receipts.** GitHub can lag a
+  moment on a new PR; its result's receipts then went without it (no PR on its card, no *Merge*
+  card). It is read again after a short pause.
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see
