@@ -600,6 +600,35 @@ async def test_a_fork_has_the_conversation_before_the_turn_in_progress(backend, 
     await second.disconnect()
 
 
+async def test_a_session_let_go_of_is_forked_with_its_whole_conversation(backend, tmp_path):
+    """forks.py, spawn_worker(fork_of): a worker between turns whose session Chief of Staff let
+    go of (a quiet or closed worker) is forked from its log, all of its conversation; resumed
+    elsewhere, the fork answers from it."""
+    if not backend.capabilities.fork:
+        pytest.skip("This agent's sessions are not forked (forks.py).")
+    session, turn = await open_session(backend, tmp_path)
+    await session.send("Remember the codename 'KESTREL-9'. Reply with just: ok")
+    await turn.wait()
+    await session.disconnect()
+    forked = await backend.fork_session(session.session_id, "contract fork, let go of")
+    backend.created.append(forked)
+    assert await backend.get_session_metadata(forked), "a fork the agent knows"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    options = {
+        "working_directory": str(elsewhere),
+        "on_permission_request": lambda request, inv: PermissionDecisionApproveOnce(),
+    }
+    if not isinstance(backend, ScriptedBackend):
+        options["model"] = MODEL
+    second = await backend.resume_session(forked, **options)
+    told = Turn(second)
+    await second.send("What codename did I ask you to remember? Reply with just the codename.")
+    await told.wait()
+    assert "KESTREL-9" in told.said().upper()
+    await second.disconnect()
+
+
 async def test_abort_ends_the_turn_and_its_command(backend, tmp_path):
     # A marker no other process on the machine has (live runs and other checkouts' tests run
     # `sleep` too): the fraction of a second makes it this run's alone.

@@ -6,8 +6,12 @@ checks, for each request, which worker took it:
 
   reuse:  a follow-up in loose words (Chinese too), acting on what a worker found, a feature
           named by its name, a closed worker (reopened), after a restart
-  new:    unrelated work, "start a fresh worker", "in parallel" while the worker is busy
+  new:    unrelated work, "start a fresh worker" (and in Chinese, about a worker's subject),
+          "in parallel" while the worker is busy
   none:   a question about earlier work is answered without starting anything
+
+Its data folder has a space in its path, as macOS's own has. LIVE_ROUTING_PORT moves its ports
+(the app's, and the stand-in Slack's 200 above it).
 
     uv run python scripts/live_routing.py
 """
@@ -25,9 +29,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 import live_e2e
 import live_parity  # noqa: F401  (it sets its own port: this one is set after)
 
-live_e2e.PORT = 18770
+live_e2e.PORT = int(os.environ.get("LIVE_ROUTING_PORT", "18770"))
+if "LIVE_ROUTING_PORT" in os.environ:
+    live_e2e.SLACK_PORT = live_e2e.PORT + 200
 live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
-from live_e2e import App, cleanup, git, log, transcript, wait_for  # noqa: E402
+from live_e2e import App, cleanup, data_dir, git, log, transcript, wait_for  # noqa: E402
 from live_parity import setup, write  # noqa: E402
 
 HELPER = re.compile(r"“(Learn how you work|Learn checks from mistakes|Distill owner profile)”")
@@ -171,6 +177,15 @@ async def run_day(app: App, project: Path, orders: Path) -> list:
     day.check("'start a fresh worker' starts one", kind == "new"
               and who not in {analyst, coder, orders_worker}, kind)  # fmt: skip
 
+    # The owner's words win over reuse in any language, on a subject a worker knows (initials:
+    # the fixer's): a new worker (from the fixer's conversation, or not).
+    kind, who = await day.ask(
+        f"新开一个 worker 来做这个\uff0c不要交给已有的 worker\uff1a在 {project} 里\uff0c"
+        "initials('jean-luc picard') 现在返回什么\uff1f只回答\uff0c不要改文件。"
+    )
+    day.check("a new worker asked for in Chinese starts one", kind == "new"
+              and who not in {analyst, coder, fixer, orders_worker}, kind)  # fmt: skip
+
     kind, busy = await day.ask(
         f"In {orders}: run `sleep 40 && uv run --with pytest python -m pytest -q` and report.",
         settle=False,
@@ -193,7 +208,9 @@ async def main():
             root = Path(temporary).resolve()
             home, project, _ = setup(root)
             orders = orders_project(root)
-            app = App(root / "data", root / "log", {"COPILOT_HOME": str(home)})
+            data = data_dir(root)
+            data.parent.mkdir(parents=True, exist_ok=True)
+            app = App(data, root / "log", {"COPILOT_HOME": str(home)})
             await app.start()
             try:
                 await app.post("/api/settings", {
@@ -206,7 +223,7 @@ async def main():
                 raise
             finally:
                 await app.stop()
-                await cleanup(root / "data")
+                await cleanup(data)
                 subprocess.run(["git", "-C", str(project), "worktree", "prune"])
     print("\n================ ROUTING ================")
     for number, name, ok, detail in every:
