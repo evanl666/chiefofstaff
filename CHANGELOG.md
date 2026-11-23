@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.55 (2026-11-23)
 
 - **Claude Code workers, and the Router and the Watchdog on Claude, run on a Mac's usual data
   folder.** Chief of Staff's check of Claude Code put the paths of its own folder into shell
