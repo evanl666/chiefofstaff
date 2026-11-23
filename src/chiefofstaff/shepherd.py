@@ -44,7 +44,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import integrity, threads
+from . import agents, integrity, threads
 from .backend import COPILOT_AGENT, StepSandboxPolicy
 from .control import (
     APPLYING,
@@ -402,8 +402,8 @@ class Shepherd(Keeping, Steps):
         row's words."""
         if not row or row["closed_at"]:
             return "its worker was closed"
-        if self.runtime.agent(row["id"]) != COPILOT_AGENT:
-            return "its worker runs on Codex, not Copilot"
+        if (agent := self.runtime.agent(row["id"])) != COPILOT_AGENT:
+            return f"its worker runs on {agents.display(agent)}, not Copilot"
         if not (self.runtime.sandbox_host and self.runtime.backend
                 and self.runtime.backend.capabilities.sandbox):  # fmt: skip
             return "this computer has no sandbox for it"
