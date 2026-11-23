@@ -362,6 +362,7 @@ RESUMED = {
     agents.SIGN_IN: "resumed after sign-in",
     agents.MISSING: "resumed once installed",
     agents.LIMITED: "resumed once its limit reset",
+    agents.UNCHECKED: "resumed once Chief of Staff's check of it ran",
 }
 # How long past a plan limit's reset its agent is asked again (its clock and this one's), and
 # how long it may take to say.
@@ -372,10 +373,12 @@ LOOK_LIMIT_SECONDS = 30.0
 DOING = frozenset({"tool", "report", "update"})
 # How long a worker's dropped schedules take to be deleted in Claude, at most (its turn included).
 SCHEDULES_DELETE_SECONDS = 120.0
-# How soon an agent's check that could not run is tried again, at the earliest (seconds); and
-# how soon after its last a worker's process stopping by itself again fails it instead of
-# starting another (never a loop of starts).
+# How soon an agent's check that could not run is tried again, at the earliest (seconds), and
+# after each that could not run in a row (CHECK_AGAIN: by itself meanwhile, while a role or held
+# work wants that agent: never final); and how soon after its last a worker's process stopping
+# by itself again fails it instead of starting another (never a loop of starts).
 AGENT_CHECK_AGAIN = 60.0
+CHECK_AGAIN = (AGENT_CHECK_AGAIN, 120.0, 300.0, 600.0, 1800.0)
 AGENT_LOST_AGAIN = 120.0
 # Chief of Staff's own sessions Settings can put on another agent and that keep a session of
 # their own (agent-roles.md): placed by Runtime.place_role. Watch for you runs as a helper
@@ -763,9 +766,12 @@ class Runtime:
         # Workers Chief of Staff stopped (their spend, a change) whose turn has not settled:
         # what their turn says meanwhile (its start shown late) does not stop them again.
         self.halted: set[str] = set()
-        # When each agent's check last ran (recheck_agent), and when each worker's own process
-        # last stopped by itself (worker_lost).
+        # When each agent's check last ran (recheck_agent), how many in a row could not run,
+        # and its wait to try it again (check_later); and when each worker's own process last
+        # stopped by itself (worker_lost).
         self.agent_checked_at: dict[str, float] = {}
+        self.check_tries: dict[str, int] = {}
+        self.check_waits: dict[str, asyncio.Task] = {}
         self.lost_at: dict[str, float] = {}
         # Each agent's processes as last recorded (kv `agentpids:<agent>`).
         self.agent_pids: dict[str, dict[int, str]] = {}
@@ -924,6 +930,7 @@ class Runtime:
         agentsetup.kept_paths(self.store)  # Agents installed from here, found as before.
         for name in agents.NAMES:
             self.arm_limit(name)  # A limit used up: its reset waited for again.
+            self.arm_check(name)  # A check that could not run: tried again by itself.
         self.task_actions.settle_reports()
         await self.connect()
         self.after_update()
@@ -1348,8 +1355,8 @@ class Runtime:
         known, the card its refusal points at is there first."""
         if row:
             await self.ensure_spend_card(row)
-        if row and (why := self.agent_block(row)):
-            raise RuntimeError(why)
+        if row and (why := self.agent_block(row)) and self.blocked_on(agent, row, rechecked=True):
+            raise RuntimeError(why)  # (Not only its check that could not run: tried again.)
         await self.connect_agent(agent)
         await self.recheck_agent(agent)
         if row and (why := self.agent_block(row)):
@@ -1435,9 +1442,11 @@ class Runtime:
             found = json.loads(self.store.get(key) or "null")
         except ValueError:
             found = None
+        unrun = self.check_unrun(agent)
         if not isinstance(found, dict):
             self.agent_checked_at[agent] = time.monotonic()
             found = await backend.check(self.work_root / f"{agent}-check")
+            self.agent_checked_at[agent] = time.monotonic()
             if found.get("ran"):
                 self.store.set(key, json.dumps(found))
         backend.checked = found
@@ -1446,9 +1455,18 @@ class Runtime:
             "acting": getattr(backend, "acting_refused", ""),
             "ask_first": getattr(backend, "ask_first_refused", ""),
             "sandbox": getattr(backend, "sandbox_refused", SANDBOX_UNPROVEN),
+            # Whether its check ran (one that could not is never final: check_later).
+            "ran": bool(found.get("ran")),
+            **({"unrun": str(found.get("unrun") or "")} if not found.get("ran") else {}),
         }
         if self.store.get(f"agentrefused:{agent}") != json.dumps(refused):
             self.store.set(f"agentrefused:{agent}", json.dumps(refused))
+        if not found.get("ran"):
+            self.check_tries[agent] = self.check_tries.get(agent, 0) + 1
+            self.arm_check(agent)
+        elif self.check_tries.pop(agent, 0) or unrun:
+            # Its check ran at last: what waited for it goes on (check_passed).
+            self.background(self.check_passed(agent))
 
     def agent_gate_failed(self, agent: str, backend: Any, why: str):
         """Another agent began a turn its gate did not admit (more-agents.md 5.12.5): no worker
@@ -1466,7 +1484,7 @@ class Runtime:
             backend.checked = found
             refused = {
                 "version": await backend.version(), "acting": why, "ask_first": why,
-                "sandbox": why,
+                "sandbox": why, "ran": True,
             }  # fmt: skip
             self.store.set(f"agentrefused:{agent}", json.dumps(refused))
 
@@ -1474,18 +1492,105 @@ class Runtime:
 
     async def recheck_agent(self, agent: str):
         """A check that could not run (its version's workers wait meanwhile) is tried again
-        with a worker's start, a minute after the last try at most once."""
+        where a role or a worker wants its agent, and by itself (check_later): a minute after
+        the last try at the earliest, later after each that could not run in a row
+        (CHECK_AGAIN)."""
         entry = self.agents.get(agent)
         backend = entry.backend if entry else None
         checked = getattr(backend, "checked", None)
         if entry is None or backend is None or not isinstance(checked, dict) or checked.get("ran"):
             return
-        if time.monotonic() - self.agent_checked_at.get(agent, 0.0) < AGENT_CHECK_AGAIN:
+        if time.monotonic() < self.check_due(agent):
             return
         async with entry.lock:
             if entry.backend is backend and not (backend.checked or {}).get("ran"):  # type: ignore[attr-defined]
                 with suppress(Exception):
                     await self.check_agent(agent, backend)
+
+    def check_due(self, agent: str) -> float:
+        """When an agent's check that could not run may be tried again (monotonic)."""
+        tries = max(1, self.check_tries.get(agent, 1))
+        wait = CHECK_AGAIN[min(tries, len(CHECK_AGAIN)) - 1]
+        return self.agent_checked_at.get(agent, float("-inf")) + wait
+
+    def check_unrun(self, agent: str) -> str:
+        """Why an agent's check by Chief of Staff could not run, as its workers wait for it
+        (from its backend while it runs, else as it was last found); "" when it ran, or was
+        never tried."""
+        entry = self.agents.get(agent)
+        checked = getattr(entry.backend, "checked", None) if entry and entry.backend else None
+        found = checked if isinstance(checked, dict) else self.agent_refused(agent)
+        if found.get("ran"):
+            return ""
+        # (Recorded before a record said whether its check ran, as 0.1.53's: by its words.)
+        for said in (found.get("unrun"), found.get("ask_first"), found.get("acting")):
+            if isinstance(said, str) and (seen := agents.CHECK_UNRUN.match(said)):
+                return seen.group(1)
+        name = agents.display(agent)
+        return f"Chief of Staff's check of {name} could not run" if "ran" in found else ""
+
+    def check_wanted(self, agent: str) -> bool:
+        """Whether a role or work held for it wants an agent (its check that could not run is
+        tried again by itself meanwhile)."""
+        if self.agents and agent in agents.roles(self.store).values():
+            return True
+        for raw in self.store.items("agentrefusal:").values():
+            with suppress(ValueError):
+                found = json.loads(raw)
+                if found.get("agent") == agent and found.get("status") == agents.UNCHECKED:
+                    return True
+        return False
+
+    def arm_check(self, agent: str):
+        """An agent's check that could not run, tried again by itself while a role or held work
+        wants it (one wait per agent; from startup too, its first try a minute on)."""
+        if agent not in self.agents or not self.check_unrun(agent) or not self.check_wanted(agent):
+            return
+        if (waiting := self.check_waits.get(agent)) and not waiting.done():
+            return
+        self.agent_checked_at.setdefault(agent, time.monotonic())
+        self.check_waits[agent] = self.background(self.check_later(agent))
+
+    async def check_later(self, agent: str):
+        while not self.stopping and self.check_unrun(agent) and self.check_wanted(agent):
+            await asyncio.sleep(max(0.0, self.check_due(agent) - time.monotonic()))
+            if self.stopping or not self.check_unrun(agent) or not self.check_wanted(agent):
+                return
+            if time.monotonic() < self.check_due(agent):
+                continue  # Tried meanwhile (a worker's start, a role's).
+            tried = self.agent_checked_at.get(agent)
+            try:
+                await self.check_again(agent)
+            except Exception:
+                logger.warning("Checking %s again failed.", agent, exc_info=True)
+            if self.agent_checked_at.get(agent) == tried:
+                self.check_tried(agent)  # Not tried (it can't start now): later.
+
+    def check_tried(self, agent: str):
+        self.agent_checked_at[agent] = time.monotonic()
+        self.check_tries[agent] = self.check_tries.get(agent, 0) + 1
+
+    async def check_again(self, agent: str) -> str:
+        """An agent's check that could not run, tried again (when due: recheck_agent), its
+        agent started for it first (where it does not run, its start checks it): why it could
+        not start, else ""."""
+        entry = self.agents.get(agent)
+        if entry is None or not entry.enabled() or sys.platform == "win32":
+            return ""
+        try:
+            await self.connect_agent(agent)
+        except Exception as exc:
+            self.check_tried(agent)
+            return self.agent_start_failed(agent, exc)
+        self.agent_failed.pop(agent, None)
+        await self.recheck_agent(agent)
+        return ""
+
+    async def check_passed(self, agent: str):
+        """An agent's check that could not run has: the work held for it goes on (resume_held,
+        once), and a role of Chief of Staff's put on it moves there (place_role: at once at
+        rest, else at its turn's end)."""
+        await self.agent_back(agent, frozenset({agents.UNCHECKED}))
 
     async def disconnect_agent(self, agent: str):
         """As disconnect, for another agent's backend: only its own sessions' handles and turns
@@ -1674,8 +1779,9 @@ class Runtime:
             return ""
         return self.blocked_on(agent, row)
 
-    def blocked_on(self, agent: str, row: dict) -> str:
-        """Why this worker (or one about to be made) may not run on that agent now."""
+    def blocked_on(self, agent: str, row: dict, rechecked: bool = False) -> str:
+        """Why this worker (or one about to be made) may not run on that agent now; `rechecked`:
+        but for its check that could not run (tried again first)."""
         name = agents.display(agent)
         if sys.platform == "win32":
             return self.not_on_windows(agent)
@@ -1686,12 +1792,13 @@ class Runtime:
             return self.turned_off(agent)
         role = self.role_key(row)
         if role in PLACED_ROLES or role == SLACK:
-            return self.role_block(role, agent)
-        if role and (why := self.role_block(role, agent)):
+            return self.role_block(role, agent, rechecked)
+        if role and (why := self.role_block(role, agent, rechecked)):
             return why
         if (row["role"] != WORKER or self.special(row)) and not role:
             return f"Only your own workers run on {name}."
-        refused = self.agent_refused(agent)
+        unrun = rechecked and self.check_unrun(agent)
+        refused = {"sandbox": ""} if unrun else self.agent_refused(agent)
         sandbox = refused.get("sandbox", SANDBOX_UNPROVEN)
         if row["slack"]:
             # The same guarantees as a Copilot worker that reads Slack: its commands sandboxed
@@ -1768,9 +1875,9 @@ class Runtime:
             return {}
         return held if isinstance(held, dict) else {}
 
-    def role_block(self, role: str, agent: str) -> str:
+    def role_block(self, role: str, agent: str, rechecked: bool = False) -> str:
         """Why a role can't run on that agent now ("" when it can, as far as is known before it
-        starts there)."""
+        starts there); `rechecked`: but for its check that could not run (tried again first)."""
         if agent == COPILOT_AGENT:
             return ""
         name = agents.display(agent)
@@ -1787,15 +1894,19 @@ class Runtime:
             return f"{name} stopped and could not start again."
         if (why := self.agent_failed.get(agent)) and not (entry.backend and entry.backend.alive()):
             return why
-        refused = self.agent_refused(agent)
-        if (
-            (why := refused.get("acting"))
-            and callable(limited := getattr(entry.backend, "limit_refusal", None))
-            and why == limited()
-        ):
-            why = agents.limit_line(getattr(entry.backend, "limit", {}), name=agent)
-        if why := why or refused.get("ask_first"):
-            return why
+        if unrun := self.check_unrun(agent):
+            if not rechecked:
+                return f"{unrun}. It's tried again by itself."
+        else:
+            refused = self.agent_refused(agent)
+            if (
+                (why := refused.get("acting"))
+                and callable(limited := getattr(entry.backend, "limit_refusal", None))
+                and why == limited()
+            ):
+                why = agents.limit_line(getattr(entry.backend, "limit", {}), name=agent)
+            if why := why or refused.get("ask_first"):
+                return why
         held = self.role_held(role)
         if held.get("agent") == agent and time.time() < float(held.get("until") or 0):
             return str(held.get("why") or f"{name} could not run it.")
@@ -1905,6 +2016,8 @@ class Runtime:
             needs = f"{name} needs you to sign in"
         elif found["status"] == agents.MISSING:
             needs = f"{name} isn't installed"
+        elif found["status"] == agents.UNCHECKED:
+            needs = f"{self.check_unrun(wanted)}; it's tried again by itself"
         else:
             needs = f"{name} can't run it: {plain_why(why)}"
         card = self.add_message(
@@ -1950,7 +2063,16 @@ class Runtime:
 
     async def role_start(self, role: str) -> tuple[str, str]:
         """Where a role runs now (role_target), its agent started (one that can't start leaves
-        it on Copilot, with why), and why it is on Copilot kept for Settings' line."""
+        it on Copilot, with why), and why it is on Copilot kept for Settings' line. Its agent's
+        check that could not run is tried again first (when due: never final)."""
+        wanted = agents.role_agent(self.store, role) if self.agents else COPILOT_AGENT
+        if (
+            wanted != COPILOT_AGENT
+            and self.check_unrun(wanted)
+            and not self.role_block(role, wanted, rechecked=True)
+            and (failed := await self.check_again(wanted))
+        ):
+            self.hold_role(role, wanted, failed)
         target, why = self.role_target(role)
         if target != COPILOT_AGENT:
             try:
@@ -1966,6 +2088,7 @@ class Runtime:
                     target = COPILOT_AGENT
         if why:
             self.store.set(f"rolefallback:{role}", why)
+            self.arm_check(wanted)
         elif self.store.get(f"rolefallback:{role}") is not None:
             self.store.delete(f"rolefallback:{role}")
         return target, why
@@ -2204,7 +2327,9 @@ class Runtime:
             # Signed out (in a terminal, a turn that lost it) while its process runs: held.
             how = "run" if chosen in self.lost_sign_in else "start"
             why = f"{agents.display(chosen)} could not {how}: {said}"
-        elif not (why := self.limit_held(chosen)) and not (why := self.blocked_on(chosen, row)):
+        elif not (why := self.limit_held(chosen)) and not (
+            why := self.blocked_on(chosen, row, rechecked=True)
+        ):
             try:
                 await self.connect_agent(chosen)
                 await self.recheck_agent(chosen)
@@ -2460,9 +2585,10 @@ class Runtime:
         chosen = agents.roles(self.store)
         for role, agent in chosen.items():
             if agent != self.roles_seen.get(role, COPILOT_AGENT):
-                # The owner's choice: tried now, whatever failed it before.
+                # The owner's choice: tried now, whatever failed it before (its check too).
                 self.store.delete(f"roleheld:{role}")
                 self.agent_failed.pop(agent, None)
+                self.agent_checked_at.pop(agent, None)
         self.roles_seen = chosen
         if was_on != now or (chose is not None and chose != agents.router_chooses(self.store)):
             await self.refresh(ROUTER)  # Its spawn_worker and prompt name the agents on.
@@ -4166,6 +4292,10 @@ class Runtime:
                 agents.SIGN_IN: (f"{name} needs you to sign in", "once you have"),
                 agents.MISSING: (f"{name} isn't installed", "once it is"),
                 agents.LIMITED: (why, "once it resets"),
+                agents.UNCHECKED: (
+                    f"{self.check_unrun(agent) or why}; it's tried again by itself",
+                    "once it has run",
+                ),
             }[found["status"]]
             goes = f"gets it on {name}" if worker else f"starts on {name}"
             line = f"{needs}. Your message is saved: “{title}” {goes} {once}."
@@ -4192,6 +4322,8 @@ class Runtime:
         )
         record["card"] = message["id"]
         self.store.set(f"agentrefusal:{key}", json.dumps(record))
+        if found["status"] == agents.UNCHECKED:
+            self.arm_check(agent)
 
     def refusal_said(self, found: dict, change: dict):
         """A refusal's card as it stands now (resuming, resumed, answered): its meta changed,
@@ -4296,6 +4428,7 @@ class Runtime:
         once = {
             agents.SIGN_IN: "once you signed in",
             agents.LIMITED: "once its limit reset",
+            agents.UNCHECKED: "once Chief of Staff's check of it ran",
         }.get(found.get("status", ""), "once installed")
         did = f"Gave “{title}” your message" if found.get("worker") else f"Started “{title}”"
         self.handled.record(
@@ -5426,10 +5559,11 @@ class Runtime:
         self.agent_down(agent)
         self.publish_state()
 
-    async def agent_back(self, name: str):
-        """An agent that could not run can now (signed in, installed): the work it held goes
-        on (resume_held), and a role of Chief of Staff's put on it moves back there at once."""
-        await self.resume_held(name)
+    async def agent_back(self, name: str, held: frozenset[str] = agents.HELD):
+        """An agent that could not run can now (signed in, installed; `held`: why the work it
+        held waited): that work goes on (resume_held), and a role of Chief of Staff's put on it
+        moves back there at once."""
+        await self.resume_held(name, held)
         if not self.agents:
             return
         for role in PLACED_ROLES:

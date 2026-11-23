@@ -357,7 +357,10 @@ HELD = frozenset({SIGN_IN, MISSING})
 # An agent whose plan's limit is used up until a time it said: work for it is held too, and goes
 # on by itself once that limit resets (Runtime.limit_reset).
 LIMITED = "limited"
-WAITS = HELD | {LIMITED}
+# One whose check by Chief of Staff could not run (its machine busy, say): work for it is held
+# too, and goes on by itself once that check, tried again by itself, has run (Runtime.check_later).
+UNCHECKED = "unchecked"
+WAITS = HELD | {LIMITED, UNCHECKED}
 STATUS_WORDS = {
     READY: "Ready",
     SIGN_IN: "Sign-in needed",
@@ -372,6 +375,11 @@ NEEDS_SIGN_IN = re.compile(
 )
 # How limit_line says a limit holds an agent's work (status_of: LIMITED).
 LIMIT_SAID = re.compile(r"limit is used up|refusing requests for a rate limit")
+# What a check that could not run says (claude_check.check, CodexBackend.check): the reason, and
+# what it holds meanwhile after it.
+CHECK_UNRUN = re.compile(
+    r"(Chief of Staff's check of .+? could not (?:run|finish) \(.*\))(?:[:.]|$)"
+)
 
 
 # A key in the environment Chief of Staff started in, which an agent's workers use over its
@@ -397,7 +405,10 @@ def pays(name: str, account: str, key_env: str = "") -> str:
 
 def status_of(name: str, why: str) -> dict[str, Any]:
     """An agent that cannot run, by why (its glance's or its start's words): its sign-in
-    needed (and the command for it), not installed, or another problem, said as it is."""
+    needed (and the command for it), not installed, its check by Chief of Staff not run yet, or
+    another problem, said as it is."""
+    if CHECK_UNRUN.search(why):
+        return {"status": UNCHECKED, "said": why}
     if NEEDS_SIGN_IN.search(why):
         return {"status": SIGN_IN, "said": STATUS_WORDS[SIGN_IN], "fix": SIGN_IN_FIX[name]}
     if re.search(r"not found|not installed", why, re.IGNORECASE):

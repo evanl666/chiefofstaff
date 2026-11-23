@@ -27,6 +27,16 @@ itself.
   and the chip; it goes on by itself then, once, and work you name the agent for meanwhile is saved
   and starts there after the reset, both under *Handled for you*. *Continue with Copilot* moves
   either over now. Where the agent didn't say when (Claude, at times), it says so plainly.
+- **The Router goes to Claude or Codex by itself once Chief of Staff's check of it has run.**
+  Chief of Staff checks each new version of an agent before its workers run on it. When that
+  check could not finish (a step took too long on a machine busy with other work), the Router
+  and the Watchdog put on that agent stayed on Copilot until a restart, sometimes longer. Now a
+  step that runs over is run again once, the check is tried again by itself (after 1, 2, 5, 10
+  and 30 minutes, and whenever a role or a worker wants that agent), and once it has run the
+  Router moves there by itself. Settings says why meanwhile ("On Copilot for now: Chief of
+  Staff's check of Claude Code 2.1.322 could not finish (step 'background' took too long). It's
+  tried again by itself."), and a task you put on that agent meanwhile is saved and starts there
+  by itself once the check has run, under *Handled for you*.
 - **With the sandbox off, a worker on any agent can delete files you can.** Its commands run as
   you; the guide now says so plainly, and that turning the sandbox on prevents it.
 - **Teams: one thread for what workers that work together say (E129, E130).** Each team has a

@@ -1452,7 +1452,9 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   waits.
 - **Ask first:** every command, edit and MCP call asks Chief of Staff, which answers as for a
   Copilot worker, on the versions its check showed doing so (Codex before 0.168; Claude from
-  2.1.322, each version checked on this machine, without a model, before its first worker).
+  2.1.322, each version checked on this machine, without a model, before its first worker). A
+  check that could not finish (a machine busy with other work) is tried again by itself, and
+  whenever a worker or the Router wants that agent; what waits for it goes on once it has run.
   Codex: ChatGPT's apps and its subagents are off for such a worker, and your own Codex rules and
   `PermissionRequest` hooks can allow what those checks would refuse. Claude: your own Claude
   hooks are off for such a worker (one could approve what Chief of Staff refused); its name's

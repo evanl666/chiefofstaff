@@ -44,11 +44,19 @@ P6  Codex signed out, work for a Codex worker the owner has (P1's): the same car
     worker (it gets it once signed in), nothing started elsewhere; Continue with Copilot goes on
     with its work there, with what it was given, and answers
 
-    env LIVE_AGENTS_ROOT=<tree>/.cos-live \
-        uv run --extra claude --with playwright python scripts/live_roles.py R|S|W|F [R1 R3 …]
+Shard C, the Router on Claude once Chief of Staff's check of it has run (a `claude` on the
+shard's PATH that is the owner's own, whose workers' processes, the check's too, fail at once
+while a flag file exists):
+C1  put on Claude while its check could not run: the Router stays on Copilot, its line says
+    why and that the check is tried again by itself, and answers there; the flag gone, the
+    check is tried again by itself and the Router moves to Claude without anything asked, and
+    answers there
 
-(no shard: R, S, W, F and P, one after another; once Claude stops one, no Claude shard runs).
-For one budget across suites, give each the same LIVE_CLAUDE_SPENT file. Ports 20500-20514.
+    env LIVE_AGENTS_ROOT=<tree>/.cos-live \
+        uv run --extra claude --with playwright python scripts/live_roles.py R|S|W|F|P|C [R1 R3 …]
+
+(no shard: R, S, W, F, P and C, one after another; once Claude stops one, no Claude shard runs).
+For one budget across suites, give each the same LIVE_CLAUDE_SPENT file. Ports 20500-20515.
 """
 
 import asyncio
@@ -74,9 +82,11 @@ SHARDS = {
     "W": (20502, 20512),
     "F": (20503, 20513),
     "P": (20504, 20514),
+    "C": (20505, 20515),
 }
-CLAUDE_SHARDS = {"S", "W"}
+CLAUDE_SHARDS = {"S", "W", "C"}
 CODEX = shutil.which("codex") or "codex"
+CLAUDE = shutil.which("claude") or "claude"
 NOTICE_ON = "The {label} runs on {agent} now, with a summary of what it knew."
 
 
@@ -340,6 +350,63 @@ async def f2_back_by_itself(ctx: Ctx):
     assert ctx.agent_tokens(view["id"]) > 0, "that turn ran on Codex"
 
 
+# Shard C: the Router on Claude once its check, which could not run, has
+
+
+def claude_wrapper(root: Path) -> tuple[Path, Path]:
+    """A `claude` that is the owner's own, whose workers' processes (the check's too) fail at
+    once while the flag exists: its folder for the PATH, and the flag."""
+    folder, flag = root / "claude-path", root / "check-fails.flag"
+    folder.mkdir()
+    script = folder / "claude"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'if [ -e "{flag}" ]; then\n'
+        '  case " $* " in *" --input-format "*)\n'
+        '    echo "live_roles C: this process fails while the flag exists" >&2; exit 1;;\n'
+        "  esac\n"
+        "fi\n"
+        f'exec "{CLAUDE}" "$@"\n'
+    )
+    script.chmod(0o755)
+    flag.touch()
+    return folder, flag
+
+
+async def c1_check_tried_again(ctx: Ctx):
+    mark = await router_mark(ctx)
+    await put(ctx, "router", "claude")
+    start = "The Router runs on Copilot for now: Chief of Staff's check of Claude Code "
+
+    async def said_why():
+        found = await la.notices(ctx, (await la.state(ctx))["router_id"], mark)
+        return next((n for n in found if n.startswith(start)), None)
+
+    line = await wait_for("the line saying why", said_why, 300, ctx.app)
+    log(f"C1: {line!r}")
+    assert line.endswith(". It's tried again by itself."), line
+    assert not (await router_view(ctx)).get("agent"), "on Copilot meanwhile"
+    looked = await ctx.app.get("/api/agents")
+    router = next(role for role in looked["roles"] if role["role"] == "router")
+    assert router["chosen"] == "claude", router
+    assert router["line"] == f"On Copilot for now: {line.split(': ', 1)[1]}", router["line"]
+    said = await ask(ctx, "What is 2 plus 3? One number.")
+    assert "5" in said, said
+    mark = await router_mark(ctx)
+    ctx.notes["flag"].unlink()
+    started = time.monotonic()
+    await notice_since(ctx, mark, NOTICE_ON.format(label="Router", agent="Claude"), 600)
+    log(f"C1: on Claude by itself {time.monotonic() - started:.0f}s after the flag went")
+    view = await router_view(ctx)
+    assert view.get("agent") == "claude", view.get("agent")
+    looked = await ctx.app.get("/api/agents")
+    router = next(role for role in looked["roles"] if role["role"] == "router")
+    assert router["line"] == "", router["line"]
+    said = await ask(ctx, "What is 6 plus 7? One number.")
+    assert "13" in said, said
+    assert ctx.agent_tokens(view["id"]) > 0, "that turn ran on Claude"
+
+
 # Shard P: the agent picker
 
 
@@ -593,6 +660,7 @@ SCENARIOS: dict[str, list] = {
         p5_named_not_ready,
         p6_worker_signed_out,
     ],
+    "C": [c1_check_tried_again],
 }
 
 
@@ -642,11 +710,14 @@ async def run_shard(
         env["PATH"] = f"{folder}:{os.environ.get('PATH', '')}"
         if shard == "P":
             flag.unlink()  # Signed in, until P5 and P6.
+    if shard == "C":
+        folder, flag = claude_wrapper(root)
+        env["PATH"] = f"{folder}:{os.environ.get('PATH', '')}"
     app = App(root / "data", root / "log", env, agents=True)
     await app.start()
     ctx = Ctx(shard, app, root, home, project, truth)
     ctx.agent, ctx.base_env = agent, env
-    if shard in {"F", "P"}:
+    if shard in {"F", "P", "C"}:
         ctx.notes["flag"] = flag
     results, stopped = [], ""
     try:

@@ -1565,7 +1565,32 @@ class CodexBackend:
         command, calls an MCP tool, adds two files and moves one. Each must reach Chief of
         Staff, which refuses each (an edit at its last file, so every file of it is asked
         about); nothing refused may happen. `ran`: False when the check itself could not run
-        (then it is not remembered)."""
+        (then it is not remembered, and `unrun` says why): a step that ran over its time (a
+        machine busy with other work) is run again once first."""
+        said = f"Chief of Staff's check of Codex {self.cli_version}"
+        why = ""
+        for _ in range(2):
+            step = ["start"]
+            try:
+                return await self.check_once(folder, step)
+            except TimeoutError:
+                why = f"{said} could not finish (step '{step[0]}' took too long)"
+            except Exception as exc:  # Whatever stops the check, it says why.
+                why = f"{said} could not run ({(str(exc) or type(exc).__name__)[:200]})"
+                break
+        return {
+            "ran": False,
+            "unrun": why,
+            "ask_first": f"{why}: workers that ask first do not run on it until it does.",
+            # A version newer than those tested runs no worker until its check has run.
+            "acting": ""
+            if ask_first_tested(self.cli_version)
+            else f"{why}: no worker runs on this newer version until it does.",
+        }
+
+    async def check_once(self, folder: Path, step: list[str]) -> dict:
+        """One run of the check (check): raises when it could not run (TimeoutError: the step
+        `step[0]` ran over its time)."""
         work = folder / "work"
         asked: list[str] = []
         model = other = None
@@ -1586,7 +1611,7 @@ class CodexBackend:
             other.folder = folder
             other.arguments += model.arguments(folder)
             other.needs_sign_in = False
-            await asyncio.wait_for(self.checking(other, work, asked), CHECK_TIMEOUT)
+            await asyncio.wait_for(self.checking(other, work, asked, step), CHECK_TIMEOUT)
             happened = [
                 name
                 for name in (
@@ -1597,19 +1622,6 @@ class CodexBackend:
                 )
                 if (work / name).exists()
             ]
-        except Exception as exc:  # Whatever stops the check, it says why.
-            why = (
-                f"Chief of Staff's check of Codex {self.cli_version} could not run ("
-                + ((str(exc) or type(exc).__name__)[:200])
-            )
-            return {
-                "ran": False,
-                "ask_first": f"{why}): workers that ask first do not run on it until it does.",
-                # A version newer than those tested runs no worker until its check has run.
-                "acting": ""
-                if ask_first_tested(self.cli_version)
-                else f"{why}): no worker runs on this newer version until it does.",
-            }
         finally:
             if other:
                 await other.stop()
@@ -1653,8 +1665,13 @@ class CodexBackend:
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return []
 
-    async def checking(self, other: CodexBackend, work: Path, asked: list[str]):
+    async def checking(
+        self, other: CodexBackend, work: Path, asked: list[str], step: list[str] | None = None
+    ):
+        step = step if step is not None else ["start"]
+        step[0] = "start"
         await other.start()
+        step[0] = "thread"
         ended = asyncio.Event()
 
         def check(request: Any, invocation: dict) -> Any:
@@ -1705,6 +1722,7 @@ class CodexBackend:
                 ended.set()
 
         session.on(on_event)
+        step[0] = "turn"
         await session.send(codex_check.PROMPT.format(work=work))
         await ended.wait()
         if failed or not said or said[-1] != codex_check.REPLY:

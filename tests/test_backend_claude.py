@@ -1381,6 +1381,55 @@ async def test_the_check_of_a_claude_that_keeps_the_contract_finds_nothing(
     assert not (tmp_path / "check").exists(), "its folder goes"
 
 
+async def test_a_step_of_the_check_that_ran_over_its_time_runs_again_once(
+    agent, tmp_path, monkeypatch, check_sees
+):
+    """A machine busy with other work: one step of the check that ran over its time runs the
+    whole check again, once; it is said to have run only when it did."""
+    from chiefofstaff import claude_check
+
+    waited = claude_check.until
+    late = [True]
+
+    async def until(check, seconds=None):
+        if late[0]:
+            late[0] = False
+            raise TimeoutError("a step of the check did not happen in time")
+        await waited(check, seconds)
+
+    monkeypatch.setattr(claude_check, "until", until)
+    found = await agent.check(tmp_path / "check")
+    assert found["ran"] is True and found["acting"] == found["ask_first"] == ""
+    assert not late[0]
+
+
+async def test_a_check_whose_step_keeps_running_over_says_which_and_holds_ask_first(
+    agent, tmp_path, monkeypatch, check_sees
+):
+    from chiefofstaff import claude_check
+
+    tries = [0]
+
+    async def until(check, seconds=None):
+        tries[0] += 1
+        raise TimeoutError("a step of the check did not happen in time")
+
+    monkeypatch.setattr(claude_check, "until", until)
+    found = await agent.check(tmp_path / "check")
+    assert tries[0] == 2, "run again once"
+    late = (
+        f"Chief of Staff's check of Claude Code {agent.cli_version} could not finish (step "
+        "'steer' took too long)"
+    )
+    assert found == {
+        "ran": False,
+        "unrun": late,
+        "ask_first": f"{late}: workers that ask first do not run on it until it does.",
+        "acting": "",
+    }
+    assert not (tmp_path / "check").exists(), "its folder goes"
+
+
 @pytest.mark.parametrize(
     ("unasked", "acting", "ask_first"),
     [

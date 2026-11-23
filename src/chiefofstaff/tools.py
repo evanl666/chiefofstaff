@@ -1830,6 +1830,9 @@ class Tools:
                         f"it starts there by itself once its limit resets; or run it on "
                         f"{instead} instead"
                         if status == agents.LIMITED
+                        else f"it starts there by itself once Chief of Staff's check of it has "
+                        f"run; or run it on {instead} instead"
+                        if status == agents.UNCHECKED
                         else f"sign in or install it, and it starts there by itself; or run it on "
                         f"{instead} instead"
                         if status in agents.HELD
@@ -2394,6 +2397,9 @@ class Tools:
                 f"it gets this by itself once its limit resets; or continue its work on "
                 f"{instead}, with this"
                 if status == agents.LIMITED
+                else f"it gets this by itself once Chief of Staff's check of it has run; or "
+                f"continue its work on {instead}, with this"
+                if status == agents.UNCHECKED
                 else f"sign in, and it gets this by itself; or continue its work on {instead}, "
                 "with this"
                 if status in agents.HELD

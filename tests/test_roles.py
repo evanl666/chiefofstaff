@@ -398,6 +398,139 @@ async def test_the_router_on_another_agent_is_given_its_whole_role(
         await runtime.stop()
 
 
+# A check of Chief of Staff's that could not run (a machine busy with other work): never final
+
+LATE = (
+    "Chief of Staff's check of Claude Code 2.1.322 could not finish (step 'background' took too "
+    "long)"
+)
+
+
+def late_once(monkeypatch) -> list[int]:
+    """Claude's check, which could not finish its first run (a step ran over its time, twice),
+    then keeps the contract; how many times it ran."""
+    ran = [0]
+
+    async def check(self, folder):
+        ran[0] += 1
+        if ran[0] == 1:
+            return {
+                "ran": False,
+                "unrun": LATE,
+                "ask_first": f"{LATE}: workers that ask first do not run on it until it does.",
+                "acting": "",
+            }
+        return dict(PASSED)
+
+    monkeypatch.setattr(backend_claude.ClaudeAgent, "check", check)
+    return ran
+
+
+async def test_a_check_that_could_not_run_is_tried_again_and_the_router_moves_by_itself(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """The owner put the Router on Claude while their machine was busy: Chief of Staff's check
+    of it could not finish. The Router goes on on Copilot, Settings saying why as a role's line
+    says it, and the check is tried again by itself (never final): once it runs, the Router
+    moves to Claude, without the owner doing anything."""
+    monkeypatch.setattr(runtime_module, "CHECK_AGAIN", (0.5,) * 5, raising=False)
+    ran = late_once(monkeypatch)
+    harness, runtime = await started(tmp_path)
+    router = harness.router_id
+    try:
+        await saved(runtime, {"claude": {"enabled": True}, "roles": {"router": "claude"}})
+        assert runtime.agent(router) == "copilot"
+        assert (
+            runtime.role_line(ROUTER) == f"On Copilot for now: {LATE}. It's tried again by itself."
+        )
+        assert notices(harness, router) == [
+            f"The Router runs on Copilot for now: {LATE}. It's tried again by itself."
+        ]
+        moved = "The Router runs on Claude now, with a summary of what it knew."
+        await until(lambda: notices(harness, router)[-1] == moved, 15)
+        assert runtime.agent(router) == "claude"
+        assert ran[0] == 2, "tried again once, by itself"
+        assert runtime.role_line(ROUTER) == ""
+        assert harness.store.get(f"rolefallback:{ROUTER}") is None
+    finally:
+        await runtime.stop()
+
+
+async def test_after_a_restart_a_check_that_could_not_run_is_tried_again(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """What 0.1.53 kept of a check that could not run (its words only), the Router on Copilot
+    since: started again, Chief of Staff tries the check again and puts the Router on Claude."""
+    late_once(monkeypatch)
+    harness, runtime = await started(tmp_path)
+    router = harness.router_id
+    try:
+        await saved(runtime, {"claude": {"enabled": True}, "roles": {"router": "claude"}})
+        assert runtime.agent(router) == "copilot"
+    finally:
+        await runtime.stop()
+    refused = json.loads(harness.store.get("agentrefused:claude"))
+    said = (
+        "Chief of Staff's check of Claude Code 2.1.322 could not run (a step of the check did not "
+        "happen in time): workers that ask first do not run on it until it does."
+    )
+    harness.store.set(
+        "agentrefused:claude",
+        json.dumps({k: v for k, v in refused.items() if k not in {"ran", "unrun"}}
+                   | {"ask_first": said}),
+    )  # fmt: skip
+    again = Harness(harness.store.directory, client=harness.client)
+    runtime = await again.connect()
+    try:
+        moved = "The Router runs on Claude now, with a summary of what it knew."
+        await until(lambda: notices(harness, router)[-1] == moved, 15)
+        assert harness.store.get(f"rolefallback:{ROUTER}") is None
+    finally:
+        await runtime.stop()
+
+
+async def test_putting_the_router_on_claude_again_tries_its_check_at_once(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """The owner's choice in Settings is tried at once, its check that could not run too (not
+    a minute after the last try)."""
+    ran = late_once(monkeypatch)
+    harness, runtime = await started(tmp_path)
+    router = harness.router_id
+    try:
+        await saved(runtime, {"claude": {"enabled": True}, "roles": {"router": "claude"}})
+        assert runtime.agent(router) == "copilot" and ran[0] == 1
+        await saved(runtime, {"roles": {"router": "copilot"}})
+        await saved(runtime, {"roles": {"router": "claude"}})
+        assert ran[0] == 2
+        await until(lambda: runtime.agent(router) == "claude")
+    finally:
+        await runtime.stop()
+
+
+async def test_a_worker_that_asks_first_tries_a_check_that_could_not_run_again(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """A worker of the owner's that asks first, on a Claude whose check could not run: its
+    start tries the check again (a minute after the last at the earliest), and runs once it
+    has."""
+    monkeypatch.setattr(runtime_module, "CHECK_AGAIN", (0.2,) * 5, raising=False)
+    ran = late_once(monkeypatch)
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        await runtime.connect_agent("claude")
+        row = harness.store.create_session("w1", WORKER, "Fix", str(tmp_path))
+        runtime.set_agent("w1", "claude")
+        row = {**harness.store.session("w1"), "yolo": "off"}
+        assert runtime.agent_block(row).startswith(f"{LATE}: workers that ask first")
+        await asyncio.sleep(0.3)
+        await runtime.agent_ready("claude", row)
+        assert ran[0] == 2 and runtime.agent_block(row) == ""
+    finally:
+        await runtime.stop()
+
+
 # The Watchdog
 
 

@@ -385,6 +385,64 @@ async def test_work_held_for_a_sign_in_starts_by_itself_once_signed_in_and_only_
         await runtime.stop()
 
 
+async def test_work_held_for_a_check_that_could_not_run_goes_on_once_it_has(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """Work named for Codex while Chief of Staff's check of it could not run (a machine busy
+    with other work) is held, not refused: its card says so, and that the check is tried again
+    by itself; once it has run, the work goes on there, once, under Handled for you."""
+    from chiefofstaff import backend_codex
+    from chiefofstaff.models import Settings
+
+    late = "Chief of Staff's check of Codex 0.167.2 could not finish (step 'turn' took too long)"
+    checks = [0]
+    original = backend_codex.CodexAgent.check
+
+    async def check(self, folder):
+        checks[0] += 1
+        if checks[0] == 1:
+            return {
+                "ran": False,
+                "unrun": late,
+                "ask_first": f"{late}: workers that ask first do not run on it until it does.",
+                "acting": "",
+            }
+        return await original(self, folder)
+
+    monkeypatch.setattr(backend_codex.CodexAgent, "check", check)
+    monkeypatch.setattr(runtime_module, "CHECK_AGAIN", (1.0,) * 5, raising=False)
+    harness, runtime = await started(tmp_path, Settings(worker_yolo=False))
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        await runtime.connect_agent("codex")
+        refused = await spawn_on(harness, runtime, title="Count the rows · data",
+                                 instructions="Report done: 42 rows.", agent="codex")  # fmt: skip
+        assert "once Chief of Staff's check of it has run" in refused.text_result_for_llm
+        (card,) = [
+            m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
+        ]
+        assert card["text"] == (
+            f"{late}; it's tried again by itself. Your message is saved: “Count the rows · data” "
+            "starts on Codex once it has run."
+        )
+        assert card["meta"]["status"] == agents.UNCHECKED
+        assert harness.store.open_sessions(WORKER) == [], "held, nothing started"
+        await until(lambda: harness.store.open_sessions(WORKER), 15)
+        (worker,) = harness.store.open_sessions(WORKER)
+        assert runtime.agent(worker["id"]) == "codex" and checks[0] == 2
+        meta = harness.store.message(card["id"])["meta"]
+        assert meta["resumed"] == "Resumed once Chief of Staff's check of it ran"
+        await until(lambda: harness.store.all("SELECT id FROM handled"))
+        (handled,) = harness.store.all("SELECT kind, text FROM handled")
+        assert handled["text"] == (
+            "Started “Count the rows · data” on Codex once Chief of Staff's check of it ran"
+        )
+        await asyncio.sleep(1.5)
+        assert len(harness.store.open_sessions(WORKER)) == 1, "once"
+    finally:
+        await runtime.stop()
+
+
 async def test_cancel_while_resuming_keeps_it_for_the_owner_to_start(
     tmp_path, codex_installed, monkeypatch, quick
 ):

@@ -105,7 +105,13 @@ CLAUDE_USES = {
     "system/task_notification": ("task_id", "status", "summary"),
     "result": ("modelUsage", "usage", "is_error"),
 }
-CHECK_SECONDS = 180.0
+CHECK_SECONDS = 240.0
+# How long one step of the check may take to happen (a command running, its end reaching the
+# gate), and a turn to end: more than a step needs, also on a machine busy with other work. A
+# step that ran over runs again once, the whole check afresh, before the check says it could not
+# finish (the runtime tries it again later: it is never final).
+STEP_SECONDS = 60.0
+TURN_SECONDS = 90.0
 
 
 class Messages(ThreadingHTTPServer):
@@ -431,6 +437,8 @@ class Facts:
         self.offered: list[str] = []
         self.sandbox = "not checked"
         self.agents: list[str] = []
+        # The step the check is at (the one named when it runs over its time).
+        self.step = "start"
 
     def saw(self, kind: str, message: dict, *paths: str):
         """Which of the fields Chief of Staff reads this message had."""
@@ -507,10 +515,36 @@ async def check(agent: ClaudeAgent, folder: Path) -> dict:
     note into a turn; leave a command running whose end must reach the gate before any model
     request (blocked, it costs none); are stopped during a command, which must end; and resume,
     whose restored totals its next turn must count on. `ran`: False when the check itself could
-    not run (then it is not remembered)."""
+    not run (then it is not remembered, and `unrun` says why): a step that ran over its time is
+    run again once first."""
+    said = f"Chief of Staff's check of Claude Code {agent.cli_version}"
+    why = ""
+    for _ in range(2):
+        facts = Facts()
+        try:
+            return await check_once(agent, folder, facts)
+        except TimeoutError:
+            why = f"{said} could not finish (step '{facts.step}' took too long)"
+        except Exception as exc:  # Whatever stops the check, it says why.
+            why = f"{said} could not run ({(str(exc) or type(exc).__name__)[:200]})"
+            break
+    from .backend_claude import ask_first_tested
+
+    return {
+        "ran": False,
+        "unrun": why,
+        "ask_first": f"{why}: workers that ask first do not run on it until it does.",
+        "acting": ""
+        if ask_first_tested(agent.cli_version)
+        else f"{why}: no worker runs on this newer version until it does.",
+    }
+
+
+async def check_once(agent: ClaudeAgent, folder: Path, facts: Facts) -> dict:
+    """One run of the check (check): raises when it could not run (TimeoutError: the step
+    `facts.step` ran over its time)."""
     from .backend_claude import ClaudeAgent, ClaudeWorker, write_launcher
 
-    facts = Facts()
     work = folder / "work"
     messages = catcher = None
     checker = ClaudeAgent(agent.command, folder)
@@ -548,21 +582,8 @@ async def check(agent: ClaudeAgent, folder: Path) -> dict:
         offered = messages.requests[0]["tools"] if messages.requests else []
         facts.offered = sorted({*offered})
         reached = list(catcher.seen)
+        facts.step = "sandbox"
         facts.sandbox = await sandboxed(checker, launcher, work, facts, catcher)
-    except Exception as exc:  # Whatever stops the check, it says why.
-        why = (
-            f"Chief of Staff's check of Claude Code {agent.cli_version} could not run ("
-            + ((str(exc) or type(exc).__name__)[:200])
-        )
-        from .backend_claude import ask_first_tested
-
-        return {
-            "ran": False,
-            "ask_first": f"{why}): workers that ask first do not run on it until it does.",
-            "acting": ""
-            if ask_first_tested(agent.cli_version)
-            else f"{why}): no worker runs on this newer version until it does.",
-        }
     finally:
         await checker.stop()
         if messages:
@@ -697,22 +718,26 @@ async def checking(
     session = worker.attach(worker.options)
     turn = Turn(session, facts)
 
+    facts.step = "actions"
     await turn.send(f"{STEP}actions")
     await turn.ended()
+    facts.step = "steer"
     await turn.send(f"{STEP}steer")
-    await until(lambda: bool(worker.running_calls), 30)
+    await until(lambda: bool(worker.running_calls))
     await asyncio.sleep(0.5)
     await session.send(STEER, mode="immediate")
     await turn.ended()
+    facts.step = "background"
     await turn.send(f"{STEP}background")
     await turn.ended()
     # Its command ends, and wakes it: the gate is asked first (and refuses).
-    await until(lambda: facts.gate_seen and not worker.background, 30)
+    await until(lambda: facts.gate_seen and not worker.background)
     await asyncio.sleep(1.5)
     after = messages.turn_requests()
     facts.wakeup_requests = after - facts.wakeup_requests if facts.wakeup_requests >= 0 else -1
+    facts.step = "interrupt"
     await turn.send(f"{STEP}interrupt")
-    await until(lambda: (work / INTERRUPT_PID).exists() and bool(worker.running_calls), 30)
+    await until(lambda: (work / INTERRUPT_PID).exists() and bool(worker.running_calls))
     await asyncio.sleep(0.5)
     facts.interrupt_pid = int((work / INTERRUPT_PID).read_text().strip() or 0)
     await session.abort()
@@ -732,6 +757,7 @@ async def checking(
         checking=True,
     )
     checker.workers["check"] = resumed
+    facts.step = "resume"
     await resumed.open()
     facts.restored = resumed.restored
     session = resumed.attach(resumed.options)
@@ -774,16 +800,16 @@ class Turn:
         self.done.clear()
         await self.session.send(text)
 
-    async def ended(self, seconds: float = 60):
-        await asyncio.wait_for(self.done.wait(), seconds)
+    async def ended(self, seconds: float | None = None):
+        await asyncio.wait_for(self.done.wait(), seconds or TURN_SECONDS)
         self.done.clear()
 
 
-async def until(check: Any, seconds: float):
-    deadline = time.monotonic() + seconds
+async def until(check: Any, seconds: float | None = None):
+    deadline = time.monotonic() + (seconds or STEP_SECONDS)
     while not check():
         if time.monotonic() > deadline:
-            raise RuntimeError("a step of the check did not happen in time")
+            raise TimeoutError("a step of the check did not happen in time")
         await asyncio.sleep(0.05)
 
 

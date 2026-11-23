@@ -2706,6 +2706,41 @@ async def test_a_check_that_could_not_run_holds_only_ask_first_and_runs_again(
         await runtime.stop()
 
 
+@pytest.mark.parametrize("late", [1, 2])
+async def test_a_codex_check_whose_step_ran_over_its_time_runs_again_once(
+    tmp_path, monkeypatch, late
+):
+    """A machine busy with other work: the check's turn that ran over its time runs the whole
+    check again, once; one that ran over twice says which step, and is tried again later."""
+    checking = backend_codex.CodexBackend.checking
+    runs = [0]
+
+    async def slow(self, other, work, asked, step=None):
+        runs[0] += 1
+        if runs[0] <= late:
+            step[0] = "turn"
+            raise TimeoutError
+        return await checking(self, other, work, asked, step)
+
+    monkeypatch.setattr(backend_codex.CodexBackend, "checking", slow)
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        await runtime.connect_agent("codex")
+        found = harness.store.get("agentcheck:codex:0.167.2")
+        assert runs[0] == 2, "run again once"
+        if late == 1:
+            assert json.loads(found or "{}")["ran"] is True
+            return
+        assert found is None, "tried again later"
+        row = harness.store.create_session("w1", WORKER, "Fix", "/tmp")
+        assert runtime.agent_block({**row, "yolo": "off"}) == (
+            "Chief of Staff's check of Codex 0.167.2 could not finish (step 'turn' took too "
+            "long): workers that ask first do not run on it until it does."
+        )
+    finally:
+        await runtime.stop()
+
+
 def protocol_schema(folder: Path, without: tuple[str, str] | None = None) -> Path:
     """A protocol schema with just what Chief of Staff uses of Codex, less `without`
     ((method, field), or (method, "") for the method itself), as generate-json-schema writes."""

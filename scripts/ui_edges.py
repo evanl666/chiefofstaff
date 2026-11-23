@@ -9203,6 +9203,7 @@ async def round_roles(runtime, browser, failures: list[str]):
                 await role_shoot(page, "roles-fallback", scheme)
             finally:
                 os.environ.pop("FAKE_CODEX_SIGNED_OUT", None)
+            await roles_check_unfinished(runtime, page, scheme)
             await agents_saved(runtime, {"codex": {"enabled": False}})
             assert agents.role_agent(runtime.store, "router") == "copilot"
             assert not errors, errors
@@ -9212,6 +9213,42 @@ async def round_roles(runtime, browser, failures: list[str]):
     finally:
         await agents_saved(runtime, {"codex": {"enabled": False}})
         codex_off_path(folder)
+
+
+async def roles_check_unfinished(runtime, page, scheme: str):
+    """Chief of Staff's check of Codex could not finish (a machine busy with other work): the
+    Router on Copilot for now, the line under its choice saying so as a role's line says it,
+    and that the check is tried again by itself."""
+    from chiefofstaff import backend_codex
+
+    late = "Chief of Staff's check of Codex 0.167.2 could not finish (step 'turn' took too long)"
+    checked = backend_codex.CodexAgent.check
+
+    async def unfinished(self, folder):
+        said = f"{late}: workers that ask first do not run on it until it does."
+        return {"ran": False, "unrun": late, "ask_first": said, "acting": ""}
+
+    backend_codex.CodexAgent.check = unfinished  # type: ignore[method-assign]
+    try:
+        await page.keyboard.press("Escape")
+        await agents_saved(runtime, {"codex": {"enabled": False}})
+        for key in runtime.store.items("agentcheck:codex:"):
+            runtime.store.delete(f"agentcheck:codex:{key}")
+        await agents_saved(runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"}})
+        assert runtime.on_copilot(runtime.store.get("router_id"))
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=agents]").click()
+        system = page.locator("#settings-pane .tab[data-tab=agents] #agents-system")
+        if not await system.evaluate("n => n.open"):
+            await system.locator("summary").click()
+        await expect(page.locator("#role-router-line")).to_have_text(
+            f"On Copilot for now: {late}. It's tried again by itself.", timeout=20000
+        )
+        await role_shoot(page, "roles-check-retry", scheme)
+    finally:
+        backend_codex.CodexAgent.check = checked  # type: ignore[method-assign]
+        for waiting in runtime.check_waits.values():
+            waiting.cancel()
 
 
 async def round_picker(runtime, browser, failures: list[str]):
