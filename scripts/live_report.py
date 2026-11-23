@@ -9,14 +9,21 @@ R3. The owner asks a worker a direct question; report(status="answer") reaches H
     leaves the finished task unchanged.
 R4. An older worker answers the owner's direct question with status="progress"; it is forwarded
     as an Answer/Update and leaves the finished task unchanged.
+R5. The owner accepts a result, then asks its worker in its chat for a correction: the corrected
+    result is a line in the Router's chat, once, on its task, and stays there while the worker
+    follows up on the owner's next message (owner report 0.1.53, item 2).
+R6. A worker asks a decision again after the owner answered it (seen_precedents=true): it gets
+    the answer, no new card; asked to reconsider it on new evidence, its card names the earlier
+    decision, and the owner's answer replaces it: one decision in force (item 1).
 
-    uv run python scripts/live_report.py [R1 R2 R3 R4]
+    uv run python scripts/live_report.py [R1 R2 R3 R4 R5 R6]
 
 LIVE_REPORT_PORT sets its port (default 18777; Slack's fake on the port + 50).
 """
 
 import asyncio
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -29,7 +36,7 @@ import live_parity  # noqa: F401  (it sets its own port: this one is set after)
 live_e2e.PORT = int(os.environ.get("LIVE_REPORT_PORT", "18777"))
 live_e2e.SLACK_PORT = live_e2e.PORT + 50
 live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
-from live_e2e import App, cleanup, log, transcript, wait_for  # noqa: E402
+from live_e2e import App, cleanup, data_dir, log, transcript, wait_for  # noqa: E402
 from live_parity import setup  # noqa: E402
 
 MODEL = os.environ.get("REPORT_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-sonnet-5.5"))
@@ -262,11 +269,185 @@ async def r4_progress_answer_compatibility(app: App) -> list[tuple[str, bool, st
     return await reported_answer(app, "progress")
 
 
+async def last_id(app: App, session: str) -> int:
+    return max((m["id"] for m in await app.get(f"/api/sessions/{session}/messages")), default=0)
+
+
+async def r5_a_correction_stays_on_home(app: App) -> list[tuple[str, bool, str]]:
+    mark = await say(
+        app,
+        "Start a new worker (no project): write the number 42 into number.txt in its folder, "
+        "then report done.",
+    )
+    done = await task_of(app, mark, {"review", "done"}, "the number task is reported")
+    worker = done["session_id"]
+    await idle(app, worker, "its first turn ends")
+    await app.post(f"/api/tasks/{done['id']}/accept")
+    router = await router_id(app)
+    router_mark = await last_id(app, router)
+    await app.post(
+        f"/api/sessions/{worker}/messages",
+        {
+            "text": "That number is wrong: number.txt must contain 57. Correct the file, then "
+            "report done with the corrected result."
+        },
+    )
+
+    async def corrected():
+        messages = await app.get(f"/api/sessions/{router}/messages?after={router_mark}")
+        found = [
+            m
+            for m in messages
+            if m["kind"] == "inbound"
+            and m["meta"].get("from") == worker
+            and m["meta"].get("status") in {"done", "answer"}
+            and "57" in m["text"]
+        ]
+        return found or None
+
+    await wait_for("the correction is a line in the Router's chat", corrected, 600, app)
+    await idle(app, worker, "its correction turn ends")
+    lines = await corrected() or []
+    upto = max(m["id"] for m in lines)
+    worker_mark = await last_id(app, worker)
+    await app.post(
+        f"/api/sessions/{worker}/messages",
+        {"text": "One more check on it: run `sleep 15; wc -c number.txt` and tell me the count."},
+    )
+
+    async def following_up():
+        row = await app.get(f"/api/sessions/{worker}")
+        return row["status"] == "working" or None
+
+    await wait_for("its worker follows up", following_up, 300, app)
+    meanwhile = [m for m in await corrected() or [] if m["id"] <= upto]
+    await idle(app, worker, "its follow-up ends")
+    after = [m for m in await corrected() or [] if m["id"] <= upto]
+    said = await app.get(f"/api/sessions/{worker}/messages?after={worker_mark}")
+    tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker]
+    now = await task(app, done["id"])
+    log(f"R5: {[(m['meta']['status'], m['text'][:80]) for m in lines]}; result {now['result']!r}")
+    return [
+        ("R5 the correction is a line in the Router's chat, once", len(lines) == 1,
+         f"{len(lines)} line(s)"),
+        ("R5 it is on its task", bool(lines) and lines[0]["meta"].get("task_id") == done["id"],
+         lines[0]["meta"].get("task_id", "") if lines else ""),
+        ("R5 it is there while its worker follows up, and after", len(meanwhile) == len(after) == 1,
+         f"{len(meanwhile)} then {len(after)}"),
+        ("R5 a correction keeps its task", [t["id"] for t in tasks] == [done["id"]],
+         ", ".join(t["title"] for t in tasks)),
+        ("R5 its worker answered the follow-up", any(m["kind"] in {"assistant", "report"}
+                                                      for m in said), f"{len(said)} message(s)"),
+    ]  # fmt: skip
+
+
+GREETING = "Should greet.txt say hi or hello?"
+
+
+async def decision_card(app: App, worker: str | None = None, after: str = ""):
+    """A decision card waiting for the owner (asked by this worker, made after `after`)."""
+    drafts = (await app.get("/api/state"))["drafts"]
+    found = [
+        d
+        for d in drafts
+        if d["kind"] == "decision"
+        and d["status"] == "pending"
+        and (worker is None or d["session_id"] == worker)
+        and d["created_at"] > after
+    ]
+    return found[-1] if found else None
+
+
+def decisions(app: App) -> list[tuple[str, str, str, str]]:
+    """Every decision kept: id, status, what replaced it, its text."""
+    with sqlite3.connect(app.data / "chiefofstaff.db") as db:
+        return db.execute(
+            "SELECT id, status, coalesce(replaced_by, ''), text FROM decisions ORDER BY created_at"
+        ).fetchall()
+
+
+async def r6_a_decision_is_not_asked_twice(app: App) -> list[tuple[str, bool, str]]:
+    await say(
+        app,
+        "Start a new worker (no project) for this: before anything else it asks me with "
+        f"ask_decision, the question exactly “{GREETING}”, options hi and hello. Once I decide, "
+        "it writes that word into greet.txt in its folder and reports done.",
+    )
+    card = await wait_for("its decision card", lambda: decision_card(app), 600, app)
+    worker = card["session_id"]
+    await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "text": "hello"})
+
+    async def reported():
+        found = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker]
+        return next((t for t in found if t["status"] in {"review", "done"}), None)
+
+    done = await wait_for("it writes hello and reports", reported, 600, app)
+    await idle(app, worker, "its turn ends")
+    first = next(row[0] for row in decisions(app) if GREETING in row[3])
+    mark = await last_id(app, worker)
+    await app.post(
+        f"/api/sessions/{worker}/messages",
+        {
+            "text": f"Call ask_decision again, the question exactly “{GREETING}”, with "
+            "seen_precedents=true, then tell me in one line what it answered. Change no files."
+        },
+    )
+
+    async def answered():
+        said = await app.get(f"/api/sessions/{worker}/messages?after={mark}")
+        return [m for m in said if m["kind"] in {"assistant", "report"}] or None
+
+    await wait_for("it says what ask_decision answered", answered, 600, app)
+    await idle(app, worker, "its turn ends")
+    again = await decision_card(app, worker)
+    said = " ".join(m["text"] for m in await answered() or [])
+    now = await task(app, done["id"])
+    results = [
+        ("R6 asked again: no new card", again is None, again["id"] if again else ""),
+        ("R6 asked again: it has the owner's answer", "hello" in said.lower(), said[:100]),
+        ("R6 its task did not wait again", now["status"] in {"review", "done"}, now["status"]),
+    ]
+    await app.post(
+        f"/api/sessions/{worker}/messages",
+        {
+            "text": "New evidence: greet.txt is shown to Spanish speakers. Ask me to reconsider "
+            "that decision with ask_decision (replaces=its id, and why: what changed). Once I "
+            "decide, write that word into greet.txt and report done."
+        },
+    )
+    revisit = await wait_for(
+        "its reconsideration card", lambda: decision_card(app, worker, card["created_at"]), 600, app
+    )
+    target = revisit["target"]
+    previous, why = target.get("previous", ""), target.get("why", "")
+    results.append((
+        "R6 the reconsideration names the earlier decision, and why",
+        target.get("replaces") == first and "hello" in previous and bool(why),
+        f"{target.get('replaces')}: {previous[:60]} / {why[:60]}",
+    ))  # fmt: skip
+    await app.post(f"/api/drafts/{revisit['id']}", {"action": "answer", "text": "hola"})
+    await wait_for("it reports again", lambda: _finished(app, done["id"]), 600, app)
+    await idle(app, worker, "its turn ends")
+    kept = decisions(app)
+    active = [row for row in kept if row[1] == "active"]
+    old = next(row for row in kept if row[0] == first)
+    log(f"R6: decisions {kept}")
+    results += [
+        ("R6 one decision in force", len(active) == 1 and "hola" in active[0][3],
+         "; ".join(row[3] for row in active)),
+        ("R6 the earlier one is replaced by it", bool(active) and old[2] == active[0][0],
+         f"{old[1]} → {old[2]}"),
+    ]  # fmt: skip
+    return results
+
+
 SCENARIOS = {
     "R1": r1_answer_about_finished_work,
     "R2": r2_the_routers_answer_moves_the_task_on,
     "R3": r3_answer_status,
     "R4": r4_progress_answer_compatibility,
+    "R5": r5_a_correction_stays_on_home,
+    "R6": r6_a_decision_is_not_asked_twice,
 }
 
 
@@ -276,7 +457,8 @@ async def main():
     with tempfile.TemporaryDirectory(prefix="cos-report-") as temporary:
         root = Path(temporary).resolve()
         home, project, _ = setup(root)
-        app = App(root / "data", root / "log", {"COPILOT_HOME": str(home)})
+        # Its data folder's path has a space, as macOS's own has ("Application Support").
+        app = App(data_dir(root), root / "log", {"COPILOT_HOME": str(home)})
         await app.start()
         try:
             await app.post("/api/settings", {
@@ -291,7 +473,7 @@ async def main():
             raise
         finally:
             await app.stop()
-            await cleanup(root / "data")
+            await cleanup(data_dir(root))
             subprocess.run(["git", "-C", str(project), "worktree", "prune"], check=False)
     print("\n================ REPORT ================")
     for name, ok, detail in every:
