@@ -781,7 +781,7 @@ notes** for later sessions (editable in Settings).
 Work depends on decisions: "v1 is email login only", "limit attempts per account". Chief of
 Staff keeps them, each with the tasks that rely on it:
 
-- your answers on decision cards;
+- your answers on decision cards (or in the worker's chat, to its card);
 - decisions you state to the Router ("SMS login is out for v1"), which it records and links to
   the tasks they concern: the work you ask for in the same message, and a finished task only
   when what it delivered relies on it.
@@ -800,7 +800,12 @@ all"). It records the new decision in place of the old one, and Chief of Staff:
 Work that does not rely on the decision carries on untouched.
 
 When a worker is about to ask something you decided before, it is told first: it follows your
-earlier decision, or asks anyway and the card shows *You decided before: …*.
+earlier decision, or asks anyway and the card shows *You decided before: …*. A question you
+answered for its task, asked again, gets your answer, not a new card. When what it found since
+calls one of your decisions into question, its card says *Reconsiders what you decided: …* and
+why; your answer replaces that decision (one decision stays in force), and every other task that
+relied on it is told, as above. Decided another way meanwhile (told the Router, say), the card
+leaves and its task goes on under your new decision.
 
 ## How you work: learned, and kept up to date
 

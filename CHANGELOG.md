@@ -13,6 +13,19 @@
 - **A PR a worker opens just before its report is in that result's receipts.** GitHub can lag a
   moment on a new PR; its result's receipts then went without it (no PR on its card, no *Merge*
   card). It is read again after a short pause.
+- **A decision you made is not asked again, and reconsidering one replaces it.** A worker that
+  asked the same question again on its task (after being shown your answer) made a new card,
+  and its task waited again; when it had found the first choice wrong, both answers stayed in
+  force. Asked again, it now gets your answer (or, still waiting, the card it waits on); an
+  answer you give in its chat counts too. When what it found calls a decision into question,
+  its card says *Reconsiders what you decided: …* and why, and your answer replaces that
+  decision: one stays in force, and every other task that relied on it is told. Decided another
+  way meanwhile, that card leaves and its task goes on.
+- **A corrected result stays in sight.** You accepted a result, asked its worker in its chat
+  for a correction, and it reported it done: while it worked on your next message, *Needs you*
+  showed nothing of the task and the Router's chat had no line of the correction. Such a result
+  is now a line in the Router's chat, once, on its task (the Router isn't woken for it), and a
+  result its worker amends in the same turn shows there as amended, not as first reported.
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see
