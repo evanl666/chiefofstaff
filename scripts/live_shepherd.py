@@ -820,6 +820,18 @@ class Ctx:
 
         return await wait_for(what, found, timeout)
 
+    async def accept(self, task: dict, timeout: float = 600) -> dict:
+        """Accept a task's result once it is one: its PR is kept moving as soon as it is open,
+        often before its worker has reported (live H-X SX4: accepted 3 s after, still running)."""
+        from live_e2e import wait_for
+
+        async def reported():
+            found = next((t for t in (await self.state())["tasks"] if t["id"] == task["id"]), None)
+            return found if found and found["status"] == "review" else None
+
+        await wait_for(f"its task's result ({task['title'][:40]})", reported, timeout)
+        return await self.app.post(f"/api/tasks/{task['id']}/accept")
+
     async def act(self, target: str, action: str, **extra):
         return await self.app.post(
             "/api/shepherd/pr", {"target": target, "action": action, **extra}
@@ -1634,7 +1646,7 @@ async def sx1_ask(ctx: Ctx):
 async def sx2_merged(ctx: Ctx):
     target, number, head = await green_pr(ctx, "sx2")
     task = await ctx.task(target)
-    await ctx.app.post(f"/api/tasks/{task['id']}/accept")
+    await ctx.accept(task)
     await ctx.act(target, "merge-when-ready", on=True)
     ctx.repo.approve(number, head)
     from live_e2e import wait_for
@@ -1659,7 +1671,7 @@ async def sx4_chain(ctx: Ctx):
     await ctx.turn_on(proactive_levels={"fix-ci": "prepare"}, proactive_budget=ROOM)
     target, number = await ctx.worker_pr("sx4", {"app/timeouts.py": BROKEN}, "Accept then fix")
     task = await ctx.task(target)
-    await ctx.app.post(f"/api/tasks/{task['id']}/accept")
+    await ctx.accept(task)
     await ctx.act(target, "merge-when-ready", on=True)
     view = await ctx.kept(
         target, lambda v: (v.get("action") or {}).get("kind") == "review", "a fix", 1500
@@ -1676,7 +1688,7 @@ async def sx4_chain(ctx: Ctx):
 async def sx5_teammate(ctx: Ctx):
     target, number, _head = await green_pr(ctx, "sx5")
     task = await ctx.task(target)
-    await ctx.app.post(f"/api/tasks/{task['id']}/accept")
+    await ctx.accept(task)
     await ctx.act(target, "merge-when-ready", on=True)
     theirs = ctx.repo.branch(
         "sx5", {"NOTES.md": "teammate"}, "A teammate's note", base="sx5", who=ctx.peer
@@ -1706,7 +1718,7 @@ async def sx6_missing_check(ctx: Ctx):
 async def sx7_label(ctx: Ctx):
     target, number, head = await green_pr(ctx, "sx7")
     task = await ctx.task(target)
-    await ctx.app.post(f"/api/tasks/{task['id']}/accept")
+    await ctx.accept(task)
     await ctx.act(target, "merge-when-ready", on=True)
     ctx.repo.hold(number)
     ctx.repo.approve(number, head)
@@ -1717,7 +1729,7 @@ async def sx7_label(ctx: Ctx):
 async def sx8_no_approval(ctx: Ctx):
     target, number, _head = await green_pr(ctx, "sx8")
     task = await ctx.task(target)
-    await ctx.app.post(f"/api/tasks/{task['id']}/accept")
+    await ctx.accept(task)
     await ctx.act(target, "merge-when-ready", on=True)
     await asyncio.sleep(240)
     assert not ctx.repo.pr(number)["merged"]
@@ -1733,7 +1745,7 @@ async def sx9_unreadable_base(ctx: Ctx):
 async def sx10_close_reopen(ctx: Ctx):
     target, number, head = await green_pr(ctx, "sx10")
     task = await ctx.task(target)
-    await ctx.app.post(f"/api/tasks/{task['id']}/accept")
+    await ctx.accept(task)
     await ctx.act(target, "merge-when-ready", on=True)
     await ctx.app.post(f"/api/sessions/{task['session_id']}/close")
     await asyncio.sleep(30)
@@ -1915,7 +1927,7 @@ async def sy10_worker_pushes(ctx: Ctx):
         "sy10", {"app/timeouts.py": GREEN}, "The worker pushes again"
     )
     task = await ctx.task(target)
-    await ctx.app.post(f"/api/tasks/{task['id']}/accept")
+    await ctx.accept(task)
     await ctx.app.post(
         f"/api/tasks/{task['id']}/follow-up", {"text": "Add a docstring to retries() and push it."}
     )
