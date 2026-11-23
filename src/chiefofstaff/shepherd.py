@@ -279,6 +279,16 @@ class Shepherd(Keeping, Steps):
     def denial(self, row: dict, request: Any) -> str | None:
         return step_denial(request, self.folders(row["id"]), row.get("cwd") or "")
 
+    def owners_checkout(self, row: dict) -> str:
+        """What a step hears of the owner's checkout (policy.owners_checkout refused it): never
+        written, and never a copy of it or its worker's worktree instead (Runtime.own_copy):
+        a step works in its own tree only."""
+        tree = (self.step_of(row["id"]) or {}).get("tree") or "the step's own tree"
+        return (
+            "Denied in a shepherd step: that is the owner's own checkout, never written. Work "
+            f"in {tree}."
+        )
+
     def saw(self, session_id: str, name: str, arguments: Any):
         """A tool call of a step: the frozen runs' evidence is void if anything else ran."""
         step_id = self.stepping.get(session_id)
