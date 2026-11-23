@@ -9335,7 +9335,7 @@ class Runtime:
         # Waiting on its decision card: what the owner writes it is their answer to it (unless
         # they ask something back: then the card stays, and this is chat).
         decided = (
-            self.decisions.answered_in_chat(session_id, about, text.strip())
+            await self.decisions.answered_in_chat(session_id, about, text.strip())
             if row["role"] == WORKER and clear_questions and text.strip()
             else []
         )
@@ -9765,6 +9765,40 @@ class Runtime:
             f"Opened in the owner's terminal since you last looked: {'; '.join(named[:5])}. "
             "list_sessions().terminal_sessions has every session open there now."
         )
+
+    def report_on_home(self, row: dict, task: dict, status: str, summary: str):
+        """What a worker reported to the owner who wrote to it in its chat about finished work
+        (a corrected result, or an answer): a line in the Router's chat on Home, as a report
+        the Router hears of shows, without waking it. Needs you does not show the task while its
+        worker follows up on the owner's next message (owner report 0.1.53, item 2: a corrected
+        result was in neither)."""
+        with suppress(RuntimeError):
+            self.add_message(
+                self.router_id(),
+                "inbound",
+                summary,
+                {
+                    "from": row["id"],
+                    "title": task["title"],
+                    "status": status,
+                    "task_id": task["id"],
+                },
+            )
+
+    def amend_on_home(self, session_id: str, task_id: str, summary: str):
+        """Its report of a task amended: its line in the Router's chat on Home says it as it is
+        now (once: not a line more)."""
+        with suppress(RuntimeError):
+            line = self.store.one(
+                "SELECT id FROM messages WHERE session_id=? AND kind='inbound' "
+                "AND json_extract(meta, '$.from')=? AND json_extract(meta, '$.task_id')=? "
+                "ORDER BY id DESC LIMIT 1",
+                (self.router_id(), session_id, task_id),
+            )
+            if line:
+                message = self.store.update_message_text(line["id"], summary)
+                shown = {k: v for k, v in (message.get("meta") or {}).items() if k != "prompt"}
+                self.bus.publish("message", {**message, "meta": shown, "amended": True})
 
     async def tell_router(
         self, row: dict, status: str, summary: str, task: dict | None = None, note: str = ""

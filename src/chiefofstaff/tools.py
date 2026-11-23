@@ -4150,9 +4150,12 @@ class Tools:
                 and not asked
             ):
                 # Reported again in the same turn (with its criteria, say): the report is
-                # amended in place; the owner and the Router heard of it once.
+                # amended in place; the owner and the Router heard of it once, its line on Home
+                # says it as it is now.
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
                 task = self.tasks.update(task["id"], result=clip_report(shown))
+                self.runtime.amend_on_home(caller, task["id"], params.summary)
+                self.store.update_message_meta(reported["id"], {**meta, "told": True})
                 self.runtime.task_actions.publish(task)
                 self.runtime.update_session(caller, report=params.summary[:4000])
                 return (
@@ -4179,6 +4182,11 @@ class Tools:
                     task = self.tasks.update(task["id"], result=clip_report(shown))
                 if task["status"] == "done" or not params.replaces_result:
                     self.runtime.task_actions.news(task["id"], params.summary)
+                # On Home too, once: under Needs you it is not while its worker follows up on
+                # the owner's next message (a result, or its answer: news on finished work).
+                said_as = "done" if params.replaces_result else "answer"
+                self.runtime.report_on_home(row, task, said_as, params.summary)
+                self.store.update_message_meta(reported["id"], {**meta, "told": True})
                 self.runtime.task_actions.publish(task)
                 others = [
                     other
