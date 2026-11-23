@@ -240,11 +240,14 @@ async def test_a_step_reaches_only_what_the_owner_allowed_and_a_slack_reader_not
 
 @pytest.mark.parametrize("sandboxed", [False, True])
 async def test_a_step_has_its_workers_caches_and_toolchains_never_the_owners_caches(
-    world, sandboxed
+    world, sandboxed, monkeypatch
 ):
     """As a sandboxed worker (0.1.46): its tools' caches are workers' own (written there, its
     shell pointed at them by its init script), the owner's caches never writable, uv's Pythons
-    and the like read-only; whatever the worker's own mode."""
+    and the like read-only; whatever the worker's own mode. (uv's Pythons where uv puts them by
+    default: CI's setup-uv sets UV_PYTHON_INSTALL_DIR elsewhere, which caches.py honors.)"""
+    for name in ("UV_PYTHON_INSTALL_DIR", "XDG_DATA_HOME"):
+        monkeypatch.delenv(name, raising=False)
     home = Path.home()
     npm, pythons = home / ".npm", home / ".local" / "share" / "uv" / "python"
     for folder in (npm, pythons):
