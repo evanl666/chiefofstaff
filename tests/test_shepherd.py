@@ -768,6 +768,71 @@ async def test_merge_when_ready_merges_exactly_the_accepted_head(world):
     assert merge[2] == "tok-me"  # As the bound account.
 
 
+def stacked(world, below: str = "closed"):
+    """acme/api#12 second in a stack on GitHub, above #11 (merged, or still open); its merge
+    followed with no wait between reads."""
+    world.github.stack = {"base": {"ref": "main"}, "number": 526, "position": 2, "size": 2}
+    merged = "2026-11-23T18:20:35Z" if below == "closed" else None
+    world.github.stack_prs = [
+        {"number": 11, "state": below, "merged_at": merged, "head": {"sha": "b" * 40}},
+        {"number": 12, "state": "open", "merged_at": None, "head": {"sha": world.h0}},
+    ]
+    from github_stacks import MERGED, UUID, taken
+
+    world.github.async_results = [taken(world.h0), MERGED]
+    github = world.runtime.github
+
+    async def pause(seconds: float):
+        return None
+
+    github.pause = pause
+    return UUID
+
+
+async def test_merge_when_ready_merges_a_stacked_pr_through_githubs_asynchronous_merge(world):
+    """The owner's log (2026-11-22): gh's merge refuses a PR in a stack on GitHub. Merge when
+    ready then merges it with GitHub's asynchronous merge, directly (never a queue or a bypass),
+    at the accepted head, as the bound account, and follows it to its end."""
+    runtime = await claimed(world)
+    runtime.task_actions.accept(world.task)
+    stacked(world)
+    await runtime.shepherd.merge_when_ready(TARGET, True)
+    green(world, world.h0)
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert world.github.merged
+    [(_, arguments, token, body)] = [w for w in world.github.writes if w[0] == "merge-async"]
+    assert arguments[1] == "repos/acme/api/pulls/12/merge-async" and token == "tok-me"
+    assert body == {"sha": world.h0, "merge_method": "squash", "merge_action": "direct_merge"}
+    [step] = [s for s in runtime.shepherd.control.steps(TARGET) if s["kind"] == "merge"]
+    assert step["state"] == "published", step
+
+
+async def test_merge_when_ready_never_merges_the_open_prs_below_a_stacked_pr(world):
+    """GitHub's merge of a PR in a stack merges the open PRs below it too, which no one
+    accepted: its row waits for them, and a merge sent anyway (they opened in between) is
+    refused, saying why."""
+    from chiefofstaff import publish
+
+    runtime = await claimed(world)
+    runtime.task_actions.accept(world.task)
+    stacked(world, below="open")
+    await runtime.shepherd.merge_when_ready(TARGET, True)
+    green(world, world.h0)
+    await runtime.shepherd.read(TARGET)
+    await settle(runtime)
+    assert not world.github.merged and not [w for w in world.github.writes if "merge" in w[0]]
+    assert runtime.store.get(f"mergewhy:{TARGET}") == (
+        "waiting for #11 below it in its stack to merge first"
+    )
+    operation = {"kind": "merge", "repo": "acme/api", "number": 12, "head": world.h0}
+    login = await runtime.github.acting_login("acme/api")
+    with pytest.raises(publish.RefusedError, match="above #11, which merging it would merge too"):
+        await publish.send_merge(runtime.shepherd, operation, login, {})
+    assert not world.github.merged
+    assert not [w for w in world.github.writes if w[0] == "merge-async"]
+
+
 @pytest.mark.parametrize(
     ("blocker", "words"),
     [

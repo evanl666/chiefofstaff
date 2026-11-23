@@ -17,6 +17,7 @@ from conftest import Harness, settle
 from chiefofstaff.backend import TESTED_CLI
 from chiefofstaff.models import Settings
 from chiefofstaff.roles import WORKER
+from chiefofstaff.sources.github import GitHubError
 
 REPO = "acme/api"
 NUMBER = 12
@@ -116,6 +117,11 @@ class FakeGitHub:
         self.head_repo = REPO
         self.fail_push_reads = False
         self.signed_out = False
+        # In a stack on GitHub (tests/github_stacks.py): the PR's REST `stack`, its stack's PRs
+        # (bottom first), and the asynchronous merge's answers after its PUT (the last repeated).
+        self.stack: dict | None = None
+        self.stack_prs: list[dict] = []
+        self.async_results: list[dict] = []
 
     def head(self) -> str:
         return run("git", "rev-parse", f"refs/heads/{BRANCH}", cwd=self.remote)
@@ -307,9 +313,25 @@ class FakeGitHub:
             )
         if text.startswith(f"api repos/{REPO}/commits/") and text.endswith("/status"):
             return json.dumps({"statuses": []})
+        if text.startswith(f"api repos/{REPO}/stacks/"):
+            return json.dumps({"number": 526, "pull_requests": self.stack_prs})
+        if text.startswith(f"api repos/{REPO}/pulls/{NUMBER}/merge-async"):
+            from github_stacks import UUID, taken
+
+            if "--method=PUT" in arguments:
+                self.writes.append(("merge-async", arguments, token, payload))
+                return json.dumps(taken((payload or {}).get("sha", "")))
+            assert arguments[1].endswith(UUID)
+            found = (
+                self.async_results.pop(0) if len(self.async_results) > 1 else self.async_results[0]
+            )
+            if found["status"] == "merged":
+                self.merged, self.state = True, "MERGED"
+            return json.dumps(found)
         if text == f"api repos/{REPO}/pulls/{NUMBER}":
             return json.dumps(
                 {
+                    **({"stack": self.stack} if self.stack else {}),
                     "number": NUMBER,
                     "title": "Fix the login timeout",
                     "state": "open" if self.state == "OPEN" else "closed",
@@ -342,6 +364,10 @@ class FakeGitHub:
             return json.dumps({"allow_squash_merge": True})
         if text.startswith("pr merge"):
             self.writes.append(("merge", arguments, token))
+            if self.stack:
+                from github_stacks import REFUSED
+
+                raise GitHubError(REFUSED)
             if arguments[-1] != self.head():
                 raise RuntimeError("GitHub request failed: Head branch was modified")
             self.merged = True

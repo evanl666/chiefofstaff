@@ -1053,7 +1053,10 @@ as your edits to drafts are.
 the task's result, or *Accept this commit…* after looking at what changed), or fixes you approved
 on top of it, once its checks pass, its reviews approve and GitHub would merge it. It never
 merges a commit nobody approved: a teammate's push pauses it until you accept the new commit.
-Bases that merge through a queue are not supported yet.
+Bases that merge through a queue are not supported yet. A PR in a stack on GitHub (its lower PRs
+merged already) merges through GitHub's merge for stacks, at that same commit; while a PR below
+it in its stack is still open, its row waits for that one to merge first, since GitHub would
+merge it too.
 
 **Your other PRs.** With *My other open PRs* ticked, Home has a *Prepared for you* section of
 your other open PRs in your repositories that need something (CI failing, comments to answer),
