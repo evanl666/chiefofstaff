@@ -188,6 +188,38 @@ def slack_messages(text: str) -> dict[str, list[str]]:
     return found
 
 
+# The first line of a Slack event (SlackSource.poll_once): the ts of each new message in it.
+NEW_TS = re.compile(r"\(new ts: ([\d., ]+)\)")
+SLACK_EVENT = re.compile(r'<message from="slack" type="event"[^>]*>\n(.*?)\n</message>', re.DOTALL)
+
+
+def slack_asked(prompt: str) -> list[dict]:
+    """The new Slack messages of the Slack events in what the Router received, in order: each
+    one's channel, ts, thread ("" for none) and quoted text. Each by its own permalink line, not
+    one written in a message's text (quoted there with "> "): one whose ts is linked to two
+    places (Slack's earlier format did not quote it) is left out."""
+    found: dict[str, dict] = {}
+    unsure: set[str] = set()
+    for body in SLACK_EVENT.findall(prompt):
+        first = NEW_TS.search(body.split("\n", 1)[0])
+        stamps = {stamp.strip() for stamp in first.group(1).split(",")} if first else set()
+        current: dict | None = None
+        for line in body.splitlines()[1:]:
+            if line.startswith(">"):
+                if current is not None:
+                    current["text"] += line[1:].strip() + "\n"
+                continue
+            for channel, seconds, micros, root in PERMALINK.findall(line):
+                stamp = f"{seconds}.{micros}"
+                if stamp not in stamps:
+                    continue
+                place = {"channel": channel, "ts": stamp, "root": root or "", "text": ""}
+                if stamp in found and found[stamp]["channel"] != channel:
+                    unsure.add(stamp)
+                current = found.setdefault(stamp, place)
+    return [place for stamp, place in found.items() if stamp not in unsure]
+
+
 def slack_entries(text: str, stamps: set[str]) -> str:
     """Only the entries of a Slack search result whose permalink is one of these messages
     ("1712345700.000400"): each entry ends with its permalink line."""

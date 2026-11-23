@@ -55,6 +55,9 @@ class SessionState:
     # message decided and asked for together belongs together.
     turn_decisions: list[str] = field(default_factory=list)
     turn_tasks: list[str] = field(default_factory=list)
+    # The new Slack messages that came to the Router in its current turn (threads.slack_asked):
+    # where a worker it gives one of them to replies, when it does not say (Tools.slack_place).
+    turn_slack: list[dict] = field(default_factory=list)
     # Tasks a worker set a check-back on in its current turn: it waits for it, not in this turn.
     turn_check_backs: set[str] = field(default_factory=set)
     # The runs it declared in its current turn, by task (run_marks): a check-back it sets in

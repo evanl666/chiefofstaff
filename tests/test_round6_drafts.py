@@ -456,3 +456,80 @@ async def test_away_merge_and_folder_cards_say_what_their_cards_say(harness, tmp
     assert await runtime.connector.apply({"draft": other}, "QQQQQ none", "QQQQQ") == (
         "no project: it starts in a folder of its own"
     )
+
+
+async def router_turn_on_slack(runtime, harness, *messages):
+    """New Slack messages, as the Slack watcher hands them to the Router, and its turn on them."""
+    await runtime.slack.poll_once()  # It starts from now.
+    harness.mcp.results["to:me"] = "\n\n".join(messages)
+    await runtime.slack.poll_once()
+    router = harness.session(harness.router_id)
+    router.emit("user.message", content=router.sent[-1])
+    await settle(runtime)
+
+
+async def test_a_worker_given_a_slack_dm_without_its_id_replies_in_that_dm(tmp_path):
+    """Live wide Q1 (r84, r85; r51, r74b before them): the Router gave Alice's DM question to a
+    worker with Slack access as 'Alice Chen asked on Slack (DM): "…"', with neither the DM's id
+    nor its thread key. The worker had no channel_id ("I don't have the DM's channel id"): it
+    drafted with draft_reply, for the owner to send themself (or to a made-up channel), and the
+    owner's away "ship it" sent Alice nothing. It is told where that message is, and sent back
+    there once from draft_reply."""
+    harness, runtime, _slack = await slack_harness(tmp_path)
+    asked = entry("D0ALICE01", "U0ALICE1", "Alice Chen", TS, "How many rows in data/sales.csv?")
+    await router_turn_on_slack(runtime, harness, asked)
+    instructions = (
+        'Alice Chen asked on Slack (DM): "How many rows in data/sales.csv?" Count them and draft '
+        "her the answer."
+    )
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, why_new="test",
+                             title="Count rows", slack=True, instructions=instructions)  # fmt: skip
+    worker, task = (
+        json.loads(result.text_result_for_llm)[key] for key in ("session_id", "task_id")
+    )
+    session = harness.session(worker)
+    session.emit("user.message", content=session.sent[0])
+    await settle(runtime)
+    told = re.search(
+        r'draft_slack_reply\(channel_id="(\w+)", thread_ts="([\d.]+)"\)', session.sent[0]
+    )
+    assert told and told.groups() == ("D0ALICE01", TS)
+    refused = await call_tool(runtime, "draft_reply", worker, to="Alice Chen", where="Slack DM",
+                              text="540 rows.")  # fmt: skip
+    assert refused.result_type == "failure" and told.group(0) in refused.text_result_for_llm
+    assert not harness.store.drafts()
+    harness.mcp.reads["D0ALICE01"] = asked
+    made = await draft(runtime, harness, worker, *told.groups(), "540 rows.")
+    assert made["target"]["task_id"] == task
+    await runtime.drafts.resolve(made["id"], DraftDecision(action="send"))
+    assert sends(harness) == [{"channel_id": "D0ALICE01", "message": "540 rows."}], "in the DM"
+    # Told once: a reply the owner sends elsewhere is drafted as asked.
+    mail = await call_tool(runtime, "draft_reply", worker, to="Vendor", where="Email", text="Hi.")
+    assert mail.result_type != "failure"
+
+
+async def test_a_worker_is_told_which_slack_message_it_answers_only_when_it_is_clear(tmp_path):
+    """Of several new Slack messages, the one its instructions quote (a link to elsewhere
+    written in its text does not move it); none when they name another conversation, or quote
+    none of them."""
+    harness, runtime, _slack = await slack_harness(tmp_path)
+    bob = entry("C0DEPLOYS", "U0BOB0001", "Bob Li", LATER, "Is the canary green?\n"
+                f"https://acme.slack.com/archives/C0ELSEWHR/p{LATER.replace('.', '')}")  # fmt: skip
+    alice = entry("D0ALICE01", "U0ALICE1", "Alice Chen", TS, "How many rows in data/sales.csv?")
+    await router_turn_on_slack(runtime, harness, alice, bob)
+
+    async def given(instructions):
+        result = await call_tool(runtime, "spawn_worker", harness.router_id, why_new="test",
+                                 title="Answer", slack=True, instructions=instructions)  # fmt: skip
+        return harness.session(json.loads(result.text_result_for_llm)["session_id"]).sent[0]
+
+    quoted = await given('Bob asks "Is the canary green?": check the rollout and answer him.')
+    assert f'draft_slack_reply(channel_id="C0DEPLOYS", thread_ts="{LATER}")' in quoted
+    assert "draft_slack_reply(" not in await given("Check the rollout and answer whoever asked.")
+    elsewhere = await given('Bob asks "Is the canary green?": answer in C0RELEASE1, not there.')
+    assert "draft_slack_reply(" not in elsewhere
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, why_new="test",
+                             title="Answer", slack=True, instructions="Answer whoever asked.",
+                             follow=[f"slack:C0DEPLOYS:{LATER}"])  # fmt: skip
+    followed = harness.session(json.loads(result.text_result_for_llm)["session_id"]).sent[0]
+    assert f'draft_slack_reply(channel_id="C0DEPLOYS", thread_ts="{LATER}")' in followed

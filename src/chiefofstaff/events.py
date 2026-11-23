@@ -508,6 +508,7 @@ class Events:
         switched = SWITCHED.findall(content) if row["role"] == ROUTER and owner else []
         state.reply_in = switched[-1] if switched else ""
         state.turn_decisions, state.turn_tasks = [], []
+        state.turn_slack = threads.slack_asked(content) if row["role"] == ROUTER else []
         state.turn_check_backs = set()
         state.turn_runs = {}
         state.turn_reported = set()

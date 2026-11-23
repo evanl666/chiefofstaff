@@ -905,8 +905,8 @@ and wakes the Router only when something new arrived.
 
 The Router forwards messages that need a reply to the **Slack session**, which reads the
 conversation and drafts a reply in your voice for you to approve. Messages that need work
-outside Slack go to a worker with Slack access. Older messages are not replayed on first
-enable.
+outside Slack go to a worker with Slack access, whose reply is drafted in the conversation the
+message came from. Older messages are not replayed on first enable.
 
 ### Delegate by reaction
 

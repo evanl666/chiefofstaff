@@ -1019,6 +1019,24 @@ def same_conversation(asked: str, text: str) -> bool:
     return not stamps or not named or bool(stamps & named)
 
 
+def quotes(text: str, message: str) -> bool:
+    """Whether a text quotes a message: five of its words in a row (all, when it has fewer),
+    its links aside."""
+    words = re.findall(r"\w+", threads.LINK.sub(" ", message).lower())
+    said = " " + " ".join(re.findall(r"\w+", text.lower())) + " "
+    size = min(5, len(words))
+    return size > 0 and any(
+        f" {' '.join(words[start : start + size])} " in said
+        for start in range(len(words) - size + 1)
+    )
+
+
+def reply_call(place: dict) -> str:
+    """The draft_slack_reply call that answers at a Slack place ({"channel", "ts"})."""
+    stamp = f', thread_ts="{place["ts"]}"' if place.get("ts") else ""
+    return f'draft_slack_reply(channel_id="{place["channel"]}"{stamp})'
+
+
 def named_pulls(text: str) -> list[str]:
     """The PRs a text names, as thread keys: by URL or as github:<owner/repo>#<n>."""
     keys = threads.pull_requests(text or "")
@@ -2017,6 +2035,11 @@ class Tools:
         if slack:
             self.runtime.drafts.mark_named(task["id"], params.instructions)
         handed = self.runtime.drafts.handed_to(task["id"])
+        place = (
+            self.slack_place(caller, task["id"], params.instructions, follow)
+            if slack and not handed
+            else ""
+        )
         spoken, note = self.report_language(caller, params.instructions)
         prompt = wrap(
             "router",
@@ -2035,6 +2058,8 @@ class Tools:
             prompt += "\n\n" + wrap("system", "context", note)
         if handed:
             prompt += "\n\n" + wrap("system", "context", self.runtime.drafts.handed_note(handed))
+        if place:
+            prompt += "\n\n" + wrap("system", "context", place)
         meta: dict[str, Any] = {"prompt": prompt, "task_id": task["id"]}
         if images := self.runtime.attachments_in(params.instructions):
             meta["attachments"] = images  # The owner's images it names come with it.
@@ -2535,6 +2560,13 @@ class Tools:
         )
         if task and (handed := self.runtime.drafts.handed_to(task["id"])):
             prompt += "\n\n" + wrap("system", "context", self.runtime.drafts.handed_note(handed))
+        elif (
+            task
+            and params.task == "new"
+            and target["slack"]
+            and (place := self.slack_place(caller, task["id"], params.text, to_follow))
+        ):
+            prompt += "\n\n" + wrap("system", "context", place)
         # More on a task it has taken up reaches it within its turn; a new task waits, and so
         # does more on one it has not seen yet (bug E94: read before the task itself).
         unseen = bool(
@@ -2628,6 +2660,57 @@ class Tools:
                 if handed.get("emoji") == settings.slack_delegate_emoji:
                     found.append(handed)
         return found
+
+    def slack_place(self, caller: str, task_id: str, text: str, follow: list[str]) -> str:
+        """Where a worker with Slack access replies to the Slack message its task answers: the
+        one Slack conversation it follows for it, else the one new Slack message of the
+        Router's turn (of several, the one its instructions quote) when they name no other.
+        Kept for the task (t_draft_reply). What the worker is told of it: "" when its
+        instructions say it, or it is not known (live Q1: told only 'Alice Chen asked on Slack
+        (DM)', it had no channel id, drafted the reply for the owner to send, and it never
+        went out)."""
+        named = {
+            *SLACK_CONVERSATION.findall(text),
+            *(found[0] for found in threads.PERMALINK.findall(text)),
+        }
+        given: dict[str, set[str]] = {}
+        for key in follow:
+            if found := threads.SLACK_THREAD.fullmatch(key):
+                given.setdefault(found.group(1), set()).add(found.group(2))
+            elif found := threads.SLACK_CONVERSATION.fullmatch(key):
+                given.setdefault(found.group(1), set())
+        if given:
+            if len(given) > 1:
+                return ""
+            [(channel, stamps)] = given.items()
+            if len(stamps) > 1:
+                return ""
+            place = {"channel": channel, "ts": next(iter(stamps), "")}
+        else:
+            asked = self.states[caller].turn_slack
+            if len(asked) > 1:
+                asked = [one for one in asked if quotes(text, one["text"])]
+            if len(asked) != 1 or named - {asked[0]["channel"]}:
+                return ""
+            place = {"channel": asked[0]["channel"], "ts": asked[0]["root"] or asked[0]["ts"]}
+        self.store.set(f"slackplace:{task_id}", json.dumps(place))
+        if place["channel"] in named:
+            return ""
+        return (
+            "This task answers a Slack message: a reply to it goes there with "
+            + reply_call(place)
+            + " (once the owner lets it), not with draft_reply, which is for a reply the owner "
+            "sends themself, elsewhere."
+        )
+
+    def place_told(self, task_id: str) -> dict:
+        """The Slack place kept for a task (slack_place), told from now on: {} when it has
+        none, or it was told already (a refused draft_reply, a Slack draft it made)."""
+        place = json.loads(self.store.get(f"slackplace:{task_id}") or "{}")
+        if not place or place.get("told"):
+            return {}
+        self.store.set(f"slackplace:{task_id}", json.dumps(place | {"told": True}))
+        return place
 
     def unnamed_task(self, worker: str, how: str) -> dict | None:
         """The task a continue or note naming none is about (bug E86: the task given last, done
@@ -4476,6 +4559,7 @@ class Tools:
             target["latest_error"] = unread_line(target["to"])
         if found := self.runtime.draft_task(caller, target):
             target["task_id"] = found  # The task it answers for, not merely its newest.
+            self.place_told(found)  # It knows where its replies go.
         draft = self.store.create_draft(caller, "slack", target, params.text, params.note)
         replaced = await self.runtime.drafts.supersede(draft)
         self.runtime.add_message(caller, "draft", params.text, {"draft_id": draft["id"]})
@@ -4550,6 +4634,13 @@ class Tools:
             target |= {"repo": repo.lower(), "number": int(number), "anywhere": True}
         if found := self.runtime.draft_task(caller, target):
             target["task_id"] = found
+            if self.runtime.slack.configured() and (place := self.place_told(found)):
+                # Asked once: a task from Slack may still need a reply sent elsewhere (mail).
+                raise ValueError(
+                    "This task answers a Slack message: draft the reply to it with "
+                    f"{reply_call(place)}, so it goes there once the owner lets it. draft_reply "
+                    "is for a reply the owner sends themself, elsewhere (call it again for that)."
+                )
         draft = self.store.create_draft(caller, "reply", target, text, params.note[:300])
         self.runtime.add_message(
             caller, "draft", text, {"draft_id": draft["id"], "label": f"Reply to {params.to}"}

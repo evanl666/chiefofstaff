@@ -138,6 +138,12 @@ itself.
   your exact words: *I'll review your billing PR this afternoon.*, not how you write to Bob.
   It now gets your message as you wrote it, and writes what you said the way you write; your
   exact words only where you quote them.
+- **A worker answering a Slack message knows where its reply goes.** Given Alice's DM question
+  as *Alice Chen asked on Slack (DM): "…"*, without the DM's id, a worker had no conversation to
+  reply in: it drafted a reply for you to copy and send yourself (or to a made-up conversation),
+  and your *ship it* while away sent Alice nothing. A worker with Slack access is now told where
+  the message it answers is (the one Slack message the Router got, or of several the one its
+  task quotes, unless the Router named another place), and its reply drafts go there.
 - **Fixes:** a Codex signed in with an API key ("API key configured") read as signed out; an
   agent signed out while its workers ran still said *Ready*, and a new task or message for it
   went to it and failed there (it is saved with its card now); work you asked done directly in
