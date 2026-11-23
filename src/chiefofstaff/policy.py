@@ -5487,16 +5487,19 @@ RESOLVE_MUTATION = re.compile(
 )
 
 
-def operation_denial(operation: dict, argv: list[str]) -> str | None:
+def operation_denial(operation: dict, argv: list[str], payload: dict | None = None) -> str | None:
     """Why Chief of Staff may not run this for a shepherd operation, or None. `operation`: what
     the plan bound (its kind; for a push the head repository, ref, planned head and commit, the
-    repository's default branch and whether the branch is protected, as just read)."""
+    repository's default branch and whether the branch is protected, as just read). `payload`:
+    the body it sends (GitHub's asynchronous merge, for a PR in a stack)."""
     kind = operation.get("kind")
     words = [str(word) for word in argv]
     if kind in {"push", "merge"} and any(word in NEVER_FLAGS for word in words):
         return "refused: no deletion, force, --admin or auto-merge"
     if kind == "push":
         return push_denial(operation, words)
+    if kind == "merge" and words[:2] == ["gh", "api"]:
+        return merge_async_denial(operation, words, payload or {})
     if kind == "merge":
         if words[:3] != ["gh", "pr", "merge"] or len(words) != 7:
             return "refused: not a plain merge"
@@ -5532,6 +5535,23 @@ def operation_denial(operation: dict, argv: list[str]) -> str | None:
             return "refused: not an endpoint a plan writes to"
         return None
     return f"refused: {kind or 'that'} is not an operation"
+
+
+def merge_async_denial(operation: dict, words: list[str], payload: dict) -> str | None:
+    """A PR in a stack merges only through GitHub's asynchronous merge: of this PR, directly
+    (never a queue, never bypassing rules), at the commit accepted, in a way GitHub names."""
+    path = f"repos/{operation.get('repo')}/pulls/{int(operation.get('number', 0))}/merge-async"
+    if words != ["gh", "api", path, "--method=PUT", "--input=-"]:
+        return "refused: a merge is of this PR, matched to its latest commit"
+    if (
+        set(payload) != {"sha", "merge_method", "merge_action"}
+        or payload["merge_action"] != "direct_merge"
+        or f"--{payload['merge_method']}" not in MERGE_METHODS
+    ):
+        return "refused: not a plain merge"
+    if not FULL_SHA.fullmatch(str(payload["sha"])) or payload["sha"] != operation.get("head"):
+        return "refused: the merge must be of the commit you accepted"
+    return None
 
 
 def push_denial(operation: dict, words: list[str]) -> str | None:

@@ -219,6 +219,31 @@ def test_a_head_matched_merge_only():
         assert operation_denial(operation, argv)
 
 
+def test_a_stacked_prs_merge_is_githubs_asynchronous_one_head_matched_and_direct():
+    """A PR in a stack on GitHub merges only through its asynchronous merge (the owner's log,
+    2026-11-22): of this PR, directly, at the commit accepted; never through a queue, never
+    bypassing the base's rules, never another PR's."""
+    operation = {"kind": "merge", "repo": "acme/api", "number": 12, "head": H1}
+    argv = ["gh", "api", "repos/acme/api/pulls/12/merge-async", "--method=PUT", "--input=-"]
+    body = {"sha": H1, "merge_method": "squash", "merge_action": "direct_merge"}
+    assert operation_denial(operation, argv, body) is None
+    for changed in (
+        {"sha": H0},
+        {"sha": H1[:12]},
+        {"merge_action": "merge_queue"},
+        {"merge_action": "default"},
+        {"merge_method": "fast-forward"},
+        {"bypass_rules": True},
+    ):
+        assert operation_denial(operation, argv, {**body, **changed}), changed
+    for other in (
+        ["gh", "api", "repos/acme/api/pulls/13/merge-async", "--method=PUT", "--input=-"],
+        ["gh", "api", "repos/acme/api/pulls/12/merge", "--method=PUT", "--input=-"],
+        [*argv, "--admin"],
+    ):
+        assert operation_denial(operation, other, body), other
+
+
 def test_github_writes_go_only_to_a_plans_endpoints():
     reply = {"kind": "reply"}
     ok = ["gh", "api", "repos/acme/api/pulls/12/comments/99/replies", "--method=POST", "--input=-"]

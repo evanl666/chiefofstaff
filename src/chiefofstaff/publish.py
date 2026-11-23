@@ -22,6 +22,7 @@ from .control import (
     PREPARED,
 )
 from .policy import DEFAULT_BRANCHES, operation_denial
+from .receipts import listed
 from .store import now
 from .workspaces import SAFE_GIT, checkout_git
 
@@ -465,20 +466,53 @@ async def send_rerun(shepherd: Shepherd, operation: dict, login: str, step: dict
 
 
 async def send_merge(shepherd: Shepherd, operation: dict, login: str, step: dict) -> str:
+    from .sources.github import STACKED
+
     github = shepherd.runtime.github
-    repo = json.loads(await github.gh("api", f"repos/{operation['repo']}"))
-    method = next(
-        (flag for flag, allowed in (("--squash", repo.get("allow_squash_merge", True)),
-                                    ("--merge", repo.get("allow_merge_commit", True)),
-                                    ("--rebase", repo.get("allow_rebase_merge", True)))
-         if allowed), "--merge",
-    )  # fmt: skip
+    method = await github.merge_method(operation["repo"])
     url = f"https://github.com/{operation['repo']}/pull/{int(operation['number'])}"
     argv = ["gh", "pr", "merge", url, method, "--match-head-commit", operation["head"]]
     if why := operation_denial(operation, argv):
         raise RefusedError(why)
-    await github.bound(login, *argv[1:])
+    try:
+        await github.bound(login, *argv[1:])
+    except RuntimeError as exc:
+        if not STACKED.search(str(exc)):
+            raise
+        await merge_stacked(shepherd, operation, login, method)
     return url
+
+
+async def merge_stacked(shepherd: Shepherd, operation: dict, login: str, method: str):
+    """A PR in a stack on GitHub (gh's merge refuses it): GitHub's asynchronous merge at the
+    accepted head, as the bound account, followed to its end. Never one above open PRs in its
+    stack, which that merge would merge too (none the owner accepted)."""
+    from .sources.github import MERGE_FOLLOW
+
+    github = shepherd.runtime.github
+    repo, number = operation["repo"], int(operation["number"])
+    found = await github.stack_of(repo, number)
+    if found is None:
+        raise RefusedError("it is in a stack on GitHub, and its stack couldn't be read")
+    if below := found[1]:
+        numbers = listed([f"#{pr['number']}" for pr in below], 5)
+        raise RefusedError(
+            f"it is in a stack on GitHub above {numbers}, which merging it would merge too: "
+            "merge those first"
+        )
+    argv, payload = github.merge_async_call(repo, number, operation["head"], method,
+                                            "direct_merge")  # fmt: skip
+    if why := operation_denial(operation, argv, payload):
+        raise RefusedError(why)
+    request = await github.merge_async(repo, number, operation["head"], method, "direct_merge",
+                                       login=login)  # fmt: skip
+    result = await github.follow_merge(repo, number, request, MERGE_FOLLOW)
+    if result.get("status") == "failed":
+        said = " ".join(str((result.get("details") or {}).get("message") or "").split())
+        raise RefusedError(f"GitHub didn't merge it: {said[:200] or 'it gave no reason'}")
+    if result.get("status") != "merged":
+        # Still at it, or queued after all: reconciled from the PR and the request (reconcile).
+        raise RuntimeError("GitHub is still merging it in the background.")
 
 
 SEND = {
@@ -524,7 +558,17 @@ async def reconcile(shepherd: Shepherd, action: dict) -> tuple[str, str]:
             return ("sent", "") if attempt > int(operation.get("attempt") or 1) else ("failed", "")
         if operation["kind"] == "merge":
             details = await github.pr_details(operation["repo"], int(operation["number"]))
-            return ("sent", "") if details["merged"] else ("failed", "")
+            if details["merged"]:
+                return "sent", ""
+            # A stack's merge GitHub may still be at (merge_stacked): unknown until it ends.
+            key = f"mergeasync:{operation['repo']}#{int(operation['number'])}"
+            asked = json.loads(shepherd.store.get(key) or "{}")
+            if asked.get("uuid") and asked.get("head") == operation["head"]:
+                found = await github.merge_result(operation["repo"], int(operation["number"]),
+                                                  asked["uuid"])  # fmt: skip
+                state = {"merged": "sent", "failed": "failed"}.get(str(found.get("status")))
+                return state or "uncertain", ""
+            return "failed", ""
     except Exception:
         logger.info("Could not reconcile %s.", action["id"], exc_info=True)
     return "uncertain", ""
@@ -673,6 +717,11 @@ async def try_merge(shepherd: Shepherd, target: str):
             return
         if details.get("permission") not in {"ADMIN", "MAINTAIN", "WRITE"}:
             waits(claim, "your account can't merge it")
+            return
+        # In a stack on GitHub above open PRs: its merge would merge them too (merge_stacked).
+        if (found := await github.stack_of(details["repo"], int(details["number"]))) and found[1]:
+            numbers = listed([f"#{pr['number']}" for pr in found[1]], 3)
+            waits(claim, f"waiting for {numbers} below it in its stack to merge first")
             return
         shepherd.store.delete(f"mergewhy:{target}")
         task = shepherd.runtime.tasks.find(claim["holder"])
