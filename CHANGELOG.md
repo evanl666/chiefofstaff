@@ -124,7 +124,9 @@ itself.
   your folder could go to a worker you had that only reads it (it declined, and a new worker
   took it): it goes to one started in place. Asking for the agents' statuses never waits on a
   slow one (one that keeps failing is asked less often); in the chip's popover, Enter no
-  longer drops the focus.
+  longer drops the focus; a message you handed over with your delegate emoji that the Router
+  named to its worker only by its link (no thread to follow) is replied to at once too, not
+  held for your OK.
 
 ## 0.1.53 (2026-11-22)
 

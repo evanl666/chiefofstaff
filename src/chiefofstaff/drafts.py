@@ -506,7 +506,20 @@ class Drafts:
             thread = f"slack:{handed.get('channel')}:{handed.get('root')}"
             if time.time() - float(handed.get("at") or 0) > HANDED_DAYS * 86400:
                 continue
-            if handed.get("ts") in text or thread in text:
+            ts = str(handed.get("ts") or "")
+            linked = {
+                f"{found.group(2)}.{found.group(3)}"
+                for found in threads.PERMALINK.finditer(text)
+                if found.group(1) == handed.get("channel")
+            }
+            # Also by its link (…/archives/<channel>/p<ts without its dot>) or that ts, as the
+            # Router may name it (live e2e: no thread key, and its reply waited for the OK).
+            bare = ts.replace(".", "")
+            if (
+                (ts and (ts in text or bare in text))
+                or thread in text
+                or {ts, handed.get("root")} & linked
+            ):
                 self.store.set(f"delegatedtask:{task_id}:{thread}", value)
 
     @staticmethod

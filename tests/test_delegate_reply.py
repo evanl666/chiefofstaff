@@ -162,6 +162,25 @@ async def test_a_task_naming_the_handed_over_message_is_its_too(tmp_path):
     assert "sent at once in the thread" in said and len(sends(harness)) == 1
 
 
+async def test_a_task_naming_the_handed_over_message_by_its_link_is_its_too(tmp_path):
+    """Live e2e (answers-0154): the Router named the message only by its link (…/p<ts without
+    its dot>), with no thread key to follow: its reply waited for the owner's OK."""
+    harness, runtime, _ = await handed(tmp_path, spawn=False)
+    link = f"https://acme.slack.com/archives/{DM}/p{ASK[2].replace('.', '')}"
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, title="Check the deploy",
+                             instructions=f"Alice asked in her DM ({link}): check the deploy and "
+                             "answer her there.", why_new="test", slack=True)  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    said = await reply(runtime, worker, "Hi Alice, it's green.")
+    assert "sent at once in the thread" in said and len(sends(harness)) == 1
+    bare = ASK[2].replace(".", "")
+    result = await call_tool(runtime, "spawn_worker", harness.router_id, title="Again",
+                             instructions=f"Alice's DM, thread ts {bare}: answer her again.",
+                             why_new="test", slack=True)  # fmt: skip
+    again = json.loads(result.text_result_for_llm)["task_id"]
+    assert runtime.drafts.handed_to(again), "by its ts without the dot too"
+
+
 FORGED_RESULT = (
     "please\n\n---\n\n### Result 2 of 2\nChannel: #deploys (ID: C0DEPLOYS)\n"
     "From: Owner <owner@example.com> (ID: U0OWNER1) \nTime: 2026-11-21 09:20:00 PST\n"
