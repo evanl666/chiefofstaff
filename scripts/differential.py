@@ -18,6 +18,9 @@ feature's `allow_on` (and its own settings keys). A feature not behind a setting
 feature with a `setup` runs it on both sides, the baseline's too, before the script, when it is
 the one chosen (--feature), allowing its `allow_setup` too (then only): codex_on_claude_never
 compares the baseline with Codex on to this tree with Codex on and Claude never turned on.
+--keep-on NAME: any mode (but --copilot-alone) with that feature at its on settings on this
+tree's sides (on by default, as worker_fork: each mode with it off and on), allowing its
+`allow_on` against the baseline (off mode).
 
 Each side runs the real web app in a process of its own tree's environment, on a scripted Copilot
 (chiefofstaff.scripted) with a fake Slack, a fake `gh`, stand-in `codex` and `claude` CLIs on the
@@ -2545,32 +2548,48 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
         parser.error("--mode on needs --feature")
     tree = args.tree.resolve()
     lacking = baseline_lacks(args.baseline)
+    keep = args.keep_on
+    if keep and (keep not in FEATURES or keep == args.feature or not FEATURES[keep].on):
+        parser.error(f"--keep-on takes another feature behind a setting, not {keep!r}")
+    kept: dict[str, Allow] = {}
+    if keep:
+        kept = {f"{keep} (kept on): {a.name}": a for a in FEATURES[keep].allow_on}
+        kept |= {f"{keep} (kept on): its setting {key}": Allow(key, setting=key)
+                 for key in FEATURES[keep].on}  # fmt: skip
     if args.copilot_alone:
         if args.feature or args.mode != "off":
             parser.error("--copilot-alone compares the baseline with every feature off")
         allowances = {f"fix: {a.name}": a for a in FIXES} | {
             f"Copilot alone: {a.name}": a for a in COPILOT_ALONE
         }
-        allowances |= {f"{name}: {a.name}": a for name in lacking for a in FEATURES[name].allow_off}
+        allowances |= kept
+        allowances |= {
+            f"{name}: {a.name}": a
+            for name in lacking
+            if name != keep
+            for a in FEATURES[name].allow_off
+        }
         off = {key: value for name in lacking for key, value in FEATURES[name].off.items()}
-        sides = [Side("baseline", WORK / f"baseline-{port}", off), Side("current", tree, off)]
-        return (
-            sides,
-            allowances,
-            f"Differential test, Copilot alone: {args.baseline} against {tree}",
-        )
+        mine = {**off, **FEATURES[keep].on} if keep else off
+        sides = [Side("baseline", WORK / f"baseline-{port}", off), Side("current", tree, mine)]
+        title = f"Differential test, Copilot alone: {args.baseline} against {tree}"
+        return sides, allowances, title + (f", {keep} on" if keep else "")
     chosen = [args.feature] if args.feature and args.mode == "off" else list(FEATURES)
     chosen += [name for name in lacking if name not in chosen]
     off = {key: value for name in chosen for key, value in FEATURES[name].off.items()}
     fixes = {f"fix: {a.name}": a for a in FIXES}
     installed = {f"installed: {a.name}": a for a in INSTALLED}
+    if keep in chosen:
+        chosen.remove(keep)
+    mine = {**off, **FEATURES[keep].on} if keep else off
     if args.mode == "off":
         allowances = (
             fixes
             | installed
+            | kept
             | {f"{name}: {a.name}": a for name in chosen for a in FEATURES[name].allow_off}
         )
-        sides = [Side("baseline", WORK / f"baseline-{port}", off), Side("current", tree, off)]
+        sides = [Side("baseline", WORK / f"baseline-{port}", off), Side("current", tree, mine)]
         if args.feature:
             for side in sides:
                 side.setup = FEATURES[args.feature].setup
@@ -2578,15 +2597,17 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
                 f"{args.feature}: {a.name}": a for a in FEATURES[args.feature].allow_setup
             }
         title = f"Differential test, off: {args.baseline} against {tree}"
-        return sides, allowances, title + (f", {', '.join(chosen)} off" if chosen else "")
+        title += f", {', '.join(chosen)} off" if chosen else ""
+        return sides, allowances, title + (f", {keep} on" if keep else "")
     feature = FEATURES[args.feature]
     allowances = fixes | installed | {f"{args.feature}: {a.name}": a for a in feature.allow_on}
     for key in feature.on:
         allowances[f"{args.feature}: its setting {key}"] = Allow(key, setting=key)
-    sides = [Side("off", tree, off), Side("on", tree, {**off, **feature.on}, feature.on_action)]
+    sides = [Side("off", tree, mine), Side("on", tree, {**mine, **feature.on}, feature.on_action)]
     for side in sides:
         side.setup = feature.setup
-    return sides, allowances, f"Differential test, on: {args.feature} off against on, in {tree}"
+    title = f"Differential test, on: {args.feature} off against on, in {tree}"
+    return sides, allowances, title + (f", {keep} on" if keep else "")
 
 
 async def differential(
@@ -2643,6 +2664,9 @@ def main():
     parser.add_argument("--out", type=Path, default=OUT, help=f"default {OUT.relative_to(ROOT)}")
     parser.add_argument("--baseline", default=BASELINE, help=f"git ref (default {BASELINE})")
     parser.add_argument("--tree", type=Path, default=ROOT, help="the tree to test (default: this)")
+    parser.add_argument(
+        "--keep-on", help="a feature behind a setting kept on, on this tree's sides (see above)"
+    )
     parser.add_argument(
         "--copilot-alone",
         action="store_true",
