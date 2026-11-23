@@ -28,10 +28,14 @@ M7  Codex's plan limit used up (the stand-in says nothing of its windows until a
     turn pauses saying which limit and until when; the @ list says it; work named for Codex is
     held with its card; once the limit resets (its time, then Codex asked again), each goes on,
     once, under Handled for you
+M8  Codex's limit used up again (after M7): a worker paused, set to go on at its reset; Continue
+    with Copilot clicked twice at once and once more from a stale card: one new worker (on
+    Copilot, real), the paused task leaves Needs you, replaced by the new one's; a stale Go on
+    at… points there; past the reset, nothing goes on in the paused worker
 
 Signs in to Copilot with COPILOT_GITHUB_TOKEN, else the gh CLI's token (a Copilot home of its own;
 ~/.copilot is not used). Uses a few premium requests (the Router: LIVE_SMOOTH_MODEL, else
-LIVE_COPILOT_MODEL, else claude-sonnet-5.5) and takes about 12 minutes. Ports: Chief of Staff on
+LIVE_COPILOT_MODEL, else claude-sonnet-5.5) and takes about 15 minutes. Ports: Chief of Staff on
 LIVE_SMOOTH_PORT (21410), its stand-in Slack on the next one. Its folders are made by `tempfile`
 (LIVE_AGENTS_ROOT to keep them elsewhere); kept for a look when a scenario fails.
 
@@ -563,8 +567,64 @@ async def m7_limit(ctx: Ctx):
     log("M7 passed")
 
 
+async def m8_continued_once(ctx: Ctx):
+    worker = ctx.workers[0]
+    resets = int(time.time()) + 75
+    write(ctx.codex_state / "limit.json", json.dumps({"minutes": 300, "resets_at": resets}))
+    mark = max((m["id"] for m in await ctx.app.get(f"/api/sessions/{worker}/messages")), default=0)
+    await ctx.app.post(f"/api/sessions/{worker}/messages", {"text": "Report done: still here."})
+
+    async def paused():
+        found = [t for t in (await ctx.state())["tasks"] if t["session_id"] == worker]
+        return next((t for t in found if (t.get("paused") or {}).get("go_on_at")), None)
+
+    task = await wait_for("its turn paused, to go on at its reset", paused, 90, ctx.app)
+    assert task["paused"]["go_on_at"] == resets, task["paused"]
+
+    def open_workers(snap: dict) -> set[str]:
+        return {r["id"] for r in snap["sessions"] if r["role"] == "worker" and not r["closed_at"]}
+
+    before = open_workers(await ctx.state())
+    # Continue with Copilot: two clicks at once (a double click, two tabs), then a stale card's.
+    path = f"/api/sessions/{worker}/continue"
+    clicks = await asyncio.gather(*(ctx.app.post(path, {"agent": "copilot"}) for _ in range(2)))
+    stale = await ctx.app.post(path, {"agent": "copilot"})
+    made = {found["session_id"] for found in (*clicks, stale)}
+    assert len(made) == 1, (clicks, stale)
+    assert [bool(found.get("already")) for found in clicks].count(True) == 1, clicks
+    assert stale["already"], stale
+    snap = await ctx.state()
+    assert open_workers(snap) - before == made, "one new worker"
+    (new,) = made
+    old = next(t for t in snap["tasks"] if t["id"] == task["id"])
+    assert old["status"] == "cancelled" and not old.get("attention"), old
+    assert not (old.get("paused") or {}).get("go_on_at"), "nor going on at its reset"
+    replaced = next(t for t in snap["tasks"] if t["session_id"] == new)
+    assert old["progress"].endswith(f"as {replaced['id']} “{replaced['title']}”."), old
+    try:
+        await ctx.app.post(f"/api/tasks/{task['id']}/go-on-at-reset", {})
+        raise AssertionError("a stale Go on at… went through")
+    except RuntimeError as exc:
+        assert "It was continued on Copilot by a new worker" in str(exc), exc
+
+    async def finished():
+        found = next(t for t in (await ctx.state())["tasks"] if t["id"] == replaced["id"])
+        return found if found["status"] in {"review", "done"} else None
+
+    await wait_for("the new worker's task, on Copilot", finished, 300, ctx.app)
+    handled = [e for e in (await ctx.state()).get("handled", []) if e["kind"] == "resumed"]
+    await asyncio.sleep(max(0.0, resets - time.time()) + 20)
+    said = [m["text"] for m in await ctx.app.get(f"/api/sessions/{worker}/messages?after={mark}")]
+    assert "Go on where you stopped." not in said, "nothing went on at its reset"
+    again = [e for e in (await ctx.state()).get("handled", []) if e["kind"] == "resumed"]
+    assert len(again) == len(handled), "nothing resumed"
+    assert open_workers(await ctx.state()) - before == made, "still one"
+    log("M8 passed")
+
+
 SCENARIOS = [
     m1_install, m2_sign_in, m3_once, m4_no_replay, m5_claude_live, m6_in_place, m7_limit,
+    m8_continued_once,
 ]  # fmt: skip
 
 

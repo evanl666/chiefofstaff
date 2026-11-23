@@ -3008,8 +3008,12 @@ class TaskActions:
             raise ValueError(f"{reference} is not a worker with a task.")
         return task
 
-    async def cancel(self, task_id: str, reason: str = "", by: str = "you") -> dict:
-        """End a task for good. Its worker stops if it is on this task, and stays open."""
+    async def cancel(
+        self, task_id: str, reason: str = "", by: str = "you", learn: bool = True, said: str = ""
+    ) -> dict:
+        """End a task for good. Its worker stops if it is on this task, and stays open.
+        `learn`: the owner's reason is theirs to learn from (not one Chief of Staff wrote);
+        `said`: the Router's chat line for it (else that it was cancelled)."""
         task = self.tasks.get(task_id)
         if task["status"] in {"done", "cancelled"}:
             raise ValueError(f"Task {task_id} is {task['status']} already.")
@@ -3024,7 +3028,7 @@ class TaskActions:
             and (self.runtime.working_on(row["id"]) or row["task_id"]) == task_id
         )
         why = f"Cancelled by {by}" + (f": {reason}" if reason else ".")
-        if by == "you" and reason.strip():
+        if by == "you" and reason.strip() and learn:
             self.runtime.learning.record(
                 "cancel",
                 context=self.about(task, task["goal"]),
@@ -3180,7 +3184,7 @@ class TaskActions:
                 },
             )
         with suppress(RuntimeError):
-            display = f"Task “{task['title']}” cancelled"
+            display = said or f"Task “{task['title']}” cancelled"
             meta = {"session_id": task["session_id"], "task_id": task_id}
             if by.lower().removeprefix("the ") == "router":
                 self.runtime.add_message(self.runtime.router_id(), "notice", display, meta)
@@ -3960,11 +3964,37 @@ class TaskActions:
             return {"session_id": session_id}
         return await self.follow_up(task["id"], text, resume=True)
 
+    async def handed_over(self, session_id: str, replaced: list[dict], new: dict, label: str):
+        """A worker's work went on with a new one (Continue with…): the tasks it had open are
+        replaced by the new one's (what waited for them waits for it), and each still open ends
+        (its card leaves Needs you); none goes on by itself at its limit's reset. Its worker
+        stays as it is (open, for reference)."""
+        self.runtime.forget_go_on_at(session_id)
+        why = f"Continued on {label} by a new worker, as {new['id']} “{new['title']}”."
+        for task in replaced:
+            self.runtime.toolset.move_dependents(task, new)
+            self.store.set(f"replacedby:{task['id']}", new["id"])
+            if self.tasks.get(task["id"])["status"] in OPEN:
+                with suppress(ValueError):
+                    line = f"“{task['title']}” continued on {label}"
+                    await self.cancel(task["id"], why, by="you", learn=False, said=line)
+            self.publish(self.tasks.get(task["id"]))  # (Its card leaves Needs you everywhere.)
+
+    def continued_as(self, task: dict) -> str:
+        """Where a task continued (Continue with…): its new worker's task, said ("" for none)."""
+        new = self.tasks.find(self.store.get(f"replacedby:{task['id']}") or "")
+        if not new or task["status"] != "cancelled":
+            return ""
+        name = agents.display(self.runtime.agent(new["session_id"]))
+        return f"It was continued on {name} by a new worker, as {new['id']} “{new['title']}”."
+
     async def go_on_at(self, task_id: str) -> dict:
         """Go on at <reset> (a task its agent paused for a limit, which said when it resets): it
         goes on by itself then, as the owner's Go on would (Monitoring until then, through a
         restart too), unless they say anything else to it first. Reset already: it goes on now."""
         task = self.tasks.get(task_id)
+        if said := self.continued_as(task):
+            raise ValueError(said)  # (A stale card: it goes on there, not here as well.)
         row = self.store.find_session(task["session_id"])
         if not (
             row
@@ -4079,6 +4109,8 @@ class TaskActions:
             self.stop_going_on(task_id)
         self.runtime.release_schedules(task["session_id"])
         if task["status"] == "cancelled" and not resume:
+            if said := self.continued_as(task):
+                raise ValueError(said)
             raise ValueError("That task was cancelled. Ask the Router for new work instead.")
         if going_on:
             # Another agent's worker whose spend is not all known: the owner accepts it.

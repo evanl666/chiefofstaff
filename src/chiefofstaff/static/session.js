@@ -231,6 +231,17 @@ export async function continueWith(session, agent) {
   try {
     const preview = await api(`/api/sessions/${session.id}/continue?agent=${encodeURIComponent(agent)}`);
     line.textContent = preview.line;
+    if (preview.already) {
+      // Continued already (a stale card, another tab): its new worker, not another one.
+      go.textContent = "Open it";
+      go.onclick = () => {
+        dialog.close();
+        select(preview.already);
+      };
+      go.disabled = false;
+      go.focus();
+      return;
+    }
     go.disabled = false;
     go.focus();
   } catch (error) {
@@ -243,7 +254,7 @@ export async function continueWith(session, agent) {
     try {
       const made = await api(`/api/sessions/${session.id}/continue`, { method: "POST", body: { agent } });
       dialog.close();
-      toast(`Continuing on ${label}.`);
+      toast(made.already ? `Already continued on ${agentName(made.agent || agent)}.` : `Continuing on ${label}.`);
       select(made.session_id);
     } catch (error) {
       go.disabled = false;
@@ -1189,15 +1200,17 @@ function refusalCard(text, meta, time) {
     return node;
   }
   if (!open) return node;
-  const answer = async (action, button) => {
-    button.disabled = true;
+  // One answer per card: every action waits while one runs.
+  const answer = async (action) => {
+    const buttons = [...node.querySelectorAll(".actions button")];
+    buttons.forEach((each) => (each.disabled = true));
     try {
       const fresh = await api(`/api/agent-refusals/${meta.agent_refused}`, { method: "POST", body: { action } });
       // (Its key is absent once none is open: not kept from before.)
       state.snapshot = { ...state.snapshot, ...fresh, agent_refusals: fresh.agent_refusals };
       if (!fresh.agent_refusals?.includes(meta.agent_refused)) node.querySelector(".actions")?.remove();
     } catch (error) {
-      button.disabled = false;
+      buttons.forEach((each) => (each.disabled = false));
       toast(error.message, "error");
     }
   };
@@ -1205,7 +1218,7 @@ function refusalCard(text, meta, time) {
   if (meta.resuming) {
     // Its agent can run it now: it goes on in a moment, unless Cancel keeps it for the owner.
     const keep = el("button", { type: "button", class: "text", text: "Cancel", title: "Keep it here: start it yourself when you like" });
-    keep.onclick = () => answer("keep", keep);
+    keep.onclick = () => answer("keep");
     node.append(el("div", { class: "actions" }, el("span", { class: "resuming", role: "status" }, el("span", { class: "spinner", "aria-hidden": "true" }), `Resuming on ${name}…`), el("span", { class: "spacer" }), keep));
     return node;
   }
@@ -1221,15 +1234,15 @@ function refusalCard(text, meta, time) {
     text: meta.worker || held ? `Continue with ${instead}` : `Run on ${instead} instead`,
     title: meta.worker ? `A new worker on ${instead} goes on from a summary of this one's work, with what it was given; this one stays open` : undefined,
   });
-  copilot.onclick = () => answer("copilot", copilot);
+  copilot.onclick = () => answer("copilot");
   if (held) {
     const drop = el("button", { type: "button", class: "text", text: "Don't run it" });
-    drop.onclick = () => answer("wait", drop);
+    drop.onclick = () => answer("wait");
     const status = statusOf(meta.agent);
     let first = null;
     if (meta.kept || ready(status)) {
       first = el("button", { type: "button", text: meta.worker ? `Send it on ${name}` : `Start on ${name}` });
-      first.onclick = () => answer("now", first);
+      first.onclick = () => answer("now");
     } else {
       first = setupAction(status || { name: meta.agent, status: meta.status });
     }
@@ -1237,7 +1250,7 @@ function refusalCard(text, meta, time) {
     return node;
   }
   const wait = el("button", { type: "button", class: "text", text: "Wait" });
-  wait.onclick = () => answer("wait", wait);
+  wait.onclick = () => answer("wait");
   // The command that makes it ready, the owner's to run (else a link to the guide).
   const fix = meta.fix ? fixLine(meta.fix) : null;
   node.append(el("div", { class: "actions" }, fix || el("a", { class: "link", href: SIGN_IN_HELP, target: "_blank", rel: "noreferrer", text: "Sign-in help" }), el("span", { class: "spacer" }), wait, copilot));

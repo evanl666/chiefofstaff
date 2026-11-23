@@ -772,6 +772,10 @@ class Runtime:
         self.agent_checked_at: dict[str, float] = {}
         self.check_tries: dict[str, int] = {}
         self.check_waits: dict[str, asyncio.Task] = {}
+        # One Continue with… of a worker at a time, and one answer to an agent refusal's card
+        # at a time (a double click, a stale card, two tabs: the second finds it done).
+        self.continue_locks: dict[str, asyncio.Lock] = {}
+        self.refusal_locks: dict[str, asyncio.Lock] = {}
         self.lost_at: dict[str, float] = {}
         # Each agent's processes as last recorded (kv `agentpids:<agent>`).
         self.agent_pids: dict[str, dict[int, str]] = {}
@@ -4368,13 +4372,14 @@ class Runtime:
     async def resume_later(self, key: str, until: float):
         try:
             await asyncio.sleep(max(0.0, until - time.time()))
-            raw = self.store.get(f"agentrefusal:{key}")
-            if not raw:
-                return
-            found = json.loads(raw)
-            if found.get("resuming") != until:
-                return  # Cancelled meanwhile.
-            await self.resume_refused(key, found, after=RESUMED[found.get("status", "")])
+            async with self.refusal_locks.setdefault(key, asyncio.Lock()):
+                raw = self.store.get(f"agentrefusal:{key}")
+                if not raw:
+                    return  # Answered meanwhile (Continue with Copilot, say).
+                found = json.loads(raw)
+                if found.get("resuming") != until:
+                    return  # Cancelled meanwhile.
+                await self.resume_refused(key, found, after=RESUMED[found.get("status", "")])
         finally:
             self.resuming.discard(key)
 
@@ -4464,7 +4469,12 @@ class Runtime:
         """The owner's answer on an agent refusal's card: start it on the agent it offers
         instead (Copilot, or the one new workers start on); start it on its own agent now
         (`now`: it can run there; held for its check, that is tried now); keep it, not going on
-        by itself (`keep`: Cancel while it was resuming); or drop it (`wait`: nothing starts)."""
+        by itself (`keep`: Cancel while it was resuming); or drop it (`wait`: nothing starts).
+        One answer per card: another meanwhile (a double click, two tabs) finds it answered."""
+        async with self.refusal_locks.setdefault(key, asyncio.Lock()):
+            return await self.answering_refusal(key, action)
+
+    async def answering_refusal(self, key: str, action: str) -> dict:
         raw = self.store.get(f"agentrefusal:{key}")
         if not raw:
             raise ValueError("That card was answered already.")
@@ -4612,6 +4622,13 @@ class Runtime:
     async def continue_preview(self, session_id: str, agent: str) -> dict:
         """What Continue with <agent>… sends, in one line: its summary's length, its changes
         (files, lines added and removed since it began), and whether this one stays open."""
+        if found := self.continued_already(session_id):
+            new = self.store.session(found["session_id"])
+            name = agents.display(found.get("agent") or self.agent(new["id"]))
+            return {
+                "line": f"Already continued on {name} by a new worker, “{new['title']}”.",
+                "already": new["id"],
+            }
         row = self.store.session(session_id)
         self.continue_checks(row, agent)
         summary = await self.handoff_summary(row, self.agent(session_id))
@@ -4655,6 +4672,22 @@ class Runtime:
             "stays_open": keeps,
         }
 
+    def continued_already(self, session_id: str) -> dict | None:
+        """The new worker this one's work went on with (Continue with…), while nothing new was
+        given to this one since: asked again (a double click, a stale card, two tabs), that one
+        is pointed to and nothing new is made."""
+        try:
+            found = json.loads(self.store.get(f"continuedon:{session_id}") or "null")
+        except ValueError:
+            return None
+        if not isinstance(found, dict) or not self.store.find_session(found.get("session_id", "")):
+            return None
+        tasks = self.tasks.for_session(session_id)
+        if (tasks[-1]["id"] if tasks else "") != found.get("last", ""):
+            return None  # Given more work since: continuing that is another matter.
+        keys = ("session_id", "task_id", "stays_open", "agent")
+        return {key: found.get(key) for key in keys} | {"already": True}
+
     async def continue_on(self, session_id: str, agent: str, also: str = "") -> dict:
         """Continue with <agent>… (the owner's, from a worker's ⋯ or by asking the Router): a
         new worker on that agent goes on with this one's work, from a summary of where it
@@ -4662,7 +4695,16 @@ class Runtime:
         folder or a clone of its own hands its folders over and closes (never two writing
         one). Only an idle worker of the owner's; the agent must be able to run it now (else
         why not, nothing changed). `also`: what the Router gave it that did not reach it (its
-        agent could not run), which the new one does too."""
+        agent could not run), which the new one does too. Its open tasks are the new one's now
+        (replaced: what waited for them waits for it; none goes on by itself at a limit's
+        reset). Once: asked again, the new worker it went on with (continued_already), but
+        with `also` (work that is not in that one's)."""
+        async with self.continue_locks.setdefault(session_id, asyncio.Lock()):
+            if not also.strip() and (found := self.continued_already(session_id)):
+                return found
+            return await self.continue_now(session_id, agent, also)
+
+    async def continue_now(self, session_id: str, agent: str, also: str) -> dict:
         row = self.store.session(session_id)
         self.continue_checks(row, agent)
         current = self.agent(session_id)
@@ -4681,6 +4723,8 @@ class Runtime:
         self.continue_checks(row, agent)
         new_id = str(uuid4())
         title = row["title"]
+        before = self.tasks.for_session(session_id)
+        replaced = [task for task in before if task["status"] in OPEN]
         checkouts = self.workspaces.checkouts(row)
         keeps, forked = self.stays_open(checkouts), []
         if keeps:
@@ -4725,6 +4769,14 @@ class Runtime:
             self.store.set(f"compare:{new_id}", group)
         task = self.tasks.create(new_id, title, summary[:4000])
         label = agents.display(agent)
+        self.store.set(
+            f"continuedon:{session_id}",
+            json.dumps({
+                "session_id": new_id, "task_id": task["id"], "stays_open": keeps, "agent": agent,
+                "last": before[-1]["id"] if before else "",
+            }),
+        )  # fmt: skip
+        await self.task_actions.handed_over(session_id, replaced, task, label)
         self.add_message(
             session_id,
             "notice",

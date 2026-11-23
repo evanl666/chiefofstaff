@@ -37,6 +37,15 @@ itself.
   Staff's check of Claude Code 2.1.322 could not finish (step 'background' took too long). It's
   tried again by itself."), and a task you put on that agent meanwhile is saved and starts there
   by itself once the check has run, under *Handled for you*.
+- **Continue on another agent moves the work over once.** On a task its plan's limit paused,
+  *Continue on another agent…* made the new worker but left the paused card in *Needs you*,
+  still set to go on at the reset, so a second click made a second worker doing the same work.
+  Now the paused task is replaced by the new worker's (what waited for it waits for the new one),
+  its card leaves at once, and nothing goes on at the reset; the first worker stays open to look
+  at. Continue clicked again (twice, from a stale card or another tab) makes nothing new and
+  opens the worker it went to; a stale *Go on at…* says where the work went. A card for work an
+  agent could not take takes one answer: its buttons wait while it runs, and a second answer
+  finds it answered.
 - **With the sandbox off, a worker on any agent can delete files you can.** Its commands run as
   you; the guide now says so plainly, and that turning the sandbox on prevents it.
 - **Teams: one thread for what workers that work together say (E129, E130).** Each team has a

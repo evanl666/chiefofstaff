@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import Harness
+from conftest import Harness, settle
 from test_agents import ran, router_options, saved, schema, spawn_on
 
 from chiefofstaff import agents, backend_claude, backend_codex, prompts, task_actions
@@ -353,6 +353,8 @@ async def test_a_workers_work_continues_on_another_agent_in_its_folders(tmp_path
     harness, runtime, worker, _ = await claude_worker(tmp_path)
     try:
         await runtime.set_session_yolo(worker, "off")  # Ask first, chosen for this worker.
+        with pytest.raises(ValueError, match="already runs on Claude"):
+            await runtime.continue_on(worker, "claude")
         row = harness.store.session(worker)
         made = await runtime.continue_on(worker, "copilot")
         new = harness.store.session(made["session_id"])
@@ -374,8 +376,6 @@ async def test_a_workers_work_continues_on_another_agent_in_its_folders(tmp_path
             "notice",
             "Continued on Copilot by a new worker, “Fix it”; this one stays open.",
         ) in harness.kinds(worker)
-        with pytest.raises(ValueError, match="already runs on Claude"):
-            await runtime.continue_on(worker, "claude")
     finally:
         await runtime.stop()
 
@@ -673,6 +673,52 @@ async def test_work_for_a_worker_whose_agent_is_signed_out_continues_on_copilot_
         await runtime.stop()
 
 
+@pytest.mark.parametrize("held", [False, True])
+async def test_a_refusal_card_is_answered_once(tmp_path, codex_installed, monkeypatch, held):
+    """Two answers at once on an agent refusal's card (a double click, two tabs): one is
+    taken, the other finds the card answered; nothing is made twice. For a worker's card:
+    Continue with Copilot; for new work held for a sign-in: Run on Copilot instead."""
+    from conftest import call_tool
+
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        made = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: Fixed.",
+                              agent="codex")  # fmt: skip
+        worker = made["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        await runtime.disconnect_agent("codex")
+        if held:
+            await spawn_on(harness, runtime, title="Count the rows · data",
+                           instructions="Report done: 42 rows.", agent="codex")  # fmt: skip
+        else:
+            await call_tool(
+                runtime, "message_session", harness.router_id, session_id=worker,
+                text="Also count the rows.", task="new", title="Count the rows · data",
+                why_new="Another deliverable.",
+            )  # fmt: skip
+        (card,) = [
+            m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
+        ]
+        before = {r["id"] for r in harness.store.open_sessions(WORKER)}
+        key = card["meta"]["agent_refused"]
+        answers = await asyncio.gather(
+            runtime.answer_refusal(key, "copilot"),
+            runtime.answer_refusal(key, "copilot"),
+            return_exceptions=True,
+        )
+        failed = [a for a in answers if isinstance(a, Exception)]
+        assert len(failed) == 1 and "answered already" in str(failed[0]), answers
+        await until(lambda: len(harness.store.open_sessions(WORKER)) > len(before), 10)
+        await settle(runtime)
+        new = {r["id"] for r in harness.store.open_sessions(WORKER)} - before
+        assert len(new) == 1, "one worker made"
+        assert "agent_refusals" not in runtime.snapshot()
+    finally:
+        await runtime.stop()
+
+
 async def test_the_routers_own_pick_that_cannot_run_starts_on_copilot_an_owners_does_not(
     tmp_path, codex_installed, monkeypatch
 ):
@@ -819,6 +865,62 @@ async def test_a_paused_task_says_its_reset_first_and_goes_on_by_itself_then(
         assert harness.store.get(f"goonat:{task}") is None
         assert harness.store.get(f"stopped:{task}") is None
         assert "Go on where you stopped." in [m["text"] for m in harness.store.messages(worker)]
+    finally:
+        await runtime.stop()
+
+
+async def test_work_a_limit_paused_goes_on_elsewhere_once_and_its_card_leaves_needs_you(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """The owner's (0.1.53): Continue on another agent… on a task Claude's plan limit paused
+    made the new worker, but the paused card stayed in Needs you, still to go on at the reset,
+    and a second click made a second worker. Now the task is replaced by the new one's (what
+    waited for it waits for that), its card goes, nothing goes on at the reset; asked again (a
+    double click, a stale card, another tab), nothing new is made: the same continuation."""
+    resets = int(time.time()) + 3600
+    info = {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": resets}
+    monkeypatch.setenv("FAKE_CLAUDE_LIMIT", json.dumps(info))
+    monkeypatch.setattr(task_actions, "GO_ON_MARGIN", 0)
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        worker, task, _ = await limited(harness, runtime, "claude", "Hit the usage limit")
+        assert harness.store.get(f"goonat:{task}") == str(resets), "to go on at its reset"
+        other = harness.store.create_session("w-next", WORKER, "Use it", str(tmp_path))
+        waiting = runtime.tasks.create(other["id"], "Use it", "Use what it made.", after=[task])
+        first, again = await asyncio.gather(
+            runtime.continue_on(worker, "copilot"), runtime.continue_on(worker, "copilot")
+        )
+        assert again == {**first, "already": True, "agent": "copilot"}, "one continuation"
+        later = await runtime.continue_on(worker, "copilot")  # A stale card.
+        assert later["session_id"] == first["session_id"] and later["already"]
+        preview = await runtime.continue_preview(worker, "copilot")
+        assert preview == {
+            "line": "Already continued on Copilot by a new worker, “Fix it”.",
+            "already": first["session_id"],
+        }
+        mine = [r["id"] for r in harness.store.open_sessions(WORKER) if r["id"] != other["id"]]
+        assert sorted(mine) == sorted([worker, first["session_id"]]), "one new worker"
+        old = runtime.tasks.get(task)
+        assert old["status"] == "cancelled", "not left paused in Needs you"
+        assert old["progress"] == (
+            f"Cancelled by you: Continued on Copilot by a new worker, as {first['task_id']} "
+            "“Fix it”."
+        )
+        assert harness.store.get(f"replacedby:{task}") == first["task_id"]
+        assert {d["id"] for d in runtime.tasks.deps(waiting["id"])} == {first["task_id"]}
+        assert harness.store.get(f"goonat:{task}") is None
+        await asyncio.sleep(0.05)
+        assert not [job for job in runtime.jobs if "going_on_at" in repr(job)]
+        assert not harness.store.session(worker)["closed_at"], "left open, for reference"
+        said = "It was continued on Copilot by a new worker, as"
+        with pytest.raises(ValueError, match=said):
+            await runtime.task_actions.go_on_at(task)  # Its stale card's Go on at…
+        with pytest.raises(ValueError, match=said):
+            await runtime.task_actions.follow_up(task, "Go on where you stopped.")
+        sent = len(harness.store.messages(worker))
+        await runtime.task_actions.going_on_at(task, resets - 7200)  # Its reset come: nothing.
+        assert len(harness.store.messages(worker)) == sent
     finally:
         await runtime.stop()
 

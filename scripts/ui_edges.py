@@ -9251,6 +9251,66 @@ async def roles_check_unfinished(runtime, page, scheme: str):
             waiting.cancel()
 
 
+async def paused_continued_once(runtime, browser, worker: str, task_id: str, selector: str):
+    """Continue with Copilot… on a task its plan's limit paused, Continue clicked twice: one
+    new worker goes on with it; its card leaves at once, and it no longer goes on at its reset.
+    Its dialog opened again (a stale card, another tab) says where it went, with Open it."""
+    store = runtime.store
+    context, page, errors, _ = await agents_page(browser, "light")
+    if await page.locator("#home-tabs").is_visible():
+        await page.locator("#home-tabs [data-tab=tasks]").click()
+    card = page.locator(selector)
+    await card.get_by_role("button", name="Continue with Copilot…").click()
+    dialog = page.locator("dialog.continue-dialog")
+    go = dialog.get_by_role("button", name="Continue")
+    await expect(go).to_be_enabled(timeout=10000)
+    await go.dblclick()
+    await expect(dialog).to_have_count(0, timeout=20000)
+    # (The new worker's chat is shown: Home, as it is now.)
+    await at_home(page)
+    if await page.locator("#home-tabs").is_visible():
+        await page.locator("#home-tabs [data-tab=tasks]").click()
+    # Out of Monitoring (and never in Needs you): only among those that ended, replaced.
+    session = selector.split(".card.task", 1)[1]
+    for place in ("#tasks-monitoring", "#needs"):
+        await expect(page.locator(f"{place} .card.task{session}")).to_have_count(0, timeout=10000)
+    assert runtime.tasks.get(task_id)["status"] == "cancelled", "not left paused"
+    made = [
+        r["id"]
+        for r in store.open_sessions("worker")
+        if store.get(f"continues:{r['id']}") == worker
+    ]
+    assert len(made) == 1, made
+    assert store.get(f"replacedby:{task_id}") == runtime.tasks.for_session(made[0])[0]["id"]
+    assert store.get(f"goonat:{task_id}") is None, "nor goes on at its reset"
+    title = store.session(worker)["title"]
+    await page.evaluate(
+        "s => import('/static/session.js').then((m) => m.continueWith(s, 'copilot'))",
+        {"id": worker, "title": title},
+    )
+    line = dialog.locator(".continue-line")
+    await expect(line).to_have_text(f"Already continued on Copilot by a new worker, “{title}”.")
+    opened = dialog.get_by_role("button", name="Open it")
+    await expect(opened).to_be_enabled()
+    for scheme in ("light", "dark"):
+        await page.emulate_media(color_scheme=scheme)
+        await picker_shoot(page, "plan-limit-continued-again", scheme, "#main", focus=dialog)
+    await opened.click()
+    await expect(dialog).to_have_count(0)
+    assert (
+        len(
+            [
+                r
+                for r in store.open_sessions("worker")
+                if store.get(f"continues:{r['id']}") == worker
+            ]
+        )
+        == 1
+    )
+    assert not errors, errors
+    await context.close()
+
+
 async def round_picker(runtime, browser, failures: list[str]):
     """The first-run card for an agent installed and signed in; Coding agents' rows folded and
     open, with a plan's usage and its chip; @codex in the composer; a worker's agent on its row
@@ -9656,6 +9716,7 @@ async def picker_workers(runtime, browser):
         await context.close()
     assert runtime.tasks.get(task_id)["status"] == "waiting"
     assert len(store.messages(paused["session_id"])) == sent, "nothing sent before its reset"
+    await paused_continued_once(runtime, browser, paused["session_id"], task_id, selector)
     # (Codex's limit not kept for the rounds after: they have Codex as it is.)
     store.delete("agentlimit:codex")
     if waiting := runtime.limit_waits.pop("codex", None):

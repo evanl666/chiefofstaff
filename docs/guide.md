@@ -1416,7 +1416,9 @@ copy of its worktree; this one stays open."), then a new worker on that agent go
 summary (its task, reports, last messages, and each folder's branch and uncommitted changes) in a
 copy of its worktree: the same commit, its uncommitted changes and new files. This one stays
 open, as it was. One that works in your own folder (in place) hands that folder over and closes,
-so two workers never write the same one.
+so two workers never write the same one. Its open tasks are the new worker's now (what waited for
+them waits for the new one; a paused one leaves *Needs you* and no longer goes on at its reset),
+and continuing it again opens the worker it went to rather than making another.
 
 **Usage.** Each agent's row says how much of its plan's limits is used and when they reset,
 where the agent says it (Codex reads its own rate limits; Claude's come from what its workers
