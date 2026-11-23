@@ -4463,8 +4463,8 @@ class Runtime:
     async def answer_refusal(self, key: str, action: str) -> dict:
         """The owner's answer on an agent refusal's card: start it on the agent it offers
         instead (Copilot, or the one new workers start on); start it on its own agent now
-        (`now`: it can run there); keep it, not going on by itself (`keep`: Cancel while it
-        was resuming); or drop it (`wait`: nothing starts)."""
+        (`now`: it can run there; held for its check, that is tried now); keep it, not going on
+        by itself (`keep`: Cancel while it was resuming); or drop it (`wait`: nothing starts)."""
         raw = self.store.get(f"agentrefusal:{key}")
         if not raw:
             raise ValueError("That card was answered already.")
@@ -4476,6 +4476,8 @@ class Runtime:
             self.publish_state()
             return {}
         if action == "now":
+            if found.get("status") == agents.UNCHECKED:
+                self.agent_checked_at.pop(found["agent"], None)  # The owner's: its check now.
             await self.resume_refused(key, found, after="started when you asked")
             return {}
         if found.get("worker") and action == "copilot":

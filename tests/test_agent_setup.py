@@ -443,6 +443,44 @@ async def test_work_held_for_a_check_that_could_not_run_goes_on_once_it_has(
         await runtime.stop()
 
 
+async def test_start_on_a_card_held_for_a_check_tries_the_check_now(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """The owner's Start on Codex, on work held for a check that could not run: the check is
+    tried now (not a minute after the last try), and the work starts once it has run."""
+    from chiefofstaff import backend_codex
+    from chiefofstaff.models import Settings
+
+    late = "Chief of Staff's check of Codex 0.167.2 could not finish (step 'turn' took too long)"
+    checks = [0]
+    original = backend_codex.CodexAgent.check
+
+    async def check(self, folder):
+        checks[0] += 1
+        if checks[0] == 1:
+            said = f"{late}: workers that ask first do not run on it until it does."
+            return {"ran": False, "unrun": late, "ask_first": said, "acting": ""}
+        return await original(self, folder)
+
+    monkeypatch.setattr(backend_codex.CodexAgent, "check", check)
+    harness, runtime = await started(tmp_path, Settings(worker_yolo=False))
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        await runtime.connect_agent("codex")
+        await spawn_on(harness, runtime, title="Count the rows · data",
+                       instructions="Report done: 42 rows.", agent="codex")  # fmt: skip
+        (card,) = [
+            m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
+        ]
+        await runtime.answer_refusal(card["meta"]["agent_refused"], "now")
+        assert checks[0] == 2, "tried now"
+        (worker,) = harness.store.open_sessions(WORKER)
+        assert runtime.agent(worker["id"]) == "codex"
+        assert harness.store.message(card["id"])["meta"]["resumed"] == "Started when you asked"
+    finally:
+        await runtime.stop()
+
+
 async def test_cancel_while_resuming_keeps_it_for_the_owner_to_start(
     tmp_path, codex_installed, monkeypatch, quick
 ):
