@@ -1,4 +1,4 @@
-"""Prepared for you, live (S1): the 55 scenarios of its release gate, on real GitHub and a real
+"""Prepared for you, live (S1): the 57 scenarios of its release gate, on real GitHub and a real
 Copilot, in five shards. Each checks GitHub itself, not only what Chief of Staff says.
 
 Not run on every change: it spends Actions minutes and model credits, and writes to a shared
@@ -35,7 +35,8 @@ Every `gh api` call either account makes is checked to be REPOSITORY's own (in_r
 git only ever pushes to REPOSITORY, under the run's own branches.
 
 Copilot runs with a COPILOT_HOME of its own (its config.json copied from yours, read only). Ports
-default to 19930-19944 (LIVE_SHEPHERD_PORT_BASE moves them).
+default to 19930-19944 (LIVE_SHEPHERD_PORT_BASE moves them). Chief of Staff's data folder has a
+space in its name (DATA), as macOS's own does (~/Library/Application Support).
 
 Budgets (per run): at most 2,000 GitHub requests per account, content writes through one writer
 (Chief of Staff's own), job timeouts of 10 minutes, a credit cap per shard (SHARD_CREDITS): a
@@ -89,6 +90,11 @@ SX8  a required approval missing
 SX9  the base's protection can't be read: no merge (a token that can't read rules)
 SX10 close and reopen the worker between accept and green: acceptance kept; merged after Resume
 SX11 after the merge: the claim ends, the worker closes when nothing is open, Accept stays
+SX12 a stack on GitHub, the worker's PR at its bottom: Merge on its card merges it through
+     GitHub's merge for stacks (gh's merge refuses it), at the head the card showed; the PR
+     above it stays open
+SX13 the worker's PR above an open PR in its stack: its card says that one merges too, and
+     Merge all 2 merges both (GitHub's stack merge)
 
 Shard Y, safety, cost, restarts:
 SY1  turned off mid-attempt: drained, off completes
@@ -119,6 +125,7 @@ import asyncio
 import base64
 import contextlib
 import importlib.util
+import itertools
 import json
 import os
 import shutil
@@ -144,6 +151,8 @@ ROOM = 400.0
 # Long enough for one of Chief of Staff's reads of a claimed PR (shepherd.READ_SECONDS) and more.
 READ_ROUND = 330
 MODEL = os.environ.get("LIVE_SHEPHERD_MODEL", "claude-sonnet-5.5")
+# Chief of Staff's data folder in a run's folder: with a space, as macOS's own data folder.
+DATA = "cos data"
 # Every branch a run makes is under shepherd-live/<stamp>/; its ruleset and its hold label are
 # named after its stamp too: what cleanup looks for.
 RUNS = "shepherd-live"
@@ -836,16 +845,22 @@ class Ctx:
         return await self.app.post(f"/api/shepherd/steps/{step}", {"action": "approve", **choices})
 
     async def worker_pr(
-        self, branch: str, files: dict[str, str], title: str, kept: bool = True, note: str = ""
+        self,
+        branch: str,
+        files: dict[str, str],
+        title: str,
+        kept: bool = True,
+        note: str = "",
+        base: str = "base",
     ) -> tuple[str, int]:
         """A PR a worker opens or prepares for Create PR (its task makes and follows it): its
         target; with `kept`, once its task keeps it moving (never while Prepared for you is off).
         `note`: the owner's word on fixing it later, in the task itself (said after its result,
         it would be more on the task: at work on it again, its worker fixes CI itself, as since
-        0.1.48)."""
+        0.1.48). `base`: the run's branch it is from and into (its base, else another)."""
         patch = self.root / f"{branch}.json"
         patch.write_text(json.dumps(files))
-        ref, base = self.repo.ref(branch), self.repo.base
+        ref, base = self.repo.ref(branch), self.repo.ref(base)
         await self.ask(
             f"In {self.repo.clone}, on a new branch `{ref}` from origin/{base}, write each file "
             f"in {patch} (a JSON object: path -> full text) exactly as given, commit with the "
@@ -956,7 +971,7 @@ async def start_app(root: Path, shard: str, owner: GitHub, base: str):
         "CHIEFOFSTAFF_MIN_FREE_MEMORY": "0",
         "PATH": f"{gh_shim(root, base)}{os.pathsep}{os.environ.get('PATH', '')}",
     }
-    app = live_e2e.App(root / "data", root / "log", env)
+    app = live_e2e.App(root / DATA, root / "log", env)
     await app.start()
     return app, home
 
@@ -1752,6 +1767,97 @@ async def sx11_after_merge(ctx: Ctx):
     assert task["status"] in {"review", "done"}, task["status"]
 
 
+def stacked(ctx: Ctx, numbers: list[int]) -> int:
+    """GitHub's stack of these PRs, bottom first: its number."""
+    made = ctx.owner.json(
+        "api", f"repos/{ctx.repo.name}/stacks", "-X", "POST", payload={"pull_requests": numbers}
+    )
+    return int(made["number"])
+
+
+async def merge_card(ctx: Ctx, number: int, timeout: float = 900) -> dict:
+    """The PR's Ready to merge card, once it is offered."""
+    from live_e2e import wait_for
+
+    label = f"{ctx.repo.name}#{number}".lower()
+
+    async def found():
+        for draft in (await ctx.state())["drafts"]:
+            target = draft.get("target") or {}
+            if (
+                draft["kind"] == "merge"
+                and draft["status"] == "pending"
+                and (str(target.get("label") or "").lower() == label)
+            ):
+                return draft
+        return None
+
+    return await wait_for(f"the Ready to merge card of #{number}", found, timeout)
+
+
+async def merged_from_card(ctx: Ctx, card: dict, numbers: list[int]) -> dict:
+    """Merge clicked on the card: these PRs merged on GitHub, and the card done, saying so."""
+    from live_e2e import wait_for
+
+    await ctx.app.post(f"/api/drafts/{card['id']}", {"action": "send"})
+    for number in numbers:
+        await wait_for(f"#{number} merged", lambda n=number: _async(ctx.repo.pr(n)["merged"]), 600)
+
+    async def done():
+        for draft in (await ctx.state())["drafts"]:
+            if draft["id"] == card["id"] and draft["status"] != "pending":
+                return draft
+        return None
+
+    return await wait_for("its card done", done, 300)
+
+
+async def sx12_stack_bottom(ctx: Ctx):
+    await ctx.turn_on()
+    _target, number, head = await green_pr(ctx, "sx12")
+    branch = ctx.repo.pr(number)["head"]["ref"]
+    ctx.repo.branch("sx12-up", {"notes/sx12-up.md": "# above\n"}, "Above it", base=branch)
+    above = ctx.repo.open_pr("sx12-up", "Above sx12", base=branch)
+    stacked(ctx, [number, above])
+    ctx.repo.approve(number, head)
+    card = await merge_card(ctx, number)
+    assert card["target"]["head"] == head, card
+    done = await merged_from_card(ctx, card, [number])
+    assert done["status"] == "sent" and "GitHub's stack merge" in done["outcome"], done
+    pr = ctx.repo.pr(number)
+    assert pr["merged"] and pr["head"]["sha"] == head, "merged at the head the card showed"
+    assert ctx.repo.pr(above)["state"] == "open", "the PR above it is not merged with it"
+    log(f"SX12: {done['outcome']}")
+
+
+async def sx13_stack_above(ctx: Ctx):
+    await ctx.turn_on()
+    low = ctx.repo.branch("sx13-low", {"notes/sx13-low.md": "# below\n"}, "Below it")
+    below = ctx.repo.open_pr("sx13-low", "Below sx13")
+    target, number = await ctx.worker_pr(
+        "sx13", {"app/timeouts.py": GREEN, "notes/sx13.md": "# sx13\n"}, "Green (sx13)",
+        kept=False, base="sx13-low",
+    )  # fmt: skip
+    head = ctx.repo.pr(number)["head"]["sha"]
+    assert await ctx.repo.ci(head) == "success" and await ctx.repo.ci(low) == "success"
+    stacked(ctx, [below, number])
+    ctx.repo.approve(below, low)
+    ctx.repo.approve(number, head)
+    card = await merge_card(ctx, number)
+    try:
+        await ctx.app.post(f"/api/drafts/{card['id']}", {"action": "send"})
+    except RuntimeError as exc:
+        assert f"is in a stack above #{below}" in str(exc) and "Merge all 2" in str(exc), exc
+    else:
+        raise AssertionError("merged without saying the PR below it merges too")
+    assert not ctx.repo.pr(below)["merged"] and not ctx.repo.pr(number)["merged"]
+    shown = next(d for d in (await ctx.state())["drafts"] if d["id"] == card["id"])
+    assert [pr["number"] for pr in shown["target"]["stack_below"]] == [below], shown
+    done = await merged_from_card(ctx, shown, [below, number])
+    assert done["status"] == "sent" and f"with #{below} below it" in done["outcome"], done
+    log(f"SX13 ({target}): {done['outcome']}")
+
+
 # Shard Y: safety, cost, restarts.
 
 
@@ -2177,6 +2283,8 @@ SCENARIOS: dict[str, list[tuple[str, Scenario]]] = {
         ("SX9", sx9_unreadable_base),
         ("SX10", sx10_close_reopen),
         ("SX11", sx11_after_merge),
+        ("SX12", sx12_stack_bottom),
+        ("SX13", sx13_stack_above),
     ],
     "Y": [
         ("SY1", sy1_off_mid_attempt),
@@ -2237,6 +2345,10 @@ MAKES: dict[str, dict[str, int]] = {
     "SX7": {"worker PR": 1, "label": 1, "peer approval": 1},
     "SX8": {"worker PR": 1},
     "SX10": {"worker PR": 1, "peer approval": 1, "cos merge": 1},
+    "SX12": {"worker PR": 1, "script PR": 1, "script stack": 1, "peer approval": 1,
+             "cos merge": 1},
+    "SX13": {"worker PR": 1, "script PR": 1, "script stack": 1, "peer approval": 2,
+             "cos merge": 1},
     "SY1": {"worker PR": 1},
     "SY2": {"worker PR": 1, "cos push": 1},
     "SY3": {"worker PR": 1, "peer line comment": 3, "peer review": 1, "cos reply": 3,
@@ -2492,6 +2604,13 @@ class World:
         if key == ("POST", "issues", "N", "labels"):
             assert set(data["labels"]) <= self.labels, "a label it did not make first"
             return 200, [{"name": name} for name in data["labels"]]
+        if key == ("POST", "stacks"):
+            # GitHub's stack: of the run's open PRs only, each based on the one below it.
+            members = [self.prs[int(n)] for n in data["pull_requests"]]
+            assert len(members) >= 2 and all(pr["state"] == "open" for pr in members), data
+            for lower, upper in itertools.pairwise(members):
+                assert upper["base"]["ref"] == lower["head"]["ref"], (lower, upper)
+            return 201, {"number": 900 + len(self.prs), "pull_requests": members}
         if key == ("GET", "actions", "runs"):
             return 200, {"workflow_runs": list(self.runs.values())}
         if key == ("POST", "actions", "runs", "N", "cancel"):
@@ -2583,7 +2702,9 @@ async def dry_run():
         # A stacked child, a PR merged into the run's base, and a worker that named its branch
         # its own way (no prefix), with its PR into the run's base.
         repo.branch("su3-child", {"NOTES.md": "child"}, "Child", base="su3")
-        repo.open_pr("su3-child", "Child", base="su3")
+        child = repo.open_pr("su3-child", "Child", base="su3")
+        owner("api", f"repos/{REPOSITORY}/stacks", "-X", "POST",
+              payload={"pull_requests": [number, child]})  # fmt: skip
         repo.branch("sx2", {"NOTES.md": "green"}, "Green")
         merged = repo.open_pr("sx2", "Green")
         owner("api", f"repos/{REPOSITORY}/pulls/{merged}/merge", "-X", "PUT")  # As Chief of Staff.
@@ -2666,7 +2787,7 @@ async def shard(name: str, wanted: set[str]):
                 with contextlib.suppress(Exception):
                     from live_e2e import cleanup as sessions_cleanup
 
-                    await sessions_cleanup(root / "data")
+                    await sessions_cleanup(root / DATA)
             try:
                 left = repo.cleanup()
             except Exception as exc:  # Said, not raised over the run's own failure.
