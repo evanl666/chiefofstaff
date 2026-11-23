@@ -9762,8 +9762,9 @@ async def picker_workers(runtime, browser):
     )
     assert not errors, errors
     await context.close()
-    # Work for a worker of theirs on an agent signed out now: the same card, in one click its
-    # work goes on on Copilot (from its summary, with what it was given); it stays open.
+    # Work for a worker of theirs on an agent signed out now: the same card. Its work went on on
+    # Copilot already (Continue with… above): in one click, what it was given goes to that
+    # worker, and nothing new is made; the first stays open.
     runtime.agent_refused_card(
         "codex",
         "Codex is not signed in: sign in from Settings → Coding agents.",
@@ -9787,12 +9788,15 @@ async def picker_workers(runtime, browser):
             before = {r["id"] for r in store.open_sessions("worker")}
             await card.get_by_role("button", name="Continue with Copilot").click()
             await expect(card.locator(".actions")).to_have_count(0)
+            await expect(card.locator(".card-outcome")).to_have_text(
+                "Sent to “Port the parser” on Copilot"
+            )
             await expect(
-                page.locator("#timeline .event.started .what", has_text="Continued “Port the")
-            ).to_have_text(["Continued “Port the parser” on Copilot"])
-            (again,) = [r for r in store.open_sessions("worker") if r["id"] not in before]
-            assert runtime.agent(again["id"]) == "copilot", again
-            assert store.get(f"continues:{again['id']}") == worker
+                page.locator("#timeline .event.started .what", has_text="Continued in “Port the")
+            ).to_have_text(["Continued in “Port the parser”"])
+            assert {r["id"] for r in store.open_sessions("worker")} == before, "none made"
+            given = store.messages(moved)
+            assert any("Also port the tokenizer." in m["text"] for m in given), given[-3:]
             assert not store.session(worker)["closed_at"], "the first one stays open"
         assert not errors, errors
         await context.close()

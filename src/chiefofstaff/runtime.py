@@ -4589,16 +4589,10 @@ class Runtime:
             MessageSession.model_validate(replay), self.router_id()
         )
         self.store.delete(f"agentrefusal:{key}")
-        row = self.store.session(target)
         name = agents.display(self.agent(target))
-        title = self.display_title(row)
+        title = self.display_title(self.store.session(target))
+        # The card says where it went; message_session's own line in the chat says what it was.
         self.refusal_said(found, {"resumed": f"Sent to “{title}” on {name}"})
-        self.add_message(
-            self.router_id(),
-            "notice",
-            f"Gave your message to “{title}” on {name}, which goes on with that worker's work",
-            {"session_id": target},
-        )
         return {**done, "sent": True}
 
     def plan_limit_seen(self, agent: str, limit: dict):
