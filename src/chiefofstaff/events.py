@@ -25,6 +25,7 @@ from .envelope import SWITCHED, from_owner, news_tasks, tasks_named, wrap
 from .policy import (
     OWNERS_CHECKOUT,
     OWNERS_CHECKOUT_ASK,
+    OWNERS_CHECKOUT_TREE,
     owners_checkout,
     permission_denial,
     private_denial,
@@ -151,6 +152,8 @@ PRE_TOOL_SLOW = 0.5
 # checkout of the owner's given only to read: then the worker gets a copy of its own
 # (Runtime.own_copy).
 OWNERS_CHECKOUTS = (OWNERS_CHECKOUT, OWNERS_CHECKOUT_ASK)
+# How it starts of an edit in the checkout a worker's own worktree was made from.
+OWNERS_TREE = OWNERS_CHECKOUT_TREE.split("{", 1)[0]
 # Seconds after its loop went idle (assistant.idle) or a turn ended (assistant.turn_end, for a
 # Copilot that does not say assistant.idle) with no session.idle: a command left running in the
 # background holds it (see Events.held_idle).
@@ -1188,7 +1191,11 @@ class Events:
             or (stepping and (reason := self.runtime.shepherd.denial(row, request)))
             or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
         ):
-            if reason in OWNERS_CHECKOUTS and getattr(request, "kind", "") == "shell":
+            if stepping and (reason in OWNERS_CHECKOUTS or reason.startswith(OWNERS_TREE)):
+                # A shepherd step: never a copy of the owner's checkout, nor its worker's
+                # worktree, instead of its own tree.
+                reason = self.runtime.shepherd.owners_checkout(row)
+            elif reason in OWNERS_CHECKOUTS and getattr(request, "kind", "") == "shell":
                 # Run in a copy of its own instead, made now (once): never stuck on it.
                 reason = await self.runtime.own_copy(row, request) or reason
             self.runtime.add_message(row["id"], "notice", reason)

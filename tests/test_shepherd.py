@@ -385,6 +385,44 @@ async def test_a_workers_own_clone_is_worked_in_only_at_the_head_never_made_into
     assert not marker.exists()
 
 
+async def test_in_a_step_the_owners_checkout_is_never_written_nor_copied_for_it(world):
+    """0.1.53's checkout guard holds in a step, and a step works in its own trees only: a
+    command that would run or write in the owner's checkout its worker's worktree was made from,
+    or an edit there, is refused naming the step's tree; no copy of that checkout (a worktree and
+    branch in the owner's repository) is made for it, and it is not sent to its worker's
+    worktree."""
+    from types import SimpleNamespace
+
+    from shepherd_world import run
+
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "running", step
+    before = runtime.workspaces.checkouts(runtime.store.session(world.worker))
+    branches = run("git", "branch", "--list", cwd=world.clone)
+
+    def command(line: str, cwd: str):
+        return SimpleNamespace(kind="shell", full_command_text=line, cwd=cwd, commands=[],
+                               possible_paths=[], possible_urls=[], intention="",
+                               has_write_file_redirection=">" in line,
+                               can_offer_session_approval=False)  # fmt: skip
+
+    target = world.clone / "app.py"
+    for request in (
+        command(f"cd {world.clone} && python -m pytest -q", step["tree"]),
+        command("touch notes.txt", str(world.clone)),
+        SimpleNamespace(kind="write", file_name=str(target), resolved_path=str(target)),
+    ):
+        decision = await runtime.events.on_permission(request, {"session_id": world.worker})
+        said = getattr(decision, "feedback", "")
+        assert said.startswith("Denied in a shepherd step:"), said
+        assert step["tree"] in said and "copy" not in said, said
+    assert runtime.workspaces.checkouts(runtime.store.session(world.worker)) == before
+    assert run("git", "branch", "--list", cwd=world.clone) == branches
+
+
 async def test_off_has_no_tables_no_snapshot_and_no_hooks(harness, tmp_path):
     world = World(harness, tmp_path)
     world.build()
