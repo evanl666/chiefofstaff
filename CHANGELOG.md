@@ -71,6 +71,11 @@
   `cd gone || echo y > ../app/notes.txt` from a worker's own folder wrote into your checkout
   unrefused. The same on Windows: a `Set-Location` that fails goes on where it was, unless
   `-ErrorAction Stop` ends the line; and cmd's `cd /d`.
+- **Java, Maven and Gradle in a worker's sandbox where a cache's path has a space** (a home
+  folder's). The truststore and Gradle's daemon folder are now quoted in `JAVA_TOOL_OPTIONS` and
+  `GRADLE_OPTS`, as the JVM and Gradle's script read quotes there; Maven's local repository goes
+  in `JAVA_TOOL_OPTIONS` then, since `mvn` splits `MAVEN_OPTS` at every space. Before, such a
+  path left every JVM unable to start.
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see

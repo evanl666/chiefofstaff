@@ -2,6 +2,7 @@
 
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -803,3 +804,99 @@ def test_chiefs_own_virtualenv_is_no_toolchain_of_workers(tmp_path, monkeypatch)
     other.mkdir(parents=True)
     monkeypatch.setenv("VIRTUAL_ENV", str(other))
     assert str(other) in caches.tool_paths(caches.Owner(home))
+
+
+def hotspot_options(value: str) -> list[str]:
+    """JAVA_TOOL_OPTIONS as the JVM reads it (HotSpot's Arguments::parse_options_buffer):
+    split at whitespace, a run in single or double quotes one piece of an option, its quotes
+    dropped (no escapes)."""
+    options, index = [], 0
+    while index < len(value):
+        if value[index].isspace():
+            index += 1
+            continue
+        option = ""
+        while index < len(value) and not value[index].isspace():
+            if value[index] in "'\"":
+                end = value.index(value[index], index + 1)  # (Unmatched: the JVM won't start.)
+                option += value[index + 1 : end]
+                index = end + 1
+            else:
+                option += value[index]
+                index += 1
+        options.append(option)
+    return options
+
+
+def jvm_settings(text: str) -> dict[str, str]:
+    """JAVA_TOOL_OPTIONS, MAVEN_OPTS and GRADLE_OPTS once bash sourced a worker's script."""
+    found = subprocess.run(
+        ["bash", "--norc", "--noprofile", "-c",
+         f". /dev/stdin <<'EOF'\n{text}EOF\n"
+         'printf "%s\\0" "$JAVA_TOOL_OPTIONS" "$MAVEN_OPTS" "$GRADLE_OPTS"'],
+        capture_output=True, text=True, check=True,
+        env={"PATH": os.environ["PATH"], "HTTPS_PROXY": "http://127.0.0.1:54313",
+             "MAVEN_OPTS": "-Xmx1g", "GRADLE_OPTS": "-Xmx2g"},
+    ).stdout.split("\0")  # fmt: skip
+    return dict(zip(("JAVA_TOOL_OPTIONS", "MAVEN_OPTS", "GRADLE_OPTS"), found, strict=False))
+
+
+def test_a_cache_path_with_a_space_reaches_the_jvm_whole(tmp_path):
+    """The workers' caches where a path has a space (a home folder's): each JVM option naming
+    one reaches the JVM whole, as each reads its options: the JVM itself takes quotes in
+    JAVA_TOOL_OPTIONS, Gradle's start script in GRADLE_OPTS (through xargs); mvn splits
+    MAVEN_OPTS at whitespace, quotes and all (`$MAVEN_OPTS` unquoted), so a path with a space
+    goes to Maven's JVM in JAVA_TOOL_OPTIONS instead."""
+    base = tmp_path / "a home"
+    home, tier = base / "owner", base / "caches" / "workers"
+    (home / ".m2" / "repository").mkdir(parents=True)
+    store = base / "caches" / "java" / "truststore-7.p12"
+    store.parent.mkdir(parents=True)
+    store.write_text("x")
+    text = caches.script(tier, caches.Owner(home), base / "ws", base / "tmp", True, "", store)
+    found = jvm_settings(text)
+    tools = hotspot_options(found["JAVA_TOOL_OPTIONS"])
+    maven = tools + found["MAVEN_OPTS"].split()  # (What java gets from mvn.)
+    assert f"-Djavax.net.ssl.trustStore={store}" in tools
+    assert "-Dhttps.proxyHost=127.0.0.1" in tools and "-Dhttps.proxyPort=54313" in tools
+    assert f"-Dmaven.repo.local={tier / 'maven' / 'repository'}" in maven
+    assert f"-Dmaven.repo.local.tail={home / '.m2' / 'repository'}" in maven
+    assert all(word.startswith("-") for word in found["MAVEN_OPTS"].split()), found
+    assert found["MAVEN_OPTS"].split()[-1] == "-Xmx1g", "the owner's own, after"
+    gradle = shlex.split(found["GRADLE_OPTS"])  # (As xargs takes quotes.)
+    assert f"-Dorg.gradle.daemon.registry.base={tier / 'gradle-daemons' / 'tmp'}" in gradle
+    assert gradle[0] == "-Dorg.gradle.native=false" and gradle[-1] == "-Xmx2g", gradle
+    # Without a space, each where it was.
+    plain = caches.script(tmp_path.parent / "t", caches.Owner(home), base, base, False, "", None)
+    assert "-Dmaven.repo.local=" in jvm_settings(plain)["MAVEN_OPTS"]
+
+
+def java_runs() -> bool:
+    """A JVM here (macOS's /usr/bin/java without one would offer to install one: not run)."""
+    if (
+        sys.platform == "darwin"
+        and subprocess.run(["/usr/libexec/java_home"], capture_output=True, check=False).returncode
+    ):
+        return False
+    return (
+        bool(shutil.which("java"))
+        and not subprocess.run(["java", "-version"], capture_output=True, check=False).returncode
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not java_runs(), reason="no JVM here")
+def test_the_jvm_itself_takes_a_cache_path_with_a_space(tmp_path):
+    """What the reading above relies on, on a real JVM (Linux runners have one): the options
+    of a worker's script whose paths have a space are its system properties, whole."""
+    base = tmp_path / "a home"
+    tier, store = base / "caches" / "workers", base / "java" / "truststore-7.p12"
+    store.parent.mkdir(parents=True)
+    store.write_text("x")
+    text = caches.script(tier, caches.Owner(base / "owner"), base, base, False, "", store)
+    shown = subprocess.run(
+        ["bash", "--norc", "--noprofile", "-c",
+         f". /dev/stdin <<'EOF'\n{text}EOF\njava -XshowSettings:properties -version"],
+        capture_output=True, text=True, check=True, env={"PATH": os.environ["PATH"]},
+    ).stderr  # fmt: skip
+    assert f"javax.net.ssl.trustStore = {store}" in shown, shown
+    assert f"maven.repo.local = {tier / 'maven' / 'repository'}" in shown, shown

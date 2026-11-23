@@ -1266,6 +1266,24 @@ JAVA_PROXY = (
 )
 
 
+# JAVA_TOOL_OPTIONS so far and a space, in a shell's words, to put more options after.
+JAVA_TOOL_OPTIONS = '"${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }"'
+WHITESPACE = re.compile(r"\s")
+
+
+def jvm_option(option: str) -> str:
+    """One JVM option for JAVA_TOOL_OPTIONS or GRADLE_OPTS: in quotes when it has whitespace in
+    it (a path's), as the JVM takes them in JAVA_TOOL_OPTIONS (HotSpot's parse_options_buffer:
+    either quote, no escapes) and Gradle's start script in GRADLE_OPTS (through xargs)."""
+    if not WHITESPACE.search(option):
+        return option
+    return f"'{option}'" if '"' in option else f'"{option}"'
+
+
+def jvm_options(options: list[str]) -> str:
+    return " ".join(map(jvm_option, options))
+
+
 def script(
     tier: Path,
     owner: Owner,
@@ -1308,9 +1326,15 @@ def script(
         f"export GRADLE_USER_HOME={q(str(t / 'gradle'))}",
         # Gradle's native libraries would load from that writable folder, which the sandbox
         # refuses; its daemons are this worker's own (a daemon keeps the sandbox it started in).
-        'export GRADLE_OPTS="-Dorg.gradle.native=false '
-        f"-Dorg.gradle.daemon.registry.base={t / 'gradle-daemons' / temporary.name} "
-        '-Dorg.gradle.daemon.idletimeout=900000${GRADLE_OPTS:+ $GRADLE_OPTS}"',
+        "export GRADLE_OPTS="
+        + q(
+            "-Dorg.gradle.native=false "
+            + jvm_option(
+                f"-Dorg.gradle.daemon.registry.base={t / 'gradle-daemons' / temporary.name}"
+            )
+            + " -Dorg.gradle.daemon.idletimeout=900000"
+        )
+        + '"${GRADLE_OPTS:+ $GRADLE_OPTS}"',
         f"export MAVEN_USER_HOME={q(str(t / 'maven'))}",
         f"export PLAYWRIGHT_BROWSERS_PATH={q(str(t / 'ms-playwright'))}",
         # The other caches Copilot's dev-tool access opened in the owner's home, and any tool
@@ -1342,22 +1366,31 @@ def script(
         # Git's system configuration (Homebrew's etc/gitconfig) is denied to a Slack reader:
         # read none (git warns at each command about one it cannot read).
         lines.append("export GIT_CONFIG_NOSYSTEM=1")
-    maven = f"-Dmaven.repo.local={t / 'maven' / 'repository'}"
+    maven = [f"-Dmaven.repo.local={t / 'maven' / 'repository'}"]
     if read_through:
         lines.append(f"export GRADLE_RO_DEP_CACHE={q(str(owner.gradle() / 'caches'))}")
         if owner.maven_repository().is_dir():
-            maven += f" -Dmaven.repo.local.tail={owner.maven_repository()}"
+            maven.append(f"-Dmaven.repo.local.tail={owner.maven_repository()}")
         downloads = owner.go_modules() / "cache" / "download"
         upstream = goproxy or "https://proxy.golang.org,direct"
         lines.append(f"export GOPROXY={q(f'file://{downloads},{upstream}')}")
-    lines.append(f'export MAVEN_OPTS="{maven}${{MAVEN_OPTS:+ $MAVEN_OPTS}}"')
+    # mvn hands MAVEN_OPTS to java split at whitespace, quotes and all (`$MAVEN_OPTS`): an
+    # option with a space in its path goes to Maven's JVM in JAVA_TOOL_OPTIONS, whose quotes the
+    # JVM takes (the owner's own MAVEN_OPTS, given after, win over either as before).
+    spaced = [option for option in maven if WHITESPACE.search(option)]
+    plain = " ".join(option for option in maven if option not in spaced)
+    lines.append(f'export MAVEN_OPTS={q(plain)}"${{MAVEN_OPTS:+ $MAVEN_OPTS}}"')
+    if spaced:
+        lines.append(f"export JAVA_TOOL_OPTIONS={JAVA_TOOL_OPTIONS}{q(jvm_options(spaced))}")
     lines.append(JAVA_PROXY.rstrip())
     if truststore:
-        store = (
-            f"-Djavax.net.ssl.trustStore={truststore} -Djavax.net.ssl.trustStorePassword=changeit"
-        )
+        store = [
+            f"-Djavax.net.ssl.trustStore={truststore}",
+            "-Djavax.net.ssl.trustStorePassword=changeit",
+        ]
         lines.append(
-            f'[ -s {q(str(truststore))} ] && export JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS {store}"'
+            f"[ -s {q(str(truststore))} ] && export JAVA_TOOL_OPTIONS={JAVA_TOOL_OPTIONS}"
+            f"{q(jvm_options(store))}"
         )
     # Copilot reports an init script that ends with an error before every command.
     lines.append("true")
