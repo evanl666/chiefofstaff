@@ -1436,7 +1436,11 @@ or installs it), then your workers, and marks the agent the Router runs on (*Rou
 and Escape work in the list and in the chip's popover. The agent you pick becomes a chip above the
 box ("On Codex", × removes it), and the Router starts that work there; click the chip to pick
 another agent, or that agent's model and effort, with whose plan it uses under them. Saying so works
-too ("do this with Claude"). The chip wins over the Router's own choice. While more than one agent
+too ("do this with Claude"). The chip wins over the Router's own choice. Claude's models are its
+aliases, each with the exact model it stands for now ("Opus (now claude-opus-5-5)": it follows
+Claude Code's updates), and those exact models, to pin one ("claude-opus-5-5 (pinned)"); the first
+choice is what Settings chose ("Settings: Opus (now …)"), or Claude Code's own default where Settings
+chose none. While more than one agent
 is on, each worker shows its agent's mark (a small diamond of its colour, its model on hover) on its
 sidebar row, its tasks and its header, and on the line that says it started in your chat.
 

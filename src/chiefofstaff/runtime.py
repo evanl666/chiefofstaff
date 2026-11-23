@@ -596,9 +596,14 @@ def model_price(model: Any) -> tuple[float, float]:
 
 
 def described(model: Any) -> dict:
-    """One of another agent's models, as describe_model has Copilot's, and whether it is that
-    agent's default."""
-    return describe_model(model) | {"default": bool(getattr(model, "is_default", False))}
+    """One of another agent's models, as describe_model has Copilot's, whether it is that
+    agent's default, and the exact model it stands for now (Claude's aliases)."""
+    resolved = getattr(model, "resolved", "")
+    return (
+        describe_model(model)
+        | {"default": bool(getattr(model, "is_default", False))}
+        | ({"resolved": resolved} if isinstance(resolved, str) and resolved else {})
+    )
 
 
 def identity_digest(paths: list[str]) -> str:
@@ -4528,7 +4533,10 @@ class Runtime:
             return {}
         if found.get("worker") and action == "copilot":
             # One of the owner's workers on an agent that could not run: its work goes on, with
-            # what the Router gave it, on the agent offered (as Continue with… does).
+            # what the Router gave it, on the agent offered (as Continue with… does); continued
+            # already (its ⋯, before), what it was given goes to the worker it continued on.
+            if done := self.continued_already(found["worker"]):
+                return await self.refusal_to_continuation(key, found, done)
             instead = found.get("instead") or COPILOT_AGENT
             made = await self.continue_on(found["worker"], instead, also=found.get("text", ""))
             self.store.delete(f"agentrefusal:{key}")
@@ -4562,6 +4570,36 @@ class Runtime:
             instead=f" on {agents.display(instead)} instead",
         )
         return {}
+
+    async def refusal_to_continuation(self, key: str, found: dict, done: dict) -> dict:
+        """Continue with Copilot on a card for a worker whose work went on already with a new
+        one (Continue with…): what the Router gave the first goes to that one instead, as the
+        Router sent it (a task the first had is the new one's now); nothing new is made."""
+        from .tools import MessageSession
+
+        target = done["session_id"]
+        replay = dict(found.get("replay") or {"text": found.get("text", "")})
+        replay["session_id"] = target
+        if replay.get("task") == "continue":
+            given = str(replay.get("task_id") or "")
+            replay["task_id"] = self.store.get(f"replacedby:{given}") or done.get("task_id") or ""
+        elif replay.get("task") == "new" and not replay.get("earlier"):
+            replay["earlier"] = "keep"  # The owner's: more for it, its own task goes on.
+        await self.toolset.t_message_session(
+            MessageSession.model_validate(replay), self.router_id()
+        )
+        self.store.delete(f"agentrefusal:{key}")
+        row = self.store.session(target)
+        name = agents.display(self.agent(target))
+        title = self.display_title(row)
+        self.refusal_said(found, {"resumed": f"Sent to “{title}” on {name}"})
+        self.add_message(
+            self.router_id(),
+            "notice",
+            f"Gave your message to “{title}” on {name}, which goes on with that worker's work",
+            {"session_id": target},
+        )
+        return {**done, "sent": True}
 
     def plan_limit_seen(self, agent: str, limit: dict):
         """An agent's plan limit as its worker last said it: Settings says it. A worker pauses
@@ -5425,9 +5463,16 @@ class Runtime:
     def agents_view(self) -> dict:
         """What the page knows of the agents on (in the snapshot only while one is)."""
         on = agents.turned_on(self.store)
+        # The model Settings chose for each (its workers' "Settings: …" choice says which).
+        configured = {
+            name: config["model"]
+            for name, config in agents.configured(self.store).items()
+            if name in on and config.get("model")
+        }
         return {
             "on": on,
             "names": {name: agents.display(name) for name in on},
+            **({"configured_models": configured} if configured else {}),
             "new_workers": agents.new_workers(self.store),
             "router_chooses": agents.router_chooses(self.store),
             # The agent the Router runs on now (the @ list marks it).

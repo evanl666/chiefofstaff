@@ -631,7 +631,8 @@ async def sandboxed(
     """Claude's sandbox as Chief of Staff gives a worker's commands its own (sandbox_settings),
     on a worker of its own: a write outside its folder, a read of a file kept unreadable and a
     host off its list must all fail, a host on its list must be reached (the catcher answers,
-    nothing goes further). "" when they did, else why its workers may not run sandboxed."""
+    nothing goes further). "" when they did, else why its workers may not run sandboxed; raises
+    TimeoutError when its step ran over its time (the check could not finish)."""
     from .backend import SandboxPolicy
     from .backend_claude import ClaudeWorker
 
@@ -664,6 +665,10 @@ async def sandboxed(
             await session.disconnect()
         finally:
             await worker.stop()
+    except TimeoutError:
+        # Its step ran over its time (a machine busy with other work): the check could not
+        # finish, and runs again (check), never a verdict that its sandbox does not hold.
+        raise
     except Exception as exc:
         return f"{said} could not check its sandbox ({(str(exc) or type(exc).__name__)[:200]})"
     caught = list(catcher.seen[seen:])

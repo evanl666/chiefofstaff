@@ -654,6 +654,35 @@ async def test_claudes_sandbox_adds_only_its_staging_folder_to_the_global_git_ig
     assert (tmp_path / "global-git-ignore").read_text() == "**/.claude/.cc-writes/\n"
 
 
+async def test_claudes_models_list_the_exact_model_of_each_alias_and_a_pinned_one_is_asked_for(
+    backend, tmp_path
+):
+    """Claude Code's own list of models for a worker (2.1.322's initialize): each alias with the
+    exact model it stands for now (resolvedModel), which Chief of Staff lists too, to pin
+    (picker_models); a worker on such an exact model asks the Messages API for that very model
+    (the stand-in's: no model call off this machine)."""
+    from chiefofstaff.backend_claude import picker_models
+
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    session, turn = await open_session(backend, tmp_path)
+    await session.send("Reply with just: listed")
+    await turn.wait()
+    rows = next(iter(backend.workers.values())).initialized.get("models") or []
+    aliases = {row["value"]: row.get("resolvedModel") for row in rows if row.get("value")}
+    assert aliases.get("default"), rows
+    listed = {model.id: model for model in picker_models(rows)}
+    exact = sorted({resolved for resolved in aliases.values() if resolved})
+    assert exact and all(listed[model].resolved == model for model in exact), listed
+    pinned = next((model for model in exact if "haiku" in model), exact[0])
+    asked = len(backend.model.bodies)
+    session, turn = await open_session(backend, tmp_path, model=pinned)
+    await session.send("Reply with just: pinned")
+    await turn.wait()
+    models = {body.get("model") for body in backend.model.bodies[asked:]}
+    assert pinned in models, models
+
+
 async def test_claudes_sandbox_writes_its_folder_unless_its_policy_holds_it(backend, tmp_path):
     """Claude's sandbox (2.1.322) lets a command write the folder it runs in whatever its
     allowWrite says; held read-only (denyWrite), it is not. So a sandboxed worker whose folder

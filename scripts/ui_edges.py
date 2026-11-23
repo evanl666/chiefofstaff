@@ -6054,6 +6054,7 @@ async def main():
                           round_thirteen, round_fourteen, round_storage, round_mascot,
                           round_others,
                           round_send, round_agents, round_picker, round_roles,
+                          round_claude_models,
                           round_picker_ux, round_agent_parity, round_agent_smooth, round_qa6,
                           round_qa7_life,
                           round_qa8_report,
@@ -9218,7 +9219,18 @@ async def round_roles(runtime, browser, failures: list[str]):
                 )
                 await expect(choose).to_have_attribute("aria-describedby", "role-router-line")
                 await expect(choose).to_have_value("codex")
+                # Folded, its line says where it runs now, not only where it was put.
+                await expect(system.locator("summary")).to_have_text(
+                    "System agents · The Router on Copilot for now"
+                )
                 await role_shoot(page, "roles-fallback", scheme)
+                # Chosen again (not saved yet): where it is put, as chosen.
+                await choose.select_option("copilot")
+                await expect(system.locator("summary")).to_have_text("System agents")
+                await choose.select_option("codex")
+                await expect(system.locator("summary")).to_have_text(
+                    "System agents · The Router on Copilot for now"
+                )
             finally:
                 os.environ.pop("FAKE_CODEX_SIGNED_OUT", None)
             await roles_check_unfinished(runtime, page, scheme)
@@ -9230,6 +9242,102 @@ async def round_roles(runtime, browser, failures: list[str]):
             "for now, saying why")  # fmt: skip
     finally:
         await agents_saved(runtime, {"codex": {"enabled": False}})
+        codex_off_path(folder)
+
+
+# As Claude Code lists its models to a worker (2.1.322's initialize): with what each alias stands
+# for now, and a row by version.
+CLAUDE_ROWS = [
+    {"value": "default", "displayName": "Default (recommended)", "resolvedModel": "claude-opus-5-5",
+     "description": "Use the default model (currently Opus 5.5)"},
+    {"value": "opus", "displayName": "Opus", "resolvedModel": "claude-opus-5-5",
+     "description": "Opus 5.5 · Best for everyday, complex tasks",
+     "supportedEffortLevels": ["low", "high"]},
+    {"value": "haiku", "displayName": "Haiku", "resolvedModel": "claude-haiku-5-5",
+     "description": "Haiku 5.5 · Fastest for quick answers"},
+    {"value": "claude-opus-4-8", "displayName": "Opus 4.8", "resolvedModel": "claude-opus-4-8"},
+]  # fmt: skip
+
+
+async def round_claude_models(runtime, browser, failures: list[str]):
+    """A Claude worker's Model menu (the owner's, 0.1.53: "Default · Opus" and "Default
+    (recommended)", whose was whose not said, and no exact version): its first choice is what
+    Settings chose, said as what it is, or Claude Code's own default where Settings chose none
+    (then not listed twice); each alias with the exact model it stands for now; each exact
+    model, pinned. Settings' row: Claude Code's default first, then the same."""
+    from chiefofstaff import backend_claude
+
+    store = runtime.store
+    folder, _ = codex_on_path()
+    os.environ["FAKE_CLAUDE_INIT"] = json.dumps({"models": CLAUDE_ROWS})
+    version = "2.1.322"  # The stand-in's.
+    backend_claude.LISTED[version] = backend_claude.picker_models(CLAUDE_ROWS)
+    runtime.agent_models_cache.pop("claude", None)
+    worker = ""
+    pinned = ["claude-opus-4-8", "claude-opus-5-5", "claude-haiku-5-5"]
+    rest = [
+        "Opus (now claude-opus-5-5)",
+        "Haiku (now claude-haiku-5-5)",
+        *(f"{model} (pinned)" for model in pinned),
+    ]
+    try:
+        await agents_saved(runtime, {"claude": {"enabled": True}})
+        from copilot.tools import ToolInvocation
+
+        spawn = runtime.toolset.spawn_on(["claude"])
+        made = await spawn.handler(
+            ToolInvocation(session_id=store.get("router_id"), tool_call_id="t",
+                           tool_name="spawn_worker",
+                           arguments={"title": "Tidy the notes", "agent": "claude",
+                                      "instructions": "Report done: Tidied.", "why_new": "t"})
+        )  # fmt: skip
+        worker = json.loads(made.text_result_for_llm)["session_id"]
+        await until(lambda: store.session(worker)["status"] not in {"queued", "working"}, 60)
+        for chosen, first, more in (
+            ("", ["Claude Code's default (now claude-opus-5-5)"], []),
+            (
+                "opus",
+                ["Settings: Opus (now claude-opus-5-5)"],
+                ["Claude Code's default (now claude-opus-5-5)"],
+            ),
+        ):
+            await agents_saved(runtime, {"claude": {"enabled": True, "model": chosen}})
+            for scheme in ("light", "dark"):
+                context, page, errors, _ = await agents_page(browser, scheme)
+                await page.evaluate(
+                    "id => import('/static/session.js').then((m) => m.select(id))", worker
+                )
+                # Its tabs, no team: nothing more beside them (0.1.55 said "null" there).
+                await expect(page.locator("#worker-tabs")).to_have_text("WorkToolsReports")
+                await page.locator("#session-more-button").click()
+                options = page.locator("#session-model option")
+                await expect(options).to_have_text([*first, *more, *rest], timeout=20000)
+                values = await options.evaluate_all("nodes => nodes.map((n) => n.value)")
+                assert values == ["", *(["default"] if more else []), "opus", "haiku", *pinned]
+                name = f"claude-models-menu{'-settings' if chosen else ''}"
+                await picker_shoot(page, name, scheme, "#session-tuning", focus=options.first)
+                await page.keyboard.press("Escape")
+                if chosen and scheme == "light":
+                    # Settings' row: Claude Code's default first (not listed twice), Opus chosen.
+                    await page.locator("#settings-button").click()
+                    await page.locator("#settings-tabs [data-tab=agents]").click()
+                    field = page.locator("select[name=agent_claude_model]")
+                    await expect(field.locator("option")).to_have_text(
+                        ["Claude Code's default (now claude-opus-5-5)", *rest], timeout=20000
+                    )
+                    await expect(field).to_have_value("opus")
+                    await page.keyboard.press("Escape")
+                assert not errors, errors
+                await context.close()
+        log("claude models: what Settings chose or Claude Code's default, once; each alias with "
+            "what it stands for now; each exact model, to pin; Settings' row")  # fmt: skip
+    finally:
+        os.environ.pop("FAKE_CLAUDE_INIT", None)
+        backend_claude.LISTED.pop(version, None)
+        if worker:
+            with contextlib.suppress(Exception):
+                await runtime.workers.close(worker, by="you")
+        await agents_saved(runtime, {"claude": {"enabled": False}})
         codex_off_path(folder)
 
 
@@ -9261,6 +9369,9 @@ async def roles_check_unfinished(runtime, page, scheme: str):
             await system.locator("summary").click()
         await expect(page.locator("#role-router-line")).to_have_text(
             f"On Copilot for now: {late}. It's tried again by itself.", timeout=20000
+        )
+        await expect(system.locator("summary")).to_have_text(
+            "System agents · The Router on Copilot for now"
         )
         await role_shoot(page, "roles-check-retry", scheme)
     finally:

@@ -744,12 +744,45 @@ def alias_models() -> list[SimpleNamespace]:
     return [model_entry({"value": value, "displayName": name}) for value, name in ALIASES]
 
 
+def picker_models(rows: Any) -> list[SimpleNamespace]:
+    """Claude Code's models as it lists them for this account: its default and each alias,
+    which follow its updates (with the exact model each stands for now, `resolvedModel`), and
+    those it lists by version; then, to pin, each exact model they stand for that it lists no
+    row of (with the efforts of the alias that stands for it, as Codex's are pinned by id)."""
+    entries: dict[str, dict] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("value"):
+            entries.setdefault(str(row["value"]), row)
+    for row in sorted(entries.values(), key=lambda found: found["value"] == "default"):
+        resolved = str(row.get("resolvedModel") or "")
+        if resolved and resolved not in entries:
+            name = version_name(row) or resolved
+            entries[resolved] = {**row, "value": resolved, "displayName": name}
+    return [model_entry(row) for row in entries.values()]
+
+
+def version_name(row: dict) -> str:
+    """The version an alias stands for now, as Claude Code says it ("Opus 5.5" of "Opus 5.5 ·
+    Best for everyday, complex tasks", or of the default's "(currently Opus 5.5)")."""
+    said = str(row.get("description") or "")
+    if found := re.search(r"\(currently ([^)]+)\)", said):
+        return found.group(1).strip()
+    head = said.split(" · ", 1)[0].strip()
+    name = str(row.get("displayName") or "")
+    return head if name and head.startswith(name) and head != name else ""
+
+
 def model_entry(model: dict) -> SimpleNamespace:
     efforts = [str(e) for e in model.get("supportedEffortLevels") or [] if isinstance(e, str)]
     value = str(model.get("value") or "")
     return SimpleNamespace(
         id=value,
-        name=str(model.get("displayName") or value),
+        # Claude Code's own default as what it is ("Default (recommended)" said nothing of whose).
+        name="Claude Code's default"
+        if value == "default"
+        else str(model.get("displayName") or value),
+        # The exact model it stands for now (an alias's, the default's; an exact one's own).
+        resolved=str(model.get("resolvedModel") or ""),
         policy=None,
         billing=None,
         capabilities=SimpleNamespace(limits=SimpleNamespace(max_prompt_tokens=0)),
@@ -1569,8 +1602,9 @@ class ClaudeWorker:
                 + ", ".join(problems)
                 + "): an administrator's Claude settings may override them."
             )
-        models = [model_entry(m) for m in initialized.get("models") or [] if isinstance(m, dict)]
-        if models and version:
+        models = picker_models(initialized.get("models"))
+        # Not the check's (a made-up key's account, offline): the owner's account's list only.
+        if models and version and not self.checking:
             LISTED[version] = models
 
     async def probe(self):

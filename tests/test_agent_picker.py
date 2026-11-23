@@ -719,6 +719,47 @@ async def test_a_refusal_card_is_answered_once(tmp_path, codex_installed, monkey
         await runtime.stop()
 
 
+async def test_a_card_for_a_worker_continued_already_sends_its_message_to_the_new_one(
+    tmp_path, codex_installed, monkeypatch
+):
+    """A worker of the owner's on Codex, continued on Copilot already (its ⋯), then given more
+    while Codex is signed out: Continue with Copilot on its card sends that to the worker it
+    went to, makes no other."""
+    from conftest import call_tool
+
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        made = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: Fixed.",
+                              agent="codex")  # fmt: skip
+        worker = made["session_id"]
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        first = await runtime.continue_on(worker, "copilot")
+        await until(lambda: harness.store.session(first["session_id"])["status"] != "queued", 30)
+        monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+        await runtime.disconnect_agent("codex")
+        await call_tool(
+            runtime, "message_session", harness.router_id, session_id=worker,
+            text="Also count the rows.", task="new", title="Count the rows · data",
+            why_new="Another deliverable.",
+        )  # fmt: skip
+        (card,) = [
+            m for m in harness.store.messages(harness.router_id) if m["meta"].get("agent_refused")
+        ]
+        before = {r["id"] for r in harness.store.open_sessions(WORKER)}
+        sent = await runtime.answer_refusal(card["meta"]["agent_refused"], "copilot")
+        assert sent["session_id"] == first["session_id"]
+        assert {r["id"] for r in harness.store.open_sessions(WORKER)} == before, "none made"
+        tasks = runtime.tasks.for_session(first["session_id"])
+        assert [t["title"] for t in tasks][-1] == "Count the rows · data", "given to it"
+        assert "Also count the rows." in tasks[-1]["goal"]
+        meta = harness.store.message(card["id"])["meta"]
+        assert meta["resumed"] == "Sent to “Fix it” on Copilot"
+        assert "agent_refusals" not in runtime.snapshot()
+    finally:
+        await runtime.stop()
+
+
 async def test_the_routers_own_pick_that_cannot_run_starts_on_copilot_an_owners_does_not(
     tmp_path, codex_installed, monkeypatch
 ):

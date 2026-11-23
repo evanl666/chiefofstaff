@@ -322,11 +322,12 @@ summary { min-height: 28px; }
 .menu > button.danger, #session-menu-items > button.danger { color: var(--red); background: none; }
 .menu > button.danger:not(:disabled):hover, #session-menu-items > button.danger:not(:disabled):hover { background: var(--red-soft); }
 .menu.wide { width: 280px; padding: 12px; gap: 8px; }
-.menu.wide label { display: grid; gap: 4px; font-size: var(--small); color: var(--muted); }
-.menu.wide select { width: 100%; min-height: 32px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: var(--body); padding: 0 8px; }
+.menu.wide label { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; font-size: var(--small); color: var(--muted); }
+/* A long choice (Claude's "Opus (now claude-opus-5-5)") is cut off within it, never widening it. */
+.menu.wide select { width: 100%; min-width: 0; text-overflow: ellipsis; min-height: 32px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: var(--body); padding: 0 8px; }
 .menu.wide select.yolo { color: var(--red); border-color: var(--red); }
 .menu.wide hr { border: 0; border-top: 1px solid var(--line); margin: 4px -12px; }
-#session-tuning { display: grid; gap: 8px; }
+#session-tuning { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 #session-menu-items { display: grid; gap: 1px; }
 #session-menu-items:empty { display: none; }
 #session-menu-items > label { margin-bottom: 6px; }

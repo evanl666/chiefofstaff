@@ -1447,6 +1447,26 @@ async def test_the_check_holds_in_a_data_folder_whose_path_has_a_space_and_a_quo
     assert made == {"Application Support", "agents", "fake"}, "no ~/…/Application left"
 
 
+async def test_a_sandbox_step_that_ran_over_its_time_is_not_a_verdict_on_its_sandbox(
+    agent, tmp_path, monkeypatch, check_sees
+):
+    """Its sandbox step ran over its time (a machine busy with other work): the check could not
+    finish, and is tried again; never kept as "its sandbox does not hold" for that version."""
+    from chiefofstaff import claude_check
+
+    send = claude_check.Turn.send
+
+    async def slow(self, text):
+        if text == f"{claude_check.STEP}sandbox":
+            raise TimeoutError
+        await send(self, text)
+
+    monkeypatch.setattr(claude_check.Turn, "send", slow)
+    found = await agent.check(tmp_path / "check")
+    assert found["ran"] is False and "sandbox" not in found, found
+    assert found["unrun"].endswith("could not finish (step 'sandbox' took too long)"), found
+
+
 def test_the_file_an_unquoted_check_left_outside_its_folder_goes_and_nothing_else(tmp_path):
     """What 0.1.53 and 0.1.54 left where the data folder's path has a space: the file named by
     the path's first word, with the pid and the rest of the path in it. Only that, exactly."""

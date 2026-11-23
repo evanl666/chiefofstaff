@@ -5,7 +5,7 @@ import { codeHtml, lines, plural, since } from "./text.js";
 import { closedWorkers, followOthers, HOME, loadState, sessions, state } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { EFFORTS, renderHeader, select } from "./session.js";
-import { agentMark, fixLine, statusText } from "./agentpick.js";
+import { agentMark, fixLine, modelOptions, statusText } from "./agentpick.js";
 import { openSetup, setupLine, setupWords } from "./agentsetup.js";
 // Settings opens on the tab last used, or the one asked for ("you" for what was learned).
 const TAB = "cos.settingsTab";
@@ -1265,12 +1265,12 @@ function agentRow(agent, disabled) {
     ? el(
         "select",
         { name: `agent_${agent.name}_model` },
-        el("option", { value: "", text: "Agent's default" }),
-        ...listed.map((model) => el("option", { value: model.id, text: model.name || model.id })),
-        ...(agent.model && !listed.some((model) => model.id === agent.model) ? [el("option", { value: agent.model, text: agent.model })] : []),
+        ...modelOptions(agent.name, listed, { settings: true, label: "Agent's default" }),
+        ...(agent.model && agent.model !== "default" && !listed.some((model) => model.id === agent.model) ? [el("option", { value: agent.model, text: agent.model })] : []),
       )
     : el("input", { name: `agent_${agent.name}_model`, placeholder: "Agent's default", value: agent.model || "", autocomplete: "off" });
-  if (listed.length) modelField.value = agent.model || "";
+  // (Claude Code's default chosen by name is its first choice: the same.)
+  if (listed.length) modelField.value = agent.name === "claude" && agent.model === "default" ? "" : agent.model || "";
   const errorId = `agent-${agent.name}-limit-error`;
   const limit = el("input", { name: `agent_${agent.name}_limit`, type: "text", inputmode: "numeric", placeholder: "No limit", value: agent.limit ? grouped(agent.limit) : "", autocomplete: "off", "aria-describedby": errorId });
   limit.addEventListener("blur", () => {
@@ -1324,14 +1324,19 @@ function newWorkersChoices(chosen) {
     const fallback = row.querySelector(".agents-unavailable");
     if (fallback) fallback.hidden = choice.value === "copilot";
   }
-  // Folded, its line saying where any of them runs other than on Copilot.
+  // Folded, its line saying where any of them runs other than on Copilot: where it runs now
+  // (on Copilot for now, where its agent can't run it: its line says why), as saved.
   const system = $("#agents-system");
   const shownRoles = [...document.querySelectorAll("#agents-roles .agents-role:not([hidden])")];
   system.hidden = !shownRoles.length;
   const elsewhere = shownRoles
-    .map((row) => [row.querySelector(".agents-choice span").textContent.replace(/ runs on$/, ""), row.querySelector("select")])
+    .map((row) => [row.querySelector(".agents-choice span").textContent.replace(/ runs on$/, ""), row.querySelector("select"), row])
     .filter(([, choice]) => choice.value !== "copilot")
-    .map(([label, choice]) => `${label} on ${choice.selectedOptions[0]?.text || choice.value}`);
+    .map(([label, choice, row]) =>
+      choice.value === choice.dataset.chosen && row.querySelector(".agents-role-line")?.textContent
+        ? `${label} on Copilot for now`
+        : `${label} on ${choice.selectedOptions[0]?.text || choice.value}`,
+    );
   system.querySelector("summary").textContent = ["System agents", ...elsewhere].join(" · ");
   $("#agents-places").hidden = !on.length;
   const hint = $("#agents-hint");

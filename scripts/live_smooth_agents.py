@@ -32,6 +32,9 @@ M8  Codex's limit used up again (after M7): M7's worker paused, set to go on at 
     with Copilot clicked twice at once and once more from a stale card: one new worker (on
     Copilot, real), the paused task leaves Needs you, replaced by the new one's; a stale Go on
     at… points there; past the reset, nothing goes on in the paused worker
+M9  Claude's models, from the stand-in Claude (as Claude Code 2.1.322 lists them: each alias with
+    the exact model it stands for now): its Model choices are its aliases and those exact models;
+    a worker pinned to one (claude-haiku-5-5) runs its next turn on that very model
 
 Signs in to Copilot with COPILOT_GITHUB_TOKEN, else the gh CLI's token (a Copilot home of its own;
 ~/.copilot is not used). Uses a few premium requests (the Router: LIVE_SMOOTH_MODEL, else
@@ -47,6 +50,7 @@ import contextlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -174,6 +178,18 @@ def write(path: Path, text: str, mode: int = 0o644):
     path.chmod(mode)
 
 
+# As Claude Code 2.1.322 lists its models to a worker (its initialize): each alias with the exact
+# model it stands for now.
+CLAUDE_MODELS = [
+    {"value": "default", "displayName": "Default (recommended)", "resolvedModel": "claude-opus-5-5",
+     "description": "Use the default model (currently Opus 5.5)"},
+    {"value": "opus", "displayName": "Opus", "resolvedModel": "claude-opus-5-5",
+     "description": "Opus 5.5 · Best for everyday, complex tasks"},
+    {"value": "haiku", "displayName": "Haiku", "resolvedModel": "claude-haiku-5-5",
+     "description": "Haiku 5.5 · Fastest for quick answers"},
+]  # fmt: skip
+
+
 def stand_ins(root: Path) -> dict[str, str]:
     """This run's environment: the stand-in `claude` and `curl` on the PATH (the owner's own
     agents off it), the stand-in Codex only once installed; a home and agent folders of its own."""
@@ -221,6 +237,8 @@ def stand_ins(root: Path) -> dict[str, str]:
         "FAKE_CODEX_HOME": str(root / "fake-codex-home"),
         "FAKE_CLAUDE_HOME": str(root / "fake-claude-home"),
         "FAKE_CLAUDE_PASTE": PASTE,
+        # Its models as Claude Code lists them to a worker (M9).
+        "FAKE_CLAUDE_INIT": json.dumps({"models": CLAUDE_MODELS}),
         "CHIEFOFSTAFF_MIN_FREE_MEMORY": "0",
     }
     if (runtime := SDK_CACHE / FALLBACK_CLI).is_dir():
@@ -624,9 +642,53 @@ async def m8_continued_once(ctx: Ctx):
     log("M8 passed")
 
 
+async def m9_claude_models(ctx: Ctx):
+    settings = (await ctx.state())["settings"]
+    await ctx.app.post("/api/settings", {**settings, "agents": {"claude": {"enabled": True}}})
+    await ctx.say(
+        f"In {ctx.project}, how many lines does README.md have? Give the worker this line word "
+        "for word: Report done: listed.",
+        agent="claude",
+    )
+
+    async def done():
+        found = [r for r in await ctx.workers_on("claude") if r["status"] in {"done", "idle"}]
+        return found[0] if found else None
+
+    worker = await wait_for("a Claude worker (the stand-in) reports", done, 300, ctx.app)
+    models = await ctx.app.get("/api/models?agent=claude")
+    shown = [(m["id"], m["name"], m.get("resolved", "")) for m in models]
+    log(f"M9: {shown}")
+    assert shown == [
+        ("default", "Claude Code's default", "claude-opus-5-5"),
+        ("opus", "Opus", "claude-opus-5-5"),
+        ("haiku", "Haiku", "claude-haiku-5-5"),
+        ("claude-opus-5-5", "Opus 5.5", "claude-opus-5-5"),
+        ("claude-haiku-5-5", "Haiku 5.5", "claude-haiku-5-5"),
+    ], shown
+    pinned = "claude-haiku-5-5"
+    view = await ctx.app.post(f"/api/sessions/{worker['id']}/model", {"model": pinned})
+    assert view["model_choice"] == pinned, view
+    after = max(m["id"] for m in await ctx.app.get(f"/api/sessions/{worker['id']}/messages"))
+    await ctx.app.post(f"/api/sessions/{worker['id']}/messages", {"text": "Report done: pinned."})
+
+    async def reported():
+        found = await ctx.app.get(f"/api/sessions/{worker['id']}/messages?after={after}")
+        return next((m for m in found if m["kind"] == "report"), None)
+
+    await wait_for("its turn on the pinned model", reported, 120, ctx.app)
+    database = live_e2e.data_dir(ctx.root) / "chiefofstaff.db"
+    query = "SELECT model FROM agent_usage WHERE session_id=? ORDER BY id"
+    with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as found:
+        ran = [row[0] for row in found.execute(query, (worker["id"],))]
+    assert ran and ran[-1] == pinned, ran
+    ctx.no_real_agent()
+    log(f"M9 passed (its turns ran on {ran})")
+
+
 SCENARIOS = [
     m1_install, m2_sign_in, m3_once, m4_no_replay, m5_claude_live, m6_in_place, m7_limit,
-    m8_continued_once,
+    m8_continued_once, m9_claude_models,
 ]  # fmt: skip
 
 

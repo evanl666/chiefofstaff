@@ -3,7 +3,7 @@
 import { $, api, closeMenus, closeOnBackdrop, FRESH_START, rememberKey, startFresh, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, othersOn, routerId, state, viewedId } from "./state.js";
 import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
-import { appendMessages, chatAnchor, followAnchor, renderHeader, scrolledByOwner, scrollToBottom, select } from "./session.js";
+import { agentModels, appendMessages, chatAnchor, followAnchor, renderHeader, scrolledByOwner, scrollToBottom, select } from "./session.js";
 import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setAgent, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
@@ -143,6 +143,7 @@ function bindUi() {
     const menu = $("#session-more");
     const open = menu.hidden;
     closeMenus();
+    if (open && current()?.agent === "claude") agentModels(current());
     if (open) renderHeader();  // As the session is now.
     menu.hidden = !open;
   });

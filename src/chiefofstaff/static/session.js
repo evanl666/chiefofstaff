@@ -8,7 +8,7 @@ import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
-import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, markOf, marksShown, modelLabel, ready, statuses, statusOf } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, markOf, marksShown, modelLabel, modelOptions, ready, statuses, statusOf } from "./agentpick.js";
 import { setupAction } from "./agentsetup.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
@@ -435,10 +435,7 @@ function renderTuning(session) {
   const show = (select, shown) => {
     select.closest("label").hidden = !shown;
   };
-  model.replaceChildren(
-    el("option", { value: "", text: `Default${fallback ? ` · ${fallback}` : ""}` }),
-    ...shownModels.map((item) => el("option", { value: item.id, text: item.name })),
-  );
+  model.replaceChildren(...modelOptions(session.agent, shownModels, { selected: session.model_choice, label: `Default${fallback ? ` · ${fallback}` : ""}` }));
   model.value = session.model_choice || "";
   const info = modelInfo(session.model);
   const efforts = info?.efforts || [];
@@ -477,9 +474,10 @@ function renderTuning(session) {
   context.onchange = () =>
     save({ model: session.model_choice, effort: keptEffort, context: context.value }, `Context window: ${context.selectedOptions[0].text.replace(" tokens", "")}`);
 }
-// Another agent's models, listed once a worker on it shows its ⋯ menu.
-async function agentModels(session) {
-  state.agentModels = { ...state.agentModels, [session.agent]: [] };
+// Another agent's models, listed once a worker on it shows its ⋯ menu (Claude's, each time it
+// opens: those listed meanwhile, its exact models once a worker reported them, as they are now).
+export async function agentModels(session) {
+  state.agentModels = { ...state.agentModels, [session.agent]: state.agentModels?.[session.agent] || [] };
   try {
     state.agentModels[session.agent] = await api(`/api/models?agent=${encodeURIComponent(session.agent)}`);
   } catch {
@@ -1044,7 +1042,7 @@ function updateWorkerTabs() {
           el("button", { type: "button", role: "tab", "data-tab": tab, "aria-selected": String(workerTab.tab === tab), onclick: () => setWorkerTab(session.id, tab) }, label, tab === "team" && told ? el("span", { class: "count", text: String(told) }) : null),
         ),
       ),
-      team ? el("button", { type: "button", class: "link team-link", text: "Team thread", title: `What ${team.name} told and asked each other`, onclick: () => showTeam(team.id, { focus: session.id }) }) : null,
+      team ? el("button", { type: "button", class: "link team-link", text: "Team thread", title: `What ${team.name} told and asked each other`, onclick: () => showTeam(team.id, { focus: session.id }) }) : "",
     );
   }
   // What a tab with nothing there says.

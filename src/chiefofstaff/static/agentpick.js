@@ -107,7 +107,9 @@ export async function refreshStatuses(after) {
 async function modelsOf(agent) {
   if (agent === "copilot") return state.models || [];
   state.agentModels = state.agentModels || {};
-  if (!state.agentModels[agent]?.length) {
+  // Claude's, asked again each time: the list its first worker reports (its exact models) takes
+  // the place of the aliases listed before one ran.
+  if (agent === "claude" || !state.agentModels[agent]?.length) {
     try {
       state.agentModels = { ...state.agentModels, [agent]: await api(`/api/models?agent=${encodeURIComponent(agent)}`) };
     } catch {
@@ -117,6 +119,28 @@ async function modelsOf(agent) {
   return state.agentModels[agent] || [];
 }
 export const EFFORT_WORDS = { none: "none", low: "low", medium: "medium", high: "high", xhigh: "extra high", max: "max" };
+// A model as a choice says it. Claude's: an alias (or Claude Code's default) with the exact
+// model it stands for now, as it follows Claude Code's updates; an exact model, pinned.
+export function modelText(agent, model) {
+  if (agent !== "claude") return model.name || model.id;
+  if (model.id.startsWith("claude-")) return `${model.id} (pinned)`;
+  return `${model.name || model.id}${model.resolved ? ` (now ${model.resolved})` : ""}`;
+}
+// A model menu's choices. Its first ("") is what Settings chose: for Claude, said as what it is
+// ("Settings: Opus (now …)"), or Claude Code's own default where Settings chose none, which is
+// then not listed again; where Settings chose another, Claude Code's default is a choice of its
+// own. In Settings (`settings`), its first is Claude Code's default.
+export function modelOptions(agent, models, { settings = false, selected = "", label = "Default" } = {}) {
+  if (agent !== "claude") return [el("option", { value: "", text: label }), ...models.map((model) => el("option", { value: model.id, text: model.name || model.id }))];
+  const native = models.find((model) => model.id === "default");
+  const nativeText = native ? modelText(agent, native) : "Claude Code's default";
+  const configured = settings ? "" : state.snapshot?.agents?.configured_models?.claude || "";
+  const chose = configured && configured !== "default";
+  const own = models.find((model) => model.id === configured);
+  const first = chose ? `Settings: ${own ? modelText(agent, own) : configured}` : nativeText;
+  const listed = models.filter((model) => model.id !== "default" || (!settings && (chose || selected === "default")));
+  return [el("option", { value: "", text: first }), ...listed.map((model) => el("option", { value: model.id, text: modelText(agent, model) }))];
+}
 
 // The one popover: agents on the left (those that can run work now; the others dimmed, their
 // fix under them), the chosen one's models and effort on the right, whose plan it uses under
@@ -187,7 +211,7 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
     const agent = picked.agent;
     const models = await modelsOf(agent);
     if (openPopover !== node || picked.agent !== agent) return;
-    const model = el("select", { "aria-label": "Model" }, el("option", { value: "", text: "Default" }), ...models.map((item) => el("option", { value: item.id, text: item.name || item.id })));
+    const model = el("select", { "aria-label": "Model" }, ...modelOptions(agent, models, { selected: picked.model }));
     model.value = models.some((item) => item.id === picked.model) ? picked.model : "";
     const info = models.find((item) => item.id === picked.model) || models.find((item) => item.default);
     const efforts = info?.efforts || [];

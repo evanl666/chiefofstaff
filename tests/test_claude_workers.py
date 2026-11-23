@@ -1638,3 +1638,55 @@ async def test_a_claude_workers_worktrees_go_with_its_checkouts_when_it_closes(
         await until(lambda: "feat" not in listed() and str(cwd) not in listed(), 30)
     finally:
         await runtime.stop()
+
+
+# Its models: Claude Code's aliases, and the exact models they stand for, to pin
+
+
+PINNED, OLDER = "claude-opus-5-5", "claude-opus-4-8"
+# As Claude Code 2.1.322 lists them to a worker (its initialize), with a row by version.
+LISTED_MODELS = [
+    {"value": "default", "displayName": "Default (recommended)", "resolvedModel": PINNED,
+     "description": "Use the default model (currently Opus 5.5) · $4/$20 per Mtok"},
+    {"value": "opus", "displayName": "Opus", "resolvedModel": PINNED,
+     "description": "Opus 5.5 · Best for everyday, complex tasks",
+     "supportedEffortLevels": ["low", "high"]},
+    {"value": "haiku", "displayName": "Haiku", "resolvedModel": "claude-haiku-5-5",
+     "description": "Haiku 5.5 · Fastest for quick answers"},
+    {"value": OLDER, "displayName": "Opus 4.8", "resolvedModel": OLDER},
+]  # fmt: skip
+
+
+async def test_its_models_are_the_aliases_and_the_exact_models_they_stand_for_to_pin(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """The owner's (0.1.53): a Claude worker's Model menu had only Claude Code's aliases (its
+    resolvedModel dropped), so no exact version could be pinned, and the check's own list
+    (a made-up key's account) could take the place of the account's. Now each alias says the
+    exact model it stands for, and each such model is a choice of its own (with its alias's
+    efforts), pinned as a Codex worker's is; the check's list is never kept."""
+    monkeypatch.setenv("FAKE_CLAUDE_INIT", json.dumps({"models": LISTED_MODELS}))
+    harness, runtime, worker, _ = await claude_worker(tmp_path)
+    try:
+        models = await runtime.agent_models("claude")
+        assert [(m["id"], m["name"], m.get("resolved")) for m in models] == [
+            ("default", "Claude Code's default", PINNED),
+            ("opus", "Opus", PINNED),
+            ("haiku", "Haiku", "claude-haiku-5-5"),
+            (OLDER, "Opus 4.8", OLDER),
+            (PINNED, "Opus 5.5", PINNED),
+            ("claude-haiku-5-5", "Haiku 5.5", "claude-haiku-5-5"),
+        ]
+        assert next(m for m in models if m["id"] == PINNED)["efforts"] == ["low", "high"]
+        view = await runtime.set_agent_model(worker, PINNED, "high", "")
+        assert view["model_choice"] == PINNED
+        listed = await call_tool(runtime, "list_sessions", harness.router_id)
+        assert PINNED in listed.text_result_for_llm
+        # The check's worker (offline, a made-up key's account) lists only aliases: not kept.
+        process = runtime.states.handle(worker).worker
+        process.checking = True
+        process.read_back({**process.initialized, "models": [{"value": "check-only"}]})
+        runtime.agent_models_cache.clear()
+        assert [m["id"] for m in await runtime.agent_models("claude")][:2] == ["default", "opus"]
+    finally:
+        await runtime.stop()

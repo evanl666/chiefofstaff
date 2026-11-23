@@ -27,6 +27,19 @@
   is now a line in the Router's chat, once, on its task (the Router isn't woken for it), as is
   its answer to what you asked it there (an *Update*); a result its worker amends in the same
   turn shows there as amended, not as first reported.
+- **Claude's models say what they run, and an exact one can be pinned.** A Claude worker's model
+  menu (its **⋯**, the chip's popover, Settings) listed "Default · Opus" and "Default
+  (recommended)" without saying whose default each was, and only Claude Code's aliases. Now its
+  first choice says what Settings chose ("Settings: Opus (now claude-opus-5-5)"), or is Claude
+  Code's own default where Settings chose none (then listed once); each alias says the exact
+  model it stands for now and follows Claude Code's updates; and each of those exact models is a
+  choice of its own, pinned, as Codex workers' are. The list is the one your account's workers
+  report: Chief of Staff's offline check of Claude Code no longer replaces it with its own.
+- **Fixes:** Continue with Copilot on a card for a worker whose work already went on with a new
+  worker sends its message to that one, instead of making another; folded *System agents* says
+  "The Router on Copilot for now" while its agent can't run it, not where it was put; a step of
+  Claude's sandbox check that took too long is tried again, never kept as its sandbox not holding;
+  a worker without a team no longer shows "null" beside its tabs.
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see
