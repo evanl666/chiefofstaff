@@ -240,12 +240,15 @@ fork, up to its last finished turn) and a note from Chief of Staff on what the f
 doing now and where. It works in a folder and branch of its own (from the project's base); the
 busy worker goes on undisturbed. The Router chat says *Started a second worker for “…” (context
 from “…”)*; in the sidebar the second worker sits under the first, and its task's row says
-*Worker from “…”*. With every slot taken, or when only that worker can do it (its branch or PR,
-or you asked for it), the task waits for it as before. Work you ask for in parallel (meanwhile,
-at the same time) with what a worker is doing goes to a second worker at once too, busy or not.
-Turn it off in Settings → General
-(*Give a busy worker's new task to a second worker with its context*). Workers on other agents
-(Codex) are not forked yet: their new tasks wait.
+*Worker from “…”*; in its team's *Tasks* it is *⑂ forked from …*. With every slot taken, or
+when only that worker can do it (its branch or PR, or you asked for it), the task waits for it
+as before. Work you ask for in parallel (meanwhile, at the same time) with what a worker is
+doing goes to a second worker at once too, busy or not. When you ask for a new worker for
+something an earlier worker knows, the Router can start it from that worker's conversation
+the same way. A worker on Codex or Claude Code (whose conversations are not forked yet), or one
+whose fork fails, hands its second worker a brief of its work instead: its tasks, what the
+finished ones found, its folders and files. Turn it off in Settings → General (*Give a busy
+worker's new task to a second worker with its context*).
 
 `spawn_worker` refuses once when related workers exist, so the Router decides explicitly; so
 does a new task for a worker given one in the last half hour ("oh wait, one more thing" is

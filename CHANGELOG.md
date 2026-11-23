@@ -42,6 +42,18 @@
   a worker without a team no longer shows "null" beside its tabs; new work you pick an agent for
   in the message box (`@claude`) is no longer given to a worker on another agent that knows the
   project: it starts on the agent you picked.
+- **A busy worker's new task goes to a second worker with its context.** When the worker that
+  knows the subject is busy (at work with two or more tasks open, or for ten minutes without a
+  break) and a worker slot is free, its new task no longer waits behind its other work: a
+  second worker starts at once from that worker's conversation so far (up to its last finished
+  turn), in a folder and branch of its own from the project's base, while the first goes on
+  undisturbed. Work you want done in parallel with what a worker is doing goes there too, and a
+  new worker you ask for can start from an earlier worker's conversation. The Router chat says
+  *Started a second worker for “…” (context from “…”)*; the second worker sits under the first
+  in the sidebar, its task's row says *Worker from “…”*, and its team's *Tasks* say *⑂ forked
+  from …*. A worker on Codex or Claude Code, whose conversations are not forked yet, hands its
+  second worker a brief of its work instead (its tasks, what the finished ones found, its
+  folders and files). On by default; Settings → General turns it off.
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see
