@@ -6,8 +6,11 @@ is free, the task would wait for the rest of its work: Chief of Staff forks its 
 (up to its turn in progress, not that turn) and starts a second worker on the fork, in a
 workspace of its own, with a brief made from what Chief of Staff knows of the first one's work
 now (no model call). The first worker goes on undisturbed. Anything that does not fit (the
-setting off, no free slot, an agent that cannot fork, the Router's same_worker) leaves the task
-with the busy worker, as before. See docs/design/worker-fork.md.
+setting off, no free slot, the Router's same_worker) leaves the task with the busy worker, as
+before. The Router can also start a new worker from a related one's conversation
+(spawn_worker's fork_of). Where its conversation cannot be copied (its agent's sessions are not
+forked, or the fork failed), the second worker gets a fuller brief of its work instead (its
+tasks' results, folders and files, as context_from gives). See docs/design/worker-fork.md.
 """
 
 from __future__ import annotations
@@ -17,10 +20,12 @@ import logging
 import os
 import time
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
-from . import machine
+from . import agents, machine
 from .envelope import clean_title, short
 from .policy import within
 from .roles import WORKER
@@ -37,6 +42,20 @@ BUSY_MINUTES = float(os.environ.get("CHIEFOFSTAFF_FORK_BUSY_MINUTES", "10"))
 # What the brief says of each of the first worker's open tasks, at most.
 GOAL_CHARS = 400
 PROGRESS_CHARS = 300
+# A brief without its conversation: the results of its latest finished tasks, at most.
+EARLIER_TASKS = 3
+DONE = {"review", "done"}
+
+
+@dataclass
+class Second:
+    """A second worker about to be made: the worker it comes from, its session's id (the fork
+    of that worker's session, or a new one), and whether it has that conversation (`native`)
+    or a brief of its work only."""
+
+    source: dict
+    session_id: str
+    native: bool
 
 
 class Forks:
@@ -118,28 +137,60 @@ class Forks:
         if target["role"] != WORKER or self.runtime.special(target):
             return ""
         why = self.busy(target) or ("wanted in parallel" if self.parallel(target, parallel) else "")
-        return why if why and not self.unforkable(target) else ""
+        return why if why and not self.blocked(target) else ""
 
     def parallel(self, target: dict, parallel: bool) -> bool:
         """The Router wants this new task done in parallel with the turn the worker is in."""
         return parallel and self.store.settings().fork_busy and self.in_turn(target)
 
-    def unforkable(self, target: dict) -> str:
-        """Why no second worker can be started from this one now ("" when one can)."""
-        copilot = self.runtime.copilot_id(target["id"])
-        if not self.runtime.made(target["id"]) or self.store.get(f"fresh:{copilot}"):
-            return "nothing of its conversation to copy yet"
-        if copilot in self.runtime.elsewhere:
-            return "it is open in a terminal"
-        if any(c.get("in_place") for c in self.runtime.workspaces.checkouts(target)):
+    def blocked(self, target: dict) -> str:
+        """Why no second worker takes a new task of this one's now, which then waits for it as
+        before ("" when one can)."""
+        if self.in_place(target):
             return "it works in the owner's own folder"  # One worker writes there.
-        if self.backend(target) is None:
-            return "its agent's sessions are not forked"
         if self.runtime.workers.running() >= self.store.settings().max_workers:
             return "every worker slot is taken"  # It waits for this worker, as for a slot.
         if machine.short_of_memory() is not None or machine.short_of_disk() is not None:
             return "this computer is short of memory or disk"
         return ""
+
+    def in_place(self, target: dict) -> bool:
+        return any(c.get("in_place") for c in self.runtime.workspaces.checkouts(target))
+
+    def uncopied(self, source: dict) -> str:
+        """Why this worker's conversation is not copied to a second worker, which then gets a
+        brief of its work only ("" when it is)."""
+        if self.backend(source) is None:
+            return "its agent's sessions are not forked"
+        copilot = self.runtime.copilot_id(source["id"])
+        if not self.runtime.made(source["id"]) or self.store.get(f"fresh:{copilot}"):
+            return "nothing of its conversation to copy yet"
+        if self.runtime.is_elsewhere(source):
+            return "it is open in a terminal"
+        if self.in_place(source):
+            return "it works in the owner's own folder"  # Its conversation edits that folder.
+        return ""
+
+    async def second(self, source: dict, title: str) -> Second | None:
+        """A second worker of this one: on a fork of its session when that can be made (its
+        conversation so far), else on a new session with a brief of its work; None when its
+        agent cannot run one now."""
+        if not (why := self.uncopied(source)):
+            try:
+                return Second(source, await self.make(source, title), True)
+            except Exception:
+                logger.warning("Could not fork %s: a brief instead.", source["id"], exc_info=True)
+        else:
+            logger.info("A second worker of %s with a brief: %s.", source["id"], why)
+        agent = self.runtime.agent(source["id"])
+        if agent != agents.COPILOT and not await self.runs(agent):
+            return None
+        return Second(source, str(uuid4()), False)
+
+    async def runs(self, agent: str) -> bool:
+        """Whether a new worker on this agent (not Copilot) can start now."""
+        entry = self.runtime.agents.get(agent)
+        return bool(entry and entry.enabled()) and not await self.runtime.worker_agent_down(agent)
 
     async def make(self, source: dict, title: str) -> str:
         """Fork the busy worker's session for the second worker: its id."""
@@ -161,14 +212,19 @@ class Forks:
             with suppress(Exception):
                 await backend.delete_session(session_id)
 
-    async def record(self, row: dict, source: dict):
-        """The second worker's row exists: its session is made (it resumes the fork), whose
-        worker it came from, and where its own part of its log begins (what it copied is never
-        shown as what it did, nor counted as what it used)."""
-        session_id = row["id"]
-        self.store.set(f"created:{session_id}", "1")
-        origin = {"id": source["id"], "title": self.runtime.display_title(source)}
+    async def record(self, row: dict, second: Second):
+        """The second worker's row exists: whose worker it came from (relations.py: a fork),
+        and on a fork, that its session is made (it resumes the fork) and where its own part of
+        its log begins (what it copied is never shown as what it did, nor counted as what it
+        used)."""
+        session_id, source = row["id"], second.source
+        origin: dict[str, Any] = {"id": source["id"], "title": self.runtime.display_title(source)}
+        if not second.native:
+            origin["brief"] = True
         self.store.set(f"forkof:{session_id}", json.dumps(origin, ensure_ascii=False))
+        if not second.native:
+            return
+        self.store.set(f"created:{session_id}", "1")
         end = 0
         if backend := self.backend(row):
             with suppress(Exception):
@@ -217,15 +273,24 @@ class Forks:
         other)."""
         return int(self.store.get(f"forklog:{session_id}") or 0)
 
-    def brief(self, source: dict, row: dict) -> str:
-        """What the second worker is told with its task, from Chief of Staff's own records."""
+    def brief(self, source: dict, row: dict, native: bool = True) -> str:
+        """What the second worker is told with its task, from Chief of Staff's own records:
+        with its conversation copied (`native`), or without it (what its finished tasks found
+        too)."""
         name = self.runtime.display_title(source)
         lines = [
-            f"You are a second worker, started from the conversation of worker "
-            f"{short(source['id'])} “{name}” because it is busy: what came before this message "
-            "is its conversation up to its last finished turn, copied to you. That worker goes "
-            "on with its own work in its own folder. Its tasks are not yours: do not continue, "
-            "check on or report them, and do not tell the owner about them."
+            (
+                f"You are a second worker, started from the conversation of worker "
+                f"{short(source['id'])} “{name}”: what came before this message is its "
+                "conversation up to its last finished turn, copied to you."
+                if native
+                else f"You are a second worker of worker {short(source['id'])} “{name}”, "
+                "started with what Chief of Staff knows of its work (its conversation is not "
+                "copied to you): it is below."
+            )
+            + " That worker goes on with its own work in its own folder. Its tasks are not "
+            "yours: do not continue, check on or report them, and do not tell the owner about "
+            "them."
         ]
         open_ = [
             t
@@ -241,6 +306,9 @@ class Forks:
                 if progress := " ".join((task["progress"] or "").split()):
                     said += f" Latest: {progress[:PROGRESS_CHARS]}"
                 lines.append(said)
+        finished = [t["id"] for t in self.tasks.for_session(source["id"]) if t["status"] in DONE]
+        if finished and not native:
+            lines.append(self.tasks.briefing(finished[-EARLIER_TASKS:], "What it did before"))
         files = json.loads(source.get("files") or "[]")[-12:]
         if files:
             lines.append("Files it changed so far: " + ", ".join(files))

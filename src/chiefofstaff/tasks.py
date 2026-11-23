@@ -318,7 +318,9 @@ class TaskBook:
 
     # Text for sessions
 
-    def briefing(self, task_ids: list[str]) -> str:
+    def briefing(
+        self, task_ids: list[str], heading: str = "Earlier work this task builds on"
+    ) -> str:
         """What earlier tasks found and where their work is, for a worker that builds on them."""
         parts = []
         for identifier in task_ids:
@@ -341,7 +343,7 @@ class TaskBook:
             if links:
                 lines.append("Links: " + ", ".join(links))
             parts.append("\n".join(lines))
-        return "Earlier work this task builds on:\n\n" + "\n\n".join(parts)
+        return f"{heading}:\n\n" + "\n\n".join(parts)
 
 
 SESSION_TO_TASK = {

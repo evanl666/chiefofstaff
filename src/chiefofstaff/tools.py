@@ -26,6 +26,7 @@ from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .digest import NEEDS_WORDS, Needs, needs, task_words, waiting_parts
 from .envelope import clean_title, language, short, wrap
+from .forks import Second
 from .habits import UpdateStyle
 from .learning import ProposeLessons
 from .models import (
@@ -1923,13 +1924,13 @@ class Tools:
         untrusted: bool = False,
         agent: str = "",
         instead: str = "",
-        fork: tuple[dict, str] | None = None,
+        fork: Second | None = None,
     ):
         """`untrusted`: a helper that reads untrusted content (the connector) runs as a worker
         that reads Slack does, whether or not Slack is connected. `agent`: the one the owner
         chose for it on a card (else its params' or Settings'); `instead`: what its one notice
-        adds then (" on Copilot instead"). `fork`: the busy worker a second worker is started
-        from, and the fork of its session it runs on (forks.py)."""
+        adds then (" on Copilot instead"). `fork`: a second worker of another (forks.py), on its
+        agent: the session it runs on (a fork of that worker's, or a new one with a brief)."""
         self.caller(caller, ROUTER)
         if not special and not agent and not fork and (compared := self.compared(params, caller)):
             return await self.spawn_compare(params, caller, compared)
@@ -1970,6 +1971,7 @@ class Tools:
             self.runtime.agents
             and not special
             and not agent
+            and not fork
             and caller == self.runtime.router_id()
             and (chip := self.runtime.chosen_agent())
         ):
@@ -1980,7 +1982,7 @@ class Tools:
                 params = params.model_copy(update=chosen)
         agent, agent_notice = agents.COPILOT, ""
         if fork:
-            agent = self.runtime.agent(fork[0]["id"])  # Its session is that agent's.
+            agent = self.runtime.agent(fork.source["id"])  # As careful, on its agent (forks.py).
         elif not special and (self.runtime.agents or named or picked):
             try:
                 agent, agent_notice = await self.runtime.new_worker_agent(
@@ -2062,16 +2064,17 @@ class Tools:
                     "Related workers exist. If the owner asked for a new worker in so many words "
                     "(a new, fresh or separate one, one worker for exactly this, in any "
                     "language), that is reason enough: call spawn_worker again with why_new "
-                    "quoting their words, and give it to none of them. Otherwise, if this is "
-                    "about the same subject as one of them, send it there with message_session "
-                    "instead (a closed one reopens with its context and files; one without a "
-                    "branch takes its own worktree with add_repo to change code, so needing a "
-                    f"worktree is no reason for a new worker).{busy} A code change on another "
-                    "subject (another feature, function or bug, even in the same project) is not "
-                    "theirs: on their branch it would ship in the same PR. Then call "
-                    "spawn_worker again with why_new.\n" + json.dumps(related, ensure_ascii=False)
+                    "quoting their words, and give it to none of them. Otherwise, if "
+                    "this is about the same subject as one of them, send it there with "
+                    "message_session instead (a closed one reopens with its context and files; "
+                    "one without a branch takes its own worktree with add_repo to change code, "
+                    f"so needing a worktree is no reason for a new worker).{busy} A code change "
+                    "on another subject (another feature, function or bug, even in the same "
+                    "project) is not theirs: on their branch it would ship in the same PR. Then "
+                    "call spawn_worker again with why_new.\n"
+                    + json.dumps(related, ensure_ascii=False)
                 )
-        session_id = fork[1] if fork else str(uuid4())
+        session_id = fork.session_id if fork else str(uuid4())
         slack = (params.slack and self.runtime.slack.configured()) or untrusted
         if params.slack and not slack and any(key.startswith("slack:") for key in follow):
             raise ValueError(
@@ -2103,9 +2106,10 @@ class Tools:
             session_id, WORKER, title, "queued", cwd=cwd, branch=branch, slack=slack
         )
         if fork:
-            await self.runtime.forks.record(row, fork[0])
+            await self.runtime.forks.record(row, fork)
             # As careful as the worker it came from (Ask first), on its context tier.
-            self.store.update_session(session_id, yolo=fork[0]["yolo"], context=fork[0]["context"])
+            source = fork.source
+            self.store.update_session(session_id, yolo=source["yolo"], context=source["context"])
         elif not special and self.runtime.agents_on():
             # Until its first step, it can start over on another agent (restart_on).
             self.store.set(f"untouched:{session_id}", "1")
@@ -2214,7 +2218,8 @@ class Tools:
             reply_in=spoken,
         )
         if fork:
-            brief = self.runtime.forks.brief(fork[0], self.store.session(session_id))
+            row = self.store.session(session_id)
+            brief = self.runtime.forks.brief(fork.source, row, fork.native)
             prompt += "\n\n" + wrap("system", "context", brief)
         if context_from:
             prompt += "\n\n" + wrap("system", "context", self.tasks.briefing(context_from))
@@ -2229,13 +2234,13 @@ class Tools:
         meta: dict[str, Any] = {"prompt": prompt, "task_id": task["id"]}
         if images := self.runtime.attachments_in(params.instructions):
             meta["attachments"] = images  # The owner's images it names come with it.
-        origin = self.runtime.display_title(fork[0]) if fork else ""
+        origin = self.runtime.display_title(fork.source) if fork else ""
         if fork:
             self.runtime.add_message(
                 session_id,
                 "notice",
                 f"Started with the context of “{origin}”",
-                {"session_id": fork[0]["id"]},
+                {"session_id": fork.source["id"]},
             )
         self.runtime.add_message(session_id, "router", params.instructions, meta)
         if agent_notice:  # The agent Settings chose could not run it.
@@ -2266,7 +2271,7 @@ class Tools:
             )
             if fork:
                 self.runtime.add_message(
-                    fork[0]["id"],
+                    fork.source["id"],
                     "notice",
                     f"Its context went to a second worker for “{title}”",
                     {"session_id": session_id, "task_id": task["id"]},
@@ -2292,9 +2297,11 @@ class Tools:
             offered = ", ".join(info["efforts"]) if info and info["efforts"] else "none"
             result["warning"] = f"Effort {params.effort} is not offered by this model ({offered})."
         if fork:
+            had = "its conversation so far" if fork.native else "a brief of its work"
             result["note"] = (
-                f"Worker {short(fork[0]['id'])} was busy, so a second worker with its "
-                "conversation so far took this task: this session. Message it about this task."
+                f"A second worker of worker {short(fork.source['id'])}, with {had}, took this "
+                "task: this session (that worker goes on with its own). Message it about this "
+                "task."
             )
         elif params.after:
             result["note"] = (
@@ -2608,7 +2615,7 @@ class Tools:
             params = params.model_copy(update={"earlier": params.earlier or "keep"})
         elif parallel:
             # It would wait for that worker's turn: the Router's to start elsewhere instead.
-            why = self.runtime.forks.unforkable(target) or "the task replaces its running one"
+            why = self.runtime.forks.blocked(target) or "the task replaces its running one"
             raise ValueError(self.not_in_parallel(target, why))
         # A running task left behind by a new one would show as waiting its turn though it was
         # delivered or waits on the owner: the Router says what becomes of it.
@@ -2992,19 +2999,14 @@ class Tools:
     async def fork_task(
         self, caller: str, target: dict, params: MessageSession, title: str, why_new: str
     ) -> dict | None:
-        """A new task for a busy worker, given to a second worker started from its session's
-        fork, in a workspace made as for its own projects; None when that could not be done
-        (nothing of it is left: the task then goes to the busy worker, as before)."""
-        forks = self.runtime.forks
-        checkouts = self.workspaces.checkouts(target)
-        projects = list(dict.fromkeys(c["project"] for c in checkouts if c.get("project")))
-        # The second worker works on the projects the busy one works on, as it does.
+        """A new task for a busy worker, given to a second worker of it (forks.py: on its
+        session's fork, or with a brief of its work), in a workspace made as for its own
+        projects; None when that could not be done (nothing of it is left: the task then goes
+        to the busy worker, as before)."""
         spawn = SpawnWorker.model_construct(
             title=title,
             instructions=params.text,
-            project=projects[0] if projects else "",
-            more_projects=projects[1:],
-            isolate=any(c.get("worktree") for c in checkouts),
+            **self.second_workspace(target),
             done_when=params.done_when,
             review=params.review,
             decisions=params.decisions,
@@ -3014,21 +3016,43 @@ class Tools:
             why_new=why_new,
             replaces=params.replaces,
         )
-        try:
-            forked = await forks.make(target, title)
-        except Exception:
-            logger.warning("Could not fork %s; it gets the new task.", target["id"], exc_info=True)
+        return await self.start_second(target, spawn, caller, title)
+
+    def second_workspace(self, source: dict) -> dict:
+        """A second worker works on the projects the worker it comes from works on, as it does:
+        in a worktree of its own when that one has one (or works in the owner's folder itself),
+        from the project's base."""
+        checkouts = self.workspaces.checkouts(source)
+        projects = list(dict.fromkeys(c["project"] for c in checkouts if c.get("project")))
+        return {
+            "project": projects[0] if projects else "",
+            "more_projects": projects[1:],
+            "isolate": any(c.get("worktree") or c.get("in_place") for c in checkouts),
+        }
+
+    async def start_second(
+        self, source: dict, spawn: SpawnWorker, caller: str, title: str, refused: bool = False
+    ) -> dict | None:
+        """A second worker of `source` for this task (forks.py); None when none could be made
+        (nothing of it is left). `refused`: what keeps it from being made is said (raised), as
+        spawn_worker says it."""
+        forks = self.runtime.forks
+        second = await forks.second(source, title)
+        if second is None:
             return None
         try:
             # One that reads Slack holds Slack's words in its context: so does its fork.
             return await self.t_spawn_worker(
-                spawn, caller, untrusted=bool(target["slack"]), fork=(target, forked)
+                spawn, caller, untrusted=bool(source["slack"]), fork=second
             )
         except Exception:
-            if self.store.find_session(forked):
+            if self.store.find_session(second.session_id):
                 raise
-            await forks.drop(target, forked)
-            logger.warning("Could not start a second worker of %s.", target["id"], exc_info=True)
+            if second.native:
+                await forks.drop(source, second.session_id)
+            if refused:
+                raise
+            logger.warning("Could not start a second worker of %s.", source["id"], exc_info=True)
             return None
 
     @staticmethod

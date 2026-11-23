@@ -6,12 +6,14 @@ import json
 import subprocess
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import Harness, call_tool, settle
+from conftest import FakeClient, Harness, call_tool, settle
 from copilot.tools import ToolInvocation
+from test_backends import live, on, received, until
 from test_repos import commit, published
 
 from chiefofstaff import backend as backend_module
@@ -62,6 +64,11 @@ def branch_of(path: str) -> str:
     found = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path,
                            capture_output=True, text=True, check=True)  # fmt: skip
     return found.stdout.strip()
+
+
+def tasks_of_ids(harness, worker):
+    return [t["id"] for t in harness.store.all(
+        "SELECT id FROM tasks WHERE session_id=? ORDER BY created_at", (worker,))]  # fmt: skip
 
 
 def tasks_of(harness, worker):
@@ -192,12 +199,37 @@ async def test_otherwise_the_worker_gets_its_new_task_as_before(tmp_path, case):
     assert any("Add a CSV export." in text for text in harness.session(worker).sent[-2:])
 
 
-@pytest.mark.parametrize("failing", ["fork", "unknown", "workspace"])
 async def test_a_second_worker_that_cannot_be_made_leaves_the_task_with_the_busy_one(
-    harness, monkeypatch, failing
+    harness, monkeypatch
 ):
     runtime = await harness.connect()
     worker = await busy(runtime, harness)
+
+    async def refused(*args, **kwargs):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(runtime.workspaces, "prepare_directory", refused)
+    told = await new_task(runtime, harness, worker, "Export CSV", "Add a CSV export.")
+    assert told.startswith("Delivered") and "Export CSV" in tasks_of(harness, worker)
+    assert len(harness.store.open_sessions("worker")) == 1, "nothing of a second worker is left"
+    made = [forked for _, forked in harness.client.forks]
+    assert made and harness.client.deleted == made, "a fork no worker runs on is deleted"
+
+
+@pytest.mark.parametrize("failing", ["fork", "unknown", "not forked"])
+async def test_a_busy_worker_whose_conversation_cannot_be_copied_hands_on_a_brief_of_its_work(
+    harness, monkeypatch, failing
+):
+    """Where its agent's sessions are not forked, or the fork fails, the second worker still
+    takes the task at once: with a brief of the busy worker's work (its tasks, what its
+    finished ones found, its folders and files) instead of its conversation."""
+    runtime = await harness.connect()
+    worker = (await spawn(runtime, harness.router_id, "Fix login"))["session_id"]
+    runtime.tasks.update(tasks_of_ids(harness, worker)[0], status="review",
+                         result="The form posts twice: fixed.")  # fmt: skip
+    await new_task(runtime, harness, worker, "Fix logout", "Fix logout.", why_new="another")
+    await at_work(runtime, harness, worker)
+    await new_task(runtime, harness, worker, "Fix signup", "Fix signup.", earlier="keep")
 
     async def refused(*args, **kwargs):
         raise RuntimeError("no")
@@ -211,12 +243,61 @@ async def test_a_second_worker_that_cannot_be_made_leaves_the_task_with_the_busy
     elif failing == "unknown":
         monkeypatch.setattr(harness.client, "fork_session", unknown)
     else:
-        monkeypatch.setattr(runtime.workspaces, "prepare_directory", refused)
-    told = await new_task(runtime, harness, worker, "Export CSV", "Add a CSV export.")
-    assert told.startswith("Delivered") and "Export CSV" in tasks_of(harness, worker)
-    assert len(harness.store.open_sessions("worker")) == 1, "nothing of a second worker is left"
+        monkeypatch.setattr(harness.client, "capabilities", replace(FakeClient.capabilities,
+                                                                    fork=False))  # fmt: skip
+    before = list(harness.session(worker).sent)
+    result = await new_task(runtime, harness, worker, "Export CSV", "Add a CSV export.")
+    await settle(runtime)
+    second = result["session_id"]
+    assert second != worker and tasks_of(harness, second) == ["Export CSV"]
+    assert "Export CSV" not in tasks_of(harness, worker)
+    assert harness.session(worker).sent == before, "the busy worker is not disturbed"
+    assert second in harness.client.created and second not in harness.client.resumed, (
+        "a session of its own: nothing of the conversation"
+    )
+    sent = harness.session(second).sent
+    assert len(sent) == 1 and "Add a CSV export." in sent[0]
+    assert "its conversation is not copied to you" in sent[0], "the brief says so"
+    assert "“Fix signup”" in sent[0] and "The form posts twice: fixed." in sent[0], (
+        "its open tasks, and what its finished ones found"
+    )
+    assert "a brief of its work" in result["note"]
     made = [forked for _, forked in harness.client.forks]
     assert harness.client.deleted == made, "a fork no worker runs on is deleted"
+    name = runtime.display_title(harness.store.session(worker))
+    assert runtime.view(harness.store.session(second))["fork_of"]["id"] == worker
+    notices = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
+    assert notices[-1].startswith(
+        f"Started a second worker for “Export CSV” (context from “{name}”)"
+    )
+
+
+async def test_a_busy_worker_on_another_agent_gets_a_second_worker_there_with_a_brief(harness):
+    """An agent whose sessions are not forked (a Codex-like one): the second worker runs on that
+    agent too, at once, with a brief of the busy worker's work; while that agent cannot run
+    one, the task waits for the busy worker, as before."""
+    runtime = await harness.connect()
+    on(harness, "codex-like")
+    worker = (await spawn(runtime, harness.router_id, "Ponder at length"))["session_id"]
+    await until(lambda: runtime.forks.in_turn(harness.store.session(worker)))
+    told = await new_task(runtime, harness, worker, "Fix logout", "Fix logout.", earlier="keep")
+    assert told.startswith("Delivered"), told
+    result = await new_task(runtime, harness, worker, "Export CSV", "Add a CSV export.")
+    second = result["session_id"]
+    assert second != worker and runtime.agent(second) == "codex-like"
+    assert tasks_of(harness, second) == ["Export CSV"] and not harness.client.forks
+    await until(lambda: received(live(runtime, second)))
+    given = received(live(runtime, second))[0]
+    assert "Add a CSV export." in given and "its conversation is not copied to you" in given
+    assert "“Fix logout”" in given
+
+    async def down(agent):
+        return "Codex-like is signed out."
+
+    runtime.worker_agent_down = down  # type: ignore[method-assign]
+    told = await new_task(runtime, harness, worker, "Export TSV", "Add a TSV export.")
+    assert "Not sent: Codex-like is signed out." in told, told
+    assert len(harness.store.open_sessions("worker")) == 2, "no second worker it could not run"
 
 
 async def test_a_slack_readers_second_worker_reads_slack_too(harness):
