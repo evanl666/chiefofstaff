@@ -1,7 +1,7 @@
 // Task cards on Home: what runs and what it does now, what waits, what is finished.
 
 import { api, el, foldable, FRESH_START, freshButton, moreMenu, once, startFresh, submits, toast } from "./dom.js";
-import { monitorParts, obligationsOf, PLAN_STOP, PR_TO_FIX, resetTime, SECTION_DOT, statusWord, taskPhase, workerContext } from "./board.js";
+import { monitorParts, obligationsOf, PLAN_STOP, PR_TO_FIX, resetTime, SECTION_DOT, SECTIONS, statusWord, taskPhase, workerContext } from "./board.js";
 import { ago, changesText, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel, uncheckedText } from "./text.js";
 import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
@@ -212,7 +212,11 @@ function refreshTaskCard(node, task, phase) {
   node.querySelector(".head .meta").dataset.tip = help;
   const dot = node.querySelector(".head .dot");
   dot.className = dotClass(task, phase);
-  dot.dataset.tip = unread(task, phase) ? "Not read yet" : "";
+  dot.dataset.tip = dotTip(task, phase);
+  const tag = node.querySelector(":scope > .head .new-tag");
+  const fresh = newTag(task, phase);
+  if (tag && !fresh) tag.remove();
+  else if (fresh && !tag) dot.after(fresh);
   const review = task.status === "review";
   const id = node.querySelector(".head .tid");
   if (id) id.textContent = task.id;
@@ -242,7 +246,12 @@ function placePart(node, part, fresh) {
   if (after) after.before(fresh);
   else node.append(fresh);
 }
-const dotClass = (task, phase) => `dot ${SECTION_DOT[phase.section] ?? ""}${unread(task, phase) ? " unread" : ""}`;
+// The dot says where the task is, in its section's color only (amber: Needs you), read or not:
+// a result not opened yet says "New" beside it instead (a blue dot read as Running's).
+const dotClass = (task, phase) => `dot ${SECTION_DOT[phase.section] ?? ""}`;
+const SECTION_NAMES = Object.fromEntries(SECTIONS);
+const dotTip = (task, phase) => [SECTION_NAMES[phase.section], unread(task, phase) ? "a new result, not opened yet" : ""].filter(Boolean).join(" · ");
+const newTag = (task, phase) => (unread(task, phase) ? el("span", { class: "new-tag", text: "New", "data-tip": "A new result, not opened yet: it is marked read once you open it" }) : null);
 // What a click on its title does, said on hover: a row shows all of it (or folds it back); in a
 // draft's card it opens its worker.
 const titleTip = (task, phase) => (isRow(phase) ? `${task.title}\nClick to see it all, or to fold it back` : task.session_id ? `${task.title}\nOpen its worker at this task` : task.goal || "");
@@ -313,7 +322,7 @@ export function unfoldTask(node, open = !node.classList.contains("unfolded"), se
   if (node.dataset.task) unfolded[open ? "add" : "delete"](node.dataset.task);
   if (open && seen) readTask(node.dataset.task);
 }
-// A result the owner opened is read: its unread dot goes (asked once per task here).
+// A result the owner opened is read: its "New" goes (asked once per task here).
 const reading = new Set();
 function readTask(taskId) {
   const task = tasks().find((item) => item.id === taskId);
@@ -419,7 +428,8 @@ function taskCard(task, phase = phaseOf(task)) {
     el(
       "div",
       { class: "head" },
-      el("span", { class: dotClass(task, phase), "data-tip": unread(task, phase) ? "Not read yet" : undefined }),
+      el("span", { class: dotClass(task, phase), "data-tip": dotTip(task, phase) || undefined }),
+      newTag(task, phase),
       el("button", { type: "button", class: "title", text: task.title, "data-tip": titleTip(task, phase), "aria-expanded": row ? String(unfolded.has(task.id)) : undefined, onclick: () => (row ? unfoldTask(node, undefined, true) : openAt?.()), disabled: !openAt && !row }),
       el("span", { class: "tid", text: task.id, "data-tip": "Task id" }),
       el("span", { class: "meta", "data-tip": help }, ...metaParts(meta)),

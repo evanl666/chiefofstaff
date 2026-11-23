@@ -397,6 +397,18 @@ FIXES: list[Allow] = [
         data=r"^backend\.sessions\.worker:.*\.options\.tools\[\d+\]\.parameters\.properties"
         r"\.replaces$",
     ),
+    # 0.1.56: a task's dot says where it is (amber under Needs you, read or not), in words on
+    # hover; a result not opened yet says New before its title instead of a blue dot.
+    Allow(
+        "a task's dot, its place in words on hover",
+        element=".card.task .head > .dot",
+        views=r"^home",
+    ),
+    Allow(
+        "a result not opened yet: New before its title, its dot amber (was blue)",
+        element=".card.task .head:has(> .dot.unread, > .new-tag)",
+        views=r"^home",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

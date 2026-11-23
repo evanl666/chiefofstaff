@@ -1010,6 +1010,41 @@ async def approvals_views(runtime, browser, quality: Quality):
     runtime.publish_state()
 
 
+async def needs_dots_views(runtime, browser, quality: Quality):
+    """0.1.56: Needs you's dots all amber, a result not opened yet "New" before its title, a
+    task at work blue; 800 to 1440 px, light and dark (browser-shots/needs-dots/)."""
+    from ui_edges import needs_dots_done, needs_dots_seeded
+
+    folder = SHOTS / "needs-dots"
+    folder.mkdir(exist_ok=True)
+    seeded = needs_dots_seeded(runtime)
+    first = seeded["first"][1]
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 1400}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        needs = page.locator("#needs")
+        row = needs.locator(f'.card.task[data-task="{first}"] > .head')
+        await expect(row.locator(".new-tag")).to_have_text("New", timeout=15000)
+        await expect(row.locator(".dot")).to_have_class(re.compile(r"\bwaiting\b"))
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1400})
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            await page.wait_for_timeout(150)
+            await needs.screenshot(path=folder / f"quality-{width}-{scheme}-needs.png")
+            await row.screenshot(path=folder / f"quality-{width}-{scheme}-row.png")
+            await quality.check(page, f"needs dots {width} {scheme}", "#needs", KNOWN_ROW_FINDINGS)
+        await quality.contrast(page, f"needs dots {scheme}", "#needs")
+        quality.failures += [f"page error {scheme}: {error}" for error in errors]
+        await context.close()
+    needs_dots_done(runtime, seeded)
+
+
 async def teams_views(runtime, browser, quality: Quality):
     """E129, E130: Home's chat with what workers told each other folded (one line: how many,
     who, what waits) and the routing receipts folded, open; the Teams strip and a question held
@@ -1606,8 +1641,10 @@ async def main():
                 log("Usage: as Copilot counts it, by task, a worker's tasks (usage/)")
                 await relations_views(runtime, browser, quality)
                 log("how a team's tasks are related (relations/)")
-            await fork_views(runtime, browser, quality)
-            log("a busy worker's second worker (fork/)")
+                await needs_dots_views(runtime, browser, quality)
+                log("Needs you's dots, read or not, and a new result's word (needs-dots/)")
+                await fork_views(runtime, browser, quality)
+                log("a busy worker's second worker (fork/)")
             await shepherd_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True

@@ -54,6 +54,11 @@
   from …*. A worker on Codex or Claude Code, whose conversations are not forked yet, hands its
   second worker a brief of its work instead (its tasks, what the finished ones found, its
   folders and files). On by default; Settings → General turns it off.
+- **Under *Needs you*, every dot is amber.** A result you had not opened yet had a blue dot,
+  Running's color, so beside the amber ones it read as still running. A task's dot now always
+  says where it is (amber: it needs you), opened or not, as the sidebar's dots do; a result you
+  have not opened yet says *New* before its title until you open it (hover the dot or the word
+  for what it means).
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see

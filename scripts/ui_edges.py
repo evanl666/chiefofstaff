@@ -1921,14 +1921,15 @@ async def round_six(runtime, browser, failures: list[str]):
     await expect(reported).to_have_class(re.compile(r"\brow\b"), timeout=15000)
     assert await needs.locator(".card.task", has_text="Eval SLM").count() == 1
     await expect(reported.locator(".head .meta")).to_contain_text("Awaiting acceptance")
-    await expect(reported.locator(".head .dot.unread")).to_have_count(1)
+    await expect(reported.locator(".head .new-tag")).to_have_text("New")
+    await expect(reported.locator(".head .dot")).to_have_class(re.compile(r"\bwaiting\b"))
     await expect(reported.locator(".row-foot .row-chips .chip-link")).to_have_text(
         ["Doc · qwen3_8b SFT 11-05"]
     )
     async with page.expect_request(f"**/api/tasks/{report['id']}/read"):
         await reported.locator(".row-line").click()
     await expect(reported).to_have_class(re.compile(r"\bunfolded\b"))
-    await expect(reported.locator(".head .dot.unread")).to_have_count(0)
+    await expect(reported.locator(".head .new-tag")).to_have_count(0)
     chips = reported.locator(".chips > .receipts")
     await expect(chips.locator(".link-chip .chip-link")).to_have_text(["Doc · qwen3_8b SFT 11-05"])
     await expect(chips.locator(".link-chip .chip-link").first).to_have_attribute(
@@ -5986,8 +5987,8 @@ async def main():
             await expect(reviewing.locator(".head .meta")).to_contain_text("Awaiting acceptance")
             await expect(reviewing.get_by_role("button", name="Accept")).to_be_visible()
             await expect(reviewing.get_by_role("button", name="Request changes")).to_be_visible()
-            # Not read yet (CONTRACT task.read): a dot says so until the owner opens it.
-            await expect(reviewing.locator(".head .dot.unread")).to_have_count(1)
+            # Not read yet (CONTRACT task.read): "New" says so until the owner opens it.
+            await expect(reviewing.locator(".head .new-tag")).to_have_text("New")
             # In the chat, the report is one line with its gist, pointing at the task's card.
             reported = page.locator("#timeline .event.done", has_text="Review the exports PR")
             await expect(reported).to_contain_text("finished: Review done.")
@@ -5997,7 +5998,7 @@ async def main():
             await expect(reviewing).to_have_class(re.compile(r"\bexpanded\b"))
             await expect(reviewing.locator(".report")).to_contain_text("Review done.")
             # Read now (once the server keeps it); Accept ends it, as any result.
-            await expect(reviewing.locator(".head .dot.unread")).to_have_count(0, timeout=5000)
+            await expect(reviewing.locator(".head .new-tag")).to_have_count(0, timeout=5000)
             await expect(reviewing.get_by_role("button", name="Done")).to_have_count(0)
             # New receipts redraw the card (a commit seen: Create PR comes): the report the
             # owner opened stays open.
@@ -6061,7 +6062,7 @@ async def main():
                           round_layout, round_fresh_start, round_qa8_auth,
                           round_qa8_approvals, round_e125, round_teams,
                           round_usage, round_relations, round_shepherd,
-                          round_stacked_merge, round_fork):  # fmt: skip
+                          round_stacked_merge, round_fork, round_needs_dots):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -6070,6 +6071,106 @@ async def main():
         if failures:
             raise AssertionError(f"browser errors: {failures}")
     print("UI EDGE CASES PASSED")
+
+
+async def round_needs_dots(runtime, browser, failures: list[str]):
+    """0.1.56: a dot says where its task is, the same color under Needs you whether its result
+    was opened or not (blue is Running's: an unread result's blue dot read as "still running");
+    a result not opened yet says so in a word beside its title, gone once opened. The sidebar's
+    worker dots agree with the cards'."""
+    seeded = needs_dots_seeded(runtime)
+    shots = Path(os.environ.get("NEEDS_DOTS_SHOTS", SHOTS / "needs-dots"))
+    shots.mkdir(parents=True, exist_ok=True)
+    color = "node => getComputedStyle(node).backgroundColor"
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+
+        def card(key, page=page):
+            return page.locator(f'#panel .card.task[data-task="{seeded[key][1]}"]')
+
+        await expect(card("first")).to_be_visible(timeout=15000)
+        running = await card("busy").locator(".head .dot").evaluate(color)
+        amber = await card("third").locator(".head .dot").evaluate(color)
+        assert amber != running, (scheme, amber, running)
+        for key in ("first", "second", "third"):
+            row = card(key)
+            await expect(row.locator(".head .meta")).to_contain_text("Awaiting acceptance")
+            dot = row.locator(".head .dot")
+            # Where it is, whether its result was opened or not: Needs you's color.
+            await expect(dot).to_have_class(re.compile(r"\bwaiting\b"))
+            assert await dot.evaluate(color) == amber, (scheme, key)
+            # The sidebar's dot for its worker is the same.
+            side = page.locator(f'#session-list .item[data-id="{seeded[key][0]}"] .dot')
+            assert await side.evaluate(color) == amber, (scheme, key, "sidebar")
+        for key in ("first", "second"):
+            tag = card(key).locator(".head .new-tag")
+            await expect(tag).to_have_text("New")
+            await expect(tag).to_have_attribute("data-tip", re.compile(r"not opened yet"))
+            await expect(card(key).locator(".head .dot")).to_have_attribute(
+                "data-tip", "Needs you · a new result, not opened yet"
+            )
+        await expect(card("third").locator(".head .new-tag")).to_have_count(0)
+        await expect(card("third").locator(".head .dot")).to_have_attribute("data-tip", "Needs you")
+        await expect(card("busy").locator(".head .dot")).to_have_attribute("data-tip", "Running")
+        # The word sits on the title's line, and the title still has room at 800 px.
+        await page.locator("#needs").screenshot(path=shots / f"needs-1280-{scheme}.png")
+        await page.set_viewport_size({"width": 800, "height": 900})
+        await page.locator("#home-tabs [data-tab=needs]").click()
+        box = await card("first").locator(".head .new-tag").bounding_box()
+        title = await card("first").locator(".head .title").bounding_box()
+        assert (
+            box
+            and title
+            and abs(box["y"] + box["height"] / 2 - title["y"] - title["height"] / 2) < 3
+        )
+        assert title["width"] > 120, title
+        await page.locator("#needs").screenshot(path=shots / f"needs-800-{scheme}.png")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        if scheme == "dark":
+            # Opened: the word goes, the dot stays Needs you's.
+            async with page.expect_request(f"**/api/tasks/{seeded['first'][1]}/read"):
+                await card("first").locator(".head .title").click()
+            await expect(card("first").locator(".head .new-tag")).to_have_count(0)
+            await expect(card("first").locator(".head .dot")).to_have_class(
+                re.compile(r"\bwaiting\b")
+            )
+            assert await card("first").locator(".head .dot").evaluate(color) == amber
+            await expect(card("second").locator(".head .new-tag")).to_have_text("New")
+        await context.close()
+    needs_dots_done(runtime, seeded)
+    log("Needs you: every dot amber, read or not; a new result says New beside its title")
+
+
+def needs_dots_seeded(runtime) -> dict:
+    """Three results under Needs you, two not opened yet, and a task at work: {key: (worker,
+    task)}."""
+    store = runtime.store
+    seeded = {}
+    titles = {"first": "Ship the export fix", "second": "Rotate the API token",
+              "third": "Tidy the release notes", "busy": "Index the archive"}  # fmt: skip
+    for key, title in titles.items():
+        session = f"wdots{key}"
+        store.create_session(session, "worker", title, "idle", cwd=str(Path.home()))
+        task = runtime.tasks.create(session, title, title, status="running")
+        seeded[key] = (session, task["id"])
+    for key in ("first", "second", "third"):
+        runtime.tasks.move(seeded[key][1], "review", result=f"{key.title()}: done, tests pass.")
+    runtime.update_session(seeded["busy"][0], status="working")
+    runtime.task_actions.mark_read(seeded["third"][1])  # Opened already.
+    runtime.bus.publish("state")
+    return seeded
+
+
+def needs_dots_done(runtime, seeded: dict):
+    for session, task in seeded.values():
+        runtime.tasks.move(task, "done")
+        runtime.update_session(session, status="idle")
+    runtime.bus.publish("state")
 
 
 def usage_seeded(runtime) -> dict:
