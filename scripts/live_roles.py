@@ -13,7 +13,7 @@ R5  back on Copilot: one line, and what it was told on Codex comes with it
 
 Shard S, the same on Claude (Claude's cheapest model, LIVE_CLAUDE_MODEL, default "haiku"; the
 owner's Claude files recorded before and checked after, and the run's one Claude budget, as
-scripts/live_claude.py has them: LIVE_CLAUDE_BUDGET, default 3,000,000 tokens, shared through
+scripts/live_claude.py has them: LIVE_CLAUDE_BUDGET, default 1,500,000 tokens, shared through
 LIVE_CLAUDE_SPENT by every suite of the run LIVE_CLAUDE_RUN names; a scenario stops as it runs
 out, and the shard stops at a limit of the owner's plan):
 S1-S5 as R1-R5
@@ -56,8 +56,11 @@ C1  put on Claude while its check could not run: the Router stays on Copilot, it
         uv run --extra claude --with playwright python scripts/live_roles.py R|S|W|F|P|C [R1 R3 …]
 
 (no shard: R, S, W, F, P and C, one after another; once Claude stops one, no Claude shard runs).
-LIVE_CLAUDE_TURNS=0 runs no turn of Claude's model: C without its last question, S and W not
-at all. Each shard's data folder has a space in its path, as macOS's ("Application Support").
+It spends the owner's own Claude plan in S, W and C: before it starts it says so, with what they
+are estimated to spend (live_claude.ESTIMATE), and waits 10 s on a terminal for a Ctrl+C.
+LIVE_CLAUDE_TURNS=0 (stand-in mode) runs no turn of Claude's model: C without its last
+question, W without a scan on Claude, S not at all. Each shard's data folder has a space in its
+path, as macOS's ("Application Support").
 For one budget across suites, give each the same LIVE_CLAUDE_SPENT file. Ports 20500-20515.
 """
 
@@ -87,10 +90,10 @@ SHARDS = {
     "C": (20505, 20515),
 }
 CLAUDE_SHARDS = {"S", "W", "C"}
-# LIVE_CLAUDE_TURNS=0: no turn of Claude's model (the owner's plan used up, say): shard C only,
-# its check (offline: a stand-in model) and the Router's move, not its turn there; no calibrating
-# run of `claude -p` either. S and W, all Claude turns, do not run.
-CLAUDE_TURNS = os.environ.get("LIVE_CLAUDE_TURNS", "1") != "0"
+# LIVE_CLAUDE_TURNS=0: no turn of Claude's model (the owner's plan used up, say): C's check
+# (offline: a stand-in model) and the Router's move, not its turn there; W's scan on Copilot, not
+# on Claude; no calibrating run of `claude -p` either. S, all Claude turns, does not run.
+CLAUDE_TURNS = lc.TURNS
 CODEX = shutil.which("codex") or "codex"
 CLAUDE = shutil.which("claude") or "claude"
 NOTICE_ON = "The {label} runs on {agent} now, with a summary of what it knew."
@@ -289,7 +292,11 @@ async def w1_watch_for_you(ctx: Ctx):
         assert "connector" not in roles and "slack" not in roles, sorted(roles)
     else:
         assert roles["connector"]["agents"] == ["claude"], roles["connector"]
+    on_claude = not held and CLAUDE_TURNS
+    if on_claude:
         await put(ctx, "connector", "claude")
+    elif not held:
+        log("W1: not put on Claude (LIVE_CLAUDE_TURNS=0): its scan runs on Copilot")
     await ctx.app.post("/api/watch/scan", {})
 
     async def scanned():
@@ -300,7 +307,7 @@ async def w1_watch_for_you(ctx: Ctx):
         return await la.session(ctx, found["session_id"])
 
     view = await wait_for("the scan completes", scanned, 600, ctx.app)
-    want = None if held else "claude"
+    want = "claude" if on_claude else None
     assert view.get("agent") == want, (view.get("agent"), want)
     log(f"W1 passed: scanned on {label(want or 'copilot')}")
 
@@ -761,7 +768,7 @@ async def run_shard(
             if agent == "claude" and ctx.plan_stopped():
                 stopped = "Claude refused a turn for a limit of the plan: stopped here"
                 break
-            if agent == "claude" and spent_before + ctx.claude_tokens() >= lc.BUDGET:
+            if agent == "claude" and lc.spent_out(spent_before + ctx.claude_tokens()):
                 stopped = f"the budget ({lc.BUDGET:,} Claude tokens) is spent: stopped here"
                 break
         ctx.notes["tokens"] = ctx.agent_tokens()
@@ -821,14 +828,24 @@ async def main() -> int:
     results, stopped, spent = [], "", lc.run_spent()
     if CLAUDE_SHARDS & set(shards):
         log(f"run {lc.RUN!r}: {spent:,} of {lc.BUDGET:,} Claude tokens spent before ({lc.SPENT})")
+        lc.plan_warning(
+            [
+                la.label(scenario)
+                for shard in shards
+                if shard in CLAUDE_SHARDS
+                for scenario in SCENARIOS[shard]
+                if not wanted or la.label(scenario) in wanted
+            ],
+            spent,
+        )
     for shard in shards:
         # (Once Claude stopped one, no Claude shard runs; the others do.)
         if shard in CLAUDE_SHARDS and stopped:
             continue
-        if shard in {"S", "W"} and not CLAUDE_TURNS:
+        if shard == "S" and not CLAUDE_TURNS:
             log(f"shard {shard} not run: it needs Claude's turns (LIVE_CLAUDE_TURNS=0)")
             continue
-        if shard in CLAUDE_SHARDS and spent >= lc.BUDGET:
+        if shard in CLAUDE_SHARDS and lc.spent_out(spent):
             stopped = f"the run's budget ({lc.BUDGET:,} Claude tokens) is spent: {shard} not run"
             continue
         found, tokens, why = await run_shard(shard, wanted, spent)

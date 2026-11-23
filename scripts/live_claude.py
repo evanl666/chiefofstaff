@@ -4,10 +4,17 @@ shards E-H: 43 scenarios). Each scenario passes or fails on its own (a failure d
 and the shard goes on); the summary lists each, with the Claude tokens and Copilot credits the
 shard spent, and the exit code says whether all passed.
 
-Within a budget, one shard at a time (never in parallel, never beside another Claude run):
+It spends the owner's own Claude plan (a full run of E-H took about 5.6M tokens on haiku, a
+week's plan): before it starts it says so, with what the scenarios it runs are estimated to
+spend (ESTIMATE), and waits 10 s on a terminal for a Ctrl+C. Within a budget, one shard at a
+time (never in parallel, never beside another Claude run):
 - Claude workers use the cheapest model (LIVE_CLAUDE_MODEL, default "haiku");
+- LIVE_CLAUDE_TURNS=0 runs no turn of Claude's model (stand-in mode: Chief of Staff's own check
+  of Claude is offline, on a stand-in model): only the scenarios that need none (NO_TURNS: H6,
+  H7), no calibrating run of `claude -p` either; the others are listed as not run;
 - one budget for the whole run, whatever the processes its shards run in: LIVE_CLAUDE_BUDGET
-  tokens (default 3,000,000), counted as Claude counts them (cached input included) in a file
+  tokens (default 1,500,000: about one shard), counted as Claude counts them (cached input
+  included) in a file
   shared by the run's shards (LIVE_CLAUDE_SPENT, default .cos-live-claude-spent.json in the
   tree), kept for the run LIVE_CLAUDE_RUN names (default today's date; another name starts at
   0). It is checked every 15 s: the scenario at work then stops, and no other starts, once it
@@ -115,7 +122,9 @@ from live_parity import setup, write
 
 SHARDS = {"E": (18970, 18980), "F": (18971, 18981), "G": (18972, 18982), "H": (18973, 18983)}
 CLAUDE_MODEL = os.environ.get("LIVE_CLAUDE_MODEL", "haiku")
-BUDGET = int(os.environ.get("LIVE_CLAUDE_BUDGET", "3000000"))
+BUDGET = int(os.environ.get("LIVE_CLAUDE_BUDGET", "1500000"))
+# LIVE_CLAUDE_TURNS=0: no turn of Claude's model (the owner's plan used up, say).
+TURNS = os.environ.get("LIVE_CLAUDE_TURNS", "1") != "0"
 SPENT = Path(
     os.environ.get("LIVE_CLAUDE_SPENT")
     or Path(__file__).resolve().parent.parent / ".cos-live-claude-spent.json"
@@ -137,6 +146,72 @@ OFFLINE = {
     "H9": "test_schedules_deleted_in_claude_do_not_come_back_with_claude_resume",
 }
 ALL = os.environ.get("LIVE_CLAUDE_ALL") == "1"
+# The scenarios no turn of Claude's model takes part in: stand-in mode runs them.
+NO_TURNS = {"H6", "H7"}
+# What each scenario spent on haiku, as Claude counts tokens (a run of 2026-11-22), rounded: the
+# warning before a run adds them up (one not listed: ESTIMATE_ELSE).
+ESTIMATE = {
+    "E1": 220_000, "E5": 110_000, "E6": 70_000, "E7": 140_000, "E9": 40_000, "E11": 220_000,
+    "E14": 110_000, "E16": 230_000, "E17": 240_000, "E18": 220_000,
+    "F1": 500_000, "F2": 110_000, "F4": 110_000, "F5": 110_000, "F6": 280_000, "F7": 380_000,
+    "G1": 110_000, "G2": 210_000, "G3": 250_000, "G4": 110_000, "G5": 280_000, "G6": 230_000,
+    "G7": 70_000, "G8": 220_000,
+    "H1": 150_000, "H2": 140_000, "H3": 180_000, "H4": 230_000, "H5": 110_000, "H6": 0, "H7": 0,
+    "H8": 140_000, "H10": 260_000,
+    # live_roles.py: the Router on Claude (S), Watch for you (W), its check tried again (C).
+    "S1": 40_000, "S2": 30_000, "S3": 40_000, "S4": 30_000, "S5": 40_000, "W1": 0, "C1": 40_000,
+}  # fmt: skip
+ESTIMATE_ELSE = 150_000
+
+
+def spent_out(spent: int) -> bool:
+    """The run's budget is spent (stand-in mode spends none of it: never)."""
+    return TURNS and spent >= BUDGET
+
+
+def plan_warning(names: list[str], spent: int) -> None:
+    """Before a run on the owner's Claude plan: what it is estimated to spend, against the
+    budget; on a terminal, 10 s to stop it."""
+    if not TURNS or not names:
+        return
+    estimate = sum(ESTIMATE.get(name, ESTIMATE_ELSE) for name in names)
+    room = max(BUDGET - spent, 0)
+    print(
+        "\n" + "!" * 72 + "\n"
+        f"WARNING: this run uses the owner's own Claude plan (their `claude` sign-in), model "
+        f"{CLAUDE_MODEL!r}.\n"
+        f"Estimated spend: about {estimate:,} Claude tokens for {len(names)} scenarios "
+        f"({', '.join(names)}).\n"
+        f"Budget: {BUDGET:,} (LIVE_CLAUDE_BUDGET), {spent:,} spent already in run {RUN!r}: "
+        + (f"it stops after about {room:,} more.\n" if estimate > room else "within it.\n")
+        + "Without the plan: LIVE_CLAUDE_TURNS=0 (only what needs no turn of Claude's model).\n"
+        + "!" * 72,
+        flush=True,
+    )
+    if sys.stdin.isatty():
+        print("Starting in 10 s: Ctrl+C to stop.", flush=True)
+        time.sleep(10)
+
+
+def planned(shards: list[str], wanted: set[str]) -> list[str]:
+    """The scenarios a run of these shards would run, in order."""
+    return [
+        name
+        for shard in shards
+        for name in map(la.label, SCENARIOS[shard])
+        if not left_out(name, wanted)
+    ]
+
+
+def left_out(name: str, wanted: set[str]) -> str:
+    """Why the scenario is left out of the run ("": it runs)."""
+    if wanted and name not in wanted:
+        return "not asked for"
+    if name in OFFLINE and not ALL and not wanted:
+        return f"shown offline ({OFFLINE[name]})"
+    if not TURNS and name not in NO_TURNS:
+        return "it needs Claude's turns (LIVE_CLAUDE_TURNS=0)"
+    return ""
 
 
 def run_spent() -> int:
@@ -1473,7 +1548,7 @@ async def within_budget(ctx: Ctx, scenario, spent_before: int) -> Exception | No
     task = asyncio.ensure_future(scenario(ctx))
     while not task.done():
         await asyncio.wait({task}, timeout=BUDGET_EVERY)
-        if not task.done() and spent_before + ctx.claude_tokens() >= BUDGET:
+        if not task.done() and spent_out(spent_before + ctx.claude_tokens()):
             task.cancel()
             with contextlib.suppress(BaseException):
                 await task
@@ -1494,7 +1569,11 @@ async def run_shard(shard: str, wanted: set[str], spent_before: int) -> tuple[li
     home, project, truth = setup(root)
     (root / "marks").mkdir()
     record = root / "owner-files.json"
-    allowed = await asyncio.to_thread(calibrated, root, record)
+    if TURNS:
+        allowed = await asyncio.to_thread(calibrated, root, record)
+    else:
+        allowed = ""
+        await asyncio.to_thread(owners_claude_files, "record", record)
     env = {
         "COPILOT_HOME": str(home),
         "CHIEFOFSTAFF_MIN_FREE_MEMORY": "0",
@@ -1524,10 +1603,9 @@ async def run_shard(shard: str, wanted: set[str], spent_before: int) -> tuple[li
         )  # fmt: skip
         for scenario in SCENARIOS[shard]:
             name = la.label(scenario)
-            if wanted and name not in wanted:
-                continue
-            if name in OFFLINE and not ALL and not wanted:
-                log(f"=== {name} left out: shown offline ({OFFLINE[name]})")
+            if why := left_out(name, wanted):
+                if why != "not asked for":
+                    log(f"=== {name} left out: {why}")
                 continue
             log(f"=== {name} {scenario.__name__}")
             started, before = time.monotonic(), ctx.claude_tokens()
@@ -1546,7 +1624,7 @@ async def run_shard(shard: str, wanted: set[str], spent_before: int) -> tuple[li
             if ctx.plan_stopped():
                 stopped = "Claude refused a turn for a limit of the plan: stopped here"
                 break
-            if spent_before + ctx.claude_tokens() >= BUDGET:
+            if spent_out(spent_before + ctx.claude_tokens()):
                 stopped = f"the budget ({BUDGET:,} Claude tokens) is spent: stopped here"
                 break
         ctx.notes["tokens"] = ctx.claude_tokens()
@@ -1588,10 +1666,15 @@ async def main() -> int:
     wanted = {name.upper() for name in sys.argv[2:]}
     spent, results, stopped = run_spent(), [], ""
     log(f"run {RUN!r}: {spent:,} of {BUDGET:,} Claude tokens spent before ({SPENT})")
-    if spent >= BUDGET:
+    if spent_out(spent):
         print(f"STOPPED: the run's budget ({BUDGET:,} Claude tokens) is spent; a new run: "
               f"LIVE_CLAUDE_RUN=<another name>")  # fmt: skip
         return 1
+    if not TURNS:
+        # Stand-in mode: only shards with a scenario that needs no turn of Claude's model.
+        shards = [shard for shard in shards if planned([shard], wanted)]
+        log(f"LIVE_CLAUDE_TURNS=0: no turn of Claude's model; runs {planned(shards, wanted)}")
+    plan_warning(planned(shards, wanted), spent)
     for shard in shards:
         found, tokens, stopped = await run_shard(shard, wanted, spent)
         results += found
