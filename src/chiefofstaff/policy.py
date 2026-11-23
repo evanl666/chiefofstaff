@@ -4579,6 +4579,64 @@ def checkout_places(kept: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(places))
 
 
+# Where a line may be at a point of it (CheckoutWrites.line): folders, None for one not known.
+Places = frozenset[str | None]
+NO_PLACE: Places = frozenset()
+UNKNOWN_PLACE: Places = frozenset({None})
+# The most folders a line is followed in at once: past them, where it is is not known.
+MOST_PLACES = 8
+# A separator's parts: a subshell's opening and closing, and the operators between.
+SEPARATOR_PIECES = re.compile(r"[()]|[^()]+")
+
+
+def capped(places: Places) -> Places:
+    return UNKNOWN_PLACE if len(places) > MOST_PLACES else places
+
+
+class Moves:
+    """The moves a line makes (`cd`, `pushd`, `popd`, Set-Location…): the folders each `pushd`
+    left, with where the line stayed if it failed, for `popd` to go back to."""
+
+    def __init__(self):
+        self.pushed: list[tuple[Places, Places, int]] = []
+        self.count = 0
+
+    def entered(
+        self, pushing: bool, here: Places, moved: Places, failed: Places
+    ) -> tuple[Places, Places]:
+        """A move from `here`: where it leaves the line, and where it stays when it fails."""
+        self.count += 1
+        if pushing:
+            self.pushed.append((here, failed, self.count))
+        return capped(moved), failed
+
+    def popped(self, here: Places) -> tuple[Places, Places]:
+        """`popd`: back where its `pushd` was. Where that pushd failed, nothing of it was
+        pushed: this popd goes back where the one before it was, or fails (and stays where
+        that pushd left the line, if nothing moved it since; else wherever it may be)."""
+        self.count += 1
+        if not self.pushed:
+            return UNKNOWN_PLACE, here
+        before, failed, at = self.pushed.pop()
+        if not failed:
+            return before, NO_PLACE
+        if self.pushed:
+            return capped(before | self.pushed[-1][0]), NO_PLACE
+        return before, failed if at == self.count - 1 else here
+
+
+def joined(
+    joiner: str, before: tuple[Places, Places], after: tuple[Places, Places]
+) -> tuple[Places, Places]:
+    """Where a list is when it succeeded and when it failed (`ok`, `failed`), once a command
+    joined to it ends: after `&&` it ran only if the list succeeded, after `||` if it failed."""
+    if joiner == "&&":
+        return after[0], capped(before[1] | after[1])
+    if joiner == "||":
+        return capped(before[0] | after[0]), after[1]
+    return after
+
+
 class CheckoutWrites:
     """What a line does in a checkout of the owner's given only to read (`kept`), as
     checkout_write reads it: `found` is CHECKOUT_WRITES (it writes there), CHECKOUT_ASKS (a
@@ -4681,18 +4739,29 @@ class CheckoutWrites:
                 self.ask()
                 return
 
-    def either(self, one: str | None, other: str | None) -> str | None:
-        """Where a command runs that may run in either folder: one in a read-only checkout, if
-        either is (or one not known)."""
-        if one is None or other is None:
-            return None
-        return one if self.inside(one, real=True) or not self.inside(other, real=True) else other
-
     def moved(self, folder: str | None, target: str) -> str | None:
         """The folder `cd target` goes to from `folder` (None: not known)."""
         if not target or target == "-" or GLOB.search(target):
             return None
         return self.place(target, folder)
+
+    @staticmethod
+    def enterable(folder: str | None) -> bool:
+        """Whether a `cd` into `folder` can't fail: a folder there now that can be entered (one
+        not known, or not there yet, may not be: then the line goes on where it was)."""
+        return folder is not None and Path(folder).is_dir() and os.access(folder, os.X_OK)
+
+    def location(
+        self, base: str, rest: list[str], here: Places, moves: Moves
+    ) -> tuple[Places, Places]:
+        """Where `cd`, `pushd` or `popd` (its words but options, `rest`) leaves the line when it
+        succeeds, and when it fails (where it was: a cd that can fail, see enterable)."""
+        if base == "popd":
+            return moves.popped(here)
+        # (`cd a b`: bash refuses it, zsh replaces a part of the folder's path.)
+        goes = {f: None if len(rest) > 1 else self.moved(f, rest[0] if rest else "~") for f in here}
+        failed = frozenset(f for f, to in goes.items() if len(rest) > 1 or not self.enterable(to))
+        return moves.entered(base == "pushd", here, frozenset(goes.values()), failed)
 
     def command(self, words: list[str], targets: list[str], folder: str | None) -> list[str]:
         """One simple command (its redirections' targets apart): what it writes. The lines it
@@ -4818,13 +4887,17 @@ class CheckoutWrites:
         tokens = shell_words(plain)
         words: list[str] = []
         targets: list[str] = []
-        stack: list[str | None] = []
-        pushed: list[str | None] = []
         target = ""
         fed_shell = False
-        # What joined this command to the one before ("" for none: a list's start); whether a
-        # move in its `&&` list may not have run, so that after the list, where is not known.
-        joiner, unsure, start_of_list = "", False, folder
+        # Where the line may be: `here`, where the next command runs; `ok` and `failed`, where
+        # it is when what ran so far (the list up to here) succeeded, and when it failed, which
+        # `&&` and `||` choose between; `ran`, where the last command ran (a pipe's next command
+        # starts there too, and a background one's leaves it there). A subshell's moves end with
+        # it; one in it that can fail (see location) leaves its commands where it was too.
+        here = ok = failed = ran = frozenset({folder})
+        joiner = ""  # What joined the next command to the list before it ("": its start).
+        stack: list[tuple[Places, Places, Places, str]] = []
+        moves = Moves()
         for index, token in enumerate([*tokens, Separator(";")]):
             if isinstance(token, Separator):
                 following = tokens[index + 1] if index + 1 < len(tokens) else None
@@ -4836,44 +4909,49 @@ class CheckoutWrites:
                     continue  # (`&>log`: its file read with the redirection.)
                 name, start = command_name(words)
                 base = name.rsplit("/", 1)[-1]
+                outcome: tuple[Places, Places] | None = None
                 if base in {"cd", "pushd", "popd"}:
                     rest = [word for word in words[start:] if not word.startswith("-")]
-                    before = folder
-                    if base == "popd":
-                        folder = pushed.pop() if pushed else None
-                    else:
-                        if base == "pushd":
-                            pushed.append(folder)
-                        folder = self.moved(folder, rest[0] if rest else "~")
-                    if joiner == "||":
-                        folder = self.either(before, folder)  # (It may not have run.)
-                    elif (joiner == "&&" or words[:1] in (["then"], ["do"], ["else"])) and (
-                        folder != before
-                    ):
-                        unsure, start_of_list = True, before  # (Sure in its `&&` list.)
+                    outcome = self.location(base, rest, here, moves)
                 elif base in {"source", "."}:
-                    self.unknown(name, words[start:], folder)
-                    file = words[start] if start < len(words) else ""
-                    if (where := self.place(file, folder)) and self.inside(where, real=True):
-                        self.ask()
-                    folder = None  # (Where it leaves the shell: not known.)
+                    for where in here:
+                        self.unknown(name, words[start:], where)
+                        file = words[start] if start < len(words) else ""
+                        if (found := self.place(file, where)) and self.inside(found, real=True):
+                            self.ask()
+                    outcome = UNKNOWN_PLACE, UNKNOWN_PLACE  # (Where it leaves the shell.)
                 elif words or targets:
                     if base in FED_SHELLS and not any(w[:1] != "-" for w in words[start:]):
                         fed_shell = True  # (A shell running what its input says.)
-                    runs += [(script, folder) for script in self.command(words, targets, folder)]
+                    for where in here:
+                        runs += [(script, where) for script in self.command(words, targets, where)]
+                    # (`exit`, `return`: nothing after them runs.)
+                    outcome = (NO_PLACE, NO_PLACE) if base in {"exit", "return"} else (here, here)
+                if outcome is not None:
+                    if words[:start].count("!") % 2:
+                        outcome = outcome[1], outcome[0]  # (`! cd x`: its status turned.)
+                    ok, failed = joined(joiner, (ok, failed), outcome)
+                    ran = here
                 words, targets, target = [], [], ""
-                operator = token.strip("()")
-                joiner = (
-                    "||" if "||" in operator else "&&" if "&&" in operator
-                    else "|" if "|" in operator else ";" if operator else joiner
-                )  # fmt: skip
-                if joiner in {";", "|"} and unsure and "(" not in token:
-                    folder, unsure = self.either(start_of_list, folder), False
-                if "(" in token:
-                    stack.append(folder)
-                    joiner = ""
-                if ")" in token and stack:
-                    folder = stack.pop()
+                for piece in SEPARATOR_PIECES.findall(token):
+                    if piece == "(":
+                        stack.append((ok, failed, here, joiner))
+                        ok = failed = here
+                        joiner = ""
+                    elif piece == ")":
+                        if stack:
+                            before_ok, before_failed, here, opened = stack.pop()
+                            ok, failed = joined(opened, (before_ok, before_failed), (here, here))
+                            ran = here
+                    else:
+                        joiner = (
+                            "||" if "||" in piece else "&&" if "&&" in piece
+                            else "|" if "|" in piece else "&" if "&" in piece else ";"
+                        )  # fmt: skip
+                        here = capped(
+                            ok if joiner == "&&" else failed if joiner == "||"
+                            else ok | failed | (ran if joiner in {"|", "&"} else NO_PLACE)
+                        )  # fmt: skip
                 continue
             if target:
                 if target == ">":
@@ -4895,7 +4973,7 @@ class CheckoutWrites:
                 continue
             words.append(token)
         if fed_shell:
-            runs += [(body, folder) for body, _ in bodies]
+            runs += [(body, where) for body, _ in bodies for where in ok | failed]
         return runs
 
 

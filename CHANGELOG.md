@@ -65,6 +65,12 @@
   Node from its package) is known as Claude's, so a session open in it is never taken for
   closed and resumed beside it; and a worker can add a local repository by a `file://` URL
   whose path has a space.
+- **A checkout of yours given to read stays read-only after a `cd` that fails.** A command
+  after a `cd` to a folder that isn't there (after `;`, `||`, a new line, `pushd`, in a
+  subshell or `sh -c`) runs where the line was, not in that folder, and is now read so: before,
+  `cd gone || echo y > ../app/notes.txt` from a worker's own folder wrote into your checkout
+  unrefused. The same on Windows: a `Set-Location` that fails goes on where it was, unless
+  `-ErrorAction Stop` ends the line; and cmd's `cd /d`.
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see

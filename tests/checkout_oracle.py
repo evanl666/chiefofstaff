@@ -68,10 +68,18 @@ def made(rng: random.Random, depth: int = 0) -> str:
     elif depth < 1 and roll < 0.18 and "'" not in line:
         line = f"eval '{line}'"
     elif roll < 0.3:
-        # (Into the sandbox's own folders only: a `cd ..` twice would leave it.)
-        line = f"cd {rng.choice(['{K}', '{O}', '{K}/src', '{K}/src/..'])} && {line}"
+        # (Into the sandbox's own folders only: a `cd ..` twice would leave it. `gone` is not
+        # there: the cd fails, and what runs then runs where the line was.)
+        to = rng.choice(["{K}", "{O}", "{K}/src", "{K}/src/..", "{O}/gone", "{K}/gone"])
+        line = f"cd {to} {rng.choice(['&&', ';', '||'])} {line}"
     elif roll < 0.36:
-        line = f"(cd {rng.choice(['{K}', '{O}'])} && {line})"
+        line = f"(cd {rng.choice(['{K}', '{O}', '{O}/gone'])} && {line})"
+    elif roll < 0.4:
+        line = (
+            f"pushd {rng.choice(['{K}', '{O}', '{O}/gone'])} > /dev/null; {line}; popd > /dev/null"
+        )
+    elif depth < 1 and roll < 0.43 and "'" not in line:
+        line = f"sh -c 'cd {rng.choice(['{O}', '{O}/gone'])} || {line}'"
     return line
 
 
@@ -177,6 +185,12 @@ def seeds() -> list[tuple[str, str]]:
     for command in SIMPLE:
         line = command.format(r=rng.choice(READS), w=rng.choice(WRITES), w2=rng.choice(WRITES),
                               n=1, K="{K}", O="{O}")  # fmt: skip
+        lines += [(line, "kept"), (line, "own")]
+    # A cd that fails: what runs then runs where the line was (`../kept` from the worker's own).
+    for line in ("cd {O}/gone && cat x || echo y > ../kept/n.txt", "cd {O}/gone; touch ../kept/n",
+                 "cd {O}/gone || touch ../kept/n", "(cd {O}/gone; touch ../kept/n)",
+                 "pushd {O}/gone; touch ../kept/n; popd", "sh -c 'cd {O}/gone || touch ../kept/n'",
+                 "cd {O}/gone || exit; touch ../kept/n", "cd {O}/gone; touch n"):  # fmt: skip
         lines += [(line, "kept"), (line, "own")]
     return lines
 

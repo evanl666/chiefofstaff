@@ -2869,6 +2869,28 @@ CHECKOUT_LINES = [
     ("touch {O}/../kept/a", "O", "W"), ("gh pr checkout 1", "K", "W"),
     ("for f in *.py; do echo $f; done", "K", ""),
     ("for f in *.py; do echo x >> $f; done", "K", "A"),
+    # A cd that can fail (to a folder not there): what runs when it failed runs where the line
+    # was, and a relative path from there may be the checkout (`../kept` from the worker's own).
+    ("cd {O}/gone && cat AGENTS.md || echo y > ../kept/n.txt", "O", "W"),
+    ("cd {O}/gone || echo y > ../kept/n.txt", "O", "W"), ("cd {O}/gone; touch ../kept/n", "O", "W"),
+    ("cd {O}/gone\necho y > ../kept/n.txt", "O", "W"), ("cd {O}/gone; echo y > n.txt", "K", "W"),
+    ("cd {O}/gone && echo y > ../kept/n.txt", "O", ""), ("cd {O}; echo y > n.txt", "K", ""),
+    ("cd {O} || echo y > n.txt", "K", ""), ("cd {O} {K}; echo y > n.txt", "K", "W"),
+    ("! cd {O}/gone && echo y > ../kept/n.txt", "O", "W"),
+    ("cd {O}/gone && cat a | sort || touch ../kept/n", "O", "W"),
+    ("(cd {O}/gone && cat a) || echo y > ../kept/n.txt", "O", "W"),
+    ("(cd {O}/gone; echo y > ../kept/n.txt)", "O", "W"),
+    ("(cd {O}/gone || exit; echo y > ../kept/n.txt)", "O", ""),
+    ("cd {O}/gone || exit 1; echo y > n.txt", "K", ""),
+    ("(cd {O}/gone || exit; true) || touch ../kept/n", "O", "W"),
+    ("pushd {O}/gone; echo y > ../kept/n.txt; popd", "O", "W"),
+    ("pushd {O}/gone && echo y > n.txt; popd", "O", ""),
+    ("pushd {O} > /dev/null; popd; echo y > n.txt", "K", "W"),
+    ("pushd {O}/gone; cd {K}; popd; touch n", "O", "W"),
+    ("pushd {O}; pushd {O}/gone; popd; touch n", "K", "W"),
+    ("sh -c 'cd {O}/gone || echo y > ../kept/n.txt'", "O", "W"),
+    ("bash -c 'cd {O}/gone; sh -c \"touch ../kept/n\"'", "O", "W"),
+    ("cd {O}/gone && touch a; touch ../kept/n", "O", "W"),
 ]  # fmt: skip
 
 

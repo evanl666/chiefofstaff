@@ -7,6 +7,8 @@ Windows, `echo y >> README.md` and `./run_tests.sh` in that checkout were let th
 The reading runs everywhere (as on Windows: policy.WINDOWS_SHELLS); what only Windows itself
 does (its paths for edits) runs there."""
 
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -104,7 +106,7 @@ SPELLINGS = [
     (f"Push-Location {KEPT}; Pop-Location; Set-Content x y", "O", ""),
     ("Set-Location -Path ..\\..\\..\\app; Set-Content x y", "O", "W"),
     ("cd; Set-Content x y", "O", ""), ("cd $env:TEMP; Set-Content x y", "O", "A"),
-    ("D:; Set-Content x y", "O", "A"), (f"cd {KEPT} || Set-Content x y", "O", "W"),
+    ("D:; Set-Content x y", "O", "A"), (f"cd {KEPT} || Set-Content x y", "O", ""),
     ("Get-ChildItem | ForEach-Object { cd $_ }; Set-Content x y", "O", "A"),
     (". .\\setup.ps1", "K", "A"), ("exit 0", "K", ""), ("$x = 5", "K", ""),
     ("& { Get-Content x }", "K", ""), ("& { Remove-Item x }", "K", "W"),
@@ -138,6 +140,49 @@ CMD = [
 
 def place(where: str) -> str:
     return {"K": KEPT, "O": OWN}.get(where) or rf"{KEPT}\{where}"
+
+
+# A move that can fail (to a folder not there, `gone`): what runs after it, when it failed, runs
+# where the line was; with -ErrorAction Stop, nothing after it runs. PowerShell's lines, then
+# cmd's (the folders but `gone` there, as on the owner's machine).
+FAILING_MOVES = [
+    (f"Set-Location {OWN}\\gone; Set-Content x y", "K", "W"),
+    (f"Set-Location {OWN}; Set-Content x y", "K", ""),
+    (f"Set-Location {OWN}\\gone\nSet-Content x y", "K", "W"),
+    (f"Set-Location {OWN}\\gone -ErrorAction Stop; Set-Content x y", "K", ""),
+    (f"Set-Location -ea Stop {OWN}\\gone; Set-Content x y", "K", ""),
+    (f"Set-Location -ErrorAction:Stop -Path {OWN}\\gone; Set-Content x y", "K", ""),
+    (f"Set-Location {OWN}\\gone -ErrorAction SilentlyContinue; Set-Content x y", "K", "W"),
+    (f"cd {OWN}\\gone || Set-Content x y", "K", "W"),
+    (f"cd {OWN}\\gone && Set-Content x y", "K", ""),
+    (f"cd {OWN} || Set-Content x y", "K", ""),
+    (f"Push-Location {OWN}\\gone; Set-Content x y; Pop-Location", "K", "W"),
+    (f"Push-Location {OWN}; Pop-Location; Set-Content x y", "K", "W"),
+    (f'powershell -Command "cd {OWN}\\gone; Set-Content x y"', "K", "W"),
+]  # fmt: skip
+FAILING_CMD_MOVES = [
+    (f"cd /d {OWN}\\gone & del x", "K", "W"), (f"cd /d {OWN}\\gone && del x", "K", ""),
+    (f"cd /d {OWN}\\gone || del x", "K", "W"), (f"cd /d {OWN} & del x", "K", ""),
+    (f"pushd {OWN}\\gone & del x & popd", "K", "W"),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("line", "where", "said", "shell"),
+    [(*case, "") for case in FAILING_MOVES] + [(*case, "cmd") for case in FAILING_CMD_MOVES],
+)
+def test_what_runs_after_a_move_that_failed_runs_where_the_line_was(
+    line, where, said, shell, monkeypatch
+):
+    """Set-Location to a folder not there writes an error and the line goes on where it was
+    (`;`, a new line, `||`), unless -ErrorAction Stop ends it; cmd's `cd /d` as well."""
+    monkeypatch.setattr(
+        policy.CheckoutWrites,
+        "enterable",
+        staticmethod(lambda f: f is not None and "gone" not in f),
+    )
+    expected = {"W": policy.CHECKOUT_WRITES, "A": policy.CHECKOUT_ASKS, "": ""}[said]
+    assert policy.checkout_write(line, place(where), (KEPT,), shell) == expected, line
 
 
 @pytest.mark.parametrize(("line", "where", "said"), POWERSHELL)
@@ -286,3 +331,37 @@ async def test_a_windows_workers_edit_in_the_owners_checkout_is_refused(tmp_path
                                 resolved_path=str(own / "n.txt"))  # fmt: skip
     decision = await runtime.events.on_permission(elsewhere, {"session_id": info["session_id"]})
     assert type(decision).__name__ == "PermissionDecisionApproveOnce"
+
+
+@pytest.mark.skipif(not shutil.which("pwsh"), reason="PowerShell 7 is not here")
+def test_powershell_itself_goes_on_where_it_was_after_a_move_that_failed(tmp_path):
+    """What the reading of a failed move relies on, in PowerShell itself (Windows' runners have
+    it): after Set-Location to a folder not there, `;` and `||` go on where the line was;
+    -ErrorAction Stop (`-ea Stop`, `-ErrorAction:Stop`) ends the line; a Push-Location that
+    failed pushed nothing for Pop-Location."""
+    gone = tmp_path / "gone"
+
+    def wrote(line: str, name: str) -> bool:
+        subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", line.format(gone=f"'{gone}'")],
+            cwd=tmp_path, capture_output=True, timeout=120, check=False,
+        )  # fmt: skip
+        return (tmp_path / name).exists()
+
+    assert wrote("Set-Location {gone}; Set-Content a.txt y", "a.txt")
+    assert wrote("Set-Location {gone}\nSet-Content b.txt y", "b.txt")
+    assert wrote("Set-Location {gone} || Set-Content c.txt y", "c.txt")
+    assert wrote("Push-Location {gone}; Pop-Location; Set-Content d.txt y", "d.txt")
+    assert not wrote("Set-Location {gone} -ErrorAction Stop; Set-Content e.txt y", "e.txt")
+    assert not wrote("Set-Location -ea Stop {gone}; Set-Content f.txt y", "f.txt")
+    assert not wrote("Set-Location -ErrorAction:Stop {gone} || Set-Content g.txt y", "g.txt")
+
+
+@windows
+def test_cmd_itself_goes_on_where_it_was_after_a_cd_that_failed(tmp_path):
+    """cmd's `cd /d` to a folder not there: `&` and `||` go on where the line was."""
+    gone = tmp_path / "gone"
+    for line, name in ((f'cd /d "{gone}" & echo y> a.txt', "a.txt"),
+                       (f'cd /d "{gone}" || echo y> b.txt', "b.txt")):  # fmt: skip
+        subprocess.run(["cmd", "/d", "/c", line], cwd=tmp_path, capture_output=True, check=False)
+        assert (tmp_path / name).exists(), line

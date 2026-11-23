@@ -32,8 +32,14 @@ from .policy import (
     MADE_UP,
     MOST_LINE,
     MOST_NESTED,
+    NO_PLACE,
+    UNKNOWN_PLACE,
     CheckoutWrites,
+    Moves,
+    Places,
     TooComplexError,
+    capped,
+    joined,
 )
 
 # Shells whose lines are read as on macOS and Linux (Git Bash, WSL): on Windows, not read (a
@@ -600,13 +606,16 @@ class WindowsCheckout(CheckoutWrites):
         line = CmdLine(text) if dialect == "cmd" else Line(text)
         if line.calls and self.near(folder):
             self.ask()
-        moves = any(LOCATION_WORD.search(group) for group in line.groups)
+        moving = any(LOCATION_WORD.search(group) for group in line.groups)
         runs: list[tuple[str, str | None, str]] = []
         words: list[Word] = []
         targets: list[Word] = []
-        pushed: list[str | None] = []
+        moves = Moves()
         redirecting = ""  # ">": the next word is a file written; "<": one read.
         calling = False
+        # Where the line may be, as CheckoutWrites.line follows it: where the next statement
+        # runs, where the line is when what ran so far succeeded or failed, where the last ran.
+        here = ok = failed = ran = frozenset({folder})
         joiner = ""
         for token in [*line.tokens, Token("op", value=";")]:
             if token.kind == "redirect":
@@ -620,10 +629,10 @@ class WindowsCheckout(CheckoutWrites):
                     words.append(token.word)
                 redirecting = ""
                 for index in token.word.groups:
-                    runs.append((line.groups[index], folder, "ps"))
+                    runs += [(line.groups[index], where, "ps") for where in here]
                 continue
             if token.kind == "group":
-                runs.append((line.groups[int(token.value)], folder, "ps"))
+                runs += [(line.groups[int(token.value)], where, "ps") for where in here]
                 words.append(Word(MADE_UP, groups=(int(token.value),)))
                 continue
             if token.value == "&" and not words and dialect != "cmd":
@@ -631,47 +640,53 @@ class WindowsCheckout(CheckoutWrites):
                 continue
             if token.value == ",":
                 continue  # (An array's items: words of the same command.)
-            before = folder
             grouped = any(word.groups for word in words)
-            folder, more = self.statement(words, targets, folder, dialect, calling, pushed)
-            runs += more
-            if joiner == "||" and folder != before:
-                folder = self.either(before, folder)  # (It may not have run.)
-            if moves and grouped:
-                folder = None  # (A group moved somewhere: where, not known.)
+            if words or targets:
+                *outcome, more = self.statement(words, targets, here, dialect, calling, moves)
+                runs += more
+                if moving and grouped:
+                    outcome = [UNKNOWN_PLACE, UNKNOWN_PLACE]  # (A group moved: where, not known.)
+                ok, failed = joined(joiner, (ok, failed), (outcome[0], outcome[1]))
+                ran = here
             words, targets, calling, redirecting = [], [], False, ""
-            joiner = token.value
+            joiner = {"&&": "&&", "||": "||", "|": "|", "&": "&"}.get(token.value, ";")
+            here = capped(
+                ok if joiner == "&&" else failed if joiner == "||"
+                else ok | failed | (ran if joiner in {"|", "&"} else NO_PLACE)
+            )  # fmt: skip
         return runs
 
     def statement(
         self,
         words: list[Word],
         targets: list[Word],
-        folder: str | None,
+        here: Places,
         dialect: str,
         calling: bool,
-        pushed: list[str | None],
-    ) -> tuple[str | None, list[tuple[str, str | None, str]]]:
-        """One command (or expression) and where it leaves the shell: what it writes, and the
-        lines it runs."""
+        moves: Moves,
+    ) -> tuple[Places, Places, list[tuple[str, str | None, str]]]:
+        """One command (or expression), run in any of the folders `here`: what it writes, where
+        it leaves the shell when it succeeds and when it fails, and the lines it runs."""
         for target in targets:
-            self.writes(target.text, folder)
+            for where in here:
+                self.writes(target.text, where)
         if not words:
-            return folder, []
+            return here, here, []
         cmd = dialect == "cmd"
         first = words[0]
         if not cmd and not calling and first.text == "." and len(words) > 1:
-            self.unknown(words[1].text, [w.text for w in words[2:]], folder)  # Dot-sourced.
-            return None, []
+            for where in here:  # Dot-sourced.
+                self.unknown(words[1].text, [w.text for w in words[2:]], where)
+            return UNKNOWN_PLACE, UNKNOWN_PLACE, []
         if not cmd and not calling and first.text.casefold() in PS_KEYWORDS:
-            return folder, []  # (What it encloses: its groups, read on their own.)
+            return here, here, []  # (What it encloses: its groups, read on their own.)
         if not cmd and (after := assigned(words)) is not None:
             words = after  # `$x = Get-Content f`: the command after it.
             if not words:
-                return folder, []
+                return here, here, []
             first = words[0]
         if re.fullmatch(r"[A-Za-z]:", first.text):
-            return None, []  # (A drive's own folder: not known.)
+            return UNKNOWN_PLACE, UNKNOWN_PLACE, []  # (A drive's own folder: not known.)
         expression = (
             not cmd
             and not calling
@@ -685,43 +700,67 @@ class WindowsCheckout(CheckoutWrites):
             )
         )
         if expression or (calling and first.text == MADE_UP and first.groups):
-            return folder, []  # (A value, or a block called: its groups are read.)
+            return here, here, []  # (A value, or a block called: its groups are read.)
         if first.made_up:
-            if self.near(folder):
+            if any(self.near(where) for where in here):
                 self.ask()  # (`& $tool`: a program not known.)
-            return folder, []
+            return here, here, []
         name = first.text
         rest = [word.text for word in words[1:]]
         program = program_of(name)
         if program in PS_LOCATION or (cmd and program in {"cd", "chdir", "pushd", "popd"}):
-            return self.located(program, words[1:], folder, pushed, cmd), []
-        return folder, self.command_of(name, program, rest, folder, cmd)
+            return *self.located(program, words[1:], here, moves, cmd), []
+        runs = [run for where in here for run in self.command_of(name, program, rest, where, cmd)]
+        return here, here, runs
 
     def located(
-        self, program: str, words: list[Word], folder: str | None, pushed, cmd: bool
-    ) -> str | None:
-        """Where `cd`, Set-Location, Push-Location, Pop-Location leave the shell."""
+        self, program: str, words: list[Word], here: Places, moves: Moves, cmd: bool
+    ) -> tuple[Places, Places]:
+        """Where `cd`, Set-Location, Push-Location, Pop-Location leave the shell when they
+        succeed, and when they fail: where it was (a folder not there writes an error and the
+        line goes on), unless -ErrorAction Stop ends the line there."""
         if program in {"popd", "pop-location"}:
-            return pushed.pop() if pushed else None
+            return moves.popped(here)
         target: Word | None = None
-        for index, word in enumerate(words):
-            name = word.text.lstrip("-").casefold()
-            if not cmd and word.text.startswith("-") and not word.quoted:
+        stops = False  # (-ErrorAction Stop: its error ends the line.)
+        index = 0
+        while index < len(words):
+            word = words[index]
+            index += 1
+            if cmd:
+                if word.text.casefold() != "/d" and target is None:
+                    target = word
+                continue
+            if not word.text.startswith("-") or word.quoted:
+                target = target or word
+                continue
+            name, colon, value = word.text.lstrip("-").casefold().partition(":")
+            if (
+                not colon
+                and name
+                and any(
+                    known.startswith(name)
+                    for known in ("path", "literalpath", "lp", "stackname", *PS_VALUES)
+                )
+            ):
+                value = words[index].text.casefold() if index < len(words) else ""
                 if any(path.startswith(name) for path in ("path", "literalpath", "lp")):
-                    target = words[index + 1] if index + 1 < len(words) else None
-                    break
-                continue
-            if cmd and word.text.casefold() == "/d":
-                continue
-            target = word
-            break
-        if program in {"pushd", "push-location"}:
-            pushed.append(folder)
+                    target = words[index] if index < len(words) else None
+                index += 1  # (Its value, the next word.)
+            if name == "ea" or (len(name) > 1 and "erroraction".startswith(name)):
+                stops = value.casefold() in {"stop", "1"}
         if target is None:
-            return folder if cmd else self.moved(folder, "~")
-        if target.made_up or target.text in {"-", "+"}:
-            return None
-        return self.moved(folder, target.text) or None
+            goes = {where: where if cmd else self.moved(where, "~") for where in here}
+        elif target.made_up or target.text in {"-", "+"}:
+            goes = dict.fromkeys(here)
+        else:
+            goes = {where: self.moved(where, target.text) or None for where in here}
+        failed = frozenset(
+            where for where, to in goes.items() if not (cmd and target is None)
+            and not self.enterable(to)
+        )  # fmt: skip
+        pushing = program in {"pushd", "push-location"}
+        return moves.entered(pushing, here, frozenset(goes.values()), NO_PLACE if stops else failed)
 
     def command_of(
         self, name: str, program: str, rest: list[str], folder: str | None, cmd: bool
