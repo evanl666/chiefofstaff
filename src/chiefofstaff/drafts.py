@@ -20,7 +20,7 @@ from .learning import SENSITIVE
 from .models import DraftDecision, OkItem
 from .peers import clip
 from .roles import ROUTER, SLACK, WORKER
-from .sources.github import REVIEW_EVENTS, merge_refusal
+from .sources.github import REVIEW_EVENTS, MergePending, StackBelow, merge_refusal
 from .sources.slack import describe, message_keys, plain
 from .store import hours_ago, now
 from .tasks import OPEN
@@ -91,6 +91,12 @@ YOUR_OK = frozenset(
 )
 
 
+# A merge card while GitHub merges its PR's stack in the background, and once it has been at it
+# longer than Chief of Staff follows it.
+MERGING = "Merging: GitHub merges its stack in the background; this card says when it's done."
+STILL_MERGING = "GitHub is still merging its stack: see the PR. This card goes once it's merged."
+
+
 class Drafts:
     """The owner's decisions on drafts, and what follows from them."""
 
@@ -101,6 +107,8 @@ class Drafts:
         self.delivery = runtime.delivery
         # Decisions on drafts happen one at a time.
         self.draft_lock = asyncio.Lock()
+        # Merge cards whose PR GitHub is merging in the background (a stack's merge).
+        self.merging: set[str] = set()
 
     def style_examples(self) -> str:
         examples = json.loads(self.store.get("style_examples") or "[]")[-5:]
@@ -1536,24 +1544,68 @@ class Drafts:
             return draft
         if decision.action != "send":
             raise ValueError("Merge it, or not now.")
+        if draft["id"] in self.merging:
+            return draft  # GitHub is at it: the card says when it is done.
         target = draft["target"]
         try:
             outcome = await self.runtime.github.merge(target)
-        except Exception as exc:
-            reason, moved = merge_refusal(describe(exc)[:600])
-            if moved:
-                # Merge is only ever of the head the card shows: this card is done, and the PR
-                # is offered again once its new commits are ready.
-                draft = self.store.update_draft(
-                    draft["id"], status="rejected", outcome=reason, resolved_at=now()
-                )
-            else:
-                draft = self.store.update_draft(draft["id"], outcome=f"Not merged: {reason}")
+        except StackBelow as exc:
+            # Merging it merges the open PRs below it in its stack: the card says so first, and
+            # its next Merge merges them with it, as they are now.
+            self.store.update_draft_target(draft["id"], {**target, "stack_below": exc.below})
+            draft = self.store.update_draft(draft["id"], outcome=str(exc))
             self.bus.publish("draft", draft)
-            # The PR as it is now (its new head, checks, mergeability) on its card and task,
-            # not at the next round.
-            self.runtime.background(self.runtime.task_actions.refresh_open_prs(target["label"]))
-            raise RuntimeError(f"Not merged: {reason}") from exc
+            raise ValueError(str(exc)) from exc
+        except MergePending as exc:
+            draft = self.store.update_draft(draft["id"], outcome=MERGING)
+            self.bus.publish("draft", draft)
+            self.merging.add(draft["id"])
+            self.runtime.background(self.merge_followed(draft, exc))
+            return draft
+        except Exception as exc:
+            raise RuntimeError(f"Not merged: {self.merge_failed(draft, exc)}") from exc
+        return await self.merge_done(draft, outcome)
+
+    def merge_failed(self, draft: dict, exc: BaseException) -> str:
+        """A merge GitHub refused, said on its card (gone when new commits came: it is offered
+        again once they are ready); the PR read again at once. Why, in words."""
+        reason, moved = merge_refusal(describe(exc)[:600])
+        if moved:
+            # Merge is only ever of the head the card shows: this card is done, and the PR
+            # is offered again once its new commits are ready.
+            draft = self.store.update_draft(
+                draft["id"], status="rejected", outcome=reason, resolved_at=now()
+            )
+        else:
+            draft = self.store.update_draft(draft["id"], outcome=f"Not merged: {reason}")
+        self.bus.publish("draft", draft)
+        # The PR as it is now (its new head, checks, mergeability) on its card and task,
+        # not at the next round.
+        label = draft["target"]["label"]
+        self.runtime.background(self.runtime.task_actions.refresh_open_prs(label))
+        return reason
+
+    async def merge_followed(self, draft: dict, pending: MergePending):
+        """A stack's merge GitHub runs in the background, followed to its end: its card done
+        then, or saying why not."""
+        try:
+            outcome = await pending.follow()
+        except Exception as exc:
+            self.merge_failed(draft, exc)
+            return
+        finally:
+            self.merging.discard(draft["id"])
+        draft = self.store.draft(draft["id"])
+        if draft["status"] != "pending":
+            return  # Settled meanwhile (the PR seen merged, the card gone).
+        if outcome is None:
+            draft = self.store.update_draft(draft["id"], outcome=STILL_MERGING)
+            self.bus.publish("draft", draft)
+            return
+        await self.merge_done(draft, outcome)
+
+    async def merge_done(self, draft: dict, outcome: str) -> dict:
+        target = draft["target"]
         draft = self.store.update_draft(
             draft["id"], status="sent", outcome=outcome, resolved_at=now()
         )

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A PR in a stack on GitHub merges from its card.** *Merge* on a stacked PR failed with
+  GitHub's "part of a stack and must be merged using the asynchronous merge REST API" (each
+  click again). It now merges through GitHub's own merge for stacks, at the commit the card
+  showed, and the card says when GitHub is done (*Merging…* while it works in the background).
+  A PR above open PRs of its stack says first that those merge with it (GitHub merges a stack
+  from the bottom), and *Merge all 3* merges them as they were then; one GitHub can't merge
+  says why in words, and what to do. *Merge when ready* merges a stacked PR the same way, and
+  waits for any open PR below it to merge first.
+
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see
 [the guide](docs/guide.md#prepared-for-you-keeping-your-prs-moving).
