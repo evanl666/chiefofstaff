@@ -168,7 +168,8 @@ class Keeping:
             raise ValueError("Its base's rules could not be read.")
         if any(rule.get("type") == "merge_queue" for rule in rules):
             raise ValueError("Its base merges through a queue: not yet.")
-        if not (claim.get("accepted") or {}).get("sha"):
+        due = self.store.get(f"acceptdue:{claim['holder']}")  # Recorded in a moment.
+        if not (claim.get("accepted") or {}).get("sha") and not due:
             raise ValueError(
                 "Accept it first: Accept on its task, or Accept this commit in its menu."
             )
@@ -209,6 +210,11 @@ class Keeping:
         too: the owner's review stands (only what it does waits)."""
         if not (self.on() and self.control.exists()):
             return []
+        if task["id"] in self.runtime.task_actions.receipts_due:
+            # Accepted as its result's receipts are read (its PR's head among them): recorded
+            # once they are (receipts_read), not taken for a head that moved.
+            self.store.set(f"acceptdue:{task['id']}", "1")
+            return []
         evidence = {}
         run = self.store.one(
             "SELECT evidence FROM runs WHERE task_id=? AND evidence!='' ORDER BY started_at DESC",
@@ -242,6 +248,18 @@ class Keeping:
                 self.store.set(f"acceptnote:{claim['target']}", note)
                 notes.append(note)
         return notes
+
+    def receipts_read(self: Shepherd, task_id: str):  # type: ignore[misc]
+        """A result accepted while its receipts were being read: its acceptance, recorded now
+        that they are (accepted), if it is still accepted."""
+        if not self.store.get(f"acceptdue:{task_id}"):
+            return
+        self.store.delete(f"acceptdue:{task_id}")
+        task = self.runtime.tasks.find(task_id)
+        if task and task["status"] == "done" and not self.store.get(f"setaside:{task_id}"):
+            self.accepted(task)
+            for claim in self.control.held_by(task_id):
+                self.publish_holder(claim)
 
     def require(self: Shepherd, target: str) -> dict:  # type: ignore[misc]
         if why := self.refusal():

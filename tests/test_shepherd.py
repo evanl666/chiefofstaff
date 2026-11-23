@@ -755,6 +755,34 @@ async def test_accept_of_a_result_whose_receipts_lack_its_pr_says_so(world):
     )
 
 
+async def test_an_accept_as_its_receipts_are_read_is_recorded_once_they_are(world):
+    """Live H-X2 SX2: the owner's Accept came as its result's receipts were still being read:
+    nothing of its PR was there yet, and Merge when ready said "Accept it first". The head is
+    recorded once they are read; Merge when ready can be turned on meanwhile."""
+    import time
+
+    runtime = await claimed(world)
+    actions = runtime.task_actions
+    run_id = runtime.store.value("SELECT id FROM runs WHERE task_id=?", (world.task,))
+    read = runtime.store.value("SELECT evidence FROM runs WHERE id=?", (run_id,))
+    reading = {**json.loads(read), "prs": []}
+    runtime.store.execute("UPDATE runs SET evidence=? WHERE id=?", (json.dumps(reading), run_id))
+    actions.result_due(world.task)
+    asked = time.monotonic()
+    actions.accept(world.task)
+    assert not runtime.shepherd.control.claim(TARGET)["accepted"].get("sha")
+    assert not runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]["accept_note"]
+    await runtime.shepherd.merge_when_ready(TARGET, True)
+    runtime.store.execute("UPDATE runs SET evidence=? WHERE id=?", (read, run_id))
+
+    async def done():
+        return None
+
+    await actions.result_read(world.task, done(), asked)
+    claim = runtime.shepherd.control.claim(TARGET)
+    assert claim["accepted"]["sha"] == world.h0 and claim["merge_when_ready"], claim
+
+
 def green(world, head):
     world.github.checks[head] = [
         {"name": "ci / test", "status": "COMPLETED", "conclusion": "SUCCESS", "required": True}

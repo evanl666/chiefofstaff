@@ -1190,6 +1190,9 @@ class TaskActions:
             if self.read_now(task_id, asked):
                 with suppress(Exception):
                     self.publish(self.tasks.get(task_id))
+                if self.runtime.shepherd.on():
+                    with suppress(Exception):
+                        self.runtime.shepherd.receipts_read(task_id)  # An Accept meanwhile.
 
     def result_due(self, task_id: str):
         """A result reported now, its checkouts read next (collect_evidence, ended)."""
