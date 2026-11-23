@@ -734,11 +734,14 @@ class Events:
         # (The SDK keeps its cost as a private field.)
         cost = getattr(used, "_copilot_usage", None) or getattr(used, "copilot_usage", None)
         run = self.tasks.run(row["id"]) if row["role"] == WORKER else None
+        spent = (getattr(cost, "total_nano_aiu", 0) or 0) / 1e9
+        if row["role"] == WORKER and self.runtime.shepherd.marked(row["id"]):
+            self.runtime.shepherd.usage(row["id"], spent)  # A step's spend too.
         self.store.record_usage(
             row["id"],
             row["role"],
             getattr(used, "model", None) or getattr(data, "model", None) or "",
-            (getattr(cost, "total_nano_aiu", 0) or 0) / 1e9,
+            spent,
             0,
             getattr(used, "input_tokens", 0) or 0,
             getattr(used, "output_tokens", 0) or 0,
