@@ -848,7 +848,8 @@ async def base_ref(top: Path) -> tuple[str, str]:
     return ref, ref + note
 
 
-GIT_URL = re.compile(r"^(https?://|ssh://|git@|file://)\S+$")
+# A file:// URL's path may have a space in it, as git takes it (macOS's "Application Support").
+GIT_URL = re.compile(r"^(?:(?:https?://|ssh://|git@)\S+|file://\S.*)$")
 
 
 GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")

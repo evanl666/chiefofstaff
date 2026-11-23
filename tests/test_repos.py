@@ -7056,3 +7056,15 @@ async def test_work_in_place_goes_to_a_worker_started_in_place_never_one_that_re
         text="How many rows now?",
     )  # fmt: skip
     assert not (asked.error or "").startswith("Not sent: the owner asked"), asked
+
+
+def test_a_file_url_with_a_space_in_its_path_is_a_git_url():
+    """A local repository's file:// URL may have a space in its path, as git takes it (macOS's
+    "Application Support", a "My Repos" folder): it is cloned from there, under its own name."""
+    from chiefofstaff import workspaces
+
+    url = "file:///Users/a/My Repos/app.git"
+    assert workspaces.clone_source(url) == (url, "app")
+    assert workspaces.repository_key(url) == workspaces.repository_key("/Users/a/My Repos/app")
+    with pytest.raises(ValueError, match="a git URL"):
+        workspaces.clone_source("https://example.com/a b.git")

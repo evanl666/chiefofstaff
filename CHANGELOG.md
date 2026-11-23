@@ -59,6 +59,12 @@
   says where it is (amber: it needs you), opened or not, as the sidebar's dots do; a result you
   have not opened yet says *New* before its title until you open it (hover the dot or the word
   for what it means).
+- **Paths with a space, tested everywhere.** Every test and live suite now runs Chief of Staff
+  with a data folder whose path has a space, as macOS's own has (`Application Support`). What
+  that found is fixed: a Claude Code run from a folder whose path has a space (by itself, or by
+  Node from its package) is known as Claude's, so a session open in it is never taken for
+  closed and resumed beside it; and a worker can add a local repository by a `file://` URL
+  whose path has a space.
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see

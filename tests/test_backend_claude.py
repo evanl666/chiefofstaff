@@ -2325,3 +2325,16 @@ async def test_a_conversation_reset_says_what_was_spent_before_it_counts_again(a
         "what it spent up to the reset is told before its count starts over"
     )
     assert worker.tally.total()["inputTokens"] == 0
+
+
+def test_a_claude_run_from_a_path_with_a_space_is_claudes():
+    """A path with a space in it (macOS's "Application Support") is several words of a command
+    line: a `claude` run from one, or by its interpreter from one, is still Claude Code's."""
+    for command in (
+        "/Users/a/Library/Application Support/Claude/claude-code/2.1.322/claude --resume x",
+        "node /Users/a/My Tools/node_modules/@anthropic-ai/claude-code/cli.js -p",
+        "/opt/py/bin/python3 /Users/a/Application Support/bin/claude --output-format stream-json",
+    ):
+        assert backend_claude.claude_program(command), command
+    for command in ("grep -rn claude src", "/usr/bin/python3 /Users/a/Application Support/x.py"):
+        assert not backend_claude.claude_program(command), command

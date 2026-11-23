@@ -3879,13 +3879,21 @@ def claude_program(command: str) -> bool:
     """Whether a command line is Claude Code's (a pid a `sessions/` file names is still that
     process, not another that took its number): `claude` as typed or its path, run by itself or
     by its interpreter (`node …/bin/claude`), a version of its native installer's
-    (…/claude/versions/2.1.322), or Node running its package's script (…/claude-code/cli.js)."""
-    words = [Path(word) for word in command.split()[:2]]
+    (…/claude/versions/2.1.322), or Node running its package's script (…/claude-code/cli.js).
+    A path with a space in it (macOS's "Application Support") is several words of the line:
+    each run of the words before its first option is read as one."""
+    words = []
+    for word in command.split()[:8]:
+        if word.startswith("-"):
+            break
+        words.append(word)
+    runs = [Path(" ".join(words[start:end])) for start in range(len(words))
+            for end in range(start + 1, len(words) + 1)]  # fmt: skip
     return any(
-        word.name.startswith("claude")
-        or word.parent.parts[-2:] == ("claude", "versions")
-        or "claude-code" in word.parts
-        for word in words
+        run.name.startswith("claude")
+        or run.parent.parts[-2:] == ("claude", "versions")
+        or "claude-code" in run.parts
+        for run in runs
     )
 
 
