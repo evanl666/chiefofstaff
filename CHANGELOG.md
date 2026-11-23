@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.54 (2026-11-23)
 
 Workers that work together are a team you can follow in one thread, with how their tasks
 are related; usage counts as Copilot counts it; and choosing and using another coding agent
