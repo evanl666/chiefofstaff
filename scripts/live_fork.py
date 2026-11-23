@@ -13,17 +13,26 @@ F5  a worker at work on its only task (not busy): related work the owner wants d
 F6  the owner asks for a new worker for work only a related worker's conversation can do (a
     codename it read from a file deleted since): the Router starts it from that worker
     (spawn_worker fork_of), and it knows the codename; that worker, between turns, untouched
+F7  on Codex, whose conversations are not forked: a busy Codex worker's related task goes to a
+    second worker on Codex at once, with a brief of its work; it answers from the brief (a
+    codename only the busy worker's earlier result held: not in the Router's words to it)
 
 Uses your signed-in Copilot CLI and consumes premium requests; the Copilot sessions it creates
-are deleted at the end. Its data folder has a space in its path, as macOS's own has. Set TMPDIR
-to a scratch folder of yours (its temporary folders go there); LIVE_FORK_PORT moves its ports
-(the app's, and the stand-in Slack's 200 above it). Scenarios by name run alone (F6: only it).
+are deleted at the end. F7 runs only when named, in a Chief of Staff of its own with your own
+Codex (its sign-in, its plan's usage, LIVE_CODEX_MODEL or Codex's default): the threads it made
+are archived at the end. Each data folder has a space in its path, as macOS's own has. Set
+TMPDIR to a scratch folder of yours (its temporary folders go there); LIVE_FORK_PORT moves its
+ports (the app's, and the stand-in Slack's 200 above it). Scenarios by name run alone.
 
-    uv run --with playwright python scripts/live_fork.py [F6]
+    uv run --with playwright python scripts/live_fork.py [F6] [F7]
 """
 
 import asyncio
+import contextlib
+import json
 import os
+import shutil
+import sqlite3
 import sys
 import tempfile
 from datetime import UTC, datetime
@@ -42,6 +51,9 @@ from live_parity import setup  # noqa: E402
 MODEL = os.environ.get("FORK_MODEL", "claude-sonnet-5.5")
 CODENAME = "HERON-7"
 VAULT = "OSPREY-3"
+LARK = "LARK-58"
+CODEX_MODEL = os.environ.get("LIVE_CODEX_MODEL", "")
+COPILOT_SCENARIOS = {"F1", "F2", "F3", "F4", "F5", "F6"}
 FINISHED = {"review", "done"}
 SECOND = "Started a second worker for"
 
@@ -90,6 +102,12 @@ class Run:
             for m in await self.app.get(f"/api/sessions/{router}/messages?after={mark}")
             if m["kind"] == "notice"
         ]
+
+    def rows(self, query: str, *args) -> list[tuple]:
+        """Chief of Staff's own records, read only (what a worker was sent, in full)."""
+        database = data_dir(self.root) / "chiefofstaff.db"
+        with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
+            return db.execute(query, args).fetchall()
 
     async def tasks(self, session_id: str) -> list[dict]:
         state = await self.app.get("/api/state")
@@ -245,6 +263,94 @@ async def f6_a_new_worker_the_owner_asks_for_starts_from_a_related_one(run: Run)
     run.check("F6 the Vault Keeper was given nothing", not told, str(told)[:120])
 
 
+async def f7_a_busy_codex_worker_hands_a_brief_to_a_second_worker(run: Run):
+    secret = run.root / "secret-lark.txt"
+    secret.write_text(f"The codename is {LARK}.\n")
+    mark = await run.say(
+        f"Start a worker titled 'Lark Keeper' (no project, use codex): read the file {secret} "
+        "and report the codename it holds as your result, word for word."
+    )
+    started = await run.notice(mark, "Started")
+    worker = started["meta"]["session_id"]
+    first = await run.finished(started["meta"]["task_id"], 900)
+    secret.unlink()
+    run.check("F7 the busy worker is on Codex", (await run.session(worker)).get("agent") == "codex")
+    run.check("F7 its earlier result holds the codename", LARK in (first.get("result") or ""),
+              (first.get("result") or "")[:80])  # fmt: skip
+    mark = await run.say(
+        "Give the 'Lark Keeper' worker a new task (that same worker): run `sleep 240` in its "
+        "folder, then write 'slept' into slept.txt there, and report."
+    )
+    await run.notice(mark, "New task", "Started")
+    await run.at_work(worker, "sleep 240", 600)
+    mark = await run.say(
+        "Give the 'Lark Keeper' worker one more task, for once it is free (that same worker): "
+        "write 'two' into two.txt in its folder."
+    )
+    await run.notice(mark, "New task", "Started")
+    own = [t["id"] for t in await run.tasks(worker)]
+    mark = await run.say(
+        "New task for the 'Lark Keeper' worker: write the codename from its earlier result into "
+        "codename.txt. I need it now: do not wait for what it is doing. Do not put the codename "
+        "in your message to it: it knows it."
+    )
+    line = await run.notice(mark, SECOND, "New task", "Started", "Queued")
+    second = line["meta"]["session_id"]
+    run.check("F7 a second worker took it at once", line["text"].startswith(SECOND), line["text"])
+    if second == worker:
+        for task_id in [*own, line["meta"]["task_id"]]:
+            await run.finished(task_id, 1500)
+        return
+    row = await run.session(second)
+    run.check("F7 on Codex too", row.get("agent") == "codex", str(row.get("agent")))
+    origin = row.get("fork_of") or {}
+    run.check("F7 linked to the busy worker, with a brief", origin.get("id") == worker
+              and origin.get("brief") is True, str(origin))  # fmt: skip
+    query = "SELECT meta FROM messages WHERE session_id=? AND kind='router' ORDER BY id"
+    sent = [json.loads(meta or "{}").get("prompt", "") for (meta,) in run.rows(query, second)]
+    given = sent[0] if sent else ""
+    brief = "its conversation is not copied to you" in given and LARK in given
+    run.check("F7 its brief: not the conversation, what the earlier task found", brief,
+              given[-200:])  # fmt: skip
+    task = await run.finished(line["meta"]["task_id"], 1200)
+    told = " ".join([task.get("title") or "", task.get("goal") or ""])
+    run.check("F7 the Router's words to it hold no codename", LARK not in told, told[:120])
+    written = Path(row["cwd"]) / "codename.txt"
+    said = written.read_text().strip() if written.exists() else ""
+    run.check("F7 it answered from the brief", LARK in said, said[:80])
+    run.check("F7 its task is done", task["status"] in FINISHED, task["status"])
+    for task_id in own:
+        done = await run.finished(task_id, 1200)
+        run.check(f"F7 the busy worker's own task finished: {done['title']}", True)
+
+
+async def archive_codex(root: Path):
+    """The Codex threads a run made, archived in the owner's Codex (as live_agents.py does)."""
+    from chiefofstaff.backend_codex import CodexBackend
+
+    database = data_dir(root) / "chiefofstaff.db"
+    with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
+        named = db.execute("SELECT key, value FROM kv WHERE key LIKE 'agent:%'").fetchall()
+        workers = [key.split(":", 1)[1] for key, value in named if value == "codex"]
+        threads = []
+        for worker in workers:
+            found = db.execute(
+                "SELECT value FROM kv WHERE key=?", (f"copilot:{worker}",)
+            ).fetchone()
+            threads.append(found[0] if found else worker)
+    if not threads:
+        return
+    codex = CodexBackend(shutil.which("codex") or "codex")
+    await codex.start()
+    try:
+        for thread in dict.fromkeys(threads):
+            with contextlib.suppress(Exception):
+                await codex.archive(thread)
+    finally:
+        await codex.stop()
+    log(f"archived {len(threads)} Codex threads")
+
+
 async def f3_no_free_slot_the_task_waits_for_the_busy_worker(run: Run):
     await run.app.post("/api/settings", {"max_workers": 1})
     worker = await run.busy_worker("Slot Keeper", 120)
@@ -255,41 +361,81 @@ async def f3_no_free_slot_the_task_waits_for_the_busy_worker(run: Run):
     await run.finished(line["meta"]["task_id"], 1200)
 
 
+async def copilot(root: Path, wanted: set[str]) -> list:
+    home, project, _ = setup(root)
+    data = data_dir(root)
+    data.parent.mkdir(parents=True, exist_ok=True)
+    app = App(data, root / "log", {"COPILOT_HOME": str(home)})
+    await app.start()
+    run = Run(app, root)
+    try:
+        await app.post("/api/settings", {
+            "projects": [str(project)], "model": MODEL, "max_workers": 4,
+            "fork_busy": True, "mac_notifications": False, "digest_time": ""})  # fmt: skip
+        if not wanted or wanted & {"F1", "F2", "F4"}:
+            worker = await f1_f4_a_busy_worker_hands_a_related_task_to_a_second_worker(run)
+            await f2_a_free_worker_takes_its_related_task_itself(run, worker)
+        if not wanted or "F5" in wanted:
+            await f5_work_wanted_in_parallel_goes_to_a_second_worker(run)
+        if not wanted or "F6" in wanted:
+            await f6_a_new_worker_the_owner_asks_for_starts_from_a_related_one(run)
+        if not wanted or "F3" in wanted:  # (Last: it takes every slot but one.)
+            await f3_no_free_slot_the_task_waits_for_the_busy_worker(run)
+    except BaseException:
+        router = (await app.get("/api/state"))["router_id"]
+        print(transcript(await app.get(f"/api/sessions/{router}/messages")))
+        raise
+    finally:
+        await app.stop()
+        await cleanup(data)
+    return run.results
+
+
+async def codex(root: Path) -> list:
+    """F7, in a Chief of Staff of its own with the owner's Codex on (new workers start there)."""
+    home, project, _ = setup(root)
+    data = data_dir(root)
+    data.parent.mkdir(parents=True, exist_ok=True)
+    env = {"COPILOT_HOME": str(home), "CHIEFOFSTAFF_MIN_FREE_MEMORY": "0"}
+    app = App(data, root / "log", env, agents=True)
+    await app.start()
+    run = Run(app, root)
+    try:
+        current = (await app.get("/api/state"))["settings"]
+        await app.post("/api/settings", {
+            **current, "projects": [str(project)], "model": MODEL, "max_workers": 4,
+            "fork_busy": True, "mac_notifications": False, "digest_time": "",
+            "agents": {"codex": {"enabled": True, "model": CODEX_MODEL},
+                       "new_workers": "codex"}})  # fmt: skip
+        await f7_a_busy_codex_worker_hands_a_brief_to_a_second_worker(run)
+    except BaseException:
+        router = (await app.get("/api/state"))["router_id"]
+        print(transcript(await app.get(f"/api/sessions/{router}/messages")))
+        raise
+    finally:
+        await app.stop()
+        with contextlib.suppress(Exception):
+            await archive_codex(root)
+        await cleanup(data)
+    return run.results
+
+
 async def main():
-    wanted = set(sys.argv[1:])
+    wanted = {name.upper() for name in sys.argv[1:]}
+    results = []
     with tempfile.TemporaryDirectory(prefix="cos-fork-") as temporary:
         root = Path(temporary).resolve()
-        home, project, _ = setup(root)
-        data = data_dir(root)
-        data.parent.mkdir(parents=True, exist_ok=True)
-        app = App(data, root / "log", {"COPILOT_HOME": str(home)})
-        await app.start()
-        run = Run(app, root)
-        try:
-            await app.post("/api/settings", {
-                "projects": [str(project)], "model": MODEL, "max_workers": 4,
-                "fork_busy": True, "mac_notifications": False, "digest_time": ""})  # fmt: skip
-            if not wanted or wanted & {"F1", "F2", "F4"}:
-                worker = await f1_f4_a_busy_worker_hands_a_related_task_to_a_second_worker(run)
-                await f2_a_free_worker_takes_its_related_task_itself(run, worker)
-            if not wanted or "F5" in wanted:
-                await f5_work_wanted_in_parallel_goes_to_a_second_worker(run)
-            if not wanted or "F6" in wanted:
-                await f6_a_new_worker_the_owner_asks_for_starts_from_a_related_one(run)
-            if not wanted or "F3" in wanted:  # (Last: it takes every slot but one.)
-                await f3_no_free_slot_the_task_waits_for_the_busy_worker(run)
-        except BaseException:
-            router = (await app.get("/api/state"))["router_id"]
-            print(transcript(await app.get(f"/api/sessions/{router}/messages")))
-            raise
-        finally:
-            await app.stop()
-            await cleanup(data)
+        if not wanted or wanted & COPILOT_SCENARIOS:
+            (root / "copilot").mkdir()
+            results += await copilot(root / "copilot", wanted)
+        if "F7" in wanted:
+            (root / "codex").mkdir()
+            results += await codex(root / "codex")
     print("\n================ FORK ================")
-    for name, ok, detail in run.results:
+    for name, ok, detail in results:
         print(f"{'PASS' if ok else 'FAIL'}  {name}  ({detail})")
-    failed = [item for item in run.results if not item[1]]
-    print(f"{len(run.results) - len(failed)}/{len(run.results)} as expected")
+    failed = [item for item in results if not item[1]]
+    print(f"{len(results) - len(failed)}/{len(results)} as expected")
     if failed:
         raise SystemExit(1)
 
