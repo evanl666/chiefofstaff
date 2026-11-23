@@ -805,7 +805,7 @@ async def test_a_codex_limit_used_up_again_after_its_reset_is_read_again(
     harness, runtime = await started(tmp_path)
     try:
         await saved(runtime, {"codex": {"enabled": True}})
-        codex_limit(300, 2)
+        codex_limit(300, 15)  # (Still ahead when its turn fails and its limits are read: CI.)
         worker, task, _ = await limited(harness, runtime, "codex", "Report done: Fixed.")
         await until(lambda: runtime.tasks.get(task)["status"] != "waiting", 30)  # Reset.
         await until(
