@@ -39,7 +39,9 @@
   worker sends its message to that one, instead of making another; folded *System agents* says
   "The Router on Copilot for now" while its agent can't run it, not where it was put; a step of
   Claude's sandbox check that took too long is tried again, never kept as its sandbox not holding;
-  a worker without a team no longer shows "null" beside its tabs.
+  a worker without a team no longer shows "null" beside its tabs; new work you pick an agent for
+  in the message box (`@claude`) is no longer given to a worker on another agent that knows the
+  project: it starts on the agent you picked.
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see

@@ -2400,6 +2400,20 @@ class Tools:
         if self.runtime.special(target):
             raise ValueError("That is Chief of Staff's own helper, not a worker to give work to.")
         self.runtime.check_follow(target, [threads.normalize(key) for key in params.follow])
+        if (
+            params.task == "new"
+            and target["role"] == WORKER
+            and caller == self.runtime.router_id()
+            and (chip := self.runtime.chosen_agent())
+            and chip != (agent := self.runtime.agent(target["id"]))
+        ):
+            # The owner's @agent in this turn's message: new work runs there (as spawn_worker
+            # has it), never as a task for a worker on another agent that knows the project.
+            raise ValueError(
+                f"Not sent: the owner chose {agents.display(chip)} for this (their @{chip} in "
+                f"the message), and this worker runs on {agents.display(agent)}. Start it on "
+                f"{agents.display(chip)} with spawn_worker."
+            )
         task = self.tasks.current(target["id"]) if target["role"] == WORKER else None
         if params.task_id and params.task != "new":
             named = self.tasks.find(params.task_id.strip())

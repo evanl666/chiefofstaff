@@ -307,6 +307,42 @@ async def test_last_used_starts_new_workers_on_the_agent_the_owner_last_chose(
         await runtime.stop()
 
 
+async def test_new_work_the_owner_chose_an_agent_for_is_not_given_to_a_worker_on_another(
+    tmp_path, codex_installed
+):
+    """The owner's @codex (its chip) on new work: the Router may not give it as a task to a
+    worker on another agent that knows the project (live, 0.1.55: @claude's went to a Codex
+    worker); it starts it there with spawn_worker. Their worker on that agent may have it."""
+    from conftest import call_tool
+
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        other = await spawn_on(harness, runtime, title="One", instructions="Report done: x")
+        await runtime.owner_send(harness.router_id, "Count the rows", agent="codex")
+        refused = await call_tool(
+            runtime, "message_session", harness.router_id, session_id=other["session_id"],
+            text="Count the rows.", task="new", title="Count the rows · data", why_new="Another.",
+        )  # fmt: skip
+        assert refused.result_type == "failure"
+        assert refused.error == (
+            "Not sent: the owner chose Codex for this (their @codex in the message), and this "
+            "worker runs on Copilot. Start it on Codex with spawn_worker."
+        )
+        assert [t["title"] for t in runtime.tasks.for_session(other["session_id"])] == ["One"]
+        mine = await spawn_on(harness, runtime, title="Count it", instructions="Report done: 5")
+        assert runtime.agent(mine["session_id"]) == "codex"
+        await until(lambda: harness.store.session(mine["session_id"])["status"] == "done", 30)
+        given = await call_tool(
+            runtime, "message_session", harness.router_id, session_id=mine["session_id"],
+            text="Also the columns.", task="new", title="Count the columns · data",
+            why_new="Another.",
+        )  # fmt: skip
+        assert given.result_type != "failure", given.error
+    finally:
+        await runtime.stop()
+
+
 async def test_the_page_names_each_model_as_its_agent_does_and_last_used(tmp_path, codex_installed):
     harness, runtime = await started(tmp_path)
     try:
