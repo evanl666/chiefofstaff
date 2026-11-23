@@ -102,6 +102,66 @@ async def test_a_long_answer_to_a_note_on_finished_work_keeps_its_result(harness
     assert router_inbound(harness)[-1]["text"] == LONG
 
 
+# What a worker says in its chat once it has answered, its earlier work told again: long enough
+# that a one-line report would be completed with it (Workers.complete_report).
+RESTATED = (
+    "I ran `sleep 45`, then appended `# marker` to `textkit/__init__.py` with the `echo` command "
+    "you gave, and `tail -n 2` on the file shows `# marker` as the last line. I wrote nothing "
+    "else, made no commit and changed no other file in the project folder."
+)
+
+
+async def reported(runtime, harness, title, summary):
+    """A worker whose task is finished (in review) and whose turn is over."""
+    worker, task = await spawn(runtime, harness.router_id, title)
+    session = harness.session(worker)
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="done", summary=summary)
+    await idle(runtime, session)
+    return worker, session, runtime.tasks.get(task["id"])
+
+
+async def test_a_done_report_answering_a_question_in_chat_keeps_the_result(harness):
+    """Live M2 (r79): asked in its chat "Question only, change nothing: how many lines…? Answer
+    with a done report", the worker answered with a done report (news: the result stays) and
+    told its earlier work again in its chat; at its turn's end that report was completed with
+    those words and became the task's result."""
+    runtime = await harness.connect()
+    worker, session, before = await reported(runtime, harness, "Marker", "Appended the marker.")
+    await runtime.owner_send(worker, "Question only, change nothing: how many lines does "
+                             "textkit/__init__.py have? Answer with a done report.")  # fmt: skip
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="done", task_id=before["id"],
+                    summary="It has 14 lines. No changes made.")  # fmt: skip
+    await idle(runtime, session, RESTATED)
+    after = runtime.tasks.get(before["id"])
+    assert (after["status"], after["result"]) == (before["status"], before["result"])
+    assert runtime.task_actions.view(after)["news"]["text"] == "It has 14 lines. No changes made."
+
+
+@pytest.mark.parametrize("status", ["answer", "done", "progress"])
+async def test_an_answer_to_the_routers_note_on_finished_work_keeps_its_result(harness, status):
+    """Live R1 (r83): the Router's note on a finished task ("which shell command did you use?")
+    answered: whatever status the worker reports it with, it is an answer the Router gets, the
+    task stays as it was (no new result, no second "finished"), whatever it says in its chat."""
+    runtime = await harness.connect()
+    summary = 'Wrote "plum" to plum.txt in the worker folder.'
+    worker, session, before = await reported(runtime, harness, "Write plum", summary)
+    notified = len(harness.notifications)
+    await router_says(runtime, harness, worker, before, "note",
+                      "Which shell command did you use to write plum.txt?")  # fmt: skip
+    await turn(runtime, session)
+    said = await call_tool(runtime, "report", worker, status=status, task_id=before["id"],
+                           summary="I used `echo plum > plum.txt`.")  # fmt: skip
+    assert said.result_type == "success", said.text_result_for_llm
+    await idle(runtime, session, RESTATED)
+    after = runtime.tasks.get(before["id"])
+    assert (after["status"], after["result"]) == (before["status"], before["result"])
+    assert not [n for n in harness.notifications[notified:] if "finished" in n[0].lower()]
+    assert "echo plum > plum.txt" in router_inbound(harness)[-1]["text"], "the Router has it"
+    assert not nudged(session)
+
+
 async def test_an_answer_to_a_note_on_work_checked_on_reaches_the_router(harness):
     """E85: with a check-back set on finished B, the answer to the Router's note about it went
     nowhere: neither filed (rightly) nor passed on."""

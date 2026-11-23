@@ -4027,6 +4027,14 @@ async def m2_a_question_in_chat_stays_news(ctx: Ctx):
     """Bug bash 3: a question in chat about finished work, while others changed the folder,
     became a "new result" that replaced the one under review."""
     task = ctx.notes["marker"]
+
+    async def at_rest():
+        # Its turn is over: its last words may complete its one-line report (r79 M2 took the
+        # result before that, and the owner's question came into that turn).
+        row = await session(ctx, task["session_id"])
+        return not row["slot"] and row["status"] not in {"queued", "starting", "working"}
+
+    await wait_for("its turn is over", at_rest, 300, ctx.app)
     before = await ctx.app.get(f"/api/tasks/{task['id']}")
     (ctx.project / "AGENTS.md").write_text("the owner's own agent notes\n")
     try:

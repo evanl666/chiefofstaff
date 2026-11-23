@@ -70,8 +70,10 @@ async def task(app: App, task_id: str) -> dict:
 
 async def idle(app: App, worker: str, what: str, timeout: float = 600):
     async def done():
+        # Its turn is over (a report already says "done" while it writes its last words, which
+        # may complete a one-line report: r83 R1 took the result before that).
         row = await app.get(f"/api/sessions/{worker}")
-        return row["status"] not in {"queued", "starting", "working"} or None
+        return (row["status"] not in {"queued", "starting", "working"} and not row["slot"]) or None
 
     await wait_for(what, done, timeout, app)
 
@@ -85,6 +87,7 @@ async def r1_answer_about_finished_work(app: App) -> list[tuple[str, bool, str]]
     done = await task_of(app, mark, {"review", "done"}, "the plum task is reported")
     worker = done["session_id"]
     await idle(app, worker, "its turn ends")
+    done = await task(app, done["id"])  # As its turn left it.
     worker_mark = max(m["id"] for m in await app.get(f"/api/sessions/{worker}/messages"))
     router = await router_id(app)
     mark = await say(

@@ -3506,6 +3506,19 @@ class Tools:
             return asked["kind"] == "owner" and bool(asked["meta"].get("chat"))
         return False
 
+    def answers_note(self, caller: str, task: dict) -> bool:
+        """Whether its turn answers the Router's note about this task: the last instruction it
+        has seen is that note (a restart's note resumes the turn it interrupted)."""
+        upto = self.seen_upto(caller)
+        while found := last_instruction(self.store, caller, upto):
+            asked = self.store.message(found)
+            prompt = str(asked["meta"].get("prompt") or "")
+            if asked["kind"] == "notice" and prompt.startswith(RESTART_PROMPT):
+                upto = found - 1
+                continue
+            return router_note(asked) and asked["meta"].get("task_id") == task["id"]
+        return False
+
     def seen_upto(self, caller: str) -> int | None:
         """The newest message it has seen (None: no mark): not one still on its way, nor one
         sent into its turn and not shown to it yet."""
@@ -3557,6 +3570,18 @@ class Tools:
             if row["role"] == WORKER
             else None
         )
+        # The Router's note on finished work changes no task (E96): what the worker reports on
+        # that task in answer to it is its answer, whatever status it picks (live R1: "done"
+        # made it a new result, a second "finished"). The Router, which asked, has it.
+        if (
+            task
+            and row["role"] == WORKER
+            and params.status in {"done", "progress"}
+            and not params.new_task_title.strip()
+            and task["status"] in {"review", "done"}
+            and self.answers_note(caller, task)
+        ):
+            params = params.model_copy(update={"status": "answer", "replaces_result": False})
         # News a followed thread or a check-back brought is news on the task it is for, also
         # said as an answer (live G2: a PR's CI failed after its task was accepted, told with
         # status="answer", and the news never came under Needs you).

@@ -284,7 +284,10 @@ class Workers:
             self.runtime.bus.publish(
                 "message", self.store.update_message_text(inbound["id"], full) | amended
             )
-        self.tasks.update(task["id"], result=clip_report(full))
+        if task["result"] in {clip_report(report["text"]), clip_report(short)}:
+            # Only the result that report gave: one that was news on finished work (an answer
+            # to the owner's question: live M2) leaves the result it had as it was.
+            self.tasks.update(task["id"], result=clip_report(full))
         self.runtime.update_session(session_id, report=full[:4000])
 
     def answer_on_home(self, session_id: str):

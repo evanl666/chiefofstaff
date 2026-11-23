@@ -84,9 +84,10 @@ one it was last given word of (your message, or the Router's on a task it had: a
 note, a changed decision); when that word started a task of the Router's, with several
 finished, it is a task of its own, named from your message (the box says which: *Message about
 “…”*, *A new task for this worker…*; on Home, the *To* line: *as a new task*). Its worker is named for that task while it works on it; about finished work, its answer is an
-*Update* on the task, which keeps its result, unless it changed code for you, or redid or
-corrected the work: then that is its new result (to review again when you had not accepted it),
-and the one before is under *Earlier reports* on its card. A message there that asks for something else ("New, separate task: add mod()
+*Update* on the task, which keeps its result (whatever it adds in its chat), unless it changed
+code for you, or redid or corrected the work: then that is its new result (to review again when
+you had not accepted it), and the one before is under *Earlier reports* on its card. Its answer
+to the Router's note about finished work never is. A message there that asks for something else ("New, separate task: add mod()
 on a new branch", another PR or question) is told apart by the worker that reads it, not by
 its words: it reports that work as a task of its own, with your message and what it ran for
 it, and the task it was on keeps its result (or, still at work, goes on).
