@@ -148,7 +148,8 @@ def run(policy, cases: list[tuple[str, str]], tmp: Path, workers: int = 4) -> li
         root = tmp / f"run{number}"
         shutil.copytree(template, root, symlinks=True)
         kept, own = root / "kept", root / "own"
-        text = line.replace("{K}", str(kept)).replace("{O}", str(own))
+        # Quoted, as a worker writes a path with a space in it (the tests' folders have one).
+        text = line.replace("{K}", f'"{kept}"').replace("{O}", f'"{own}"')
         cwd = kept if where == "kept" else own
         verdict = policy.checkout_write(text, str(cwd), (str(kept),))
         home = root / "home"

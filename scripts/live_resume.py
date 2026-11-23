@@ -139,7 +139,7 @@ async def main():
         root = Path(temporary).resolve()
         home = copilot_home(root)
         os.environ["COPILOT_HOME"] = str(home)  # (This process's: Chief of Staff's and cleanup's.)
-        data = root / "data"
+        data = live_e2e.data_dir(root)
         app = App(data, root / "chiefofstaff.log", {"COPILOT_GITHUB_TOKEN": token})
         failed = False
         try:

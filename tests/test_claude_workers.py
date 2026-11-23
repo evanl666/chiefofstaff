@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -535,7 +536,8 @@ async def test_a_claude_worker_continues_in_a_terminal_and_is_left_alone_there(
         row = harness.store.session(worker)
         given = await runtime.terminal_command(worker)
         assert given == {
-            "command": f"cd {row['cwd']} && claude --resume {backend_claude.dashed(worker)}",
+            "command": f"cd {shlex.quote(row['cwd'])} && claude --resume "
+            f"{backend_claude.dashed(worker)}",
             "agent": "claude",
         }
         assert not runtime.states.is_live(worker), "let go of first"
@@ -611,7 +613,7 @@ async def test_the_owners_claude_sessions_are_listed_and_one_adopted_goes_on_as_
         assert [(i["id"], i["agent"], i["agent_name"], i["cwd"], i["open"]) for i in listed] == [
             (session, "claude", "Claude", str(project), False)
         ]
-        assert listed[0]["resume"] == f"cd {project} && claude --resume {session}"
+        assert listed[0]["resume"] == f"cd {shlex.quote(str(project))} && claude --resume {session}"
         history = await runtime.workers.history(session)
         assert [(e["kind"], e["text"]) for e in history["entries"]] == [
             ("owner", "Remember the word 'teal'."),

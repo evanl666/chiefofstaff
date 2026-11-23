@@ -6,6 +6,7 @@ work it held goes on once, by itself, never twice and never what had already run
 import asyncio
 import json
 import os
+import shlex
 import time
 from pathlib import Path
 
@@ -562,7 +563,8 @@ async def test_a_turn_that_lost_its_sign_in_after_running_tools_is_never_replaye
         await saved(runtime, {"codex": {"enabled": True}})
         made = await spawn_on(
             harness, runtime, title="Count the rows · data", agent="codex",
-            instructions=f"Run the shell command `echo once >> {marker}` then Lose the sign-in",
+            instructions=f"Run the shell command `echo once >> {shlex.quote(str(marker))}` then "
+            "Lose the sign-in",
         )  # fmt: skip
         worker = made["session_id"]
         await until(lambda: runtime.agent_status("codex")["status"] == agents.SIGN_IN, 30)

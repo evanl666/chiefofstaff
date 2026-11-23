@@ -253,7 +253,7 @@ async def main():
     with tempfile.TemporaryDirectory(prefix="cos-relations-") as temporary:
         root = Path(temporary).resolve()
         home, project, truth = setup(root)
-        app = App(root / "data", root / "log", {"COPILOT_HOME": str(home)})
+        app = App(live_e2e.data_dir(root), root / "log", {"COPILOT_HOME": str(home)})
         ctx = Ctx(app, root, home, project, truth, workspace)
         ctx.app_base = live_e2e.BASE
         await app.start()
@@ -278,7 +278,7 @@ async def main():
         finally:
             await app.stop()
             SHOTS.joinpath("app.log").write_text((root / "log").read_text())
-            await cleanup(root / "data")
+            await cleanup(live_e2e.data_dir(root))
             git(project, "worktree", "prune")
 
 

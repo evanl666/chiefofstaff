@@ -3,6 +3,7 @@ import hashlib
 import inspect
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -3593,7 +3594,7 @@ def armed_clone(tmp_path: Path, workspace: Path, marker: Path) -> Path:
     its own (sub, a commit not pushed yet) whose config runs a program as it is pushed to, and
     a `.gitmodules` saying to ignore it."""
     evil = tmp_path / "evil.sh"
-    evil.write_text(f"#!/bin/sh\necho ran >> {marker}\nexit 1\n")
+    evil.write_text(f"#!/bin/sh\necho ran >> {shlex.quote(str(marker))}\nexit 1\n")
     evil.chmod(0o755)
     up, subup = tmp_path / "up.git", tmp_path / "subup.git"
     for bare in (up, subup):
@@ -3609,7 +3610,7 @@ def armed_clone(tmp_path: Path, workspace: Path, marker: Path) -> Path:
     run("git", "clone", "-q", str(subup), "sub", cwd=clone)
     run("git", "checkout", "-q", "-b", "work", cwd=clone / "sub")
     commit(clone / "sub", "s.txt", "s2\n")
-    run("git", "config", "remote.origin.receivepack", str(evil), cwd=clone / "sub")
+    run("git", "config", "remote.origin.receivepack", shlex.quote(str(evil)), cwd=clone / "sub")
     (clone / ".gitmodules").write_text(
         f'[submodule "sub"]\n\tpath = sub\n\turl = {subup}\n\tignore = all\n'
     )
@@ -5584,7 +5585,9 @@ async def test_a_worktree_workers_test_run_in_the_owners_checkout_runs_on_their_
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
                     task="new", title="Run check.sh in app", why_new="another deliverable",
                     text=asked)  # fmt: skip
-    said = await decided(runtime, worker, f"cd {app} && ls && ./check.sh", str(tree))
+    said = await decided(
+        runtime, worker, f"cd {shlex.quote(str(app))} && ls && ./check.sh", str(tree)
+    )
     [copy] = copies(harness, worker)
     there = Path(copy["path"])
     assert said == policy_module.OWN_COPY.format(path=str(there), left_out=""), said
@@ -5594,10 +5597,12 @@ async def test_a_worktree_workers_test_run_in_the_owners_checkout_runs_on_their_
     assert run("git", "rev-parse", "HEAD", cwd=there) == run("git", "rev-parse", "HEAD", cwd=app)
     copied = policy_module.OWN_COPY.format(path=str(there), left_out="")
     assert await decided(runtime, worker, "npm test", str(app)) == copied, "the same copy"
-    logged = f"cd {app} && ./check.sh > check.log 2>&1"  # (It runs there: all of it, in the copy.)
+    # (It runs there: all of it, in the copy.)
+    logged = f"cd {shlex.quote(str(app))} && ./check.sh > check.log 2>&1"
     assert await decided(runtime, worker, logged, str(tree)) == copied
     written = policy_module.OWN_WORKTREE.format(path=str(tree))
-    assert await decided(runtime, worker, f"echo y >> {app}/README.md", str(tree)) == written
+    line = f"echo y >> {shlex.quote(str(app))}/README.md"
+    assert await decided(runtime, worker, line, str(tree)) == written
     request = SimpleNamespace(kind="write", file_name=str(app / "README.md"),
                               resolved_path=str(app / "README.md"))  # fmt: skip
     decision = await runtime.events.on_permission(request, {"session_id": worker})

@@ -1342,7 +1342,8 @@ async def test_a_codex_workers_command_refused_in_the_owners_checkout_runs_in_it
         assert steered == [wrap("system", "refused", f"Chief of Staff refused that: {said}")]
         assert (Path(copy["path"]) / "README.md").read_text() == "# app, edited\n"
         await session.send(
-            f"Run the shell command `cd {copy['path']} && ./run_tests.sh`. Then reply with just: ok"
+            f"Run the shell command `cd {shlex.quote(copy['path'])} && ./run_tests.sh`. Then reply "
+            "with just: ok"
         )
         await turn.wait()
         assert (Path(copy["path"]) / "ran.txt").read_text() == "ran\n", "run in its copy"

@@ -1919,9 +1919,13 @@ async def main():
         "CHIEFOFSTAFF_OTHERS_STALL_SECONDS": str(STALL),
         "CHIEFOFSTAFF_OTHERS_IDLE_SECONDS": str(IDLE),
     }
-    app = Instance("Chief of Staff", PORT, root / "data", root / "chiefofstaff.log", env)
+    app = Instance("Chief of Staff", PORT, live_e2e.data_dir(root), root / "chiefofstaff.log", env)
     other = Instance(
-        "the other Chief of Staff", OTHER_PORT, root / "data2", root / "other.log", env
+        "the other Chief of Staff",
+        OTHER_PORT,
+        live_e2e.data_dir(root).with_name("data2"),
+        root / "other.log",
+        env,
     )
     ctx = Ctx(root, home, app, other)
     ctx.watch = Watch(ctx)

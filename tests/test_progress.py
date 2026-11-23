@@ -4,6 +4,7 @@ plus the failures a real setup throws at sessions (plugin hooks, efforts, late r
 import asyncio
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -13,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import FakeSession, Harness, call_tool, env, settle, task_of
+from conftest import FakeSession, Harness, begins, call_tool, env, settle, task_of
 
 from chiefofstaff.models import DraftDecision, Settings
 
@@ -897,8 +898,8 @@ async def test_workers_write_a_cache_of_their_own_and_read_the_owners(tmp_path, 
         scripts[0][0].startswith(path + "/") for path in policy.readonly
     ), "its init script: read, never written"
     text = Path(scripts[0][0]).read_text()  # noqa: ASYNC240
-    assert f"npm_config_cache={tier}/npm" in text
-    assert f"GRADLE_RO_DEP_CACHE={home}/.gradle/caches" in text
+    assert f"npm_config_cache={shlex.quote(f'{tier}/npm')}" in text
+    assert f"GRADLE_RO_DEP_CACHE={shlex.quote(str(home / '.gradle' / 'caches'))}" in text
     await harness.session(worker).send("Go on")
     runtime.states[worker].handle = None
     await runtime.session_for(worker)
@@ -986,9 +987,8 @@ async def test_sandboxed_workers_get_only_the_owners_files_chief_of_staff_names(
             "CCACHE_DIR",
             "UV_TOOL_DIR",
         ):
-            assert f"export {variable}={own.tier}/" in text or f" {variable}={own.tier}/" in text, (
-                variable
-            )
+            start = begins(f"{own.tier}/")
+            assert f"export {variable}={start}" in text or f" {variable}={start}" in text, variable
     crate = tmp_path / "crate"
     (crate / "cli").mkdir(parents=True)
     (crate / "cli" / "Cargo.toml").write_text("[package]\n")
@@ -1063,7 +1063,9 @@ async def test_no_configuration_file_makes_a_folder_of_the_owners_writable(tmp_p
         )
         assert (f"maven.repo.local.tail={moved / 'm2'}" in own.text) == (not slack)
         for read_through in ("GRADLE_RO_DEP_CACHE", "GOPROXY=file://"):
-            assert (read_through in own.text) == (not slack), "none of the owner's, for Slack's"
+            assert (read_through in own.text.replace("'", "")) == (not slack), (
+                "none of the owner's, for Slack's"
+            )
 
 
 async def test_what_workers_caches_need_to_know_is_found_at_connect_whatever_the_settings(
@@ -1128,7 +1130,7 @@ async def test_a_worker_never_waits_for_the_java_truststore(tmp_path, monkeypatc
         worker = await asyncio.wait_for(spawn(runtime, harness.router_id, "Build"), 5)
         found = runtime.cache_plan(harness.store.session(worker))
         store = caches.truststore_file(runtime.cache_tier, 7)
-        assert f"[ -s {store} ]" in found.text
+        assert f"[ -s {shlex.quote(str(store))} ]" in found.text
         assert str(store.parent) in found.readonly
     finally:
         release.set()

@@ -355,9 +355,9 @@ async def main() -> int:
         chosen = {name: project for name, project in chosen.items() if name in wanted}
     for name, project in chosen.items():
         make(project, name, caches, results_root)
-    app = App(root / "data", root / "log", {"COPILOT_HOME": str(home)}, agents=True)
+    app = App(live_e2e.data_dir(root), root / "log", {"COPILOT_HOME": str(home)}, agents=True)
     await app.start()
-    database = root / "data" / "chiefofstaff.db"
+    database = live_e2e.data_dir(root) / "chiefofstaff.db"
     results: dict[str, dict] = {}
     try:
         current = (await app.get("/api/state"))["settings"]
@@ -386,7 +386,7 @@ async def main() -> int:
     finally:
         await app.stop()
         with contextlib.suppress(Exception):
-            await cleanup(root / "data")
+            await cleanup(live_e2e.data_dir(root))
         (root.parent / f"cos-perf-{int(time.time())}.json").write_text(
             json.dumps(results, indent=1)
         )

@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import struct
@@ -2276,7 +2277,7 @@ async def test_a_command_refused_in_the_owners_checkout_is_sent_to_a_copy_of_its
         app = it.app
         (app / "run_tests.sh").write_text("#!/bin/sh\necho ran > ran.txt\n")
         (app / "run_tests.sh").chmod(0o755)
-        run = f"cd {app} && ./run_tests.sh" if isolate else "./run_tests.sh"
+        run = f"cd {shlex.quote(str(app))} && ./run_tests.sh" if isolate else "./run_tests.sh"
         await it.session.send(f"Run the shell command `{run}`. Then reply with just: done")
         await it.turn.wait()
         assert not (app / "ran.txt").exists(), "not run in the owner's checkout"
@@ -2288,7 +2289,8 @@ async def test_a_command_refused_in_the_owners_checkout_is_sent_to_a_copy_of_its
         if isinstance(backend, ScriptedBackend):
             return  # (A scripted agent runs no command.)
         await it.session.send(
-            f"Run the shell command `cd {tree} && ./run_tests.sh`. Then reply with just: done"
+            f"Run the shell command `cd {shlex.quote(str(tree))} && ./run_tests.sh`. Then reply "
+            "with just: done"
         )
         await it.turn.wait()
         assert (tree / "ran.txt").read_text() == "ran\n", "run in its copy"

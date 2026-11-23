@@ -401,7 +401,7 @@ async def main():
         root = Path(temporary).resolve()
         project = service_project(root)
         home = copilot_home(root, [project, root / "own-session"])
-        app = App(root / "data", root / "log", {"COPILOT_HOME": str(home)})
+        app = App(live_e2e.data_dir(root), root / "log", {"COPILOT_HOME": str(home)})
         await app.start()
         since = time.time()
         if "M1" in wanted:
@@ -434,7 +434,7 @@ async def main():
             raise
         finally:
             await app.stop()
-            await cleanup(root / "data")
+            await cleanup(live_e2e.data_dir(root))
             subprocess.run(["git", "-C", str(project), "worktree", "prune"], check=False)
 
 

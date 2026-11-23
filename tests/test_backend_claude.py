@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import uuid
@@ -411,7 +412,9 @@ async def test_abort_ends_the_turn_and_its_command(agent, tmp_path):
     marker = tmp_path / "pid"
     session = await agent.create_session(session_id="2" * 32, name="t", **options(tmp_path))
     turn = Turn(session)
-    await session.send(f"Run the shell command `echo $$ > {marker}; exec sleep 30`")
+    await session.send(
+        f"Run the shell command `echo $$ > {shlex.quote(str(marker))}; exec sleep 30`"
+    )
     for _ in range(200):
         if marker.exists() and marker.read_text().strip():
             break
@@ -1472,8 +1475,9 @@ def test_the_file_an_unquoted_check_left_outside_its_folder_goes_and_nothing_els
     the path's first word, with the pid and the rest of the path in it. Only that, exactly."""
     from chiefofstaff import claude_check
 
-    work = tmp_path / "Application Support" / "work-buddy" / "work" / "claude-check" / "work"
-    stray = tmp_path / "Application"
+    base = tmp_path.parent  # (Where tmp_path is: "Application Support" in it, conftest.)
+    work = base / "Application Support" / "work-buddy" / "work" / "claude-check" / "work"
+    stray = base / "Application"
     stray.write_text("66743 Support/work-buddy/work/claude-check/work/interrupt.pid\n")
     claude_check.tidy_stray(work)
     assert not stray.exists()
@@ -1512,7 +1516,9 @@ async def test_a_note_steered_into_a_stopped_turn_starts_no_turn_after_it(agent,
         session_id="b3" * 16, name="t", **options(tmp_path, on_message=raw)
     )
     turn = Turn(session)
-    await session.send(f"Run the shell command `echo $$ > {marker}; exec sleep 30`")
+    await session.send(
+        f"Run the shell command `echo $$ > {shlex.quote(str(marker))}; exec sleep 30`"
+    )
     for _ in range(200):
         if marker.exists() and marker.read_text().strip():
             break
@@ -1524,7 +1530,7 @@ async def test_a_note_steered_into_a_stopped_turn_starts_no_turn_after_it(agent,
     await until(lambda: raw.blocked() >= 1)
     await asyncio.sleep(0.05)
     assert [m.content for m in turn.of("user.message")] == [
-        f"Run the shell command `echo $$ > {marker}; exec sleep 30`"
+        f"Run the shell command `echo $$ > {shlex.quote(str(marker))}; exec sleep 30`"
     ], "the note never shows: Chief of Staff sends it again with the next message"
     assert turn.said() == [] and turn.kinds().count("abort") == 1
     assert not await session.queue_holds()

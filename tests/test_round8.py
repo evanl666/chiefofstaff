@@ -1,6 +1,7 @@
 """Bug bash round 8."""
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -483,7 +484,7 @@ async def test_a_worker_given_the_owners_checkout_to_read_cannot_write_there_by_
     refused = "The same command was not run in the owner's checkout; your own copy of it"
     for yolo in ("on", "off"):
         harness.store.execute("UPDATE sessions SET yolo=? WHERE id=?", (yolo, info["session_id"]))
-        assert refused in await decided(f"echo y >> {app}/AGENTS.md"), yolo
+        assert refused in await decided(f"echo y >> {shlex.quote(str(app))}/AGENTS.md"), yolo
         assert refused in await decided("git add -A && git commit -m x"), yolo
         assert refused in await decided("touch notes.txt", cwd=str(app)), yolo
         assert await decided("head -1 README.md") == "PermissionDecisionApproveOnce", yolo
@@ -534,22 +535,23 @@ async def test_a_worker_in_its_own_worktree_never_writes_the_owners_checkout(tmp
                                can_offer_session_approval=False)  # fmt: skip
 
     copy = tmp_path / "copy.txt"
+    a, c = shlex.quote(str(app)), shlex.quote(str(copy))  # (Their paths have a space: conftest.)
     allowed = "PermissionDecisionApproveOnce"
     for yolo in ("on", "off"):
         harness.store.execute("UPDATE sessions SET yolo=? WHERE id=?", (yolo, worker))
         said = await decided(edit(app / "AGENTS.md"))
         assert "owner's own checkout" in said and str(tree) in said, (yolo, said)
         for line, cwd in [
-            (f"echo y >> {app}/AGENTS.md", tree),
-            (f"cp {app}/AGENTS.md {copy} && echo y >> {app}/AGENTS.md", tree),
+            (f"echo y >> {a}/AGENTS.md", tree),
+            (f"cp {a}/AGENTS.md {c} && echo y >> {a}/AGENTS.md", tree),
             ("touch notes.txt", app),
-            (f"git -C {app} commit -qam y", tree),
+            (f"git -C {a} commit -qam y", tree),
         ]:
             said = await decided(command(line, cwd))
             assert "your own worktree of it is at" in said and str(tree) in said, (yolo, line)
         assert await decided(edit(tree / "AGENTS.md")) == allowed, yolo
         assert await decided(command("echo y >> AGENTS.md && git commit -qam y")) == allowed
-        assert await decided(command(f"head -1 {app}/AGENTS.md > {copy}")) == allowed, yolo
+        assert await decided(command(f"head -1 {a}/AGENTS.md > {c}")) == allowed, yolo
         assert await decided(command('cd "$(mktemp -d)" && echo x > made.txt')) == allowed
     assert (app / "AGENTS.md").read_text() == "Python 3.11+.\n"
 

@@ -1583,7 +1583,10 @@ async def main():
     machine.read_disk = lambda paths: {"free": 200 * 10**9, "total": 500 * 10**9, "path": "/"}
     phase = sys.argv[1] if len(sys.argv) > 1 else "check"
     SHOTS.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="cos-quality-") as temporary:
+    # Its folder's name has a space, as macOS's data folder has one ("Application Support"):
+    # every path Chief of Staff puts in a command must keep it whole. No longer for it, so Send
+    # to Chief's socket in its data folder still fits a socket's path.
+    with tempfile.TemporaryDirectory(prefix="cos quality-") as temporary:
         # The owner's own agents are never found here: stand-ins are put on the PATH where used.
         os.environ["PATH"] = without_agents(os.environ["PATH"], Path(temporary) / "bin")
         holder: dict = {}

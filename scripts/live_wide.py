@@ -5115,7 +5115,7 @@ async def main():
             # the guard would hold their work back, which is F's to test.
             "CHIEFOFSTAFF_MIN_FREE_MEMORY": "101" if shard == "F" else "0",
         }
-        app = App(root / "data", root / "log", env)
+        app = App(live_e2e.data_dir(root), root / "log", env)
         ctx = Ctx(app, root, home, project, truth, workspace)
         ctx.app_base = live_e2e.BASE
         await app.start()
@@ -5151,7 +5151,7 @@ async def main():
         finally:
             await app.stop()
             (Path("/tmp/cos-live") / f"app-{shard}.log").write_text((root / "log").read_text())
-            await cleanup(root / "data")
+            await cleanup(live_e2e.data_dir(root))
             git(project, "worktree", "prune")
 
 

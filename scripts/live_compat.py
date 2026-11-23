@@ -176,7 +176,7 @@ async def main():
         cache = root / "runtime"
         cli = updated_cli(root)
         app = App(
-            root / "data",
+            live_e2e.data_dir(root),
             root / "chiefofstaff.log",
             {"COPILOT_GITHUB_TOKEN": token, "COPILOT_CLI_EXTRACT_DIR": str(cache)},
         )

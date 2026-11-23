@@ -1119,7 +1119,9 @@ async def main():
     # As a terminal the owner opens: nothing of a Copilot that may be running this test.
     for key in [key for key in os.environ if key.startswith("COPILOT_")]:
         os.environ.pop(key)
-    root = Path(tempfile.mkdtemp(prefix="cos-send-", dir=os.environ.get("LIVE_SEND_TMP")))
+    # Its name has a space, as macOS's data folder has one ("Application Support"), and so has
+    # its data folder's path; no longer for it (the send socket in it must fit a socket's path).
+    root = Path(tempfile.mkdtemp(prefix="cos send-", dir=os.environ.get("LIVE_SEND_TMP")))
     root = root.resolve()
     home = make_home(root)
     projects = {name: root / name for name in PROJECTS}

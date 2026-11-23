@@ -12,8 +12,10 @@ browser-shots/ (light and dark).
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -34,13 +36,18 @@ def log(text: str):
 
 
 async def start() -> tuple[subprocess.Popen, str]:
+    # Its data folder has a space in its path, as macOS's has ("Application Support").
+    root = Path(tempfile.mkdtemp(prefix="cos-demo-"))
+    data = root / "Application Support" / "data"
     process = subprocess.Popen(
-        [sys.executable, "-m", "chiefofstaff", "--demo", "--no-browser", "--port", str(PORT)],
+        [sys.executable, "-m", "chiefofstaff", "--demo", "--no-browser", "--port", str(PORT),
+         "--data-dir", str(data)],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-    )
+    )  # fmt: skip
+    process.root = root  # type: ignore[attr-defined]
     for _ in range(200):
         line = await asyncio.to_thread(process.stdout.readline)
         if match := re.search(r"(http://127\.0\.0\.1:\d+/#token=\S+)", line):
@@ -51,6 +58,7 @@ async def start() -> tuple[subprocess.Popen, str]:
             ).start()
             return process, match.group(1)
     process.kill()
+    shutil.rmtree(root, ignore_errors=True)
     raise RuntimeError("The demo did not start.")
 
 
@@ -405,6 +413,8 @@ async def run(scheme: str):
         raise
     finally:
         process.terminate()
+        process.wait(timeout=30)
+        shutil.rmtree(process.root, ignore_errors=True)  # type: ignore[attr-defined]
 
 
 async def main():

@@ -5712,7 +5712,10 @@ async def main():
     # A disk as roomy as the pages expect, whatever this machine's is (a low one adds the
     # Router's note under Needs you); a round about storage sets its own.
     machine.read_disk = lambda paths: {"free": 200 * 10**9, "total": 500 * 10**9, "path": "/"}
-    with tempfile.TemporaryDirectory(prefix="cos-ui-") as temporary:
+    # Its folder's name has a space, as macOS's data folder has one ("Application Support"):
+    # every path Chief of Staff puts in a command must keep it whole. No longer for it, so Send
+    # to Chief's socket in its data folder still fits a socket's path.
+    with tempfile.TemporaryDirectory(prefix="cos ui-") as temporary:
         # The owner's own agents are never found here: stand-ins are put on the PATH where used.
         os.environ["PATH"] = without_agents(os.environ["PATH"], Path(temporary) / "bin")
         # Nor this machine's free disk space (low, it would be a card under Needs you): room

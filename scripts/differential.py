@@ -1722,10 +1722,10 @@ def run_folder(port: int) -> Path:
              pwd.getpwuid(os.getuid()).pw_dir]  # fmt: skip
     for base in filter(None, bases):
         real = Path(os.path.realpath(base))
-        socket_path = real / f"d{port}-xxxxxxxx" / "data" / "send" / "socket"
+        socket_path = real / f"d{port} xxxxxxxx" / "data" / "send" / "socket"
         if real.is_dir() and len(str(socket_path)) < SOCKET_PATH and owners_only(real):
-            return Path(os.path.realpath(tempfile.mkdtemp(prefix=f"d{port}-", dir=real)))
-    return WORK / f"run-{port}"
+            return Path(os.path.realpath(tempfile.mkdtemp(prefix=f"d{port} ", dir=real)))
+    return WORK / f"run {port}"
 
 
 def make_run(run: Path, alone: bool = False) -> dict:
@@ -2474,6 +2474,9 @@ def report(
 async def run_sides(
     sides: list[Side], out: Path, allowances: dict[str, Allow], port: int, alone: bool = False
 ) -> tuple[list[dict], list[dict], list[Path], Path]:
+    # Short, so Send to Chief's socket in its data folder fits (run_folder), its name with a
+    # space, as macOS's data folder has one ("Application Support"): every path Chief of
+    # Staff puts in a command must keep it whole.
     run = run_folder(port)
     captures, pages, folders = [], [], []
     try:

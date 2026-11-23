@@ -70,11 +70,20 @@ def log(text: str):
     print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
 
 
+SPACED = "Application Support"
+
+
 def data_dir(root: Path) -> Path:
     """A run's data folder, its path with a space as macOS's own is ("Application Support"):
     every command Chief of Staff writes with a path in it must keep it whole (0.1.54's check
-    of Claude Code did not, and never finished there)."""
-    return root / "Application Support" / "data"
+    of Claude Code did not, and never finished there). Every live suite's (0.1.56)."""
+    return root / SPACED / "data"
+
+
+def run_root(data: Path) -> Path:
+    """The run's own folder a data folder is in (data_dir's root)."""
+    folder = data.resolve().parent
+    return folder.parent if folder.name == SPACED else folder
 
 
 class App:
@@ -1621,7 +1630,7 @@ async def cleanup(data: Path):
     client = backend.client
     # Also whatever the database does not list (a crash, a delete that failed): every session
     # that worked in this run's temporary folders.
-    root = str(data.resolve().parent) + "/"
+    root = str(run_root(data)) + "/"
     for meta in await client.list_sessions():
         folder = (meta.context.working_directory if meta.context else "") or ""
         if folder.startswith(root) and meta.session_id not in ids:
@@ -1649,7 +1658,7 @@ async def main():
         (project / "README.md").write_text("# Demo project\n")
         git(project, "add", ".")
         git(project, "-c", "user.email=e2e@test", "-c", "user.name=e2e", "commit", "-qm", "init")
-        data = root / "data"
+        data = data_dir(root)
         # Like a company plugin's hook whose service is down: it fails on every turn.
         hooks = root / "hooks"
         hooks.mkdir()

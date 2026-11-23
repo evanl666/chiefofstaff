@@ -191,7 +191,7 @@ async def main():
             [*git, "-c", "user.email=live@test", "-c", "user.name=live", "commit", "-qm", "init"],
             check=True,
         )
-        data, marker, calls = root / "data", root / "connected", root / "calls.txt"
+        data, marker, calls = live_e2e.data_dir(root), root / "connected", root / "calls.txt"
         app = App(data, root / "chiefofstaff.log")
         link = browser_step(marker)
         failed = False

@@ -1758,7 +1758,10 @@ def test_a_line_the_oracle_runs_changes_nothing_out_of_its_sandbox(tmp_path):
     other = tmp_path / "other"
     oracle.make_repository(other, "main", ["push.default=simple"])
     box = oracle.Sandbox(tmp_path / "box")
-    box.run(f"cd {other} && git checkout -b x; git config --global alias.p push", "feat")
+    box.run(
+        f"cd {shlex.quote(str(other))} && git checkout -b x; git config --global alias.p push",
+        "feat",
+    )
     assert (other / ".git" / "HEAD").read_text() == "ref: refs/heads/main\n"
     assert (other / ".git" / "branches").read_text() == "main\nfeat\nmaster\nwb/x\n"
     home = tmp_path / "home"
@@ -1766,7 +1769,8 @@ def test_a_line_the_oracle_runs_changes_nothing_out_of_its_sandbox(tmp_path):
     prefix = oracle.confined(home / "sandbox", home)
     if not prefix:
         pytest.skip("no sandbox-exec here")
-    line = f"echo x > {home}/outside; echo y > {home}/sandbox/inside"
+    folder = shlex.quote(str(home))
+    line = f"echo x > {folder}/outside; echo y > {folder}/sandbox/inside"
     subprocess.run([*prefix, "/bin/sh", "-c", line], check=False, capture_output=True)
     assert not (home / "outside").exists() and (home / "sandbox" / "inside").exists()
 
@@ -2025,7 +2029,7 @@ def test_cd_reads_dot_dot_as_the_lines_mode_says(command, shell, goes, tmp_path)
     token = policy.SHELL.set(shell)
     try:
         policy.reading.cache_clear()
-        found = policy.pushes(command.format(work=work), str(work))
+        found = policy.pushes(command.format(work=shlex.quote(str(work))), str(work))
     finally:
         policy.SHELL.reset(token)
     assert len(found) == 1, found
@@ -2882,7 +2886,7 @@ def test_a_command_that_writes_in_the_owners_checkout_given_to_read_is_refused(
     subprocess.run(["git", "init", "-q", str(kept)], check=True)
     for name in ("AGENTS.md", "src/app.py", "tool.py"):
         (kept / name).write_text("x\n")
-    command = line.format(K=kept, O=own)
+    command = line.format(K=f'"{kept}"', O=f'"{own}"')  # (Its path has a space: conftest.)
     row = {"role": "worker", "cwd": str(kept if where == "K" else own)}
     checkouts = [{"path": str(kept), "shared": True, "git_dir": str(kept / ".git")},
                  {"path": str(own), "branch": "chief/x"}]  # fmt: skip

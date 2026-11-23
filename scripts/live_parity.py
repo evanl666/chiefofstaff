@@ -531,7 +531,7 @@ async def run(number: int) -> list[str]:
         home, project, truth = setup(root)
         world = truths()
         app = App(
-            root / "data",
+            live_e2e.data_dir(root),
             root / "chiefofstaff.log",
             {"COPILOT_HOME": str(home)},
             agents=AGENT != "copilot",
@@ -593,7 +593,7 @@ async def run(number: int) -> list[str]:
             summary.append(f"the owner's checkout untouched: {'yes' if untouched else 'NO'}")
             assert untouched, f"the owner's checkout changed: {changed or commits + ' commits'}"
             if AGENT == "codex":
-                database = root / "data" / "chiefofstaff.db"
+                database = live_e2e.data_dir(root) / "chiefofstaff.db"
                 with contextlib.closing(
                     sqlite3.connect(f"file:{database}?mode=ro", uri=True)
                 ) as db:

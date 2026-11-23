@@ -167,7 +167,7 @@ async def main():
     chosen = sys.argv[1:] or ["V1", "V2"]
     with tempfile.TemporaryDirectory(prefix="cos-live-hotfix-") as temporary:
         root = Path(temporary).resolve()
-        data, calls = root / "data", root / "calls.txt"
+        data, calls = live_e2e.data_dir(root), root / "calls.txt"
         app = App(data, root / "chiefofstaff.log")
         failed = False
         try:

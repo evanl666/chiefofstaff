@@ -71,7 +71,7 @@ async def away(harness):
 def notification(harness, messenger: dict) -> str:
     """The messenger's last job: the message with codes."""
     sent = harness.session(messenger["id"]).sent[-1]
-    found = re.search(r"A: (/\S+-codes\.txt)", sent)
+    found = re.search(r"A: (/.+?-codes\.txt)", sent)
     assert found, sent
     return Path(found.group(1)).read_text()
 

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -344,7 +345,8 @@ def test_a_push_naming_no_branch_goes_where_the_command_went_first(tmp_path):
     mine = checkout_on(tmp_path / "mine", "wb/fix")
     theirs = checkout_on(tmp_path / "theirs", "main")
     row = {"role": "worker", "slack": 0, "cwd": str(mine)}
-    for command in (f"cd {theirs} && git push", "cd ../theirs; git push", f"git -C {theirs} push"):
+    quoted = shlex.quote(str(theirs))
+    for command in (f"cd {quoted} && git push", "cd ../theirs; git push", f"git -C {quoted} push"):
         denied = permission_denial(row, request("shell", full_command_text=command))
         assert denied and "default branch" in denied, command
     assert permission_denial(row, request("shell", full_command_text="git push")) is None

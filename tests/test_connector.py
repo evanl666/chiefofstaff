@@ -108,8 +108,8 @@ def notification(harness, messenger: dict) -> tuple[str, str, dict]:
     """The messenger's last job: the message with codes (Slack text and Block Kit) and the
     one without."""
     sent = harness.session(messenger["id"]).sent[-1]
-    codes = re.search(r"A: (/\S+-codes\.txt) or (/\S+-codes\.json)", sent)
-    plain = re.search(r"B: (/\S+-plain\.txt)", sent)
+    codes = re.search(r"A: (/.+?-codes\.txt) or (/.+?-codes\.json)", sent)
+    plain = re.search(r"B: (/.+?-plain\.txt)", sent)
     assert codes and plain, sent
     return read(codes.group(1)), read(plain.group(1)), json.loads(read(codes.group(2)))
 

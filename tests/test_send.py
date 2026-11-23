@@ -205,7 +205,9 @@ def owned():
         found = folder.lstat()
         if found.st_uid not in (os.geteuid(), 0) or found.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             pytest.skip(f"{folder} is not the owner's alone here")
-    folder = Path(tempfile.mkdtemp(prefix=".cos-send-", dir=home))
+    # Its name has a space, as tmp_path's path has (conftest), no longer for it: a socket's
+    # path is short (own_home.MOST_PATH).
+    folder = Path(tempfile.mkdtemp(prefix=".cos send-", dir=home))
     try:
         yield folder
     finally:

@@ -3,6 +3,7 @@ import inspect
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 
@@ -109,6 +110,24 @@ def paced(request) -> float:
     pace = runner_pace()
     request.node.add_marker(pytest.mark.timeout(base * pace, func_only=True), append=False)
     return pace
+
+
+def begins(text: str) -> str:
+    """How a value that begins with `text` begins once shell-quoted (shlex.quote) in a script:
+    quoted when its path has a space, as the tests' folders do (tmp_path)."""
+    quoted = shlex.quote(text + "_")
+    return quoted[: quoted.index(text) + len(text)]
+
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """Each test's own folder, with a space in its path as macOS's data folder has one
+    ("Application Support"): the data directories the tests make in it (tmp_path / "data")
+    have one too, so a command Chief of Staff writes with a path in it that does not keep it
+    whole fails here (0.1.55: the check of Claude Code never finished there)."""
+    spaced = tmp_path / "Application Support"
+    spaced.mkdir()
+    return spaced
 
 
 @pytest.fixture(autouse=True)

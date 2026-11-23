@@ -1,11 +1,13 @@
 """Sandboxed workers' caches (caches.py): what fills them, what their shell is given."""
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from conftest import begins
 
 from chiefofstaff import caches, safefs
 
@@ -126,7 +128,9 @@ def test_a_workers_init_script_starts_no_process_and_points_java_at_the_proxy(tm
     assert "GOBIN" not in found, "go install's default, GOPATH's bin (a GOBIN set fails cross)"
     owned = caches.script(tier, owner, tmp_path / "ws", tmp_path / "t", True, "", None,
                           gobin=True)  # fmt: skip
-    assert f"GOBIN={tier / 'go' / 'bin'}" in owned, "the owner's GOBIN (go env -w) is read-only"
+    assert f"GOBIN={shlex.quote(str(tier / 'go' / 'bin'))}" in owned, (
+        "the owner's GOBIN (go env -w) is read-only"
+    )
     assert f"PNPM_HOME={tier / 'pnpm'}" in found
     assert "npm_config_store_dir" not in found, "npm 11.5 and later warn about it at every command"
     stale = caches.script(tier, owner, tmp_path / "ws", tmp_path / "t", True, "", tmp_path / "no")
@@ -138,7 +142,7 @@ def test_a_workers_init_script_starts_no_process_and_points_java_at_the_proxy(tm
     (tmp_path / "home" / ".npmrc").parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / "home" / ".npmrc").write_text("store-dir=/elsewhere/pnpm-store\n")
     named = caches.script(tier, owner, tmp_path / "ws", tmp_path / "t", True, "", None)
-    assert f"npm_config_store_dir={tier / 'pnpm' / 'store'}" in named, (
+    assert f"npm_config_store_dir={shlex.quote(str(tier / 'pnpm' / 'store'))}" in named, (
         "the owner's ~/.npmrc names a store, which would win over PNPM_HOME"
     )
     plain = caches.script(
@@ -187,7 +191,8 @@ def test_the_owners_own_configuration_says_where_their_caches_are(tmp_path, monk
         assert source in sources, source
     text = caches.script(tmp_path / "tier", owner, tmp_path / "ws", tmp_path / "t", True, "", None)
     assert f"-Dmaven.repo.local.tail={home / 'repo'}" in text
-    assert f"GOPROXY=file://{moved / 'gomod' / 'cache' / 'download'}," in text
+    downloads = moved / "gomod" / "cache" / "download"
+    assert f"GOPROXY={begins(f'file://{downloads},')}" in text
     assert caches.Owner(tmp_path / "other").npm() == tmp_path / "other" / ".npm", "or where it is"
 
 
@@ -372,7 +377,7 @@ def test_yarn_classic_is_seeded_where_it_looks_under_the_workers_cache_home(tmp_
     tier = tmp_path / "caches" / "workers"
     plan = caches.plan(tier, tmp_path / "ws" / "w", "12345678-x", tmp_path / "scripts",
                        slack=False, read_through=True, home=home)  # fmt: skip
-    assert f"XDG_CACHE_HOME={tier / 'xdg'}" in plan.text
+    assert f"XDG_CACHE_HOME={shlex.quote(str(tier / 'xdg'))}" in plan.text
     SEED(tier, caches.Owner(home))
     assert (tier / "xdg" / "yarn" / "v6" / "npm-left-pad-1.3.0").is_dir()
 
@@ -668,7 +673,7 @@ def test_node_gyp_builds_in_workers_own_folder_with_the_owners_headers(tmp_path,
     tier, scripts = tmp_path / "chief" / "workers", tmp_path / "data" / "worker-shell"
     found = caches.plan(tier, tmp_path / "ws" / "w", "11111111-a", scripts, slack=False,
                         read_through=True, home=home)  # fmt: skip
-    assert f"export npm_config_devdir={tier / 'node-gyp'}" in found.text
+    assert f"export npm_config_devdir={shlex.quote(str(tier / 'node-gyp'))}" in found.text
     assert caches.prepare(found, "11111111-a", scripts)
     assert (tier / "node-gyp" / "22.11.0").resolve() == headers
     monkeypatch.setattr(caches, "system", lambda: "linux")

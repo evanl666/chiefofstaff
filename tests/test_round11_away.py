@@ -21,8 +21,8 @@ NEEDS = "The worker found two possible solutions and needs you to select one bef
 def files(harness, messenger: dict) -> tuple[str, str]:
     """The messenger's last job's message with codes ("" when it has none) and without."""
     job = harness.session(messenger["id"]).sent[-1]
-    codes = re.search(r"A: (/\S+-codes\.txt)", job)
-    plain = re.search(r"B: (/\S+-plain\.txt)", job)
+    codes = re.search(r"A: (/.+?-codes\.txt)", job)
+    plain = re.search(r"B: (/.+?-plain\.txt)", job)
     assert plain, job
     return (Path(codes.group(1)).read_text() if codes else ""), Path(plain.group(1)).read_text()
 
@@ -185,7 +185,7 @@ async def test_codes_are_made_and_kept_only_where_replies_are_read(tmp_path):
     messenger, job, sending = await notify("Tuesday, final answer.", "")
     assert sending == codes() == before, "no code made for it, nor kept"
     assert "A: " not in job and "-codes." not in job, job
-    written = re.search(r"B: (/\S+)-plain\.txt", job).group(1)
+    written = re.search(r"B: (/.+?)-plain\.txt", job).group(1)
     assert not list(Path(written).parent.glob(f"{Path(written).name}-codes.*")), "none written"
     _codes, plain = files(harness, messenger)
     lines = section(plain, "Tuesday, final answer.")

@@ -274,7 +274,7 @@ async def main():
     with tempfile.TemporaryDirectory(prefix="cos-usecases-") as temporary:
         root = Path(temporary).resolve()
         home, project, _ = setup(root)
-        app = App(root / "data", root / "log", {"COPILOT_HOME": str(home)})
+        app = App(live_e2e.data_dir(root), root / "log", {"COPILOT_HOME": str(home)})
         await app.start()
         try:
             await app.post(
@@ -309,7 +309,7 @@ async def main():
             raise
         finally:
             await app.stop()
-            await cleanup(root / "data")
+            await cleanup(live_e2e.data_dir(root))
             git(project, "worktree", "prune")
 
 

@@ -255,7 +255,7 @@ async def main():
         sys.exit(f"unknown scenario: {unknown}")
     with tempfile.TemporaryDirectory(prefix="cos-live-approvals-") as temporary:
         root = Path(temporary).resolve()
-        data, project = root / "data", root / "app"
+        data, project = live_e2e.data_dir(root), root / "app"
         project.mkdir()
         git(project, "init", "-q", "-b", "main")
         (project / "README.md").write_text("# App\n")

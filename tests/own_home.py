@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 # The longest a home's path may be: a data directory a test makes in it holds a socket, whose
-# path (`<home>/.cos-send-XXXXXXXX/data/send/socket`, 36 more) fits macOS's 104 bytes with
+# path (`<home>/.cos send-XXXXXXXX/data/send/socket`, 36 more) fits macOS's 104 bytes with
 # its ending zero. (macOS's temporary folder, /private/var/folders/xx/…/T, is 56 long.)
 MOST_PATH = 67
 
