@@ -292,13 +292,21 @@ class Workers:
             self.tasks.update(task["id"], result=clip_report(full))
         self.runtime.update_session(session_id, report=full[:4000])
 
+    def asked_on_home(self, session_id: str, recent: list[dict] | None = None) -> dict | None:
+        """The owner's message from Home (@) its turn answers, if that is what it answers
+        (`recent`: its messages from its last instruction on, when read already)."""
+        if recent is None:
+            recent = since_last_instruction(recent_messages(self.store, session_id))
+        if not recent or recent[0]["kind"] != "owner" or not recent[0]["meta"].get("home"):
+            return None
+        return recent[0]
+
     def answer_on_home(self, session_id: str):
         """The owner wrote to a worker on Home (@): its answer shows there too, once, as a line
         that opens the worker (its report, if it made one, is on the task's card)."""
         recent = since_last_instruction(recent_messages(self.store, session_id))
-        if not recent or recent[0]["kind"] != "owner" or not recent[0]["meta"].get("home"):
+        if not (asked := self.asked_on_home(session_id, recent)):
             return
-        asked = recent[0]
         if self.store.get(f"answered_home:{asked['id']}"):
             return
         said = [

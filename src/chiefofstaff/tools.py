@@ -4183,10 +4183,12 @@ class Tools:
                 if task["status"] == "done" or not params.replaces_result:
                     self.runtime.task_actions.news(task["id"], params.summary)
                 # On Home too, once: under Needs you it is not while its worker follows up on
-                # the owner's next message (a result, or its answer: news on finished work).
-                said_as = "done" if params.replaces_result else "answer"
-                self.runtime.report_on_home(row, task, said_as, params.summary)
-                self.store.update_message_meta(reported["id"], {**meta, "told": True})
+                # the owner's next message. A result as a report; an answer (news on finished
+                # work) as one, unless the owner asked on Home (@): its answer line is there.
+                if params.replaces_result or not self.runtime.workers.asked_on_home(caller):
+                    said_as = "done" if params.replaces_result else "answer"
+                    self.runtime.report_on_home(row, task, said_as, params.summary)
+                    self.store.update_message_meta(reported["id"], {**meta, "told": True})
                 self.runtime.task_actions.publish(task)
                 others = [
                     other

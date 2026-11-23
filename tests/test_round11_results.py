@@ -189,3 +189,25 @@ async def test_news_on_an_accepted_tasks_pr_that_redoes_it_shows_on_home(harness
     await call_tool(runtime, "report", worker, status="done", task_id=task, summary=summary)
     await settle(runtime)
     assert len(on_home(harness, task, summary)) == 1
+
+
+async def test_a_correction_asked_on_home_is_its_result_there_once(harness):
+    """From Home (@): its line there is the corrected result (not the words it said after
+    it), once."""
+    runtime = await harness.connect()
+    worker, task = await reported(runtime, harness, "Compare stores", "First result.")
+    runtime.task_actions.accept(task)
+    await runtime.owner_send_to(harness.router_id, worker, "Include pgvector.")
+    summary = "Checked pgvector. Qdrant still fits."
+    await call_tool(runtime, "report", worker, status="done", task_id=task,
+                    replaces_result=True, summary=summary)  # fmt: skip
+    session = harness.session(worker)
+    session.emit("assistant.message", content="Done.")
+    session.emit("session.idle")
+    await settle(runtime)
+    lines = [
+        (m["kind"], m["text"])
+        for m in harness.store.messages(harness.router_id)
+        if m["kind"] == "answer" or (m["kind"] == "inbound" and m["meta"].get("from") == worker)
+    ]
+    assert lines == [("inbound", "First result."), ("inbound", summary)]
