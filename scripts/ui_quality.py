@@ -1364,10 +1364,14 @@ async def fork_views(runtime, browser, quality: Quality):
         await page.goto(f"{BASE}/#token={TOKEN}")
         await expect(page.locator("#application")).to_be_visible()
         line = page.locator("#timeline .event", has_text="Started a second worker")
+        # In a run of the Router's routing lines it is folded (0.1.53): open the fold.
+        fold = page.locator("#timeline .fold.routing", has=line)
         for width in WIDTHS:
             await page.set_viewport_size({"width": width, "height": 900})
             if width < 1100:
                 await page.locator("#home-tabs [data-tab=chat]").click()
+            if await fold.count() and not await line.is_visible():
+                await fold.locator(".fold-line button.line").click()
             await line.scroll_into_view_if_needed()
             await page.wait_for_timeout(150)
             await page.screenshot(path=folder / f"home-chat-{width}-{scheme}.png")
