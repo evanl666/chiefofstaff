@@ -26,7 +26,8 @@ itself.
   tomorrow 11:11 AM"; Codex's limits are read when it didn't say them first), as do the `@` list
   and the chip; it goes on by itself then, once, and work you name the agent for meanwhile is saved
   and starts there after the reset, both under *Handled for you*. *Continue with Copilot* moves
-  either over now. Where the agent didn't say when (Claude, at times), it says so plainly.
+  either over now. Where the agent didn't say when (Claude, at times), it says so plainly. A
+  limit used up again after it reset says its new reset too (Codex's limits are read again).
 - **The Router goes to Claude or Codex by itself once Chief of Staff's check of it has run.**
   Chief of Staff checks each new version of an agent before its workers run on it. When that
   check could not finish (a step took too long on a machine busy with other work), the Router

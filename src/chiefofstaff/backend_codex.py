@@ -3155,8 +3155,9 @@ class CodexSession:
             error = mapping(turn.get("error"))
             said = str(error.get("message") or "Codex failed.")
             if (limit := limit_failure(error, self.backend.rate_limits)) is not None:
-                if limit["status"] == "rejected" and not limit["resets_at"]:
-                    # Its limits not said before the failure: read now, for when it resets.
+                if limit["status"] == "rejected" and limit["resets_at"] <= time.time():
+                    # Its limits not said before the failure (or what it said is past: a reset
+                    # gone by, used up again since): read now, for when it resets.
                     await self.backend.read_rate_limits()
                     limit = limit_failure(error, self.backend.rate_limits) or limit
                 self.emit("session.error", message=said, error_type="plan_limit", limit=limit)

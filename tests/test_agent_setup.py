@@ -14,7 +14,7 @@ from conftest import call_tool
 from test_agent_picker import started, until
 from test_agents import ran, saved, spawn_on
 
-from chiefofstaff import agents, agentsetup, backend_claude
+from chiefofstaff import agents, agentsetup, backend_claude, task_actions
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff.roles import WORKER
 
@@ -790,6 +790,37 @@ async def test_a_codex_limit_it_did_not_say_first_is_read_and_said_until_when(
             "Weekly limit used up",
             resets,
         )
+    finally:
+        await runtime.stop()
+
+
+async def test_a_codex_limit_used_up_again_after_its_reset_is_read_again(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """Its limit reset, then used up again: what Codex said of its rate limits before is past
+    (its reset gone by), so they are read again, and the worker's line says the new reset."""
+    from test_agent_picker import limited
+
+    monkeypatch.setattr(task_actions, "GO_ON_MARGIN", 0.2)
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        codex_limit(300, 2)
+        worker, task, _ = await limited(harness, runtime, "codex", "Report done: Fixed.")
+        await until(lambda: runtime.tasks.get(task)["status"] != "waiting", 30)  # Reset.
+        await until(
+            lambda: harness.store.session(worker)["status"] not in {"working", "queued"}, 30
+        )
+        resets = codex_limit(300, 3600)
+        await runtime.owner_send(worker, "Report done: again.")
+
+        def paused():
+            last = harness.store.messages(worker)[-1]
+            return last if last["text"].startswith("Paused: ") else None
+
+        await until(paused, 30)
+        line = f"Codex's 5-hour limit is used up · resets {agents.reset_words(resets)}"
+        assert paused()["text"] == f"Paused: {line}"
     finally:
         await runtime.stop()
 
