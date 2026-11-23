@@ -373,7 +373,7 @@ export function caption(view, row) {
   }
   if (chip?.kind === "context") return chip.side === "to" ? `${me} picks up from ${workerName(view, chip.other)}` : `${workerName(view, chip.other)} picks up from here`;
   if (chip?.kind === "split") return chip.side === "to" ? `${me} split this off “${shorten(shownTitle(data.get(chip.other)), 40)}”` : `${me} split “${shorten(shownTitle(data.get(chip.other)), 40)}” off`;
-  if (chip?.kind === "fork") return chip.side === "to" ? `Forked from ${workerName(view, chip.other)} while it was busy` : `${workerName(view, chip.other)} forked from ${me} while it was busy`;
+  if (chip?.kind === "fork") return chip.side === "to" ? `${me} started with ${workerName(view, chip.other)}'s context` : `${me}'s context went to ${workerName(view, chip.other)}`;
   if (chip?.kind === "after") return `${workerName(view, chip.other)} ${chip.state === "pending" ? "waits on" : "started once"} ${me}${chip.state === "pending" ? "" : " delivered"}`;
   if (chip?.kind === "followups") return `${me} followed it up ${chip.count === 1 ? "once" : `${chip.count} times`}`;
   if (group) return fanWords(view, group);

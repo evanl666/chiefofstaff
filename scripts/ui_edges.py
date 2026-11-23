@@ -6670,6 +6670,34 @@ async def round_fork(runtime, browser, failures: list[str]):
             await expect(nested).to_have_class(re.compile(r"\bselected\b"))
             await context.close()
     log("a second worker: one line, nested under its worker, its row and chats linked")
+    # One team with the worker it came from: in the team's tasks, forked from it (⑂).
+    team = runtime.teams.team_of(worker)
+    assert team and {runtime.teams.team_of(other) for other in (second, third)} == {team}
+    [task] = [
+        t["id"] for t in runtime.tasks.for_session(second) if t["title"] == "Export to Parquet"
+    ]
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
+    view = page.locator("#timeline .team-view")
+    rel = view.locator(f'.trow[data-task="{task}"] .rel')
+    await expect(rel).to_have_class(re.compile(r"\bbranched\b"))
+    await expect(rel.locator(".glyph.branched")).to_have_count(1)
+    label = runtime.teams.label(store.session(worker))
+    await expect(rel.locator(".words")).to_have_text(f"forked from {label}")
+    await expect(view.locator(".rel-summary .rel-chip", has_text="2 forks")).to_have_count(1)
+    await view.locator(f'.trow[data-task="{task}"] .main').click()
+    mine = runtime.teams.label(store.session(second))
+    await expect(view.locator(f'.lineage[data-task="{task}"] .caption')).to_have_text(
+        f"{mine} started with {label}'s context"
+    )
+    found = await view.evaluate(OVERFLOWS)
+    assert not found, found
+    await page.locator("#main").screenshot(path=SHOTS / "fork-team-1280.png")
+    await context.close()
+    log("its team: forked from the worker it came from (⑂), a caption saying with whose context")
     # The switch: one line in Settings → General, on; off when saved off.
     context = await browser.new_context(viewport={"width": 1280, "height": 900})
     page = await context.new_page()
