@@ -284,9 +284,12 @@ async def test_a_busy_worker_on_another_agent_gets_a_second_worker_there_with_a_
     await until(lambda: runtime.forks.in_turn(harness.store.session(worker)))
     told = await new_task(runtime, harness, worker, "Fix logout", "Fix logout.", earlier="keep")
     assert told.startswith("Delivered"), told
+    chosen = json.dumps({"model": "codex-like-large", "effort": "high"})
+    harness.store.set(f"agentmodel:{worker}", chosen)
     result = await new_task(runtime, harness, worker, "Export CSV", "Add a CSV export.")
     second = result["session_id"]
     assert second != worker and runtime.agent(second) == "codex-like"
+    assert harness.store.get(f"agentmodel:{second}") == chosen, "its model and effort there"
     assert tasks_of(harness, second) == ["Export CSV"] and not harness.client.forks
     await until(lambda: received(live(runtime, second)))
     given = received(live(runtime, second))[0]

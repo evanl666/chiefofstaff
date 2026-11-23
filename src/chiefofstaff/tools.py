@@ -2183,6 +2183,13 @@ class Tools:
             self.store.set(f"agentmodel:{session_id}", json.dumps(choice))
         elif params.model or effort:
             self.store.update_session(session_id, model=params.model, effort=effort)
+        elif (
+            fork
+            and agent != agents.COPILOT
+            and (chosen := self.store.get(f"agentmodel:{fork.source['id']}"))
+        ):
+            # On its agent, the model and effort of the worker it comes from (as on Copilot).
+            self.store.set(f"agentmodel:{session_id}", chosen)
         criteria = clean_criteria(params.done_when)
         task = self.tasks.create(
             session_id,
