@@ -28,7 +28,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from . import prompts
+from . import ingress, prompts
 from .habits import own_words, shown
 from .models import DraftDecision, NestedArguments
 from .policy import within
@@ -517,6 +517,8 @@ class Learning:
                 "WHERE id=?",
                 (status, text, now(), identifier),
             )
+            if text and (channel := ingress.current()):
+                self.store.set(f"ingress:{identifier}", channel)  # Kept by them: how (ingress.py).
         self.retire_oldest()
         count = sum(1 for identifier in ids if str(kept.get(identifier, "")).strip())
         card = self.store.update_draft(
@@ -555,6 +557,8 @@ class Learning:
             updated_at) VALUES (?,?,?,'[]','[]','active',?,?)""",
             (identifier, text, self.scope(scope), now(), now()),
         )
+        if channel := ingress.current():
+            self.store.set(f"ingress:{identifier}", channel)  # Written by them: how (ingress.py).
         self.retire_oldest()
         await self.runtime.refresh(ROUTER, SLACK, WORKER)
         self.bus.publish("state")

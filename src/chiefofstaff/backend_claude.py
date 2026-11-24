@@ -1182,7 +1182,8 @@ class ClaudeWorker:
         self.checking = checking
         self.tools = {tool.name: tool for tool in options.get("tools") or []}
         self.cwd = options.get("working_directory") or str(Path.home())
-        self.ask_first = bool(options.get("ask_first"))
+        # Asking first as its process opened (its hooks off, Claude's own settings for it).
+        self.opened_asking = bool(options.get("ask_first"))
         # Chief of Staff's own session (the Router, the Watchdog): its tools and nothing else,
         # as its Copilot session has them: none of Claude's (no commands, files, web, subagents,
         # schedules or questions), and no MCP server but Chief of Staff's.
@@ -1289,6 +1290,13 @@ class ClaudeWorker:
         self.docs_given = str(options.get("docs_given") or "")
         self.trusted = False
 
+    @property
+    def ask_first(self) -> bool:
+        """Whether its checks ask first now: as its process opened, or stricter, while the policy
+        of the turn says so (Autopilot continued it: Runtime.yolo)."""
+        now = self.options.get("asks_first_now")
+        return self.opened_asking or bool(callable(now) and now())
+
     # The process
 
     def private_files(self) -> dict[str, str]:
@@ -1341,7 +1349,7 @@ class ClaudeWorker:
             if why := sandbox_widened(self.cwd, trusted, local, restricted):
                 raise RuntimeError(why)
             settings["sandbox"] = sandbox_settings(policy)
-        if self.ask_first or self.options.get("sandbox"):
+        if self.opened_asking or self.options.get("sandbox"):
             # The owner's hooks and mods: off (5.7). Sandboxed, every hook is off: Claude runs
             # them outside its sandbox (a trusted repository's, its skills' and subagents', a
             # plugin's), and 2.1.322 turns off all or none (contract test).

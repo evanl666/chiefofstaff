@@ -431,15 +431,20 @@ class Asks:
         """
         row = self.store.session(session_id)
         draft = self.store.create_draft(session_id, kind, target, text)
-        self.runtime.add_message(
-            session_id, "draft", text, {"draft_id": draft["id"], "label": LABELS[kind]}
-        )
-        self.bus.publish("draft", draft)
-        who = "Chief of Staff" if row["role"] != "worker" else self.runtime.display_title(row)
-        self.runtime.alert(
-            text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}"
-        )
         answer = asyncio.get_running_loop().create_future()
+        autopilot = self.runtime.autopilot
+        if autopilot.ticked and autopilot.holds_card(row, kind):
+            # Autopilot decides it first: not drawn meanwhile (autopilot/answers.py).
+            self.runtime.background(autopilot.decide_card(row, draft, answer))
+        else:
+            self.runtime.add_message(
+                session_id, "draft", text, {"draft_id": draft["id"], "label": LABELS[kind]}
+            )
+            self.bus.publish("draft", draft)
+            who = "Chief of Staff" if row["role"] != "worker" else self.runtime.display_title(row)
+            self.runtime.alert(
+                text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}"
+            )
         self.requests[draft["id"]] = answer
         self.states[session_id].asking[draft["id"]] = text
         self.runtime.publish_session(self.store.session(session_id))

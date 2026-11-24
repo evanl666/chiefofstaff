@@ -468,6 +468,14 @@ class Logbook:
             )
         return self.item(item_id)
 
+    def release(self, item_id: str):
+        """A claimed item that could not go yet: queued again (delivered later, once)."""
+        self.store.execute(
+            "UPDATE autopilot_outbox SET state=?, claimed_at=NULL WHERE id=? AND state=? "
+            "AND message_id IS NULL",
+            (QUEUED, item_id, CLAIMED),
+        )
+
     def stored(self, item_id: str, message_id: int):
         """The message a claimed item became (before it is transmitted)."""
         self.store.execute(

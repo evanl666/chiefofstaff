@@ -305,7 +305,12 @@ MAX_ATTACHMENT = 5 * 1024 * 1024
 ATTACHMENT_NAME = re.compile(r"\b([0-9a-f]{32}\.(?:png|jpg|gif|webp))\b")
 # Workers Chief of Staff starts for itself that have nothing but their own tools: they read
 # quoted data (the owner's words, test output) and propose; they run nothing.
-TOOLLESS = {"learner": ["update_style", "propose_lessons"], "checker": ["propose_checks"]}
+TOOLLESS = {
+    "learner": ["update_style", "propose_lessons"],
+    "checker": ["propose_checks"],
+    # Autopilot's judge (autopilot/judge.py): proposes an answer from the owner's own words.
+    "judge": ["propose_answer"],
+}
 SPECIALS = HELPER_KINDS
 CONNECTOR_TOOLS = ["report_found", "report_owner_words"]
 # The messenger sends away notifications and reads the owner's replies to them; through Chief of
@@ -4209,6 +4214,9 @@ class Runtime:
             "on_elicitation_request": self.asks.on_elicitation,
             "on_mcp_auth_request": self.asks.on_mcp_auth,
             "ask_first": not self.yolo(row),
+            # The checks of each request read the policy now: stricter than at its start while
+            # Autopilot continues it (its process opened acting on its own).
+            "asks_first_now": lambda: not self.yolo(self.store.find_session(row["id"]) or row),
             "folders": folders,
             # The worker (its own process of the agent), and the child agents it had: the only
             # other threads its turns may reach.
@@ -6363,6 +6371,8 @@ class Runtime:
                 await self.ready_caches(row)
             placed = self.role_key(row) in PLACED_ROLES
             options = self.role_options(row) if placed else self.agent_options(row)
+            # How its process opens (Autopilot opens it again asking first before it goes on).
+            self.states[row["id"]].opened_asking = bool(options.get("ask_first"))
             trusted = {}
             if (
                 agent == "claude"

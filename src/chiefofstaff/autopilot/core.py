@@ -17,6 +17,7 @@ flag, `ticked`).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -27,6 +28,7 @@ from ..envelope import wrap
 from ..models import AS_SAVED, Settings
 from ..store import now
 from . import grammar
+from .answers import Answers, Later
 from .logbook import (
     CLAIMED,
     DONE,
@@ -160,7 +162,7 @@ def said_receipts(done: dict) -> str:
     return ", ".join(parts) or "nothing more"
 
 
-class Autopilot:
+class Autopilot(Answers):
     """The switch and its runs, the outbox, and the hooks (inert while the line is unticked)."""
 
     def __init__(self, runtime: Runtime):
@@ -176,9 +178,14 @@ class Autopilot:
         self.deliveries: dict[str, Callable[[dict], Awaitable[str]]] = {
             "router-note": self.deliver_router_note,
             "summary": self.deliver_summary,
+            "worker": self.deliver_worker,
         }
         self.dispatch_lock = asyncio.Lock()
         self.run_lock = asyncio.Lock()
+        # Cards held from the page while they are judged; the judge's one item at a time.
+        self.deciding: set[str] = set()
+        self.judge_lock = asyncio.Lock()
+        self.proposal: asyncio.Future | None = None
 
     # The switch.
 
@@ -337,8 +344,20 @@ class Autopilot:
             )
             self.book.queue(run["id"], entry["id"], "summary", {}, self.book.generation())
         self.book.keep_head()
+        self.tidy()
         self.runtime.background(self.dispatch())
         self.runtime.publish_state()
+
+    def tidy(self):
+        """What it kept about items that are gone (answered, closed): forgotten at a run's end."""
+        pending = {draft["id"] for draft in self.store.drafts()}
+        for key in self.store.keys("autopilot:setaside:"):
+            item = key.removeprefix("autopilot:setaside:")
+            if item not in pending and not self.store.get(f"ownerq:{item}"):
+                self.store.delete(key)
+        for key in self.store.keys("autopilot:judged:"):
+            if not self.store.get(f"ownerq:{key.removeprefix('autopilot:judged:')}"):
+                self.store.delete(key)
 
     # Chat commands.
 
@@ -390,6 +409,9 @@ class Autopilot:
                 handler = self.deliveries.get(claimed["kind"])
                 try:
                     outcome = await handler(claimed) if handler else "no handler"
+                except Later:
+                    self.book.release(claimed["id"])  # Delivered later, once.
+                    continue
                 except Exception as exc:
                     logger.warning("An Autopilot delivery failed.", exc_info=True)
                     self.book.finish(claimed["id"], FAILED, str(exc)[:500])
@@ -498,6 +520,8 @@ class Autopilot:
             await self.end(run, by="time", at_its_time=True)
         if self.book.outbox(QUEUED):
             await self.dispatch()
+        if self.run() is not None:
+            await self.check_questions()
 
     async def settings_changed(self, old: Settings, new: Settings):
         """Ticked: its tables (once). Unticked: a run on stops as Stop stops it."""
@@ -577,6 +601,19 @@ class Autopilot:
     def spent_today(self) -> float:
         return float(self.store.get(f"autopilot:spent:{local_now().date().isoformat()}") or 0)
 
+    def spend(self, used: float):
+        """What it spent (its judge, the turns it started): on the day's cap."""
+        if used <= 0:
+            return
+        key = f"autopilot:spent:{local_now().date().isoformat()}"
+        with self.store.transaction():
+            self.store.set(key, str(round(float(self.store.get(key) or 0) + used, 3)))
+        self.runtime.publish_state()
+
+    def paused(self) -> bool:
+        """Today's credits are used: what would cost credits waits."""
+        return self.spent_today() >= self.store.settings().autopilot_credits
+
     def state(self) -> dict[str, Any]:
         """Home's header line: until when, what it did, whether it is paused."""
         run = self.run()
@@ -606,4 +643,11 @@ class Autopilot:
             "record": bool(self.book.runs(1)),
             "morning": self.morning_time(),
             "ask_first": self.store.settings().autopilot_ask_first,
+            # Cards not drawn while it judges them (two minutes at most).
+            "deciding": sorted(self.deciding),
+            # What it set aside, and why (a line under its card in Needs you).
+            "set_aside": {
+                key: json.loads(value).get("why", "")
+                for key, value in self.store.items("autopilot:setaside:").items()
+            },
         }
