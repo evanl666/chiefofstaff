@@ -1,7 +1,10 @@
 """Downgrade test (docs/design/more-agents.md, section 8): an earlier Chief of Staff, which runs
-every worker on Copilot, opening a data directory where workers ran on Codex.
+every worker on Copilot, opening a data directory where workers ran on Codex. With
+`--case teams` (teams-v2.md, Teams lite): a team this tree made, 0.1.56 working in its folder,
+then this tree again.
 
     uv run python scripts/downgrade.py [--baseline v0.1.42]
+    uv run python scripts/downgrade.py --case teams --baseline v0.1.56
 
 1. This tree, with Codex on (the stand-in CLI, tests/fake_codex.py, as `codex` on the PATH) and
    one worker slot: a Codex worker that finished (idle), one at work with a command it left
@@ -175,6 +178,223 @@ async def old_side(run: Path, rows: dict):
     await runtime.stop()
 
 
+# Teams lite (--case teams): this tree makes a team for one of the owner's requests (its
+# passive stamps: req:, reqtasks:, with:, xchg:, from_task/to_task); 0.1.56 opens the folder and
+# works in it (reopens and accepts a part, continues one, tells, splits and merges back, a failed
+# part done instead by a task of its own); this tree again: no error, the team as its tasks are now.
+
+
+def remembering():
+    """The scripted backend, keeping its sessions from one run to the next as Copilot does."""
+    from chiefofstaff.scripted import ScriptedBackend
+
+    class Remembering(ScriptedBackend):
+        async def resume_session(self, session_id, **options):
+            self.histories.setdefault(session_id, [])
+            return await super().resume_session(session_id, **options)
+
+    return Remembering()
+
+
+async def tool(runtime, name: str, caller: str, **arguments):
+    from copilot.tools import ToolInvocation
+
+    result = await runtime.tools[name].handler(
+        ToolInvocation(session_id=caller, tool_call_id="t", tool_name=name, arguments=arguments)
+    )
+    text = result if isinstance(result, str) else result.text_result_for_llm
+    if not isinstance(result, str) and result.result_type == "failure":
+        raise RuntimeError(text)
+    return text
+
+
+async def teams_new(run: Path):
+    from chiefofstaff.models import Settings
+
+    store, runtime = runtime_for(run / "data", remembering())
+    store.save_settings(Settings(max_workers=10, projects=[]))
+    await started(runtime)
+    router = store.get("router_id")
+    asked = runtime.add_message(router, "owner", "Ship checkout v2: the API, then the UI.")
+    runtime.states[router].turn_request = str(asked["id"])
+
+    async def spawn(title: str, **extra) -> dict:
+        arguments = {"title": title, "instructions": title, "why_new": "t", **extra}
+        return json.loads(await tool(runtime, "spawn_worker", router, **arguments))
+
+    api = await spawn("Checkout API: the v2 endpoints")
+    ui = await spawn("Checkout UI: the v2 pages", works_with=[api["task_id"]])
+    tests = await spawn("Checkout tests: end to end", after=[api["task_id"], ui["task_id"]])
+    await tool(runtime, "tell_session", api["session_id"], session_id=ui["session_id"],
+               text="Totals are in cents.")  # fmt: skip
+    [team] = runtime.snapshot()["teams"]
+    runtime.teams_lite.seen(team["id"], "k0156")
+    found = {
+        "team": team["id"],
+        "parts": [member["name"] for member in team["members"]],
+        "rows": {"api": api, "ui": ui, "tests": tests},
+        "keys": sorted({key.split(":", 1)[0] for key in store.keys("")}),
+    }
+    await runtime.stop()
+    print("downgrade: ready " + json.dumps(found), flush=True)
+
+
+async def teams_old(run: Path, rows: dict):
+    store, runtime = runtime_for(run / "data", remembering())
+    await runtime.start()
+    await asyncio.sleep(2)
+    router = store.get("router_id")
+    api, ui, tests = rows["api"], rows["ui"], rows["tests"]
+
+    def idle(row: dict) -> bool:
+        return store.session(row["session_id"])["status"] not in {"working", "queued", "starting"}
+
+    def status(row: dict) -> str:
+        return runtime.tasks.get(row["task_id"])["status"]
+
+    async def reported(row: dict, summary: str):
+        await until(lambda: idle(row) and status(row) in {"running", "review"})
+        await tool(runtime, "report", row["session_id"], status="done", summary=summary,
+                   task_id=row["task_id"])  # fmt: skip
+
+    # (The tests wait, queued, for the API and the UI: `after`.)
+    await until(lambda: idle(api) and idle(ui))
+    done = []
+    await reported(api, "The v2 endpoints are in.")
+    runtime.task_actions.accept(api["task_id"])
+    await runtime.task_actions.follow_up(api["task_id"], "Also return the currency.")
+    await reported(api, "They return the currency too.")
+    runtime.task_actions.accept(api["task_id"])
+    done.append("reopened and accepted")
+    await tool(
+        runtime, "message_session", router, session_id=ui["session_id"], task="continue",
+        task_id=ui["task_id"], text="Also show the currency.",
+    )  # fmt: skip
+    await until(lambda: runtime.tasks.get(ui["task_id"])["status"] == "review" and idle(ui))
+    runtime.task_actions.accept(ui["task_id"])
+    done.append("continued and accepted")
+    await tool(runtime, "tell_session", ui["session_id"], session_id=tests["session_id"],
+               text="The pages are on staging.")  # fmt: skip
+    done.append("told")
+    split = runtime.task_actions.split(api["task_id"], "Currency in the API")
+    runtime.task_actions.merge_back(split["id"])
+    done.append("split and merged back")
+    runtime.tasks.move(tests["task_id"], "failed")
+    instead = json.loads(
+        await tool(runtime, "spawn_worker", router, title="Checkout tests on Linux",
+                   instructions="Run them on Linux.", why_new="t", replaces=[tests["task_id"]])
+    )  # fmt: skip
+    done.append("replaced")
+    found = {
+        "done": done,
+        "instead": instead,
+        "status": {key: runtime.tasks.get(row["task_id"])["status"] for key, row in rows.items()},
+    }
+    await runtime.stop()
+    print("downgrade: result " + json.dumps(found), flush=True)
+
+
+async def teams_again(run: Path):
+    store, runtime = runtime_for(run / "data", remembering())
+    await runtime.start()
+    await asyncio.sleep(2)
+    teams = runtime.snapshot()["teams"]
+    pages = [runtime.teams_lite.page(team["id"]) for team in teams]
+    found = {
+        "seen": [store.get(f"teamseen:{team['id']}") for team in teams],
+        "teams": [
+            {
+                "id": team["id"],
+                "members": [
+                    {key: member[key] for key in ("name", "task", "status", "moved_out")}
+                    for member in team["members"]
+                ],
+            }
+            for team in teams
+        ],
+        "told": [
+            [item["title"] for item in page["items"] if item["kind"] == "tell"] for page in pages
+        ],
+    }
+    await runtime.stop()
+    print("downgrade: result " + json.dumps(found), flush=True)
+
+
+async def teams_downgrade(baseline: str) -> int:
+    run, tree = WORK / "run", WORK / "baseline"
+    shutil.rmtree(WORK, ignore_errors=True)
+    WORK.mkdir(parents=True)
+    env = environment(run)
+    checks = Checks()
+    try:
+        print(f"This tree: a team for one of the owner's requests ({ROOT})", flush=True)
+        new, found = await side(ROOT, env, "--side", "teams-new", "--run", str(run))
+        await new.wait()
+        checks.check(found["parts"] == ["API", "UI", "Tests"], "a team of three", found)
+        stamps = {"req", "reqtasks", "teamseen", "with", "xchg"}
+        checks.check(stamps <= set(found["keys"]), "its stamps, in kv", found["keys"])
+        rows = found["rows"]
+        print(f"The baseline ({baseline}) works in that data directory", flush=True)
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", "-f", str(tree), baseline],
+            cwd=ROOT, check=True, capture_output=True,
+        )  # fmt: skip
+        old, result = await side(
+            tree, env, "--side", "teams-old", "--run", str(run), "--rows", json.dumps(rows)
+        )
+        await old.wait()
+        checks.check(
+            result["done"]
+            == [
+                "reopened and accepted",
+                "continued and accepted",
+                "told",
+                "split and merged back",
+                "replaced",
+            ],
+            "it reopens and accepts a part, continues one, tells, splits and merges back, and "
+            "replaces a part, as ever",
+            result,
+        )
+        print("This tree again on that data directory", flush=True)
+        again, back = await side(ROOT, env, "--side", "teams-again", "--run", str(run))
+        await again.wait()
+        teams = back["teams"]
+        checks.check(len(teams) == 1 and teams[0]["id"] == found["team"], "the same team", teams)
+        members = teams[0]["members"] if teams else []
+        checks.check(
+            [m["status"] for m in members]
+            == [result["status"][key] for key in ("api", "ui", "tests")],
+            "its parts as their tasks are now",
+            members,
+        )
+        moved = members[2]["moved_out"] if len(members) == 3 else None
+        checks.check(
+            bool(moved) and moved["task"] == result["instead"]["task_id"],
+            "a part done instead by a task of 0.1.56's (no request) has moved out",
+            members,
+        )
+        checks.check(
+            [(mark or "").split("|")[0] for mark in back["seen"]] == ["k0156"],
+            "the owner's look, kept",
+            back["seen"],
+        )
+        checks.check(
+            back["told"] == [["Totals are in cents"]],
+            "its history: what it handed on before (0.1.56's tell has no tasks: not in it)",
+            back["told"],
+        )
+    finally:
+        if tree.exists():
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(tree)], cwd=ROOT, capture_output=True
+            )
+            subprocess.run(["git", "worktree", "prune"], cwd=ROOT, capture_output=True)
+        shutil.rmtree(WORK, ignore_errors=True)
+    print("downgrade: " + ("passed" if not checks.failed else f"{checks.failed} check(s) failed"))
+    return 1 if checks.failed else 0
+
+
 # The run: both sides, one after the other, on one data directory.
 
 
@@ -313,7 +533,8 @@ async def downgrade(baseline: str) -> int:
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--baseline", default=BASELINE)
-    parser.add_argument("--side", choices=("new", "old"))
+    parser.add_argument("--case", choices=("codex", "teams"), default="codex")
+    parser.add_argument("--side", choices=("new", "old", "teams-new", "teams-old", "teams-again"))
     parser.add_argument("--run", type=Path)
     parser.add_argument("--rows", default="{}")
     args = parser.parse_args()
@@ -321,6 +542,14 @@ def main():
         asyncio.run(new_side(args.run))
     elif args.side == "old":
         asyncio.run(old_side(args.run, json.loads(args.rows)))
+    elif args.side == "teams-new":
+        asyncio.run(teams_new(args.run))
+    elif args.side == "teams-old":
+        asyncio.run(teams_old(args.run, json.loads(args.rows)))
+    elif args.side == "teams-again":
+        asyncio.run(teams_again(args.run))
+    elif args.case == "teams":
+        sys.exit(asyncio.run(teams_downgrade(args.baseline)))
     else:
         sys.exit(asyncio.run(downgrade(args.baseline)))
 
