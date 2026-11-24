@@ -467,7 +467,8 @@ def test_the_page_turns_it_on_and_off_and_reads_its_record(tmp_path):
         actions = http.get(f"/api/autopilot/runs/{state['run']}").json()["actions"]
         assert [a["kind"] for a in actions] == ["stopping"]
         full = http.get(f"/api/autopilot/entries/{actions[0]['id']}").json()
-        assert full["why"]["by"] == "you"
+        # Its run too: a link to the entry alone opens that run.
+        assert full["why"]["by"] == "you" and full["run_id"] == state["run"]
         text = http.get(f"/api/autopilot/runs/{state['run']}/markdown").json()["text"]
         assert text.startswith("# Autopilot · ") and "Stopped: you pressed Stop" in text
         assert http.post("/api/autopilot", json={"duration": "forever"},

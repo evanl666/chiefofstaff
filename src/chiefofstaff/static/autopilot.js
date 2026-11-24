@@ -236,6 +236,16 @@ export async function refreshRecord() {
     return;
   }
   view.data = data;
+  // An entry linked alone (the Router's answer): its run, open.
+  if (!view.run && view.entry) {
+    try {
+      const found = await api(`/api/autopilot/entries/${view.entry}`);
+      details.set(found.id, found);
+      view.run = found.run_id;
+    } catch {
+      view.entry = "";
+    }
+  }
   if (!view.run && data.runs.length) view.run = data.runs[0].id;
   renderRecord();
   const loads = data.runs.filter((run) => run.id === view.run || view.open.has(run.id)).map((run) => loadRun(run.id));

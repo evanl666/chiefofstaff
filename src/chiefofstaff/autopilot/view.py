@@ -79,8 +79,9 @@ def entry(autopilot: Autopilot, entry_id: str) -> dict:
     if not found:
         raise LookupError("No such entry in the Autopilot record.")
     return {
-        "id": found["id"], "at": found["at"], "kind": found["kind"], "text": found["title"],
-        "task_id": found["task_id"], "subject": found["subject"], "why": found["why"],
+        "id": found["id"], "run_id": found["run_id"], "at": found["at"], "kind": found["kind"],
+        "text": found["title"], "task_id": found["task_id"], "subject": found["subject"],
+        "why": found["why"],
         "evidence": book.whole(found["evidence"]), "payload": book.whole(found["payload"]),
         "later": [{"at": e["at"], "kind": e["kind"], "text": e["title"],
                    "evidence": book.whole(e["evidence"])}
