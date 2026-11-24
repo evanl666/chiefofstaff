@@ -68,6 +68,8 @@ SETTINGS_FIELDS |= {
 # (With Copilot alone, as here: other agents' fields are made only where one is installed or on.)
 # Prepared for you: its switch in General (its tab's fields come only while it is on).
 SETTINGS_FIELDS |= {"proactive"}
+# Autopilot: its line in General (its group's fields come only while it is ticked).
+SETTINGS_FIELDS |= {"autopilot"}
 # (Ask first is worker_yolo the other way round: its field has its own name.)
 FORM_NAMES = SETTINGS_FIELDS - {
     "role_models", "role_efforts", "watches", "watch_hours", "worker_yolo", "model",
@@ -14329,11 +14331,21 @@ async def round_autopilot(runtime, browser, failures: list[str]):
     menu = page.locator("#session-actions .menu-wrap.autopilot")
     opener = menu.locator("button.menu-button")
     await expect(opener).to_have_text("Autopilot")
-    await quiet_for(page, 400)  # (the saved settings' snapshot drawn)
+    # The header as it stays: drawn again once the Router is told of the line (its rule, its
+    # tool), which can take a moment with many sessions.
+    for _ in range(40):
+        drawn = await opener.element_handle()
+        await quiet_for(page, 500)
+        if await drawn.evaluate("node => node.isConnected"):
+            break
+    # As every menu: Enter opens it on its first item, arrows move, Enter picks.
     await opener.focus()
     await page.keyboard.press("Enter")
     await expect(menu.get_by_role("menuitem")).to_have_count(3)
-    await page.keyboard.press("Tab")
+    await expect(menu.get_by_role("menuitem", name="For 2 hours")).to_be_focused()
+    await page.keyboard.press("ArrowDown")
+    await expect(menu.get_by_role("menuitem").nth(1)).to_be_focused()
+    await page.keyboard.press("ArrowUp")
     await expect(menu.get_by_role("menuitem", name="For 2 hours")).to_be_focused()
     await page.keyboard.press("Enter")
     await until(lambda: runtime.autopilot.run() is not None, 10)
@@ -14496,11 +14508,13 @@ async def round_autopilot(runtime, browser, failures: list[str]):
         """(id) => {
           const link = Object.assign(document.createElement("a"), { href: `#autopilot/${id}`,
             id: "autopilot-entry-link", textContent: "its entry" });
-          document.querySelector("#timeline").append(link);
+          Object.assign(link.style, { position: "fixed", top: "8px", left: "40%", zIndex: 99 });
+          document.body.append(link);
         }""",
         first["id"],
     )
     await page.locator("#autopilot-entry-link").click()
+    await page.evaluate("document.querySelector('#autopilot-entry-link').remove()")
     linked = page.locator(f'.autopilot-record [data-entry="{first["id"]}"]')
     await expect(linked).to_be_visible()
     await expect(linked.locator(".autopilot-line")).to_have_attribute("aria-expanded", "true")
