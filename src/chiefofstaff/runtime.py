@@ -6337,6 +6337,12 @@ class Runtime:
             await self.ready_caches(row)
             options, trusted = self.options(row), self.trust(row)
         else:
+            if row["role"] == WORKER and self.shepherd.marked(row["id"]):
+                # A shepherd step's profile is Copilot's only (Shepherd.executor_refusal): never
+                # this worker's own options in its place.
+                raise RuntimeError(
+                    f"A fix is never prepared on {agents.display(agent)}: it runs on Copilot only."
+                )
             if agent == "claude":
                 # As a Copilot worker's: Claude loads its folder's settings as its process
                 # starts (a resume too), so not before the owner says to use them.
