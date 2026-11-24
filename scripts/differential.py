@@ -779,8 +779,8 @@ FEATURES["proactive"] = Feature(
 # values; an owner message to the Router that is exactly one of its commands is answered by Chief
 # of Staff (the script sends none); and how each owner input came in (ingress), stored with it and
 # never shown or sent to a model. On and never run: that line checked with its small group, its
-# menu on Home, its part of the state, its tables (made on the first tick), and the Router's rule
-# and its record tool.
+# menu on Home, its part of the state, its tables (made on the first tick), the owner's messages
+# a task was given by (kept for its scope), and the Router's rule and its record tool.
 AUTOPILOT_TABLES = r"autopilot_(runs|log|blobs|outbox|decisions)"
 FEATURES["autopilot"] = Feature(
     off={"autopilot": False},
@@ -816,6 +816,11 @@ FEATURES["autopilot"] = Feature(
         Allow("its part of the state", data=r"\./api/state\.autopilot$"),
         Allow("its tables", data=rf"\.db\.{AUTOPILOT_TABLES}$"),
         Allow("its tables in the schema", data=rf"\.db\._schema\.{AUTOPILOT_TABLES}(_\w+)?$"),
+        Allow(
+            "the owner's messages a task was given by ({owner:<ref>}), kept for its scope while "
+            "its line is ticked",
+            data=r"\.db\.kv\.autopilot:refs:",
+        ),
         Allow(
             "the Router's rule while its line is ticked",
             data=r"\.system_message\.content$",
