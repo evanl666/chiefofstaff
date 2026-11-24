@@ -69,7 +69,7 @@ from .receipts import APPROVAL
 from .roles import WORKER
 from .steps import Steps
 from .store import now
-from .workspaces import service_secrets
+from .workspaces import registry_secrets, service_secrets
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -118,7 +118,10 @@ BLOCKED_HOSTS = (
     *GITHUB_DOMAINS, *(f"*.{domain}" for domain in GITHUB_DOMAINS), *sorted(GITHUB_EXACT),
     "*.ghcr.io", "github.githubassets.com",
 )  # fmt: skip
-# Hosts an install of a project needs, by what the project has (routines.md's derivation).
+# Hosts an install of a project needs, by what the project has (routines.md's derivation): where
+# its packages download from, not a registry's API for publishing where downloads don't need it
+# (crates.io: cargo's sparse index names static.crates.io for downloads). What each accepts:
+# SECURITY.md, "Prepared for you".
 PROJECT_HOSTS = {
     "package.json": ("registry.npmjs.org", "registry.yarnpkg.com"),
     "pnpm-lock.yaml": ("registry.npmjs.org",),
@@ -126,7 +129,7 @@ PROJECT_HOSTS = {
     "requirements.txt": ("pypi.org", "files.pythonhosted.org"),
     "uv.lock": ("pypi.org", "files.pythonhosted.org"),
     "go.mod": ("proxy.golang.org", "sum.golang.org", "storage.googleapis.com"),
-    "Cargo.toml": ("crates.io", "index.crates.io", "static.crates.io"),
+    "Cargo.toml": ("index.crates.io", "static.crates.io"),
     "Gemfile": ("rubygems.org", "index.rubygems.org"),
     "build.gradle": ("repo.maven.apache.org", "services.gradle.org", "plugins.gradle.org"),
     "build.gradle.kts": ("repo.maven.apache.org", "services.gradle.org", "plugins.gradle.org"),
@@ -1230,12 +1233,15 @@ def git_config_files() -> list[str]:
 
 def step_denied() -> tuple[str, ...]:
     """What a step's commands may neither read nor write: the services' secrets, gh's and git's
-    credentials, SSH keys and the keychains."""
+    credentials, SSH keys, the keychains, and the owner's registry and cloud credentials (as a
+    worker that reads Slack has them: a registry a step downloads from takes a publish, and
+    storage.googleapis.com an upload, with the owner's token)."""
     home = Path.home()
     return tuple(dict.fromkeys([
         *service_secrets(),
         *(str(home / name) for name in (".config/gh", ".git-credentials", ".netrc", ".ssh")),
         str(home / "Library" / "Keychains"),
+        *registry_secrets(),
     ]))  # fmt: skip
 
 
