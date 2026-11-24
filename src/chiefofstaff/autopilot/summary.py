@@ -40,9 +40,11 @@ def window(started: str | None, ended: str | None) -> str:
     start, end = at(started), at(ended) or datetime.now().astimezone()
     if start is None:
         return ""
-    shown = lambda moment: f"{moment.hour % 12 or 12}:{moment.minute:02d} " + (  # noqa: E731
-        "AM" if moment.hour < 12 else "PM"
-    )
+
+    def shown(moment: datetime) -> str:
+        half = "AM" if moment.hour < 12 else "PM"
+        return f"{moment.hour % 12 or 12}:{moment.minute:02d} {half}"
+
     if start.date() == end.date():
         return f"{shown(start)} \u2013 {shown(end)}"
     return f"{start.strftime('%a')} {shown(start)} \u2013 {end.strftime('%a')} {shown(end)}"

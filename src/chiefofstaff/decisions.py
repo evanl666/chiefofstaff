@@ -607,6 +607,9 @@ class Decisions:
             agreed=(choice.lower() == best.lower()) if best else None,
         )
         card = self.close(card["id"], "answered", choice)
+        if changes := target.get("changes"):
+            # Their Change of a decision Autopilot made: theirs now (autopilot/answers.py).
+            self.runtime.autopilot.decision_changed(changes, choice)
         text = f"The owner decided: {choice}"
         short = choice if len(choice) <= 80 else choice[:79].rstrip() + "…"
         await self.tell_askers(

@@ -17,6 +17,7 @@ from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import agents, ingress
+from .autopilot import view as autopilot_view
 from .bus import Bus
 from .models import (
     AgentInstall,
@@ -710,6 +711,39 @@ def create_app(
     @app.post("/api/autopilot/stop")
     async def autopilot_stop():
         return await runtime.autopilot.stop(by="you", why="you pressed Stop")
+
+    @app.get("/api/autopilot/record")
+    async def autopilot_record():
+        """Every run, newest first; never before the first one (the line ticked or not)."""
+        if not runtime.autopilot.book.runs(1):
+            raise HTTPException(404, "Autopilot has no record yet.")
+        return await asyncio.to_thread(autopilot_view.runs, runtime.autopilot)
+
+    @app.get("/api/autopilot/runs/{run_id}")
+    async def autopilot_run(run_id: str):
+        if not runtime.autopilot.book.run(run_id):
+            raise HTTPException(404, "No such run.")
+        return {"actions": await asyncio.to_thread(autopilot_view.actions, runtime.autopilot,
+                                                   run_id)}  # fmt: skip
+
+    @app.get("/api/autopilot/runs/{run_id}/markdown")
+    async def autopilot_markdown(run_id: str):
+        return {"text": await asyncio.to_thread(autopilot_view.markdown, runtime.autopilot,
+                                                run_id)}  # fmt: skip
+
+    @app.get("/api/autopilot/entries/{entry_id}")
+    async def autopilot_entry(entry_id: str):
+        return await asyncio.to_thread(autopilot_view.entry, runtime.autopilot, entry_id)
+
+    @app.post("/api/autopilot/entries/{entry_id}/undo")
+    async def autopilot_undo(entry_id: str):
+        return {"said": runtime.autopilot.undo(entry_id)}
+
+    @app.post("/api/autopilot/entries/{entry_id}/change")
+    async def autopilot_change(entry_id: str):
+        card = runtime.autopilot.change(entry_id)
+        return {"said": "Decide it again: your answer is told to every task that asked.",
+                "card": card["id"]}  # fmt: skip
 
     @app.get("/api/file")
     async def read_file(path: str, session: str = ""):

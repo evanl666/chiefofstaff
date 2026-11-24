@@ -60,6 +60,10 @@ async def asked(runtime, session_id, question, choices=()):
     )
 
 
+def cite(message, quote):
+    return {"id": f"message:{message['id']}", "quote": quote}
+
+
 def entries(runtime, *kinds):
     return runtime.autopilot.book.entries(kinds=kinds)
 
@@ -75,8 +79,7 @@ async def test_a_question_settled_by_a_page_message_is_answered_quoted(harness):
         await asyncio.sleep(0)  # (Not settle: it would wait for the judge.)
     assert not answer.done() and runtime.snapshot()["autopilot"]["deciding"], "held, not drawn"
     assert not [m for m in harness.store.messages(session) if m["kind"] == "draft"]
-    judge = await judge_proposes(harness, answer="Postgres",
-                                 basis=[{"id": f"message:{owner['id']}", "quote": "Postgres for v1"}])  # fmt: skip
+    judge = await judge_proposes(harness, answer="Postgres", basis=[cite(owner, "Postgres for v1")])
     result = await asyncio.wait_for(answer, 5)
     assert result["answer"].startswith("Postgres\n\n(Answered for the owner by Autopilot")
     assert judge["role"] == "worker" and runtime.special(judge) == "judge"
@@ -178,8 +181,7 @@ async def test_a_decision_is_kept_apart_and_told_in_autopilots_envelope(harness)
                     options=[{"choice": "Postgres", "effect": "a"},
                              {"choice": "Redis", "effect": "b"}],
                     recommendation="Redis")  # fmt: skip
-    await judge_proposes(harness, answer="postgres",
-                         basis=[{"id": f"message:{owner['id']}", "quote": "Postgres for v1"}])  # fmt: skip
+    await judge_proposes(harness, answer="postgres", basis=[cite(owner, "Postgres for v1")])
     await settle(runtime)
     [card] = [d for d in harness.store.drafts("answered") if d["kind"] == "decision"]
     assert card["outcome"] == "Decided by Autopilot: Postgres"
@@ -225,8 +227,7 @@ async def test_a_reported_question_is_answered_once_the_routers_turn_is_over(har
             break
         harness.session(harness.router_id).emit("session.idle")
     tick = asyncio.ensure_future(runtime.autopilot.tick())
-    await judge_proposes(harness, answer="sessions_v1",
-                         basis=[{"id": f"message:{owner['id']}", "quote": "sessions_v1"}])  # fmt: skip
+    await judge_proposes(harness, answer="sessions_v1", basis=[cite(owner, "sessions_v1")])
     await asyncio.wait_for(tick, 5)
     await settle(runtime)
     assert runtime.asks.owner_questions() == []
@@ -234,3 +235,32 @@ async def test_a_reported_question_is_answered_once_the_routers_turn_is_over(har
     assert 'type="autopilot"' in sent and "sessions_v1" in sent
     assert runtime.tasks.get(made["task_id"])["status"] == "running"
     assert [e["kind"] for e in entries(runtime, "answered")] == ["answered"]
+
+
+async def test_change_puts_its_decision_to_the_owner_who_then_decides(harness):
+    from chiefofstaff.models import DraftDecision
+
+    runtime = await harness.connect()
+    await on(runtime)
+    made = await worker(runtime, harness.router_id)
+    session = made["session_id"]
+    owner = await said_in_page(runtime, session, "Postgres for v1.")
+    await call_tool(runtime, "ask_decision", session, question="Which store for sessions?",
+                    options=[{"choice": "Postgres", "effect": "a"},
+                             {"choice": "Redis", "effect": "b"}])  # fmt: skip
+    await judge_proposes(harness, answer="Postgres", basis=[cite(owner, "Postgres for v1")])
+    await settle(runtime)
+    [decided] = entries(runtime, "decided")
+    card = runtime.autopilot.change(decided["id"])
+    assert card["status"] == "pending" and card["target"]["previous"] == "Postgres"
+    with ingress.through(ingress.PAGE):
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Redis"))
+    await settle(runtime)
+    [mine] = runtime.decisions.active()
+    assert mine["text"] == "Which store for sessions? → Redis", "recorded as the owner's"
+    assert runtime.autopilot.book.decisions(task_id=made["task_id"])[0]["status"] == "changed"
+    assert "The owner decided: Redis" in harness.session(session).sent[-1]
+    [changed] = entries(runtime, "undone")
+    assert changed["of"] == decided["id"]
+    with pytest.raises(ValueError, match="changed it already"):
+        runtime.autopilot.change(decided["id"])

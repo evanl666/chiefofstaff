@@ -423,8 +423,10 @@ async def test_a_daily_summary_due_during_a_short_run_is_folded_into_its_card(ha
     card = harness.store.messages(harness.router_id)[-1]["meta"]["autopilot_summary"]
     assert card["folded"][0] == "Daily summary\n• Finished: Docs"
     assert card["folded"][1].startswith("While you focused (")
-    assert not [m for m in harness.store.messages(harness.router_id)
-                if m["meta"].get("focus_summary")], "never two cards for the same hours"  # fmt: skip
+    focused = [
+        m for m in harness.store.messages(harness.router_id) if m["meta"].get("focus_summary")
+    ]
+    assert not focused, "never two cards for the same hours"
 
 
 async def test_an_open_ended_run_has_its_part_in_each_daily_summary(harness):
@@ -440,3 +442,33 @@ async def test_an_open_ended_run_has_its_part_in_each_daily_summary(harness):
     assert runtime.autopilot.book.run(state["run"])["summarized"]
     again = runtime.autopilot.fold_digest("")
     assert again.endswith(": 0 done, 0 left for you"), "its card covers what came after"
+
+
+def test_the_page_turns_it_on_and_off_and_reads_its_record(tmp_path):
+    from fastapi.testclient import TestClient
+    from test_web import ORIGIN, TOKEN, sign_in
+
+    from chiefofstaff.web import create_app
+
+    app = create_app(tmp_path / "data", TOKEN, 8765)
+    with TestClient(app, base_url="http://127.0.0.1:8765") as http:
+        sign_in(http)
+        assert http.get("/api/autopilot/record").status_code == 404, "nothing before a run"
+        refused = http.post("/api/autopilot", json={"duration": "2h"}, headers=ORIGIN)
+        assert refused.status_code == 400 and "tick it in Settings" in refused.json()["detail"]
+        http.post("/api/settings", json={"autopilot": True}, headers=ORIGIN)
+        state = http.post("/api/autopilot", json={"duration": "2h"}, headers=ORIGIN).json()
+        assert state["run"] and state["until"]
+        assert http.get("/api/state").json()["autopilot"]["run"] == state["run"]
+        record = http.get("/api/autopilot/record").json()
+        assert record["chain"]["ok"] and record["runs"][0]["id"] == state["run"]
+        stopped = http.post("/api/autopilot/stop", headers=ORIGIN).json()
+        assert stopped["said"] == "Autopilot stopped." and stopped["run"] is None
+        actions = http.get(f"/api/autopilot/runs/{state['run']}").json()["actions"]
+        assert [a["kind"] for a in actions] == ["stopping"]
+        full = http.get(f"/api/autopilot/entries/{actions[0]['id']}").json()
+        assert full["why"]["by"] == "you"
+        text = http.get(f"/api/autopilot/runs/{state['run']}/markdown").json()["text"]
+        assert text.startswith("# Autopilot · ") and "Stopped: you pressed Stop" in text
+        assert http.post("/api/autopilot", json={"duration": "forever"},
+                         headers=ORIGIN).status_code == 422  # fmt: skip
