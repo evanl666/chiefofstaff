@@ -95,7 +95,7 @@ READ_SECONDS = 300
 STEPS_AT_ONCE = 1
 # What a PR's claim keeps beside it (kv `<prefix>:<target>`), gone when the PR merges or closes.
 TARGET_KEYS = ("acceptnote", "capped", "checksbefore", "clickfirst", "mergewhy", "stopped",
-               "signedbranch", "noteligible")  # fmt: skip
+               "signedbranch", "noteligible", "signin")  # fmt: skip
 # A plan's diff and replies are kept this long after its outcome (its journal for good).
 PLAN_DAYS = 30
 # Said of any action while it is off.
@@ -135,6 +135,25 @@ PROJECT_HOSTS = {
     "build.gradle.kts": ("repo.maven.apache.org", "services.gradle.org", "plugins.gradle.org"),
     "pom.xml": ("repo.maven.apache.org",),
 }
+# An attempt whose install needed the owner's sign-in to a registry (their credentials are never
+# a step's): said on its PR's row, and no attempt for a day. Read in its commands' output, in each
+# package manager's own words for it (npm, pnpm, yarn, pip, uv, poetry, cargo, Maven, Gradle,
+# Bundler), never a test's own 401.
+SIGN_IN_WHY = "its install needs your sign-in to a private registry"
+SIGN_IN = re.compile(
+    r"\bE401\b|ERR_PNPM_FETCH_401|\bYN0041\b|Request failed \\?\"401 Unauthorized|"
+    r"HTTP error 401 while getting|401 Error, Credentials not correct|"
+    r"\(401 Unauthorized\) for url|Missing credentials for https?://|"
+    r"401 Client Error: Unauthorized for url: https?://(?!(?:localhost|127\.|testserver)\b)|"
+    r"[Rr]eceived status code 401 from server|status code: 401, reason phrase|"
+    r"failed to get successful HTTP response from .*, got 401|no token found for|"
+    r"Authentication is required for [\w.-]+"
+)
+# Commands that install a project's packages (or build it, fetching them first).
+INSTALLS = re.compile(
+    r"(?:^|[\s;&|(/])(?:npm|npx|pnpm|yarn|bun|pip3?|uv|uvx|poetry|pipenv|cargo|go|mvn|mvnw|"
+    r"gradle|gradlew|bundle|gem)(?=$|[\s;&|)])"
+)
 # What a failed CI log says when the failure is the infrastructure's, not the code's.
 INFRASTRUCTURE = re.compile(
     r"runner has received a shutdown signal|lost communication with the server|"
@@ -423,6 +442,9 @@ class Shepherd(Keeping, Steps):
         signed = float(self.store.get(f"signedbranch:{step['target']}") or 0) if step else 0
         if signed > time.time() - 86400:
             return "the branch requires signed commits"
+        signin = float(self.store.get(f"signin:{step['target']}") or 0) if step else 0
+        if signin > time.time() - 86400:
+            return SIGN_IN_WHY
         return ""
 
     def busy(self, row: dict) -> bool:
@@ -1225,6 +1247,15 @@ def prepare_downgrade(store) -> list[str]:
         if row:
             stopped.append(row["title"])
     return stopped
+
+
+def needs_sign_in(ran: list[tuple[str, str]]) -> bool:
+    """Whether an install among these commands (each its line and the end of its output) was
+    refused for want of a registry sign-in."""
+    return any(
+        INSTALLS.search(command) and any(SIGN_IN.search(line) for line in output.splitlines())
+        for command, output in ran
+    )
 
 
 def git_config_files() -> list[str]:
