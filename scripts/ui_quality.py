@@ -3,7 +3,7 @@ tasks, cards that need the owner) on a fake Copilot, at 800 to 1440 px, light an
 sidebar's Other Copilot sessions with 3, 12 and 40 of them, before and after where each stands
 is shown (browser-shots/others/: a title keeps its width); Send to Chief's line in Settings and a
 sent item's line on Home (browser-shots/send/); Monitoring's runs and Artifacts' folded runs
-(browser-shots/qa-e41/); Settings' Coding agents tab and a worker on Codex
+(browser-shots/qa-e41/); Settings → Agents & models and a worker on Codex
 (browser-shots/agents-m2/); a task's life: its cards, a failed task out of Needs you, failing
 Watch scans (browser-shots/qa7-life/); Your OK and Handled for you (browser-shots/qa8-approvals/);
 a busy worker's second worker: its line, its place in the sidebar, its row and chat, and its
@@ -54,6 +54,8 @@ ASK = (
     "Fix the flaky login test in acme-api, then add rate limiting to login attempts. "
     "Also compare a few feature-flag services for us."
 )
+# Settings → Connections' rows (settings-v2.md §5), each opening its details.
+CONNECTIONS = ("slack", "github", "watches", "away", "tools", "send")
 FIX, COMPARE, LIMIT = (
     "Fix the flaky login test",
     "Compare feature-flag services",
@@ -481,20 +483,27 @@ async def run(runtime, seeded, browser, quality: Quality, phase: str):
 
         await page.set_viewport_size({"width": 1280, "height": 900})
         await page.locator("#settings-button").click()
-        for tab in ("general", "workers", "models", "connections", "you", "advanced"):
+        # Each page, and each connection's details in place of its list, at every width
+        # (settings-v2.md §10.3; 900 px and below, the pages are tabs over the page).
+        views = [(tab, None) for tab in ("general", "workers", "agents", "connections", "you",
+                                         "advanced")] + [("connections", key) for key in CONNECTIONS]  # fmt: skip
+        for tab, key in views:
+            await page.set_viewport_size({"width": 1280, "height": 900})
             await page.locator(f"#settings-tabs [data-tab={tab}]").click()
-            if tab == "connections":
-                for section in ("slack", "abilities", "watches", "away"):
-                    details = page.locator(f"#conn-{section}")
-                    if not await details.evaluate("section => section.open"):
-                        await details.locator("summary").click()
-            await page.wait_for_timeout(150)
-            await page.screenshot(path=SHOTS / f"quality-{phase}-settings-{tab}-{scheme}.png")
-            await quality.check(page, f"settings {tab} {scheme}", "#settings-dialog")
-            await quality.contrast(page, f"settings {tab} {scheme}", "#settings-dialog")
-        await page.set_viewport_size({"width": 800, "height": 900})
-        await page.screenshot(path=SHOTS / f"quality-{phase}-settings-800-{scheme}.png")
-        await quality.check(page, f"settings 800 {scheme}", "#settings-dialog")
+            if key:
+                await page.locator(f".conn[data-conn={key}] .conn-open").click()
+            name = key or tab
+            for width in WIDTHS:
+                await page.set_viewport_size({"width": width, "height": 900})
+                await page.wait_for_timeout(120)
+                await page.screenshot(
+                    path=SHOTS / f"quality-{phase}-settings-{name}-{width}-{scheme}.png"
+                )
+                await quality.check(page, f"settings {name} {width} {scheme}", "#settings-dialog")
+            await quality.contrast(page, f"settings {name} {scheme}", "#settings-dialog")
+            if key:
+                await page.locator(f"[data-conn-detail={key}] [data-back]").click()
+        await page.set_viewport_size({"width": 1280, "height": 900})
         await page.locator("#settings-cancel").click()
         await page.set_viewport_size({"width": 1280, "height": 900})
         await page.locator("#usage-button").click()
@@ -791,6 +800,7 @@ async def send_views(runtime, browser, quality: Quality):
             for state in ("off", "consent", "on", "problem"):
                 await page.locator("#settings-button").click()
                 await page.locator("#settings-tabs [data-tab=connections]").click()
+                await page.locator(".conn[data-conn=send] .conn-open").click()
                 if state == "consent":
                     await switch.check()
                 elif state in {"on", "problem"}:
@@ -1218,22 +1228,48 @@ async def usage_views(runtime, browser, quality: Quality):
 
 async def signed_out(route):
     codex = {
-        "name": "codex", "label": "Codex", "enabled": False, "model": "", "limit": 0,
-        "found": True, "state": "", "models": [],
-        "problem": "Codex is not signed in: sign in from Settings → Coding agents.",
+        "name": "codex", "label": "Codex", "enabled": False, "model": "", "effort": "",
+        "limit": 0, "found": True, "state": "", "models": [], "status": "signin",
+        "said": "Sign-in needed", "ways": [{"method": "browser"}],
+        "fix": {"command": "codex login", "then": ""},
+        "problem": "Codex is not signed in: sign in from Settings → Agents & models.",
     }  # fmt: skip
     claude = codex | {
-        "name": "claude", "label": "Claude",
-        "problem": "Not signed in to Claude Code: sign in from Settings → Coding agents.",
+        "name": "claude", "label": "Claude", "fix": {"command": "claude auth login", "then": ""},
+        "problem": "Not signed in to Claude Code: sign in from Settings → Agents & models.",
+    }  # fmt: skip
+    answer = {"agents": [codex, claude], "new_workers": "copilot", "sandboxed": False}
+    await route.fulfill(json=answer)
+
+
+# Long and combined states of an agent's row (settings-v2.md §3.3): its alert lines wrap under
+# it, its status a few words.
+async def long_states(route):
+    soon = int(__import__("time").time()) + 3 * 86400
+    codex = {
+        "name": "codex", "label": "Codex", "enabled": True, "model": "", "effort": "",
+        "limit": 0, "found": True, "state": "0.167.2 · signed in with ChatGPT", "models": [],
+        "status": "ready", "said": "Ready", "problem": (
+            "Codex can't run while workers are sandboxed: its sandbox has not passed Chief of "
+            "Staff's checks yet. Its workers wait; turn the sandbox off in Workers to go on."),
+    }  # fmt: skip
+    claude = codex | {
+        "name": "claude", "label": "Claude", "problem": "", "expires": soon,
+        "state": "2.1.322 · signed in with your Claude plan",
+        "usage": [{"label": "weekly limit", "used": 100, "resets_at": soon}],
+        "limit_line": "Your Claude plan's weekly limit is reached; workers go on with extra usage "
+        "until it resets at 3:40 pm.",
     }  # fmt: skip
     answer = {"agents": [codex, claude], "new_workers": "copilot", "sandboxed": False}
     await route.fulfill(json=answer)
 
 
 async def agents_views(runtime, browser, quality: Quality):
-    """Other coding agents (docs/design/more-agents.md 5.10, the agent picker): Settings' Coding
-    agents tab (Codex's and Claude's rows), signed out, found, being turned on, on (where new
-    workers start, its Model and Limit); a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
+    """Other coding agents (docs/design/more-agents.md 5.10, the agent picker; settings-v2.md §3):
+    Settings → Agents & models (Copilot's, Codex's and Claude's rows), signed out, long states
+    (a long reason it can't run, extra usage with its sign-in ending; its own sessions open),
+    found, being turned on (its model, effort and limit), on (new workers run on, its meter's
+    windows on focus); a worker on Codex, its header and ⋯; 800 to 1440 px, light and dark
     (browser-shots/agents-m2/quality-*)."""
     from copilot.tools import ToolInvocation
     from ui_edges import agents_saved, codex_off_path, codex_on_path, until
@@ -1250,32 +1286,37 @@ async def agents_views(runtime, browser, quality: Quality):
             page = await context.new_page()
             await page.goto(f"{BASE}/#token={TOKEN}")
             await expect(page.locator("#application")).to_be_visible()
-            for state in ("signed-out", "found", "enabling", "on-open"):
-                if state == "signed-out":
-                    # One that cannot be turned on: it looks it, in both themes.
-                    await page.route("**/api/agents", signed_out)
+            for state in ("signed-out", "long", "found", "enabling", "on-open"):
+                routed = {"signed-out": signed_out, "long": long_states}.get(state)
+                if routed:
+                    # One that cannot be turned on looks it; long states wrap, in both themes.
+                    await page.route("**/api/agents", routed)
                 await page.locator("#settings-button").click()
                 await page.locator("#settings-tabs [data-tab=agents]").click()
-                group = page.locator("#settings-pane .tab[data-tab=agents]")
+                group = page.locator("#settings-page-agents")
+                await expect(group).to_have_attribute("data-looked", "done", timeout=20000)
                 if state == "signed-out":
-                    await expect(group.locator(".agent-row.disabled .agent-problem")).to_have_count(
-                        2
+                    await expect(group.locator(".agent .status")).to_have_text(
+                        ["Ready", "Sign in needed", "Sign in needed"]
                     )
+                    await expect(group.locator("label.check.locked")).to_have_count(2)
+                    await group.locator("#agent-claude .fold").click()
+                if state == "long":
+                    await group.locator("#own-sessions summary").click()
                 if state in {"found", "enabling"}:
-                    await expect(group.locator(".agent-row small[role=status]")).to_have_text(
-                        [
-                            "Ready · Uses your ChatGPT sign-in",
-                            "Ready · Uses your Claude plan",
-                        ],
-                        timeout=20000,
+                    await expect(group.locator(".agent .status")).to_have_text(
+                        ["Ready", "Ready · off for workers", "Ready · off for workers"]
                     )
                 if state == "enabling":
                     await group.locator("input[name=agent_codex_enabled]").check()
+                    await group.locator("#agent-codex .fold").click()
                 if state == "on-open":
                     await expect(group.locator("input[name=agent_codex_enabled]")).to_be_checked(
                         timeout=20000
                     )
-                    await expect(group.locator("#agents-choice")).to_be_visible()
+                    await expect(group.locator("select[name=agent_new_workers]")).to_be_visible()
+                    await group.locator("#agent-codex .fold").click()
+                    await group.locator("#agent-codex .plan-meter").focus()
                 for width in WIDTHS:
                     await page.set_viewport_size({"width": width, "height": 900})
                     await page.wait_for_timeout(100)
@@ -1292,8 +1333,8 @@ async def agents_views(runtime, browser, quality: Quality):
                     await until(lambda: bool(runtime.agents_on()), 10)
                 else:
                     await page.locator("#settings-cancel").click()
-                if state == "signed-out":
-                    await page.unroute("**/api/agents", signed_out)
+                if routed:
+                    await page.unroute("**/api/agents", routed)
             # A worker on Codex: its header and its ⋯.
             router = runtime.store.get("router_id")
             result = await runtime.toolset.spawn_on(["codex"]).handler(
@@ -1350,7 +1391,7 @@ async def agents_views(runtime, browser, quality: Quality):
     finally:
         await agents_saved(runtime, {"codex": {"enabled": False}})
         codex_off_path(codex)
-    log("Coding agents: the tab's states, a Codex worker, the picker; browser-shots/agents-m2/")
+    log("Agents & models: its rows' states, a Codex worker, the picker; browser-shots/agents-m2/")
 
 
 # The owner's "Go on" to a task (task's-life round, 0.1.48), in the Router's chat: its task
