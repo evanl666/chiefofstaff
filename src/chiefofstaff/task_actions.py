@@ -4994,13 +4994,11 @@ class TaskActions:
         nudged = self.store.get(f"stallnudge:{task['id']}") or ""
         return {
             **task,
-            # Accepted for the owner by Autopilot (only then: autopilot/results.py; not looked
-            # up where it was never used).
+            # Accepted for the owner by Autopilot (only then: autopilot/results.py), with its
+            # entry in the record.
             **(
-                {"accepted_by": "autopilot"}
-                if task["status"] == "done"
-                and self.runtime.autopilot.book.made
-                and self.store.get(f"autopilot:accepted:{task['id']}")
+                {"accepted_by": "autopilot", "accepted_entry": entry}
+                if (entry := self.runtime.autopilot.accepted_entry(task))
                 else {}
             ),
             # Its state, apart: where its run is (queued, running, waiting, finished,

@@ -3,6 +3,7 @@ of the exact commit (autopilot/verify.py), starts what waited on it, and nudges 
 once more (autopilot/results.py)."""
 
 import asyncio
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -143,6 +144,55 @@ async def test_a_committed_result_whose_checks_pass_offline_is_accepted(
         runtime.autopilot.undo(accepted["id"])
     await verified(runtime)
     assert runtime.tasks.get(info["task_id"])["status"] == "review", "not accepted again"
+
+
+async def test_what_autopilot_accepted_says_so_wherever_it_is_said(tmp_path, git_repo, offline):
+    """Never "accepted by the owner" when Autopilot accepted it: its task (with its entry, for
+    the record's link), its worker's chat, the Router's words for it, its rule; the owner's own
+    Accept is said as before."""
+    from chiefofstaff import prompts
+    from chiefofstaff.digest import needs, task_words
+
+    harness, runtime = await project(tmp_path, git_repo)
+    router = harness.router_id
+    info, _ = await finished(harness, runtime, git_repo)
+    later = json.loads((await call_tool(
+        runtime, "spawn_worker", router, title="Write the client", instructions="Client",
+        after=[info["task_id"]], wait_for="accepted", why_new="test",
+    )).text_result_for_llm)  # fmt: skip
+    assert later["note"] == (
+        "Starts automatically once the tasks it depends on are accepted (by the owner, or by "
+        "Autopilot while it is on)."
+    )
+    await verified(runtime)
+    await settle(runtime)
+    [accepted] = entries(runtime, "accepted")
+    task = runtime.tasks.get(info["task_id"])
+    view = runtime.task_actions.view(task)
+    assert (view["accepted_by"], view["accepted_entry"]) == ("autopilot", accepted["id"])
+    notice = [m for m in harness.store.messages(info["session_id"]) if m["kind"] == "notice"][-1]
+    assert notice["text"] == (
+        f"Autopilot accepted it: its checks pass at {accepted['payload']['commit'][:7]}."
+    )
+    assert notice["meta"]["autopilot"]["entry"] == accepted["id"]
+    assert task_words(task, needs(runtime)) == "done, accepted by Autopilot"
+    said = await call_tool(runtime, "message_session", router, session_id=info["session_id"],
+                           text="More", task="continue", task_id=info["task_id"])  # fmt: skip
+    assert "was accepted by Autopilot and is done" in said.text_result_for_llm
+    said = await call_tool(runtime, "message_session", router, session_id=info["session_id"],
+                           text="More", task="continue")  # fmt: skip
+    assert "was accepted by Autopilot and is done" in said.text_result_for_llm
+    assert "by the owner" not in said.text_result_for_llm
+    assert "accepted by Autopilot" in prompts.AUTOPILOT_RULE
+    # Undone, then the owner's own Accept: said as theirs.
+    runtime.autopilot.undo(accepted["id"])
+    runtime.task_actions.accept(info["task_id"])
+    task = runtime.tasks.get(info["task_id"])
+    assert "accepted_by" not in runtime.task_actions.view(task)
+    assert task_words(task, needs(runtime)) == "done"
+    said = await call_tool(runtime, "message_session", router, session_id=info["session_id"],
+                           text="More", task="continue", task_id=info["task_id"])  # fmt: skip
+    assert "was accepted by the owner and is done" in said.text_result_for_llm
 
 
 async def test_what_waited_on_it_starts_carrying_its_origin(tmp_path, git_repo, offline):

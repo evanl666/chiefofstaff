@@ -346,7 +346,11 @@ function renderPanel() {
   const monitoring = section(taskBox, "tasks-monitoring", "Monitoring", { help: "Not being worked on now; waiting on something that wakes it: a PR's CI or review, a thread, a time it checks back, a slot or its turn. Click a row to see all of it.", empty: "Nothing to wait on." });
   fill(monitoring, sections.monitoring.map((task) => taskItem(task, tasks.phases.get(task.id))), editing, { hold: true });
   // Recently finished: a row per task, the newest first across all workers, a page at a time.
-  const recent = section(taskBox, "tasks-recent", "Recently finished", { help: "Finished in the last three days, the newest first: results you accepted, tasks cancelled or set aside. Click a row to see all of it.", empty: "Nothing finished lately." });
+  const recentHelp = `Finished in the last three days, the newest first: results ${autopilot() ? "you or Autopilot" : "you"} accepted, tasks cancelled or set aside. Click a row to see all of it.`;
+  const recent = section(taskBox, "tasks-recent", "Recently finished", { help: recentHelp, empty: "Nothing finished lately." });
+  // (Autopilot's line ticked or unticked since it was drawn: said as it is now.)
+  const recentTip = recent.querySelector(":scope > summary");
+  if (recentTip.dataset.tip !== recentHelp) recentTip.dataset.tip = recentHelp;
   const finished = sections.finished.length;
   const shown = Math.min(state.finishedShown || FINISHED_PAGE, finished);
   const more = shown < finished

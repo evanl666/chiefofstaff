@@ -93,6 +93,13 @@ class Results:
             return head.strip() == commit
         return False
 
+    def accepted_entry(self: Autopilot, task: dict) -> str:  # type: ignore[misc]
+        """Its acceptance's entry in the record, for a done task Autopilot accepted ("" when
+        the owner did; never looked up where Autopilot was never used)."""
+        if task.get("status") != "done" or not self.book.made:
+            return ""
+        return self.store.get(f"autopilot:accepted:{task['id']}") or ""
+
     def accept_verified(self: Autopilot, task: dict, record: dict):  # type: ignore[misc]
         run = self.run() or {}
         tasks = self.runtime.tasks
@@ -145,11 +152,17 @@ class Results:
                                        "entry": entry["id"]}))  # fmt: skip
 
     async def deliver_accepted(self: Autopilot, item: dict) -> str:  # type: ignore[misc]
-        """After an acceptance commits: its task shown done, what waited on it started."""
+        """After an acceptance commits: its task shown done, a line in its worker's chat (as
+        Autopilot's, linking to its entry), what waited on it started."""
         actions = self.runtime.task_actions
         task = self.runtime.tasks.find(item["payload"]["task_id"])
+        entry = self.book.entry(item["entry"])
         if task:
             actions.publish(task)
+            if entry and task["session_id"]:
+                commit = verify.short((entry["payload"] or {}).get("commit", ""))
+                self.notice(task["session_id"], task, entry,
+                            f"Autopilot accepted it: its checks pass at {commit}.")  # fmt: skip
         await self.runtime.workers.pump()
         return ""
 

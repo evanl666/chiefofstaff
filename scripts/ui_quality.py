@@ -2312,6 +2312,15 @@ async def autopilot_views(runtime, browser, quality: Quality):
         await expect(summary).to_contain_text("Workers asked first while Autopilot was on")
         await expect(summary.locator(".autopilot-then").first).to_contain_text("then: ")
         await quality.contrast(page, f"autopilot card {scheme}", ".card.autopilot-summary")
+        # What it accepted, under Recently finished: said so, with its entry.
+        row = page.locator(f'#tasks-recent .card.task[data-task="{seeded["login"]["task_id"]}"]')
+        await row.locator(".head .title").click()
+        await expect(row.locator(".autopilot-accepted")).to_contain_text("Accepted by Autopilot")
+        await row.scroll_into_view_if_needed()
+        await page.wait_for_timeout(100)
+        await row.screenshot(path=folder / f"accepted-1280-{scheme}.png")
+        await quality.check(page, f"autopilot accepted {scheme}", "#tasks-recent")
+        await row.locator(".head .title").click()
         # A worker's chat: Autopilot's line, marked as its own.
         await page.locator("#sidebar").get_by_text("Session store").first.click()
         notice = page.locator(".line.autopilot-notice")

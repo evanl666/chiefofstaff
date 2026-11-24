@@ -2458,9 +2458,13 @@ class Tools:
             )
         elif params.after:
             result["note"] = (
-                "Starts automatically once the owner accepted the tasks it depends on."
-                if params.wait_for == "accepted"
-                else "Starts automatically when the tasks it depends on are done."
+                "Starts automatically when the tasks it depends on are done."
+                if params.wait_for != "accepted"
+                # (Autopilot on: it may accept them; autopilot/results.py.)
+                else "Starts automatically once the tasks it depends on are accepted (by the "
+                "owner, or by Autopilot while it is on)."
+                if self.runtime.autopilot.run()
+                else "Starts automatically once the owner accepted the tasks it depends on."
             )
         elif row["status"] == "queued" and row["activity"].startswith("waiting for memory"):
             result["note"] = (
@@ -3186,6 +3190,10 @@ class Tools:
             "a done task, or another subject: task='new' with a title. Only telling it "
             "something: task='note'."
         )
+
+    def accepter(self, task: dict) -> str:
+        """Who accepted a done task, in the Router's words."""
+        return "Autopilot" if self.runtime.autopilot.accepted_entry(task) else "the owner"
 
     @staticmethod
     def not_in_parallel(target: dict, why: str) -> str:
