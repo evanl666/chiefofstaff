@@ -46,7 +46,7 @@ On the right, everything has one place:
 | --- | --- |
 | **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, PRs of yours ready to merge (*Merge* merges it as shown; anything pushed since stops it: the card says so and goes, and the PR comes back once its new commits are ready. A PR in a stack on GitHub merges through GitHub's merge for stacks, in the background: the card says *Merging…* and goes once it's merged. One above open PRs of its stack first says those merge with it, as GitHub merges a stack from the bottom, and *Merge all 3* then merges them as they were shown; a PR below changed since is shown again first), sends a restart interrupted, failed or blocked tasks. A Slack reply someone answered before you sent it is not sent: its card shows what they wrote, marked new, and its one action is *Send anyway* (held again only if someone writes after that); a reply you emptied is not sent either. A draft its worker withdrew or replaced leaves, and its line in the chat says so (after a reload too). A worker's (or the Slack session's) question stays here until you answer or dismiss it, also when its task was cancelled or finished meanwhile: answering means you want the work, and that task goes on with your answer. One it asked on a card and went on without, as no answer came in time, says so, and leaves once its task ends (see *Questions* below). One the Router answers for you (from what you said before) leaves, and its task goes on. Each of the Slack session's questions has a card of its own (a new one does not replace the last), and your answer reaches it with the question it answers. A note of the Router's that needs you (*The Router*, marked *Urgent* when it cannot wait) stays here until you say *Got it* or *Open* it (it shows in the chat), or write to the Router after it. The approvals that only need your OK (habits, checks, a changed decision, a folder, a PR ready to merge, a sign-in) are one card, *Your OK*, a line each, and what was handled for you is one quiet line under it (see [Your OK and Handled for you](#your-ok-and-handled-for-you)). Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. While the page is open, a short note at the bottom also tells you what comes for you (click it to go there): what needs you, and away from Home news too; not what the session you are looking at says itself, and while you [focus](#focus) only what is urgent. |
 | **Tasks** | Task by task, in four areas after *Needs you*, then *Artifacts*. Every area folds (click its title; its count stays in sight, and it stays as you left it; *Needs you* opens again by itself when something new comes). Every task is one row, the same in every area: its title (click it to open the row into its whole card; **▴** or Esc folds it back), where it stands and why, its latest progress (the step it is in and for how long, *Waiting for background process* when its turn is over and a command it left running goes on, or its latest report), its worker as a small link (its current name, or *Worker chat*; an icon on a narrow panel;
-opens its chat at that task), what it made, and the one action that matters now. A task is finished only once you accepted it and nothing is left to run or monitor. *Needs you*: every finished result (*Awaiting acceptance*; a report that changed no code, opened no PR and has nothing failing is accepted for you a few minutes after you read it, or a day after it finished, and listed under [Handled for you](#your-ok-and-handled-for-you) with *Undo*; otherwise nothing accepts it for you, not time, its worker going on to other work, nor its PR being merged), with *Accept*, *View report*, *Follow up* and *Request changes* (say what to change: its worker is told you did not accept it, and its next report is a new result to accept); questions (why it asks, its choices as buttons, what it does next), tasks stopped, failed or blocked, and news on finished work (*Update*). A row's dot is its place's color, amber under *Needs you* and blue under *Running*; a result you have not opened yet says *New* before its title until you open it. *Running*: the tasks being worked on now (a worker does one at a time; a result you asked more about shows here, *Following up*, while its worker is at it). *Monitoring*: tasks nobody has to act on now that something still has to come for: a review, CI or the merge of a PR it made (also once you accepted it), a reply on a thread it follows, a time it checks back (`check_back`, for a long run), a run it started, a slot (*Queued*), its turn (*Up next*) or its worker's return (*Paused*). A row says what it waits for and on what (*Waiting for approval · app#594*), when it was last checked and when next (a run Chief of Staff does not read itself: when its worker said where it stands, *reported running 3h ago*), and, hover it, what wakes it; long quiet it says so (*No updates for 26h*) and stays here: it is never taken for finished. A check-back is on the runs it names (`runs`, by link or name), else on those its worker declared or updated in the turn it set it; it is kept when the task is reported done while one of them still goes on. On accepted work, its worker's report on a check-back that says each run again as it stood, still going, is what the row says (*reported running just now · next in 59 min*), not an *Update*; anything else is (a run ended, failed or new, a failure said in words only), timed as itself. A run nothing has told of for a day (its worker is not at it and no check-back is on it) is *Status unknown · reported running 2d ago* (since the last word on it, its worker's or GitHub's). Such a run is *status unknown* on Artifacts and on its task's chips too (amber, never folded away; hover: how old the last word is), as one you stopped tracking is *not tracked*, a run on your computer among its task's links included. A finished task with nothing else to wait on then comes to *Needs you* (*Status unknown*), with *Mark ended* and *Stop tracking* on its row (of several such runs, *Mark ended…* and *Stop tracking…* let you pick which), and says so when its worker's later report no longer lists the run (until a report names it again); otherwise **⋯** has them, whatever the task's state. The task leaves *Monitoring* once none of its runs is followed; a run no longer tracked is *not tracked* on Artifacts, gray, never counted as running. A GitHub Actions run (its link may carry *?pr=…*) is read on GitHub every few minutes until it ends; while reading it fails, its tooltip says so, why, and when it was last read. A PR of yours to fix (*CI failing*, *changes requested*, *merge conflicts*) is under *Needs you*; one ready to merge is offered on a *Merge* card there. *Overdue*: no activity for *Stalled after* hours (Settings → General, 4 by default) and nothing to wait on: its worker is asked once where it stands, *Nudge* asks again; no answer within the hour brings it to *Needs you*. *Recently finished*: accepted tasks with nothing left to monitor (a PR you reviewed for someone else ends here once your review is in: news on it comes back as an *Update*; accepted work its worker goes on with as a new task watching all it waits on is that task's row, and *Still following* here), and tasks cancelled or set aside, which say so, never *Done*; the newest first, 30 at a time (*Show more*), for three days. *Monitoring* and *Recently finished* scroll on their own and do not move while the mouse is over them. *Artifacts* (last, so it never pushes your tasks down): the PRs, documents and runs your tasks delivered, by their real names, each PR with what the task did to it (*Created*, *Modified*, *Reviewed*) and where it stands now as GitHub has it (*draft*, *in review*, *changes requested*, *CI failing*, *awaiting approval*, *ready to merge*, *merged*…; a document or run as its worker last said); a PR is listed for the task that made, changed or reviewed it, never for one that only mentions it. What needs a look (failing CI, changes asked for, a failed, waiting or unknown run) comes first, whichever task it is of, each task's together; then the rest, the task with what needs a look first first: one task's merged PRs never push another's failing one out of sight. Three runs of a task or more are one line with the latest, the failed, the waiting and the unknown ones under it in the same card, one line each (its name, then its status in a word, *failed*, *waiting*, *unknown*, *running*, *pending*, *done*, *ended* or *not tracked*, and since when it stands so: *ended · just now* once you marked it; its own words on hover), the rest behind *+N*; the line counts them in the same words, what needs a look most first (*9 runs · 1 failed · 1 waiting · 3 running*; all done, *9 done*). A CI build its worker declared (Jenkins, Buildkite, GitLab, CircleCI, Azure DevOps) is a run; on your computer, where a dev server's page can be called anything (*/pipelines/new*), only one that says which it is (Airflow, Flyte, a Prefect flow run, GitLab's */-/pipelines/*, a Jenkins named so). Files, mockups, screenshots, CSVs, logs, links it only mentions, a document site's home page and a page of this computer (*localhost*, a loopback address, *0.0.0.0* or *[::]*, a *.localhost* name or one your hosts file maps there) are not listed, nor one on your network or on a port of its own said to be serving (a dev server's): they stay on its card, in its report, files and links. A document or a run is listed wherever it is served: anything that can bring a task under *Needs you* is on Artifacts too. **✕** takes one off the list (on a task's runs line, all its runs, with *Undo*); *Show … taken off* brings each back. A PR a task follows that cannot be read says why on its row: no access, not found, GitHub's rate limit or GitHub not answering (with *Retry*); *Stop following* there stops it for that task only. Hover anything for more (its id, worker, credits): the tip goes as soon as the list changes. *Copy report* (markdown for a PR description), *Create PR* (for commits on a branch of its own, a *chief/…* one or one you named, that no PR is from yet), *Rename…* and, when its latest result is about something else, *Move the latest result to a new task…* (with *Undo split* for ten minutes) are under **⋯**. Every count counts tasks. |
+opens its chat at that task), what it made, and the one action that matters now. A task is finished only once you accepted it and nothing is left to run or monitor. *Needs you*: every finished result (*Awaiting acceptance*; a report that changed no code, opened no PR and has nothing failing is accepted for you a few minutes after you read it, or a day after it finished, and listed under [Handled for you](#your-ok-and-handled-for-you) with *Undo*; otherwise nothing accepts it for you, not time, its worker going on to other work, nor its PR being merged), with *Accept*, *View report*, *Follow up* and *Request changes* (say what to change: its worker is told you did not accept it, and its next report is a new result to accept); questions (why it asks, its choices as buttons, what it does next), tasks stopped, failed or blocked, and news on finished work (*Update*). A row's dot is its place's color, amber under *Needs you* and blue under *Running*; a result you have not opened yet says *New* before its title until you open it. *Running*: the tasks being worked on now (a worker does one at a time; a result you asked more about shows here, *Following up*, while its worker is at it). *Monitoring*: tasks nobody has to act on now that something still has to come for: a review, CI or the merge of a PR it made (also once you accepted it), a reply on a thread it follows, a time it checks back (`check_back`, for a long run), a run it started, a slot (*Queued*), its turn (*Up next*) or its worker's return (*Paused*). A row says what it waits for and on what (*Waiting for approval · app#594*), when it was last checked and when next (a run Chief of Staff does not read itself: when its worker said where it stands, *reported running 3h ago*), and, hover it, what wakes it; long quiet it says so (*No updates for 26h*) and stays here: it is never taken for finished. A check-back is on the runs it names (`runs`, by link or name), else on those its worker declared or updated in the turn it set it; it is kept when the task is reported done while one of them still goes on. On accepted work, its worker's report on a check-back that says each run again as it stood, still going, is what the row says (*reported running just now · next in 59 min*), not an *Update*; anything else is (a run ended, failed or new, a failure said in words only), timed as itself. A run nothing has told of for a day (its worker is not at it and no check-back is on it) is *Status unknown · reported running 2d ago* (since the last word on it, its worker's or GitHub's). Such a run is *status unknown* on Artifacts and on its task's chips too (amber, never folded away; hover: how old the last word is), as one you stopped tracking is *not tracked*, a run on your computer among its task's links included. A finished task with nothing else to wait on then comes to *Needs you* (*Status unknown*), with *Mark ended* and *Stop tracking* on its row (of several such runs, *Mark ended…* and *Stop tracking…* let you pick which), and says so when its worker's later report no longer lists the run (until a report names it again); otherwise **⋯** has them, whatever the task's state. The task leaves *Monitoring* once none of its runs is followed; a run no longer tracked is *not tracked* on Artifacts, gray, never counted as running. A GitHub Actions run (its link may carry *?pr=…*) is read on GitHub every few minutes until it ends; while reading it fails, its tooltip says so, why, and when it was last read. A PR of yours to fix (*CI failing*, *changes requested*, *merge conflicts*) is under *Needs you*; one ready to merge is offered on a *Merge* card there. *Overdue*: no activity for *Overdue after* hours (Settings → General, 4 by default) and nothing to wait on: its worker is asked once where it stands, *Nudge* asks again; no answer within the hour brings it to *Needs you*. *Recently finished*: accepted tasks with nothing left to monitor (a PR you reviewed for someone else ends here once your review is in: news on it comes back as an *Update*; accepted work its worker goes on with as a new task watching all it waits on is that task's row, and *Still following* here), and tasks cancelled or set aside, which say so, never *Done*; the newest first, 30 at a time (*Show more*), for three days. *Monitoring* and *Recently finished* scroll on their own and do not move while the mouse is over them. *Artifacts* (last, so it never pushes your tasks down): the PRs, documents and runs your tasks delivered, by their real names, each PR with what the task did to it (*Created*, *Modified*, *Reviewed*) and where it stands now as GitHub has it (*draft*, *in review*, *changes requested*, *CI failing*, *awaiting approval*, *ready to merge*, *merged*…; a document or run as its worker last said); a PR is listed for the task that made, changed or reviewed it, never for one that only mentions it. What needs a look (failing CI, changes asked for, a failed, waiting or unknown run) comes first, whichever task it is of, each task's together; then the rest, the task with what needs a look first first: one task's merged PRs never push another's failing one out of sight. Three runs of a task or more are one line with the latest, the failed, the waiting and the unknown ones under it in the same card, one line each (its name, then its status in a word, *failed*, *waiting*, *unknown*, *running*, *pending*, *done*, *ended* or *not tracked*, and since when it stands so: *ended · just now* once you marked it; its own words on hover), the rest behind *+N*; the line counts them in the same words, what needs a look most first (*9 runs · 1 failed · 1 waiting · 3 running*; all done, *9 done*). A CI build its worker declared (Jenkins, Buildkite, GitLab, CircleCI, Azure DevOps) is a run; on your computer, where a dev server's page can be called anything (*/pipelines/new*), only one that says which it is (Airflow, Flyte, a Prefect flow run, GitLab's */-/pipelines/*, a Jenkins named so). Files, mockups, screenshots, CSVs, logs, links it only mentions, a document site's home page and a page of this computer (*localhost*, a loopback address, *0.0.0.0* or *[::]*, a *.localhost* name or one your hosts file maps there) are not listed, nor one on your network or on a port of its own said to be serving (a dev server's): they stay on its card, in its report, files and links. A document or a run is listed wherever it is served: anything that can bring a task under *Needs you* is on Artifacts too. **✕** takes one off the list (on a task's runs line, all its runs, with *Undo*); *Show … taken off* brings each back. A PR a task follows that cannot be read says why on its row: no access, not found, GitHub's rate limit or GitHub not answering (with *Retry*); *Stop following* there stops it for that task only. Hover anything for more (its id, worker, credits): the tip goes as soon as the list changes. *Copy report* (markdown for a PR description), *Create PR* (for commits on a branch of its own, a *chief/…* one or one you named, that no PR is from yet), *Rename…* and, when its latest result is about something else, *Move the latest result to a new task…* (with *Undo split* for ten minutes) are under **⋯**. Every count counts tasks. |
 
 When a finished task's worker drafted something for you (a Slack reply, a PR review, a reply on
 your own PR), the draft is the one card: the task's own card is in it (*Result of …*: what it
@@ -265,8 +265,8 @@ doing goes to a second worker at once too, busy or not. When you ask for a new w
 something an earlier worker knows, the Router can start it from that worker's conversation
 the same way. A worker on Codex or Claude Code (whose conversations are not forked yet), or one
 whose fork fails, hands its second worker a brief of its work instead: its tasks, what the
-finished ones found, its folders and files. Turn it off in Settings → General (*Give a busy
-worker's new task to a second worker with its context*).
+finished ones found, its folders and files. Turn it off in Settings → General (*A busy
+worker's new task starts at once*).
 
 `spawn_worker` refuses once when related workers exist, so the Router decides explicitly; so
 does a new task for a worker given one in the last half hour ("oh wait, one more thing" is
@@ -274,15 +274,15 @@ more of that task), unless the Router says why it is another. The timeline shows
 for …*, *Continued in …* or *Started …* (or *New task …*) *· new because …*.
 
 Workers close themselves when their PR is merged or closed. Finished workers that follow
-nothing close after *Close idle after* hours (default 24), unless something of theirs is still
-under *Needs you* (a result to review, news, a question, a failed task, a card): those stay in
-the sidebar and the @ list until it is settled. Closing is reversible: talk to a
+nothing close after 24 hours idle (Settings → General → More, *Close finished workers after*),
+unless something of theirs is still under *Needs you* (a result to review, news, a question, a
+failed task, a card): those stay in the sidebar and the @ list until it is settled. Closing is reversible: talk to a
 closed worker, or open it and press *Reopen*, to continue with its conversation and checkout.
 Closing a worker at work stops it and cancels its open tasks, and the Router hears of it;
 *Reopen* (or writing to it) brings back the ones it had started, where they were: stopped,
 waiting for your *Go on* or *Cancel* (or still waiting for your answer).
 
-At most *Parallel workers* run at once (up to 1000); the rest queue.
+At most *Workers at once* (Settings → General) run at once (up to 1000); the rest queue.
 
 **Your computer stays responsive.** A Copilot session is light (an open, idle one takes about
 half a megabyte; one that has worked about ten, plus the MCP servers it starts for itself).
@@ -348,7 +348,7 @@ idle, green once it finished; for a wait, how long replaces *open*. Hover a row 
 or its last answer; the first line of its view says it too. At most five rows show at once,
 those waiting for you first, the rest under *N more*. A row whose status cannot be told for
 sure looks as before, and its tooltip says why. Turn it off with *Show where my other sessions
-stand* in Settings → General.
+stand* in Settings → General → More (which says why, when none of them can say where it stands).
 
 **Send it a message to continue it here.** It becomes a worker, with its conversation so far in
 its timeline, and keeps working in its own folder, inside your code folder or not: nothing is
@@ -430,8 +430,8 @@ files a worktree needs, like `.env`, are copied in from your checkout: by defaul
 Claude Code) lists others instead. Only files git ignores are copied, and never for workers that
 read Slack.
 
-Folders outside the code folder can be added under *Advanced → Other project folders*, and
-*Task folders* puts the task folders somewhere else. A worker's header opens its folder in
+Folders outside the code folder can be added under Settings → General → More → *Other project
+folders*, and *Task folders* there puts the task folders somewhere else. A worker's header opens its folder in
 Finder or VS Code.
 
 Workers run like the Copilot sessions you start in a terminal: they load your plugins, your MCP
@@ -447,7 +447,7 @@ Without the worker sandbox (the default), a worker's folder settings are never h
 word: the worker already runs commands as you, so a hold would add friction, not protection, and
 Chief of Staff skips those checks entirely (nothing read before turns or tools). A hook or server a
 worker plants stays in that folder and loads in later sessions there, yours too: turn the worker
-sandbox on in Settings → Workers for repositories you don't trust. The rest of this section is
+sandbox on in Settings → General (*Sandbox*) for repositories you don't trust. The rest of this section is
 how it works with the sandbox on.
 
 A repository's own Copilot settings load for a worker only as you last let them: their hooks and
@@ -905,9 +905,9 @@ for a request that came without you (a Slack message) reports in that request's 
 Each style applies at once to the sessions that write that way
 for you (the Slack session and workers that read Slack get your Slack style; workers get your
 commit and review style; the Router and workers answer you the way you talk to them), and the
-Router chat says what was learned, with a link to Settings. Settings → *You* → *How you work* shows each, with its version; *Undo* goes back to the
-previous one. Turn *Learn from my Slack messages, PR reviews, commits and Copilot sessions* off
-to stop reading them. Of your Copilot sessions, only those you talked in are read (two messages
+Router chat says what was learned, with a link to Settings. Settings → *You* → *Writing styles*
+(folded, with how many) shows each, with its version; *Undo* goes back to the previous one. Turn
+*Learn from what I write* off to stop reading them. Of your Copilot sessions, only those you talked in are read (two messages
 of yours or more): not a one-shot one, such as a `copilot -p` you ran or one question you asked
 and left, which is written for a script or a single answer; nor sessions a program, a worker or a
 script made (see [Your other sessions](#your-other-sessions)). What was read from
@@ -934,9 +934,8 @@ times or more, and not about secrets, money or what goes out, is kept at once, w
 (*Keep*; *Details* shows the **Learned from your work** card: keep, reword or untick each). Only
 what you keep goes into your sessions' instructions; habits learned while the card waits join it.
 
-Settings → *You* lists the habits in use (remove any, or add your own: they apply from your
-sessions' next message) and shows how close the sessions
-get to you: the share of recommendations you took, drafts you sent as written and results you
+Settings → *You* → *Habits* lists the habits in use (remove any, or add your own: they apply from
+your sessions' next message), and the page's last line shows how close the sessions get to you: the share of recommendations you took, drafts you sent as written and results you
 accepted as they were, over the last 30 days and the 30 before. Usage shows what a result you
 accepted cost, by model.
 
@@ -954,8 +953,8 @@ proof; *Use this check* turns it on.
 From then on, when a worker in that repository says it is done with changes to files the check
 applies to, the check runs on a clean copy of its work. If it fails, the worker is sent back
 once to fix it (or to say why it does not apply); if it still fails, the review card flags it.
-Settings → *You* lists the checks, how often each ran and caught something, and turns
-any off. Checks run in a sandbox: no network, no writes, and nothing in your home folder but the
+Settings → *You* → *Checks* (folded, with how many) lists the checks, how often each ran and
+caught something, and turns any off. Checks run in a sandbox: no network, no writes, and nothing in your home folder but the
 repository is readable. They need macOS (`sandbox-exec`) or `bwrap` on Linux, so none run on
 Windows.
 
@@ -1068,8 +1067,9 @@ Workers commit on their branch but do not push unless the task asks for it: you 
 
 ## Prepared for you: keeping your PRs moving
 
-Off by default. Turn it on in Settings → General (*Keep my PRs moving: prepare fixes and
-replies for my approval*); its own tab, *Prepared for you*, then holds its choices.
+Off by default. Turn it on in Settings → General (*Keep my PRs moving*); its *Options*, under its
+line while it is on, hold its choices (*Settings* on Home's *Prepared for you* opens them), and its
+line says what it does now and what it spent today.
 
 **Your worker PRs.** When a PR a worker opened for you fails CI or gets review comments, Chief of
 Staff prepares what it needs in that same worker: a fix, checked, or replies to the comments.
@@ -1150,7 +1150,7 @@ restart** waits for no turn running, no attempt starts.
 
 **Replies and the AI line.** The first time it would post a reply in a repository, the review
 asks whether replies there say they were drafted with an AI assistant; your answer is kept per
-repository (Settings → *Prepared for you* → *Repositories*). Replies you post are learned from,
+repository (Settings → General → *Keep my PRs moving* → *Options* → *Repositories*). Replies you post are learned from,
 as your edits to drafts are.
 
 **Merge when ready** is per PR, in its ⋯. It merges only the commit you accepted (by accepting
@@ -1461,21 +1461,24 @@ branches it pushes to as it likes, and it opens PRs and reads anything; a push w
 command doesn't say plainly is refused too, saying so. The same for workers on Codex (whose
 ChatGPT apps are off for that reason) and Claude Code.
 
-**With *Ask first*** (yolo off), Chief of Staff also refuses, and the worker asks you: writes
-outside its folders, `sudo`, any force push, piping downloads into a shell, system-level
-destructive commands and `gh issue delete`. Workers that read Slack cannot fetch URLs, and their
+**With *Ask first*** (yolo off), workers ask before risky commands: Chief of Staff also refuses,
+and the worker asks you: writes outside its folders, `sudo`, any force push, piping downloads
+into a shell, system-level destructive commands and `gh issue delete`. Workers that read Slack cannot fetch URLs, and their
 network reaches only GitHub when sandboxed. These checks read commands as text, which can't be
 fully parsed: the push and delete checks are a best effort (a push whose branch a command doesn't
 say plainly, a script fed to a shell on a line that pushes, and a command line too long or
 complex to check, are refused, saying so; what they don't read:
 [Known limits](../SECURITY.md#known-limits)). Protect your default branch on GitHub as well.
 
-**Yolo** is on by default, as in your own Copilot sessions: workers then run without the *Ask
-first* checks. Turn it off in Settings → *Workers* (or per worker in its header's **⋯**: *Ask
-first*). Workers that read Slack keep the checks unless you choose yolo for them there. Either
-way, the sandbox applies when it is on; a worker is kept out of a checkout of yours given to read
-and out of Chief of Staff's private files; a *Prepared for you* step can't reach GitHub; and the
-Router never asks a worker to merge or force-push.
+**Yolo** is on by default: workers act without asking, as in your own Copilot sessions (the *Ask
+first* checks don't run). Tick *Ask first* in Settings → General, whose line says which way it is
+and, under it, what holds either way (*no worker posts, reviews or merges on GitHub as you, pushes
+to main, or force-pushes others' branches*); or choose per worker in its header's **⋯**: *Yolo
+(acts without asking)* or *Ask first (asks before risky commands)*. Workers that read Slack keep
+the checks unless you choose yolo for them there. Either way, the sandbox applies when it is on;
+a worker is kept out of a checkout of yours given to read and out of Chief of Staff's private
+files; a *Prepared for you* step can't reach GitHub; and the Router never asks a worker to merge
+or force-push.
 
 Nothing is sent as you without your approval: what Chief of Staff sends itself (a Slack reply, a
 PR review or reply from its card, what *Prepared for you* publishes) goes only once you approve
@@ -1702,7 +1705,7 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   sandbox, set as Chief of Staff's is for a Copilot worker (writes only in its folders, your
   secrets unreadable, the network as Settings says; your checkout given to read stays read-only
   even as the folder its commands run in), on a version whose check showed it holding. Codex
-  workers can't run while Settings → *Workers* sandboxes workers (Codex's sandbox has not passed
+  workers can't run while Settings → General → *Sandbox* is on (Codex's sandbox has not passed
   Chief of Staff's checks yet); with it off they run as Copilot workers do then, with your caches,
   tools and network (`danger-full-access`), and every edit and every command that writes still
   asks Chief of Staff, so your own checkouts stay read-only to them. Your own Codex `sandbox_mode`
@@ -1852,7 +1855,7 @@ runs the version it had). Installed another way (pip, pipx), or on Windows, the 
 command to run. Plain `uvx chiefofstaff` runs the version uv cached the first time, however old:
 start it with `uvx chiefofstaff@latest`. Chief of Staff reads its own page on PyPI for this, at
 most once a day, and sends nothing about you or your machine; *Say when a newer Chief of Staff is
-out* (Settings → General) turns it off. When Copilot can't start at all, the error says the
+out* (Settings → General → More) turns it off. When Copilot can't start at all, the error says the
 command that updates Chief of Staff.
 
 Your Copilot CLI updates itself, and the Copilot SDK Chief of Staff is built on can lag behind it.

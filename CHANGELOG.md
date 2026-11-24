@@ -53,6 +53,31 @@
   Router or you cancel it. Busy is twenty minutes in a turn now, not ten (or two open tasks, as
   before).
 
+Settings has four pages: General and You are regrouped, and Workers, Advanced and Prepared for
+you are parts of General.
+
+- **Four pages.** *General* holds what *Workers*, *Advanced* and *Prepared for you* held, in groups:
+  *Your work* (the code folder, *Workers at once*, was *Parallel workers*); *Workers* (**Ask
+  first**, which replaces the yolo switch: ticked, workers ask, the same setting the other way
+  round; its line says *Workers ask before risky commands* or *Workers act without asking, as in
+  your own Copilot sessions*, and under it, always, what holds either way, and a worker's ⋯ says it
+  the same way: *Yolo (acts without asking)*, *Ask first (asks before risky commands)*; *Sandbox*,
+  its line saying the same way which way it is, and under it, always, that workers that read Slack
+  are always sandboxed, its *Options*, *Also writable* and the shared caches, there on or off, as
+  they apply to those workers either way); *On its own* (*Keep my PRs moving*, whose *Options* hold
+  what its page held while it is on, its line saying what it does now and spent today; *A busy
+  worker's new task starts at once*); *Keep me posted* (*Daily summary*; *Desktop notifications*,
+  now only where they can show: macOS). *More*, folded: *Close finished workers after … hours idle*,
+  *Overdue after … hours* (was *Stalled after*: Home calls those tasks overdue), other sessions'
+  switch (saying why when none can say where it stands), the update notice, the report footer, other
+  project folders, task folders and where the data is. What a tooltip said is a line under its
+  setting.
+- **You**: *Learn from what I write* (what it read, *Learn now*) and the checks switch; *Writing
+  styles*, *Habits* and *Checks* folded with how many (Habits open, to add one); *Your profile*
+  folded with its first line, or that a draft waits; *Environment notes* with how many.
+- *Workers*, *Advanced* and *Prepared for you* (links, the last page used) open their place in
+  General; messages that named *Settings → Workers* name *Settings → General*.
+
 ## 0.1.57 (2026-11-25)
 
 No worker posts, reviews or merges on GitHub as you, yolo or not; Settings has one page for agents
