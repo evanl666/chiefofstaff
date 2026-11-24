@@ -1831,7 +1831,12 @@ class Tools:
         async def run(params, invocation):
             caller = self.runtime.row_id(invocation.session_id)
             try:
-                result = await handler(params, caller)
+                if self.runtime.autopilot.origins.any():
+                    # What it causes carries its turn's origin (autopilot/origin.py).
+                    with self.runtime.autopilot.origins.acting(caller):
+                        result = await handler(params, caller)
+                else:
+                    result = await handler(params, caller)
             except (ValueError, LookupError, RuntimeError) as exc:
                 return ToolResult(
                     text_result_for_llm=f"Error: {exc}", result_type="failure", error=str(exc)
@@ -5005,7 +5010,15 @@ class Tools:
         replaced = await self.runtime.drafts.supersede(draft)
         self.runtime.add_message(caller, "draft", params.text, {"draft_id": draft["id"]})
         held = ""
-        if handed := self.runtime.drafts.handed_over(draft, row):
+        handed = self.runtime.drafts.handed_over(draft, row)
+        if handed and self.runtime.autopilot.origins.of(caller):
+            # Drafted in a turn Autopilot continued: never sent through the owner's delegation;
+            # it waits for them as any other reply (autopilot/origin.py).
+            handed = None
+            draft = self.store.update_draft(
+                draft["id"], outcome="Not sent at once: Autopilot continued this work."
+            )
+        if handed:
             # The owner handed this message over with their own reaction: the reply in its
             # thread goes out at once (their decision, Settings), unless a check holds it.
             sent, held = await self.runtime.drafts.send_handed(draft, handed)
