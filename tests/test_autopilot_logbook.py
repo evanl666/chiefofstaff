@@ -209,9 +209,11 @@ def test_an_outbox_item_is_delivered_once_after_its_commit(book):
     claimed = book.claim(item)
     assert claimed["state"] == CLAIMED and claimed["payload"] == {"text": "hi"}
     assert book.claim(item) is None, "claimed once"
+    book.stored(item, 41)
     assert book.outbox(CLAIMED)[0]["id"] == item, "unfinished: reconciled at start"
     assert book.finish(item, DONE) and not book.finish(item, DONE)
     assert book.item(item)["state"] == DONE and book.outbox(QUEUED, CLAIMED) == []
+    assert book.item(item)["message_id"] == 41
     with pytest.raises(ValueError, match="outcome"):
         book.finish(item, QUEUED)
 
