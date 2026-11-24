@@ -6,10 +6,11 @@ import asyncio
 import json
 
 import pytest
-from conftest import call_tool, settle
+from conftest import Harness, call_tool, settle
 
 from chiefofstaff import ingress
 from chiefofstaff.autopilot.judge import PARKED_ANSWER
+from chiefofstaff.models import Settings
 
 
 async def on(runtime, **changes):
@@ -92,6 +93,31 @@ async def test_a_question_settled_by_a_page_message_is_answered_quoted(harness):
     assert runtime.autopilot.origins.of(session)["entries"] == [entry["id"]]
     assert runtime.yolo(harness.store.session(session)) is False, "asks first from here"
     assert harness.store.drafts("pending") == []
+
+
+async def test_the_judge_decides_with_the_routers_model_and_effort_on_copilot(tmp_path):
+    """It decides for the owner: the Router's model and effort (Settings → Models), not the
+    workers', on Copilot; and it follows a change of the Router's model."""
+    settings = Settings(model="fast-model", role_models={"router": "smart-model"},
+                        role_efforts={"router": "high"})  # fmt: skip
+    harness = Harness(tmp_path / "data", settings)
+    runtime = await harness.connect()
+    await on(runtime)
+    made = await worker(runtime, harness.router_id)
+    session = made["session_id"]
+    assert harness.session(session).options["model"] == "fast-model", "a worker: theirs"
+    owner = await said_in_page(runtime, session, "Postgres for v1, please.")
+    answer = await asked(runtime, session, "Which store for sessions?", ["Postgres", "Redis"])
+    judge = await judge_proposes(harness, answer="Postgres", basis=[cite(owner, "Postgres for v1")])
+    await asyncio.wait_for(answer, 5)
+    options = harness.session(judge["id"]).options
+    assert (options["model"], options.get("reasoning_effort")) == ("smart-model", "high")
+    assert runtime.agent(judge["id"]) == "copilot"
+    old = runtime.store.settings()
+    new = old.model_copy(update={"role_models": {"router": "fast-model"}})
+    runtime.store.save_settings(new)
+    assert runtime.chosen_model(harness.store.session(judge["id"])) == "fast-model"
+    assert runtime.chosen_model(harness.store.session(session)) == "fast-model"
 
 
 @pytest.mark.parametrize(

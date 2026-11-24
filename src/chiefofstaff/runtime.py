@@ -113,7 +113,7 @@ from .habits import Habits
 from .handled import Handled
 from .learning import Learning
 from .ledger import Ledger
-from .models import AS_SAVED, Attachment, SentItem, Settings
+from .models import AS_SAVED, Attachment, Role, SentItem, Settings
 from .notify import mac_notification
 from .others import Others
 from .peers import Peers
@@ -921,6 +921,9 @@ class Runtime:
         self.copilot_starting = self.agent_waits = False
         self.hosts_failed: dict[str, str] = {}
         self.models_cache: tuple[float, list[dict]] = (0.0, [])
+        # Autopilot's judge sessions (kv `judge:<id>`), read once: they think with the Router's
+        # model and effort (model_role).
+        self.judge_ids: set[str] | None = None
         # Copilot workers that wait for the owner to say to use their folder's changed agent
         # settings (settings_stop): not started from the queue meanwhile; and why, in words.
         self.settings_held: set[str] = set()
@@ -6654,7 +6657,19 @@ class Runtime:
         if kind := self.helper_kind(row):
             own = agents.kind_model(self.store, kind, COPILOT_AGENT, settings)["model"]
             return row.get("model") or own or settings.model
-        return row.get("model") or settings.role_models.get(row["role"]) or settings.model
+        return row.get("model") or settings.role_models.get(self.model_role(row)) or settings.model
+
+    def model_role(self, row: dict) -> Role:
+        """The role whose model and effort in Settings a session takes: its own; Autopilot's
+        judge, which decides for the owner, the Router's."""
+        if row["role"] == WORKER and row.get("id") in self.judges():
+            return "router"
+        return row["role"]
+
+    def judges(self) -> set[str]:
+        if self.judge_ids is None:
+            self.judge_ids = {key.split(":", 1)[1] for key in self.store.keys("judge:")}
+        return self.judge_ids
 
     def helper_kind(self, row: dict) -> str:
         """Watch for you's kind or the helpers' for one of Chief of Staff's helper workers ("" for
@@ -6706,7 +6721,7 @@ class Runtime:
         if kind := self.helper_kind(row):
             own = agents.kind_model(self.store, kind, COPILOT_AGENT)["effort"]
         else:
-            own = self.store.settings().role_efforts.get(row["role"], "")
+            own = self.store.settings().role_efforts.get(self.model_role(row), "")
         effort = row.get("effort") or own
         if self.fallback(row):
             # Copilot refused this session's model with these options: the model's own defaults.

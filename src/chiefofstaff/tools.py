@@ -2325,6 +2325,8 @@ class Tools:
             self.store.set(f"parts:{task['id']}", json.dumps(parts))
         if special:  # Its own tools: see Runtime.tool_names.
             self.store.set(f"{special}:{session_id}", "1")
+            if special == "judge":
+                self.runtime.judges().add(session_id)  # Its model: Runtime.model_role.
         # A PR the task is to act on is followed: its reviews, replies and CI come to the worker
         # (not one its instructions only mention: news there is not this task's).
         self.runtime.follow(
