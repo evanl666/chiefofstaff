@@ -139,7 +139,9 @@ async def test_stop_withdraws_what_was_queued_and_ends_with_its_summary(harness)
     assert run["state"] == "ended" and run["ended_by"] == "you"
     summary = harness.store.messages(harness.router_id)[-1]
     assert summary["kind"] == "update" and summary["meta"]["autopilot_summary"]["run"] == run["id"]
-    assert summary["text"] == "Autopilot did 1 thing and left 0 for you."
+    said = "Autopilot did 1 thing and left 0 for you. 0 of 100 credits."
+    assert summary["text"].splitlines()[1] == said
+    assert summary["meta"]["autopilot_summary"]["groups"][0]["name"] == "Done"
     assert summary["meta"]["deferred"], "the Router hears it is off with its next message"
     assert book.check().ok and harness.store.get("autopilot:head")
     # Stop again: nothing on.
@@ -381,3 +383,60 @@ async def test_stop_stops_a_turn_it_continued_and_its_task_waits_with_go_on(harn
     assert harness.store.get(f"stopped:{other['task_id']}") is None, "the owner's own goes on"
     row = harness.store.session(worker["session_id"])
     assert runtime.yolo(row) is False, "Ask first stays until the owner writes to it"
+
+
+async def test_the_router_answers_what_it_did_from_its_record_only_once_ticked(harness):
+    runtime = await harness.connect()
+    router = harness.store.session(harness.router_id)
+    assert "autopilot_log" not in runtime.tool_names(router)
+    assert "autopilot_log" not in runtime.session_prompt(router, None)
+    await tick(runtime)
+    router = harness.store.session(harness.router_id)
+    assert "autopilot_log" in runtime.tool_names(router)
+    assert "Answer what Autopilot did only from autopilot_log" in runtime.session_prompt(
+        router, None
+    )
+    state = await runtime.autopilot.start(None, by="home")
+    runtime.autopilot.book.append(state["run"], "answered", "Answered “Which store?”: Postgres")
+    found = json.loads(
+        (await call_tool(runtime, "autopilot_log", router["id"])).text_result_for_llm
+    )
+    assert [e["kind"] for e in found["entries"]] == ["started", "answered"]
+    assert found["counts"] == {"started": 1, "answered": 1}
+    assert found["entries"][1]["link"].startswith("#autopilot/e")
+    refused = await call_tool(runtime, "autopilot_log", harness.router_id, kind="answered")
+    assert [e["kind"] for e in json.loads(refused.text_result_for_llm)["entries"]] == ["answered"]
+    await tick(runtime, autopilot=False)
+    assert "autopilot_log" not in runtime.tool_names(harness.store.session(harness.router_id))
+
+
+async def test_a_daily_summary_due_during_a_short_run_is_folded_into_its_card(harness):
+    runtime = await harness.connect()
+    await tick(runtime)
+    await runtime.autopilot.start(runtime.autopilot.until_of("2h"), by="home")
+    assert runtime.autopilot.fold_digest("Daily summary\n• Finished: Docs") == ""
+    await runtime.focus.start(30)
+    await runtime.focus.end()
+    stopped = await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    await settle(runtime)
+    assert stopped["run"] is None
+    card = harness.store.messages(harness.router_id)[-1]["meta"]["autopilot_summary"]
+    assert card["folded"][0] == "Daily summary\n• Finished: Docs"
+    assert card["folded"][1].startswith("While you focused (")
+    assert not [m for m in harness.store.messages(harness.router_id)
+                if m["meta"].get("focus_summary")], "never two cards for the same hours"  # fmt: skip
+
+
+async def test_an_open_ended_run_has_its_part_in_each_daily_summary(harness):
+    runtime = await harness.connect()
+    await tick(runtime)
+    state = await runtime.autopilot.start(None, by="home")
+    runtime.autopilot.book.append(state["run"], "accepted", "Accepted “Docs”")
+    said = runtime.autopilot.fold_digest("Daily summary\n• Finished: Docs")
+    assert said.splitlines()[-1].startswith(
+        "• Autopilot is still on (until you turn it off), since"
+    )
+    assert said.splitlines()[-1].endswith(": 1 done, 0 left for you")
+    assert runtime.autopilot.book.run(state["run"])["summarized"]
+    again = runtime.autopilot.fold_digest("")
+    assert again.endswith(": 0 done, 0 left for you"), "its card covers what came after"

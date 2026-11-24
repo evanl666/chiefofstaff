@@ -4627,7 +4627,8 @@ class Runtime:
 
     def tool_names(self, row: dict) -> list[str]:
         if row["role"] == ROUTER:
-            return ROUTER_TOOLS
+            # Autopilot's record, once its line is ticked (autopilot/).
+            return ROUTER_TOOLS + (["autopilot_log"] if self.store.settings().autopilot else [])
         if (special := self.special(row)) in TOOLLESS:
             return TOOLLESS[special]
         if special == "connector":
@@ -4710,6 +4711,8 @@ class Runtime:
                 )
         if row["role"] == ROUTER and self.shepherd.on():
             prompt = prompts.with_shepherd_rule(prompt)
+        if row["role"] == ROUTER and settings.autopilot:
+            prompt = prompts.with_autopilot_rule(prompt)
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
         prompt += self.learning.block(row)
@@ -11587,6 +11590,9 @@ class Runtime:
         since = float(self.store.get("digest_at") or moment - 86400)
         self.store.set("digest_at", str(moment))
         text = digest(self, since, moment)
+        if self.autopilot.ticked:
+            # Due during an Autopilot run: folded into its card, or its part said each day.
+            text = self.autopilot.fold_digest(text)
         if text:
             self.add_message(self.router_id(), "update", text, {"digest": True}, unread=True)
             self.alert(text.splitlines()[0], session_id=self.router_id(), needs_action=False)
@@ -12277,6 +12283,8 @@ class Runtime:
             await self.refresh(ROUTER)  # Its one rule and its tools' shepherd field.
         if old.autopilot or new.autopilot:
             await self.autopilot.settings_changed(old, new)
+        if old.autopilot != new.autopilot:
+            await self.refresh(ROUTER)  # Its one rule and autopilot_log come and go with it.
         if old.other_sessions != new.other_sessions:
             # First, before anything awaits: once the save returns, nothing more is told.
             self.others.switch(new.other_sessions)

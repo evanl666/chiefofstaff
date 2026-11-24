@@ -84,8 +84,7 @@ class Focus:
                     kind="notice",
                     display=f"Focus ended at {clock}",
                 )
-        if started:
-            text = self.summary(started)
+        if started and not self.runtime.autopilot.fold(text := self.summary(started)):
             with suppress(RuntimeError):
                 self.runtime.add_message(
                     self.runtime.router_id(), "update", text, {"focus_summary": True}, unread=True
