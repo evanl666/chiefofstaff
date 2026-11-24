@@ -1537,7 +1537,10 @@ async def test_workers_open_and_resume_on_copilots_own_runtime_in_experimental_m
         opened = [path.name for path in (home / "session-state").glob("*-*-*-*-*")]
         assert len(opened) == 1
         logs = "".join(path.read_text() for path in (home / "logs").glob("*.log"))
-        assert "Installed 1 native extension(s)" in logs
+        # It ran the extension: "Installed 1 native extension(s)" (to 1.0.114), "loaded 1
+        # extension(s)" (1.0.115), then the extension's own process.
+        assert re.search(r"Installed 1 native extension\(s\)|loaded 1 extension\(s\)", logs)
+        assert "extension.mjs ===" in logs
     backend = await on_fallback()
     try:
         assert backend.fallback and backend.fallback[1] == FALLBACK_CLI
