@@ -1052,25 +1052,37 @@ The row's ⋯ adds *Stop looking after this PR* (its news then comes to its work
 
 **How a fix is checked.** The fix is a commit on top of the PR's latest commit, made in the worker's
 checkout when that is at the same commit with nothing uncommitted; otherwise in a fresh copy,
-leaving the worker's branch and any unpushed work as they are (the review says so). A repository the
-worker cloned into its own folder is used only while it is at that commit (no copy is made of it,
-and its fix isn't run on frozen copies). Then Chief of Staff runs the test command that failed, in
-the worker's restricted session, on two frozen copies, one of the PR as it is and one with the fix,
-and the review says what it showed: which tests failed before and pass now, and whether any test
-stopped running. Test names are read for pytest, Go, cargo and vitest; for other runners the review
-says which tests ran was not checked. A fix that skips or weakens a test, edits CI or changes what
-the checks check is never hidden among the rest: it is marked, and its parts come first.
+leaving the worker's branch and any unpushed work as they are (the review says so). Either way its
+git works in a folder of its own: your repository, which the worker's checkout shares with yours,
+stays read-only to it, and Chief of Staff moves its commit in once it ends (onto the worker's
+branch, when it worked in the worker's checkout). A repository the worker cloned into its own folder
+is used only while it is at that commit (no copy is made of it, and its fix isn't run on frozen
+copies). Then Chief of Staff runs the test command that failed, in the worker's restricted session,
+on two frozen copies, one of the PR as it is and one with the fix, and the review says what it
+showed: which tests failed before and pass now, and whether any test stopped running. Test names are
+read for pytest, Go, cargo and vitest; for other runners the review says which tests ran was not
+checked. A fix that skips or weakens a test, edits CI or changes what the checks check is never
+hidden among the rest: it is marked, and its parts come first.
 
 **While it prepares, the worker runs restricted.** For that turn only: no GitHub (no `git push`,
-no `gh`, no GitHub hosts at all), no credentials, no MCP servers, no Slack, and the network only
-for the package registries its project installs from (PyPI, npm, crates.io, Go, and the hosts you
-list under *Other hosts fixes may download from*). Its tools use workers' own package caches, as
-a sandboxed worker's do; yours stay read-only. This computer's own servers are reachable only
-for a repository where you tick *Its tests may use this computer's servers*. Chief of Staff
-publishes what you approve itself, as your account, with git hooks off and a push that only goes
-out if the branch is still where the plan found it. Before the first fix on a new version of
-Copilot, Chief of Staff checks that those limits hold on this computer; until they do, nothing is
-prepared.
+no `gh`, no GitHub hosts at all), no credentials (none of your git, GitHub, SSH, keychain, package
+registry or cloud sign-ins), no MCP servers, no Slack, your repository read-only, and the network
+only for the package registries its project installs from (PyPI, npm, crates.io's index and
+downloads, Go, and the hosts you list under *Other hosts fixes may download from*). Its tools use
+workers' own package caches, as a sandboxed worker's do; yours stay read-only. This computer's own
+servers are reachable only for a repository where you tick *Its tests may use this computer's
+servers*. Chief of Staff publishes what you approve itself, as your account, with git hooks off
+and a push that only goes out if the branch is still where the plan found it. Before the first
+fix on a new version of Copilot, Chief of Staff checks that those limits hold on this computer;
+until they do, nothing is prepared.
+
+**What those limits don't stop.** A fix's tests run your project's code, and its dependencies'. The
+registries it may reach take uploads from anyone with an account of their own there (an npm or
+RubyGems publish), Go's module proxy fetches any module path it is asked for, and Go's large
+downloads come from a storage host (storage.googleapis.com) that takes uploads to a link someone
+else signed. So code that means to can still carry what is in the checkout out through those hosts,
+by its author's account; none of your accounts can be used for it. A registry that needs your
+sign-in to download from can't be used while it prepares.
 
 **Levels and credits.** For each kind (*CI failures*, *Review comments*): *Off*, *Suggest* (it
 offers *Fix it*) or *Prepare* (it prepares at once). Work you didn't ask for spends at most
@@ -1114,7 +1126,8 @@ take yet and why (a fork, stacked, a draft). *Hand to a worker* starts a task of
 checks the branch out in a worktree of its own; the PR then is that task's, and kept moving as
 above. You can also ask the Router: "keep acme/api#117 moving".
 
-Not yet: PRs from forks, stacked PRs, Codex or Claude workers, and making any change without your
+Not yet: PRs from forks, stacked PRs, Codex or Claude workers (Codex has no sandbox for it, and
+Claude Code's can't keep commands from your keychain), and making any change without your
 approval.
 
 ## Watches: what to look out for
