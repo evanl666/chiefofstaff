@@ -64,7 +64,9 @@
   - **None of your package registry or cloud sign-ins can be read** (npm, PyPI, cargo, RubyGems,
     Gradle, Maven, Docker, AWS, Google Cloud and the like), so nothing can be published or
     uploaded as you through the hosts it downloads from. A registry that needs your sign-in to
-    download from can't be used while it prepares.
+    download from can't be used while it prepares: its PR's row then says *Can't prepare fixes
+    here: its install needs your sign-in to a private registry*, and no fix is tried there for
+    a day.
   - **A Rust project reaches only where cargo downloads from** (index.crates.io and
     static.crates.io), not crates.io itself, which takes publishes.
   - **Still on Copilot workers only.** On Claude Code, preparing stays off: Claude's sandbox

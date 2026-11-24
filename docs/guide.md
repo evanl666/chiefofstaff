@@ -1077,7 +1077,8 @@ RubyGems publish), Go's module proxy fetches any module path it is asked for, an
 downloads come from a storage host (storage.googleapis.com) that takes uploads to a link someone
 else signed. So code that means to can still carry what is in the checkout out through those hosts,
 by its author's account; none of your accounts can be used for it. A registry that needs your
-sign-in to download from can't be used while it prepares.
+sign-in to download from can't be used while it prepares: when its install fails for that, its PR's
+row says so, and no fix is tried there for a day.
 
 **Levels and credits.** For each kind (*CI failures*, *Review comments*): *Off*, *Suggest* (it
 offers *Fix it*) or *Prepare* (it prepares at once). Work you didn't ask for spends at most

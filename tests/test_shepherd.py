@@ -233,6 +233,61 @@ async def test_a_step_reaches_where_its_project_downloads_from_not_a_registrys_a
     assert (policy.allowed_hosts, policy.outbound) == (hosts, True)
 
 
+E401 = """npm error code E401
+npm error 401 Unauthorized - GET https://npm.acme.dev/@acme%2fui - authentication required
+npm error A complete log of this run can be found in: /w/.npm/_logs/debug-0.log
+"""
+OWN_401 = """FAILED tests/test_login.py::test_expired - assert 401 == 200
+ +  where 401 = <Response [401]>.status_code (GET http://testserver/login)
+1 failed, 12 passed in 0.31s
+"""
+
+
+@pytest.mark.parametrize(
+    ("line", "output", "refused"),
+    [("npm ci", E401, True), ("uv run pytest -q", OWN_401, False)],
+)
+async def test_an_install_that_needs_the_owners_sign_in_says_so_on_the_prs_row(
+    world, line, output, refused
+):
+    """The owner's registry sign-ins are never a step's: an attempt whose install was refused
+    for one says so in one line on its PR's row, and none is tried for a day (each would fail
+    the same way). A test's own 401 is the failure to fix, not that."""
+    from types import SimpleNamespace
+
+    runtime = await claimed(world)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    session = world.session()
+    session.emit("tool.execution_start", tool_name="bash", tool_call_id="i1",
+                 arguments={"command": line})  # fmt: skip
+    session.emit(
+        "tool.execution_complete", tool_call_id="i1", success=False,
+        result=SimpleNamespace(content=output), shell_execution=SimpleNamespace(exit_code=1),
+    )  # fmt: skip
+    await settle(runtime)
+    await step_result(runtime, world.worker, step=step["id"], outcome="diagnosis",
+                      summary="Its packages could not be installed.")  # fmt: skip
+    session.emit("session.idle")
+    await settle(runtime)
+    await settle(runtime)
+    ended = runtime.shepherd.control.step(step["id"])
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    if not refused:
+        assert ended["state"] == "prepared" and ended["plan"]["kind"] == "diagnosis", ended
+        return
+    assert ended["state"] == "refused", ended
+    assert view["line"] == (
+        "Can't prepare fixes here: its install needs your sign-in to a private registry."
+    )
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    again = runtime.shepherd.control.steps(TARGET)[-1]
+    assert again["id"] != step["id"] and again["state"] == "refused", again
+    assert not runtime.shepherd.marked(world.worker)
+
+
 async def test_a_step_never_reads_the_owners_registry_or_cloud_credentials(world):
     """With them, a registry it downloads from would take a publish as the owner (npm, PyPI,
     cargo), and storage.googleapis.com an upload: they are unreadable, as for a worker that

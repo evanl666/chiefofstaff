@@ -763,9 +763,19 @@ class Steps:
         self.publish_task(step)
 
     async def conclude(self: Shepherd, step: dict):  # type: ignore[misc]
-        """The attempt's result as a plan, a diagnosis, or nothing."""
+        """The attempt's result as a plan, a diagnosis, or nothing; refused, said on its PR's
+        row, where its install needed the owner's sign-in to a registry (and no commit came)."""
+        from .shepherd import SIGN_IN_WHY, needs_sign_in
+
         result = step["result"] or {}
         outcome = result.get("outcome")
+        ran = self.store.all(
+            "SELECT command, output FROM commands WHERE run_id=? ORDER BY id", (step["run_id"],)
+        )
+        if not result.get("commit") and needs_sign_in([(r["command"], r["output"]) for r in ran]):
+            self.store.set(f"signin:{step['target']}", str(time.time()))
+            self.end_step(step, "refused", SIGN_IN_WHY)
+            return
         if not outcome:
             self.end_step(step, "nothing", "It ended without a result.")
             return
