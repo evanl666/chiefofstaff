@@ -43,7 +43,17 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from . import agents, agentsetup, caches, compat, prompts, settings_guard, threads, updates
+from . import (
+    agents,
+    agentsetup,
+    caches,
+    compat,
+    ingress,
+    prompts,
+    settings_guard,
+    threads,
+    updates,
+)
 from . import workspaces as workspaces_module
 from .abilities import Abilities
 from .accounts import Accounts
@@ -9165,6 +9175,10 @@ class Runtime:
             and (same := self.repeated(session_id, kind, text, meta or {}))
         ):
             return same  # The same answer again within a minute (a turn retried, say): once.
+        if kind == "owner" and (channel := ingress.current()):
+            # How the owner's word came in (the page, an away answer): only the page's is theirs
+            # for Autopilot (ingress.py). Never drawn, never in a prompt.
+            meta = {**(meta or {}), "ingress": channel}
         message = self.store.add_message(session_id, kind, text, meta)
         if kind in DOING and self.store.get(f"untouched:{session_id}"):
             # Its first step: Restart on… gives way to Continue with… (its view says so with

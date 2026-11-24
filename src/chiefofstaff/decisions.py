@@ -24,7 +24,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from . import catalog
+from . import catalog, ingress
 from .envelope import wrap
 from .models import DraftDecision, NestedArguments
 from .roles import ROUTER, WORKER
@@ -407,6 +407,9 @@ class Decisions:
         choice = clean(decision.text, 500)
         if not choice:
             raise ValueError("Pick an option or write your decision.")
+        if channel := ingress.current():
+            # How their answer came in (the page, an away answer): see ingress.py.
+            self.store.set(f"ingress:{card['id']}", channel)
         tasks = [asker["task_id"] for asker in target["askers"] if asker["task_id"]]
         replaces = [self.current(target["replaces"])["id"]] if target.get("replaces") else []
         recorded = await self.record(
