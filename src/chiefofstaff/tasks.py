@@ -203,7 +203,10 @@ class TaskBook:
         after: tuple[str, ...] | list[str] = (),
         needs: str = "result",
         criteria: list[str] | None = None,
+        request: str = "",
     ) -> dict:
+        """`request`: the owner message it was made for (Teams' `req:` and `reqtasks:` stamps,
+        written with it); "" when it was made for none."""
         if status not in STATUSES:
             raise ValueError(f"Invalid task status: {status}")
         if needs not in {"result", "accepted"}:
@@ -221,6 +224,10 @@ class TaskBook:
                 (identifier, dependency, needs),
             )
         self.store.execute("UPDATE sessions SET task_id=? WHERE id=?", (identifier, session_id))
+        if request:
+            self.store.set(f"req:{identifier}", request)
+            made = json.loads(self.store.get(f"reqtasks:{request}") or "[]")
+            self.store.set(f"reqtasks:{request}", json.dumps([*made, identifier]))
         if status == "running":
             self.start_run(identifier, "start")
         task = self.get(identifier)
