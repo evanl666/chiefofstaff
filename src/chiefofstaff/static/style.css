@@ -1227,6 +1227,9 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .event.waiting .mark { color: var(--amber); }
 .event.failed .mark { color: var(--red); }
 .event .what { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soft); }
+/* An answer the owner asked for: a small Answer label, its words in the text's colour. */
+.event .chip.answer { padding: 0 7px; border-radius: 9px; line-height: 18px; white-space: nowrap; }
+.event.answer .what { color: var(--text); }
 .event button.link { flex: none; min-height: 28px; padding: 0 6px; margin: 0; font-size: var(--small); color: var(--muted); border-radius: 6px; }
 .event:hover button.link, .event button.link:focus-visible { color: var(--accent); }
 .event button.link:not(:disabled):hover { background: var(--hover); color: var(--accent); }

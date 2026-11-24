@@ -497,6 +497,15 @@ FIXES: list[Allow] = [
         element="#tasks-teams, #session-list .team-line, #needs .card.team-wait",
         views=r"^(home|sidebar)",
     ),
+    # 0.1.57 (owner report): an answer the owner asked for (the Router asked a worker for them,
+    # or they asked it on Home) stands apart on Home: an Answer label, its worker's short name
+    # and its first line in the text's colour (was "Answer/Update from “<task>”: …", muted).
+    Allow(
+        "Home's answer line: an Answer label, its worker's short name",
+        element='#timeline .event.answer, #timeline .event:has(.what:is([title^="Answer/Update '
+        'from"], [title^="Answer from"]))',
+        views=r"^home",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

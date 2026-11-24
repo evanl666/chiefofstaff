@@ -138,7 +138,8 @@ longer one is not sent but stays for you to shorten.
 
 **Progress:** ask the Router ("how is it going?"). It reads what each worker is doing now and
 said last, and answers at once instead of waiting on the workers. Ask it to put a question to a
-worker and the worker's *Answer/Update* comes to Home once; it changes nothing about its task.
+worker and the worker's answer comes to Home once, a line marked *Answer* with the worker's
+short name; it changes nothing about its task.
 A worker's routine progress reports stay quiet, on its task's card: the latest, with the four
 before it folded under *Earlier updates*. A message you send a worker in
 a long step (a query, a build, a job) reaches it at once: Copilot moves the command it runs to
