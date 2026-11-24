@@ -151,6 +151,10 @@ class Allow:
     views: str = ""
     # A count only this many more on the side tested (one more event, say), nothing else.
     more: int = 0
+    # False: the views `views` names are not photographed at all, on either side (no screenshot,
+    # no DOM snapshot), so one may exist on one side only: for a view a release redraws on
+    # purpose, compared by what it holds and does instead (Settings v2: SETTINGS_V2).
+    pixels: bool = True
     # A text changed only by what this regex finds: the same on both sides once each match of
     # it is taken out (a key added inside a tool's JSON answer, say).
     without: str = ""
@@ -158,11 +162,15 @@ class Allow:
     def matches(
         self, path: str, after: Any, text_lines: list[str] | None, before: Any = None
     ) -> bool:
-        if self.element and not (self.setting or self.data):
-            return False
+        if (self.element or not self.pixels) and not (self.setting or self.data):
+            return False  # About pictures only.
         if self.setting:
             key = re.escape(self.setting)
-            if not re.search(rf"(\./api/state\.settings|\.db\.settings\.1\.value)\.{key}$", path):
+            # (Settings' own field of it, and what Save sent of it: settings_round_trip.)
+            where = (
+                r"\./api/state\.settings|\.db\.settings\.1\.value|^page\.settings\.(?:fields|sent)"
+            )
+            if not re.search(rf"(?:{where})\.{key}$", path):
                 return False
         if self.data and not re.search(self.data, path):
             return False
@@ -788,6 +796,11 @@ FEATURES["proactive"] = Feature(
             element="#settings-tabs [data-tab=proactive], #settings-pane .tab[data-tab=proactive]",
             views=r"^settings-",
         ),
+        Allow(
+            "its tab's fields in Settings",
+            data=r"^page\.settings\.fields\.(?:proactive_worker_prs|proactive_my_prs|level_[\w-]+"
+            r"|proactive_budget|step_hosts)$",
+        ),
         Allow("its part of the state", data=r"\./api/state\.shepherd$"),
         Allow("its tables", data=rf"\.db\.{SHEPHERD_TABLES}$"),
         Allow(
@@ -858,6 +871,30 @@ INSTALLED = [
                        "chiefofstaff.backend_claude")
     ),
 ]  # fmt: skip
+
+# Settings v2, phase 1 (docs/design/settings-v2.md §9.5): an intentional change of the Settings
+# view, so for this release it is compared by what it holds (every named field once mounted, by
+# name: its kind and value) and what it does (Save with nothing changed: what it sends and what
+# is stored), not by its pixels; Home stays strict, also as it is after Settings closed
+# (home-after-settings-*). Allowed in every run. The next release's baseline is this one, and
+# compares Settings' pictures again (this list removed).
+SETTINGS_V2 = [
+    Allow(
+        "Settings v2 (docs/design/settings-v2.md): its views are compared by fields and round trip",
+        views=r"^settings",
+        pixels=False,
+    ),
+    Allow(
+        "Settings v2: Copilot's and each agent's model, a menu that keeps what it can't list "
+        "(§8.7), not a free text field: the same value",
+        data=r"^page\.settings\.fields\.(?:model|model_(?:router|worker|slack|watchdog)|agent_\w+_model)$",
+        without=r"^(?:input:text|select:select-one):",
+    ),
+    Allow(
+        "Settings v2: an agent's effort, settable now (§9.1)",
+        data=r"^page\.settings\.fields\.agent_\w+_effort$",
+    ),
+]
 
 # Copilot alone (--copilot-alone: no other coding agent on the PATH, the owner's hidden too): the
 # agent picker shows nothing of other agents anywhere, so this tree is v0.1.48 itself but for the
@@ -1939,6 +1976,7 @@ class Camera:
     def __init__(self, folder: Path, allowances: dict[str, Allow]):
         self.folder = folder
         self.elements = {name: a for name, a in allowances.items() if a.element}
+        self.unseen = {name: a for name, a in allowances.items() if not a.pixels}
         self.dom: dict[str, str] = {}
         self.hidden: Counter = Counter()  # Allowance -> screenshots it hid something in.
 
@@ -1952,13 +1990,23 @@ class Camera:
     def skipped(self, view: str) -> str:
         return ", ".join(self.applying(view).values())
 
+    def unpictured(self, view: str) -> bool:
+        """Whether an allowance keeps this view out of the comparison of pictures (pixels=False)."""
+        return any(
+            not a.pixels and (not a.views or re.search(a.views, view)) for a in self.unseen.values()
+        )
+
     async def snapshot(self, page, view: str, selector: str, skip: str = ""):
+        if self.unpictured(view):
+            return
         skip = ", ".join(filter(None, [self.skipped(view), skip]))
         self.dom[view] = await page.evaluate(DOM, [selector, skip])
 
     async def shoot(
         self, page, view: str, scheme: str, selector: str = "", dom: str = "", restore=True
     ):
+        if self.unpictured(view):
+            return
         skip = self.skipped(view)
         for name, element in self.applying(view).items():
             if await page.evaluate("s => document.querySelectorAll(s).length", element):
@@ -1986,6 +2034,7 @@ async def photograph(
     camera = Camera(folder, allowances)
     requests: set[str] = set()
     errors: list[str] = []
+    held: dict = {}
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         for scheme in SCHEMES:
@@ -1998,7 +2047,9 @@ async def photograph(
 
             def requested(request):
                 if "/api/" in request.url:
-                    body = request.post_data or ""
+                    # (A Save's body is compared field by field: settings_round_trip's `sent`.)
+                    saving = request.url.endswith("/api/settings") and request.method == "POST"
+                    body = "" if saving else request.post_data or ""
                     requests.add(
                         f"{request.method} {request.url.split(str(port), 1)[-1]} {body}".strip()
                     )
@@ -2038,19 +2089,84 @@ async def photograph(
                         await camera.shoot(page, f"sidebar-external-{width}", scheme, "#sidebar")
                         await external.click()
                 await settings(page, camera, scheme, width)
+            if scheme == SCHEMES[0]:
+                # What Settings holds and does: every field once mounted, and a Save of nothing
+                # changed; then Home again, as it is after Settings closed.
+                held = await settings_round_trip(page)
+                for width in WIDTHS:
+                    await page.set_viewport_size({"width": width, "height": HEIGHT})
+                    await quiet(page)
+                    await page.evaluate(PINNED)
+                    await camera.shoot(page, f"home-after-settings-{width}", scheme)
             await context.close()
         await browser.close()
     return {"requests": sorted(requests), "errors": sorted(set(errors)), "dom": camera.dom,
-            "hidden": camera.hidden}  # fmt: skip
+            "hidden": camera.hidden, "settings": held}  # fmt: skip
 
 
 PINNED = """() => { const chat = document.querySelector("#scroller"); if (chat) chat.scrollTop = chat.scrollHeight; }"""
-AGENTS_LOOKED = """() => ![...document.querySelectorAll("#agents-rows [role=status]")].some(
-  (line) => line.textContent === "Checking…")"""
+# Agents & models shown: its look answered (data-looked, settings-v2.md §3.6); before Settings
+# v2, the Coding agents tab's rows no longer "Checking…".
+AGENTS_LOOKED = """() => {
+  const page = document.querySelector("#settings-page-agents");
+  if (page && !page.hidden) return ["none", "done", "failed"].includes(page.dataset.looked);
+  return ![...document.querySelectorAll("#agents-rows [role=status]")].some(
+    (line) => line.textContent === "Checking…");
+}"""
+# Every named control of Settings, by name: its kind and its value (checked, for a checkbox).
+FIELDS = """() => Object.fromEntries([...document.querySelector("#settings-form").elements]
+  .filter((field) => field.name)
+  .map((field) => [field.name, `${field.tagName.toLowerCase()}:${field.type}:${
+    field.type === "checkbox" ? field.checked : field.value}`]))"""
+# Each page, connection, agent's row and fold of Settings shown once (all its fields mounted, as
+# they would be by an owner going through it).
+VISIT = """async () => {
+  const pause = () => new Promise((done) => setTimeout(done, 150));
+  for (const tab of document.querySelectorAll("#settings-tabs [role=tab]")) {
+    if (tab.hidden) continue;
+    tab.click();
+    await pause();
+    const page = document.querySelector(`#settings-pane > .tab[data-tab="${tab.dataset.tab}"]`);
+    for (const row of page?.querySelectorAll(".conn .conn-open") || []) {
+      row.click();
+      await pause();
+      document.querySelector("#settings-pane [data-conn-detail]:not([hidden]) [data-back]")?.click();
+    }
+    for (const fold of page?.querySelectorAll(".agent .fold[aria-expanded=false]") || []) fold.click();
+    for (const part of page?.querySelectorAll("details") || []) part.open = true;
+  }
+}"""
+
+
+async def settings_round_trip(page) -> dict:
+    """Settings opened, every page, connection, row and fold shown (each agent looked at as the
+    page looks), its fields read (`fields`), then Save with nothing changed: what it sent
+    (`sent`, without `base`)."""
+    await page.locator("#settings-button").click()
+    dialog = page.locator("#settings-dialog")
+    await dialog.wait_for()
+    await page.evaluate(VISIT)
+    for tab in await page.locator("#settings-tabs [role=tab]").all():
+        if not await tab.is_visible():
+            continue
+        await tab.evaluate("b => b.click()")
+        await page.wait_for_function(AGENTS_LOOKED, timeout=20000)
+    await quiet(page)
+    await page.evaluate(VISIT)
+    fields = await page.evaluate(FIELDS)
+    async with page.expect_request("**/api/settings") as request:
+        await page.locator("#settings-form footer button[type=submit]").click()
+    sent = (await request.value).post_data_json or {}
+    sent.pop("base", None)
+    await dialog.wait_for(state="hidden")
+    await quiet(page)
+    return {"fields": fields, "sent": sent}
 
 
 async def settings(page, camera: Camera, scheme: str, width: int):
     """Each tab of Settings, its folded sections open, page by page as it scrolls."""
+    if camera.unpictured(f"settings-{width}") and camera.unpictured(f"settings-general-p1-{width}"):
+        return  # Compared by what it holds and does (settings_round_trip), not its pictures.
     await page.locator("#settings-button").click()
     dialog = page.locator("#settings-dialog")
     await dialog.wait_for()
@@ -2557,7 +2673,10 @@ def normalized(capture: dict, page: dict, side: Side, run: Path) -> dict:
     paths = [(str(run.resolve()), "<run>"), (str(run), "<run>"), (str(side.tree.resolve()), "<tree>"),
              (str(side.tree), "<tree>"), (home, "~")]  # fmt: skip
     normalizer = Normalizer(paths)
-    document = {**capture, "page": {key: page[key] for key in ("requests", "errors")}}
+    document = {
+        **capture,
+        "page": {key: page[key] for key in ("requests", "errors", "settings") if key in page},
+    }
     normalizer.collect([document, page["dom"]])
     return {
         "data": normalizer.value(document),
@@ -2610,7 +2729,7 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
     if args.copilot_alone:
         if args.feature or args.mode != "off":
             parser.error("--copilot-alone compares the baseline with every feature off")
-        allowances = {f"fix: {a.name}": a for a in FIXES} | {
+        allowances = {f"fix: {a.name}": a for a in FIXES + SETTINGS_V2} | {
             f"Copilot alone: {a.name}": a for a in COPILOT_ALONE
         }
         allowances |= kept
@@ -2628,7 +2747,7 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
     chosen = [args.feature] if args.feature and args.mode == "off" else list(FEATURES)
     chosen += [name for name in lacking if name not in chosen]
     off = {key: value for name in chosen for key, value in FEATURES[name].off.items()}
-    fixes = {f"fix: {a.name}": a for a in FIXES}
+    fixes = {f"fix: {a.name}": a for a in FIXES + SETTINGS_V2}
     installed = {f"installed: {a.name}": a for a in INSTALLED}
     if keep in chosen:
         chosen.remove(keep)
