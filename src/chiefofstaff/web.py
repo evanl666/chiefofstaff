@@ -26,6 +26,7 @@ from .models import (
     AgentSignIn,
     ApproveSafe,
     ArtifactHide,
+    AutopilotRequest,
     CheckBackAction,
     ContinueOn,
     DraftDecision,
@@ -696,6 +697,15 @@ def create_app(
     @app.post("/api/focus")
     async def focus(payload: FocusRequest):
         return await runtime.focus.start(payload.minutes)
+
+    @app.post("/api/autopilot")
+    async def autopilot_on(payload: AutopilotRequest):
+        autopilot = runtime.autopilot
+        return await autopilot.start(autopilot.until_of(payload.duration), by="home")
+
+    @app.post("/api/autopilot/stop")
+    async def autopilot_stop():
+        return await runtime.autopilot.stop(by="you", why="you pressed Stop")
 
     @app.get("/api/file")
     async def read_file(path: str, session: str = ""):

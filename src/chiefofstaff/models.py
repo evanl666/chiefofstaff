@@ -472,6 +472,17 @@ class Settings(StrictModel):
     proactive_repos: dict[Repository, RepositoryChoices] = Field(
         default_factory=dict, max_length=200
     )
+    # Autopilot (autopilot/): while the owner turns it on (Home's button, or a command to the
+    # Router), Chief of Staff answers its workers from what the owner said in the page, accepts
+    # results it verified itself and starts what waited on them, writing every action down.
+    # Off: nothing of it runs, reads or changes what any session gets; this ticks its line.
+    autopilot: bool = False
+    # Credits a day it may spend (its judge, the turns it starts).
+    autopilot_credits: float = Field(default=100, ge=0, le=10000)
+    # Where it acts: all the owner's projects (empty), or only these repositories.
+    autopilot_repos: list[Repository] = Field(default_factory=list, max_length=200)
+    # Turns it continues run with the Ask-first checks, whatever worker_yolo says.
+    autopilot_ask_first: bool = True
 
     @field_validator("step_hosts")
     @classmethod
@@ -654,6 +665,7 @@ class Settings(StrictModel):
                 )
             self.scratch_directory = str(scratch)
         self.github_repos = list(dict.fromkeys(repo.lower() for repo in self.github_repos))
+        self.autopilot_repos = list(dict.fromkeys(repo.lower() for repo in self.autopilot_repos))
         if self.github_enabled and not self.github_repos:
             raise ValueError("Choose repositories before enabling review-request monitoring.")
         return self
@@ -801,6 +813,12 @@ class NewLesson(StrictModel):
 class FocusRequest(StrictModel):
     # 0 ends focus now.
     minutes: int = Field(ge=0, le=600)
+
+
+class AutopilotRequest(StrictModel):
+    """Home's Autopilot menu: on for 2 hours, until the morning time, or until turned off."""
+
+    duration: Literal["2h", "morning", "off"]
 
 
 class ProjectPath(StrictModel):
