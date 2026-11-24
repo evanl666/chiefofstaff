@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.56 (2026-11-23)
 
 A busy worker's new task starts at once in a second worker with its context; a decision you
 made isn't asked again; a PR in a stack merges from its card; and Prepared for you (new, off
