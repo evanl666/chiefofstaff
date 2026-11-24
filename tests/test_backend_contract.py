@@ -2453,13 +2453,14 @@ async def test_with_ask_first_every_mcp_call_asks_and_githubs_writes_stay_refuse
         assert not (marks / "review-published").exists(), "refused: never published"
         await owner.archive(session.session_id)
 
+        # Acting on its own, the same (the floor): GitHub's writes are the owner's to approve.
         asked.clear()
         session, turn = await open_session(owner, tmp_path, on_permission_request=check)
         await session.send(prompt)
         await turn.wait()
-        assert not [r for r in asked if r.kind == "mcp"], "acting on its own: as configured"
-        if real_codex(owner):
-            assert (marks / "review-published").exists()
+        mcp = [(r.server_name, r.tool_name, r.read_only) for r in asked if r.kind == "mcp"]
+        assert ("github-mcp-server", "create_pull_request_review", False) in mcp, asked
+        assert not (marks / "review-published").exists(), "refused: never published"
         await owner.archive(session.session_id)
     finally:
         await owner.stop()
@@ -2471,7 +2472,8 @@ async def test_with_ask_first_codex_asks_for_dotted_and_plugin_servers_set_to_ru
 ):
     """The owner's config lets two servers' tools run unasked: one whose name has a dot in it,
     and one a plugin adds (its policy is its plugin's). With Ask first each call still reaches
-    Chief of Staff (and is refused here); acting on its own, each runs as configured."""
+    Chief of Staff (and is refused here); acting on its own, the one that is GitHub's by its
+    name still does (the floor), the other runs as configured."""
     if not REAL_CODEX:
         pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
     home = tmp_path / "codex-home"
@@ -2540,8 +2542,10 @@ async def test_with_ask_first_codex_asks_for_dotted_and_plugin_servers_set_to_ru
         session, turn = await open_session(codex, tmp_path, on_permission_request=check)
         await session.send(prompt)
         await turn.wait()
-        assert not [a for a in asked if a[0] == "mcp"], "acting on its own: as configured"
-        assert (marks / "review-published").exists()
+        assert [a for a in asked if a[0] == "mcp"] == [
+            ("mcp", "github-mcp-server", "create_pull_request_review")
+        ], asked
+        assert (marks / "review-published").exists(), "the plugin's, as configured"
     finally:
         await codex.stop()
         model.close()
@@ -2794,7 +2798,8 @@ async def test_codex_memories_never_run_their_agent_for_a_worker(tmp_path, monke
     agent of its own (consolidation) with no approval asked, and, under a worker's full access,
     no sandbox, which Stop does not end. Every worker has them off (nothing of the pipeline
     starts in its process) and its thread never feeds them; subagents are off only for one
-    that asks first (the tools its model is offered)."""
+    that asks first (the tools its model is offered). ChatGPT's apps are off for every worker
+    (the floor: their actions take Codex's own approvals)."""
     if not REAL_CODEX:
         pytest.skip("Set CHIEFOFSTAFF_TEST_CODEX=1 to check it on real Codex.")
     import sqlite3
@@ -2814,7 +2819,8 @@ async def test_codex_memories_never_run_their_agent_for_a_worker(tmp_path, monke
         await session.send("Reply with just: ok")
         await turn.wait()
         listed = await codex.request("experimentalFeature/list", {"threadId": session.session_id})
-        enabled = {f["name"]: f["enabled"] for f in listed["data"]}["memories"]
+        features = {f["name"]: f["enabled"] for f in listed["data"]}
+        enabled = features["memories"]
     finally:
         await codex.stop()
         model.close()
@@ -2829,6 +2835,7 @@ async def test_codex_memories_never_run_their_agent_for_a_worker(tmp_path, monke
     modes = rows("state", "SELECT memory_mode FROM threads")
     jobs = sum(count for (count,) in rows("memories", "SELECT count(*) FROM jobs"))
     assert enabled is False and modes == [("disabled",)], (enabled, modes)
+    assert features.get("apps") is not True, "ChatGPT's apps are off for every worker"
     assert jobs == 0, "nothing of the memories pipeline started in its process"
     offered = set().union(*(subagent_tools(body.get("tools")) for body in model.bodies))
     if ask_first:

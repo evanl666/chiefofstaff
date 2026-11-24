@@ -23,7 +23,7 @@ from copilot import Tool, define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
 
-from chiefofstaff import agents, backend_codex, events, provenance
+from chiefofstaff import agents, backend_codex, events, policy, provenance
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff import workers as workers_module
 from chiefofstaff.backend import process_table, running
@@ -1080,6 +1080,47 @@ async def test_with_ask_first_an_mcp_call_that_ran_unasked_stops_the_worker(tmp_
         await codex.stop()
 
 
+async def test_acting_on_its_own_its_github_servers_ask_and_chatgpts_apps_are_off(
+    tmp_path, monkeypatch
+):
+    """The floor on Codex (0.1.57): a worker acting on its own ran its GitHub MCP server's
+    writes, and ChatGPT's apps (GitHub's among them, on Codex's own approvals), as the owner
+    unasked. Every tool of a GitHub server asks now (Chief of Staff refuses its writes), a
+    plugin's too; its other servers are left as they are. One that still ran unasked stops it."""
+    servers = {
+        "github": {"url": "https://api.githubcopilot.com/mcp/"},
+        "work": {"command": "docker", "args": ["ghcr.io/github/github-mcp-server"]},
+        "notes": {"command": "notes", "tools": {"write": {"approval_mode": "approve"}}},
+    }
+    plugins = {"gh@local": {"name": "gh", "servers": ["github-tools", "docs"]}}
+    monkeypatch.setenv("FAKE_CODEX_CONFIG", json.dumps({"mcp_servers": servers}))
+    monkeypatch.setenv("FAKE_CODEX_PLUGINS", json.dumps(plugins))
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        config = await codex.thread_config({}, str(tmp_path))
+    finally:
+        await codex.stop()
+    prompt = {"default_tools_approval_mode": "prompt"}
+    assert config["features.apps"] is False
+    assert config["mcp_servers"] == {"github": prompt, "work": prompt}, "notes as the owner has it"
+    assert config["plugins"] == {"gh@local": {"mcp_servers": {"github-tools": prompt}}}
+    assert "features.multi_agent" not in config and "agents" not in config
+
+    monkeypatch.setenv("FAKE_CODEX_UNASKED", "mcp")
+    monkeypatch.setenv("FAKE_CODEX_PLUGINS", "{}")
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        session, turn = await opened(codex, tmp_path)
+        await session.send("Call the MCP tool add_issue_comment of github. Reply with just: done")
+        await until(lambda: not codex.alive())
+        assert "ran a tool of github, GitHub's, without asking" in codex.refusal
+        assert "done" not in [d.content for d in turn.data("assistant.message")]
+    finally:
+        await codex.stop()
+
+
 async def test_with_ask_first_every_server_it_can_name_asks(tmp_path, monkeypatch):
     servers = {
         "notes": {"command": "notes", "tools": {"write": {"approval_mode": "approve"}, "a.b": {}}},
@@ -1161,14 +1202,16 @@ async def test_with_ask_first_a_settings_server_named_as_one_of_codexs_asks_for_
         "create_pull_request_review": {"approval_mode": "prompt"},
         "merge_pull_request": {"approval_mode": "prompt"},
     }, "each tool any loaded table names asks"
-    assert acting["mcp_servers"] == {"github": {"url": "https://api.githubcopilot.com/mcp/"}}
+    # The floor: GitHub's server asks a worker acting on its own too (its writes are refused).
+    assert acting["mcp_servers"] == {"github": github}
 
 
 async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
     tmp_path, monkeypatch
 ):
     """Review: an app's call (GitHub's, say) takes approval from Codex's own `apps` settings,
-    not Chief of Staff's: a worker that asks first has none, nor subagents (one could open
+    not Chief of Staff's: no worker has them (the floor: nothing goes out on GitHub as the owner
+    unasked, whatever the mode). A worker that asks first has no subagents (one could open
     another worker's thread); one acting on its own keeps the owner's. Codex's memories are off
     for every worker (their agent asks nobody, and Stop does not end it)."""
     log = tmp_path / "log.jsonl"
@@ -1184,7 +1227,7 @@ async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
                 "experimentalFeature/list", {"threadId": session.session_id}
             )
             features[session] = {f["name"]: f["enabled"] for f in listed["data"]}
-        assert (features[asking]["apps"], features[acting]["apps"]) == (False, True)
+        assert (features[asking]["apps"], features[acting]["apps"]) == (False, False)
         assert (features[asking]["multi_agent"], features[acting]["multi_agent"]) == (False, True)
         assert (features[asking]["memories"], features[acting]["memories"]) == (False, False)
         starts = [json.loads(line).get("params") for line in log.read_text().splitlines()]
@@ -1225,11 +1268,12 @@ async def test_chatgpts_apps_are_off_for_a_worker_that_asks_first_as_read_back(
             await opened(codex, tmp_path, ask_first=True)
         with pytest.raises(RuntimeError, match="did not turn ChatGPT's apps off"):
             await codex.resume_session(asking.session_id, ask_first=True)
-        assert (await opened(codex, tmp_path))[0].session_id, "acting on its own, it runs"
+        with pytest.raises(RuntimeError, match="did not turn ChatGPT's apps off"):
+            await opened(codex, tmp_path)
     finally:
         await codex.stop()
     methods = [json.loads(line)["method"] for line in log.read_text().splitlines()]
-    assert methods.count("thread/archive") == 4 and "thread/unsubscribe" in methods
+    assert methods.count("thread/archive") == 5 and "thread/unsubscribe" in methods
 
 
 @pytest.mark.parametrize("ask_first", [True, False])
@@ -3105,6 +3149,43 @@ async def test_a_codex_workers_mcp_tool_that_needs_an_account_connected_has_one_
         await runtime.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in Codex runs commands in zsh")
+async def test_a_codex_worker_acting_on_its_own_is_held_to_the_floor(tmp_path, monkeypatch):
+    """0.1.57: acting on its own (yolo), a Codex worker's `gh pr comment` and its GitHub MCP
+    server's writes went out as the owner. Refused now, as every worker's: it is told to ask;
+    its reads still run."""
+    ran = tmp_path / "gh-ran"
+    stand_in = tmp_path / "gh-bin" / "gh"  # Never the owner's gh.
+    stand_in.parent.mkdir()
+    stand_in.write_text(f'#!/bin/sh\necho "$@" >> {shlex.quote(str(ran))}\n')
+    stand_in.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stand_in.parent}{os.pathsep}{os.environ['PATH']}")
+    owner = {"github": {"url": "https://api.githubcopilot.com/mcp/"}}
+    harness, runtime = await brief(
+        tmp_path, monkeypatch, FAKE_CODEX_CONFIG=json.dumps({"mcp_servers": owner})
+    )
+    try:
+        worker = await spawn(
+            runtime,
+            harness,
+            "Run the shell command `gh pr comment 4 --body Done`. Call the MCP tool "
+            "merge_pull_request of github. Call the MCP tool get_pull_request of github "
+            "(read-only). Run the shell command `gh pr view 4`. Report done: tried",
+        )
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)  # (Its MCP calls come after its report.)
+        assert runtime.yolo(harness.store.session(worker))
+        notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+        ask = policy.FLOOR_ASK
+        assert any("`gh pr comment`" in text and ask in text for text in notices), notices
+        assert any("merge_pull_request" in text and ask in text for text in notices)
+        assert "get_pull_request" in str(harness.kinds(worker)), "its reads run"
+        assert ran.read_text() == "pr view 4\n", "only the read ran"
+        assert "Stopped" not in str(harness.kinds(worker))
+    finally:
+        await runtime.stop()
+
+
 async def test_a_codex_worker_codex_no_longer_has_cannot_be_reopened(tmp_path, monkeypatch):
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
@@ -4341,7 +4422,7 @@ async def test_a_codex_worker_switched_to_act_on_its_own_finishes_its_turn_first
         await until(lambda: "second" in str(harness.kinds(worker)), 30)
         assert backend.workers[worker] is not before
         last = thread_configs(log)[-1]
-        assert "features.apps" not in last and "agents" not in last
+        assert "agents" not in last and "features.multi_agent" not in last
         assert runtime.states.handle(worker).options["ask_first"] is False
     finally:
         await runtime.stop()

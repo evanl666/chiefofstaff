@@ -74,7 +74,7 @@ from .backend import (
 )
 from .envelope import inert, wrap
 from .machine import kill_process_tree
-from .policy import GITHUB_MCP
+from .policy import GITHUB_MCP, github_server
 
 logger = logging.getLogger(__name__)
 
@@ -459,17 +459,6 @@ def version_of(user_agent: str) -> str:
     """The CLI's version, from the app-server's user agent ("chiefofstaff/0.167.2 (Mac OS…")."""
     found = re.search(r"/(\d+\.\d+\.\d+[\w.-]*)", user_agent or "")
     return found.group(1) if found else ""
-
-
-def github_server(name: str, config: Any) -> bool:
-    """Whether an MCP server in the owner's Codex config is GitHub's: by its name, its command
-    and arguments, or its URL."""
-    if GITHUB.search(name):
-        return True
-    if not isinstance(config, dict):
-        return False
-    parts = [config.get("command"), config.get("url"), *(config.get("args") or [])]
-    return any(isinstance(part, str) and GITHUB.search(part) for part in parts)
 
 
 def github_app(meta: dict) -> bool:
@@ -1525,6 +1514,15 @@ class CodexBackend:
                 f"which has nothing but its tools: {kept}"
             )
         if not options.get("ask_first"):
+            if (
+                not (options.get("role_only") or options.get("checking"))
+                and "apps" in features
+                and features["apps"].get("enabled") is not False
+            ):
+                raise RuntimeError(
+                    "Codex did not turn ChatGPT's apps off for this worker (their actions, on "
+                    f"GitHub too, are not checked by Chief of Staff): {kept}"
+                )
             return
         if features.get("apps", {}).get("enabled") is not False:
             raise RuntimeError(
@@ -1821,6 +1819,38 @@ class CodexBackend:
         if provided:
             # Codex merges these into the owner's own servers, as Copilot does its session's.
             config["mcp_servers"] = dict(provided)
+        if not (options.get("ask_first") or options.get("role_only") or options.get("checking")):
+            # The floor (policy.floor_denial), whatever the worker's mode: ChatGPT's apps, whose
+            # calls take Codex's own approvals, are off (their GitHub actions could not be
+            # checked), and every tool of a GitHub MCP server asks, so that its writes, which
+            # are the owner's, are refused.
+            config["features.apps"] = False
+            known = owner_servers(read)
+            for name in {*known, *provided}:
+                entry, given = mapping(known.get(name)), mapping(provided.get(name))
+                if not github_server(name, given or entry):
+                    continue
+                tools = {**mapping(entry.get("tools")), **mapping(given.get("tools"))}
+                config.setdefault("mcp_servers", {})[name] = {**given, **asking({"tools": tools})}
+            # A plugin's GitHub server too, by its name (its policy is in the plugin's table).
+            try:
+                plugins = await self.plugin_servers(cwd)
+            except RuntimeError:
+                logger.warning("Codex's plugins could not be read for a worker.", exc_info=True)
+                plugins = {}
+            configured = mapping(owner.get("plugins"))
+            theirs = {
+                plugin: {
+                    name: asking(mapping(configured.get(plugin)).get("mcp_servers"), name)
+                    for name in names
+                    if GITHUB.search(name)
+                }
+                for plugin, names in plugins.items()
+            }
+            if asked := {
+                plugin: {"mcp_servers": found} for plugin, found in theirs.items() if found
+            }:
+                config["plugins"] = asked
         if options.get("ask_first"):
             config["features.apps"] = False
             # Its subagents: a child's resume_agent opens any thread Codex can name (another
@@ -3054,7 +3084,7 @@ class CodexSession:
         parent = self.parent_call(thread)
         if (
             kind == "mcpToolCall"
-            and self.options.get("ask_first")
+            and (self.options.get("ask_first") or self.github(str(item.get("server") or "")))
             and not self.options.get("checking")  # The check finds out what asks itself.
             and self.ran_unasked(item)
         ):
@@ -3062,6 +3092,10 @@ class CodexSession:
             self.stop_worker(
                 f"Stopped: Codex ran a tool of {server} without asking first, though this worker "
                 "asks first. Check that server's settings in Codex, or let it act on its own."
+                if self.options.get("ask_first")
+                else f"Stopped: Codex ran a tool of {server}, GitHub's, without asking Chief of "
+                "Staff first, though what it writes there is yours to approve. Check that "
+                "server's settings in Codex."
             )
             return
         if kind == "agentMessage":
