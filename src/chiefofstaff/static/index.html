@@ -109,19 +109,20 @@
       <div id="file-body"></div>
     </dialog>
 
-    <dialog id="settings-dialog" aria-label="Settings">
-      <form id="settings-form" method="dialog">
-        <h2>Settings</h2>
+    <dialog id="settings-dialog" aria-labelledby="settings-title">
+      <!-- novalidate: Save checks the fields itself, and opens the page and folds a wrong one is in. -->
+      <form id="settings-form" method="dialog" novalidate>
+        <h2 id="settings-title">Settings</h2>
         <nav id="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
-          <button type="button" role="tab" data-tab="general">General</button>
-          <button type="button" role="tab" data-tab="workers">Workers</button>
-          <button type="button" role="tab" data-tab="models">Models</button>
-          <button type="button" role="tab" data-tab="connections">Connections</button>
-          <button type="button" role="tab" data-tab="you">You</button>
-          <button type="button" role="tab" data-tab="advanced">Advanced</button>
+          <button type="button" role="tab" id="settings-tab-general" data-tab="general" aria-controls="settings-page-general">General</button>
+          <button type="button" role="tab" id="settings-tab-workers" data-tab="workers" aria-controls="settings-page-workers">Workers</button>
+          <button type="button" role="tab" id="settings-tab-agents" data-tab="agents" aria-controls="settings-page-agents">Agents &amp; models</button>
+          <button type="button" role="tab" id="settings-tab-connections" data-tab="connections" aria-controls="settings-page-connections">Connections</button>
+          <button type="button" role="tab" id="settings-tab-you" data-tab="you" aria-controls="settings-page-you">You</button>
+          <button type="button" role="tab" id="settings-tab-advanced" data-tab="advanced" aria-controls="settings-page-advanced">Advanced</button>
         </nav>
         <div id="settings-pane">
-          <section class="tab" data-tab="general">
+          <section class="tab" role="tabpanel" id="settings-page-general" data-tab="general" aria-labelledby="settings-tab-general">
             <label>
               <span>Code folder</span>
               <input name="code_folder" placeholder="/Users/you/workspace" autocomplete="off" />
@@ -141,7 +142,7 @@
             <label class="check" id="proactive-line"><input name="proactive" type="checkbox" /> Keep my PRs moving: prepare fixes and replies for my approval</label>
           </section>
 
-          <section class="tab" data-tab="workers" hidden>
+          <section class="tab" role="tabpanel" id="settings-page-workers" data-tab="workers" aria-labelledby="settings-tab-workers" hidden>
             <label class="check"><input name="worker_yolo" type="checkbox" /> Workers act without asking for permission first (yolo)</label>
             <small>Either way, no worker comments, reviews, merges or closes on GitHub as you, pushes to main or force-pushes others' branches without your OK. Change it for one worker in its ⋯ menu.</small>
             <label class="check"><input name="worker_sandbox" type="checkbox" /> Sandbox: workers can change files only in their own folders</label>
@@ -153,28 +154,39 @@
               <small>For tools that must write outside a worker's folders, such as a Copilot plugin hook that keeps a journal.</small>
             </label>
             <label class="check"><input name="shared_caches" type="checkbox" /> Start workers' caches from yours (read-only to them), so installs are as fast as in your terminal</label>
-            <div class="check-row"><label class="check"><input name="watchdog_enabled" type="checkbox" /> Watchdog: check workers for stalls and drift</label><button id="watchdog-activity" type="button" class="link quiet" hidden>View activity</button></div>
-            <label class="short"><span>Credit limit per worker</span><input name="worker_credit_limit" type="number" min="0" step="1" placeholder="0 = none, or 30 and up" /></label>
           </section>
 
-          <section class="tab" data-tab="models" hidden>
-            <datalist id="model-options"></datalist>
-            <div class="model-grid">
-              <span></span><small>Model</small><small>Thinking effort</small>
-              <span>Default</span><input name="model" list="model-options" placeholder="Copilot default" aria-label="Default model" /><span></span>
-              <span>Router</span><input name="model_router" list="model-options" placeholder="Default" aria-label="Router model" /><select name="effort_router" aria-label="Router thinking effort"></select>
-              <span>Workers</span><input name="model_worker" list="model-options" placeholder="Default" aria-label="Workers model" /><select name="effort_worker" aria-label="Workers thinking effort"></select>
-              <span>Slack</span><input name="model_slack" list="model-options" placeholder="Default" aria-label="Slack model" /><select name="effort_slack" aria-label="Slack thinking effort"></select>
-              <span>Watchdog</span><input name="model_watchdog" list="model-options" placeholder="Default" aria-label="Watchdog model" /><select name="effort_watchdog" aria-label="Watchdog thinking effort"></select>
+          <!-- Agents & models (agentspage.js): who does the work, and with which model. Drawn when
+               Settings opens; the look at installed agents (data-looked) updates its rows in place. -->
+          <section class="tab agents-page" role="tabpanel" id="settings-page-agents" data-tab="agents" aria-labelledby="settings-tab-agents" data-looked="none" hidden>
+            <div class="page-head"><h3>Agents &amp; models</h3><p>Who does the work, and with which model.</p></div>
+            <div id="agents-page"></div>
+          </section>
+
+          <!-- Connections: one row each (its status, at most one action); a row opens its details in
+               place. Every connection's details are in the form from the start: Back keeps drafts. -->
+          <section class="tab" role="tabpanel" id="settings-page-connections" data-tab="connections" aria-labelledby="settings-tab-connections" hidden>
+            <div id="conn-list" class="conn-page">
+              <div class="page-head"><h3>Connections</h3><p>What Chief of Staff watches for you, and the tools your workers get.</p></div>
+              <div class="box" role="list" aria-label="Connections">
+                <div class="conn" role="listitem" data-conn="slack"><button type="button" class="conn-open"><span class="words"><span class="name">Slack</span><span class="state" id="slack-summary"></span></span></button><span class="go"><button type="button" class="secondary conn-act" hidden></button><span class="chev" aria-hidden="true">›</span></span></div>
+                <div class="conn" role="listitem" data-conn="github"><button type="button" class="conn-open"><span class="words"><span class="name">GitHub reviews</span><span class="state" id="github-summary"></span></span></button><span class="go"><button type="button" class="secondary conn-act" hidden></button><span class="chev" aria-hidden="true">›</span></span></div>
+                <div class="conn" role="listitem" data-conn="watches"><button type="button" class="conn-open"><span class="words"><span class="name">Watches</span><span class="state" id="watches-summary"></span></span></button><span class="go"><button type="button" class="secondary conn-act" hidden></button><span class="chev" aria-hidden="true">›</span></span></div>
+                <div class="conn" role="listitem" data-conn="away"><button type="button" class="conn-open"><span class="words"><span class="name">When you're away</span><span class="state" id="away-summary"></span></span></button><span class="go"><button type="button" class="secondary conn-act" hidden></button><span class="chev" aria-hidden="true">›</span></span></div>
+                <div class="conn" role="listitem" data-conn="tools"><button type="button" class="conn-open"><span class="words"><span class="name">Skills, plugins and MCP servers</span><span class="state" id="abilities-summary"></span></span></button><span class="go"><button type="button" class="secondary conn-act" hidden></button><span class="chev" aria-hidden="true">›</span></span></div>
+                <div class="conn" role="listitem" data-conn="send"><button type="button" class="conn-open"><span class="words"><span class="name">Send to Chief from the command line</span><span class="state" id="send-summary"></span></span></button><span class="go"><button type="button" class="secondary conn-act" hidden></button><span class="chev" aria-hidden="true">›</span></span></div>
+              </div>
+              <div id="connections-extra"></div>
+              <div class="pause-line">
+                <label class="check"><input id="paused-box" name="paused" type="checkbox" aria-describedby="paused-help" /> Pause watching</label>
+                <small class="help" id="paused-help">Stops Slack, GitHub, Watches, away notices, learning and Prepared for you (what it had ready is withdrawn).</small>
+              </div>
             </div>
-            <small id="effort-hint" hidden>Auto picks a model for each turn and takes no thinking effort: choose a model where you want to set one.</small>
-            <small>Effort applies where the model supports it. Change one session's model in its ⋯ menu.</small>
-          </section>
 
-          <section class="tab" data-tab="connections" hidden>
-            <details class="section" id="conn-slack">
-              <summary><span>Slack</span><small id="slack-summary"></small></summary>
-              <div class="section-body">
+            <section class="conn-detail" id="conn-slack" data-conn-detail="slack" aria-labelledby="conn-slack-title" hidden>
+              <button type="button" class="back-link" data-back>‹ Connections</button>
+              <div class="detail-head"><h3 id="conn-slack-title" tabindex="-1">Slack</h3><span class="state" data-conn-state="slack"></span></div>
+              <div class="conn-fields">
                 <label class="check"><input name="slack_enabled" type="checkbox" /> Watch Slack for DMs and mentions</label>
                 <div class="row">
                   <label class="grow">
@@ -185,19 +197,24 @@
                   <button id="slack-token-remove" type="button" class="link" hidden>Remove</button>
                 </div>
                 <small id="slack-status"></small>
-                <label>
+                <label class="short">
                   <span>Delegate emoji</span>
                   <input name="slack_delegate_emoji" placeholder=":robot_face:" autocomplete="off" />
                   <small>React with it to any Slack message, yours or someone else's, to hand it to your chief of staff. Empty turns it off.</small>
                 </label>
                 <label class="check"><input name="slack_delegate_reply" type="checkbox" /> <span id="slack-delegate-reply">Reply directly when you react with :robot_face:</span></label>
+                <details class="more-fold" id="slack-more">
+                  <summary>More</summary>
+                  <label class="short"><span>Check every (s)</span><input name="slack_poll_seconds" type="number" min="20" max="900" /></label>
+                </details>
                 <div><button id="slack-activity" type="button" class="link quiet" hidden>View activity</button></div>
               </div>
-            </details>
+            </section>
 
-            <details class="section" id="conn-github">
-              <summary><span>GitHub reviews</span><small id="github-summary"></small></summary>
-              <div class="section-body">
+            <section class="conn-detail" id="conn-github" data-conn-detail="github" aria-labelledby="conn-github-title" hidden>
+              <button type="button" class="back-link" data-back>‹ Connections</button>
+              <div class="detail-head"><h3 id="conn-github-title" tabindex="-1">GitHub reviews</h3><span class="state" data-conn-state="github"></span></div>
+              <div class="conn-fields">
                 <label class="check"><input name="github_enabled" type="checkbox" /> Watch review requests</label>
                 <label>
                   <span>Repositories</span>
@@ -205,49 +222,29 @@
                 </label>
                 <small id="github-status"></small>
               </div>
-            </details>
+            </section>
 
-            <details class="section" id="conn-abilities">
-              <summary><span>Abilities</span><small id="abilities-summary"></small></summary>
-              <div class="section-body">
-                <p class="hint">Skills, plugins and MCP servers for workers, on top of what your Copilot has.</p>
-                <h4>Skills</h4>
-                <ul id="skills" class="memory"></ul>
-                <div class="inline-actions">
-                  <button id="skill-upload" type="button" class="secondary">Upload SKILL.md</button>
-                  <button id="skill-paste" type="button" class="link">Paste one</button>
-                  <input id="skill-file" type="file" accept=".md,text/markdown,text/plain" hidden />
-                </div>
-                <div id="skill-paste-box" class="paste-box" hidden>
-                  <textarea id="skill-text" rows="6" aria-label="SKILL.md" placeholder="---&#10;name: release-notes&#10;description: How we write release notes&#10;---&#10;…"></textarea>
-                  <div class="inline-actions"><button id="skill-add" type="button">Add skill</button><button id="skill-cancel" type="button" class="link">Cancel</button></div>
-                </div>
-                <label><span>Skill folders</span><textarea name="skill_folders" rows="2" placeholder="Folders of skills (each a folder with a SKILL.md) — one per line"></textarea></label>
-                <h4>Plugins</h4>
-                <label><span>Copilot plugins to install</span><textarea name="plugins" rows="2" placeholder="owner/repo, owner/repo:path, name@marketplace or an https URL — one per line"></textarea></label>
-                <ul id="plugin-status" class="memory"></ul>
-                <div><button id="plugins-retry" type="button" class="link" hidden>Retry failed</button></div>
-                <h4>MCP servers</h4>
-                <label>
-                  <span>As in Copilot's mcp-config.json</span>
-                  <textarea name="mcp_servers" rows="4" class="mono" spellcheck="false" placeholder='{"jira": {"command": "npx", "args": ["-y", "jira-mcp"]}, "docs": {"type": "http", "url": "https://…"}}'></textarea>
-                  <small id="mcp-error" class="error" hidden></small>
-                </label>
-              </div>
-            </details>
-
-            <details class="section" id="conn-watches">
-              <summary><span>Watches</span><small id="watches-summary"></small></summary>
-              <div class="section-body">
-                <p class="hint">Uses whatever tools your Copilot has here — Slack, Glean, mail. Found items go to the Router, which drafts replies in your voice for you to approve.</p>
+            <section class="conn-detail" id="conn-watches" data-conn-detail="watches" aria-labelledby="conn-watches-title" hidden>
+              <button type="button" class="back-link" data-back>‹ Connections</button>
+              <div class="detail-head"><h3 id="conn-watches-title" tabindex="-1">Watches</h3><span class="state" data-conn-state="watches"></span></div>
+              <div class="conn-fields">
+                <small>Uses whatever tools your Copilot has here — Slack, Glean, mail. Found items go to the Router, which drafts replies in your voice for you to approve.</small>
                 <ul id="watch-list" class="watch-list"></ul>
                 <div><button id="watch-add" type="button" class="link">+ Add watch</button></div>
-                <div class="row">
-                  <label class="hours"><span>Work hours</span><span class="range"><input id="watch-from" type="time" aria-label="Work hours from" /><span>–</span><input id="watch-to" type="time" aria-label="Work hours to" /></span></label>
-                  <label><span>Every (min)</span><input name="watch_minutes" type="number" min="1" max="240" /></label>
-                  <label><span>After hours (min)</span><input name="watch_after_hours_minutes" type="number" min="0" max="1440" title="0: no watching outside work hours" /></label>
+                <div class="schedule-line">
+                  <span id="watch-hours-words">In work hours</span>
+                  <input id="watch-from" type="time" aria-label="Work hours from" />
+                  <span aria-hidden="true">–</span>
+                  <input id="watch-to" type="time" aria-label="Work hours to" />
+                  <span>every</span>
+                  <input name="watch_minutes" type="number" min="1" max="240" aria-label="In work hours, every (minutes)" />
+                  <span>min</span>
                 </div>
-                <small>After hours 0 means no watching outside work hours.</small>
+                <div class="schedule-line">
+                  <span>After hours and weekends every</span>
+                  <input name="watch_after_hours_minutes" type="number" min="0" max="1440" aria-label="After hours and weekends, every (minutes)" />
+                  <span>min · 0: not at all</span>
+                </div>
                 <small id="watch-resting" class="resting" role="status" hidden></small>
                 <div class="learn-row">
                   <button id="watch-scan" type="button" class="secondary">Scan now</button>
@@ -255,11 +252,12 @@
                   <button id="watch-activity" type="button" class="link quiet" hidden>View activity</button>
                 </div>
               </div>
-            </details>
+            </section>
 
-            <details class="section" id="conn-away">
-              <summary><span>When you're away</span><small id="away-summary"></small></summary>
-              <div class="section-body">
+            <section class="conn-detail" id="conn-away" data-conn-detail="away" aria-labelledby="conn-away-title" hidden>
+              <button type="button" class="back-link" data-back>‹ Connections</button>
+              <div class="detail-head"><h3 id="conn-away-title" tabindex="-1">When you're away</h3><span class="state" data-conn-state="away"></span></div>
+              <div class="conn-fields">
                 <label class="check"><input name="away_notify" type="checkbox" /> Reach me elsewhere when something needs me and I'm away</label>
                 <label class="short"><span id="away-after">Away after (minutes without keyboard or mouse)</span><input name="away_minutes" type="number" min="1" max="240" /></label>
                 <label><span>How to reach you</span><textarea name="away_how" rows="2" placeholder="e.g. DM me on Slack via the company bot plugin"></textarea></label>
@@ -269,20 +267,56 @@
                 </div>
                 <ul id="away-can" class="away-can" hidden></ul>
               </div>
-            </details>
-            <div id="connections-extra"></div>
-            <div id="send-line" class="send-line">
-              <label class="check"><input name="send_to_chief" type="checkbox" aria-describedby="send-how send-problem" /> Send to Chief from the command line</label>
-              <div id="send-consent" class="send-consent" hidden>
-                <p class="hint">What you send (your note, and any link or text you pass) goes to Chief of Staff on this computer, which hands it to GitHub Copilot under your account; the work it starts runs with your settings, as any task does.</p>
-                <div class="inline-actions"><button id="send-on" type="button">Turn on</button><button id="send-cancel" type="button" class="link">Cancel</button></div>
+            </section>
+
+            <section class="conn-detail" id="conn-abilities" data-conn-detail="tools" aria-labelledby="conn-tools-title" hidden>
+              <button type="button" class="back-link" data-back>‹ Connections</button>
+              <div class="detail-head"><h3 id="conn-tools-title" tabindex="-1">Skills, plugins and MCP servers</h3><span class="state" data-conn-state="tools"></span></div>
+              <div class="conn-fields">
+                <small>For workers, on top of what your Copilot has. They run as you: add only what you would install for yourself.</small>
+                <h4>Skills</h4>
+                <ul id="skills" class="memory"></ul>
+                <div class="inline-actions">
+                  <button id="skill-paste" type="button" class="secondary">Add a skill…</button>
+                  <input id="skill-file" type="file" accept=".md,text/markdown,text/plain" hidden />
+                </div>
+                <div id="skill-paste-box" class="paste-box" hidden>
+                  <textarea id="skill-text" rows="6" aria-label="SKILL.md" placeholder="---&#10;name: release-notes&#10;description: How we write release notes&#10;---&#10;…"></textarea>
+                  <div class="inline-actions"><button id="skill-add" type="button">Add skill</button><button id="skill-upload" type="button" class="link">Upload a SKILL.md</button><button id="skill-cancel" type="button" class="link">Cancel</button></div>
+                </div>
+                <h4>Plugins</h4>
+                <ul id="plugin-status" class="memory"></ul>
+                <button id="plugins-retry" type="button" class="link" hidden>Retry failed</button>
+                <label><span>Copilot plugins to install</span><textarea name="plugins" rows="2" placeholder="owner/repo, owner/repo:path, name@marketplace or an https URL — one per line"></textarea></label>
+                <h4>MCP servers</h4>
+                <label>
+                  <span>As in Copilot's mcp-config.json</span>
+                  <textarea name="mcp_servers" rows="4" class="mono" spellcheck="false" placeholder='{"jira": {"command": "npx", "args": ["-y", "jira-mcp"]}, "docs": {"type": "http", "url": "https://…"}}'></textarea>
+                  <small id="mcp-error" class="error" hidden></small>
+                </label>
+                <details class="more-fold" id="skill-folders-more">
+                  <summary>Skill folders</summary>
+                  <label><span>Skill folders</span><textarea name="skill_folders" rows="2" placeholder="Folders of skills (each a folder with a SKILL.md) — one per line"></textarea></label>
+                </details>
               </div>
-              <small id="send-how" hidden><code>chiefofstaff send "…"</code> from a terminal, or a hotkey: <a class="link" href="https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#send-to-chief" target="_blank" rel="noreferrer">recipes</a></small>
-              <small id="send-problem" class="error" role="status" hidden></small>
-            </div>
+            </section>
+
+            <section class="conn-detail" id="conn-send" data-conn-detail="send" aria-labelledby="conn-send-title" hidden>
+              <button type="button" class="back-link" data-back>‹ Connections</button>
+              <div class="detail-head"><h3 id="conn-send-title" tabindex="-1">Send to Chief from the command line</h3><span class="state" data-conn-state="send"></span></div>
+              <div id="send-line" class="send-line">
+                <label class="check"><input name="send_to_chief" type="checkbox" aria-describedby="send-how send-problem" /> Send to Chief from the command line</label>
+                <div id="send-consent" class="send-consent" hidden>
+                  <p class="hint">What you send (your note, and any link or text you pass) goes to Chief of Staff on this computer, which hands it to GitHub Copilot under your account; the work it starts runs with your settings, as any task does.</p>
+                  <div class="inline-actions"><button id="send-on" type="button">Turn on</button><button id="send-cancel" type="button" class="link">Cancel</button></div>
+                </div>
+                <small id="send-how" hidden><code>chiefofstaff send "…"</code> from a terminal, or a hotkey: <a class="link" href="https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#send-to-chief" target="_blank" rel="noreferrer">recipes</a></small>
+                <small id="send-problem" class="error" role="status" hidden></small>
+              </div>
+            </section>
           </section>
 
-          <section class="tab" data-tab="you" hidden>
+          <section class="tab" role="tabpanel" id="settings-page-you" data-tab="you" aria-labelledby="settings-tab-you" hidden>
             <h3>How you work</h3>
             <p class="hint">Learned from what you write and how you correct your sessions. It stays on this machine; how you write applies at once, habits wait for your OK.</p>
             <label class="check"><input name="learn_from_work" type="checkbox" /> Learn from what I write: Slack (or any tool here that reaches it, such as Glean), PR reviews, commits and Copilot sessions</label>
@@ -326,12 +360,7 @@
             </label>
           </section>
 
-          <section class="tab" data-tab="advanced" hidden>
-            <div class="row">
-              <label class="grow"><span>Copilot command</span><input name="copilot_command" /></label>
-              <label><span>Slack check (s)</span><input name="slack_poll_seconds" type="number" min="20" max="900" /></label>
-            </div>
-            <label class="check" title="While paused, Slack and GitHub are not checked, Watches do not scan, “When you're away” sends nothing and reads no replies, nothing is learned from your work, and Prepared for you prepares nothing (what it had ready is withdrawn; it looks again when you resume)."><input name="paused" type="checkbox" /> Pause watching: Slack, GitHub, Watches, away notifications, learning and Prepared for you</label>
+          <section class="tab" role="tabpanel" id="settings-page-advanced" data-tab="advanced" aria-labelledby="settings-tab-advanced" hidden>
             <label class="check"><input name="report_footer" type="checkbox" /> Copied reports end with a short “Orchestrated with Chief of Staff” line</label>
             <label>
               <span>Other project folders</span>
@@ -350,7 +379,7 @@
         <footer>
           <p id="settings-error" class="error" hidden></p>
           <button type="button" class="secondary" id="settings-cancel">Cancel</button>
-          <button type="submit">Save</button>
+          <button type="submit" id="settings-save">Save</button>
         </footer>
       </form>
     </dialog>

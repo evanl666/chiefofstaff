@@ -1217,9 +1217,10 @@ async def test_an_infrastructure_failure_gets_a_rerun_plan_no_attempt(world):
 
 
 async def test_pause_watching_says_it_pauses_prepared_for_you_too(world):
-    """Pause watching (Settings → Advanced) stops Prepared for you as well: nothing is prepared,
-    what it had ready is withdrawn, and its actions say it is paused. Its label and tip named
-    Slack, GitHub, Watches, away notifications and learning only."""
+    """Pause watching (at the end of Settings → Connections) stops Prepared for you as well:
+    nothing is prepared, what it had ready is withdrawn, and its actions say it is paused. Its
+    label and tip named Slack, GitHub, Watches, away notifications and learning only; its line
+    says what it stops (settings-v2.md §9.7)."""
     import re
 
     runtime = await claimed(world)
@@ -1232,9 +1233,14 @@ async def test_pause_watching_says_it_pauses_prepared_for_you_too(world):
     assert not runtime.shepherd.active() and "paused" in runtime.shepherd.refusal()
     page = (Path(__file__).parent.parent / "src/chiefofstaff/static/index.html").read_text()
     found = re.search(
-        r'<label class="check" title="([^"]*)"><input name="paused"[^>]*/>([^<]*)', page
+        r'<input id="paused-box" name="paused"[^>]*/>([^<]*)</label>\s*'
+        r'<small class="help" id="paused-help">([^<]*)</small>',
+        page,
     )
     assert found, "the switch"
-    tip, label = found.groups()
-    assert label.strip().endswith("learning and Prepared for you"), label
-    assert "Prepared for you prepares nothing (what it had ready is withdrawn" in tip
+    label, helper = found.groups()
+    assert label.strip() == "Pause watching", label
+    assert helper == (
+        "Stops Slack, GitHub, Watches, away notices, learning and Prepared for you "
+        "(what it had ready is withdrawn)."
+    ), helper

@@ -211,8 +211,12 @@ export async function once(key, node, run) {
 // shown, over whatever the list moved there since. Ours goes as soon as what it is for moves,
 // changes or goes.
 let tip = null;
-function tipBox() {
-  return document.getElementById("tip") || document.body.appendChild(el("div", { id: "tip", role: "tooltip", hidden: true }));
+// Inside an open modal dialog (Settings), where the page's own would be under the top layer.
+export function tipBox() {
+  const host = document.querySelector("dialog[open]:modal") || document.body;
+  const box = document.getElementById("tip");
+  if (box && box.parentElement === host) return box;
+  return host.appendChild(box || el("div", { id: "tip", role: "tooltip", hidden: true }));
 }
 export function hideTip() {
   clearTimeout(tip?.timer);
@@ -220,9 +224,9 @@ export function hideTip() {
   const box = document.getElementById("tip");
   if (box) box.hidden = true;
 }
-function showTip(node) {
+function showTip(node, { focused = false } = {}) {
   // Gone or moved from under the mouse while it waited: nothing to say about it.
-  if (!node.isConnected || !node.matches(":hover")) {
+  if (!node.isConnected || !(focused || node.matches(":hover"))) {
     hideTip();
     return;
   }
@@ -231,9 +235,12 @@ function showTip(node) {
   box.hidden = false;
   const at = node.getBoundingClientRect();
   const size = box.getBoundingClientRect();
-  const below = at.bottom + 6 + size.height <= window.innerHeight;
-  box.style.top = `${below ? at.bottom + 6 : Math.max(4, at.top - size.height - 6)}px`;
-  box.style.left = `${Math.max(8, Math.min(at.left, window.innerWidth - size.width - 8))}px`;
+  // In Settings, inside its page area: never over its list of pages.
+  const pane = node.closest("#settings-pane")?.getBoundingClientRect();
+  const area = pane || { top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight };
+  const below = at.bottom + 6 + size.height <= area.bottom;
+  box.style.top = `${below ? at.bottom + 6 : Math.max(area.top + 4, at.top - size.height - 6)}px`;
+  box.style.left = `${Math.max(area.left + 8, Math.min(at.left, area.right - size.width - 8))}px`;
   tip.at = at;
 }
 // After the page is redrawn: the tooltip says what its element says now, or goes with it.
@@ -250,6 +257,17 @@ function armTip(event) {
   if (node?.dataset.tip) tip = { node, timer: setTimeout(() => showTip(node), 350) };
 }
 document.addEventListener("pointerover", armTip);
+// A focusable element with a tip of its own (a plan's meter in Settings) says it on focus too.
+document.addEventListener("focusin", (event) => {
+  const node = event.target.closest?.("[data-tip][tabindex]");
+  if (!node?.dataset.tip) return;
+  hideTip();
+  tip = { node };
+  showTip(node, { focused: true });
+});
+document.addEventListener("focusout", (event) => {
+  if (tip?.node === event.target) hideTip();
+});
 // Gone because the page changed under it: the next move of the mouse shows what is there now.
 document.addEventListener("pointermove", (event) => !tip && armTip(event));
 document.addEventListener("pointerout", (event) => {
