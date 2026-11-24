@@ -41,8 +41,9 @@ WINDOW_DAYS = 7
 PAST_PAGE = 20
 PAST_READ = 200
 HISTORY_PAGE = 50
-# Every request's teams are read again this often (their tasks' changes invalidate them).
-RELOAD_SECONDS = 3600
+# Every request's teams are read again this often, to be safe (a change to a task of one reads
+# its request again at once).
+RELOAD_SECONDS = 24 * 3600
 CHUNK = 400
 # Part colors by the order parts joined: neighbours apart, red last.
 PALETTE = ("c0", "c3", "c5", "c2", "c6", "c7", "c1", "c4")
@@ -82,6 +83,11 @@ class TeamsLite:
         self.requests: dict[str, Request] = {}
         self.dirty: set[str] = set()
         self.loaded = 0.0
+        # Kept as requests are read: how many teams there are, and the requests of the current
+        # window (a task open, or changed in its last WINDOW_DAYS), looked over every 10 min.
+        self.total = 0
+        self.recent: set[str] = set()
+        self.recent_at = 0.0
         self.memo: tuple[tuple, tuple[list[dict], int]] | None = None
 
     # Stamps, as things happen (passive: never read back to change what is done).
@@ -374,11 +380,12 @@ class TeamsLite:
         }
 
     def load(self):
-        """Every request's teams: all of them now and then (once an hour), else those whose
+        """Every request's teams: all of them now and then (once a day), else those whose
         tasks changed since."""
         if not self.loaded or time.time() - self.loaded > RELOAD_SECONDS:
             made = {key: loads(value, []) for key, value in self.store.items("reqtasks:").items()}
-            self.requests = self.read(made)
+            self.requests, self.total, self.recent, self.recent_at = {}, 0, set(), time.time()
+            self.put(self.read(made))
             self.loaded, self.dirty = time.time(), set()
             return
         if self.dirty:
@@ -387,7 +394,23 @@ class TeamsLite:
                 key.split(":", 1)[1]: loads(value, [])
                 for key, value in self.kv([f"reqtasks:{r}" for r in again]).items()
             }
-            self.requests.update(self.read(made))
+            self.put(self.read(made))
+
+    def put(self, found: dict[str, Request]):
+        since = self.since()
+        for request, entry in found.items():
+            if old := self.requests.get(request):
+                self.total -= len(old.teams)
+            self.requests[request] = entry
+            self.total += len(entry.teams)
+            if entry.open or entry.latest >= since:
+                self.recent.add(request)
+            else:
+                self.recent.discard(request)
+
+    @staticmethod
+    def since() -> str:
+        return (datetime.now(UTC) - timedelta(days=WINDOW_DAYS)).isoformat()
 
     def current(self, listed: list[dict]) -> tuple[list[dict], int]:
         """Candidate teams (§4.1): those of a request with a task open, listed on Home, or
@@ -399,9 +422,10 @@ class TeamsLite:
         self.load()
         window = self.window(listed)
         # Read anew on every change: what a hook may have missed never stays.
-        self.requests.update(self.read({r: self.requests[r].tasks for r in window}))
+        self.put(self.read({r: self.requests[r].tasks for r in window}))
+        window = self.window(listed)
         teams = [team for r in window for team in self.requests[r].teams]
-        past = sum(len(entry.teams) for r, entry in self.requests.items() if r not in window)
+        past = self.total - len(teams)
         seen = self.kv([f"teamseen:{team['id']}" for team in teams])
         for team in teams:
             team["seen"] = seen_mark(seen.get(f"teamseen:{team['id']}"))
@@ -414,10 +438,12 @@ class TeamsLite:
         return int(time.time() // 60)
 
     def window(self, listed: list[dict]) -> set[str]:
-        since = (datetime.now(UTC) - timedelta(days=WINDOW_DAYS)).isoformat()
+        if time.time() - self.recent_at > 600:
+            since = self.since()
+            self.recent = {r for r, e in self.requests.items() if e.open or e.latest >= since}
+            self.recent_at = time.time()
         stamps = self.kv([f"req:{task['id']}" for task in listed])
-        found = {value for value in stamps.values() if value in self.requests}
-        found |= {r for r, entry in self.requests.items() if entry.open or entry.latest >= since}
+        found = {value for value in stamps.values() if value in self.requests} | self.recent
         return {r for r in found if self.requests[r].teams or len(self.requests[r].tasks) >= 2}
 
     def snapshot(self, listed: list[dict]) -> dict:
@@ -525,7 +551,7 @@ class TeamsLite:
         request, task = found.groups()
         made = {request: loads(self.store.get(f"reqtasks:{request}"), [])}
         entry = self.read(made)[request]
-        self.requests[request] = entry
+        self.put({request: entry})
         team = next((t for t in entry.teams if t["id"] == team_id), None)
         team = team or next(
             (t for t in entry.teams if any(task in m["tasks"] for m in t["members"])), None
@@ -541,8 +567,17 @@ class TeamsLite:
         team = self.find(team_id)
         waiting = self.waiting([team]).get(team["id"], [])
         tasks = [task for member in team["members"] for task in member["tasks"]]
-        rows = self.rows("SELECT * FROM tasks WHERE id IN ({})", tasks)
-        views = [self.runtime.task_actions.view(row) for row in rows]
+        rows = self.rows(
+            "SELECT id, session_id, title, status, progress, created_at, updated_at, ended_at "
+            "FROM tasks WHERE id IN ({})",
+            tasks,
+        )
+        # As they stand, for a part Home does not list (its own rows, the page's, are Home's).
+        aside = self.kv([f"setaside:{row['id']}" for row in rows])
+        views = [
+            {**row, "set_aside": row["status"] == "done" and f"setaside:{row['id']}" in aside}
+            for row in rows
+        ]
         items, pairs = self.history(team)
         items += self.moments(team, {row["id"]: row for row in rows})
         items.sort(key=lambda item: (item["at"], item["key"]), reverse=True)
@@ -700,7 +735,7 @@ class TeamsLite:
                 if len(made) < 2:
                     continue
                 entry = self.read({request: made})[request]
-                self.requests[request] = entry
+                self.put({request: entry})
             if request in window:
                 continue
             found += entry.teams
