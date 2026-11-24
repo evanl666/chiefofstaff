@@ -4,6 +4,7 @@ its decisions kept apart from the owner's."""
 
 import asyncio
 import json
+import time
 
 import pytest
 from conftest import Harness, call_tool, settle
@@ -38,13 +39,7 @@ async def said_in_page(runtime, session_id, text):
 async def judge_proposes(harness, **proposal):
     """The judge's model calls propose_answer (once Autopilot asked it)."""
     runtime = harness.runtime
-    for _ in range(200):
-        await asyncio.sleep(0)
-        if runtime.autopilot.proposal is not None and harness.store.keys("judge:"):
-            break
-    else:
-        raise AssertionError("the judge was never asked")
-    judge = harness.store.keys("judge:")[0].removeprefix("judge:")
+    judge = await until(lambda: judging(harness))
     defaults = {"park": False, "asks_permission": False, "reversible": True, "sure": True,
                 "reason": "The owner said so."}  # fmt: skip
     result = await call_tool(runtime, "propose_answer", judge, **{**defaults, **proposal})
@@ -69,6 +64,30 @@ def entries(runtime, *kinds):
     return runtime.autopilot.book.entries(kinds=kinds)
 
 
+async def until(check, seconds: float = 10):
+    """By the clock, not by a count of turns of the loop (slower machines take more)."""
+    deadline = time.monotonic() + seconds
+    while not (found := check()):
+        assert time.monotonic() < deadline, "timed out"
+        await asyncio.sleep(0.01)
+    return found
+
+
+def judging(harness) -> str:
+    """The judge's session once it was given an item to judge ("" before)."""
+    runtime = harness.runtime
+    keys = harness.store.keys("judge:")
+    if runtime.autopilot.proposal is None or not keys:
+        return ""
+    judge = keys[0].removeprefix("judge:")
+    session = harness.client.sessions.get(harness.store.get(f"copilot:{judge}") or judge)
+    return judge if session and session.sent else ""
+
+
+def drawn(harness, session_id) -> list[dict]:
+    return [m for m in harness.store.messages(session_id) if m["kind"] == "draft"]
+
+
 async def test_a_question_settled_by_a_page_message_is_answered_quoted(harness):
     runtime = await harness.connect()
     await on(runtime)
@@ -76,8 +95,7 @@ async def test_a_question_settled_by_a_page_message_is_answered_quoted(harness):
     session = made["session_id"]
     owner = await said_in_page(runtime, session, "Postgres for v1, please.")
     answer = await asked(runtime, session, "Which store for sessions?", ["Postgres", "Redis"])
-    for _ in range(50):
-        await asyncio.sleep(0)  # (Not settle: it would wait for the judge.)
+    await until(lambda: judging(harness))  # (Not settle: it would wait for the judge.)
     assert not answer.done() and runtime.snapshot()["autopilot"]["deciding"], "held, not drawn"
     assert not [m for m in harness.store.messages(session) if m["kind"] == "draft"]
     judge = await judge_proposes(harness, answer="Postgres", basis=[cite(owner, "Postgres for v1")])
@@ -212,23 +230,18 @@ async def test_a_card_held_when_stop_comes_goes_to_the_owner_unanswered(harness)
     session = made["session_id"]
     owner = await said_in_page(runtime, session, "Postgres for v1, please.")
     answer = await asked(runtime, session, "Which store for sessions?", ["Postgres", "Redis"])
-    for _ in range(200):
-        await asyncio.sleep(0)
-        if runtime.autopilot.proposal is not None and harness.store.keys("judge:"):
-            break
+    judge = await until(lambda: judging(harness))
     run = runtime.autopilot.run()["id"]
     await runtime.autopilot.stop(by="you", why="you pressed Stop")
-    judge = harness.store.keys("judge:")[0].removeprefix("judge:")
     await call_tool(runtime, "propose_answer", judge, answer="Postgres",
                     basis=[cite(owner, "Postgres for v1")], park=False, asks_permission=False,
                     reversible=True, sure=True, reason="The owner said so.")  # fmt: skip
-    for _ in range(50):
-        await asyncio.sleep(0)
+    await until(lambda: drawn(harness, session))
+    await settle(runtime)
     assert not answer.done(), "its turn waits for the owner"
     assert entries(runtime, "answered") == []
     [card] = [d for d in harness.store.drafts() if d["kind"] == "question"]
     assert card["status"] == "pending"
-    assert [m for m in harness.store.messages(session) if m["kind"] == "draft"], "drawn"
     assert not runtime.snapshot()["autopilot"]["deciding"]
     assert all(e["run_id"] == run for e in entries(runtime, "parked")), "never a later run's"
     assert runtime.autopilot.origins.of(session) is None
@@ -243,17 +256,12 @@ async def test_a_judgment_made_before_stop_is_never_filed_after_it(harness):
     session = made["session_id"]
     owner = await said_in_page(runtime, session, "Postgres for v1, please.")
     answer = await asked(runtime, session, "Which store for sessions?", ["Postgres", "Redis"])
-    for _ in range(200):
-        await asyncio.sleep(0)
-        if runtime.autopilot.proposal is not None and harness.store.keys("judge:"):
-            break
-    judge = harness.store.keys("judge:")[0].removeprefix("judge:")
+    judge = await until(lambda: judging(harness))
     await call_tool(runtime, "propose_answer", judge, answer="Postgres",
                     basis=[cite(owner, "Postgres for v1")], park=False, asks_permission=False,
                     reversible=True, sure=True, reason="The owner said so.")  # fmt: skip
     runtime.autopilot.book.bump()  # Stop's brake, before the judgment is filed.
-    for _ in range(50):
-        await asyncio.sleep(0)
+    await until(lambda: drawn(harness, session))
     assert not answer.done() and entries(runtime, "answered") == []
     card = next(d for d in harness.store.drafts() if d["kind"] == "question")
     assert card["status"] == "pending"
@@ -267,9 +275,10 @@ async def test_a_decision_queued_before_stop_is_not_delivered_after_it(harness):
     made = await worker(runtime, harness.router_id)
     session = made["session_id"]
     owner = await said_in_page(runtime, session, "Postgres for v1.")
-    gate = asyncio.Event()
+    gate, readying = asyncio.Event(), asyncio.Event()
 
     async def slow_ready(row, origin):
+        readying.set()
         await gate.wait()
         return True
 
@@ -278,8 +287,7 @@ async def test_a_decision_queued_before_stop_is_not_delivered_after_it(harness):
                     options=[{"choice": "Postgres", "effect": "a"},
                              {"choice": "Redis", "effect": "b"}])  # fmt: skip
     await judge_proposes(harness, answer="Postgres", basis=[cite(owner, "Postgres for v1")])
-    for _ in range(50):
-        await asyncio.sleep(0)
+    await asyncio.wait_for(readying.wait(), 10)  # Claimed, its worker being made ready.
     sent = len(harness.session(session).sent)
     await runtime.autopilot.stop(by="you", why="you pressed Stop")
     gate.set()
@@ -290,6 +298,30 @@ async def test_a_decision_queued_before_stop_is_not_delivered_after_it(harness):
                if i["kind"] == "worker"]  # fmt: skip
     assert [i["state"] for i in workers] == ["withdrawn"]
     assert entries(runtime, "withdrawn")
+
+
+async def test_an_item_waiting_its_turn_with_the_judge_when_stop_comes_is_never_judged(harness):
+    """Review 2: one card judged, another waiting for the judge, then Stop: the one waiting
+    never asks the judge (nor waits for it); both cards go to the owner, drawn."""
+    runtime = await harness.connect()
+    await on(runtime)
+    first = (await worker(runtime, harness.router_id))["session_id"]
+    second = (await worker(runtime, harness.router_id, title="Cache store"))["session_id"]
+    await said_in_page(runtime, first, "Postgres for v1, please.")
+    await said_in_page(runtime, second, "Redis for the cache, please.")
+    answers = [await asked(runtime, first, "Which store for sessions?", ["Postgres", "Redis"])]
+    judge = await until(lambda: judging(harness))
+    answers.append(await asked(runtime, second, "Which store for the cache?", ["Redis", "None"]))
+    await until(lambda: len(runtime.autopilot.deciding) == 2)
+    conversation, prompts = harness.store.get(f"copilot:{judge}"), len(harness.session(judge).sent)
+    await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    await until(lambda: drawn(harness, first) and drawn(harness, second), 5)
+    await settle(runtime)
+    assert harness.store.get(f"copilot:{judge}") == conversation, "never run again for the second"
+    assert len(harness.session(judge).sent) == prompts, "never asked of the second"
+    assert runtime.autopilot.proposal is None
+    assert not any(answer.done() for answer in answers)
+    assert entries(runtime, "answered") == []
 
 
 @pytest.mark.parametrize(
@@ -472,8 +504,7 @@ async def test_its_tick_never_waits_for_the_judge(harness, monkeypatch):
     await asyncio.wait_for(runtime.autopilot.tick(), 1)
     await judge_proposes(harness, answer="sessions_v1", basis=[cite(owner, "Name it sessions_v1")])
     assert asked == ["judge"], "one pass at a time"
-    for _ in range(50):
-        await asyncio.sleep(0)
+    await until(lambda: entries(runtime, "answered"))
     await settle(runtime)
     assert [e["kind"] for e in entries(runtime, "answered")] == ["answered"]
 
