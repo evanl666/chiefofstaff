@@ -67,7 +67,9 @@ async def test_the_state_lists_the_questions_workers_wait_on_each_other_for(harn
 async def test_a_team_is_the_workers_that_work_together_each_with_a_short_name(harness):
     runtime, router, scout, writer = await team_of_two(harness)
     lone = await spawn(runtime, router, "Fix the flaky login test in the API: retries")
-    [team] = runtime.snapshot()["teams"]
+    # The Router's view of teams (its digest, read_team_thread), as before; the owner's is
+    # Teams lite's (test_teams_lite.py).
+    [team] = runtime.teams.view()
     assert team["id"] == f"team-{scout[:8]}"
     assert team["members"] == [scout, writer] and team["open"] == [scout, writer]
     assert team["name"] == "Token scout & Token writer"
@@ -86,7 +88,7 @@ async def test_a_team_is_the_workers_that_work_together_each_with_a_short_name(h
     third = await spawn(
         runtime, router, "Token docs", works_with=[runtime.tasks.current(writer)["id"]]
     )
-    [team] = runtime.snapshot()["teams"]
+    [team] = runtime.teams.view()
     assert team["members"] == [scout, writer, third] and team["id"] == f"team-{scout[:8]}"
     assert team["name"] == "Token scout, Token writer +1"
 
@@ -125,7 +127,7 @@ async def test_a_teams_thread_pairs_each_question_with_its_answer_and_says_what_
     assert (waiting["status"], waiting["minutes"], waiting["id"]) == ("open", 9, second)
     # The writer is not at work and its task is open: the question holds it up.
     assert waiting["blocks"] is True
-    [team_view] = runtime.snapshot()["teams"]
+    [team_view] = runtime.teams.view()
     assert (team_view["told"], team_view["asked"], team_view["answered"]) == (1, 2, 1)
     assert [(q["id"], q["minutes"], q["blocks"]) for q in team_view["waiting"]] == [
         (second, 9, True)
@@ -214,9 +216,10 @@ async def test_peer_rows_from_before_ride_along_themselves_not_in_a_digest(harne
     assert "old copy" in sent and "team-digest" not in sent
 
 
-async def test_a_question_holding_a_task_up_half_an_hour_needs_the_owner_once_per_team(harness):
+async def test_a_question_holding_a_task_up_half_an_hour_needs_the_owner_once_each(harness):
     """E129, phase 4: a question its asker's task waits on, open 30 minutes or more, is one line
-    under Needs you per team; Nudge tells the one asked (at most every half hour)."""
+    under Needs you, one per question (Teams lite: in a team or not); Nudge tells the one asked
+    (at most every half hour)."""
     from chiefofstaff.digest import needs, needs_you, waiting_parts
 
     runtime, _, scout, writer = await team_of_two(harness)
@@ -232,9 +235,12 @@ async def test_a_question_holding_a_task_up_half_an_hour_needs_the_owner_once_pe
     assert not needs(runtime).of("team"), "29 minutes: not yet"
     harness.store.execute("UPDATE questions SET asked=asked-40*60 WHERE id IN (?, ?)",
                           (question, later))  # fmt: skip
-    [held] = needs(runtime).of("team")
-    assert (held["question"]["id"], held["question"]["minutes"]) == (question, 69)
-    assert needs_you(runtime) == before + 1, "one line for the team, not one per question"
+    held = needs(runtime).of("team")
+    assert [(h["question"]["id"], h["question"]["minutes"]) for h in held] == [
+        (question, 69),
+        (later, 40),
+    ]
+    assert needs_you(runtime) == before + 2, "one line per question"
     assert "1 worker waiting on another one's answer" in waiting_parts(needs(runtime))
 
     said = await runtime.teams.nudge(f"team-{scout[:8]}", question)
@@ -242,8 +248,10 @@ async def test_a_question_holding_a_task_up_half_an_hour_needs_the_owner_once_pe
     nudge = harness.session(scout).sent[-1]
     assert nudge.startswith('<message from="system" type="peer-nudge"')
     assert f'answer_session(question_id="{question}")' in nudge and "Scope?" in nudge
-    [waiting] = [q for q in runtime.snapshot()["teams"][0]["waiting"] if q["id"] == question]
+    [waiting] = [q for q in runtime.teams.view()[0]["waiting"] if q["id"] == question]
     assert waiting["nudged"]
+    [shown] = [q for q in runtime.snapshot()["held_questions"] if q["id"] == question]
+    assert shown["nudged"]
     with pytest.raises(ValueError, match="Nudged already"):
         await runtime.teams.nudge(f"team-{scout[:8]}", question)
     with pytest.raises(LookupError):
@@ -263,8 +271,9 @@ async def test_workers_that_talk_unasked_to_work_together_are_a_team_and_nothing
     router = harness.router_id
     expert = await spawn(runtime, router, "Billing research")
     asker = await spawn(runtime, router, "Invoice bug")
-    assert runtime.snapshot()["teams"] == []
+    assert runtime.teams.view() == []
     await call_tool(runtime, "ask_session", asker, session_id=expert, question="Which table?")
-    [team] = runtime.snapshot()["teams"]
+    [team] = runtime.teams.view()
     assert team["members"] == [expert, asker] and team["asked"] == 1
+    assert runtime.snapshot()["teams"] == [], "the owner's Teams: a message makes no team"
     assert runtime.peers.of(asker) == [] and runtime.peers.of(expert) == []

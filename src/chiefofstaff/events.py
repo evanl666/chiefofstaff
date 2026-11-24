@@ -514,7 +514,7 @@ class Events:
         state.reply_in = switched[-1] if switched else ""
         state.turn_decisions, state.turn_tasks = [], []
         state.turn_request = (
-            self.runtime.teams.turn_request(row["id"], content)
+            self.runtime.teams_lite.turn_request(row["id"], content)
             if row["role"] == ROUTER and owner
             else ""
         )
