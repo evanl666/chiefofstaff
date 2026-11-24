@@ -184,10 +184,11 @@ async def test_yolo_skips_permission_checks_globally_or_per_worker(tmp_path):
     harness = Harness(tmp_path / "data", Settings(worker_sandbox=True, worker_yolo=False))
     runtime = await harness.connect()
     worker = (await spawn(runtime, harness.router_id, title="Ship", instructions="s"))["session_id"]
-    push = SimpleNamespace(kind="shell", full_command_text="git push --force", possible_urls=[])
+    # What Ask first refuses and the floor (which holds either way) lets through.
+    sudo = SimpleNamespace(kind="shell", full_command_text="sudo make install", possible_urls=[])
 
     async def allowed(session_id):
-        decision = await runtime.events.on_permission(push, {"session_id": session_id})
+        decision = await runtime.events.on_permission(sudo, {"session_id": session_id})
         return type(decision).__name__ == "PermissionDecisionApproveOnce"
 
     assert not await allowed(worker)
@@ -213,6 +214,55 @@ async def test_yolo_skips_permission_checks_globally_or_per_worker(tmp_path):
     third = (await spawn(runtime, harness.router_id, title="Third", instructions="t"))["session_id"]
     assert runtime.yolo(harness.store.session(third)), "on by default"
     assert not runtime.yolo(harness.store.session(harness.router_id)), "only workers"
+
+
+@pytest.mark.parametrize("yolo", [True, False])
+async def test_the_floor_holds_for_every_worker_yolo_or_not(tmp_path, yolo):
+    """0.1.57: a yolo worker's `gh pr comment` went out as the owner. Whatever its mode, no
+    worker speaks on GitHub as the owner, force-pushes a branch not its own or pushes to main:
+    it is told to ask. Its own branch it pushes to (forced too, acting on its own)."""
+    _, api = published(tmp_path, "api")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(api)], worker_yolo=yolo))
+    runtime = await harness.connect()
+    info = await spawn(
+        runtime, harness.router_id, title="Fix", instructions="x", project=str(api), isolate=True
+    )
+    worker, branch = info["session_id"], info["branch"]
+    assert runtime.yolo(harness.store.session(worker)) is yolo
+
+    async def refused(**request) -> str | None:
+        decision = await runtime.events.on_permission(
+            SimpleNamespace(**request), {"session_id": worker}
+        )
+        return decision.feedback if decision.kind == "reject" else None
+
+    async def shell(command: str) -> str | None:
+        return await refused(kind="shell", full_command_text=command, possible_urls=[])
+
+    for command in (
+        "gh pr comment 4 --body 'Done'",
+        "gh pr merge 4 --squash",
+        "gh pr review 4 --approve",
+        "gh pr close 4",
+        "gh issue create --title x --body y",
+        "gh issue edit 2 --add-label bug",
+        "gh issue comment 2 --body x",
+        "gh issue close 2",
+        "gh api repos/o/r/issues/2/comments -f body=x",
+        "git push origin main",
+        "git push --force origin feature",
+    ):
+        reason = await shell(command)
+        assert reason and policy_module.FLOOR_ASK in reason, command
+        assert ("notice", reason) in harness.kinds(worker)
+    reason = await refused(
+        kind="mcp", server_name="github-mcp-server", tool_name="merge_pull_request", read_only=False
+    )
+    assert reason and policy_module.FLOOR_ASK in reason
+    for command in ("gh pr create --fill", "gh pr view 4", f"git push -u origin {branch}"):
+        assert await shell(command) is None, command
+    forced = await shell(f"git push --force-with-lease origin {branch}")
+    assert (forced is None) is yolo, "its own branch: forced only acting on its own"
 
 
 async def test_a_failed_setup_leaves_no_worktree_or_branch(tmp_path):

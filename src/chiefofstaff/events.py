@@ -26,6 +26,8 @@ from .policy import (
     OWNERS_CHECKOUT,
     OWNERS_CHECKOUT_ASK,
     OWNERS_CHECKOUT_TREE,
+    floor_denial,
+    floor_needs_git,
     owners_checkout,
     permission_denial,
     private_denial,
@@ -1131,6 +1133,22 @@ class Events:
             return await asyncio.to_thread(permission_denial, row, request, writable)
         return permission_denial(row, request, writable)
 
+    async def floor(self, row: dict, request: Any) -> str | None:
+        """What no worker does as the owner, yolo or not (policy.floor_denial): its own branches
+        are its checkouts'. A check that may ask git (a push's branch) runs aside, as denial's."""
+        if row["role"] != WORKER:
+            return None
+        own = [
+            checkout["branch"]
+            for checkout in self.workspaces.checkouts(row)
+            if checkout.get("branch") and not checkout.get("shared")
+        ]
+        if floor_needs_git(request):
+            return await asyncio.to_thread(floor_denial, row, request, own)
+        if getattr(request, "kind", "") == "mcp":
+            return floor_denial(row, request, own, self.store.settings().mcp_servers)
+        return floor_denial(row, request, own)
+
     async def pre_tool(self, data: dict, invocation: dict) -> dict | None:
         """Before each tool a Copilot worker runs where Runtime.pre_tool_wanted, Copilot waiting
         for the answer (after its folder's own preToolUse hooks, whose scripts a folder moved
@@ -1193,6 +1211,7 @@ class Events:
             or (reason := self.runtime.forks.refused_write(row, request))
             or (reason := settings_write(row, request, self.runtime.held_run_files(row)))
             or (stepping and (reason := self.runtime.shepherd.denial(row, request)))
+            or (reason := await self.floor(row, request))
             or (not self.runtime.yolo(row) and (reason := await self.denial(row, request)))
         ):
             if stepping and (reason in OWNERS_CHECKOUTS or reason.startswith(OWNERS_TREE)):

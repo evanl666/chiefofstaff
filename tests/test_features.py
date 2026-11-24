@@ -878,11 +878,10 @@ def test_a_step_reads_as_what_it_is_for():
     assert describe_step("bash", {"command": "make"}) == "bash make", "the command, as it runs"
 
 
-async def test_the_settings_line_on_yolo_says_what_holds_only_with_it_off(harness):
+async def test_the_settings_line_on_yolo_says_what_holds_either_way(harness):
     """Settings → Workers said that, yolo or not, nothing is force-pushed, pushed to main or
-    posted as the owner without their OK; a yolo worker's commands are not checked at all
-    (Events.on_permission). Its line says what Ask first refuses, and that with yolo on only the
-    workers' instructions hold them back."""
+    posted as the owner without their OK, and a yolo worker's commands were not checked at all.
+    The floor holds either way now (policy.floor_denial), and the line says it."""
     runtime = await harness.connect()
     worker = (await spawn(runtime, harness.router_id, "Ship"))["session_id"]
     lines = ("git push --force origin chief/ship", "git push origin main", "gh pr comment 7 -b ok")
@@ -893,13 +892,12 @@ async def test_the_settings_line_on_yolo_says_what_holds_only_with_it_off(harnes
         return type(decision).__name__ == "PermissionDecisionApproveOnce"
 
     assert runtime.yolo(harness.store.session(worker)), "on by default"
-    assert [await allowed(line) for line in lines] == [True, True, True]
+    assert [await allowed(line) for line in lines] == [False, False, False]
     await runtime.set_session_yolo(worker, "off")
     assert [await allowed(line) for line in lines] == [False, False, False]
     page = (Path(__file__).parent.parent / "src/chiefofstaff/static/index.html").read_text()
     found = re.search(r'name="worker_yolo".*?<small>(.*?)</small>', page, re.DOTALL)
-    assert found and "Either way" not in found.group(1)
-    assert found.group(1).startswith(
-        "Off, Chief of Staff refuses their force-pushes, pushes to main and posts on GitHub as "
-        "you; on, only their instructions hold them back."
+    assert found and found.group(1).startswith(
+        "Either way, no worker comments, reviews, merges or closes on GitHub as you, pushes "
+        "to main or force-pushes others' branches without your OK."
     )

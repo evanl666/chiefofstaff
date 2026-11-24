@@ -5470,6 +5470,132 @@ def shell_denial(command: str, cwd: str, reads_slack: bool, request: Any) -> str
     return None
 
 
+# The floor (0.1.57): what no worker does as the owner on its own, with yolo on or off. Nothing
+# goes out on GitHub in their name without their OK: no PR merged, reviewed, commented on or
+# closed, no issue opened, changed, commented on or closed, no write through gh api or GitHub's
+# MCP server, no force push to a branch that is not the worker's own, no push to the default
+# branch. Its own branches it pushes to as it likes; it opens PRs and reads anything.
+FLOOR_ASK = (
+    "Chief of Staff never does that as the owner unasked, whatever the worker's mode. Ask the "
+    'owner with report(status="question"), or hand them the text as a draft to approve '
+    "(draft_github_review: a review, a reply or a comment)."
+)
+GH_PR_SPEAKS = re.compile(r"\bgh\s+pr\s+(merge|review|comment|close)\b")
+GH_ISSUE_CHANGES = re.compile(r"\bgh\s+issue\s+(create|new|edit|comment|close)\b")
+# Only a line that names git or gh is read further: the rest costs one search.
+FLOOR_WORDS = re.compile(r"\b(git|gh)\b")
+GH_WORD = re.compile(r"\bgh\b")
+GITHUB_NAMED = re.compile(r"github", re.IGNORECASE)
+
+
+def github_server(name: str, config: Any) -> bool:
+    """Whether an MCP server is GitHub's: by its name, its command and arguments, or its URL."""
+    if GITHUB_NAMED.search(name):
+        return True
+    if not isinstance(config, dict):
+        return False
+    parts = [config.get("command"), config.get("url"), *(config.get("args") or [])]
+    return any(isinstance(part, str) and GITHUB_NAMED.search(part) for part in parts)
+
+
+def floor_denial(
+    row: dict, request: Any, own: Iterable[str] = (), servers: dict | None = None
+) -> str | None:
+    """Why no worker may do this as the owner, whatever its mode (the floor above); None when
+    it may. `own`: the branches that are the worker's own (its checkouts'); `servers`: the MCP
+    servers of Settings (a GitHub one under another name is GitHub's too)."""
+    if row["role"] != WORKER:
+        return None
+    kind = getattr(request, "kind", "")
+    if kind == "mcp":
+        server = str(getattr(request, "server_name", "") or "")
+        if github_server(server, (servers or {}).get(server)) and not getattr(
+            request, "read_only", False
+        ):
+            tool = getattr(request, "tool_name", "") or "a tool"
+            return f"Denied: writing to GitHub as the owner ({tool}). {FLOOR_ASK}"
+        return None
+    if kind != "shell":
+        return None
+    command = getattr(request, "full_command_text", "") or ""
+    if not FLOOR_WORDS.search(command):
+        return None
+    try:
+        reason = floor_shell(command, row["cwd"] or "", frozenset(own), request)
+    except Exception as exc:  # Any failure to check refuses, saying so.
+        reason = f"{NOT_CHECKED} ({type(exc).__name__})"
+    return f"Denied: {reason}. {FLOOR_ASK}" if reason else None
+
+
+def floor_needs_git(request: Any) -> bool:
+    """Whether the floor's check of this request may ask git (a push's branch, an alias): such a
+    check runs aside, never holding up the rest (Events.floor)."""
+    command = getattr(request, "full_command_text", "") or ""
+    if getattr(request, "kind", "") != "shell" or not re.search(r"\bgit\b", command):
+        return False
+    return may_push(command) or may_alias(squashed(command))
+
+
+def floor_shell(command: str, cwd: str, own: frozenset[str], request: Any) -> str | None:
+    """The floor's reading of a command line (floor_denial)."""
+    if len(command) > MOST_LINE:
+        return TOO_LONG
+    if GH_WORD.search(command):
+        if found := GH_PR_SPEAKS.search(command):
+            return f"`gh pr {found.group(1)}` speaks as the owner on GitHub"
+        if found := GH_ISSUE_CHANGES.search(command):
+            return f"`gh issue {found.group(1)}` speaks as the owner on GitHub"
+        if gh_api_writes(command):
+            return (
+                "writing to GitHub through gh api (with -f/-F fields gh sends a POST: to read, "
+                "add -X GET)"
+            )
+    if not re.search(r"\bgit\b", command):
+        return None
+    answers, settings, checked = ANSWERS.set({}), SETTINGS.set({}), CHECKED.set({})
+    shell = SHELL.set(str(getattr(request, "shell", "") or ""))
+    try:
+        if too_complex(command, cwd):
+            return TOO_COMPLEX
+        if fed_script(command, cwd):
+            return FED_SCRIPT
+        if pushes_default(command, cwd):
+            return "a push to the default branch"
+        if forced_elsewhere(command, cwd, own):
+            return "a force push to a branch that is not one of yours"
+        if pushes_unknown(command, cwd):
+            return UNREADABLE_PUSH
+    finally:
+        SHELL.reset(shell)
+        CHECKED.reset(checked)
+        SETTINGS.reset(settings)
+        ANSWERS.reset(answers)
+    return None
+
+
+def forced_elsewhere(command: str, cwd: str, own: frozenset[str]) -> bool:
+    """Whether a line force-pushes (`--force`, `-f`, `--force-with-lease`, `+refspec`) a branch
+    that is not one of `own`, or one it can't tell (as its words say: v0.1.42's rule, when no
+    push read from the line forces)."""
+    found = judged(command, cwd)
+    forced = [push for push in found if push.forced]
+    if not forced:
+        return floor_force(command) and not found
+    checked = checked_branches(found)
+    for push in forced:
+        if push.unknown or push.anonymous or push.branches is None:
+            return True
+        branches = set(push.branches)
+        if push.bare_in is not None:
+            bare, unknown, several = bare_reading(push, checked, command, cwd)
+            if bare is None or unknown or several:
+                return True
+            branches |= bare
+        if not branches or not branches <= own:
+            return True
+    return False
+
+
 # A shepherd step (shepherd.py) runs in its worker under the step profile: an OS sandbox with no
 # GitHub credentials and no route to GitHub, no MCP servers or plugins, a tool allowlist. These
 # checks are its second line, applied while the step runs whatever the worker's mode: anything

@@ -471,7 +471,8 @@ async def test_a_slow_permission_check_does_not_hold_up_the_rest(tmp_path, monke
     ticking = asyncio.create_task(tick())
     try:
         decision = await runtime.events.on_permission(
-            request("shell", full_command_text="git push"), {"session_id": worker_id}
+            request("shell", full_command_text="git push origin feature"),
+            {"session_id": worker_id},
         )
     finally:
         ticking.cancel()

@@ -2959,3 +2959,82 @@ def test_what_the_checkout_check_lets_through_writes_nothing_there_in_real_bash(
         )
     assert not unsound, unsound
     assert sum(o.changed for o in outcomes) > 50, "the vocabulary writes there often enough"
+
+
+# The floor (0.1.57): what no worker does as the owner on its own, yolo or not. Its own branch
+# here is wb/x (the `feature` checkout's).
+FLOOR_REFUSED = [
+    "gh pr merge 12 --squash",
+    "gh pr review 12 --approve",
+    "gh pr comment 12 --body 'Looks good'",
+    "gh pr close 12",
+    "gh issue create --title Bug --body x",
+    "gh issue edit 3 --add-label bug",
+    "gh issue comment 3 --body 'Fixed'",
+    "gh issue close 3",
+    "gh api repos/o/r/issues/3/comments -f body=hi",
+    "gh api -X POST repos/o/r/pulls/12/reviews --input review.json",
+    "gh api --method PATCH repos/o/r/pulls/12 -F state=closed",
+    "git push origin main",
+    "git push origin HEAD:main",
+    "git push --force origin feature/x",
+    "git push --force-with-lease origin feature/x",
+    "git push origin +feature/x",
+    "cd src && git push -f origin feature/x",
+]
+FLOOR_ALLOWED = [
+    "gh pr create --fill --draft",
+    "gh pr view 12 --comments",
+    "gh pr list --author @me",
+    "gh pr checks 12",
+    "gh pr diff 12",
+    "gh issue view 3",
+    "gh api repos/o/r/pulls/12/comments",
+    "gh api -X GET repos/o/r/issues -f state=open",
+    "git push origin wb/x",
+    "git push -u origin HEAD",
+    "git push --force-with-lease origin wb/x",
+    "git push -f origin HEAD",
+    "git status && git commit -am wip",
+    "make test",
+]
+
+
+def floor(command: str, cwd, own=("wb/x",)) -> str | None:
+    row = {"role": "worker", "slack": 0, "cwd": str(cwd)}
+    request = SimpleNamespace(kind="shell", full_command_text=command)
+    return policy.floor_denial(row, request, own)
+
+
+@pytest.mark.parametrize("command", FLOOR_REFUSED)
+def test_the_floor_refuses_speaking_on_github_and_pushing_elsewhere(command, feature):
+    """Yolo or not, no worker comments, reviews, merges or closes as the owner, changes issues,
+    writes through gh api, force-pushes a branch not its own or pushes to main: the worker is
+    told to ask the owner, or hand them a draft."""
+    reason = floor(command, feature)
+    assert reason and reason.startswith("Denied: ") and policy.FLOOR_ASK in reason, command
+
+
+@pytest.mark.parametrize("command", FLOOR_ALLOWED)
+def test_the_floor_lets_through_its_own_branches_new_prs_and_reads(command, feature):
+    assert floor(command, feature) is None, command
+
+
+def test_the_floor_refuses_github_mcp_writes_and_only_for_workers(feature):
+    def mcp(server, tool, read_only=False, role="worker", servers=None):
+        row = {"role": role, "slack": 0, "cwd": str(feature)}
+        request = SimpleNamespace(
+            kind="mcp", server_name=server, tool_name=tool, read_only=read_only
+        )
+        return policy.floor_denial(row, request, (), servers)
+
+    assert "add_issue_comment" in mcp("github-mcp-server", "add_issue_comment")
+    assert mcp("github-mcp-server", "get_pull_request", read_only=True) is None
+    assert mcp("notes", "write_note") is None
+    work = {"work": {"url": "https://api.githubcopilot.com/mcp/"}}
+    assert mcp("work", "merge_pull_request", servers=work), "a Settings server that is GitHub's"
+    assert mcp("github-mcp-server", "add_issue_comment", role="router") is None
+    assert floor("gh pr comment 1 --body hi", feature) and not policy.floor_denial(
+        {"role": "router", "slack": 0, "cwd": str(feature)},
+        SimpleNamespace(kind="shell", full_command_text="gh pr comment 1 --body hi"),
+    )
