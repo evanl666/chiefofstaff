@@ -15,9 +15,9 @@ top-level keys that a plain `claude -p` run changes on this machine (`changed-ke
 gives them: the run passes them with --allow) or STATE_KEYS; nothing else (no trust, no other
 project, no MCP server, no account field but when Claude last fetched the owner's profile:
 ACCOUNT_STAMPS). Only key names are printed, never a value. A live run
-also allows SYNC_MARKS: the mark Claude writes in the owner's synced claude.ai skills at each
-sync round (any session of the owner's signed-in Claude makes it; only hiding those skills from
-workers would stop it).
+also allows any change under SYNCED: Claude's own sync of the owner's claude.ai skills (any
+session of the owner's signed-in Claude makes it; only hiding those skills from workers would
+stop it).
 
 Credentials (Codex's auth.json, Claude's sign-in) are never read: they are not here.
 """
@@ -67,9 +67,11 @@ STATE_KEYS = {
 # f1fix-4 F's calibration, a plain `claude -p`, did, and this was the only field that changed).
 # A stamp, not a credential nor the account: every other field of it must stay as it was.
 ACCOUNT_STAMPS = frozenset({"profileFetchedAt"})
-# Of the owner's synced claude.ai skills (~/.claude/skills/synced/<id>/): the mark Claude
-# (2.1.322) writes at the end of each sync round, about every ten minutes a session runs.
-SYNC_MARKS = (".last-complete-round",)
+# The owner's claude.ai skills, which Claude Code (2.1.322) itself syncs as a claude process
+# starts and about every ten minutes it runs: each bucket's manifest, the skills in it (made,
+# rewritten, removed) and the mark of each sync round (live r87 C). Chief of Staff never writes
+# there; any other skill or agent of the owner's must stay as it was.
+SYNCED = ("skills", "synced")
 NEVER = {"mcpServers", "oauthAccount", "primaryApiKey", "customApiKeyResponses", "projects"}
 
 
@@ -121,10 +123,10 @@ def watched() -> dict[str, Path]:
     return files
 
 
-def sync_mark(name: str) -> bool:
-    """Whether a watched file is a mark of Claude's skill sync rounds (SYNC_MARKS)."""
-    parts = name.removeprefix("claude ").split("/")
-    return len(parts) == 4 and parts[:2] == ["skills", "synced"] and parts[3] in SYNC_MARKS
+def synced(name: str) -> bool:
+    """Whether a watched file is one of Claude's skill sync's own, under SYNCED."""
+    parts = tuple(name.removeprefix("claude ").split("/"))
+    return len(parts) > len(SYNCED) and parts[: len(SYNCED)] == SYNCED
 
 
 def digest(path: Path) -> str | None:
@@ -235,7 +237,7 @@ def changes(
         f"{name}: {'made' if was is None else 'removed' if now is None else 'changed'}"
         for name in sorted(set(before["files"]) | set(after["files"]))
         if (was := before["files"].get(name)) != (now := after["files"].get(name))
-        and not (roots is not None and (name == "claude ~/.claude.json" or sync_mark(name)))
+        and not (roots is not None and (name == "claude ~/.claude.json" or synced(name)))
     ]
     if roots is not None:
         found += state_changes(before, roots, set(allowed))

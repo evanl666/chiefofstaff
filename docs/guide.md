@@ -1614,7 +1614,7 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   Claude keeps up to date, a worker's does too: in `~/.claude.json`, the time Anthropic's server
   last confirmed your Consumer Terms answer (`groveChoiceSeenAt`, an hour's cache; a session
   without a terminal never marks their notice as seen, it only says to run `claude`), and, with
-  skills synced from claude.ai, each sync round's mark in `~/.claude/skills/synced/` (turning that
+  skills synced from claude.ai, those skills in `~/.claude/skills/synced/` (turning that
   off for workers would hide those skills from them). Codex's commands run without a login shell,
   with the environment and `PATH` a Copilot worker's commands get; Codex puts its own helpers
   first on `PATH` and sets a few variables of its own (such as `LANG` and `LC_ALL` to `C.UTF-8`,

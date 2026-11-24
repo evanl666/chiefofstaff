@@ -211,7 +211,7 @@ Settings → *Coding agents*). For such a worker:
   folder there and in the repository's main checkout. A worker's process updates nothing
   (`DISABLE_AUTOUPDATER`: neither Claude nor your plugins or their marketplaces); it keeps
   Claude's own caches as any of your signed-in sessions does (the hour's cache of your
-  Consumer Terms answer in `.claude.json`, the mark of each claude.ai skill sync round), and
+  Consumer Terms answer in `.claude.json`, your claude.ai skills it syncs), and
   never marks a notice as seen. A worktree Claude would make in your checkout (its repository's
   main checkout, where `EnterWorktree` and a worktree-isolated subagent put one) is refused.
   Each Claude worker runs your installed `claude` itself, unmodified. Codex's

@@ -24,10 +24,11 @@ time (never in parallel, never beside another Claude run):
 - it stops at once when Claude refuses a turn for a limit of the owner's plan or a rate limit
   (a task paused for its plan's limit), saying so: the rest is run once that resets;
 - the owner's Claude files are recorded before the shard and checked after it
-  (scripts/owner_files.py): settings, CLAUDE.md, agents, skills, plugins and git's files byte for
-  byte, Claude's own state file (`.claude.json`) key by key (new projects for the shard's own
-  folders, untrusted; the top-level keys a plain `claude -p` run changes, found by one first):
-  any other change fails it.
+  (scripts/owner_files.py): settings, CLAUDE.md, agents, skills (but Claude's own sync of the
+  claude.ai ones), plugins and git's files byte for byte, Claude's own state file
+  (`.claude.json`) key by key (new projects for the shard's own folders, untrusted; the
+  top-level keys a plain `claude -p` run changes, found by one first): any other change fails
+  it.
 
 Shard E, a Claude worker's day (Claude for new workers, acting on its own):
 E1  a task and a follow-up: on Claude, the same worker, tokens counted, no Copilot credits
