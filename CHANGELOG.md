@@ -38,6 +38,10 @@
   way (your checkouts given to read, Chief of Staff's private files, the sandbox, a *Prepared
   for you* step, the Router never asking a worker to merge or force-push). Yolo itself is
   unchanged.
+- **Pause watching says it pauses *Prepared for you* too.** Settings → Advanced's *Pause
+  watching* also stops *Prepared for you* (it works from what GitHub brings in, and nothing
+  should run unasked while paused), and withdraws what it had ready, but its label didn't say
+  so. It now ends with *and Prepared for you*, and its tip says what is withdrawn.
 
 ## 0.1.56 (2026-11-23)
 

@@ -1075,7 +1075,9 @@ for is always charged to your day, and every attempt stops at a fixed amount of 
 **Your message comes first.** Write to the worker, or press *Stop*, and the attempt stops at
 once; your own new tasks take its place when workers are busy. Stopped for your message or task,
 it is tried again once the worker is free, if still needed; after *Stop*, not by itself. A
-worker you close gives its PRs back to you, paused; reopened, they are its again. What you
+worker you close gives its PRs back to you, paused; reopened, they are its again. *Pause
+watching* (Settings → Advanced) pauses Prepared for you too, as it stops reading GitHub: what it
+had ready is withdrawn, and it looks at your PRs again once you resume. What you
 approved is checked again just before each part of it is sent: turned off, paused, *Stop
 looking after this PR*, or the PR changing hands withdraws what hasn't gone out yet (a reply
 waiting its turn to be sent too), and nothing goes out more than an hour after you approved it.
