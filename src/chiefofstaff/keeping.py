@@ -42,6 +42,7 @@ class Keeping:
         """Before a claim changes holder: its attempt stopped, what is dispatching reconciled,
         its unpublished plans withdrawn."""
         await self.stop_target(target, why, "withdrawn")
+        self.stop_sending(why, target)
         for _ in range(DRAIN_SECONDS * 10):
             if not [a for a in self.control.actions("", DISPATCHING) if a["target"] == target]:
                 break

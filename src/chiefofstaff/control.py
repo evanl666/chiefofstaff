@@ -604,28 +604,64 @@ class Control:
             self.store.one("SELECT * FROM actions WHERE id=?", (action_id,)), *ACTION_JSON
         )
 
-    def dispatching(self, action_id: str, holder: str, generation: int, consent: int) -> str:
-        """The dispatch barrier: an operation is journaled as dispatching only while the claim
-        is held as approved and the feature was not turned off. "" when it may go out."""
+    def dispatching(
+        self, action_id: str, holder: str, generation: int, consent: int, by: float = 0.0
+    ) -> str:
+        """The dispatch barrier, passed immediately before an operation is transmitted (after
+        every wait: its write slot, its last reads, its account's token): it is journaled as
+        dispatching, once, only while the claim is held as approved and not paused or changing
+        hands, the feature was not turned off, and `by` (a time: how long its approval stands)
+        has not passed. "" when it may go out."""
         with self.store.lock, self.store.db:
             db = self.store.db
             action = db.execute("SELECT * FROM actions WHERE id=?", (action_id,)).fetchone()
             if action is None or action["state"] != PLANNED:
                 return "it is not waiting to go out"
-            if int(self.store_value(db, "proactive:generation") or 0) != consent:
-                return "Prepared for you was turned off"
-            claim = db.execute(
-                "SELECT holder, generation, state FROM pr_claims WHERE target=?",
-                (action["target"],),
-            ).fetchone()
-            if claim is None or (claim["holder"], claim["generation"]) != (holder, generation):
-                return "the PR changed hands"
-            if claim["state"] == PAUSED:
-                return "it was paused"
+            if why := self.consent_gone(db, action, holder, generation, consent, by):
+                return why
             db.execute(
                 "UPDATE actions SET state=?, updated_at=? WHERE id=?",
                 (DISPATCHING, now(), action_id),
             )
+        return ""
+
+    def may_dispatch(
+        self,
+        action_id: str,
+        holder: str,
+        generation: int,
+        consent: int,
+        by: float = 0.0,
+        state: str = PLANNED,
+    ) -> str:
+        """What the barrier would say now, changing nothing: before a wait (nothing waits for a
+        write slot that could not go out), or (`state` dispatching) before a second
+        transmission of one operation (a stacked PR's merge, gh's refused). "" when it may."""
+        with self.store.lock:
+            db = self.store.db
+            action = db.execute("SELECT * FROM actions WHERE id=?", (action_id,)).fetchone()
+            if action is None or action["state"] != state:
+                return "it is not waiting to go out"
+            return self.consent_gone(db, action, holder, generation, consent, by)
+
+    def consent_gone(
+        self, db: Any, action: Any, holder: str, generation: int, consent: int, by: float
+    ) -> str:
+        if int(self.store_value(db, "proactive:generation") or 0) != consent:
+            return "Prepared for you was turned off"
+        claim = db.execute(
+            "SELECT holder, generation, state FROM pr_claims WHERE target=?", (action["target"],)
+        ).fetchone()
+        if claim is None or (claim["holder"], claim["generation"]) != (holder, generation):
+            return "the PR changed hands"
+        if claim["state"] == PAUSED:
+            return "it was paused"
+        if claim["state"] not in {IDLE, STEPPING}:
+            return "the PR was merged or closed" if claim["state"] == CLAIM_ENDED else (
+                "it is changing hands"
+            )  # fmt: skip
+        if by and time.time() > by:
+            return "your approval is too old to send it now"
         return ""
 
     def finish(self, action_id: str, state: str, outcome: str = "", link: str = ""):

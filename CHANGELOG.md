@@ -13,6 +13,13 @@
   when Chief of Staff restarts stays the same way, and its worker hears why no answer came. A
   code a notification gave for the card still answers it. The worker waits no longer than
   before.
+- **What you approved in *Prepared for you* goes out only while it may.** A reply waiting its
+  turn to be sent (behind another write of your account's, or GitHub's limit on writes), or a
+  push waiting for its sign-in, still went out after you turned *Prepared for you* off, paused,
+  stopped looking after its PR or the PR changed hands: that was checked only before the wait.
+  Each part is now checked again just before it is sent; what may no longer go out is withdrawn,
+  never sent, and turning it off or *Stop looking after this PR* withdraws at once what waits.
+  Nothing goes out more than an hour after you approved it (after a long stop, say).
 
 ## 0.1.56 (2026-11-23)
 

@@ -12,6 +12,8 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from .control import (
@@ -44,8 +46,21 @@ HOLD = re.compile(
 DISCLOSURE = "\n\n<sub>Drafted with an AI assistant; reviewed and posted by me.</sub>"
 
 
+# How long an approval stands: what could not go out within it (a write slot held it, Chief of
+# Staff was stopped) is withdrawn, never sent late.
+APPROVAL_LASTS = 3600
+
+
 class RefusedError(Exception):
     """An operation not sent: why, in the owner's words."""
+
+
+class WithdrawnError(Exception):
+    """An operation not sent: found just before it would have gone out that its consent went
+    (turned off or paused, the PR changed hands) or its approval is too old."""
+
+
+Gate = Callable[[], None]
 
 
 # Approving a plan.
@@ -226,9 +241,10 @@ def dismiss(shepherd: Shepherd, step_id: str, why: str = "") -> dict:
 
 
 async def dispatch(shepherd: Shepherd, step_id: str):
-    """Send a plan's operations in order, each journaled as dispatching first (the barrier:
-    turning the feature off or a change of hands stops what has not gone out). A push that does
-    not go out withdraws what depends on it."""
+    """Send a plan's operations in order, each through the barrier (control.dispatching) just
+    before it is transmitted, after every wait (its write slot, its last reads): turning the
+    feature off, a pause, a change of hands or an approval too old withdraws what has not gone
+    out, never sent. A push that does not go out withdraws what depends on it."""
     control = shepherd.control
     step = control.step(step_id)
     if not step:
@@ -238,38 +254,74 @@ async def dispatch(shepherd: Shepherd, step_id: str):
         action["kind"] == "push" and action["state"] not in {PLANNED, "sent"}
         for action in control.actions(step_id)
     )
-    for action in control.actions(step_id, PLANNED):
-        operation = action["payload"]
-        if not pushed and operation["kind"] in {"reply", "resolve", "request-review"}:
-            control.finish(action["id"], "withdrawn", "The fix was not pushed.")
-            continue
-        claim = control.claim(step["target"])
-        if not claim:
-            control.finish(action["id"], "withdrawn", "The PR is no longer kept moving.")
-            continue
-        async with shepherd.lock(step["target"]):
-            why = control.dispatching(action["id"], claim["holder"], claim["generation"],
-                                      step["consent"])  # fmt: skip
-            if why:
-                control.finish(action["id"], "withdrawn", why[:300])
-                pushed = pushed and operation["kind"] != "push"
+    me = asyncio.current_task()
+    if me:
+        shepherd.sending[step_id] = me
+    try:
+        for action in control.actions(step_id, PLANNED):
+            operation = action["payload"]
+            if not pushed and operation["kind"] in {"reply", "resolve", "request-review"}:
+                control.finish(action["id"], "withdrawn", "The fix was not pushed.")
                 continue
-            try:
-                if operation["kind"] in CONTENT:
-                    await write_slot(shepherd, action["account"])
-                link = await SEND[operation["kind"]](shepherd, operation, action["account"], step)
-            except RefusedError as exc:
-                control.finish(action["id"], "failed", str(exc))
-                pushed = pushed and operation["kind"] != "push"
+            claim = control.claim(step["target"])
+            if not claim:
+                control.finish(action["id"], "withdrawn", "The PR is no longer kept moving.")
                 continue
-            except Exception as exc:
-                logger.info("Operation %s failed.", action["id"], exc_info=True)
-                state, link = await reconcile(shepherd, {**action, "payload": operation})
-                control.finish(action["id"], state, f"{exc}"[:300], link)
-                pushed = pushed and not (operation["kind"] == "push" and state != "sent")
-                continue
-            control.finish(action["id"], "sent", "", link)
+            async with shepherd.lock(step["target"]):
+                if not await send(shepherd, step, action, claim):
+                    pushed = pushed and operation["kind"] != "push"
+    finally:
+        if me and shepherd.sending.get(step_id) is me:
+            shepherd.sending.pop(step_id, None)
     shepherd.finish_applying(step_id)
+
+
+async def send(shepherd: Shepherd, step: dict, action: dict, claim: dict) -> bool:
+    """One operation: journaled as sent, failed, uncertain or withdrawn. Whether it went out."""
+    control, operation = shepherd.control, action["payload"]
+    approved = datetime.fromisoformat(action["created_at"]).timestamp()
+    consent = (action["id"], claim["holder"], claim["generation"], step["consent"])
+
+    def gate():
+        # Nothing awaited between this and the transmission it comes just before. Journaled as
+        # dispatching once; a second transmission (a stacked PR's merge) is checked again.
+        by = approved + APPROVAL_LASTS
+        if action["id"] in shepherd.transmitting:
+            why = control.may_dispatch(*consent, by=by, state=DISPATCHING)
+        else:
+            why = control.dispatching(*consent, by=by)
+        if why:
+            raise WithdrawnError(why)
+        shepherd.transmitting.add(action["id"])
+
+    if (control.action(action["id"]) or {}).get("state") != PLANNED:
+        return True  # Another sender has it (or had it): its end is that one's to journal.
+    try:
+        if why := control.may_dispatch(*consent, by=approved + APPROVAL_LASTS):
+            raise WithdrawnError(why)
+        if operation["kind"] in CONTENT:
+            await write_slot(shepherd, action["account"])
+        link = await SEND[operation["kind"]](shepherd, operation, action["account"], step, gate)
+    except WithdrawnError as exc:
+        control.finish(action["id"], "withdrawn", f"Not sent: {exc}."[:300])
+        return False
+    except RefusedError as exc:
+        control.finish(action["id"], "failed", str(exc))
+        return False
+    except Exception as exc:
+        logger.info("Operation %s failed.", action["id"], exc_info=True)
+        current = control.action(action["id"]) or action
+        if current["state"] == PLANNED:
+            # Never transmitted (its barrier not passed): nothing to read back.
+            control.finish(action["id"], "failed", f"{exc}"[:300])
+            return False
+        state, link = await reconcile(shepherd, current)
+        control.finish(action["id"], state, f"{exc}"[:300], link)
+        return operation["kind"] != "push" or state == "sent"
+    finally:
+        shepherd.transmitting.discard(action["id"])
+    control.finish(action["id"], "sent", "", link)
+    return True
 
 
 def finish_applying(shepherd: Shepherd, step_id: str):
@@ -344,7 +396,9 @@ async def head_checked(shepherd: Shepherd, operation: dict) -> dict:
 PUSH_RULES = frozenset({"non_fast_forward", "deletion", "creation"})
 
 
-async def send_push(shepherd: Shepherd, operation: dict, login: str, step: dict) -> str:
+async def send_push(
+    shepherd: Shepherd, operation: dict, login: str, step: dict, gate: Gate | None = None
+) -> str:
     from .shepherd import git_env
 
     details = await head_checked(shepherd, operation)
@@ -367,6 +421,8 @@ async def send_push(shepherd: Shepherd, operation: dict, login: str, step: dict)
     if why := operation_denial(facts, ["git", *SAFE_GIT, "-C", tree, *words]):
         raise RefusedError(why)
     token = await shepherd.runtime.github.bound_token(login)
+    if gate:
+        gate()  # Nothing is awaited from here to the push.
     target = f"github:{operation['repo']}#{operation['number']}"
     names = [check["name"] for check in details.get("checks") or []]
     shepherd.store.set(f"checksbefore:{target}",
@@ -388,7 +444,9 @@ async def send_push(shepherd: Shepherd, operation: dict, login: str, step: dict)
     return f"https://github.com/{operation['repo']}/pull/{operation['number']}/commits/{found}"
 
 
-async def send_reply(shepherd: Shepherd, operation: dict, login: str, step: dict) -> str:
+async def send_reply(
+    shepherd: Shepherd, operation: dict, login: str, step: dict, gate: Gate | None = None
+) -> str:
     github = shepherd.runtime.github
     details = await github.pr_details(operation["repo"], int(operation["number"]))
     thread = next((t for t in details["threads"] if t["id"] == operation["thread"]), None)
@@ -406,7 +464,9 @@ async def send_reply(shepherd: Shepherd, operation: dict, login: str, step: dict
     if why := operation_denial(operation, argv):
         raise RefusedError(why)
     github.posting(target, operation["text"])
-    reply = json.loads(await github.bound(login, *argv[1:], payload={"body": operation["text"]}))
+    reply = json.loads(
+        await github.bound(login, *argv[1:], payload={"body": operation["text"]}, gate=gate)
+    )
     if reply.get("id"):
         github.posted(f"github:reviewcomment:{reply['id']}", operation["text"], target)
         root = reply.get("in_reply_to_id") or operation["in_reply_to"]
@@ -414,7 +474,9 @@ async def send_reply(shepherd: Shepherd, operation: dict, login: str, step: dict
     return reply.get("html_url") or "Reply posted."
 
 
-async def send_resolve(shepherd: Shepherd, operation: dict, login: str, step: dict) -> str:
+async def send_resolve(
+    shepherd: Shepherd, operation: dict, login: str, step: dict, gate: Gate | None = None
+) -> str:
     github = shepherd.runtime.github
     details = await github.pr_details(operation["repo"], int(operation["number"]))
     if details["head"] != operation["after"]:
@@ -427,13 +489,15 @@ async def send_resolve(shepherd: Shepherd, operation: dict, login: str, step: di
     argv = ["gh", "api", "graphql", "-f", f"query={RESOLVE}", "-f", f"id={operation['thread']}"]
     if why := operation_denial(operation, argv):
         raise RefusedError(why)
-    found = json.loads(await github.bound(login, *argv[1:]))
+    found = json.loads(await github.bound(login, *argv[1:], gate=gate))
     if found.get("errors"):
         raise RefusedError(str(found["errors"][0].get("message", "GitHub refused"))[:200])
     return "Resolved."
 
 
-async def send_request_review(shepherd: Shepherd, operation: dict, login: str, step: dict) -> str:
+async def send_request_review(
+    shepherd: Shepherd, operation: dict, login: str, step: dict, gate: Gate | None = None
+) -> str:
     github = shepherd.runtime.github
     details = await github.pr_details(operation["repo"], int(operation["number"]))
     reviewers = [r for r in operation["reviewers"] if r and r != details["author"]]
@@ -443,11 +507,13 @@ async def send_request_review(shepherd: Shepherd, operation: dict, login: str, s
     argv = ["gh", "api", path, "--method=POST", "--input=-"]
     if why := operation_denial(operation, argv):
         raise RefusedError(why)
-    await github.bound(login, *argv[1:], payload={"reviewers": reviewers})
+    await github.bound(login, *argv[1:], payload={"reviewers": reviewers}, gate=gate)
     return f"Asked {', '.join(reviewers)} to review again."
 
 
-async def send_rerun(shepherd: Shepherd, operation: dict, login: str, step: dict) -> str:
+async def send_rerun(
+    shepherd: Shepherd, operation: dict, login: str, step: dict, gate: Gate | None = None
+) -> str:
     github = shepherd.runtime.github
     details = await github.pr_details(operation["repo"], int(step["target"].rsplit("#", 1)[1]))
     if details["head"] != operation["head"]:
@@ -456,7 +522,7 @@ async def send_rerun(shepherd: Shepherd, operation: dict, login: str, step: dict
             operation["repo"]]  # fmt: skip
     if why := operation_denial(operation, argv):
         raise RefusedError(why)
-    await github.bound(login, *argv[1:])
+    await github.bound(login, *argv[1:], gate=gate)
     shepherd.store.set(
         f"rerun:{operation['repo']}:{operation['run']}",
         json.dumps({"head": operation["head"], "checks": (step["signal"] or {}).get("checks"),
@@ -465,7 +531,9 @@ async def send_rerun(shepherd: Shepherd, operation: dict, login: str, step: dict
     return f"https://github.com/{operation['repo']}/actions/runs/{int(operation['run'])}"
 
 
-async def send_merge(shepherd: Shepherd, operation: dict, login: str, step: dict) -> str:
+async def send_merge(
+    shepherd: Shepherd, operation: dict, login: str, step: dict, gate: Gate | None = None
+) -> str:
     from .sources.github import STACKED
 
     github = shepherd.runtime.github
@@ -475,15 +543,17 @@ async def send_merge(shepherd: Shepherd, operation: dict, login: str, step: dict
     if why := operation_denial(operation, argv):
         raise RefusedError(why)
     try:
-        await github.bound(login, *argv[1:])
+        await github.bound(login, *argv[1:], gate=gate)
     except RuntimeError as exc:
         if not STACKED.search(str(exc)):
             raise
-        await merge_stacked(shepherd, operation, login, method)
+        await merge_stacked(shepherd, operation, login, method, gate)
     return url
 
 
-async def merge_stacked(shepherd: Shepherd, operation: dict, login: str, method: str):
+async def merge_stacked(
+    shepherd: Shepherd, operation: dict, login: str, method: str, gate: Gate | None = None
+):
     """A PR in a stack on GitHub (gh's merge refuses it): GitHub's asynchronous merge at the
     accepted head, as the bound account, followed to its end. Never one above open PRs in its
     stack, which that merge would merge too (none the owner accepted)."""
@@ -505,7 +575,7 @@ async def merge_stacked(shepherd: Shepherd, operation: dict, login: str, method:
     if why := operation_denial(operation, argv, payload):
         raise RefusedError(why)
     request = await github.merge_async(repo, number, operation["head"], method, "direct_merge",
-                                       login=login)  # fmt: skip
+                                       login=login, gate=gate)  # fmt: skip
     result = await github.follow_merge(repo, number, request, MERGE_FOLLOW)
     if result.get("status") == "failed":
         said = " ".join(str((result.get("details") or {}).get("message") or "").split())
@@ -740,4 +810,5 @@ async def try_merge(shepherd: Shepherd, target: str):
                            [operation], login):  # fmt: skip
             control.move_step(step["id"], PREPARED, state="withdrawn", ended_at=now())
             return
-    await dispatch(shepherd, step["id"])
+    # A sender of its own, which a stop can end (Shepherd.stop_sending) without ending this.
+    await asyncio.wait({shepherd.runtime.background(dispatch(shepherd, step["id"]))})

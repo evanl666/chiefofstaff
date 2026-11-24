@@ -1070,10 +1070,14 @@ for is always charged to your day, and every attempt stops at a fixed amount of 
 **Your message comes first.** Write to the worker, or press *Stop*, and the attempt stops at
 once; your own new tasks take its place when workers are busy. Stopped for your message or task,
 it is tried again once the worker is free, if still needed; after *Stop*, not by itself. A
-worker you close gives its PRs back to you, paused; reopened, they are its again. If Chief of
-Staff stops while it publishes what you approved, it reads on GitHub what went out when it
-starts again, and sends the rest once (replies to a fix whose push did not go out are not
-sent). While **Update and restart** waits for no turn running, no attempt starts.
+worker you close gives its PRs back to you, paused; reopened, they are its again. What you
+approved is checked again just before each part of it is sent: turned off, paused, *Stop
+looking after this PR*, or the PR changing hands withdraws what hasn't gone out yet (a reply
+waiting its turn to be sent too), and nothing goes out more than an hour after you approved it.
+If Chief of Staff stops while it publishes what you approved, it reads on GitHub what went out
+when it starts again, and sends the rest once, within that hour (replies to a fix whose push
+did not go out are not sent). While **Update and
+restart** waits for no turn running, no attempt starts.
 
 **Replies and the AI line.** The first time it would post a reply in a repository, the review
 asks whether replies there say they were drafted with an AI assistant; your answer is kept per

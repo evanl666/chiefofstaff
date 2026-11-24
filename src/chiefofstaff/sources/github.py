@@ -1511,7 +1511,14 @@ class GitHubSource:
         return ["gh", "api", path, "--method=PUT", "--input=-"], payload
 
     async def merge_async(
-        self, repo: str, number: int, head: str, method: str, action: str, login: str = ""
+        self,
+        repo: str,
+        number: int,
+        head: str,
+        method: str,
+        action: str,
+        login: str = "",
+        gate: Callable[[], None] | None = None,
     ) -> dict:
         """Ask GitHub to merge it in the background (as `login` when given, else the account
         that reaches the repository): its answer ({status, details}). One it is at already for
@@ -1519,7 +1526,7 @@ class GitHubSource:
         argv, payload = self.merge_async_call(repo, number, head, method, action)
         try:
             if login:
-                text = await self.bound(login, *argv[1:], payload=payload)
+                text = await self.bound(login, *argv[1:], payload=payload, gate=gate)
             else:
                 text = await self.gh(*argv[1:], payload=payload)
             found = json.loads(text or "{}")
@@ -2016,9 +2023,16 @@ class GitHubSource:
                 })  # fmt: skip
         return sorted(found.values(), key=lambda pr: pr["updated"], reverse=True)
 
-    async def bound(self, login: str, *arguments: str, payload: dict | None = None) -> str:
+    async def bound(
+        self,
+        login: str,
+        *arguments: str,
+        payload: dict | None = None,
+        gate: Callable[[], None] | None = None,
+    ) -> str:
         """A write as exactly this account: its token asked of gh afresh, its identity checked
-        with GitHub, and never another account tried (the shared routing is not used)."""
+        with GitHub, and never another account tried (the shared routing is not used). `gate`:
+        called last before it is sent, nothing awaited after it (it raises to stop the write)."""
         if not login:
             raise RuntimeError("No account is bound to this write.")
         try:
@@ -2030,6 +2044,8 @@ class GitHubSource:
         me = json.loads(await self.raw("api", "user", "--jq", "{login: .login}", token=token))
         if (me.get("login") or "").lower() != login.lower():
             raise RuntimeError(f"gh's token for {login} is another account's.")
+        if gate:
+            gate()
         return await self.raw(*arguments, payload=payload, token=token)
 
     async def bound_token(self, login: str) -> str:

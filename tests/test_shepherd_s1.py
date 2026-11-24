@@ -2,6 +2,7 @@
 it may spend, what stops it, where it can't run, what pauses a PR, a push the lease refuses,
 what a crash leaves, the Router's handing over, and the owner's other PRs found and handed."""
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -1515,3 +1516,60 @@ def test_a_steps_git_reads_the_owners_git_configuration_and_its_includes(tmp_pat
     assert found == [str(home / ".gitconfig"), str(extra), str(home / ".config" / "git")]
     (home / ".gitconfig").unlink()
     assert git_config_files() == [str(home / ".config" / "git")]
+
+
+# What waits to go out goes only with its consent, checked again just before it is sent.
+
+
+@pytest.mark.parametrize("held", ["reply", "push"])
+@pytest.mark.parametrize("how", ["off", "stop", "paused", "too old"])
+async def test_what_waits_to_go_out_is_withdrawn_once_its_consent_goes(
+    world, monkeypatch, held, how
+):
+    """An approved reply waited for its account's write slot (another write going out, GitHub's
+    limit), a push for its account's token, when the owner turned Prepared for you off, stopped
+    looking after the PR, or it was paused: it went out anyway once the wait was over, its
+    consent checked only before. It is checked again just before it goes; one that lost it,
+    and what follows it, end withdrawn, never sent. So does one whose approval is over an hour
+    old by then."""
+    shepherd = (runtime := await world.start()).shepherd
+    comments(world)
+    await shepherd.tick()
+    step, _ = await addressed(world, runtime, STANCES)
+    waiting, release = asyncio.Event(), asyncio.Event()
+
+    def holding(real):
+        async def held_until_released(*arguments, **options):
+            waiting.set()
+            await release.wait()
+            return await real(*arguments, **options)
+
+        return held_until_released
+
+    if held == "reply":
+        monkeypatch.setattr(publish, "write_slot", holding(publish.write_slot))
+    else:
+        monkeypatch.setattr(runtime.github, "bound_token", holding(runtime.github.bound_token))
+    await approve(shepherd, step["id"], {"disclosure": "no"})
+    await asyncio.wait_for(waiting.wait(), 10)
+    if how == "off":
+        old = runtime.store.settings()
+        new = old.model_copy(update={"proactive": False})
+        runtime.store.save_settings(new)
+        await runtime.settings_changed(old, new)
+    elif how == "stop":
+        await shepherd.keep(TARGET, False)
+    elif how == "paused":
+        shepherd.control.pause(TARGET, "a head nobody explains")
+    else:
+        monkeypatch.setattr(publish, "APPROVAL_LASTS", 0)  # Approved over an hour ago, now.
+    release.set()
+    await settle(runtime)
+    await settle(runtime)
+    assert not world.github.writes, "no reply, no review asked again"
+    assert (world.github.head() != world.h0) == (held == "reply"), "pushed only before"
+    actions = {action["kind"]: action for action in shepherd.control.actions(step["id"])}
+    assert actions[held]["state"] == "withdrawn", actions[held]
+    assert actions[held]["outcome"].startswith("Not sent: "), actions[held]["outcome"]
+    assert all(a["state"] in {"sent", "withdrawn"} for a in actions.values())
+    assert shepherd.control.step(step["id"])["state"] in {"partly", "failed"}

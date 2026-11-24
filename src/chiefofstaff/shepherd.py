@@ -228,6 +228,11 @@ class Shepherd(Keeping, Steps):
         # Content writes per account in the last hour (GitHub allows 80 a minute, 500 an hour).
         self.writes: dict[str, list[float]] = {}
         self.write_locks: dict[str, asyncio.Lock] = {}
+        # Plans going out (publish.dispatch: step id -> its sender), and the operations among
+        # them being transmitted now (past their barrier): the others wait (a write slot, their
+        # last reads) and can still be stopped.
+        self.sending: dict[str, asyncio.Task] = {}
+        self.transmitting: set[str] = set()
         self.read_at: dict[str, float] = {}
 
     # The switch.
@@ -497,8 +502,10 @@ class Shepherd(Keeping, Steps):
             if self.control.move_step(step["id"], (QUEUED, PREPARED), state="withdrawn", why=why,
                                       ended_at=now()):  # fmt: skip
                 self.control.withdraw_planned(step["id"], why)
-        # Operations sent already are not recalled: those in flight end (bounded), then any left
+        # What waits to go out never does: its sender stops, and it is withdrawn. Operations
+        # sent already are not recalled: those being transmitted end (bounded), then any left
         # dispatching are reconciled.
+        self.stop_sending(why)
         for _ in range(50):
             if not self.control.actions("", DISPATCHING):
                 break
@@ -510,6 +517,22 @@ class Shepherd(Keeping, Steps):
             if task := self.runtime.tasks.find(task_id):
                 self.runtime.task_actions.publish(task)
         self.publish()
+
+    def stop_sending(self, why: str, target: str = ""):
+        """Approved operations not sent yet (of one PR, or all) are withdrawn, never sent: each
+        plan's sender waiting for its write slot or its last reads stops now. One being
+        transmitted goes on (what follows it is refused at its barrier)."""
+        for step in self.control.steps(target, APPLYING):
+            if any(
+                action["id"] in self.transmitting for action in self.control.actions(step["id"])
+            ):
+                continue
+            if (
+                sender := self.sending.pop(step["id"], None)
+            ) and sender is not asyncio.current_task():
+                sender.cancel()
+            self.control.withdraw_planned(step["id"], f"Not sent: {why}.")
+            self.finish_applying(step["id"])
 
     async def start(self):
         """After a restart: what was dispatching is reconciled first; a session left in a step
