@@ -273,6 +273,7 @@ function notePeer(message) {
   if (meta.peer_kind === "answered") {
     // Answered: its team waits on it no more (Teams, Needs you).
     for (const team of state.snapshot.teams || []) team.waiting = (team.waiting || []).filter((item) => item.id !== meta.question_id);
+    if (state.snapshot.held_questions) state.snapshot.held_questions = state.snapshot.held_questions.filter((item) => item.id !== meta.question_id);
     renderSidebar();
     scheduleHome();
   }

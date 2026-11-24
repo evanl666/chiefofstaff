@@ -13,7 +13,7 @@ import { setupAction } from "./agentsetup.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
-import { avatar, labelOf, peerOf, peerLine, showTeam, TEAM, teamOf, waitingWords, workerLineage } from "./team.js";
+import { avatar, labelOf, peerOf, peerLine, showTeam, TEAM, teamOfPeers, teamOfWorker, waitingWords, workerLineage } from "./team.js";
 // A chat loads a page of its messages at a time: its latest, then earlier ones when asked.
 export const PAGE = 400;
 // The chat shown: its first message loaded, and how many come before it (null: not known).
@@ -137,8 +137,9 @@ export function renderHeader() {
       }
     };
     items.push(el("label", {}, el("span", { text: "Permission checks" }), checks, reason));
-    // Its short name in its team's lines and thread (E129): the owner's, or its own back ("").
-    if (teamOf(session.id)) {
+    // Its short name in the lines the Router and the chats name it by (E129): the owner's, or
+    // its own back ("").
+    if (session.team) {
       const name = el("input", { type: "text", value: session.label || "", maxlength: "24", "aria-label": "Short name", title: "How its team's lines and thread name it (empty: from its first task)" });
       name.addEventListener("change", async () => {
         try {
@@ -992,8 +993,8 @@ function sentEntry(meta, text, time) {
   return node;
 }
 // A worker's chat has tabs (E130): Work (all of it, what it and the workers it works with tell
-// each other in a line each), Team (those in full, with a way to their team's thread), Tools
-// (its steps) and Reports. They show parts of the same chat.
+// each other in a line each), Team when its task is a part of a team (Notes otherwise: those in
+// full, with a way to its team), Tools (its steps) and Reports. They show parts of the same chat.
 const WORKER_TABS = { work: "Work", team: "Team", tools: "Tools", reports: "Reports" };
 const TAB_PARTS = { team: ".peer-msg", tools: "details.steps", reports: '[data-kind="report"]' };
 const TAB_EMPTY = { team: "Nothing told or asked between it and the workers it works with yet.", tools: "No steps yet.", reports: "No reports yet." };
@@ -1022,16 +1023,17 @@ function renderWorkerTabs(session) {
   nav.hidden = false;
   updateWorkerTabs();
 }
-// Its tab bar as the chat is now: Team (N) with N what is there, its team's thread beside it.
+// Its tab bar as the chat is now: Team (N) with N what is there, its team beside it.
 function updateWorkerTabs() {
   const nav = $("#worker-tabs");
   const session = current();
   if (nav.hidden || session?.role !== "worker") return;
   const timeline = $("#timeline");
   const told = timeline.querySelectorAll(":scope > .peer-msg").length;
-  const team = teamOf(session.id);
-  const tabs = Object.entries(WORKER_TABS).filter(([tab]) => tab !== "team" || team || told);
-  const key = JSON.stringify([session.id, workerTab.tab, told, team?.id || "", tabs.length]);
+  const team = teamOfWorker(session.id)?.team;
+  // Its exchanges, and its task's lineage (when its task has relations), as before.
+  const tabs = Object.entries(WORKER_TABS).filter(([tab]) => tab !== "team" || team || told || session.team).map(([tab, label]) => [tab, tab === "team" && !team ? "Notes" : label]);
+  const key = JSON.stringify([session.id, workerTab.tab, told, team?.id || "", tabs]);
   if (nav.dataset.key !== key) {
     nav.dataset.key = key;
     nav.replaceChildren(
@@ -1042,7 +1044,7 @@ function updateWorkerTabs() {
           el("button", { type: "button", role: "tab", "data-tab": tab, "aria-selected": String(workerTab.tab === tab), onclick: () => setWorkerTab(session.id, tab) }, label, tab === "team" && told ? el("span", { class: "count", text: String(told) }) : null),
         ),
       ),
-      team ? el("button", { type: "button", class: "link team-link", text: "Team thread", title: `What ${team.name} told and asked each other`, onclick: () => showTeam(team.id, { focus: session.id }) }) : "",
+      team ? el("button", { type: "button", class: "link team-link", text: "Open team", title: `${team.goal}: its parts and what they handed each other`, onclick: () => showTeam(team.id) }) : "",
     );
   }
   // What a tab with nothing there says.
@@ -1646,7 +1648,8 @@ function summarizeFold(group) {
   // than one agent on), its agent and model on hover.
   const started = [...new Set(items.map((node) => node.started).filter(Boolean))].map((id) => byId(id) || (state.snapshot?.closed || []).find((item) => item.id === id)).filter(Boolean);
   const marks = started.map((worker) => markOf(worker)).filter(Boolean);
-  const key = `${items.length}|${ids.join()}|${waiting}|${marks.map((mark) => mark.title).join()}`;
+  const team = kind === "team" ? teamOfPeers(peers) : null;
+  const key = `${items.length}|${ids.join()}|${waiting}|${marks.map((mark) => mark.title).join()}|${team?.goal || ""}`;
   if (line.dataset.key === key) return;
   line.dataset.key = key;
   const titles = new Map(peers.flatMap((peer) => [[peer.from, peer.fromTitle], [peer.to, peer.toTitle]]));
@@ -1655,18 +1658,18 @@ function summarizeFold(group) {
     el("span", { class: "mark", text: mark }),
     el("span", { class: "what", text: `${items.length} ${noun}s` }),
     marks.length ? el("span", { class: "marks" }, ...marks) : null,
-    ids.length ? el("span", { class: "avatars" }, ...shown.map((id) => avatar(id, titles.get(id) || "")), ids.length > shown.length ? el("span", { class: "more", text: `+${ids.length - shown.length}` }) : null) : null,
+    // Between parts of one team: its goal; else the workers by their avatars.
+    team ? el("span", { class: "goal-name", text: team.goal }) : ids.length ? el("span", { class: "avatars" }, ...shown.map((id) => avatar(id, titles.get(id) || "")), ids.length > shown.length ? el("span", { class: "more", text: `+${ids.length - shown.length}` }) : null) : null,
     waiting ? el("span", { class: "waiting", text: waiting }) : null,
   ];
   const open = group.classList.contains("open");
   const toggle = el("button", { type: "button", class: "line", "aria-expanded": String(open), onclick: () => toggleFold(group) }, ...parts);
   const last = items.at(-1).peer?.to;
-  const view = kind === "team" && last ? el("button", { type: "button", class: "link", text: "Open", title: "Their whole thread", onclick: (event) => { event.stopPropagation(); openThread(last); } }) : null;
+  const view = kind === "team" && last ? el("button", { type: "button", class: "link", text: "Open", title: team ? `${team.goal}: what its parts handed each other` : "Its chat", onclick: (event) => { event.stopPropagation(); openThread(team, last); } }) : null;
   line.replaceChildren(el("div", { class: "row" }, toggle, view, items.at(-1).querySelector("time")?.cloneNode(true) || null));
 }
-// A worker's team thread, or its chat when it is in no team (any more).
-function openThread(sessionId) {
-  const team = teamOf(sessionId);
+// The team its messages are between, or the chat of the worker last told when in none.
+function openThread(team, sessionId) {
   if (team) showTeam(team.id);
   else select(sessionId);
 }

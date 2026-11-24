@@ -11,7 +11,7 @@ import { expandTask, followUpItem, inTerminal, ownTasks, questionParts, syncTask
 import { artifactItems } from "./artifacts.js";
 import { preparedItems } from "./prepared.js";
 import { duck } from "./mascot.js";
-import { avatar, blockedTeams, labelOf, showTeam, teamRows } from "./team.js";
+import { heldItem, heldQuestions, teamsSection } from "./team.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
 // Needs you (waiting for an answer, failed, a result to accept, news, no progress); a
 // worker's question whose task does not show it (cancelled, finished, or none); the Router's
@@ -27,14 +27,15 @@ export function needsYou() {
   const ok = pending.filter((draft) => YOUR_OK.has(draft.kind));
   const kinds = [...new Set(pending.map((draft) => draft.kind))];
   const drafts = pending.filter((draft) => !YOUR_OK.has(draft.kind)).sort((a, b) => kinds.indexOf(a.kind) - kinds.indexOf(b.kind));
-  return { drafts, ok, uncertain: uncertainDrafts(), tasks: waiting, questions, updates: ownerUpdates(), teams: blockedTeams(), board: found };
+  // A question between workers that holds its asker up half an hour: a card each (Teams lite).
+  return { drafts, ok, uncertain: uncertainDrafts(), tasks: waiting, questions, updates: ownerUpdates(), held: heldQuestions(), board: found };
 }
 // What the badge counts: not the cards the owner just acted on; Your OK once.
 export function needsCount() {
   const items = needsYou();
   const shown = (key) => !state.leaving.has(key);
   const ok = items.ok.some((draft) => shown(`draft:${draft.id}`)) ? 1 : 0;
-  return ok + items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.id}`)).length + items.updates.filter((update) => shown(`update:${update.id}`)).length + items.teams.filter(({ question }) => shown(`teamwait:${question.id}`)).length;
+  return ok + items.drafts.filter((draft) => shown(`draft:${draft.id}`)).length + items.uncertain.filter((draft) => shown(`draft:${draft.id}`)).length + items.tasks.filter((task) => shown(`task:${task.id}`)).length + items.questions.filter((question) => shown(`question:${question.id}`)).length + items.updates.filter((update) => shown(`update:${update.id}`)).length + items.held.filter((question) => shown(`teamwait:${question.id}`)).length;
 }
 // Where a worker stands, as its sidebar dot says and as Home shows it: the same four places.
 export const WORKER_STATES = [
@@ -260,10 +261,10 @@ function renderPanel() {
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
     ...items.tasks.map((task) => taskItem(task, tasks.phases.get(task.id))),
     ...items.questions.map(questionItem),
-    ...items.teams.map(teamWaitItem),
+    ...items.held.map(heldItem),
   ];
   // Folded, it opens by itself when something new needs the owner.
-  const needKeys = [...items.updates.map((update) => `update:${update.id}`), ...items.ok.map((draft) => `draft:${draft.id}`), ...items.drafts.map((draft) => `draft:${draft.id}`), ...items.uncertain.map((draft) => `draft:${draft.id}`), ...items.tasks.map((task) => `task:${task.id}`), ...items.questions.map((question) => `question:${question.id}`), ...items.teams.map(({ question }) => `teamwait:${question.id}`)];
+  const needKeys = [...items.updates.map((update) => `update:${update.id}`), ...items.ok.map((draft) => `draft:${draft.id}`), ...items.drafts.map((draft) => `draft:${draft.id}`), ...items.uncertain.map((draft) => `draft:${draft.id}`), ...items.tasks.map((task) => `task:${task.id}`), ...items.questions.map((question) => `question:${question.id}`), ...items.held.map((question) => `teamwait:${question.id}`)];
   if (state.needKeys && needKeys.some((key) => !state.needKeys.has(key) && !state.leaving.has(key))) needs.open = true;
   state.needKeys = new Set(needKeys);
   reconcile(needs.querySelector(".items"), steady(needs, needItems), editing);
@@ -301,8 +302,8 @@ function renderPanel() {
   const made = section(taskBox, "tasks-artifacts", "Artifacts", { help: "What your tasks delivered (PRs they opened, pushed to or reviewed, docs they wrote, flows they ran), with where each stands now: a PR as GitHub has it, the rest as its worker last said", empty: "No PRs, docs or flows yet." });
   const artifacts = artifactItems(ownTasks(), focusTask, tasks.phases);
   fill(made, artifacts.rows, editing, { count: artifacts.shown });
-  // Teams (E129): a line per team, above Running.
-  const strip = teamsStrip(editing);
+  // Teams (Teams lite): a row per team, above Running; Past teams closes it.
+  const strip = teamsSection(items, editing);
   // In this order, whatever an older page had.
   const order = [strip, running, monitoring, recent, made].filter(Boolean);
   if (order.some((node, index) => taskBox.children[index] !== node) || taskBox.children.length !== order.length) taskBox.replaceChildren(...order);
@@ -315,44 +316,6 @@ function renderPanel() {
   tabs[1].textContent = active ? String(active) : "";
 }
 const FINISHED_PAGE = 30;
-function teamsStrip(editing) {
-  const rows = teamRows();
-  if (!rows.length) return null;
-  const node = document.getElementById("teams-strip") || el("section", { id: "teams-strip", "aria-label": "Teams" }, el("h2", { class: "title", text: "Teams", "data-tip": "Workers that work together: what they told and asked each other, and what still waits" }), el("div", { class: "items" }));
-  reconcile(node.querySelector(".items"), rows, editing);
-  return node;
-}
-// A question between workers holding the asker's task up half an hour (E129): a line per team,
-// Nudge (the one asked is told) and Open thread.
-function teamWaitItem({ team, question }) {
-  const minutes = question.minutes < 60 ? `${question.minutes} min` : `${Math.floor(question.minutes / 60)} h`;
-  const nudged = question.nudged ? Math.round((Date.now() - new Date(question.nudged)) / 60000) : null;
-  return {
-    key: `teamwait:${question.id}:${minutes}:${nudged ?? ""}`,
-    id: `teamwait:${question.id}`,
-    build: () => {
-      const nudge = el("button", { type: "button", class: "secondary", text: nudged === null ? "Nudge" : `Nudged ${nudged} min ago`, disabled: nudged !== null && nudged < 30, title: `Tell ${labelOf(question.target)} that ${labelOf(question.asker)} waits for its answer` });
-      nudge.addEventListener("click", async () => {
-        nudge.disabled = true;
-        try {
-          const { said } = await api(`/api/teams/${encodeURIComponent(team.id)}/nudge`, { method: "POST", body: { question_id: question.id } });
-          toast(said);
-          await loadState();
-        } catch (error) {
-          toast(error.message, "error");
-          nudge.disabled = false;
-        }
-      });
-      return el(
-        "div",
-        { class: "card team-wait", "data-id": `teamwait:${question.id}` },
-        el("div", { class: "head" }, avatar(question.asker), el("span", { class: "label", text: `${labelOf(question.asker)} has waited ${minutes} for ${labelOf(question.target)}` })),
-        question.text ? el("p", { class: "asked", text: question.text, title: question.text }) : null,
-        el("div", { class: "actions" }, nudge, el("button", { type: "button", class: "link", text: "Open thread", onclick: () => showTeam(team.id) })),
-      );
-    },
-  };
-}
 // Your OK (E123): the approvals, one card, drawn again as any of them changes.
 function okItem(drafts) {
   const shown = drafts.filter((draft) => !state.leaving.has(`draft:${draft.id}`));
