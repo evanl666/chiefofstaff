@@ -319,7 +319,8 @@ class Autopilot(Answers, Results):
         parts = [grammar.said_off(True, language)]
         if continued:
             parts.append(
-                f"{continued} task{'s' if continued != 1 else ''} it had continued wait with Go on"
+                f"{continued} task{'s' if continued != 1 else ''} it had continued "
+                f"wait{'' if continued != 1 else 's'} with Go on"
             )
         if withdrawn:
             parts.append(
@@ -329,8 +330,20 @@ class Autopilot(Answers, Results):
 
     async def stop_continued(self, run: dict, stopping: dict) -> int:
         """Turns it continued that are running now: stopped as Stop stops one (their tasks wait
-        with Go on). None in a run that continued nothing."""
-        return 0
+        with Go on, and Ask first stays on them until they end)."""
+        ours = {entry["id"] for entry in self.book.entries(run_id=run["id"], limit=100000)}
+        stopped = 0
+        for session_id, carried in list(self.origins.sticky.items()):
+            if not ours & set(carried.get("entries") or []):
+                continue
+            row = self.store.find_session(session_id)
+            state = self.runtime.states[session_id]
+            if not row or row["closed_at"]:
+                continue
+            if row["status"] in {"working", "starting"} or state.busy:
+                await self.runtime.workers.interrupt(session_id, by="Autopilot's Stop")
+                stopped += 1
+        return stopped
 
     async def end(self, run: dict, *, by: str, at_its_time: bool):
         """The run's end: its `ended` entry, the head kept, the summary card, the Router told."""
