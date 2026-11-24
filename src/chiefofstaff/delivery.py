@@ -440,8 +440,13 @@ class Delivery:
             return False
         state = self.states[row["id"]]
         if state.reopen_asking:
-            self.give_back(row["id"], claimed)
-            return True  # Being opened again, or once its turn is over.
+            job = autopilot.reopening.get(row["id"])
+            if job and not job.done():
+                self.give_back(row["id"], claimed)
+                return True  # Being opened again now.
+            # Held for its turn's end (confined, which held it until then, went with its
+            # process or that turn): looked at again as it is now.
+            state.reopen_asking = False
         how = autopilot.reopen_first(row, carried, claimed=claimed)
         if not how:
             return False
@@ -453,7 +458,9 @@ class Delivery:
             # Kept for its next process (Runtime.reattach, once its turn is over).
             state.confined = state.stale = True
             return True
-        self.runtime.background(autopilot.reopen_asking(row, carried))
+        autopilot.reopening[row["id"]] = self.runtime.background(
+            autopilot.reopen_asking(row, carried)
+        )
         return True
 
     def give_back(self, session_id: str, claimed: bool):

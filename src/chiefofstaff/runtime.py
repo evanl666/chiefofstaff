@@ -6279,6 +6279,7 @@ class Runtime:
         state = self.states[session_id]
         state.stale = False
         state.confined = False  # Its next connection is sandboxed from the start.
+        state.reopen_asking = False  # Its next connection opens asking first if it must.
         state.after_refresh = ""  # The next connection has the new options from the start.
         state.steps.clear()  # A disconnected session is in no step.
         state.mcp_calls.clear()

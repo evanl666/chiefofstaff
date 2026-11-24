@@ -4,6 +4,8 @@ it, and passes it on to what that turn starts; a turn that carries it never publ
 
 import asyncio
 import json
+import os
+import signal
 
 from conftest import Harness, call_tool, settle, slack_tool
 from test_delegate_reply import ASK, DM, handed, reactions, reply, sends
@@ -396,6 +398,84 @@ async def test_a_slot_taken_for_a_send_as_it_is_opened_again_is_waited_for_not_a
                             for t in runtime.tasks.for_session(worker)), 30)  # fmt: skip
     assert state.opened_asking is True and not state.confined
     assert not [m for m in harness.store.messages(worker) if (m["meta"] or {}).get("stopped")]
+
+
+async def held_for_its_turn(harness, runtime, worker):
+    """What carries Autopilot's origin, held for the end of a turn the worker is in (its report
+    filed, its turn not settled)."""
+    runtime.begun.add(worker)
+    runtime.states[worker].busy = True
+    entry = await autopilot_entry(runtime)
+    router = harness.store.session(harness.router_id)
+    runtime.autopilot.origins.taken(router, [{"meta": {TAG: {"entries": [entry["id"]],
+                                                             "ask_first": True}}}])  # fmt: skip
+    told = await call_tool(runtime, "message_session", router["id"], session_id=worker,
+                           text="Report done: Again.", task="new", title="Fix it again",
+                           why_new="t")  # fmt: skip
+    assert told.result_type != "failure", told.text_result_for_llm
+    assert runtime.states[worker].reopen_asking and runtime.states[worker].confined
+
+
+async def test_a_worker_held_for_its_turns_end_whose_process_dies_takes_the_owners_message(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Re-review 1 (reproduced): held for its turn's end, its process killed: the turn's end
+    never comes, and nothing it is given waits for it; the owner's next message reaches it."""
+    from test_claude_workers import until
+
+    harness, runtime, made = await claude_done(tmp_path, monkeypatch)
+    worker = made["session_id"]
+    await held_for_its_turn(harness, runtime, worker)
+    os.kill(runtime.states.handle(worker).worker.pid, signal.SIGKILL)
+    await until(lambda: runtime.states.handle(worker) is None, 30)
+    assert not runtime.states[worker].reopen_asking
+    with ingress.through(ingress.PAGE):
+        owner = await runtime.owner_send(worker, "Report done: Yours.")
+    await until(lambda: int(harness.store.get(f"sent:{worker}") or 0) >= owner["id"], 30)
+    # Its turn on it (with what was held for it, in the one message): it went on.
+    await until(lambda: any(m["kind"] == "report" and m["id"] > owner["id"]
+                            for m in harness.store.messages(worker)), 30)  # fmt: skip
+
+
+async def test_whatever_ends_its_process_or_its_turns_ends_its_hold(harness):
+    """Re-review 1: each way a worker's process or turns end (detached; its agent's connection
+    gone; its process lost) ends a hold for its turn's end, with that turn."""
+    runtime = await harness.connect()
+    made = (await spawned(runtime, harness.router_id, "Write the client"))["session_id"]
+    await settle(runtime)
+    state = runtime.states[made]
+    state.reopen_asking = state.confined = True
+    await runtime.detach(made)
+    assert not state.reopen_asking and not state.confined
+    state.reopen_asking = state.confined = True
+    runtime.states.end_turns([made])
+    assert not state.reopen_asking and not state.confined
+    state.reopen_asking = state.confined = True
+    await runtime.worker_lost("claude", made, "crash")
+    assert not state.reopen_asking and not state.confined
+
+
+async def test_a_hold_nothing_ends_any_more_is_looked_at_again_not_trusted(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Re-review 1: a hold for asking first left with nothing to end it (no reopen under way, no
+    turn of its own at work) is looked at again: it is opened asking first and given it."""
+    from test_claude_workers import until
+
+    harness, runtime, made = await claude_done(tmp_path, monkeypatch)
+    worker = made["session_id"]
+    runtime.states[worker].reopen_asking = True  # Left by a turn's end that never came.
+    entry = await autopilot_entry(runtime)
+    router = harness.store.session(harness.router_id)
+    runtime.autopilot.origins.taken(router, [{"meta": {TAG: {"entries": [entry["id"]],
+                                                             "ask_first": True}}}])  # fmt: skip
+    told = await call_tool(runtime, "message_session", router["id"], session_id=worker,
+                           text="Report done: Again.", task="new", title="Fix it again",
+                           why_new="t")  # fmt: skip
+    assert told.result_type != "failure", told.text_result_for_llm
+    await until(lambda: any(t["title"] == "Fix it again" and t["status"] in {"review", "done"}
+                            for t in runtime.tasks.for_session(worker)), 30)  # fmt: skip
+    assert runtime.states[worker].opened_asking is True
 
 
 async def test_a_claude_worker_at_work_takes_it_only_once_opened_again_asking_first(

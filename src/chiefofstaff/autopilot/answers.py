@@ -336,6 +336,8 @@ class Answers:
         finally:
             if not state.confined:
                 state.reopen_asking = False
+            if self.reopening.get(row["id"]) is asyncio.current_task():
+                del self.reopening[row["id"]]
 
     async def ready(self: Autopilot, row: dict, origin: dict) -> bool:  # type: ignore[misc]
         """Before Autopilot continues a worker with `origin`: on another agent, opened again

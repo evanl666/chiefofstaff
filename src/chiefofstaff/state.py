@@ -206,6 +206,7 @@ class SessionStates:
             state.retuned = False
             state.stale = False
             state.confined = False
+            state.reopen_asking = False  # (Held for its turn's end, which went with it.)
             state.after_refresh = ""
             state.awaiting = None
             state.held = False
