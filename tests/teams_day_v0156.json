@@ -1,0 +1,549 @@
+{
+ "answers": [
+  "success: {\"task_id\": \"<id2>\", \"session_id\": \"<id1>\", \"status\": \"working\", \"cwd\": \"<dir>/work/workspaces/<id3>\"}",
+  "success: {\"task_id\": \"<id5>\", \"session_id\": \"<id4>\", \"status\": \"working\", \"cwd\": \"<dir>/work/workspaces/<id6>\"}",
+  "success: {\"task_id\": \"<id8>\", \"session_id\": \"<id7>\", \"status\": \"queued\", \"cwd\": \"<dir>/work/workspaces/<id9>\", \"note\": \"Starts automatically when the tasks it depends on are done.\"}",
+  "success: {\"task_id\": \"<id11>\", \"session_id\": \"<id10>\", \"status\": \"working\", \"cwd\": \"<dir>/work/workspaces/<id12>\"}",
+  "success: Told “Checkout UI: the v2 pages”.",
+  "success: Asked “Checkout API: the v2 endpoints” (<id13>). The answer arrives as a type=\"answer\" message; go on with other work meanwhile.",
+  "success: Delivered.",
+  "success: Reported to the Router.",
+  "success: {\"task_id\": \"<id15>\", \"session_id\": \"<id14>\", \"status\": \"working\", \"cwd\": \"<dir>/work/workspaces/<id16>\"}",
+  "success: Asked “Checkout API: the v2 endpoints” (<id17>). The answer arrives as a type=\"answer\" message; go on with other work meanwhile.",
+  "success: Told “Checkout UI: the v2 pages”.",
+  "success: {\"task_id\": \"<id19>\", \"session_id\": \"<id18>\", \"status\": \"queued\", \"cwd\": \"<dir>/work/workspaces/<id20>\", \"note\": \"Queued until a worker slot frees up.\"}",
+  "success: Reported to the Router.",
+  "success: Delivered (task <id21>).",
+  "success: Team <id22>: “Checkout API” (<id23>), “Checkout UI” (<id24>), “Checkout tests” (<id25>), “Checkout docs” (<id26>), “Invoice rounding bug” (<id27>), “Checkout tests on Linux” (<id28>).\n- <time> “Checkout API” (<id23>) told “Checkout UI” (<id24>): Totals are in cents.\n- <time> “Checkout UI” (<id24>) asked “Checkout API” (<id23>) (<id13>): Rounding mode?\n  Answered after 0 min: Half even.\n- <time> “Invoice rounding bug” (<id27>) asked “Checkout API” (<id23>) (<id17>): Do totals round half even?\n  Not answered yet (0 min).\n- <time> “Checkout docs” (<id26>) told “Checkout UI” (<id24>): The docs link to the pages.\nWhat one of them told another is theirs to use: never pass it on yourself.",
+  "success: Team <id22>: “Checkout API” (<id23>), “Checkout UI” (<id24>), “Checkout tests” (<id25>), “Checkout docs” (<id26>), “Invoice rounding bug” (<id27>), “Checkout tests on Linux” (<id28>).\n- <time> “Checkout API” (<id23>) told “Checkout UI” (<id24>): Totals are in cents.\n- <time> “Checkout UI” (<id24>) asked “Checkout API” (<id23>) (<id13>): Rounding mode?\n  Answered after 0 min: Half even.\n- <time> “Invoice rounding bug” (<id27>) asked “Checkout API” (<id23>) (<id17>): Do totals round half even?\n  Not answered yet (0 min).\n- <time> “Checkout docs” (<id26>) told “Checkout UI” (<id24>): The docs link to the pages.\nWhat one of them told another is theirs to use: never pass it on yourself.",
+  "success: Team <id22>: “Checkout API” (<id23>), “Checkout UI” (<id24>), “Checkout tests” (<id25>), “Checkout docs” (<id26>), “Invoice rounding bug” (<id27>), “Checkout tests on Linux” (<id28>).\n- <time> “Checkout API” (<id23>) told “Checkout UI” (<id24>): Totals are in cents.\n- <time> “Checkout UI” (<id24>) asked “Checkout API” (<id23>) (<id13>): Rounding mode?\n  Answered after 0 min: Half even.\n- <time> “Invoice rounding bug” (<id27>) asked “Checkout API” (<id23>) (<id17>): Do totals round half even?\n  Not answered yet (0 min).\n- <time> “Checkout docs” (<id26>) told “Checkout UI” (<id24>): The docs link to the pages.\nWhat one of them told another is theirs to use: never pass it on yourself."
+ ],
+ "given": {
+  "0": [
+   "<message from=\"owner\" type=\"message\" reply_in=\"English\">\nShip checkout v2 for acme-shop: the API, the UI, tests.\n</message>",
+   "<message from=\"system\" type=\"team-digest\">\nWorkers that work together, since your last turn (who, not what; read_team_thread when the owner asks about it or a question there holds a task up):\n- <id22> (<id23> “Checkout API”, <id24> “Checkout UI”, <id25> “Checkout tests”): 1 answered, 1 asked, 1 told.\n</message>\n\n<message from=\"<id23>\" type=\"report\" status=\"done\" task=\"<id2>\" title=\"Checkout API: the v2 endpoints\" reply_in=\"English\">\nThe v2 endpoints are in acme/checkout#481.\n</message>\n\n<message from=\"owner\" type=\"message\" reply_in=\"English\">\nHow is checkout going?\n</message>\n\n<message from=\"system\" type=\"context\">\nEarlier workers that may be about the same subject (keyword match):\n- “Checkout UI: the v2 pages” (<id4>, working). Task: Checkout UI: the v2 pages\n- “Checkout tests: end to end” (<id7>, queued). Task: Checkout tests: end to end\n- “Checkout API: the v2 endpoints” (<id1>, done). Task: Checkout API: the v2 endpoints Result: The v2 endpoints are in acme/checkout#481.\n- “Checkout docs” (<id10>, working). Task: Checkout docs\nIf this request concerns the same project, repo or topic as one of them, send it to that worker with message_session (a closed one reopens with its context and files). Start a new worker only if none does, or when the owner asks for a new worker in so many words: then always, with why_new quoting them.\n</message>",
+   "<message from=\"owner\" type=\"message\" reply_in=\"English\">\nAlso fix the invoice rounding bug.\n</message>",
+   "<message from=\"system\" type=\"team-digest\">\nWorkers that work together, since your last turn (who, not what; read_team_thread when the owner asks about it or a question there holds a task up):\n- <id22> (<id23> “Checkout API”, <id24> “Checkout UI”, <id25> “Checkout tests”, <id26> “Checkout docs”, <id27> “Invoice rounding bug”, <id28> “Checkout tests on Linux”): 1 asked, 1 told. Open: “Invoice rounding bug” waits on “Checkout API” for 0 min (<id17>).\n</message>\n\n<message from=\"<id24>\" type=\"report\" status=\"done\" task=\"<id5>\" title=\"Checkout UI: the v2 pages\" reply_in=\"English\">\nThe v2 pages are in acme/checkout#482.\n</message>\n\n<message from=\"owner\" type=\"message\" reply_in=\"English\">\nAnd now?\n</message>"
+  ],
+  "1": [
+   "<message from=\"router\" type=\"task\" title=\"Checkout API: the v2 endpoints\" task=\"<id2>\" reply_in=\"English\">\nCheckout API: the v2 endpoints\n</message>",
+   "<message from=\"system\" type=\"peer\" worker=\"<id29>\">\n“Checkout UI: the v2 pages” (<id24>) now works at the same time as you, on another part of the same request: Checkout UI: the v2 pages. Tell it what it needs from your work with tell_session (as soon as you have it); it tells you what you need.\n</message>",
+   "<message from=\"<id24>\" type=\"question\" question=\"<id13>\" title=\"Checkout UI: the v2 pages\">\nRounding mode?\n</message>",
+   "<message from=\"<id27>\" type=\"question\" question=\"<id17>\" title=\"Invoice rounding bug\">\nDo totals round half even?\n</message>"
+  ],
+  "2": [
+   "<message from=\"router\" type=\"task\" title=\"Checkout UI: the v2 pages\" task=\"<id5>\" reply_in=\"English\">\nCheckout UI: the v2 pages\n</message>\n\n<message from=\"system\" type=\"peers\">\nYou work at the same time as these workers, on parts of the same request:\n- “Checkout API: the v2 endpoints” (<id23>), on task <id2> “Checkout API: the v2 endpoints” (running)\nTell them what they need from your work as soon as you have it (a value, a name, a changed interface or file format, a finding that affects them) with tell_session; ask them with ask_session. What they tell you arrives as from=\"worker:…\" type=\"note\". When your task waits for something from one of them, end your turn without a report: their message starts your next turn.\n</message>",
+   "<message from=\"<id23>\" type=\"note\" title=\"Checkout API: the v2 endpoints\" task=\"<id2>\">\nTotals are in cents.\n</message>",
+   "<message from=\"<id23>\" type=\"answer\" question=\"<id13>\" title=\"Checkout API: the v2 endpoints\">\nHalf even.\n</message>",
+   "<message from=\"<id23>\" type=\"peer-done\" title=\"Checkout API: the v2 endpoints\" task=\"<id2>\">\n“Checkout API: the v2 endpoints” finished “Checkout API: the v2 endpoints”:\nThe v2 endpoints are in acme/checkout#481.\n</message>",
+   "<message from=\"<id26>\" type=\"note\" title=\"Checkout docs\" task=\"<id11>\">\nThe docs link to the pages.\n</message>",
+   "<message from=\"router\" type=\"task\" title=\"Checkout UI copy\" task=\"<id21>\" reply_in=\"English\">\nTighten the copy.\n</message>"
+  ],
+  "3": null,
+  "4": [
+   "<message from=\"router\" type=\"task\" title=\"Checkout docs\" task=\"<id11>\" reply_in=\"English\">\nCheckout docs\n</message>"
+  ],
+  "5": [
+   "<message from=\"router\" type=\"task\" title=\"Invoice rounding bug\" task=\"<id15>\" reply_in=\"English\">\nInvoice rounding bug\n</message>"
+  ],
+  "6": null
+ },
+ "messages": {
+  "0": [
+   {
+    "kind": "owner",
+    "meta": {
+     "prompt": "<message from=\"owner\" type=\"message\" ref=\"<id30>\" reply_in=\"English\">\nShip checkout v2 for acme-shop: the API, the UI, tests.\n</message>",
+     "ref": "<id30>"
+    },
+    "text": "Ship checkout v2 for acme-shop: the API, the UI, tests."
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "session_id": "<id1>",
+     "task_id": "<id2>"
+    },
+    "text": "Started “Checkout API: the v2 endpoints” · new because test"
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "session_id": "<id4>",
+     "task_id": "<id5>"
+    },
+    "text": "Started “Checkout UI: the v2 pages” · new because test"
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "session_id": "<id7>",
+     "task_id": "<id8>"
+    },
+    "text": "Queued “Checkout tests: end to end” · after “Checkout API: the v2 endpoints”, “Checkout UI: the v2 pages” · new because test"
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "session_id": "<id10>",
+     "task_id": "<id11>"
+    },
+    "text": "Started “Checkout docs” · new because test"
+   },
+   {
+    "kind": "peer",
+    "meta": {
+     "peer_from": "<id1>",
+     "peer_kind": "told",
+     "peer_to": "<id4>"
+    },
+    "text": "“Checkout API: the v2 endpoints” told “Checkout UI: the v2 pages”: Totals are in cents."
+   },
+   {
+    "kind": "peer",
+    "meta": {
+     "peer_from": "<id4>",
+     "peer_kind": "asked",
+     "peer_to": "<id1>",
+     "question_id": "<id13>"
+    },
+    "text": "“Checkout UI: the v2 pages” asked “Checkout API: the v2 endpoints”: Rounding mode?"
+   },
+   {
+    "kind": "peer",
+    "meta": {
+     "peer_from": "<id1>",
+     "peer_kind": "answered",
+     "peer_to": "<id4>",
+     "question_id": "<id13>"
+    },
+    "text": "“Checkout API: the v2 endpoints” answered “Checkout UI: the v2 pages”: Half even."
+   },
+   {
+    "kind": "inbound",
+    "meta": {
+     "from": "<id1>",
+     "prompt": "<message from=\"<id23>\" type=\"report\" status=\"done\" task=\"<id2>\" title=\"Checkout API: the v2 endpoints\" reply_in=\"English\">\nThe v2 endpoints are in acme/checkout#481.\n</message>",
+     "status": "done",
+     "task_id": "<id2>",
+     "title": "Checkout API: the v2 endpoints"
+    },
+    "text": "The v2 endpoints are in acme/checkout#481."
+   },
+   {
+    "kind": "owner",
+    "meta": {
+     "prompt": "<message from=\"owner\" type=\"message\" ref=\"<id31>\" reply_in=\"English\">\nHow is checkout going?\n</message>\n\n<message from=\"system\" type=\"context\">\nEarlier workers that may be about the same subject (keyword match):\n- “Checkout UI: the v2 pages” (<id4>, working). Task: Checkout UI: the v2 pages\n- “Checkout tests: end to end” (<id7>, queued). Task: Checkout tests: end to end\n- “Checkout API: the v2 endpoints” (<id1>, done). Task: Checkout API: the v2 endpoints Result: The v2 endpoints are in acme/checkout#481.\n- “Checkout docs” (<id10>, working). Task: Checkout docs\nIf this request concerns the same project, repo or topic as one of them, send it to that worker with message_session (a closed one reopens with its context and files). Start a new worker only if none does, or when the owner asks for a new worker in so many words: then always, with why_new quoting them.\n</message>",
+     "ref": "<id31>"
+    },
+    "text": "How is checkout going?"
+   },
+   {
+    "kind": "owner",
+    "meta": {
+     "prompt": "<message from=\"owner\" type=\"message\" ref=\"<id32>\" reply_in=\"English\">\nAlso fix the invoice rounding bug.\n</message>",
+     "ref": "<id32>"
+    },
+    "text": "Also fix the invoice rounding bug."
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "session_id": "<id14>",
+     "task_id": "<id15>"
+    },
+    "text": "Started “Invoice rounding bug” · new because test"
+   },
+   {
+    "kind": "peer",
+    "meta": {
+     "peer_from": "<id14>",
+     "peer_kind": "asked",
+     "peer_to": "<id1>",
+     "question_id": "<id17>"
+    },
+    "text": "“Invoice rounding bug” asked “Checkout API: the v2 endpoints”: Do totals round half even?"
+   },
+   {
+    "kind": "peer",
+    "meta": {
+     "peer_from": "<id10>",
+     "peer_kind": "told",
+     "peer_to": "<id4>"
+    },
+    "text": "“Checkout docs” told “Checkout UI: the v2 pages”: The docs link to the pages."
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "session_id": "<id7>",
+     "task_id": "<id8>"
+    },
+    "text": "Task “Checkout tests: end to end” cancelled"
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "session_id": "<id18>",
+     "task_id": "<id19>"
+    },
+    "text": "Queued “Checkout tests on Linux” · waits for a worker slot (4 busy) · new because test"
+   },
+   {
+    "kind": "inbound",
+    "meta": {
+     "from": "<id4>",
+     "prompt": "<message from=\"<id24>\" type=\"report\" status=\"done\" task=\"<id5>\" title=\"Checkout UI: the v2 pages\" reply_in=\"English\">\nThe v2 pages are in acme/checkout#482.\n</message>",
+     "status": "done",
+     "task_id": "<id5>",
+     "title": "Checkout UI: the v2 pages"
+    },
+    "text": "The v2 pages are in acme/checkout#482."
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "session_id": "<id4>",
+     "task_id": "<id21>"
+    },
+    "text": "New task “Checkout UI copy” for the worker of “Checkout UI: the v2 pages” · new because another deliverable: its words"
+   },
+   {
+    "kind": "owner",
+    "meta": {
+     "prompt": "<message from=\"owner\" type=\"message\" ref=\"<id33>\" reply_in=\"English\">\nAnd now?\n</message>",
+     "ref": "<id33>"
+    },
+    "text": "And now?"
+   }
+  ],
+  "1": [
+   {
+    "kind": "router",
+    "meta": {
+     "prompt": "<message from=\"router\" type=\"task\" title=\"Checkout API: the v2 endpoints\" task=\"<id2>\" reply_in=\"English\">\nCheckout API: the v2 endpoints\n</message>",
+     "task_id": "<id2>"
+    },
+    "text": "Checkout API: the v2 endpoints"
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "peer": "<id4>",
+     "prompt": "<message from=\"system\" type=\"peer\" worker=\"<id29>\">\n“Checkout UI: the v2 pages” (<id24>) now works at the same time as you, on another part of the same request: Checkout UI: the v2 pages. Tell it what it needs from your work with tell_session (as soon as you have it); it tells you what you need.\n</message>",
+     "session_id": "<id4>",
+     "title": "Checkout UI: the v2 pages"
+    },
+    "text": "“Checkout UI: the v2 pages” (<id24>) now works at the same time as you, on another part of the same request: Checkout UI: the v2 pages. Tell it what it needs from your work with tell_session (as soon as you have it); it tells you what you need."
+   },
+   {
+    "kind": "tell",
+    "meta": {
+     "target": "<id4>",
+     "title": "Checkout UI: the v2 pages"
+    },
+    "text": "Totals are in cents."
+   },
+   {
+    "kind": "inbound",
+    "meta": {
+     "asked_by": "<id4>",
+     "prompt": "<message from=\"<id24>\" type=\"question\" question=\"<id13>\" title=\"Checkout UI: the v2 pages\">\nRounding mode?\n</message>",
+     "question_id": "<id13>",
+     "title": "Checkout UI: the v2 pages"
+    },
+    "text": "Rounding mode?"
+   },
+   {
+    "kind": "report",
+    "meta": {
+     "status": "done",
+     "task_id": "<id2>",
+     "told": true
+    },
+    "text": "The v2 endpoints are in acme/checkout#481."
+   },
+   {
+    "kind": "inbound",
+    "meta": {
+     "asked_by": "<id14>",
+     "prompt": "<message from=\"<id27>\" type=\"question\" question=\"<id17>\" title=\"Invoice rounding bug\">\nDo totals round half even?\n</message>",
+     "question_id": "<id17>",
+     "title": "Invoice rounding bug"
+    },
+    "text": "Do totals round half even?"
+   }
+  ],
+  "2": [
+   {
+    "kind": "router",
+    "meta": {
+     "prompt": "<message from=\"router\" type=\"task\" title=\"Checkout UI: the v2 pages\" task=\"<id5>\" reply_in=\"English\">\nCheckout UI: the v2 pages\n</message>\n\n<message from=\"system\" type=\"peers\">\nYou work at the same time as these workers, on parts of the same request:\n- “Checkout API: the v2 endpoints” (<id23>), on task <id2> “Checkout API: the v2 endpoints” (running)\nTell them what they need from your work as soon as you have it (a value, a name, a changed interface or file format, a finding that affects them) with tell_session; ask them with ask_session. What they tell you arrives as from=\"worker:…\" type=\"note\". When your task waits for something from one of them, end your turn without a report: their message starts your next turn.\n</message>",
+     "task_id": "<id5>"
+    },
+    "text": "Checkout UI: the v2 pages"
+   },
+   {
+    "kind": "inbound",
+    "meta": {
+     "prompt": "<message from=\"<id23>\" type=\"note\" title=\"Checkout API: the v2 endpoints\" task=\"<id2>\">\nTotals are in cents.\n</message>",
+     "title": "Checkout API: the v2 endpoints",
+     "told_by": "<id1>"
+    },
+    "text": "Totals are in cents."
+   },
+   {
+    "kind": "ask",
+    "meta": {
+     "question_id": "<id13>",
+     "target": "<id1>",
+     "title": "“Checkout API: the v2 endpoints”"
+    },
+    "text": "Rounding mode?"
+   },
+   {
+    "kind": "inbound",
+    "meta": {
+     "answered_by": "<id1>",
+     "prompt": "<message from=\"<id23>\" type=\"answer\" question=\"<id13>\" title=\"Checkout API: the v2 endpoints\">\nHalf even.\n</message>",
+     "question_id": "<id13>",
+     "title": "“Checkout API: the v2 endpoints”"
+    },
+    "text": "Half even."
+   },
+   {
+    "kind": "inbound",
+    "meta": {
+     "finished": true,
+     "prompt": "<message from=\"<id23>\" type=\"peer-done\" title=\"Checkout API: the v2 endpoints\" task=\"<id2>\">\n“Checkout API: the v2 endpoints” finished “Checkout API: the v2 endpoints”:\nThe v2 endpoints are in acme/checkout#481.\n</message>",
+     "title": "Checkout API: the v2 endpoints",
+     "told_by": "<id1>"
+    },
+    "text": "“Checkout API: the v2 endpoints” finished “Checkout API: the v2 endpoints”:\nThe v2 endpoints are in acme/checkout#481."
+   },
+   {
+    "kind": "inbound",
+    "meta": {
+     "prompt": "<message from=\"<id26>\" type=\"note\" title=\"Checkout docs\" task=\"<id11>\">\nThe docs link to the pages.\n</message>",
+     "title": "Checkout docs",
+     "told_by": "<id10>"
+    },
+    "text": "The docs link to the pages."
+   },
+   {
+    "kind": "report",
+    "meta": {
+     "status": "done",
+     "task_id": "<id5>",
+     "told": true
+    },
+    "text": "The v2 pages are in acme/checkout#482."
+   },
+   {
+    "kind": "router",
+    "meta": {
+     "prompt": "<message from=\"router\" type=\"task\" title=\"Checkout UI copy\" task=\"<id21>\" reply_in=\"English\">\nTighten the copy.\n</message>",
+     "task_id": "<id21>"
+    },
+    "text": "Tighten the copy."
+   }
+  ],
+  "3": [
+   {
+    "kind": "router",
+    "meta": {
+     "deferred": true,
+     "prompt": "<message from=\"router\" type=\"task\" title=\"Checkout tests: end to end\" task=\"<id8>\" reply_in=\"English\">\nCheckout tests: end to end\n</message>",
+     "task_id": "<id8>"
+    },
+    "text": "Checkout tests: end to end"
+   },
+   {
+    "kind": "notice",
+    "meta": {
+     "deferred": true,
+     "prompt": "<message from=\"system\" type=\"cancelled\" task=\"<id8>\">\nTask <id8> “Checkout tests: end to end” was cancelled. Stop work on it; no report.\n</message>",
+     "stopped": true
+    },
+    "text": "Cancelled by the Router: Replaced by <id19> “Checkout tests on Linux”."
+   }
+  ],
+  "4": [
+   {
+    "kind": "router",
+    "meta": {
+     "prompt": "<message from=\"router\" type=\"task\" title=\"Checkout docs\" task=\"<id11>\" reply_in=\"English\">\nCheckout docs\n</message>",
+     "task_id": "<id11>"
+    },
+    "text": "Checkout docs"
+   },
+   {
+    "kind": "tell",
+    "meta": {
+     "target": "<id4>",
+     "title": "Checkout UI: the v2 pages"
+    },
+    "text": "The docs link to the pages."
+   }
+  ],
+  "5": [
+   {
+    "kind": "router",
+    "meta": {
+     "prompt": "<message from=\"router\" type=\"task\" title=\"Invoice rounding bug\" task=\"<id15>\" reply_in=\"English\">\nInvoice rounding bug\n</message>",
+     "task_id": "<id15>"
+    },
+    "text": "Invoice rounding bug"
+   },
+   {
+    "kind": "ask",
+    "meta": {
+     "question_id": "<id17>",
+     "target": "<id1>",
+     "title": "“Checkout API: the v2 endpoints”"
+    },
+    "text": "Do totals round half even?"
+   }
+  ],
+  "6": [
+   {
+    "kind": "router",
+    "meta": {
+     "prompt": "<message from=\"router\" type=\"task\" title=\"Checkout tests on Linux\" task=\"<id19>\" reply_in=\"English\">\nCheckout tests on Linux\n</message>",
+     "task_id": "<id19>"
+    },
+    "text": "Checkout tests on Linux"
+   }
+  ]
+ },
+ "peers": {
+  "0": [],
+  "1": [
+   "<id4>"
+  ],
+  "2": [
+   "<id1>"
+  ],
+  "3": [],
+  "4": [],
+  "5": [],
+  "6": []
+ },
+ "tasks": [
+  {
+   "after": [],
+   "goal": "Checkout API: the v2 endpoints",
+   "id": "<id2>",
+   "session_id": "<id1>",
+   "status": "review",
+   "title": "Checkout API: the v2 endpoints"
+  },
+  {
+   "after": [],
+   "goal": "Checkout UI: the v2 pages",
+   "id": "<id5>",
+   "session_id": "<id4>",
+   "status": "review",
+   "title": "Checkout UI: the v2 pages"
+  },
+  {
+   "after": [
+    [
+     "<id2>",
+     "result"
+    ],
+    [
+     "<id5>",
+     "result"
+    ]
+   ],
+   "goal": "Checkout tests: end to end",
+   "id": "<id8>",
+   "session_id": "<id7>",
+   "status": "cancelled",
+   "title": "Checkout tests: end to end"
+  },
+  {
+   "after": [],
+   "goal": "Checkout docs",
+   "id": "<id11>",
+   "session_id": "<id10>",
+   "status": "running",
+   "title": "Checkout docs"
+  },
+  {
+   "after": [],
+   "goal": "Invoice rounding bug",
+   "id": "<id15>",
+   "session_id": "<id14>",
+   "status": "running",
+   "title": "Invoice rounding bug"
+  },
+  {
+   "after": [],
+   "goal": "Checkout tests on Linux",
+   "id": "<id19>",
+   "session_id": "<id18>",
+   "status": "queued",
+   "title": "Checkout tests on Linux"
+  },
+  {
+   "after": [],
+   "goal": "Tighten the copy.",
+   "id": "<id21>",
+   "session_id": "<id4>",
+   "status": "running",
+   "title": "Checkout UI copy"
+  }
+ ],
+ "teams": [
+  {
+   "answered": 1,
+   "asked": 2,
+   "cue": {
+    "parts": null,
+    "waiting": 0
+   },
+   "id": "<id22>",
+   "labels": {
+    "<id10>": "Checkout docs",
+    "<id14>": "Invoice rounding bug",
+    "<id18>": "Checkout tests on Linux",
+    "<id1>": "Checkout API",
+    "<id4>": "Checkout UI",
+    "<id7>": "Checkout tests"
+   },
+   "last_at": "<time>",
+   "members": [
+    "<id1>",
+    "<id4>",
+    "<id7>",
+    "<id10>",
+    "<id14>",
+    "<id18>"
+   ],
+   "name": "Checkout API, Checkout UI +4",
+   "open": [
+    "<id1>",
+    "<id4>",
+    "<id7>",
+    "<id10>",
+    "<id14>",
+    "<id18>"
+   ],
+   "told": 2,
+   "waiting": [
+    {
+     "asked": "<time>",
+     "asker": "<id14>",
+     "blocks": false,
+     "id": "<id17>",
+     "minutes": 0,
+     "nudged": "",
+     "target": "<id1>",
+     "text": "Do totals round half even?"
+    }
+   ]
+  }
+ ]
+}
