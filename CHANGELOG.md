@@ -57,10 +57,10 @@
 - **Prepared for you holds its limits more tightly.** While a worker prepares a fix:
   - **Your repository is read-only to it.** Its git now keeps its own branch, staging area and
     commits in a folder of its own, reading your repository's history without writing it, and
-    Chief of Staff moves its commit into your repository and onto the worker's branch once it
-    ends. Before, a command it ran could delete or move your branches, other workers' branches
-    and tags, or the repository's history, in the repository a worker's folder shares with
-    yours.
+    Chief of Staff moves its commit into your repository once it ends (onto the worker's branch
+    when it worked in the worker's checkout, as before). Before, a command it ran could delete
+    or move your branches, other workers' branches and tags, or the repository's history, in
+    the repository a worker's folder shares with yours.
   - **None of your package registry or cloud sign-ins can be read** (npm, PyPI, cargo, RubyGems,
     Gradle, Maven, Docker, AWS, Google Cloud and the like), so nothing can be published or
     uploaded as you through the hosts it downloads from. A registry that needs your sign-in to
