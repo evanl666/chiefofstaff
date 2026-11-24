@@ -1113,8 +1113,8 @@ class Events:
         self.store.set(key, str(time.time()))
         sandboxed = "sandbox" in message
         hint = (
-            " If that plugin needs to write somewhere, add the folder under Settings → Workers → "
-            "Also writable in the sandbox."
+            " If that plugin needs to write somewhere, add the folder under Settings → General → "
+            "Sandbox → Also writable."
             if sandboxed
             else ""
         )

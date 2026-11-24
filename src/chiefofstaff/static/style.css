@@ -925,7 +925,6 @@ dialog footer button { min-height: 32px; padding: 0 16px; }
 #settings-pane label > small { margin-top: 1px; }
 #settings-form > footer { grid-area: 3 / 1 / 4 / 3; margin: 0; padding: 12px 20px; border-top: 1px solid var(--line); align-items: center; }
 #settings-form > footer .error { flex: 1; }
-.learn-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 details.section { border: 1px solid var(--line); border-radius: var(--radius-lg); }
 details.section + details.section { margin-top: -4px; }
 details.section > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border-radius: var(--radius-lg); cursor: pointer; list-style: none; font-weight: 600; font-size: var(--body); }
@@ -955,7 +954,7 @@ label.hours input { width: 118px; }
 #learn-state:empty { display: none; }
 /* A page's head (its name, what it is for in one line); a quiet box of rows, as details.section
    draws one. */
-#settings-pane .tab.agents-page, #agents-page, #settings-pane .conn-page, #settings-pane .conn-detail { gap: 20px; }
+#settings-pane .tab.agents-page, #agents-page, #settings-pane .conn-page, #settings-pane .conn-detail, #settings-pane .tab.general-page, #settings-pane .tab.you-page { gap: 20px; }
 #agents-page { display: grid; }
 #connections-extra:empty { display: none; }
 #plugins-retry { justify-self: start; }
@@ -973,6 +972,39 @@ label.hours input { width: 118px; }
 #settings-pane details.more-fold > summary::before { content: ""; width: 5px; height: 5px; margin: 0 3px 0 1px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform 0.12s var(--ease); }
 #settings-pane details.more-fold[open] > summary::before { transform: rotate(45deg); margin-top: -3px; }
 #settings-pane details.more-fold > summary:hover { color: var(--text); }
+/* General and You: groups (a quiet heading over a box of lines); one setting per line, its name
+   and its helper on the left, its control on the right; a switch line's box first, as
+   everywhere. What a line governs unfolds under it (Options), indented to its words. */
+#settings-pane .settings-group { display: grid; gap: 8px; }
+#settings-pane .settings-group > h4 { margin: 0; padding: 0 2px; }
+#settings-pane .box > .line-row + .line-row, #settings-pane .box > .unfold + .line-row { border-top: 1px solid var(--line); }
+.line-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 16px; min-height: 52px; padding: 10px 16px; }
+.line-row > .words { display: grid; gap: 1px; min-width: 0; }
+#settings-pane .line-row label.name { font-weight: 500; }
+.line-row .help { color: var(--muted); font-size: var(--small); line-height: 1.5; }
+.line-row .help.warn { color: var(--amber); }
+.line-row .help.state { color: var(--soft); }
+.line-row.check-line > .words > .help { margin-left: 28px; }
+.line-row > .control { display: flex; align-items: center; gap: 8px; justify-self: end; }
+.line-row.check-line > .control { align-self: start; }
+#settings-pane .line-row > .control input:not([type="checkbox"]), #settings-pane .line-row > .control select { width: auto; }
+#settings-pane .line-row .num { width: 76px; text-align: right; font-variant-numeric: tabular-nums; }
+#settings-pane .line-row .field-wide { width: 280px; }
+.line-row .unit { color: var(--muted); font-size: var(--small); white-space: nowrap; }
+.line-row.wide { grid-template-columns: minmax(0, 1fr); }
+.line-row.wide textarea { margin-top: 6px; }
+#settings-pane button.link.options { min-height: 28px; padding: 0 4px; color: var(--muted); font-size: var(--small); text-decoration: none; }
+#settings-pane button.link.options:hover, #settings-pane button.link.options[aria-expanded="true"] { color: var(--text); }
+#settings-pane .unfold { display: grid; gap: 12px; padding: 0 16px 16px 44px; }
+#settings-pane .unfold > .row { align-items: flex-end; }
+#settings-pane .unfold label.budget input { text-align: right; }
+.learn-line .learn-run { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }
+#settings-pane details.section .count { margin-left: 6px; color: var(--muted); font-weight: 400; font-size: var(--small); }
+#settings-pane details.section > summary small.preview { max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#settings-pane details.section > summary small.preview.warn { color: var(--amber); }
+.you-lists { display: grid; gap: 8px; }
+#settings-pane .lesson-add select { width: auto; }
+.you-lists details.section + details.section { margin-top: 0; }
 
 /* Agents & models: new workers run on (the answer at a glance); a row per agent (its mark and
    name, its status in a few words, its plan's meter, its one action, its switch; what must not
@@ -1121,7 +1153,6 @@ ul.memory li { display: flex; gap: 10px; align-items: center; padding: 4px 0; bo
 ul.memory .row-text.inline { display: flex; align-items: baseline; gap: 8px; }
 ul.memory .row-text.inline .clamped { flex: 1; }
 ul.memory .row-text.inline > small { flex: none; white-space: nowrap; min-width: 84px; text-align: right; }
-h4[data-count]::after { content: " · " attr(data-count); color: var(--muted); font-weight: 400; }
 ul.memory li:last-child { border-bottom: 0; }
 ul.memory li.off { opacity: 0.55; }
 ul.memory li.empty-note { color: var(--muted); font-size: var(--small); }
@@ -1143,6 +1174,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
   .agent-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .agent-fields > :first-child { grid-column: 1 / -1; }
   .own-grid { grid-template-columns: 108px minmax(0, 1fr) minmax(0, 2.2fr); }
+  #settings-pane .line-row .field-wide { width: 220px; }
 }
 /* Under 600 px a line's controls go under its words. */
 @media (max-width: 600px) {
@@ -1152,6 +1184,10 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
   .own-grid { grid-template-columns: minmax(0, 1fr); }
   .own-grid > .sub { grid-column: 1; }
   .default-line { grid-template-columns: minmax(0, 1fr); }
+  .line-row { grid-template-columns: minmax(0, 1fr); }
+  .line-row > .control { justify-self: start; }
+  .line-row.check-line > .control { margin-left: 28px; }
+  #settings-pane .unfold { padding-left: 16px; }
 }
 .error { color: var(--red); font-size: var(--small); margin: 0; white-space: pre-line; }
 .error:empty { display: none; }

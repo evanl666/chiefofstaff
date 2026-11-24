@@ -881,7 +881,8 @@ def test_a_step_reads_as_what_it_is_for():
 async def test_the_settings_line_on_yolo_says_what_holds_either_way(harness):
     """Settings → Workers said that, yolo or not, nothing is force-pushed, pushed to main or
     posted as the owner without their OK, and a yolo worker's commands were not checked at all.
-    The floor holds either way now (policy.floor_denial), and the line says it."""
+    The floor holds either way now (policy.floor_denial), and the line says it: under Ask first
+    in Settings → General, always shown (settings-v2.md §7.2)."""
     runtime = await harness.connect()
     worker = (await spawn(runtime, harness.router_id, "Ship"))["session_id"]
     lines = ("git push --force origin chief/ship", "git push origin main", "gh pr comment 7 -b ok")
@@ -896,8 +897,8 @@ async def test_the_settings_line_on_yolo_says_what_holds_either_way(harness):
     await runtime.set_session_yolo(worker, "off")
     assert [await allowed(line) for line in lines] == [False, False, False]
     page = (Path(__file__).parent.parent / "src/chiefofstaff/static/index.html").read_text()
-    found = re.search(r'name="worker_yolo".*?<small>(.*?)</small>', page, re.DOTALL)
-    assert found and found.group(1).startswith(
-        "Either way, no worker comments, reviews, merges or closes on GitHub as you, pushes "
-        "to main or force-pushes others' branches without your OK."
-    )
+    found = re.search(r'name="ask_first".*?id="ask-first-floor">(.*?)</small>', page, re.DOTALL)
+    assert found and found.group(1) == (
+        "Either way, no worker posts, reviews or merges on GitHub as you, pushes to main, or "
+        "force-pushes others' branches."
+    ), found and found.group(1)
