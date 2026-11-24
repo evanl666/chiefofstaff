@@ -65,13 +65,18 @@ def folder_of(step_folder: str) -> Path:
     return Path(step_folder).with_name(Path(step_folder).name + ".git")
 
 
-def make(common: str, admin: str, tree: str, step_folder: str, head: str, branch: str) -> dict:
+def make(
+    common: str, admin: str, tree: str, step_folder: str, head: str, branch: str, own: bool
+) -> dict:
     """The step's git folder for its worktree `tree` (a linked worktree of `common`, `admin`
-    its own folder there), at `head` (on `branch`, a ref name, where the step works in its
-    worker's own worktree: the step's commits move it there first). Returns its record (what
-    release_git restores), the worktree's `.git` not yet pointed at it (point())."""
+    its own folder there), at `head` (on `branch`, a ref name, when the worktree is on one).
+    `own`: the worker's own worktree, whose HEAD Chief of Staff moves to the step's commit once
+    it ends (release_git). Returns its record, the worktree's `.git` not yet pointed at it
+    (point())."""
     common = os.path.realpath(common)
     place = folder_of(step_folder)
+    if place.parent.is_symlink() or place.is_symlink():
+        raise ValueError(f"{place.parent} is a link, not its own folder")
     if place.exists():
         shutil.rmtree(place)
     for part in ("objects/info", "objects/pack", "refs/heads", "refs/tags"):
@@ -117,7 +122,8 @@ def make(common: str, admin: str, tree: str, step_folder: str, head: str, branch
             env=pins)  # fmt: skip
     pointer = Path(tree) / ".git"
     return {"git": str(place), "pointer": str(pointer), "was": pointer.read_text(),
-            "admin": admin, "common": common, "branch": branch, "h0": head}  # fmt: skip
+            "admin": admin, "common": common, "branch": branch, "h0": head,
+            "own": own}  # fmt: skip
 
 
 def newest(tree: str, pins: dict[str, str]) -> int:
