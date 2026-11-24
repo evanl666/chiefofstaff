@@ -317,3 +317,67 @@ def test_a_downgrade_of_data_that_never_used_it_says_nothing_of_it(tmp_path, cap
     assert entry.prepare_downgrade(None, tmp_path / "data") == 0
     assert capsys.readouterr().out.strip() == "Nothing to prepare: no workers ran on another agent."
     assert not tables(Store(tmp_path / "data")) & set(TABLES)
+
+
+async def test_a_downgrade_drains_a_turn_it_continued_whose_answer_went_out(
+    harness, capsys, monkeypatch
+):
+    """Fix 5: the answer was received (nothing unsent is left), and the worker is at work on
+    Autopilot's word: an older version would go on with it as it was. Left stopped by the owner
+    instead, nothing of it to wake or replay."""
+    from chiefofstaff import __main__ as entry
+
+    runtime = await harness.connect()
+    await tick(runtime)
+    state = await runtime.autopilot.start(None, by="home")
+    worker = await spawn(runtime, harness.router_id, "Write the client")
+    await settle(runtime)
+    book, store = runtime.autopilot.book, harness.store
+    session, task_id = worker["session_id"], worker["task_id"]
+    answered = book.append(state["run"], "answered", "Answered", task_id=task_id)
+    runtime.autopilot.origins.keep(session, {"entries": [answered["id"]], "ask_first": True})
+    last = store.value("SELECT max(id) FROM messages WHERE session_id=?", (session,))
+    store.set(f"sent:{session}", str(last))  # Everything it was sent went out.
+    store.update_session(session, status="working")
+    store.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+    store.set(f"checkback:{task_id}", json.dumps({"at": "2026-11-24T12:00:00+00:00"}))
+    monkeypatch.setattr(entry, "lock_data_file", lambda handle: None)
+    assert entry.prepare_downgrade(None, store.directory) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out == [
+        "Stopped Autopilot.",
+        "Stopped what Autopilot had continued: “Write the client”; each waits for you.",
+    ]
+    reread = Store(store.directory)
+    assert reread.session(session)["status"] == "idle"
+    assert reread.get(f"stopped:{task_id}") == "you"
+    assert reread.one("SELECT status FROM tasks WHERE id=?", (task_id,))["status"] == "waiting"
+    assert reread.get(f"checkback:{task_id}") is None, "nothing wakes it"
+    mark = int(reread.get(f"sent:{session}") or 0)
+    assert all(m["meta"].get("deferred") for m in reread.prompts(session, after=mark))
+    assert reread.keys("autopilot:origin:") == [] and reread.keys("autopilot:turn:") == []
+    stops = Logbook(reread).entries(kinds=("stopping",))
+    assert [e["subject"] for e in stops][-1] == f"session:{session}"
+    assert Logbook(reread).check().ok
+
+
+async def test_stop_stops_a_turn_it_continued_and_its_task_waits_with_go_on(harness):
+    runtime = await harness.connect()
+    await tick(runtime)
+    state = await runtime.autopilot.start(None, by="home")
+    worker = await spawn(runtime, harness.router_id, "Write the client")
+    other = await spawn(runtime, harness.router_id, "Write the docs")
+    await settle(runtime)
+    answered = runtime.autopilot.book.append(state["run"], "answered", "Answered")
+    runtime.autopilot.origins.keep(
+        worker["session_id"], {"entries": [answered["id"]], "ask_first": True}
+    )
+    for made in (worker, other):
+        harness.store.update_session(made["session_id"], status="working")
+    stopped = await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    await settle(runtime)
+    assert stopped["said"] == "Autopilot stopped. · 1 task it had continued waits with Go on"
+    assert harness.store.get(f"stopped:{worker['task_id']}") == "Autopilot's Stop"
+    assert harness.store.get(f"stopped:{other['task_id']}") is None, "the owner's own goes on"
+    row = harness.store.session(worker["session_id"])
+    assert runtime.yolo(row) is False, "Ask first stays until the owner writes to it"
