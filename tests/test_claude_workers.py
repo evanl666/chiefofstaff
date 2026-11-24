@@ -21,7 +21,7 @@ from by_hand import opened_by_hand, resumed_by_hand_is_let_go_and_said_closed_on
 from conftest import Harness, call_tool, settle
 from copilot.tools import ToolInvocation
 
-from chiefofstaff import agents, backend_claude, prompts
+from chiefofstaff import agents, backend_claude, policy, prompts
 from chiefofstaff.models import Settings
 from chiefofstaff.settings_guard import SettingsChangedError
 from chiefofstaff.workers import SETTINGS_WAIT
@@ -406,6 +406,34 @@ async def test_a_claude_worker_that_reads_slack_is_never_given_slacks_token(
         with pytest.raises(SlackError, match="not one of Slack's read tools"):
             await proxy["call"]("slack_send_message", {"text": "hi"})
         assert harness.mcp.calls == [("slack_read_thread", {"channel_id": "C1"})]
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_worker_acting_on_its_own_is_held_to_the_floor(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """0.1.57: acting on its own (yolo), a Claude worker's `gh pr comment` went out as the
+    owner. Refused now, as every worker's: it is told to ask; its reads still run."""
+    ran = tmp_path / "gh-ran"
+    stand_in = tmp_path / "gh-bin" / "gh"  # Never the owner's gh.
+    stand_in.parent.mkdir()
+    stand_in.write_text(f'#!/bin/sh\necho "$@" >> {shlex.quote(str(ran))}\n')
+    stand_in.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stand_in.parent}:{os.environ['PATH']}")
+    harness, runtime, worker, _ = await claude_worker(
+        tmp_path,
+        "Run the shell command `gh pr comment 4 --body Done`. Report done: tried",
+    )
+    try:
+        assert runtime.yolo(harness.store.session(worker))
+        notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
+        ask = policy.FLOOR_ASK
+        assert any("`gh pr comment`" in text and ask in text for text in notices), notices
+        assert not ran.exists(), "it never ran"
+        await runtime.owner_send(worker, "Run the shell command `gh pr view 4`. Report done: read")
+        await until(lambda: ran.exists(), 30)
+        assert ran.read_text() == "pr view 4\n"
     finally:
         await runtime.stop()
 

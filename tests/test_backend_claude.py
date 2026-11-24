@@ -2225,9 +2225,8 @@ async def test_what_runs_in_anthropics_cloud_needs_the_owners_ok_each_time(
 
 
 @pytest.mark.parametrize("ask_first", [False, True])
-async def test_an_agent_chief_of_staff_cannot_find_runs_only_for_a_worker_acting_alone(
-    agent, tmp_path, ask_first
-):
+async def test_an_agent_chief_of_staff_cannot_find_runs_for_no_worker(agent, tmp_path, ask_first):
+    """It may run in Anthropic's cloud, out of the floor's reach: refused whatever the mode."""
     session = await agent.create_session(
         session_id="a9" * 16, name="t", **options(tmp_path, ask_first=ask_first)
     )
@@ -2235,9 +2234,28 @@ async def test_an_agent_chief_of_staff_cannot_find_runs_only_for_a_worker_acting
     await session.send("Have a subagent of type mystery run `ls`. Reply with just: ok")
     await turn.ended()
     done = turn.of("tool.execution_complete")[0]
-    assert done.success is not ask_first
-    if ask_first:
-        assert "can't find the mystery agent's definition" in done.error.message
+    assert not done.success
+    assert "can't find the mystery agent's definition" in done.error.message
+
+
+@pytest.mark.parametrize("ask_first", [False, True])
+@pytest.mark.parametrize("tool", ["Workflow", "ShareOnboardingGuide"])
+async def test_claudes_tools_out_of_the_floors_reach_run_for_no_worker(
+    agent, tmp_path, ask_first, tool
+):
+    """0.1.57: acting on its own, a worker ran a Workflow, whose agents' actions may not reach
+    the floor's checks, or published a share link in the owner's name."""
+    session = await agent.create_session(
+        session_id="d9" * 16, name="t", **options(tmp_path, ask_first=ask_first)
+    )
+    turn = Turn(session)
+    await session.send(f"Use Claude's {tool} tool, then reply with just: ok")
+    await turn.ended()
+    (done,) = turn.of("tool.execution_complete")
+    assert not done.success
+    assert ("hold for every worker" if tool == "Workflow" else "no worker does") in (
+        done.error.message
+    )
 
 
 async def test_a_notification_for_the_owner_goes_through_chief_of_staff(agent, tmp_path):

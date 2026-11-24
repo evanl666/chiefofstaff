@@ -2915,11 +2915,11 @@ class ClaudeWorker:
                 arguments, call, cwd
             )
         if name == "Workflow":
+            # Its agents' actions may not all reach the checks, the floor's too (policy.floor_
+            # denial: nothing goes out on GitHub as the owner unasked), whatever the mode.
             return (
-                "Its agents' actions may not all reach Chief of Staff's checks, and this worker "
-                "asks first: do the steps yourself."
-                if self.ask_first
-                else ""
+                "Its agents' actions may not all reach Chief of Staff's checks, and some of "
+                "those hold for every worker: do the steps yourself."
             )
         if name == "RemoteTrigger":
             return self.cloud_call(call, "a routine")
@@ -2953,10 +2953,8 @@ class ClaudeWorker:
             return f"{DELIVERED} The owner sees it in this worker's timeline."
         if name == "ShareOnboardingGuide":
             return (
-                "A share link publishes in the owner's name, which a worker that asks first "
-                "may not do."
-                if self.ask_first
-                else ""
+                "A share link publishes in the owner's name, which no worker does unasked: ask "
+                'the owner with report(status="question").'
             )
         return None
 
@@ -2976,7 +2974,8 @@ class ClaudeWorker:
         isolation = str(arguments.get("isolation") or (definition or {}).get("isolation") or "")
         if isolation == "remote":
             return self.cloud_call(call, f"the {kind} agent")
-        if not builtin and definition is None and self.ask_first:
+        if not builtin and definition is None:
+            # Whatever the mode: the floor's checks (policy.floor_denial) hold for every worker.
             return (
                 f"Chief of Staff can't find the {kind} agent's definition, so it can't tell "
                 "whether it runs in Anthropic's cloud, where its actions can't be checked: use "
