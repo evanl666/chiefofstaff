@@ -14,7 +14,9 @@ never ticks it has none of them).
   bytes), zlib-compressed, in parts of 256 KB, which its entry's hash covers by that hash.
 - **Outbox**: what to deliver once an action is committed (a message to a worker, a card), in
   the same transaction as the change and its entry; delivered after the commit by whoever
-  claims the row, once.
+  claims the row, once. A message to a worker is stored (with the prompt it is sent as) only
+  once its row is claimed, and the row names it (`message_id`), so an unsent one is found again
+  after a crash or before a downgrade.
 - **Decisions** Autopilot made, never in the shared `decisions` table (no version's
   precedents can take one for the owner's), and the owner's own **acts** it may cite.
 
@@ -48,8 +50,9 @@ STATEMENTS = (
     data BLOB NOT NULL, PRIMARY KEY (hash, part))""",
     """CREATE TABLE IF NOT EXISTS autopilot_outbox (
     id TEXT PRIMARY KEY, entry TEXT NOT NULL, run_id TEXT NOT NULL, kind TEXT NOT NULL,
-    payload TEXT NOT NULL, state TEXT NOT NULL, claimed_at TEXT, generation INTEGER NOT NULL,
-    outcome TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, ended_at TEXT)""",
+    payload TEXT NOT NULL, state TEXT NOT NULL, claimed_at TEXT, message_id INTEGER,
+    generation INTEGER NOT NULL, outcome TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+    ended_at TEXT)""",
     """CREATE TABLE IF NOT EXISTS autopilot_decisions (
     id TEXT PRIMARY KEY, run_id TEXT NOT NULL, entry TEXT NOT NULL, card_id TEXT NOT NULL,
     question TEXT NOT NULL, options TEXT NOT NULL, choice TEXT NOT NULL, basis TEXT NOT NULL,
@@ -468,6 +471,13 @@ class Logbook:
                 (CLAIMED, now(), item_id, QUEUED),
             )
         return self.item(item_id)
+
+    def stored(self, item_id: str, message_id: int):
+        """The message a claimed item became (before it is transmitted)."""
+        self.store.execute(
+            "UPDATE autopilot_outbox SET message_id=? WHERE id=? AND state=?",
+            (message_id, item_id, CLAIMED),
+        )
 
     def finish(self, item_id: str, state: str, outcome: str = "") -> bool:
         """A claimed item's outcome."""
