@@ -792,12 +792,12 @@ FEATURES["proactive"] = Feature(
             views=r"^settings-general-",
         ),
         Allow(
-            "its tab in Settings, and its section (not photographed: the baseline has none)",
-            element="#settings-tabs [data-tab=proactive], #settings-pane .tab[data-tab=proactive]",
+            "its Options in Settings → General (not photographed: the baseline has none)",
+            element="#settings-dialog #prs-options, #settings-dialog #prs-more",
             views=r"^settings-",
         ),
         Allow(
-            "its tab's fields in Settings",
+            "its Options' fields in Settings → General",
             data=r"^page\.settings\.fields\.(?:proactive_worker_prs|proactive_my_prs|level_[\w-]+"
             r"|proactive_budget|step_hosts)$",
         ),
@@ -872,8 +872,8 @@ INSTALLED = [
     ),
 ]  # fmt: skip
 
-# Settings v2, phase 1 (docs/design/settings-v2.md §9.5): an intentional change of the Settings
-# view, so for this release it is compared by what it holds (every named field once mounted, by
+# Settings v2, phases 1 and 2 (docs/design/settings-v2.md §9.5): an intentional change of the
+# Settings view, so for this release it is compared by what it holds (every named field once mounted, by
 # name: its kind and value) and what it does (Save with nothing changed: what it sends and what
 # is stored), not by its pixels; Home stays strict, also as it is after Settings closed
 # (home-after-settings-*). Allowed in every run. The next release's baseline is this one, and
@@ -2114,10 +2114,13 @@ AGENTS_LOOKED = """() => {
     (line) => line.textContent === "Checking…");
 }"""
 # Every named control of Settings, by name: its kind and its value (checked, for a checkbox).
+# Ask first (settings-v2.md §7.2) is read as what it saves: worker_yolo, the other way round.
 FIELDS = """() => Object.fromEntries([...document.querySelector("#settings-form").elements]
   .filter((field) => field.name)
-  .map((field) => [field.name, `${field.tagName.toLowerCase()}:${field.type}:${
-    field.type === "checkbox" ? field.checked : field.value}`]))"""
+  .map((field) => field.name === "ask_first"
+    ? ["worker_yolo", `input:checkbox:${!field.checked}`]
+    : [field.name, `${field.tagName.toLowerCase()}:${field.type}:${
+      field.type === "checkbox" ? field.checked : field.value}`]))"""
 # Each page, connection, agent's row and fold of Settings shown once (all its fields mounted, as
 # they would be by an owner going through it).
 VISIT = """async () => {
@@ -2133,6 +2136,7 @@ VISIT = """async () => {
       document.querySelector("#settings-pane [data-conn-detail]:not([hidden]) [data-back]")?.click();
     }
     for (const fold of page?.querySelectorAll(".agent .fold[aria-expanded=false]") || []) fold.click();
+    for (const options of page?.querySelectorAll("button.options[aria-expanded=false]:not([hidden])") || []) options.click();
     for (const part of page?.querySelectorAll("details") || []) part.open = true;
   }
 }"""
