@@ -4337,6 +4337,7 @@ class Runtime:
         worker: str = "",
         text: str = "",
         replay: dict | None = None,
+        request: str = "",
     ):
         """A worker the owner named an agent for could not start on it (more-agents.md 5.12.8,
         recovery), or (`worker`) what the Router gave a worker of theirs on an agent that
@@ -4351,6 +4352,10 @@ class Runtime:
         instead = self.instead_of(agent)
         found = self.unready(agent, why)
         record = {"agent": agent, "params": params, "instead": instead, "status": found["status"]}
+        if request:
+            # The owner request it was asked in: whatever starts it later makes its task for
+            # that request (Teams), never for the turn running then.
+            record["request"] = request
         if worker:
             record |= {"worker": worker, "text": text, **({"replay": replay} if replay else {})}
         name = agents.display(agent)
@@ -4466,7 +4471,9 @@ class Runtime:
                     "text": found.get("text", ""),
                 }
                 await self.toolset.t_message_session(
-                    MessageSession.model_validate(replay), self.router_id()
+                    MessageSession.model_validate(replay),
+                    self.router_id(),
+                    request=found.get("request", ""),
                 )
                 self.add_message(
                     self.router_id(),
@@ -4484,6 +4491,7 @@ class Runtime:
                     self.router_id(),
                     agent=agent,
                     instead=f" on {name}: {after}",
+                    request=found.get("request", ""),
                 )
         except ValueError as exc:
             # Refused again: its new card says why (spawn_worker's, message_session's).
@@ -4561,7 +4569,12 @@ class Runtime:
             if done := self.continued_already(found["worker"]):
                 return await self.refusal_to_continuation(key, found, done)
             instead = found.get("instead") or COPILOT_AGENT
-            made = await self.continue_on(found["worker"], instead, also=found.get("text", ""))
+            made = await self.continue_on(
+                found["worker"],
+                instead,
+                also=found.get("text", ""),
+                also_request=found.get("request", ""),
+            )
             self.store.delete(f"agentrefusal:{key}")
             self.refusal_said(found, {"resumed": f"Continued on {agents.display(instead)}"})
             title = (found.get("params") or {}).get("title") or "the work"
@@ -4591,6 +4604,7 @@ class Runtime:
             self.router_id(),
             agent=instead,
             instead=f" on {agents.display(instead)} instead",
+            request=found.get("request", ""),
         )
         return {}
 
@@ -4609,7 +4623,9 @@ class Runtime:
         elif replay.get("task") == "new" and not replay.get("earlier"):
             replay["earlier"] = "keep"  # The owner's: more for it, its own task goes on.
         await self.toolset.t_message_session(
-            MessageSession.model_validate(replay), self.router_id()
+            MessageSession.model_validate(replay),
+            self.router_id(),
+            request=found.get("request", ""),
         )
         self.store.delete(f"agentrefusal:{key}")
         name = agents.display(self.agent(target))
@@ -4779,7 +4795,9 @@ class Runtime:
         keys = ("session_id", "task_id", "stays_open", "agent")
         return {key: found.get(key) for key in keys} | {"already": True}
 
-    async def continue_on(self, session_id: str, agent: str, also: str = "") -> dict:
+    async def continue_on(
+        self, session_id: str, agent: str, also: str = "", also_request: str = ""
+    ) -> dict:
         """Continue with <agent>… (the owner's, from a worker's ⋯ or by asking the Router): a
         new worker on that agent goes on with this one's work, from a summary of where it
         stands, in a copy of its worktrees: this one stays open. One that writes in the owner's
@@ -4789,13 +4807,17 @@ class Runtime:
         agent could not run), which the new one does too. Its open tasks are the new one's now
         (replaced: what waited for them waits for it; none goes on by itself at a limit's
         reset). Once: asked again, the new worker it went on with (continued_already), but
-        with `also` (work that is not in that one's)."""
+        with `also` (work that is not in that one's). `also_request`: the owner request `also`
+        was asked in (its card's): the new task is that request's only when it and every task
+        it replaces agree (Teams)."""
         async with self.continue_locks.setdefault(session_id, asyncio.Lock()):
             if not also.strip() and (found := self.continued_already(session_id)):
                 return found
-            return await self.continue_now(session_id, agent, also)
+            return await self.continue_now(session_id, agent, also, also_request)
 
-    async def continue_now(self, session_id: str, agent: str, also: str) -> dict:
+    async def continue_now(
+        self, session_id: str, agent: str, also: str, also_request: str = ""
+    ) -> dict:
         row = self.store.session(session_id)
         self.continue_checks(row, agent)
         current = self.agent(session_id)
@@ -4858,7 +4880,12 @@ class Runtime:
         self.store.set(f"continues:{new_id}", session_id)
         if group := self.store.get(f"compare:{session_id}"):
             self.store.set(f"compare:{new_id}", group)
-        task = self.tasks.create(new_id, title, summary[:4000])
+        # One request only when every piece of work it carries came from it: else none.
+        pieces = [self.store.get(f"req:{task['id']}") or "" for task in replaced]
+        if also.strip():
+            pieces.append(also_request)
+        request = pieces[0] if pieces and pieces[0] and len(set(pieces)) == 1 else ""
+        task = self.tasks.create(new_id, title, summary[:4000], request=request)
         label = agents.display(agent)
         self.store.set(
             f"continuedon:{session_id}",
@@ -10652,6 +10679,7 @@ class Runtime:
         """The owner's message to a worker that is about none of its tasks in particular: a task
         of its own, named from what they wrote, its worker on it now (the row on Home says so)."""
         lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+        # No request: the owner's own word to one worker, not a request the Router split.
         return self.tasks.create(
             session_id,
             clean_title(lines[0] if lines else text),

@@ -983,6 +983,12 @@ class Asks:
         if len(self.open_questions(caller)) >= MAX_OPEN_QUESTIONS:
             raise ValueError("You have unanswered questions; wait for their answers first.")
         question_id = "q" + uuid4().hex[:8]
+        # Which of their tasks it goes between (Teams' history), as they are now.
+        stamped = (
+            self.runtime.teams.exchange_tasks(caller, target["id"])
+            if target["role"] == "worker"
+            else {}
+        )
         self.store.execute(
             "INSERT INTO questions(id, asker, target, text, asked) VALUES (?,?,?,?,?)",
             (question_id, caller, target["id"], params.question[:4000], time.time()),
@@ -1007,13 +1013,14 @@ class Asks:
         except Exception:
             self.store.execute("DELETE FROM questions WHERE id=?", (question_id,))
             raise
-        self.runtime.add_message(
+        row = self.runtime.add_message(
             caller,
             "ask",
             params.question[:4000],
-            {"target": target["id"], "title": title, "question_id": question_id},
+            {"target": target["id"], "title": title, "question_id": question_id, **stamped},
         )
         if target["role"] == "worker":
+            self.runtime.teams.exchanged(row["id"], stamped, question_id)
             self.runtime.peers.talked(caller, target["id"])
             self.runtime.peers.copy_to_router(
                 f"“{asker['title']}” asked {title}: {clip(params.question, 600)}",
@@ -1022,6 +1029,7 @@ class Asks:
                     "peer_to": target["id"],
                     "peer_kind": "asked",
                     "question_id": question_id,
+                    **stamped,
                 },
             )
         return (

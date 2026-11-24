@@ -3499,6 +3499,7 @@ class TaskActions:
         earlier, latest, moving = self.split_parts(task)
         # Finished work split in two: what its worker is on now stays its current task.
         current = self.store.value("SELECT task_id FROM sessions WHERE id=?", (task["session_id"],))
+        # No request: a split is another deliverable, never a part of a team.
         made = self.tasks.create(
             task["session_id"], title, f"Split off task {task_id}.", status=task["status"]
         )
@@ -3706,6 +3707,7 @@ class TaskActions:
             asked = self.asked_apart(task)
             since = asked[0]["created_at"] if asked else ""
             base = self.asked_base(task, since) if since else {}
+        # No request: work split off is another deliverable, never a part of a team.
         made = self.tasks.create(
             task["session_id"], title, f"Split off task {task['id']}.", status="running"
         )

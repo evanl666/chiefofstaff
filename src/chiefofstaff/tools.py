@@ -12,6 +12,7 @@ import os
 import re
 from collections.abc import Iterable, Sequence
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -91,6 +92,10 @@ WHY_NEW_WORDS = (
 
 logger = logging.getLogger(__name__)
 
+# The owner request a Router tool call is made in (Teams: its turn's first owner message), set
+# around each of its calls: what a task made in it is stamped with. Never read back to change
+# what is done; "" outside a Router tool call (a click, a timer, a replay that says its own).
+TURN_REQUEST: ContextVar[str] = ContextVar("turn_request", default="")
 
 SPAWN_WORKER = "Start a new worker session for one task. Returns its session id."
 CONTINUE_WORKER = (
@@ -1612,7 +1617,9 @@ class Tools:
         first = first or agents.new_workers(self.store)
         return list(dict.fromkeys([first, *others]))
 
-    async def spawn_compare(self, params: SpawnWorker, caller: str, names: list[str]) -> dict:
+    async def spawn_compare(
+        self, params: SpawnWorker, caller: str, names: list[str], request: str = ""
+    ) -> dict:
         """One task on several agents (the owner's "do this with Codex and Claude"): a worker
         each, each in a worktree of its own, grouped as one Compare row; one an agent cannot
         run says why on its card, the others start."""
@@ -1633,7 +1640,7 @@ class Tools:
                 update={"isolate": isolate, "model": "", "compare_with": [], "agent": name}
             )
             try:
-                found = await self.t_spawn_worker(part, caller, agent=name)
+                found = await self.t_spawn_worker(part, caller, agent=name, request=request)
             except ValueError as exc:
                 results.append({"agent": name, "not_started": str(exc)})
                 continue
@@ -1830,12 +1837,16 @@ class Tools:
     def handler(self, handler):
         async def run(params, invocation):
             caller = self.runtime.row_id(invocation.session_id)
+            asked = self.states[caller].turn_request if caller == self.runtime.router_id() else ""
+            mark = TURN_REQUEST.set(asked)
             try:
                 result = await handler(params, caller)
             except (ValueError, LookupError, RuntimeError) as exc:
                 return ToolResult(
                     text_result_for_llm=f"Error: {exc}", result_type="failure", error=str(exc)
                 )
+            finally:
+                TURN_REQUEST.reset(mark)
             if spoken := self.states[caller].reply_in:
                 # The owner switched language in the message this Router turn answers: said
                 # again where it reads last before its line to them (live M1).
@@ -1846,6 +1857,12 @@ class Tools:
             return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
         return run
+
+    @staticmethod
+    def request_of(request: str | None) -> str:
+        """The owner request a task made now comes from: a replay's own ("" when its record
+        had none), else this Router tool call's; never the turn that happens to run."""
+        return TURN_REQUEST.get() if request is None else request
 
     def caller(self, session_id: str, *roles: str) -> dict:
         row = self.store.session(session_id)
@@ -1904,6 +1921,7 @@ class Tools:
             self.runtime.update_session(
                 session_id, closed_at=None, status="queued", activity="", task=instructions[:4000]
             )
+        # No request: a helper's run is Chief of Staff's own, never part of a team.
         task = self.tasks.create(session_id, row["title"], instructions[:4000])
         prompt = wrap("router", "task", instructions, title=row["title"], task=task["id"])
         self.runtime.add_message(
@@ -1956,17 +1974,21 @@ class Tools:
         agent: str = "",
         instead: str = "",
         fork: Second | None = None,
+        request: str | None = None,
     ):
         """`untrusted`: a helper that reads untrusted content (the connector) runs as a worker
         that reads Slack does, whether or not Slack is connected. `agent`: the one the owner
         chose for it on a card (else its params' or Settings'); `instead`: what its one notice
         adds then (" on Copilot instead"). `fork`: a second worker of another (forks.py), on its
-        agent: the session it runs on (a fork of that worker's, or a new one with a brief)."""
+        agent: the session it runs on (a fork of that worker's, or a new one with a brief).
+        `request`: the owner request a replay was asked in (its record's; "" for none), never
+        the turn running now; left out, this Router tool call's own (TURN_REQUEST)."""
         self.caller(caller, ROUTER)
+        request = "" if special else self.request_of(request)
         if (fork_of := getattr(params, "fork_of", "")) and not special and not fork:
-            return await self.spawn_fork_of(params, caller, fork_of)
+            return await self.spawn_fork_of(params, caller, fork_of, request)
         if not special and not agent and not fork and (compared := self.compared(params, caller)):
-            return await self.spawn_compare(params, caller, compared)
+            return await self.spawn_compare(params, caller, compared, request)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
         if not special and (asked := risky(params.instructions)):
             raise ValueError(
@@ -2027,7 +2049,9 @@ class Tools:
                 if named and named != agents.COPILOT:
                     # Never started on another: the owner chooses (their card's actions). The
                     # card says why: the Router does not say it again.
-                    self.runtime.agent_refused_card(named, str(exc), params.model_dump())
+                    self.runtime.agent_refused_card(
+                        named, str(exc), params.model_dump(), request=request
+                    )
                     instead = agents.display(self.runtime.instead_of(named))
                     status = agents.status_of(named, str(exc))["status"]
                     can = (
@@ -2201,7 +2225,10 @@ class Tools:
             after=[dependency["id"] for dependency in after],
             needs=params.wait_for,
             criteria=criteria,
+            request=request,
         )
+        if request and params.works_with:
+            self.runtime.teams.record_with(task["id"], request, params.works_with)
         if params.review:
             self.store.set(f"reviewreq:{task['id']}", "1")
         if context_from:
@@ -2515,8 +2542,12 @@ class Tools:
             if same_conversation(question["text"], text):
                 self.runtime.asks.dismiss(question["id"], how="")
 
-    async def t_message_session(self, params: MessageSession, caller: str):
+    async def t_message_session(
+        self, params: MessageSession, caller: str, request: str | None = None
+    ):
+        """`request`: as spawn_worker's (a replay's own; left out, this tool call's)."""
         self.caller(caller, ROUTER)
+        request = self.request_of(request)
         quoted = bool(OWNER_REF.search(params.text))  # The owner's own words, passed on.
         params = params.model_copy(update={"text": self.owner_words(params.text)})
         try:
@@ -2525,7 +2556,7 @@ class Tools:
             # One of the owner's own Copilot sessions: the owner decides whether it continues
             # here (unless it is open in a terminal: two programs writing one session would
             # garble it).
-            return await self.ask_to_continue(params)
+            return await self.ask_to_continue(params, request)
         if target["role"] == ROUTER:
             raise ValueError("That is your own session.")
         if self.runtime.special(target):
@@ -2655,7 +2686,8 @@ class Tools:
             # Busy with other work: a second worker with its context takes it now (forks.py).
             title = deliverable_title(params.title)
             self.check_title_style(title, "Not sent")
-            if (forked := await self.fork_task(caller, target, params, title, why_new)) is not None:
+            forked = await self.fork_task(caller, target, params, title, why_new, request)
+            if forked is not None:
                 return forked
             if parallel:
                 raise ValueError(self.not_in_parallel(target, "starting it failed"))
@@ -2703,6 +2735,7 @@ class Tools:
                 worker=target["id"],
                 text=params.text,
                 replay=params.model_dump(),
+                request=request,
             )
             instead = agents.display(self.runtime.instead_of(agent))
             status = agents.status_of(agent, why)["status"]
@@ -2783,6 +2816,7 @@ class Tools:
                 status="running",
                 why_new=why_new,
                 criteria=criteria,
+                request=request,
             )
             if params.review:
                 self.store.set(f"reviewreq:{task['id']}", "1")
@@ -3056,7 +3090,13 @@ class Tools:
         )
 
     async def fork_task(
-        self, caller: str, target: dict, params: MessageSession, title: str, why_new: str
+        self,
+        caller: str,
+        target: dict,
+        params: MessageSession,
+        title: str,
+        why_new: str,
+        request: str = "",
     ) -> dict | None:
         """A new task for a busy worker, given to a second worker of it (forks.py: on its
         session's fork, or with a brief of its work), in a workspace made as for its own
@@ -3075,7 +3115,7 @@ class Tools:
             why_new=why_new,
             replaces=params.replaces,
         )
-        return await self.start_second(target, spawn, caller, title)
+        return await self.start_second(target, spawn, caller, title, request=request)
 
     def second_workspace(self, source: dict) -> dict:
         """A second worker works on the projects the worker it comes from works on, as it does:
@@ -3090,7 +3130,13 @@ class Tools:
         }
 
     async def start_second(
-        self, source: dict, spawn: SpawnWorker, caller: str, title: str, refused: bool = False
+        self,
+        source: dict,
+        spawn: SpawnWorker,
+        caller: str,
+        title: str,
+        refused: bool = False,
+        request: str = "",
     ) -> dict | None:
         """A second worker of `source` for this task (forks.py); None when none could be made
         (nothing of it is left). `refused`: what keeps it from being made is said (raised), as
@@ -3102,7 +3148,7 @@ class Tools:
         try:
             # One that reads Slack holds Slack's words in its context: so does its fork.
             return await self.t_spawn_worker(
-                spawn, caller, untrusted=bool(source["slack"]), fork=second
+                spawn, caller, untrusted=bool(source["slack"]), fork=second, request=request
             )
         except Exception:
             if self.store.find_session(second.session_id):
@@ -3114,7 +3160,9 @@ class Tools:
             logger.warning("Could not start a second worker of %s.", source["id"], exc_info=True)
             return None
 
-    async def spawn_fork_of(self, params: SpawnWorker, caller: str, fork_of: str) -> dict:
+    async def spawn_fork_of(
+        self, params: SpawnWorker, caller: str, fork_of: str, request: str = ""
+    ) -> dict:
         """spawn_worker(fork_of): a new worker that starts from a related worker's conversation
         (forks.py), in a folder and branch of its own. On another agent than that worker's (the
         owner named one), or none of its kind can be made now: a new worker given that worker's
@@ -3158,12 +3206,14 @@ class Tools:
                     source["effort"] if source["effort"] in SPAWN_EFFORTS else ""
                 ),
             })  # fmt: skip
-            if made := await self.start_second(source, spawn, caller, title, refused=True):
+            if made := await self.start_second(
+                source, spawn, caller, title, refused=True, request=request
+            ):
                 return made
         # A worker of its own, which builds on that worker's task (its current one).
         context = list(dict.fromkeys([*params.context_from, source["id"]]))
         return await self.t_spawn_worker(
-            params.model_copy(update={"context_from": context}), caller
+            params.model_copy(update={"context_from": context}), caller, request=request
         )
 
     @staticmethod
@@ -3265,7 +3315,7 @@ class Tools:
             moved.append(dependent)
         return moved
 
-    async def ask_to_continue(self, params: MessageSession) -> str:
+    async def ask_to_continue(self, params: MessageSession, request: str = "") -> str:
         reference = params.session_id
         found = [
             item
@@ -3307,6 +3357,9 @@ class Tools:
         card = self.store.create_draft(
             self.runtime.router_id(), "adopt", target, params.text[:4000], item["summary"]
         )
+        if request:
+            # The request it was asked in: the task made once the owner agrees has it (Teams).
+            self.store.set(f"req:{card['id']}", request)
         self.bus.publish("draft", card)
         self.runtime.alert(
             f"Continue “{item['summary']}” here?",
@@ -3343,6 +3396,7 @@ class Tools:
                 session_id=row["id"], text=target["text"], task="new", title=target["task_title"]
             ),
             self.runtime.router_id(),
+            request=self.store.get(f"req:{card['id']}") or "",
         )
         card = self.store.update_draft(
             card["id"], status="answered", outcome="Continued here.", resolved_at=now()

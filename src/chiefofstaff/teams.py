@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from .envelope import short, wrap
 from .peers import clip
+from .peers import same as same_words
 from .roles import ROUTER, WORKER
 from .tasks import OPEN
 
@@ -38,6 +39,14 @@ THREAD_CHARS = 2000
 # per team; Nudge tells the one asked, at most once this often.
 BLOCKING_MINUTES = 30
 NUDGE_EVERY = 30 * 60
+
+
+# An owner message to the Router, as its turn receives it: its ref says which row it is.
+OWNER_REF = re.compile(r'^<message from="owner" type="message" ref="(o[0-9a-f]{6})"', re.MULTILINE)
+# A turn's owner messages are among the Router's latest ones: this many are looked at.
+RECENT_OWNER = 50
+# Exchanges kept per task (xchg:<task>): its latest.
+EXCHANGES_KEPT = 500
 
 
 class ReadTeamThread(BaseModel):
@@ -88,6 +97,84 @@ class Teams:
         self.store = runtime.store
         self.tasks = runtime.tasks
         self.cache: tuple[dict, list[list[str]]] = ({}, [])
+        # Questions asked since the start, by id: the tasks they went between (else read from
+        # their ask message, through the asker's tasks' exchanges).
+        self.asked: dict[str, dict[str, str]] = {}
+
+    # Teams lite (teams-v2.md): passive stamps, read only to show the owner their teams.
+
+    def turn_request(self, router: str, content: str) -> str:
+        """The owner request a Router turn answers: the first of the owner's messages it
+        received (their row id), by the ref each carries; "" when it received none of theirs
+        (an event, a turn resumed after a restart: their words are only quoted then)."""
+        refs = OWNER_REF.findall(content)
+        if not refs:
+            return ""
+        rows = self.store.all(
+            "SELECT id, meta FROM messages WHERE session_id=? AND kind='owner' "
+            "ORDER BY id DESC LIMIT ?",
+            (router, RECENT_OWNER),
+        )
+        found = [
+            row["id"] for row in rows if json.loads(row["meta"] or "{}").get("ref") in set(refs)
+        ]
+        return str(min(found)) if found else ""
+
+    def record_with(self, task_id: str, request: str, references: list[str]):
+        """`with:<task>`: the tasks of its own request a new task was told to work with, by id,
+        by its worker or by exact title, as they are now (never one made later, nor a worker's
+        `wants:` or candidates: those link workers as before, and make no team)."""
+        made = json.loads(self.store.get(f"reqtasks:{request}") or "[]")
+        mine = [task for task in made if task != task_id]
+        if not mine:
+            return
+        rows = self.store.all(
+            f"SELECT id, title FROM tasks WHERE id IN ({','.join('?' * len(mine))})",  # noqa: S608  (placeholders only)
+            tuple(mine),
+        )
+        found = []
+        for reference in references:
+            reference = " ".join(reference.split()).removeprefix("worker:")
+            if not reference:
+                continue
+            try:
+                named = self.runtime.task_actions.task_for(reference)
+            except ValueError:
+                named = None
+            if named:
+                found += [named["id"]] if named["id"] in mine else []
+                continue
+            found += [row["id"] for row in rows if same_words(reference, row["title"])]
+        if found := list(dict.fromkeys(found)):
+            self.store.set(f"with:{task_id}", json.dumps(found))
+
+    def recipient_task(self, target: str, from_task: str) -> str:
+        """The task an exchange reaches when that is plain: the one its recipient is at work
+        on when that is of the sender's request, else its only open task, else none."""
+        request = self.store.get(f"req:{from_task}") if from_task else ""
+        at = self.runtime.at_work(target)
+        if at and request and self.store.get(f"req:{at['id']}") == request:
+            return at["id"]
+        open_ = [task for task in self.tasks.for_session(target) if task["status"] in OPEN]
+        return open_[0]["id"] if len(open_) == 1 else ""
+
+    def exchange_tasks(self, sender: str, target: str) -> dict[str, str]:
+        """`from_task`/`to_task` for an exchange sent now (each only when known)."""
+        at = self.runtime.at_work(sender)
+        from_task = at["id"] if at else ""
+        to_task = self.recipient_task(target, from_task)
+        return {
+            key: value for key, value in (("from_task", from_task), ("to_task", to_task)) if value
+        }
+
+    def exchanged(self, message_id: int, stamped: dict[str, str], question: str = ""):
+        """An exchange's message, listed for its sender's and its recipient's tasks
+        (`xchg:<task>`, their latest EXCHANGES_KEPT): a team's history reads these by key."""
+        if question:
+            self.asked[question] = stamped
+        for task in dict.fromkeys(stamped.values()):
+            known = json.loads(self.store.get(f"xchg:{task}") or "[]")
+            self.store.set(f"xchg:{task}", json.dumps([*known, message_id][-EXCHANGES_KEPT:]))
 
     def components(self) -> list[list[str]]:
         """The teams' members (2 or more), each oldest first; the oldest team first. Read again

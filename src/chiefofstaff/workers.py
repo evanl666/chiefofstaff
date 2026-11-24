@@ -1492,6 +1492,7 @@ class Workers:
     def adopted(self, row: dict, agent: str = COPILOT_AGENT, waits: bool = False) -> dict:
         # Its work so far is not a task to review; the owner's next request starts one.
         made = f"(an existing {agents.display(agent)} session)" if agent != COPILOT_AGENT else ""
+        # No request: a placeholder; the work it is given is a task of its own (Tools.answer_adopt).
         task = self.tasks.create(row["id"], row["title"], made or "(an existing Copilot session)")
         self.tasks.move(task["id"], "done", result=ADOPTED)
         self.external_cache = (float("-inf"), [])

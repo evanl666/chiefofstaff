@@ -58,6 +58,9 @@ class SessionState:
     # message decided and asked for together belongs together.
     turn_decisions: list[str] = field(default_factory=list)
     turn_tasks: list[str] = field(default_factory=list)
+    # The owner message the Router's current turn answers (its first, by row id): the request
+    # the tasks it makes in this turn come from (Teams); "" in a turn on an event.
+    turn_request: str = ""
     # The new Slack messages that came to the Router in its current turn (threads.slack_asked):
     # where a worker it gives one of them to replies, when it does not say (Tools.slack_place).
     turn_slack: list[dict] = field(default_factory=list)

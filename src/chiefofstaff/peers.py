@@ -285,6 +285,8 @@ class Peers:
                 "coordinating, and it decides."
             )
         self.store.set(f"told:{caller}:{target['id']}", json.dumps([*told, time.time()]))
+        # Which of their tasks this goes between (Teams' history), as they are now.
+        stamped = self.runtime.teams.exchange_tasks(caller, target["id"])
         task = self.tasks.current(caller)
         prompt = wrap(
             sender(teller), "note", text, title=teller["title"], task=task["id"] if task else ""
@@ -305,14 +307,15 @@ class Peers:
                 "message. If its finished work must change, report it to the Router (status "
                 "question)."
             )
-        self.runtime.add_message(
-            caller, "tell", text, {"target": target["id"], "title": target["title"]}
+        row = self.runtime.add_message(
+            caller, "tell", text, {"target": target["id"], "title": target["title"], **stamped}
         )
+        self.runtime.teams.exchanged(row["id"], stamped)
         self.talked(caller, target["id"])
         self.copy_to_router(
             f"“{self.runtime.display_title(teller)}” told "
             f"“{self.runtime.display_title(target)}”: {clip(text, ROUTER_COPY_CHARS)}",
-            {"peer_from": caller, "peer_to": target["id"], "peer_kind": "told"},
+            {"peer_from": caller, "peer_to": target["id"], "peer_kind": "told", **stamped},
         )
         return outcome
 
