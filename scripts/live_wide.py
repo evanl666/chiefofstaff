@@ -81,9 +81,10 @@ E2  "what token did the scout pass on?": the Router answers from the team's thre
 E3  a contract between two parallel workers (a column name), asked for in Chinese
 E4  a worker that tells no one: the one waiting gets its result when it finishes
 E5  a worker asks another; Home has a line of the question and of the answer, their team's
-    thread pairs them
+    thread pairs them; two requests: no team of the owner's (Teams lite)
 E6  two unrelated tasks at once are not linked
-E7  one worker's value goes to two others
+E7  one worker's value goes to two others; one request in three parts: one team of the owner's,
+    each part named apart (Teams lite)
 E8  a test run left running in the background: shown running, then passed
 E9  a failing run that outlasts Copilot's wait: failed, not passed
 E10 `pytest && git push` with a rejected push: the tests passed
@@ -91,7 +92,8 @@ E11 tests run by the project's own script are a test run
 E12 a command Copilot refused is no failed test run
 E13 tests fail here, the PR's checks pass after: the card says CI passes now
 E14 a failing run, then the fix in a follow-up: the card turns green by itself
-E15 in the browser: those cards, who told whom, the panel's border, 120 parallel workers
+E15 in the browser: those cards, who told whom, a team's page, a worker's Notes tab, the
+    panel's border, 120 parallel workers
 E16 a quiet finished worker lets go of its Copilot session (its MCP server ends); a follow-up
     resumes it and it remembers (E runs with workers let go after a minute)
 
