@@ -1536,8 +1536,17 @@ async def test_workers_open_and_resume_on_copilots_own_runtime_in_experimental_m
         assert ran.returncode == 0, ran.stderr[-2000:]
         opened = [path.name for path in (home / "session-state").glob("*-*-*-*-*")]
         assert len(opened) == 1
-        logs = "".join(path.read_text() for path in (home / "logs").glob("*.log"))
-        assert "Installed 1 native extension(s)" in logs
+        logs = [path.read_text() for path in (home / "logs").glob("*.log")]
+        probe = home / "extensions" / "probe" / "extension.mjs"
+        modules = {f"module={probe} ===", f"module={probe.resolve()} ==="}
+        # It ran the extension: in its own log up to 1.0.114; from 1.0.115 in the extension's,
+        # launched from this file for the session it made, and joined to it (ready).
+        assert any("Installed 1 native extension(s)" in text for text in logs) or any(
+            any(module in text for module in modules)
+            and f"SESSION_ID={opened[0]}" in text
+            and "=== ready ===" in text
+            for text in logs
+        ), "the owner's CLI ran the extension"
     backend = await on_fallback()
     try:
         assert backend.fallback and backend.fallback[1] == FALLBACK_CLI
