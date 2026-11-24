@@ -190,7 +190,7 @@ thing that needs you if there is one, and a map: a node per part, by a short nam
 (each its own in the team, with an avatar of its own) and what it is doing, and one labelled
 line per pair (*result ✓ · told*, *asked · 12 min*); the map in words too, for a screen reader,
 and *All N parts* as a table beyond eight. Below it, *What they handed each other*, newest
-first (*Checkout API → Checkout UI · note*, titled by its first sentence), with *All*,
+first (*API → UI · note*, by the parts' short names, titled by its first sentence), with *All*,
 *Waiting*, *Questions* and *Notes* from eight entries on. A part continued by a task for another
 of your requests says *Continued in “…” outside this team* (a link) and counts as finished. A
 team's state is what Home's own rows say: a part waiting on your review or your answer has the
