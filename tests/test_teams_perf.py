@@ -1,8 +1,10 @@
 """Teams lite with a large history (teams-v2.md §11.5): 40 workers, 10 current teams of 6 tasks
 with 200 exchanges each, reused workers with 250 unrelated exchanges each, 5,000 past requests,
-20,000 tasks and 60,000 messages. The snapshot's teams cost what 0.1.56's did (unchanged, and
-after one task changes); a team's page and a page of past teams are quick; every read is by a
-key or an index, whatever a reused worker's other exchanges."""
+20,000 tasks and 60,000 messages. The first snapshot reads only the requests it shows (Past
+teams' count comes from a read of the rest in the background, a short chunk at a time); then the
+snapshot's teams cost what 0.1.56's did (unchanged, and after one task changes); a team's page
+and a page of past teams are quick; every read is by a key or an index, whatever a reused
+worker's other exchanges."""
 
 import json
 import statistics
@@ -10,7 +12,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from conftest import runner_pace
+from conftest import runner_pace, settle
 
 from chiefofstaff.store import now
 
@@ -131,11 +133,29 @@ async def test_teams_cost_a_snapshot_what_0156s_did_with_a_large_history(harness
     lite = runtime.teams_lite
     listed = runtime.tasks.listed(include_ended_since=now())
     assert len(listed) == CURRENT * PARTS
+    chunks: list[float] = []
+    read_all = lite.read_all
+
+    def timed_chunk(requests):
+        start = time.perf_counter()
+        read_all(requests)
+        chunks.append((time.perf_counter() - start) * 1000)
+
+    lite.read_all = timed_chunk
     started = time.perf_counter()
     snapshot = lite.snapshot(listed)
     cold = (time.perf_counter() - started) * 1000
+    assert len(snapshot["teams"]) == CURRENT and snapshot["past_teams"] is None
+    assert cold < 50 * pace, f"the first snapshot: {cold:.0f} ms"
+    # The rest, in the background: Past teams' count once it is read, never long at a time.
+    published = runtime.publish_state
+    runtime.publish_state = lambda *args, **kwargs: None
+    await settle(runtime)
+    runtime.publish_state = published
+    assert lite.loaded and len(chunks) >= PAST // 250, chunks
+    assert max(chunks) < 60 * pace, f"a chunk of the background read: {max(chunks):.0f} ms"
+    snapshot = lite.snapshot(listed)
     assert len(snapshot["teams"]) == CURRENT and snapshot["past_teams"] == PAST
-    assert cold < 2000 * pace, f"first read of every request: {cold:.0f} ms"
     # Unchanged: what the snapshot had in 0.1.56 (Teams.view), and Teams lite's now.
     old = timed(runtime.teams.view)
     new = timed(lambda: lite.snapshot(listed))
@@ -181,6 +201,9 @@ def test_every_read_is_by_a_key_or_an_index(harness):
         "LIMIT ?",
         "SELECT id FROM messages WHERE session_id=? AND kind='owner' AND id<? ORDER BY id DESC "
         "LIMIT ?",
+        "SELECT created_at FROM messages WHERE id=?",
+        "SELECT key FROM kv WHERE key >= ? AND key < ?",
+        "SELECT status FROM tasks WHERE id IN (?,?)",
     ]
     for sql in reads:
         plan = " | ".join(
