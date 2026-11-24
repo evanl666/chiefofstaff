@@ -301,17 +301,13 @@ def digest(runtime: Runtime, since: float, until: float) -> str:
     mine = f"session_id NOT IN ({HELPERS})"  # Constant SQL.
     found = needs(runtime)
     failed = found.tasks("failed")
-    sent = store.value(
-        "SELECT count(*) AS n FROM drafts WHERE status='sent' AND resolved_at>=? AND resolved_at<? "
-        "AND kind IN ('slack', 'github', 'reply')",  # Replies and reviews, not a merge.
+    # What Home lists under Handled for you for that day (handled.py): not what was undone since.
+    handled = store.value(
+        "SELECT count(*) AS n FROM handled WHERE created_at>=? AND created_at<? "
+        "AND status!='undone'",
         window,
     )
-    follow_ups = store.value(
-        """SELECT count(*) AS n FROM messages WHERE kind='inbound'
-        AND json_extract(meta, '$.thread') IS NOT NULL AND created_at>=? AND created_at<?""",
-        window,
-    )
-    if not (finished or found.items or sent or follow_ups):
+    if not (finished or found.items or handled):
         return ""
     running = store.value(
         f"SELECT count(*) AS n FROM tasks WHERE status='running' AND {mine}"  # noqa: S608
@@ -326,11 +322,8 @@ def digest(runtime: Runtime, since: float, until: float) -> str:
         lines.append("• Waiting for you: " + " · ".join(waits))
     if failed:
         lines.append(f"• Failed: {names(failed)}")
-    if sent or follow_ups:
-        lines.append(
-            f"• Handled: {sent} repl{'ies' if sent != 1 else 'y'} sent, "
-            f"{follow_ups} thread follow-up{'s' if follow_ups != 1 else ''} without the Router"
-        )
+    if handled:
+        lines.append(f"• Handled for you: {handled}, listed on Home")
     spent = f"• {running} task{'s' if running != 1 else ''} running · {credits_used:.1f} credits"
     if runtime.agents and (tokens := store.agent_tokens(since, until)):
         # Only on a day another coding agent spent some: its tokens, never as credits.

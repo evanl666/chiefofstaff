@@ -27,6 +27,10 @@
   yours could settle it as sent. It now counts only one posted as your account since it began
   to go out, with exactly its text; when two could be it, it says it can't tell which, for you
   to look (and mark it sent or send it again).
+- **The daily summary's *Handled* counts what was handled for you.** It counted the replies
+  you sent yourself and follow-ups on threads, and left out everything under *Handled for you*.
+  Its line is now *Handled for you: 3, listed on Home*: what that list shows for the day, less
+  what you undid.
 
 ## 0.1.56 (2026-11-23)
 

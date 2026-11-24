@@ -3,6 +3,7 @@ import json
 import shutil
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from chiefofstaff import catalog, prompts
 from chiefofstaff.digest import digest
 from chiefofstaff.events import describe_step, describe_tool
 from chiefofstaff.models import DraftDecision, Settings
+from chiefofstaff.store import now
 
 
 async def spawn(runtime, router, title, **extra):
@@ -378,6 +380,29 @@ async def test_daily_digest_once_a_day_and_only_when_useful(harness):
     first = await runtime.digest_once(time.time() + 1)
     assert first and harness.kinds(harness.router_id)[-1] == ("update", first)
     assert await runtime.digest_once(time.time() + 2) is None, "once a day"
+
+
+async def test_the_daily_summary_counts_what_was_handled_for_you(harness):
+    """Its "Handled" counted replies the owner sent themselves (and follow-ups on threads),
+    never what Chief of Staff handled for them: it now counts what Home's Handled for you lists
+    for that day (not what was undone since)."""
+    runtime = await harness.connect()
+    began = time.time()
+    worker = (await spawn(runtime, harness.router_id, "Answer Ann"))["session_id"]
+    sent = harness.store.create_draft(worker, "slack", {"to": "Ann"}, "On it.")
+    harness.store.update_draft(sent["id"], status="sent", resolved_at=now())
+    assert digest(runtime, began - 60, time.time() + 1).count("Handled") == 0
+    for number in range(3):
+        runtime.handled.record("accepted", f"Accepted “Report {number}”", undo="Undo")
+    undone = runtime.handled.record("lesson", "Kept a lesson", undo="Undo")
+    runtime.handled.close(undone["id"])
+    harness.store.execute(
+        "INSERT INTO handled(id, kind, text, created_at) VALUES ('hold', 'git', 'Moved', ?)",
+        (datetime.fromtimestamp(began - 2 * 86400, UTC).isoformat(),),
+    )
+    text = digest(runtime, began - 60, time.time() + 1)
+    assert "• Handled for you: 3, listed on Home\n" in text, text
+    assert len([e for e in runtime.handled.view() if e["status"] == "done"]) == 4
 
 
 async def test_the_daily_digest_counts_what_home_shows(harness):

@@ -98,8 +98,9 @@ async def test_a_stopped_follow_stays_stopped_until_given_back(tmp_path):
     assert runtime.follow(worker, ["github:acme/app#7"], given=False) == ["github:acme/app#7"]
 
 
-async def test_the_daily_summary_counts_replies_not_merges_and_leaves_out_set_aside(tmp_path):
-    """G9: "Handled: 3 replies sent" counted a PR merge; "Finished" listed a task set aside."""
+async def test_the_daily_summary_leaves_out_set_aside(tmp_path):
+    """G9: "Finished" listed a task set aside (and "Handled: 3 replies sent" counted a PR
+    merge: what the owner sends is not handled for them, see test_features)."""
     from chiefofstaff.digest import digest
 
     harness = Harness(tmp_path / "data")
@@ -116,7 +117,7 @@ async def test_the_daily_summary_counts_replies_not_merges_and_leaves_out_set_as
         harness.store.update_draft(draft["id"], status="sent", resolved_at=now())
     text = digest(runtime, began - 60, time.time() + 1)
     assert "\u201cShip notes\u201d" in text and "Old idea" not in text, text
-    assert "1 reply sent" in text, text
+    assert "Handled" not in text, text
 
 
 async def test_one_more_thing_on_a_task_just_given_is_asked_about_once(tmp_path):

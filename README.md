@@ -56,7 +56,7 @@ only with a decision to make or a draft to approve.
 - Reaches you when you are away from your desk (through your company's Slack bot, say) and
   takes your answers from there.
 - Focus mode holds notifications and gives you one summary at the end; a daily summary says what
-  finished, what waits for you and what was handled without you.
+  finished, what waits for you and what was handled for you.
 
 **Keeps many things moving at once**
 - Splits a request into tasks and runs each in its own Copilot session, in parallel or in order.

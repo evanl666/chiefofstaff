@@ -1706,8 +1706,9 @@ With no worker ever on another agent, it says there is nothing to prepare.
 
 At the configured time (default 09:00) the Router posts one summary: what finished (your tasks,
 not Chief of Staff's own helpers' nor those cancelled since), what waits for you (results to
-accept, as *Needs you* shows them: a report that only informs is not one), what was handled
-without you, how many tasks are running, credits used. Quiet days post nothing.
+accept, as *Needs you* shows them: a report that only informs is not one), how much was handled
+for you (what [Handled for you](#your-ok-and-handled-for-you) lists for that day, less what you
+undid), how many tasks are running, credits used. Quiet days post nothing.
 
 **Build from my work** (Settings → *You* → *Your profile*) starts a worker that distills a short profile
 from your projects, GitHub activity, recent Copilot sessions and, with Slack, how you write. It
