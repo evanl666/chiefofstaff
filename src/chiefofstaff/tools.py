@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, create_model
 
 from . import agents, prompts, receipts, threads
 from .asks import AnswerSession, AskSession, RecordSetup
+from .autopilot.core import AutopilotLog
 from .autopilot.judge import ProposeAnswer
 from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
@@ -1368,6 +1369,13 @@ class Tools:
                 "Update one section of how the owner writes; it applies at once.",
                 UpdateStyle,
                 self.runtime.habits.t_update_style,
+            ),
+            (
+                "autopilot_log",
+                "What Autopilot did, from its record: each entry (when, what, why, its link), "
+                "newest last, with counts. The only source for what Autopilot did.",
+                AutopilotLog,
+                self.runtime.autopilot.t_autopilot_log,
             ),
             (
                 "propose_answer",

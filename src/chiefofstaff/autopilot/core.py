@@ -24,10 +24,12 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel, Field
+
 from ..envelope import wrap
 from ..models import AS_SAVED, Settings
 from ..store import now
-from . import grammar
+from . import grammar, summary
 from .answers import Answers, Later
 from .logbook import (
     CLAIMED,
@@ -55,6 +57,16 @@ RULES = "p1"
 ACTIONS = ("answered", "decided", "accepted", "released", "nudged", "picked-folder")
 # Said of anything done while the line is unticked.
 OFF_WORDS = "Autopilot is off: tick it in Settings → General first."
+
+
+class AutopilotLog(BaseModel):
+    since: str = Field(default="", description="ISO time or date to start from (default: a day)")
+    until: str = Field(default="", description="ISO time or date to end at (default: now)")
+    kind: str = Field(
+        default="",
+        description="Only these: answered, decided, accepted, released, nudged, parked, "
+        "not-done, after, started, ended (comma separated)",
+    )
 
 
 def iso(moment: datetime | None) -> str | None:
@@ -364,8 +376,52 @@ class Autopilot(Answers, Results):
             self.book.queue(run["id"], entry["id"], "summary", {}, self.book.generation())
         self.book.keep_head()
         self.tidy()
+        if actions:
+            # One row per run under Handled for you, opening it in the record.
+            self.runtime.handled.record(
+                "autopilot",
+                f"Autopilot: {actions} action{'s' if actions != 1 else ''}",
+                ref=run["id"],
+                data={"at": [run["started_at"], now()], "link": f"#autopilot-run/{run['id']}"},
+            )
         self.runtime.background(self.dispatch())
         self.runtime.publish_state()
+
+    def fold(self, text: str) -> bool:
+        """A summary due during a run (Focus's): folded into the run's card, not a card of its
+        own (never two for the same hours). Whether it was."""
+        run = self.run()
+        if run is None or not text:
+            return False
+        key = f"autopilot:folded:{run['id']}"
+        folded = [part for part in (self.store.get(key) or "").split("\n\n") if part]
+        self.store.set(key, "\n\n".join([*folded, text]))
+        return True
+
+    def fold_digest(self, text: str) -> str:
+        """The daily summary, due during a run: folded into its card (a run of a day at most);
+        a longer one, or one until turned off, gets its part in each daily summary (said to be
+        on), and its card covers what came after."""
+        run = self.run()
+        if run is None:
+            return text
+        started = parsed(run["started_at"]) or datetime.now(UTC)
+        until = parsed(run["until"])
+        if until is not None and until - started <= timedelta(days=1):
+            self.fold(text)
+            return ""
+        moment = local_now()
+        since = run.get("summarized") or run["started_at"]
+        entries = self.book.entries(run_id=run["id"], since=since, limit=100000)
+        done = sum(1 for entry in entries if entry["kind"] in ACTIONS)
+        left = sum(1 for entry in entries if entry["kind"] in {PARKED, "not-done"})
+        end = f"until {grammar.clock(until, moment, 'en')}" if until else "until you turn it off"
+        part = (
+            f"• Autopilot is still on ({end}), since {grammar.clock(started, moment, 'en')}: "
+            f"{done} done, {left} left for you"
+        )
+        self.book.move_run(run["id"], ON, summarized=now())
+        return f"{text}\n{part}" if text else f"Daily summary\n{part}"
 
     def tidy(self):
         """What it kept about items that are gone (answered, closed): forgotten at a run's end."""
@@ -468,31 +524,12 @@ class Autopilot(Answers, Results):
         self.book.stored(item["id"], message["id"])
         router = self.store.session(self.runtime.router_id())
         self.runtime.update_session(router["id"], unread=router["unread"] + 1)
-        self.runtime.alert(text.splitlines()[0], session_id=router["id"], needs_action=False)
+        self.runtime.alert(card["said"], session_id=router["id"], needs_action=False)
         return ""
 
     def summary(self, run: dict) -> tuple[str, dict]:
         """What the run did and left, in one card (its text, and its parts for the page)."""
-        entries = self.book.entries(run_id=run.get("id", ""), limit=100000)
-        done = [entry for entry in entries if entry["kind"] in ACTIONS]
-        parked = [entry for entry in entries if entry["kind"] == PARKED]
-        moment = local_now()
-        ended = parsed(run.get("ended_at")) or moment
-        if not done and not parked:
-            text = f"Autopilot ended at {grammar.clock(ended, moment, 'en')}: nothing came up."
-        else:
-            text = (
-                f"Autopilot did {len(done)} thing{'s' if len(done) != 1 else ''} and left "
-                f"{len(parked)} for you."
-            )
-        card = {
-            "run": run.get("id"),
-            "started_at": run.get("started_at"),
-            "ended_at": run.get("ended_at"),
-            "done": [entry["id"] for entry in done],
-            "parked": [entry["id"] for entry in parked],
-        }
-        return text, card
+        return summary.card(self, run)
 
     def reconcile(self):
         """At start: items claimed and not finished. One that became a message is delivered as
@@ -621,6 +658,45 @@ class Autopilot(Answers, Results):
                 why={"rule": RULES, "settings": mode},
                 evidence=done,
             )
+
+    # The Router's tool.
+
+    async def t_autopilot_log(self, params: AutopilotLog, caller: str) -> dict:
+        if (self.store.find_session(caller) or {}).get("role") != "router":
+            raise ValueError("autopilot_log is the Router's.")
+        if not self.book.exists():
+            return {"entries": [], "counts": {}, "note": "Autopilot has never been on."}
+        since = params.since.strip() or (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        until = params.until.strip()
+        kinds = tuple(k.strip() for k in params.kind.split(",") if k.strip())
+        found = self.book.entries(since=since, until=until, kinds=kinds, limit=200)
+        counts: dict[str, int] = {}
+        for entry in found:
+            counts[entry["kind"]] = counts.get(entry["kind"], 0) + 1
+        return {
+            "entries": [
+                {
+                    "at": entry["at"],
+                    "kind": entry["kind"],
+                    "what": entry["title"],
+                    "task": entry["task_id"],
+                    "why": entry["why"],
+                    "link": f"#autopilot/{entry['id']}",
+                }
+                for entry in found
+            ],
+            "counts": counts,
+            "runs": [
+                {
+                    "started": run["started_at"],
+                    "until": run["until"],
+                    "ended": run["ended_at"],
+                    "ended_by": run["ended_by"],
+                }
+                for run in self.book.runs(10)
+                if (run["ended_at"] or "9") >= since
+            ],
+        }
 
     # What the page shows.
 
