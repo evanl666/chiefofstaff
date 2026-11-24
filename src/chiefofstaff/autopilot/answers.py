@@ -162,7 +162,7 @@ class Answers:
         if proposal is None:
             return judge.Verdict(parked="it couldn't be judged just now"), offered
         cited = [cite.model_dump() for cite in proposal.basis]
-        refusal = owner.refusal(self.runtime, task, cited, offered, proposal.answer)
+        refusal = owner.refusal(self.runtime, task, cited, offered, proposal.answer, options)
         verdict = judge.accepted(proposal, question=question, options=options, offered=offered,
                                  basis_refusal=refusal)  # fmt: skip
         return verdict, offered
@@ -170,7 +170,8 @@ class Answers:
     def basis_still(self: Autopilot, task: dict, verdict: judge.Verdict,  # type: ignore[misc]
                     offered: list[owner.Item]) -> str:  # type: ignore[misc]  # fmt: skip
         """Its basis checked again just before the answer is delivered."""
-        return owner.refusal(self.runtime, task, list(verdict.basis), offered, verdict.answer)
+        return owner.refusal(self.runtime, task, list(verdict.basis), offered, verdict.answer,
+                             verdict.options)  # fmt: skip
 
     def because(self: Autopilot, verdict: judge.Verdict, offered: list[owner.Item]) -> str:  # type: ignore[misc]
         """“because you said “Postgres for v1” (Mon 10:02 AM)”."""

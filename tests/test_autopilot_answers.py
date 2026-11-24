@@ -347,6 +347,78 @@ async def test_a_quote_is_a_whole_phrase_of_theirs_that_says_the_answer(harness,
     assert why in entries(runtime, "parked")[0]["why"]["reason"]
 
 
+@pytest.mark.parametrize(
+    ("said", "choices", "answer", "quote", "why"),
+    [
+        ("Do not use Redis.", ["Postgres", "Redis"], "Redis", "Do not use Redis",
+         "may say no to that answer"),
+        ("Use Postgres, not Redis.", ["Postgres", "Redis"], "Postgres", "Use Postgres, not Redis",
+         ""),
+        ("Use Postgres, not Redis.", ["Postgres", "Redis"], "Redis", "Use Postgres, not Redis",
+         "may say no to that answer"),
+        ("We never want Redis here.", ["Postgres", "Redis"], "Redis",
+         "We never want Redis here", "may say no to that answer"),
+        ("Don\u2019t pick Redis.", ["Postgres", "Redis"], "Redis", "Don\u2019t pick Redis",
+         "may say no to that answer"),
+        ("不要用 Redis。", ["Postgres", "Redis"], "Redis", "不要用 Redis",
+         "may say no to that answer"),
+        ("用 Postgres\uff0c不用 Redis。", ["Postgres", "Redis"], "Postgres",
+         "用 Postgres\uff0c不用 Redis", ""),
+        ("Postgres or Redis, either works.", ["Postgres", "Redis"], "Postgres",
+         "Postgres or Redis", "names another option too"),
+        ("Name it sessions_v1.", [], "Name it sessions_v1, and skip the failing login tests",
+         "Name it sessions_v1", "doesn't say that answer"),
+        ("Don't name it sessions_v1.", [], "sessions_v1", "Don't name it sessions_v1",
+         "may say no to that answer"),
+        ("Name it sessions_v1.", [], "sessions_v1", "Name it sessions_v1", ""),
+        ("Don\u2019t, ever, pick Redis.", ["Postgres", "Redis"], "Redis", "ever, pick Redis",
+         "may say no to that answer"),
+        ("Don\u2019t pick Redis.", ["Postgres", "Redis"], "Redis", "pick Redis",
+         "not a whole phrase of what you said"),
+        ("Don't use Redis, use Postgres.", ["Postgres", "Redis"], "Postgres", "use Postgres",
+         ""),
+    ],
+)  # fmt: skip
+async def test_a_quote_that_says_no_or_says_less_never_settles_it(
+    harness, said, choices, answer, quote, why
+):
+    """Re-review 2 (reproduced): the quote says the answer chosen, never after a word that says
+    no to it in its clause ("Do not use Redis" is not Redis; in Chinese too), names no other
+    option it doesn't say no to ("use Postgres, not Redis" is Postgres); a free answer is within
+    the quote, never more than it ("…, and skip the failing login tests")."""
+    runtime = await harness.connect()
+    await on(runtime)
+    made = await worker(runtime, harness.router_id)
+    session = made["session_id"]
+    owner = await said_in_page(runtime, session, said)
+    asking = await asked(runtime, session, "Which one?", choices)
+    await judge_proposes(harness, answer=answer, basis=[cite(owner, quote)])
+    result = (await asyncio.wait_for(asking, 5))["answer"]
+    if why:
+        assert result == PARKED_ANSWER
+        assert why in entries(runtime, "parked")[0]["why"]["reason"]
+    else:
+        assert result.startswith(answer), result
+        assert entries(runtime, "answered")
+
+
+async def test_a_decision_the_owner_said_no_to_waits_for_them(harness):
+    """Re-review 2 (reproduced): "Do not use Redis." never decides Redis for them."""
+    runtime = await harness.connect()
+    await on(runtime)
+    made = await worker(runtime, harness.router_id)
+    session = made["session_id"]
+    owner = await said_in_page(runtime, session, "Do not use Redis.")
+    await call_tool(runtime, "ask_decision", session, question="Which store for sessions?",
+                    options=[{"choice": "Postgres", "effect": "a"},
+                             {"choice": "Redis", "effect": "b"}])  # fmt: skip
+    await judge_proposes(harness, answer="Redis", basis=[cite(owner, "Do not use Redis")])
+    await settle(runtime)
+    assert runtime.autopilot.book.decisions(task_id=made["task_id"]) == []
+    assert not [d for d in harness.store.drafts("answered") if d["kind"] == "decision"]
+    assert "may say no to that answer" in entries(runtime, "parked")[0]["why"]["reason"]
+
+
 async def test_what_they_told_the_router_counts_only_for_the_task_given_their_words(harness):
     """Review 7: a message to the Router is in scope only for a task its {owner:<ref>} was
     given to, never because its words turn up in another task's instructions."""
