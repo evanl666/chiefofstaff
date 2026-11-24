@@ -149,6 +149,44 @@ async def test_stop_withdraws_what_was_queued_and_ends_with_its_summary(harness)
     assert again["said"] == "Autopilot is off."
 
 
+def test_its_cards_hours_are_said_once_and_plainly():
+    from chiefofstaff.autopilot.summary import window
+
+    day = datetime(2026, 11, 23, tzinfo=datetime.now().astimezone().tzinfo)
+
+    def at(hour, minute, days=0):
+        return (day + timedelta(days=days, hours=hour, minutes=minute)).isoformat()
+
+    assert window(at(14, 10), at(18, 0)) == "2:10 \u2013 6:00 PM"
+    assert window(at(9, 10), at(18, 0)) == "9:10 AM \u2013 6:00 PM"
+    assert window(at(18, 0), at(18, 0)) == "6:00 PM"
+    assert window(at(18, 0), at(8, 0, days=1)) == "Mon 6:00 PM \u2013 Tue 8:00 AM"
+
+
+async def test_its_card_says_what_waits_without_saying_set_aside_twice(harness):
+    runtime = await harness.connect()
+    await tick(runtime)
+    state = await runtime.autopilot.start(None, by="home")
+    worker = json.loads((await call_tool(runtime, "spawn_worker", harness.router_id,
+                                         title="Write the client", instructions="x",
+                                         why_new="test")).text_result_for_llm)  # fmt: skip
+    await settle(runtime)
+    question = "Push the migration to main?"
+    harness.store.set(f"ownerq:{worker['session_id']}:{worker['task_id']}", question)
+    runtime.autopilot.book.append(
+        state["run"], "parked", f"Set aside \u201c{question}\u201d: only you can allow that",
+        state="parked", subject=f"question:{worker['session_id']}:{worker['task_id']}",
+        task_id=worker["task_id"],
+    )  # fmt: skip
+    await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    await settle(runtime)
+    card = harness.store.messages(harness.router_id)[-1]["meta"]["autopilot_summary"]
+    assert card["said"] == "Autopilot left 1 for you. 0 of 100 credits."
+    [waiting] = card["groups"]
+    assert waiting["name"] == "Waiting for you"
+    assert waiting["rows"][0]["text"] == f"\u201c{question}\u201d: only you can allow that"
+
+
 async def test_autopilot_off_by_chat_says_so_in_its_language(harness):
     runtime = await harness.connect()
     router = harness.router_id
