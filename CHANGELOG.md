@@ -31,6 +31,13 @@
   you sent yourself and follow-ups on threads, and left out everything under *Handled for you*.
   Its line is now *Handled for you: 3, listed on Home*: what that list shows for the day, less
   what you undid.
+- **What yolo lets through, said as it is.** Settings → Workers said that either way nothing
+  is force-pushed, pushed to `main` or posted as you without your OK. With yolo on (the
+  default), Chief of Staff doesn't check workers' commands, so only their instructions hold them
+  back from those; the line now says so, and the guide and SECURITY.md say what holds either
+  way (your checkouts given to read, Chief of Staff's private files, the sandbox, a *Prepared
+  for you* step, the Router never asking a worker to merge or force-push). Yolo itself is
+  unchanged.
 
 ## 0.1.56 (2026-11-23)
 

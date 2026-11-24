@@ -80,8 +80,13 @@ the held folder holds is not carried); one in your own checkout waits for you.
 **Yolo** turns off Chief of Staff's permission prompts and checks for workers. It is on by
 default, as in your own Copilot sessions, except for workers that read Slack (they keep the
 checks unless you choose yolo in their header); turn it off in Settings, or per worker with
-*Ask first*. With the sandbox on, the OS boundaries above still hold. With the sandbox off (or unsupported), yolo means a
-worker can do anything your user account can. Yolo is on by default since 0.1.18, as your own
+*Ask first*. With the sandbox on, the OS boundaries above still hold, but a worker's `git` and
+`gh` still act as you on GitHub (through Copilot's proxy): only its instructions keep it from
+force-pushing, pushing to `main`, or commenting, reviewing or merging as you. With the sandbox off (or unsupported), yolo means a
+worker can do anything your user account can. Whatever yolo says, Chief of Staff keeps a
+worker out of a checkout of yours given to read and out of its own private files (as far as a
+command line can be read, as above), a *Prepared for you* step reaches no GitHub, and the Router
+never asks a worker to merge or force-push. Yolo is on by default since 0.1.18, as your own
 Copilot sessions usually run: if workers read content you do not trust (PR comments from
 strangers, say), turn it off in Settings.
 

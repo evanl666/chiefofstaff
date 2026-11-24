@@ -1390,13 +1390,19 @@ push whose branch a command doesn't say plainly, a script fed to a shell on a li
 and a command line too long or complex to check, are refused, saying so; what they don't read:
 [Known limits](../SECURITY.md#known-limits)). Protect your default branch on GitHub as well.
 
-**Yolo** is on by default, as in your own Copilot sessions: workers run without these checks.
-Turn it off in Settings → *Workers* (or per worker in its header's **⋯**: *Ask first*) to have
-them enforced. Workers that read Slack keep the checks unless you choose yolo for them there. The sandbox
-still applies when it is on. Slack replies and PR reviews remain drafts either way.
+**Yolo** is on by default, as in your own Copilot sessions: workers run without these checks, so
+only their instructions keep them from force-pushing, pushing to `main`, or commenting, reviewing
+or merging on GitHub as you (their `git` and `gh` act as you, in the sandbox too). Turn it off in
+Settings → *Workers* (or per worker in its header's **⋯**: *Ask first*) to have them enforced.
+Workers that read Slack keep the checks unless you choose yolo for them there. Either way, the
+sandbox applies when it is on; a worker is kept out of a checkout of yours given to read and out
+of Chief of Staff's private files; a *Prepared for you* step can't reach GitHub; and the Router never
+asks a worker to merge or force-push.
 
-Nothing is sent as you without your approval. See [SECURITY.md](../SECURITY.md) for which of
-these boundaries the OS enforces and which rely on the model.
+What Chief of Staff sends as you itself (a Slack reply, a PR review or reply from its card,
+what *Prepared for you* publishes) goes only once you approve it (a reply to a message you
+reacted to for it is approved by your reaction), and no worker gets your Slack connection. See [SECURITY.md](../SECURITY.md) for which of these boundaries the OS enforces and
+which rely on the model.
 
 ## Models and usage
 
