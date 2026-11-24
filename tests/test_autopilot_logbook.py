@@ -226,7 +226,7 @@ def test_stop_withdraws_what_was_queued_each_with_an_entry(book):
         first = book.queue(run["id"], entry["id"], "tell", {}, generation)
         second = book.queue(run["id"], entry["id"], "tell", {}, generation)
     book.claim(first)
-    assert book.withdraw("You pressed Stop.", run["id"]) == 1
+    assert [row["id"] for row in book.withdraw("You pressed Stop.", run["id"])] == [second]
     assert book.item(second)["state"] == WITHDRAWN and book.item(first)["state"] == CLAIMED
     withdrawn = book.entries(of=entry["id"])
     assert [e["kind"] for e in withdrawn] == [WITHDRAWN] and withdrawn[0]["task_id"] == "t1"
