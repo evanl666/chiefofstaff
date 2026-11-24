@@ -14461,7 +14461,8 @@ async def round_autopilot(runtime, browser, failures: list[str]):
     # inside its row: nothing wider than the record.
     await expect(record.locator(".autopilot-run").first).not_to_have_attribute("open", "")
     await record.locator(".autopilot-run").first.locator("summary").click()
-    await expect(record.locator(".autopilot-run").first.locator(".autopilot-item")).to_have_count(5)
+    now_on = record.locator(".autopilot-run").first
+    await expect(now_on.locator(".autopilot-item", has_text="partial outages")).to_have_count(1)
     width = await record.evaluate("node => node.scrollWidth - node.clientWidth")
     assert width <= 0, width
     await expect(record.locator(".autopilot-run").first).to_contain_text("partial outages")

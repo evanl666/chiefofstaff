@@ -2333,7 +2333,11 @@ async def autopilot_views(runtime, browser, quality: Quality):
         await meta.get_by_role("button", name="4 done").click()
         record = page.locator(".autopilot-record")
         await expect(record.locator(".autopilot-run")).to_have_count(2)
-        await expect(record.locator(".autopilot-run[open] .autopilot-item")).to_have_count(4)
+        # Its four, and whatever it did since in this world (a result it couldn't verify here).
+        opened = record.locator(".autopilot-run[open]")
+        for said in ("Answered “Which port", "Accepted “Rate-limit", "Started “Document",
+                     "Asked “Compare"):  # fmt: skip
+            await expect(opened.locator(".autopilot-item", has_text=said)).to_have_count(1)
         for width in WIDTHS:
             await page.set_viewport_size({"width": width, "height": 900})
             await page.wait_for_timeout(150)
