@@ -5487,7 +5487,7 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
     map with one labelled line per pair and the map in words, All N parts beyond 8, what its
     parts handed each other newest first, filters only from 8), a held question's card for a
     question in no team (Nudge, Open), a part continued outside its team, a done team leaving 10
-    minutes after it was seen, keyboard; 800, 1280 and 1440 px, light and dark
+    minutes after it was seen, keyboard; 800, 1024, 1280 and 1440 px, light and dark
     (browser-shots/teams-v2/)."""
     import teams_scene
 
@@ -5501,7 +5501,7 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
     checkout = next(i for g, i in ids.items() if g.startswith("Ship"))
     custom = next(i for g, i in ids.items() if g.startswith("给"))
     [warehouse] = [t["id"] for t in runtime.snapshot()["teams"] if t["goal"].startswith("Export")]
-    for width, scheme in itertools.product((1440, 1280, 800), ("light", "dark")):
+    for width, scheme in itertools.product((1440, 1280, 1024, 800), ("light", "dark")):
         context = await browser.new_context(
             viewport={"width": width, "height": 1000}, color_scheme=scheme
         )
