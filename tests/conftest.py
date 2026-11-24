@@ -124,8 +124,10 @@ def tmp_path(tmp_path: Path) -> Path:
     """Each test's own folder, with a space in its path as macOS's data folder has one
     ("Application Support"): the data directories the tests make in it (tmp_path / "data")
     have one too, so a command Chief of Staff writes with a path in it that does not keep it
-    whole fails here (0.1.55: the check of Claude Code never finished there)."""
-    spaced = tmp_path / "Application Support"
+    whole fails here (0.1.55: the check of Claude Code never finished there). On Windows a
+    short one ("a b"): its paths stop at 260 characters, and the folders pytest makes there are
+    long already (a pushed object of a workspace's mirror went past it)."""
+    spaced = tmp_path / ("a b" if sys.platform == "win32" else "Application Support")
     spaced.mkdir()
     return spaced
 
