@@ -59,7 +59,7 @@ Uses your signed-in Copilot CLI (COPILOT_HOME of its own, its config.json copied
 read only) and consumes premium requests (SHARD_CREDITS a shard at most: a shard that reaches it
 stops, failed); the Copilot sessions it creates are deleted at the end. The data folder has a
 space in its path, as macOS's own does. Set TMPDIR to a scratch folder of yours; ports from
-LIVE_AUTOPILOT_PORT (default 19650; the stand-in Slack's 200 above it).
+LIVE_AUTOPILOT_PORT (default 19650; Slack's address the next one, where nothing listens: no Slack).
 """
 
 import asyncio
@@ -82,7 +82,7 @@ import live_e2e
 import live_parity  # noqa: F401  (it sets its own port: this one is set after)
 
 live_e2e.PORT = int(os.environ.get("LIVE_AUTOPILOT_PORT", "19650"))
-live_e2e.SLACK_PORT = live_e2e.PORT + 200
+live_e2e.SLACK_PORT = live_e2e.PORT + 1
 live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
 from live_e2e import App, cleanup, data_dir, log, transcript, wait_for  # noqa: E402
 from live_parity import setup, write  # noqa: E402
