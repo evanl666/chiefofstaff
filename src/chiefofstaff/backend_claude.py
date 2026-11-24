@@ -2841,7 +2841,7 @@ class ClaudeWorker:
         if blocked and host_allowed(host, blocked):
             return f"Chief of Staff's sandbox never lets this worker's commands reach {host}."
         if getattr(policy, "outbound", True) is False:
-            return f"Chief of Staff's sandbox lets this worker's commands reach no host, not {host}."
+            return f"Chief of Staff's sandbox lets this worker's commands reach no host ({host})."
         if not hosts or host_allowed(host, hosts):
             return ""
         return (
