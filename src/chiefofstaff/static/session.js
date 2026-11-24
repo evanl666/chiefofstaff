@@ -115,8 +115,8 @@ export function renderHeader() {
       "select",
       { class: session.yolo ? "yolo" : "", title: "Permission checks for this worker" },
       el("option", { value: "", text: `Default: ${globalYolo && !session.slack ? "yolo" : "ask first"}` }),
-      el("option", { value: "on", text: "Yolo (acts without asking first)" }),
-      el("option", { value: "off", text: "Ask first (permission checks)" }),
+      el("option", { value: "on", text: "Yolo (acts without asking)" }),
+      el("option", { value: "off", text: "Ask first (asks before risky commands)" }),
     );
     checks.value = session.yolo_choice || "";
     // Ask first only where its agent's checks can run: else disabled, with why.
@@ -132,10 +132,10 @@ export function renderHeader() {
         const view = await api(`/api/sessions/${session.id}/yolo`, { method: "POST", body: { mode: checks.value } });
         upsertSession(view);
         toast(view.yolo
-          ? "Yolo: this worker acts without asking first."
+          ? "Yolo: this worker acts without asking."
           : view.switch_stopped
-            ? `Ask first: permission checks are on for this worker. It stopped to switch: ${view.switch_card ? "Go on under Needs you continues." : "send it your message again."}`
-            : "Ask first: permission checks are on for this worker.");
+            ? `Ask first: this worker asks before risky commands. It stopped to switch: ${view.switch_card ? "Go on under Needs you continues." : "send it your message again."}`
+            : "Ask first: this worker asks before risky commands.");
       } catch (error) {
         toast(error.message, "error");
       }

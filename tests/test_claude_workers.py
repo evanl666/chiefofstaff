@@ -367,7 +367,7 @@ async def test_claude_workers_run_sandboxed_only_on_a_version_whose_sandbox_held
         if not proven:
             assert why == (
                 "Claude can't run while workers are sandboxed: its sandbox let a command out. "
-                "Turn the sandbox off in Settings → Workers to go on."
+                "Turn the sandbox off in Settings → General to go on."
             )
             return
         assert why == ""

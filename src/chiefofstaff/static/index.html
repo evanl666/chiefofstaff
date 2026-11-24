@@ -115,45 +115,111 @@
         <h2 id="settings-title">Settings</h2>
         <nav id="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
           <button type="button" role="tab" id="settings-tab-general" data-tab="general" aria-controls="settings-page-general">General</button>
-          <button type="button" role="tab" id="settings-tab-workers" data-tab="workers" aria-controls="settings-page-workers">Workers</button>
           <button type="button" role="tab" id="settings-tab-agents" data-tab="agents" aria-controls="settings-page-agents">Agents &amp; models</button>
           <button type="button" role="tab" id="settings-tab-connections" data-tab="connections" aria-controls="settings-page-connections">Connections</button>
           <button type="button" role="tab" id="settings-tab-you" data-tab="you" aria-controls="settings-page-you">You</button>
-          <button type="button" role="tab" id="settings-tab-advanced" data-tab="advanced" aria-controls="settings-page-advanced">Advanced</button>
         </nav>
         <div id="settings-pane">
-          <section class="tab" role="tabpanel" id="settings-page-general" data-tab="general" aria-labelledby="settings-tab-general">
-            <label>
-              <span>Code folder</span>
-              <input name="code_folder" placeholder="/Users/you/workspace" autocomplete="off" />
-              <small>Where your repositories live. Each worker works in its own copy, so your checkouts are never touched; a repository that is missing is cloned here.</small>
-            </label>
-            <div class="row">
-              <label><span>Parallel workers</span><input name="max_workers" type="number" min="1" max="1000" /></label>
-              <label><span>Close idle after (h)</span><input name="worker_idle_hours" type="number" min="1" max="720" /></label>
-              <label title="A running task with no activity and nothing it waits on for this long shows under Stalled, and its worker is asked once where it stands"><span>Stalled after (h)</span><input name="stall_hours" type="number" min="1" max="168" /></label>
-              <label title="When the day's summary comes; empty turns it off"><span>Daily summary at</span><input name="digest_time" type="time" /></label>
+          <!-- General (docs/design/settings-v2.md §4): one setting per line, grouped; what a line
+               governs unfolds under it (Options); what most owners never change, under More. -->
+          <section class="tab general-page" role="tabpanel" id="settings-page-general" data-tab="general" aria-labelledby="settings-tab-general">
+            <div class="page-head"><h3>General</h3><p>Where your work is, how workers behave, and what Chief of Staff does on its own.</p></div>
+            <div class="settings-group" id="general-work">
+              <h4>Your work</h4>
+              <div class="box">
+                <div class="line-row">
+                  <div class="words"><label class="name" for="code-folder">Code folder</label><small class="help" id="code-folder-help">Where your repositories are. Each worker works in its own copy of one.</small></div>
+                  <div class="control"><input id="code-folder" class="field-wide" name="code_folder" placeholder="/Users/you/workspace" autocomplete="off" aria-describedby="code-folder-help" /></div>
+                </div>
+                <div class="line-row">
+                  <div class="words"><label class="name" for="max-workers">Workers at once</label><small class="help" id="max-workers-help">More tasks wait their turn.</small></div>
+                  <div class="control"><input id="max-workers" class="num" name="max_workers" type="number" min="1" max="1000" aria-describedby="max-workers-help" /></div>
+                </div>
+              </div>
             </div>
-            <small>More tasks wait in the queue, and new work also waits while this computer is low on memory. Idle finished workers close; you can reopen them. Clear <em>Daily summary at</em> to turn the summary off.</small>
-            <label class="check" title="One with several tasks, or long at work. Only when a worker slot is free; otherwise the task waits for it as before"><input name="fork_busy" type="checkbox" /> Give a busy worker's new task to a second worker with its context</label>
-            <label class="check"><input name="mac_notifications" type="checkbox" /> Desktop notifications</label>
-            <label class="check"><input name="other_sessions" type="checkbox" /> Show where my other sessions stand</label>
-            <label class="check" title="Chief of Staff reads its own page on PyPI once a day, and sends nothing about you"><input name="update_notice" type="checkbox" /> Say when a newer Chief of Staff is out</label>
-            <label class="check" id="proactive-line"><input name="proactive" type="checkbox" /> Keep my PRs moving: prepare fixes and replies for my approval</label>
-          </section>
-
-          <section class="tab" role="tabpanel" id="settings-page-workers" data-tab="workers" aria-labelledby="settings-tab-workers" hidden>
-            <label class="check"><input name="worker_yolo" type="checkbox" /> Workers act without asking for permission first (yolo)</label>
-            <small>Either way, no worker comments, reviews, merges or closes on GitHub as you, pushes to main or force-pushes others' branches without your OK. Change it for one worker in its ⋯ menu.</small>
-            <label class="check"><input name="worker_sandbox" type="checkbox" /> Sandbox: workers can change files only in their own folders</label>
-            <small>Off, workers can do what your own Copilot sessions can (your tools, keychain, Docker, other repos), under your Copilot sandbox settings if you use them. Workers that read Slack are always sandboxed.</small>
-            <small id="sandbox-hint" hidden></small>
-            <label>
-              <span>Also writable in the sandbox</span>
-              <textarea name="sandbox_writable" rows="2" placeholder="One folder per line, e.g. a Copilot plugin's own folder"></textarea>
-              <small>For tools that must write outside a worker's folders, such as a Copilot plugin hook that keeps a journal.</small>
-            </label>
-            <label class="check"><input name="shared_caches" type="checkbox" /> Start workers' caches from yours (read-only to them), so installs are as fast as in your terminal</label>
+            <div class="settings-group" id="general-workers">
+              <h4>Workers</h4>
+              <div class="box">
+                <div class="line-row check-line" id="ask-first-line">
+                  <div class="words"><label class="check name"><input id="ask-first" name="ask_first" type="checkbox" aria-describedby="ask-first-help ask-first-floor" /> Ask first</label><small class="help state" id="ask-first-help"></small><small class="help" id="ask-first-floor">Either way, no worker posts, reviews or merges on GitHub as you, pushes to main, or force-pushes others' branches.</small></div>
+                </div>
+                <div class="line-row check-line" id="sandbox-line">
+                  <div class="words"><label class="check name"><input id="worker-sandbox" name="worker_sandbox" type="checkbox" aria-describedby="sandbox-help sandbox-slack sandbox-hint" /> Sandbox</label><small class="help state" id="sandbox-help"></small><small class="help" id="sandbox-slack">Workers that read Slack are always sandboxed.</small><small class="help warn" id="sandbox-hint" hidden></small></div>
+                  <div class="control"><button type="button" class="link options" id="sandbox-options" aria-controls="sandbox-more" aria-expanded="false" aria-label="Sandbox options">Options</button></div>
+                </div>
+                <div class="unfold" id="sandbox-more" hidden>
+                  <small class="when-off" id="sandbox-when-off">Off, these still apply to the workers that read Slack.</small>
+                  <label>
+                    <span>Also writable in the sandbox</span>
+                    <textarea name="sandbox_writable" rows="2" placeholder="One folder per line, e.g. a Copilot plugin's own folder"></textarea>
+                    <small>For tools that must write outside a worker's folders, such as a Copilot plugin hook that keeps a journal.</small>
+                  </label>
+                  <label class="check"><input name="shared_caches" type="checkbox" /> Start workers' caches from yours (read-only to them), so installs are fast</label>
+                </div>
+              </div>
+            </div>
+            <div class="settings-group" id="general-own">
+              <h4>On its own</h4>
+              <div class="box">
+                <div class="line-row check-line" id="proactive-line">
+                  <div class="words"><label class="check name"><input id="proactive-box" name="proactive" type="checkbox" aria-describedby="proactive-help proactive-steps" /> Keep my PRs moving</label><small class="help" id="proactive-help"></small><small class="help warn" id="proactive-steps" hidden></small></div>
+                  <div class="control"><button type="button" class="link options" id="prs-options" aria-controls="prs-more" aria-expanded="false" aria-label="Keep my PRs moving: options" hidden>Options</button></div>
+                </div>
+                <div class="unfold" id="prs-more" hidden></div>
+                <div class="line-row check-line" id="fork-line">
+                  <div class="words"><label class="check name"><input id="fork-busy" name="fork_busy" type="checkbox" aria-describedby="fork-help" /> A busy worker's new task starts at once</label><small class="help" id="fork-help">In a second worker with its context, when a slot is free.</small></div>
+                </div>
+              </div>
+            </div>
+            <div class="settings-group" id="general-posted">
+              <h4>Keep me posted</h4>
+              <div class="box">
+                <div class="line-row">
+                  <div class="words"><label class="name" for="digest-time">Daily summary</label><small class="help" id="digest-help">Empty: no summary.</small></div>
+                  <div class="control"><input id="digest-time" name="digest_time" type="time" aria-describedby="digest-help" /></div>
+                </div>
+                <div class="line-row check-line" id="notifications-line">
+                  <div class="words"><label class="check name"><input id="mac-notifications" name="mac_notifications" type="checkbox" aria-describedby="notifications-help" /> Desktop notifications</label><small class="help" id="notifications-help">Banners on this Mac when something needs you.</small></div>
+                </div>
+              </div>
+            </div>
+            <details class="more-fold" id="general-more">
+              <summary>More: idle workers, overdue tasks, folders, updates</summary>
+              <div class="box">
+                <div class="line-row">
+                  <div class="words"><label class="name" for="idle-hours">Close finished workers after</label></div>
+                  <div class="control"><input id="idle-hours" class="num" name="worker_idle_hours" type="number" min="1" max="720" aria-describedby="idle-unit" /><span class="unit" id="idle-unit">hours idle</span></div>
+                </div>
+                <div class="line-row">
+                  <div class="words"><label class="name" for="stall-hours">Overdue after</label><small class="help" id="stall-help">A running task with no activity: its worker is asked where it stands.</small></div>
+                  <div class="control"><input id="stall-hours" class="num" name="stall_hours" type="number" min="1" max="168" aria-describedby="stall-help stall-unit" /><span class="unit" id="stall-unit">hours</span></div>
+                </div>
+                <div class="line-row check-line" id="others-line">
+                  <div class="words"><label class="check name"><input id="other-sessions" name="other_sessions" type="checkbox" aria-describedby="others-why" /> Show where my other sessions stand</label><small class="help" id="others-why" hidden></small></div>
+                </div>
+                <div class="line-row check-line" id="update-line">
+                  <div class="words"><label class="check name"><input id="update-notice" name="update_notice" type="checkbox" aria-describedby="update-help" /> Say when a newer Chief of Staff is out</label><small class="help" id="update-help">Reads its own PyPI page once a day; sends nothing about you.</small></div>
+                </div>
+                <div class="line-row check-line" id="footer-line">
+                  <div class="words"><label class="check name"><input id="report-footer" name="report_footer" type="checkbox" /> Copied reports end with “Orchestrated with Chief of Staff”</label></div>
+                </div>
+                <div class="line-row wide">
+                  <div class="words">
+                    <label class="name" for="projects">Other project folders</label>
+                    <small class="help" id="projects-help">Outside the code folder, one per line; a folder you pick when the Router asks is added here.</small>
+                    <small class="help warn" id="projects-missing" hidden></small>
+                    <textarea id="projects" name="projects" rows="2" placeholder="/Users/you/elsewhere/app" aria-describedby="projects-help projects-missing"></textarea>
+                  </div>
+                </div>
+                <div class="line-row">
+                  <div class="words"><label class="name" for="scratch-directory">Task folders</label><small class="help" id="scratch-help">Where workers' own folders go.</small></div>
+                  <div class="control"><input id="scratch-directory" class="field-wide" name="scratch_directory" autocomplete="off" aria-describedby="scratch-help" /></div>
+                </div>
+                <div class="line-row">
+                  <div class="words"><span class="name">Data</span><small class="help" id="data-directory"></small></div>
+                </div>
+              </div>
+            </details>
           </section>
 
           <!-- Agents & models (agentspage.js): who does the work, and with which model. Drawn when
@@ -316,64 +382,70 @@
             </section>
           </section>
 
-          <section class="tab" role="tabpanel" id="settings-page-you" data-tab="you" aria-labelledby="settings-tab-you" hidden>
-            <h3>How you work</h3>
-            <p class="hint">Learned from what you write and how you correct your sessions. It stays on this machine; how you write applies at once, habits wait for your OK.</p>
-            <label class="check"><input name="learn_from_work" type="checkbox" /> Learn from what I write: Slack (or any tool here that reaches it, such as Glean), PR reviews, commits and Copilot sessions</label>
-            <div class="learn-row">
-              <button id="learn-now" type="button" class="secondary">Learn now</button>
-              <span id="learn-state" role="status"></span>
-              <button id="learn-last-run" type="button" class="link" hidden>View last run</button>
+          <!-- You (docs/design/settings-v2.md §6): learning's two switches; what was learned, each
+               list folded with its count (Habits open, to add one); profile and notes folded. -->
+          <section class="tab you-page" role="tabpanel" id="settings-page-you" data-tab="you" aria-labelledby="settings-tab-you" hidden>
+            <div class="page-head"><h3>You</h3><p>What Chief of Staff learned about how you work. It stays on this computer.</p></div>
+            <div class="box">
+              <div class="line-row check-line learn-line">
+                <div class="words">
+                  <label class="check name"><input id="learn-from-work" name="learn_from_work" type="checkbox" aria-describedby="learn-status learn-state" /> Learn from what I write</label>
+                  <small class="help" id="learn-status"></small>
+                  <small class="help learn-run"><span id="learn-state" role="status"></span><button id="learn-last-run" type="button" class="link quiet" hidden>View last run</button></small>
+                </div>
+                <div class="control"><button id="learn-now" type="button" class="secondary">Learn now</button></div>
+              </div>
+              <div class="line-row check-line">
+                <div class="words"><label class="check name"><input id="learn-checks" name="learn_checks" type="checkbox" aria-describedby="checks-help" /> Turn mistakes workers fixed into checks</label><small class="help" id="checks-help">You approve each one first.</small></div>
+              </div>
             </div>
-            <small id="learn-status"></small>
-            <label class="check"><input name="learn_checks" type="checkbox" /> Turn mistakes workers fixed into checks (you approve each)</label>
             <p id="learned-nothing" class="hint" hidden>Nothing learned yet. What it learns shows here, and new habits and checks come to Needs you first.</p>
-            <h4>Writing styles</h4>
-            <ul id="styles" class="memory"></ul>
-            <h4 class="always">Habits</h4>
-            <ul id="lessons" class="memory"></ul>
-            <div id="lesson-add" class="lesson-add">
-              <input id="lesson-text" maxlength="300" placeholder="Add a habit, e.g. “Run the linter before every commit”" aria-label="New habit" />
-              <select id="lesson-scope" aria-label="Where it applies"></select>
-              <button id="lesson-save" type="button" class="secondary">Add</button>
+            <div class="you-lists">
+              <details class="section" id="you-styles">
+                <summary><span>Writing styles</span><span class="count" id="styles-count"></span></summary>
+                <div class="section-body"><ul id="styles" class="memory"></ul></div>
+              </details>
+              <details class="section" id="you-habits" open>
+                <summary><span>Habits</span><span class="count" id="lessons-count"></span></summary>
+                <div class="section-body">
+                  <ul id="lessons" class="memory"></ul>
+                  <div id="lesson-add" class="lesson-add">
+                    <input id="lesson-text" maxlength="300" placeholder="Add a habit, e.g. “Run the linter before every commit”" aria-label="New habit" />
+                    <select id="lesson-scope" aria-label="Where it applies"></select>
+                    <button id="lesson-save" type="button" class="secondary">Add</button>
+                  </div>
+                </div>
+              </details>
+              <details class="section" id="you-checks">
+                <summary><span>Checks</span><span class="count" id="checks-count"></span></summary>
+                <div class="section-body"><ul id="checks" class="memory"></ul></div>
+              </details>
             </div>
-            <h4>Checks</h4>
-            <ul id="checks" class="memory"></ul>
-            <p id="agreement" class="hint"></p>
-
-            <h3>Your profile</h3>
-            <p id="profile-draft" class="draft-banner" hidden>
-              A new profile draft is ready.
-              <button id="profile-use" type="button" class="link">Review it</button>
-              <button id="profile-discard" type="button" class="link">Discard</button>
-            </p>
-            <label>
-              <span>What your sessions know about you (you can edit it)</span>
-              <textarea name="profile" rows="5" placeholder="Empty. Build it from your work, or write it yourself."></textarea>
-            </label>
-            <div><button id="profile-distill" type="button" class="secondary">Build from my work</button></div>
-
-            <h3>Environment notes</h3>
-            <label>
-              <span>What your sessions found out about tools, integrations and sign-ins on this machine. One “topic: note” per line; edit or delete freely.</span>
-              <textarea name="setup_notes" rows="4" placeholder="Empty. Workers add notes as they set things up."></textarea>
-            </label>
-          </section>
-
-          <section class="tab" role="tabpanel" id="settings-page-advanced" data-tab="advanced" aria-labelledby="settings-tab-advanced" hidden>
-            <label class="check"><input name="report_footer" type="checkbox" /> Copied reports end with a short “Orchestrated with Chief of Staff” line</label>
-            <label>
-              <span>Other project folders</span>
-              <textarea name="projects" rows="2" placeholder="/Users/you/elsewhere/app — one per line"></textarea>
-              <small>Folders outside the code folder that workers may also work in. A folder you pick when the Router asks is added here.</small>
-              <small id="projects-missing" hidden></small>
-            </label>
-            <label>
-              <span>Task folders</span>
-              <input name="scratch_directory" autocomplete="off" />
-              <small>Where each worker's own folder goes. Empty: .chief in the code folder.</small>
-            </label>
-            <small id="data-directory"></small>
+            <details class="section" id="you-profile">
+              <summary><span>Your profile</span><small class="preview" id="profile-preview"></small></summary>
+              <div class="section-body">
+                <p id="profile-draft" class="draft-banner" hidden>
+                  A new profile draft is ready.
+                  <button id="profile-use" type="button" class="link">Review it</button>
+                  <button id="profile-discard" type="button" class="link">Discard</button>
+                </p>
+                <label>
+                  <span>What your sessions know about you (you can edit it)</span>
+                  <textarea name="profile" rows="5" placeholder="Empty. Build it from your work, or write it yourself."></textarea>
+                </label>
+                <div><button id="profile-distill" type="button" class="secondary">Build from my work</button></div>
+              </div>
+            </details>
+            <details class="section" id="you-notes">
+              <summary><span>Environment notes</span><small class="preview" id="notes-count"></small></summary>
+              <div class="section-body">
+                <label>
+                  <span>What your sessions found out about tools, integrations and sign-ins on this machine. One “topic: note” per line; edit or delete freely.</span>
+                  <textarea name="setup_notes" rows="4" placeholder="Empty. Workers add notes as they set things up."></textarea>
+                </label>
+              </div>
+            </details>
+            <p id="agreement" class="page-foot"></p>
           </section>
         </div>
         <footer>

@@ -252,7 +252,7 @@ async def test_a_plugin_hook_that_fails_does_not_fail_the_worker(harness):
     assert row["status"] == "working" and runtime.states[worker].busy
     assert runtime.tasks.current(worker)["status"] == "running"
     notes = [text for kind, text in harness.kinds(worker) if "plugin hook failed" in text]
-    assert len(notes) == 1 and "Also writable in the sandbox" in notes[0]
+    assert len(notes) == 1 and "Settings → General → Sandbox → Also writable" in notes[0]
     assert not [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
     other = await spawn(runtime, harness.router_id, "Another task")
     harness.session(other).emit("session.error", error_type="hook", message=message)

@@ -140,7 +140,7 @@ def test_a_field_the_server_refuses_is_named_as_the_page_names_it():
     """Bug bash 5 (A5): "Input should be greater than or equal to 1", not which field."""
     said = run_ui(
         """
-        page({ max_workers: field("max_workers", "0", "Parallel workers") });
+        page({ max_workers: field("max_workers", "0", "Workers at once") });
         const problems = [
           { type: "greater_than_equal", loc: ["body", "max_workers"], ctx: { ge: 1 },
             msg: "Input should be greater than or equal to 1" },
@@ -159,9 +159,39 @@ def test_a_field_the_server_refuses_is_named_as_the_page_names_it():
         """
     )
     assert said == (
-        "Parallel workers: Input should be greater than or equal to 1; "
+        "Workers at once: Input should be greater than or equal to 1; "
         "Away minutes: Input should be a valid integer; MCP server a: url is missing"
     )
+
+
+def test_ask_first_is_worker_yolo_the_other_way_round():
+    """Settings v2 §7.2: Ask first checked sends worker_yolo false; unchecked, true; whatever
+    else is saved goes back as it was."""
+    sent = run_ui(
+        """
+        const saved = { projects: [], max_workers: 4, worker_yolo: true, role_models: {},
+          role_efforts: {} };
+        s.state.snapshot = { settings: saved };
+        const ask = (checked) => {
+          page({ ask_first: { ...field("ask_first"), checked } });
+          return settings.settingsBody().worker_yolo;
+        };
+        return [ask(true), ask(false)];
+        """
+    )
+    assert sent == [False, True]
+
+
+async def test_desktop_notifications_are_offered_only_where_they_can_show(harness, monkeypatch):
+    """Settings v2 §12.2: off macOS a banner never shows (notify.py), so the page is told and
+    leaves out the line; on macOS the snapshot says nothing (as before)."""
+    import sys
+
+    runtime = await harness.connect()
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert runtime.snapshot()["desktop_notifications"] is False
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert "desktop_notifications" not in runtime.snapshot()
 
 
 def test_a_link_whose_words_are_another_address_says_where_it_goes():
@@ -249,9 +279,10 @@ def test_settings_opens_each_name_old_or_new_where_it_is_now():
     )
     assert dict(places) == {
         "general": {"tab": "general"},
-        "workers": {"tab": "workers"},
-        "advanced": {"tab": "advanced"},
-        "proactive": {"tab": "proactive"},
+        # Phase 2: Workers, Advanced and Prepared for you are parts of General now.
+        "workers": {"tab": "general", "scroll": "general-workers"},
+        "advanced": {"tab": "general", "unfold": "more"},
+        "proactive": {"tab": "general", "unfold": "prs"},
         "models": {"tab": "agents", "unfold": "models"},
         "agents": {"tab": "agents"},
         "connections": {"tab": "connections"},

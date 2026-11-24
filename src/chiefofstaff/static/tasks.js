@@ -68,7 +68,7 @@ export function slotReason(worker) {
   const limit = state.snapshot.settings.max_workers;
   // Chief of Staff's own helpers take no slot.
   const own = sessions().filter((session) => busy(session) && !session.helper).length;
-  const help = `At most ${limit} worker${limit === 1 ? "" : "s"} run at once: Settings → General → Parallel workers.`;
+  const help = `At most ${limit} worker${limit === 1 ? "" : "s"} run at once: Settings → General → Workers at once.`;
   return { text: `Waiting for a worker slot · ${Math.min(own, limit)} of ${limit} busy`, help, slot: true };
 }
 // Workers the owner is using in a terminal right now: working, though no task says so.

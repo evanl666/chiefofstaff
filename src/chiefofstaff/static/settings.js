@@ -13,9 +13,9 @@ import { renderSharedLinks } from "./share.js";
 // the right place. `connections/<row>` opens that connection's details.
 const PLACES = {
   general: { tab: "general" },
-  workers: { tab: "workers" },
-  advanced: { tab: "advanced" },
-  proactive: { tab: "proactive" },
+  workers: { tab: "general", scroll: "general-workers" },
+  advanced: { tab: "general", unfold: "more" },
+  proactive: { tab: "general", unfold: "prs" },
   models: { tab: "agents", unfold: "models" },
   agents: { tab: "agents" },
   connections: { tab: "connections" },
@@ -33,9 +33,7 @@ const tabButtons = () => [...document.querySelectorAll("#settings-tabs [role=tab
 export function showSettingsTab(name, { focus = false } = {}) {
   const place = settingsPlace(name);
   const tabs = [...document.querySelectorAll("#settings-pane > .tab")];
-  // (Prepared for you's page is there only while its switch is on.)
-  const wanted = tabs.find((section) => section.dataset.tab === place.tab && !("off" in section.dataset));
-  const shown = wanted || tabs[0];
+  const shown = tabs.find((section) => section.dataset.tab === place.tab) || tabs[0];
   localStorage.setItem(TAB, shown.dataset.tab);
   for (const section of tabs) section.hidden = section !== shown;
   for (const button of document.querySelectorAll("#settings-tabs [role=tab]")) {
@@ -46,6 +44,12 @@ export function showSettingsTab(name, { focus = false } = {}) {
   tabInView();
   $("#settings-pane").scrollTop = 0;
   if (place.connection) openConnection(place.connection, { focus });
+  // General's More (Advanced's old page), Keep my PRs moving's Options (Prepared for you's old
+  // page; while it is on) or its Workers group (Workers' old page), in view.
+  if (place.unfold === "more") $("#general-more").open = true;
+  if (place.unfold === "prs" && $("#settings-form").proactive.checked) setUnfold("prs-more", true);
+  const target = { more: "general-more", prs: "proactive-line" }[place.unfold] || place.scroll;
+  if (target) document.getElementById(target)?.scrollIntoView?.({ block: "start" });
   if (place.unfold === "models") {
     // The models it named: Chief of Staff's own sessions where a role has one, else Copilot's.
     const roles = state.snapshot?.settings?.role_models || {};
@@ -55,6 +59,13 @@ export function showSettingsTab(name, { focus = false } = {}) {
   // Agents & models looks at the installed agents when it is shown (at most once an opening).
   if (shown.dataset.tab === "agents") agentsShown();
   if (focus && !place.connection) document.querySelector(`#settings-tabs [role=tab][data-tab="${shown.dataset.tab}"]`)?.focus();
+}
+// What a line governs (its Options), unfolded or folded, its button saying which.
+function setUnfold(id, open) {
+  const part = document.getElementById(id);
+  if (!part) return;
+  part.hidden = !open;
+  document.querySelector(`[aria-controls="${id}"]`)?.setAttribute("aria-expanded", String(open));
 }
 function unfoldAgent(name) {
   const fold = document.querySelector(`#agent-${name} .fold`);
@@ -179,6 +190,12 @@ export function bindSettings() {
   form.addEventListener("input", drafted);
   form.addEventListener("change", drafted);
   $("#settings-pane").addEventListener("click", (event) => {
+    const options = event.target.closest("button.options[aria-controls]");
+    if (options) {
+      const id = options.getAttribute("aria-controls");
+      setUnfold(id, document.getElementById(id).hidden);
+      return;
+    }
     if (event.target.closest("[data-back]")) {
       closeConnection();
       return;
@@ -291,8 +308,12 @@ export function bindSettings() {
     }
   });
   $("#send-on").addEventListener("click", () => saveSend(true));
-  // Prepared for you: its tab is there while its switch is on (before it is saved, to set it up).
-  form.proactive.addEventListener("change", showProactiveTab);
+  // Keep my PRs moving: its Options are offered while it is on (before it is saved, to set it
+  // up). What a line says follows its draft: Ask first, Sandbox, Keep my PRs moving's levels.
+  form.proactive.addEventListener("change", showPrsLine);
+  for (const input of [form.ask_first, form.worker_sandbox]) input.addEventListener("change", generalWords);
+  $("#prs-more").addEventListener("input", generalWords);
+  $("#prs-more").addEventListener("change", generalWords);
   $("#send-cancel").addEventListener("click", () => {
     renderSendLine();
     sendSwitch.focus();
@@ -548,7 +569,8 @@ export function fillSettings() {
   form.scratch_directory.placeholder = settings.code_folder ? `${settings.code_folder}/.chief` : `${state.snapshot.data_directory}/work/workspaces`;
   form.max_workers.value = settings.max_workers;
   form.fork_busy.checked = Boolean(settings.fork_busy);
-  form.worker_yolo.checked = settings.worker_yolo;
+  // Ask first: worker_yolo, the other way round (checked: workers ask).
+  form.ask_first.checked = !settings.worker_yolo;
   form.worker_sandbox.checked = settings.worker_sandbox;
   form.shared_caches.checked = settings.shared_caches;
   form.sandbox_writable.value = (settings.sandbox_writable || []).join("\n");
@@ -563,15 +585,22 @@ export function fillSettings() {
   form.worker_idle_hours.value = settings.worker_idle_hours;
   form.stall_hours.value = settings.stall_hours ?? 4;
   form.mac_notifications.checked = settings.mac_notifications;
+  // Only where desktop notifications can show (macOS): the server says when they can't.
+  $("#notifications-line").hidden = state.snapshot.desktop_notifications === false;
   form.other_sessions.checked = Boolean(settings.other_sessions);
   form.update_notice.checked = settings.update_notice !== false;
   form.proactive.checked = Boolean(settings.proactive);
-  renderProactiveTab();
-  showProactiveTab();
+  $("#prs-more").replaceChildren();
+  showPrsLine();
+  // Every Options and More folded again, as each opening starts.
+  setUnfold("sandbox-more", false);
+  setUnfold("prs-more", false);
+  $("#general-more").open = false;
+  generalWords();
   // When none of them can say where it stands, its line says why.
   const why = settings.other_sessions ? state.othersWhy : "";
-  if (why) form.other_sessions.parentElement.title = why;
-  else form.other_sessions.parentElement.removeAttribute("title");
+  $("#others-why").textContent = why;
+  $("#others-why").hidden = !why;
   form.slack_enabled.checked = settings.slack_enabled;
   form.slack_token.value = "";
   form.slack_poll_seconds.value = settings.slack_poll_seconds;
@@ -588,12 +617,13 @@ export function fillSettings() {
   form.setup_notes.value = notesText();
   form.setup_notes.dataset.initial = form.setup_notes.value;
   $("#profile-draft").hidden = !state.snapshot.profile_draft;
+  youFolds();
   form.learn_from_work.checked = settings.learn_from_work;
   form.learn_checks.checked = settings.learn_checks;
   renderLearning();
   form.paused.checked = settings.paused;
   form.report_footer.checked = settings.report_footer !== false;
-  form.report_footer.closest("label").hidden = !("report_footer" in settings);
+  $("#footer-line").hidden = !("report_footer" in settings);
   form.skill_folders.value = (settings.skill_folders || []).join("\n");
   form.plugins.value = (settings.plugins || []).join("\n");
   // Those off (saved, but Copilot would refuse them) are shown with the others, to be fixed.
@@ -616,7 +646,7 @@ export function fillSettings() {
   showSlackToken();
   const github = state.snapshot.github;
   $("#github-status").textContent = github.error || (github.connected ? `Watching${github.last_checked ? `, checked ${since(github.last_checked)}` : ""}.` : "");
-  $("#data-directory").textContent = `Data: ${state.snapshot.data_directory}`;
+  $("#data-directory").textContent = state.snapshot.data_directory;
   $("#settings-error").hidden = true;
 }
 // Connections: what each section has, in its summary line; what runs, as it changes.
@@ -1027,6 +1057,7 @@ function renderLearnRow() {
   status.classList.toggle("error", Boolean(!busy && last.error));
   status.textContent = busy ? "Learning now…" : last.error ? `Last run failed: ${last.error}` : last.text ? `${last.text}${last.at ? ` · ${since(last.at)}` : ""}` : "";
   $("#learn-last-run").hidden = !lastLearner();
+  status.closest(".learn-run").hidden = !status.textContent && $("#learn-last-run").hidden;
 }
 export function renderLearning() {
   const learning = state.snapshot.learning;
@@ -1071,7 +1102,7 @@ export function renderLearning() {
     const fresh = habits.new + learning.new_feedback;
     const errors = Object.values(habits.errors || {});
     $("#learn-status").textContent = [
-      parts.length ? `Read ${parts.join(", ")}.` : "",
+      parts.length ? `Read ${parts.join(", ")}.` : "From Slack (or a tool here that reaches it, such as Glean), PR reviews, commits and Copilot sessions.",
       fresh ? `${fresh} new to learn from.` : "Nothing new to learn from.",
       errors.length ? `Could not read: ${errors[0]}` : "",
     ]
@@ -1099,14 +1130,14 @@ export function renderLearning() {
   $("#learned-nothing").hidden = !empty;
   renderLearnRow();
 }
-// A list and its heading, shown only when there is something in it (Habits always: the owner
-// adds their own there).
+// A list, folded with its count, shown only when there is something in it (Habits always: the
+// owner adds their own there).
 function showList(id, count) {
   const list = $(id);
   list.hidden = !count;
-  const heading = list.previousElementSibling;
-  heading.hidden = !count && !heading.classList.contains("always");
-  heading.dataset.count = count;
+  const fold = list.closest("details");
+  fold.hidden = !count && fold.id !== "you-habits";
+  $(`${id}-count`).textContent = count ? String(count) : "";
 }
 // A habit the owner writes down themselves: everywhere, in Slack replies, or in one project (one
 // in Settings or a repository in the code folder, as the server lists them: `projects`).
@@ -1181,7 +1212,7 @@ export function settingsBody() {
     scratch_directory: form.scratch_directory.value.trim(),
     max_workers: number("max_workers"),
     fork_busy: form.fork_busy.checked,
-    worker_yolo: form.worker_yolo.checked,
+    worker_yolo: !form.ask_first.checked,
     worker_sandbox: form.worker_sandbox.checked,
     shared_caches: form.shared_caches.checked,
     sandbox_writable: lines(form.sandbox_writable.value),
@@ -1277,7 +1308,7 @@ async function saveSettings(event) {
   }
 }
 // The field a server's error is about: named by the server, or by its label at the start of
-// the message ("Parallel workers: …", "Workers model: …"), shown where it is (revealField).
+// the message ("Workers at once: …", "Workers model: …"), shown where it is (revealField).
 const MODEL_LABELS = { "Default model:": "model", "Router model:": "model_router", "Workers model:": "model_worker", "Slack model:": "model_slack", "Watchdog model:": "model_watchdog", "The code folder ": "code_folder" };
 export function problemField(error) {
   const form = $("#settings-form");
@@ -1289,7 +1320,8 @@ export function problemField(error) {
     const words = (label.querySelector("span") || label).textContent.trim();
     return words && error.message.startsWith(`${words}:`);
   });
-  return labelled?.querySelector("input, textarea, select") || null;
+  // (A line's name labels its field from beside it; a wrapping label holds it.)
+  return labelled?.control || labelled?.querySelector("input, textarea, select") || null;
 }
 function showProblem(error) {
   const field = problemField(error);
@@ -1414,28 +1446,41 @@ function showSlackToken() {
   $("#slack-token-remove").hidden = env || !slack.token_saved;
 }
 
-// Prepared for you (shepherd.py): its one tab, only while its switch in General is on. What it
-// looks at, each kind's level, the day's credits for work nobody clicked, the hosts its steps may
-// reach, and per repository whether replies say they were drafted with an AI assistant.
+// General's lines say what they do as their draft has them (docs/design/settings-v2.md §4, §7.2).
+// Ask first is worker_yolo the other way round, said as a worker's ⋯ says it; under it, always,
+// what holds either way (#ask-first-floor: 0.1.57's floor).
+const ASK_FIRST = {
+  off: "Workers act without asking, as in your own Copilot sessions.",
+  on: "Workers ask before risky commands.",
+};
+const SANDBOX = {
+  off: "Workers can change any of your files, as your own sessions can.",
+  on: "Workers can change files only in their own folders.",
+};
+function generalWords() {
+  const form = $("#settings-form");
+  $("#ask-first-help").textContent = form.ask_first.checked ? ASK_FIRST.on : ASK_FIRST.off;
+  $("#sandbox-help").textContent = form.worker_sandbox.checked ? SANDBOX.on : SANDBOX.off;
+  // Off, its Options still apply: to the workers that read Slack, always sandboxed.
+  $("#sandbox-when-off").hidden = form.worker_sandbox.checked;
+  $("#proactive-help").textContent = prsWords();
+}
+
+// Keep my PRs moving (shepherd.py): its Options, under its line while it is on: whose PRs it
+// looks after, each kind's level, the day's credits for work nobody clicked; folded, the hosts
+// its steps may reach and per repository whether replies say they were drafted with an AI
+// assistant. Made when Settings opens with it on, or once it is ticked (from what is saved);
+// then only shown and hidden as the switch goes, so what was written there stays.
 const LEVELS = [["off", "Off"], ["suggest", "Suggest"], ["prepare", "Prepare"]];
 const KIND_NAMES = [["fix-ci", "CI failures"], ["address-review", "Review comments"]];
-// Made when Settings opens with it on, or once its switch is turned on (from what is saved);
-// then only shown and hidden as the switch goes, so what was written there stays.
-function renderProactiveTab() {
+const round = (value) => Math.round((value || 0) * 10) / 10;
+function renderPrsOptions() {
   const form = $("#settings-form");
-  document.querySelector('#settings-tabs [data-tab="proactive"]')?.remove();
-  document.querySelector('#settings-pane .tab[data-tab="proactive"]')?.remove();
-  if (!form.proactive.checked) return;
   const settings = state.snapshot.settings;
-  const button = el("button", { type: "button", role: "tab", id: "settings-tab-proactive", "data-tab": "proactive", "aria-controls": "settings-page-proactive", tabindex: "-1", text: "Prepared for you" });
-  $("#settings-tabs").insertBefore(button, document.querySelector('#settings-tabs [data-tab="you"]'));
   const kept = state.snapshot.shepherd || {};
   const levels = settings.proactive_levels || {};
   const level = (kind, name) =>
     el("label", {}, el("span", { text: name }), el("select", { name: `level_${kind}` }, ...LEVELS.map(([value, text]) => el("option", { value, text, selected: (levels[kind] || "suggest") === value }))));
-  const spent = kept.spent && (kept.spent.settled || kept.spent.reserved || kept.spent.clicked)
-    ? `Today: ${round(kept.spent.settled + kept.spent.reserved)} of ${settings.proactive_budget || 0} for work nobody clicked${kept.spent.clicked ? `, ${round(kept.spent.clicked)} for what you clicked` : ""}.`
-    : "";
   const repos = (kept.repositories || []).map((repo) => {
     const choice = (settings.proactive_repos || {})[repo] || {};
     return el(
@@ -1443,50 +1488,79 @@ function renderProactiveTab() {
       { class: "repo-row", "data-repo": repo },
       el("span", { class: "name", text: repo }),
       el("label", { class: "inline" }, el("span", { text: "Replies say they were drafted with AI" }), el("select", { class: "disclosure", "aria-label": `${repo}: replies say they were drafted with an AI assistant` }, ...[["", "Ask me"], ["yes", "Yes"], ["no", "No"]].map(([value, text]) => el("option", { value, text, selected: (choice.disclosure || "") === value })))),
-      el("label", { class: "check", "data-tip": "Off: its tests can't reach a database or server running on this computer" }, el("input", { type: "checkbox", class: "localhost", checked: Boolean(choice.localhost) }), " Its tests may use this computer's servers"),
+      el("label", { class: "check" }, el("input", { type: "checkbox", class: "localhost", checked: Boolean(choice.localhost) }), " Its tests may use this computer's servers"),
     );
   });
-  const content = [
-    el("p", { class: "hint", text: "When CI fails or reviewers comment on your PRs, Chief of Staff prepares a fix or replies in the PR's worker, checks them, and waits for your approval. Nothing is pushed or posted until you approve it." }),
-    kept.steps_here ? el("small", { class: "error-hint", text: kept.steps_here }) : null,
-    el("h4", { text: "Where" }),
-    el("label", { class: "check" }, el("input", { name: "proactive_worker_prs", type: "checkbox", checked: settings.proactive_worker_prs !== false }), " PRs my workers made"),
-    el("label", { class: "check" }, el("input", { name: "proactive_my_prs", type: "checkbox", checked: settings.proactive_my_prs !== false }), " My other open PRs in my repositories (under Prepared for you on Home)"),
-    el("h4", { text: "What it does" }),
-    el("div", { class: "row" }, ...KIND_NAMES.map(([kind, name]) => level(kind, name))),
-    el("small", { text: "Suggest: it offers Fix it. Prepare: it prepares the fix or replies right away, within the day's credits. Either way, you approve what is published." }),
-    el("label", { class: "short" }, el("span", { text: "Credits it may spend a day without asking" }), el("input", { name: "proactive_budget", type: "number", min: "0", max: "10000", step: "1", placeholder: "0 = only when you ask", value: settings.proactive_budget ? String(settings.proactive_budget) : "" })),
-    spent ? el("small", { text: spent }) : null,
-    el("label", {}, el("span", { text: "Other hosts fixes may download from" }), el("textarea", { name: "step_hosts", rows: 2, placeholder: "registry.example.com — one per line" }), el("small", { text: "PyPI, npm, crates.io and Go's proxy are allowed already. Never GitHub." })),
-    repos.length ? el("h4", { text: "Repositories" }) : null,
-    repos.length ? el("ul", { class: "repo-list" }, ...repos) : null,
-  ].filter(Boolean);
-  const fresh = el("section", { class: "tab", role: "tabpanel", id: "settings-page-proactive", "data-tab": "proactive", "aria-labelledby": "settings-tab-proactive", hidden: true }, ...content);
-  $("#settings-pane").insertBefore(fresh, document.querySelector('#settings-pane .tab[data-tab="you"]'));
+  const folded = repos.length ? `Other hosts fixes may download from · Repositories (${repos.length})` : "Other hosts fixes may download from";
+  $("#prs-more").replaceChildren(
+    el(
+      "div",
+      { class: "row" },
+      el("label", { class: "check" }, el("input", { name: "proactive_worker_prs", type: "checkbox", checked: settings.proactive_worker_prs !== false }), " PRs my workers made"),
+      el("label", { class: "check" }, el("input", { name: "proactive_my_prs", type: "checkbox", checked: settings.proactive_my_prs !== false }), " My other open PRs in my repositories"),
+    ),
+    el(
+      "div",
+      { class: "row" },
+      ...KIND_NAMES.map(([kind, name]) => level(kind, name)),
+      el("label", { class: "budget" }, el("span", { text: "Credits a day" }), el("input", { name: "proactive_budget", type: "number", min: "0", max: "10000", step: "1", placeholder: "0", "aria-label": "Credits it may spend a day without asking", value: settings.proactive_budget ? String(settings.proactive_budget) : "" })),
+    ),
+    el("small", { text: "Suggest offers Fix it; Prepare does it at once, within the credits it may spend a day without asking (0: only when you ask). Nothing is pushed or posted until you approve it." }),
+    el(
+      "details",
+      { class: "more-fold", id: "prs-hosts" },
+      el("summary", { text: folded }),
+      el("label", {}, el("span", { text: "Other hosts fixes may download from" }), el("textarea", { name: "step_hosts", rows: 2, placeholder: "registry.example.com — one per line" }), el("small", { text: "PyPI, npm, crates.io and Go's proxy are allowed already. Never GitHub." })),
+      repos.length ? el("ul", { class: "repo-list" }, ...repos) : null,
+    ),
+  );
   form.step_hosts.value = (settings.step_hosts || []).join("\n");
 }
-// Its tab while its switch is on (saved or not); off, hidden, what was written in it kept.
-function showProactiveTab() {
-  const on = $("#settings-form").proactive.checked;
-  if (on && !document.querySelector('#settings-pane .tab[data-tab="proactive"]')) renderProactiveTab();
-  const button = document.querySelector('#settings-tabs [data-tab="proactive"]');
-  const section = document.querySelector('#settings-pane .tab[data-tab="proactive"]');
-  if (!section) return;
-  const showing = !section.hidden;
-  button.hidden = !on;
-  if (on) delete section.dataset.off;
-  else section.dataset.off = "";
-  if (!on && showing) showSettingsTab("general");
+// Its line as its switch is (saved or not): its Options offered while it is on (made the first
+// time); off, folded and left out of the save, what was written in them kept.
+function showPrsLine() {
+  const form = $("#settings-form");
+  const on = form.proactive.checked;
+  if (on && !$("#prs-more").childElementCount) renderPrsOptions();
+  $("#prs-options").hidden = !on;
+  if (on) delete $("#prs-more").dataset.off;
+  else {
+    $("#prs-more").dataset.off = "";
+    setUnfold("prs-more", false);
+  }
+  const steps = on ? state.snapshot.shepherd?.steps_here || "" : "";
+  $("#proactive-steps").textContent = steps;
+  $("#proactive-steps").hidden = !steps;
+  generalWords();
 }
-const round = (value) => Math.round((value || 0) * 10) / 10;
+// What it does now, in its helper: each kind's level and the day's credits, as the draft has them.
+function prsWords() {
+  const form = $("#settings-form");
+  if (!form.proactive.checked) return "Prepares fixes for failing CI and replies to reviews, for your approval.";
+  const settings = state.snapshot.settings;
+  const level = (kind) => form[`level_${kind}`]?.value || (settings.proactive_levels || {})[kind] || "suggest";
+  const verb = { suggest: "suggests", prepare: "prepares" };
+  const ci = level("fix-ci");
+  const review = level("address-review");
+  const parts = [];
+  if (ci !== "off") parts.push(`${verb[ci]} fixes for failing CI`);
+  if (review !== "off") parts.push(ci === review ? "replies to reviews" : `${verb[review]} replies to reviews`);
+  let what = parts.length ? parts.join(ci === review ? " and " : ", ") : "looks at your PRs; CI failures and reviews are both off";
+  what = `${what[0].toUpperCase()}${what.slice(1)}`;
+  const budget = form.proactive_budget ? Number(form.proactive_budget.value || 0) : settings.proactive_budget || 0;
+  const spent = state.snapshot.shepherd?.spent;
+  const used = spent ? round((spent.settled || 0) + (spent.reserved || 0)) : 0;
+  const today = used ? (budget ? `${used} of ${budget} used today` : `${used} used today`) : "";
+  return [what, budget ? `up to ${budget} credits a day without asking` : "", today].filter(Boolean).join(" · ");
+}
 function proactiveFields() {
   const form = $("#settings-form");
   const settings = state.snapshot.settings;
-  if (!form.proactive.checked || !document.querySelector('#settings-pane .tab[data-tab="proactive"]')) return {};
+  if (!form.proactive.checked || !$("#prs-more").childElementCount) return {};
   // A repository's choices and a kind's level, only once changed here (a Save of nothing
   // changed leaves them as saved: settings-v2.md §8.7).
   const repos = { ...(settings.proactive_repos || {}) };
-  for (const row of document.querySelectorAll("#settings-pane .repo-row")) {
+  for (const row of document.querySelectorAll("#prs-more .repo-row")) {
     if (!row.querySelector("[data-dirty]")) continue;
     repos[row.dataset.repo] = { disclosure: row.querySelector(".disclosure").value, localhost: row.querySelector(".localhost").checked };
   }
@@ -1499,4 +1573,14 @@ function proactiveFields() {
     step_hosts: lines(form.step_hosts.value),
     proactive_repos: repos,
   };
+}
+
+// You: each list folded with its count (Habits always there, to add one); the profile with its
+// first line (or that a draft waits), the environment notes with how many.
+function youFolds() {
+  const profile = (state.snapshot.profile || "").trim();
+  $("#profile-preview").textContent = state.snapshot.profile_draft ? "Draft ready to review" : profile ? profile.split("\n")[0] : "Empty";
+  $("#profile-preview").classList.toggle("warn", Boolean(state.snapshot.profile_draft));
+  const notes = Object.keys(state.snapshot.setup_notes || {}).length;
+  $("#notes-count").textContent = notes ? plural(notes, "note") : "None";
 }

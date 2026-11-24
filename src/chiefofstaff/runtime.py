@@ -1845,7 +1845,7 @@ class Runtime:
         if self.store.settings().worker_sandbox and self.sandbox_host and sandbox:
             return (
                 f"{name} can't run while workers are sandboxed: {sandbox}. Turn the sandbox off "
-                "in Settings → Workers to go on."
+                "in Settings → General to go on."
             )
         if (
             agent == "claude"
@@ -11093,6 +11093,8 @@ class Runtime:
             "updates": self.owner_updates(),
             "tasks": [self.task_actions.view(task) for task in listed],
             "settings": self.store.settings().model_dump(),
+            # Off macOS no desktop notification can show (notify.py): Settings leaves out its line.
+            **({} if sys.platform == "darwin" else {"desktop_notifications": False}),
             # Only once Prepared for you was turned on: its rows, and where steps can run.
             **({"shepherd": kept} if (kept := self.shepherd.snapshot()) else {}),
             # Only while another coding agent is on: Settings' Agents & models page shows it.

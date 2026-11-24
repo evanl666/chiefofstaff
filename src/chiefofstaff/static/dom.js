@@ -32,7 +32,7 @@ function errorText(data, status) {
   return `Request failed (${status})`;
 }
 // One of the server's validation problems, with the field it is about as the page names it
-// ("Parallel workers: Input should be greater than or equal to 1"). A problem the server worded
+// ("Workers at once: Input should be greater than or equal to 1"). A problem the server worded
 // itself ("Value error, …") says what it is about.
 const fieldName = (item) => (Array.isArray(item.loc) ? item.loc : []).find((part, index) => typeof part === "string" && !(index === 0 && ["body", "query", "path"].includes(part)));
 function problemText(item) {
@@ -43,7 +43,7 @@ function problemText(item) {
 }
 function fieldLabel(name) {
   const field = /^[\w-]+$/.test(name) ? document.querySelector(`[name="${name}"]`) : null;
-  const label = field?.closest?.("label");
+  const label = field?.labels?.[0] || field?.closest?.("label");
   const shown = (label?.querySelector("span") || label)?.textContent?.trim() || field?.getAttribute?.("aria-label") || "";
   return shown || `${name[0].toUpperCase()}${name.slice(1).replace(/_/g, " ")}`;
 }
