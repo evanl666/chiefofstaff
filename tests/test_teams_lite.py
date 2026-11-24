@@ -60,7 +60,7 @@ async def test_a_task_made_for_an_owner_request_has_it_and_one_made_on_an_event_
     assert stamp(harness, direct["task_id"]) is None
 
 
-async def test_with_names_only_tasks_of_the_same_request_made_before_it(harness):
+async def test_with_names_only_tasks_of_the_same_request(harness):
     runtime = await harness.connect()
     router = harness.router_id
     first = await owner_turn(harness, runtime, "Fix the token flow.")
@@ -76,10 +76,50 @@ async def test_with_names_only_tasks_of_the_same_request_made_before_it(harness)
     tests = await spawn(runtime, router, "Tests later", works_with=[f"worker:{ui['session_id']}"])
     assert stamp(harness, old["task_id"]) == first
     assert with_of(harness, ui["task_id"]) == [api["task_id"]], "by title; never another request"
-    assert with_of(harness, tests["task_id"]) == [ui["task_id"]], "by its worker, as it is now"
-    assert with_of(harness, api["task_id"]) == [], "a task not made yet is never named"
+    assert set(with_of(harness, tests["task_id"])) == {ui["task_id"], api["task_id"]}
+    assert with_of(harness, api["task_id"]) == [tests["task_id"]], "named before it was made"
+    assert harness.store.get(f"withpending:{stamp(harness, api['task_id'])}") is None
     # wants: keeps linking workers as before (peers.candidates): the API worker works with Tests.
     assert tests["session_id"] in runtime.peers.of(api["session_id"])
+
+
+async def test_a_part_named_before_it_is_made_joins_its_team_when_made(harness):
+    """The Router starts the parts of a request one after the other, the first naming in
+    works_with one it has not started yet (by its short name): linked both ways when it is."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    request = await owner_turn(harness, runtime, "Generate a token and write it down.")
+    writer = await spawn(
+        runtime, router, "Token Writer: write the token into result.txt", works_with=["Token Scout"]
+    )
+    pending = json.loads(harness.store.get(f"withpending:{request}"))
+    assert pending == [{"task": writer["task_id"], "name": "Token Scout"}]
+    scout = await spawn(runtime, router, "Token Scout: generate a token")
+    assert with_of(harness, writer["task_id"]) == [scout["task_id"]]
+    assert with_of(harness, scout["task_id"]) == [writer["task_id"]]
+    assert harness.store.get(f"withpending:{request}") is None
+    [team] = teams_of(runtime)
+    assert [member["task"] for member in team["members"]] == [writer["task_id"], scout["task_id"]]
+
+
+async def test_a_name_no_task_of_its_request_comes_to_makes_no_team_and_goes(harness):
+    """A name given before its task is made that a task of another request takes, or none
+    does: no team; once no task of its request is open, the name is dropped."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    first = await owner_turn(harness, runtime, "Generate a token and write it down.")
+    writer = await spawn(runtime, router, "Token Writer", works_with=["Token Scout"])
+    helper = await spawn(runtime, router, "Token docs", works_with=["Ghost part"])
+    await owner_turn(harness, runtime, "Also scout tokens for the other service.")
+    await spawn(runtime, router, "Token Scout")
+    assert with_of(harness, writer["task_id"]) == [], "a task of another request: never"
+    assert teams_of(runtime) == []
+    assert len(json.loads(harness.store.get(f"withpending:{first}"))) == 2, "kept while open"
+    runtime.tasks.move(writer["task_id"], "cancelled")
+    assert harness.store.get(f"withpending:{first}"), "its other task still open"
+    runtime.tasks.move(helper["task_id"], "review")
+    assert harness.store.get(f"withpending:{first}") is None, "none open: dropped"
+    assert teams_of(runtime) == []
 
 
 async def test_message_session_new_its_fork_and_compare_sides_have_the_request(harness):
