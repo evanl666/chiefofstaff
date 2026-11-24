@@ -5,10 +5,11 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import settle
+from conftest import call_tool, settle
 
-from chiefofstaff.autopilot.logbook import QUEUED, TABLES, WITHDRAWN
+from chiefofstaff.autopilot.logbook import QUEUED, TABLES, WITHDRAWN, Logbook
 from chiefofstaff.models import Settings
+from chiefofstaff.store import Store
 
 
 def tables(store):
@@ -43,8 +44,6 @@ async def test_nothing_of_it_while_its_line_was_never_ticked(harness):
 
 
 def test_settings_saved_before_it_load_with_it_off(tmp_path):
-    from chiefofstaff.store import Store
-
     store = Store(tmp_path / "data")
     saved = Settings().model_dump()
     for key in ("autopilot", "autopilot_credits", "autopilot_repos", "autopilot_ask_first"):
@@ -241,3 +240,80 @@ async def test_the_page_shows_the_menu_durations(harness):
     assert autopilot.until_of("off", moment) is None
     with pytest.raises(ValueError, match="Choose"):
         autopilot.until_of("forever", moment)
+
+
+async def spawn(runtime, router, title):
+    result = await call_tool(
+        runtime, "spawn_worker", router, title=title, instructions=title, why_new="test"
+    )
+    return json.loads(result.text_result_for_llm)
+
+
+async def test_a_downgrade_ends_the_run_and_withdraws_what_was_not_delivered(
+    harness, capsys, monkeypatch
+):
+    """Re-review finding 8: a stored prompt an older version would replay is withdrawn, and its
+    task left stopped by the owner (Go on), not idle; what was claimed is unknown."""
+    from chiefofstaff import __main__ as entry
+
+    runtime = await harness.connect()
+    await tick(runtime)
+    state = await runtime.autopilot.start(None, by="home")
+    await settle(runtime)
+    worker = await spawn(runtime, harness.router_id, "Write the client")
+    await settle(runtime)
+    book, store = runtime.autopilot.book, harness.store
+    task_id = worker["task_id"]
+    with store.transaction():
+        entry_ = book.append(state["run"], "answered", "Answered", task_id=task_id)
+        to = {"session_id": worker["session_id"]}
+        item = book.queue(state["run"], entry_["id"], "worker", to, book.generation())
+        lost = book.queue(state["run"], entry_["id"], "worker", {}, book.generation())
+    book.claim(item)
+    book.claim(lost)
+    # Stored for the worker (its prompt kept to send), and Chief of Staff stops before it goes.
+    message = store.add_message(
+        worker["session_id"], "notice", "Autopilot answered: Postgres",
+        {"prompt": '<message from="system" type="autopilot">Postgres</message>',
+         "autopilot": {"run": state["run"], "entry": entry_["id"]}, "task_id": task_id},
+    )  # fmt: skip
+    book.stored(item, message["id"])
+    store.set(f"sent:{worker['session_id']}", str(message["id"] - 1))
+    store.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+    store.set(f"autopilot:origin:{worker['session_id']}", f"autopilot:{state['run']}:x")
+    monkeypatch.setattr(entry, "lock_data_file", lambda handle: None)
+    assert entry.prepare_downgrade(None, store.directory) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out[0] == "Stopped Autopilot."
+    assert out[1] == (
+        "Withdrew Autopilot's answers not delivered yet: 1 task(s) wait for you with Go on: "
+        "“Write the client”."
+    )
+    reread = Store(store.directory)
+    meta = reread.message(message["id"])["meta"]
+    assert "prompt" not in meta and meta["withdrawn"] is True
+    assert reread.prompts(worker["session_id"], after=message["id"] - 1) == []
+    assert reread.get(f"stopped:{task_id}") == "you"
+    assert reread.one("SELECT status FROM tasks WHERE id=?", (task_id,))["status"] == "waiting"
+    assert reread.messages(worker["session_id"])[-1]["meta"]["stopped"] is True
+    assert reread.keys("autopilot:origin:") == []
+    again = Logbook(reread)
+    assert again.item(item)["state"] == "withdrawn" and again.item(lost)["state"] == "unknown"
+    run = again.run(state["run"])
+    assert run["state"] == "ended" and run["ended_by"] == "downgrade"
+    kinds = [e["kind"] for e in again.entries(run_id=state["run"])]
+    assert kinds == ["started", "answered", "stopping", "ended", "withdrawn"]
+    assert again.check().ok
+    # Again: nothing more to do.
+    assert entry.prepare_downgrade(None, store.directory) == 0
+    assert "Autopilot" not in capsys.readouterr().out
+
+
+def test_a_downgrade_of_data_that_never_used_it_says_nothing_of_it(tmp_path, capsys, monkeypatch):
+    from chiefofstaff import __main__ as entry
+
+    Store(tmp_path / "data")
+    monkeypatch.setattr(entry, "lock_data_file", lambda handle: None)
+    assert entry.prepare_downgrade(None, tmp_path / "data") == 0
+    assert capsys.readouterr().out.strip() == "Nothing to prepare: no workers ran on another agent."
+    assert not tables(Store(tmp_path / "data")) & set(TABLES)

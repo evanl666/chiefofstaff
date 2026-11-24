@@ -18,7 +18,7 @@ never ticks it has none of them).
   once its row is claimed, and the row names it (`message_id`), so an unsent one is found again
   after a crash or before a downgrade.
 - **Decisions** Autopilot made, never in the shared `decisions` table (no version's
-  precedents can take one for the owner's), and the owner's own **acts** it may cite.
+  precedents can take one for the owner's).
 
 Pure store work: no sessions, no turns."""
 
@@ -58,10 +58,6 @@ STATEMENTS = (
     question TEXT NOT NULL, options TEXT NOT NULL, choice TEXT NOT NULL, basis TEXT NOT NULL,
     askers TEXT NOT NULL, status TEXT NOT NULL, changed_by TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL, changed_at TEXT)""",
-    """CREATE TABLE IF NOT EXISTS autopilot_provenance (
-    id TEXT PRIMARY KEY, kind TEXT NOT NULL, ref TEXT NOT NULL, channel TEXT NOT NULL,
-    text TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '{}', at TEXT NOT NULL,
-    UNIQUE (kind, ref))""",
     "CREATE INDEX IF NOT EXISTS autopilot_log_run ON autopilot_log(run_id, seq)",
     "CREATE INDEX IF NOT EXISTS autopilot_log_task ON autopilot_log(task_id, seq)",
     "CREATE INDEX IF NOT EXISTS autopilot_log_of ON autopilot_log(of)",
@@ -76,7 +72,7 @@ STATEMENTS = (
 )
 TABLES = (
     "autopilot_runs", "autopilot_log", "autopilot_blobs", "autopilot_outbox",
-    "autopilot_decisions", "autopilot_provenance",
+    "autopilot_decisions",
 )  # fmt: skip
 
 # A run's states.
@@ -577,23 +573,3 @@ class Logbook:
             (CHANGED, by, now(), decision_id, ACTIVE),
         )
         return bool(cursor.rowcount)
-
-    # The owner's own acts it may cite (a card answered in the page, say), by kind and id.
-
-    def owner_act(
-        self, kind: str, ref: str, text: str, *, channel: str, scope: dict | None = None
-    ) -> dict:
-        self.store.execute(
-            """INSERT OR IGNORE INTO autopilot_provenance(id, kind, ref, channel, text, scope, at)
-            VALUES (?,?,?,?,?,?,?)""",
-            ("p" + uuid4().hex[:10], kind, ref, channel, text, canonical(scope or {}), now()),
-        )
-        return self.act(kind, ref) or {}
-
-    def act(self, kind: str, ref: str) -> dict | None:
-        if not self.exists():
-            return None
-        row = self.store.one(
-            "SELECT * FROM autopilot_provenance WHERE kind=? AND ref=?", (kind, ref)
-        )
-        return loaded(row, "scope")
