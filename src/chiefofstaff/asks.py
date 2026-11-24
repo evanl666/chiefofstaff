@@ -985,7 +985,7 @@ class Asks:
         question_id = "q" + uuid4().hex[:8]
         # Which of their tasks it goes between (Teams' history), as they are now.
         stamped = (
-            self.runtime.teams.exchange_tasks(caller, target["id"])
+            self.runtime.teams_lite.exchange_tasks(caller, target["id"])
             if target["role"] == "worker"
             else {}
         )
@@ -1020,7 +1020,7 @@ class Asks:
             {"target": target["id"], "title": title, "question_id": question_id, **stamped},
         )
         if target["role"] == "worker":
-            self.runtime.teams.exchanged(row["id"], stamped, question_id)
+            self.runtime.teams_lite.exchanged(row["id"], stamped, question_id)
             self.runtime.peers.talked(caller, target["id"])
             self.runtime.peers.copy_to_router(
                 f"“{asker['title']}” asked {title}: {clip(params.question, 600)}",

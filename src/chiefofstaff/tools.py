@@ -2228,7 +2228,7 @@ class Tools:
             request=request,
         )
         if request and params.works_with:
-            self.runtime.teams.record_with(task["id"], request, params.works_with)
+            self.runtime.teams_lite.record_with(task["id"], request, params.works_with)
         if params.review:
             self.store.set(f"reviewreq:{task['id']}", "1")
         if context_from:

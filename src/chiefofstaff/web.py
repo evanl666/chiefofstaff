@@ -49,6 +49,7 @@ from .models import (
     SlackToken,
     TaskNote,
     TeamNudge,
+    TeamSeen,
     Unfollow,
     UpdateRequest,
 )
@@ -758,6 +759,32 @@ def create_app(
     async def session_label(session_id: str, payload: TaskNote):
         """A worker's short name, the owner's ("" gives it back its own)."""
         return {"label": runtime.teams.set_label(session_id, payload.text)}
+
+    @app.get("/api/teams/past")
+    async def past_teams(before: str = "", limit: int = 20):
+        """Teams of older requests, newest first, a page at a time (Home's Past teams)."""
+        return runtime.teams_lite.past(before, max(1, min(limit, 50)))
+
+    @app.get("/api/teams/{team_id}")
+    async def team_page(team_id: str, before: str = ""):
+        """A team (Teams lite): its parts' task rows, the map's pairs and what they handed each
+        other, newest first, a page at a time."""
+        return runtime.teams_lite.page(team_id, before)
+
+    @app.post("/api/teams/{team_id}/seen")
+    async def team_seen(team_id: str, payload: TeamSeen):
+        """The owner saw a done team (kept as the page gives it, the first look per key)."""
+        return runtime.teams_lite.seen(team_id, payload.key)
+
+    @app.post("/api/teams/{team_id}/dismiss")
+    async def team_dismiss(team_id: str, payload: TeamSeen):
+        """A done team dismissed: it goes to Past teams at once."""
+        return runtime.teams_lite.seen(team_id, payload.key, dismissed=True)
+
+    @app.post("/api/questions/{question_id}/nudge")
+    async def question_nudge(question_id: str):
+        """The owner's Nudge on a question that holds a worker up, in a team or not."""
+        return {"said": await runtime.teams_lite.nudge(question_id)}
 
     @app.get("/api/teams/{team_id}/thread")
     async def team_thread(team_id: str):

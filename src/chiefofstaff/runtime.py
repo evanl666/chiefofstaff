@@ -143,6 +143,7 @@ from .tasks import (
 )
 from .tasks import migrate as migrate_tasks
 from .teams import Teams
+from .teams_lite import TeamsLite
 from .tools import SpawnWorker, Tools
 from .watchdog import WatchConfig, Watchdog
 from .workers import SETTINGS_STOP, SETTINGS_WAIT, Workers
@@ -885,6 +886,8 @@ class Runtime:
         self.peers = Peers(self)
         self.relations = Relations(self)
         self.teams = Teams(self)
+        # What the owner sees of the work several workers do for one request (teams-v2.md).
+        self.teams_lite = TeamsLite(self)
         # A busy worker's new task, given to a second worker with its context (forks.py).
         self.forks = Forks(self)
         self.learning = Learning(self)
@@ -9236,6 +9239,7 @@ class Runtime:
         decision card it waited on no longer waits for it. Not at every change of a task that
         ended before (bug E100: finished work's own card closed at its next progress report).
         `was`: its status before, when this change set it."""
+        self.teams_lite.task_changed(task)
         self.task_actions.publish(task)
         if (
             task["status"] in ENDED
@@ -11000,6 +11004,7 @@ class Runtime:
         self.publish_state()
 
     def snapshot(self) -> dict:
+        listed = self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
         return {
             "runtime": self.status,
             # Why Send to Chief's socket is not open, while the setting is on.
@@ -11050,13 +11055,12 @@ class Runtime:
             ],
             # Questions workers wait on each other for (Home: "1 waiting 9 min").
             "peer_waiting": self.asks.peer_waiting(),
-            # Workers that work together, a team each (Home's Teams, a team's thread).
-            "teams": self.teams.view(),
+            # Teams lite: the work several workers do for one of the owner's requests, as
+            # candidates (where each stands is Home's, in the page); Past teams' count; the
+            # questions holding a worker up half an hour (Needs you, one each).
+            **self.teams_lite.snapshot(listed),
             "updates": self.owner_updates(),
-            "tasks": [
-                self.task_actions.view(task)
-                for task in self.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
-            ],
+            "tasks": [self.task_actions.view(task) for task in listed],
             "settings": self.store.settings().model_dump(),
             # Only once Prepared for you was turned on: its rows, and where steps can run.
             **({"shepherd": kept} if (kept := self.shepherd.snapshot()) else {}),
