@@ -1,5 +1,5 @@
 """Autopilot's record (autopilot/logbook.py): made on first use, append-only and chained, with
-complete payloads; its outbox, its own decisions, and the owner's acts it may cite."""
+complete payloads; its outbox and its own decisions."""
 
 import os
 import sqlite3
@@ -46,7 +46,7 @@ def test_nothing_exists_until_first_use(tmp_path):
     book = Logbook(store)
     assert not book.exists() and not tables(store) & set(TABLES)
     assert book.runs() == [] and book.entries() == [] and book.outbox() == []
-    assert book.decisions() == [] and book.act("card", "c1") is None and book.size() == 0
+    assert book.decisions() == [] and book.size() == 0
     assert book.check().ok and not store.keys("autopilot:")
     book.ensure()
     assert set(TABLES) <= tables(store)
@@ -268,14 +268,6 @@ def test_its_decisions_live_apart_from_the_owners(book):
     assert book.change_decision(made, "owner") and not book.change_decision(made, "owner")
     assert book.decision(made)["status"] == CHANGED
     assert book.decisions(status=ACTIVE) == []
-
-
-def test_the_owners_acts_are_kept_once_by_kind_and_id(book):
-    act = book.owner_act("card", "c1", "Postgres", channel="page", scope={"tasks": ["t1"]})
-    assert act["channel"] == "page" and act["scope"] == {"tasks": ["t1"]}
-    again = book.owner_act("card", "c1", "MySQL", channel="page")
-    assert again["text"] == "Postgres", "the first answer recorded stays"
-    assert book.act("card", "c2") is None
 
 
 def test_tables_made_in_a_transaction_rolled_back_are_known_to_be_gone(tmp_path):
