@@ -1280,34 +1280,6 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 #timeline[data-tab="team"] .peer-msg > .event { display: none; }
 #timeline:not([data-tab]) :is(.peer-msg, .event) + .peer-msg, #timeline:not([data-tab]) .peer-msg + .event { margin-top: -8px; }
 .tab-empty { margin: 24px 0; text-align: center; }
-/* A team's view (E130): its workers, who talks to whom, and its thread. */
-.team-view { display: grid; gap: 16px; }
-.team-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; }
-.team-members { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.team-members .member { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 10px 0 4px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); color: var(--text); font-weight: 400; }
-.team-members .member:hover { background: var(--hover); opacity: 1; }
-.team-members .member.focus { border-color: var(--accent); }
-.team-members .member.closed { color: var(--muted); }
-.team-members .member.closed .avatar { opacity: 0.55; }
-.team-members .member.earlier { padding: 0 10px; color: var(--muted); font-size: var(--small); }
-.team-graph { flex: none; max-width: 100%; height: auto; }
-.team-graph .edge { stroke: var(--muted); stroke-opacity: 0.45; stroke-linecap: round; }
-.team-graph .edge.open { stroke: var(--amber); stroke-opacity: 1; stroke-dasharray: 6 5; }
-.team-graph .node circle { fill: var(--color); stroke: var(--bg); stroke-width: 2; }
-.team-graph .node text { fill: #fff; font-size: var(--small); font-weight: 600; pointer-events: none; }
-.team-filters { display: flex; flex-wrap: wrap; gap: 4px; }
-.team-filters .filter { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 12px; background: none; color: var(--soft); border-radius: 15px; font-weight: 400; }
-.team-filters .filter:hover { background: var(--hover); color: var(--text); opacity: 1; }
-.team-filters .filter[aria-pressed="true"] { background: var(--active); color: var(--text); font-weight: 600; }
-.team-filters .count { font-size: var(--small); color: var(--muted); font-variant-numeric: tabular-nums; }
-.team-thread { display: grid; gap: 10px; }
-.team-item { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); min-width: 0; }
-.team-item.mine { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
-.team-item .head { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--small); color: var(--muted); }
-.team-item .who { color: var(--soft); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.team-item time { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
-.team-item .said { margin: 6px 0 0 30px; font-size: var(--body); color: var(--text); }
-.team-item .answer { margin: 10px 0 0 30px; padding-left: 12px; border-left: 2px solid var(--line); }
 .pill { flex: none; padding: 1px 8px; border-radius: 10px; font-size: var(--small); line-height: 18px; white-space: nowrap; }
 .pill.waiting { color: var(--amber); background: var(--amber-soft); }
 .pill.answered { color: var(--green); background: var(--green-soft); }
@@ -1357,7 +1329,6 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .sdot.failed { background: var(--red); }
 .sdot.cancelled { background: none; border: 1.5px solid var(--muted); opacity: 0.6; }
 @keyframes softpulse { 50% { opacity: 0.5; } }
-.team-graph .node.lit circle { stroke: var(--text); }
 /* A lineage: left to right, its own task ringed, its parts under it; one caption; a peek. */
 .lineage { display: grid; gap: 8px; margin: 2px 0 8px 38px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); min-width: 0; }
 .lineage .strip { display: flex; align-items: flex-start; gap: 4px; min-width: 0; overflow-x: auto; padding-bottom: 2px; }
@@ -1391,30 +1362,193 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .lineage .peek .link { margin-left: auto; flex: none; min-height: 28px; }
 /* A worker's Team tab: its task's lineage first. */
 #timeline > .team-lineage > .lineage { margin: 0 0 4px; }
-/* Home: a line per team, above Running. */
-#teams-strip { display: grid; gap: 2px; }
-#teams-strip > .title { margin: 0 0 4px; font-size: var(--small); font-weight: 600; color: var(--muted); }
-.team-row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 10px; width: 100%; min-width: 0; padding: 6px 8px; background: none; color: var(--text); font-weight: 400; text-align: left; border-radius: var(--radius); }
-.team-row:hover { background: var(--hover); opacity: 1; }
-.team-row .avatars { display: inline-flex; gap: 2px; grid-row: span 2; }
-.team-row .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.team-row .words { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--small); color: var(--muted); }
-.team-row.waiting .words { color: var(--amber); }
-.team-row .cue { display: inline-flex; align-items: center; gap: 5px; vertical-align: -2px; }
-.team-row .cue .glyph { width: 12px; height: 12px; }
-/* The sidebar: a team's workers together, under its line. */
-#session-list .team-line { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 28px; margin-top: 4px; padding: 0 12px 0 14px; background: none; color: var(--muted); font-size: var(--small); font-weight: 500; text-align: left; }
-#session-list .team-line:hover { color: var(--text); opacity: 1; }
-#session-list .team-line .swatch { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--color); }
+/* Teams lite (teams-v2.md): a team is one request of the owner's that several workers do. Every
+   color is a variable above; nothing moves (Phase 1 is static). */
+/* A part's avatar: its name's first character in its color; its state's ring; a tick when done. */
+.pa { position: relative; display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--color, var(--muted)); color: #fff; font-size: var(--small); font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+.pa.lg { width: 30px; height: 30px; font-size: 13px; }
+.pa .ring { position: absolute; inset: -4px; border-radius: 50%; pointer-events: none; }
+.pa .tick { position: absolute; right: -4px; bottom: -3px; width: 14px; height: 14px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 2px var(--card); display: grid; place-items: center; }
+.pa .tick svg { width: 9px; height: 9px; fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.pa .bang { position: absolute; right: -6px; bottom: -4px; width: 13px; height: 13px; border-radius: 50%; background: var(--badge); box-shadow: 0 0 0 2px var(--card); color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center; }
+
+/* A team's page: its request, the one thing that needs you, its map, what they handed each other. */
+#session-meta > .dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; vertical-align: 0; }
+.team-page { display: grid; gap: 20px; width: 100%; max-width: 920px; margin: 0 auto; min-width: 0; }
+.tv2-why { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: -4px 0 0; font-size: var(--small); color: var(--muted); }
+.tv2-why .why-label { flex: none; }
+.tv2-why .quote { min-width: 0; min-height: 0; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; color: var(--soft); font-weight: 400; text-align: left; }
+.tv2-why .quote:hover { opacity: 1; color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+.tv2-callout { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--line)); border-radius: var(--radius-lg); background: var(--amber-soft); }
+.tv2-callout .what { flex: 1; min-width: 0; }
+.tv2-callout .what strong { display: block; font-weight: 600; }
+.tv2-callout .what span { font-size: var(--small); color: var(--soft); }
+.tv2-callout > button { flex: none; }
+/* Done: one calm row; it leaves Teams by itself. */
+.tv2-done { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 2px 0; }
+.tv2-done .done-mark { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--green-soft); }
+.tv2-done .done-mark svg { width: 16px; height: 16px; fill: none; stroke: var(--green); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tv2-done .what { flex: 1; min-width: 0; }
+.tv2-done .what strong { display: block; font-weight: 600; color: var(--text); }
+.tv2-done .what span { display: block; font-size: var(--small); color: var(--muted); }
+.tv2-done > button.link { flex: none; min-height: 28px; font-size: var(--small); }
+
+/* The flow map: parts left to right as work moves; every line says what it carries. */
+.tv2-map { position: relative; min-width: 0; padding: 18px 16px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); box-shadow: var(--shadow); }
+.tv2-map .grid { position: relative; z-index: 1; display: grid; column-gap: 92px; row-gap: 72px; justify-content: center; align-items: center; }
+.tv2-map svg.edges { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.tv2-map .labels { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.tv2-node { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 10px; row-gap: 1px; width: 100%; min-width: 0; min-height: 58px; padding: 9px 12px 9px 10px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); color: var(--text); font-weight: 400; text-align: left; }
+.tv2-node:not(:disabled):hover { opacity: 1; border-color: color-mix(in srgb, var(--color, var(--muted)) 45%, var(--line)); box-shadow: var(--shadow); }
+.tv2-node .pa { grid-row: span 2; }
+.tv2-node .name { display: flex; align-items: center; gap: 4px; min-width: 0; font-weight: 600; line-height: 18px; }
+.tv2-node .name > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tv2-node .name .agent-mark { margin: 0 0 0 3px; }
+.tv2-node .status { min-width: 0; font-size: var(--small); line-height: 16px; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.tv2-node.is-working .status { color: var(--soft); }
+.tv2-node.is-waiting .status, .tv2-node.is-review .status { color: var(--amber); }
+.tv2-node.is-done { background: color-mix(in srgb, var(--card) 70%, var(--bg)); }
+.tv2-node.is-done .pa { filter: saturate(0.55); }
+.tv2-node.is-done .name { color: var(--soft); }
+.tv2-node.is-ended .pa { filter: saturate(0.2); opacity: 0.8; }
+.tv2-node.lit { border-color: var(--text); }
+/* Working: an accent arc around its avatar (still). Waiting: an amber ring. Up next: dashed. */
+.tv2-node.is-working .ring { background: conic-gradient(from 0deg, transparent 0 62%, var(--accent) 88%, transparent 100%); -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px)); mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px)); }
+.tv2-node.is-waiting .ring, .tv2-node.is-review .ring { border: 2px solid var(--amber); }
+.tv2-node.is-watching .ring { border: 1.5px solid color-mix(in srgb, var(--accent) 70%, transparent); }
+.tv2-node.is-queued .ring { border: 1.5px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
+.tv2-node.is-queued .pa { background: color-mix(in srgb, var(--color, var(--muted)) 60%, var(--muted)); }
+.tv2-more { display: grid; place-items: center; grid-template-columns: 1fr; color: var(--soft); font-size: var(--small); font-weight: 500; }
+/* Lines: one ink; amber while a question holds a part up or your OK is waited for; dashed while
+   what it carries is still to come. */
+.tv2-map .e { fill: none; stroke: var(--muted); stroke-opacity: 0.55; stroke-width: 1.5; stroke-linecap: round; }
+.tv2-map .e.done { stroke-opacity: 0.4; }
+.tv2-map .e.pending { stroke-dasharray: 3 5; }
+.tv2-map .e.msg { stroke: var(--soft); stroke-opacity: 0.5; }
+.tv2-map .e.owner { stroke: var(--amber); stroke-opacity: 0.75; stroke-dasharray: 3 5; }
+.tv2-map .e.failed { stroke: var(--red); stroke-opacity: 0.7; stroke-dasharray: 3 5; }
+.tv2-map .e.open { stroke: var(--amber); stroke-opacity: 1; stroke-dasharray: 5 4; }
+.tv2-map .e.lit { stroke: var(--text); stroke-opacity: 0.9; }
+.tv2-map .head-muted { fill: var(--muted); fill-opacity: 0.7; }
+.tv2-map .head-amber { fill: var(--amber); }
+.tv2-map .head-red { fill: var(--red); }
+.tv2-map .head-soft { fill: var(--soft); fill-opacity: 0.7; }
+.tv2-label { position: absolute; min-height: 0; padding: 1px 5px; border: 0; border-radius: 9px; background: var(--card); color: var(--muted); font-size: var(--small); font-weight: 400; line-height: 16px; text-align: center; white-space: nowrap; pointer-events: auto; cursor: default; }
+.tv2-label.start { text-align: left; }
+.tv2-label .piece { display: inline-block; border-radius: 6px; }
+.tv2-label .piece.amber { padding: 0 4px; color: var(--amber); background: var(--amber-soft); }
+.tv2-label .piece.red { color: var(--red); }
+.tv2-label .sep { color: var(--muted); }
+.tv2-label:not(:disabled):hover, .tv2-label.lit { opacity: 1; color: var(--text); }
+/* Narrow: top to bottom when three columns would not fit. */
+.tv2-map.vertical .grid { column-gap: 116px; row-gap: 56px; justify-content: stretch; }
+.tv2-map.vertical .tv2-node.spans { justify-self: center; width: calc(50% - 58px); }
+/* All N parts, beyond 8: a table under the map. */
+.tv2-all > summary { width: fit-content; min-height: 28px; font-size: var(--small); color: var(--accent); cursor: pointer; }
+.tv2-all table { width: 100%; margin-top: 6px; border-collapse: collapse; font-size: var(--small); }
+.tv2-all :is(th, td) { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; font-weight: 400; color: var(--soft); }
+.tv2-all thead th { color: var(--muted); font-weight: 600; }
+.tv2-all tbody th { color: var(--text); font-weight: 600; }
+
+/* What they handed each other: newest first, a question with its answer, a note by its lead. */
+.tv2-history { display: grid; gap: 8px; min-width: 0; }
+.tv2-history > h2, .tv2-history > summary { display: flex; align-items: center; gap: 8px; min-height: 28px; margin: 0; font-size: var(--small); font-weight: 600; color: var(--muted); }
+.tv2-history > summary { list-style: none; cursor: pointer; }
+.tv2-history > summary::-webkit-details-marker { display: none; }
+.tv2-history > summary::before { content: "▸"; width: 8px; }
+.tv2-history[open] > summary::before { content: "▾"; }
+.tv2-history .count { font-weight: 500; font-variant-numeric: tabular-nums; }
+.tv2-history .filters { display: flex; gap: 2px; margin-left: auto; }
+.tv2-history .filters button { min-height: 28px; padding: 0 10px; border-radius: 14px; background: none; color: var(--muted); font-size: var(--small); font-weight: 400; }
+.tv2-history .filters button:hover { opacity: 1; color: var(--text); background: var(--hover); }
+.tv2-history .filters button[aria-pressed="true"] { color: var(--text); background: var(--active); font-weight: 600; }
+.tv2-history .filters .n { margin-left: 4px; color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.tv2-history .list { display: grid; gap: 8px; min-width: 0; }
+.tv2-history > .show-more { justify-self: start; }
+.tv2-item { min-width: 0; padding: 10px 14px 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); }
+.tv2-item.waiting { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); }
+.tv2-item .top { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--small); color: var(--muted); }
+.tv2-item .who { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--soft); font-weight: 600; }
+.tv2-item .who .arrow { color: var(--muted); font-weight: 400; }
+.tv2-item .kind { flex: none; }
+.tv2-item .pill { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tv2-item time { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+.tv2-item .about { margin: 4px 0 0 30px; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.tv2-item .text { margin: 2px 0 0 30px; color: var(--soft); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: pre-line; }
+.tv2-item .text.whole { display: block; }
+.tv2-item .more { min-height: 24px; margin: 2px 0 0 24px; padding: 0 6px; background: none; color: var(--accent); font-size: var(--small); font-weight: 500; }
+.tv2-item .more:hover { opacity: 1; text-decoration: underline; }
+.tv2-item .answer { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; margin: 8px 0 0 30px; padding: 6px 0 0 10px; border-left: 2px solid var(--line); }
+.tv2-item .answer .pa { grid-row: span 2; width: 18px; height: 18px; margin-top: 1px; font-size: 10px; }
+.tv2-item .answer .a-top { font-size: var(--small); color: var(--muted); }
+.tv2-item .answer .a-top strong { color: var(--soft); font-weight: 600; }
+.tv2-item .answer .a-text { color: var(--text); overflow-wrap: anywhere; white-space: pre-line; }
+.tv2-event { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 0 4px 0 6px; font-size: var(--small); color: var(--muted); }
+.tv2-event .mark { flex: none; width: 16px; text-align: center; color: var(--muted); }
+.tv2-event.done .mark { color: var(--green); }
+.tv2-event .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soft); }
+.tv2-event time { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+
+/* Home: Teams, above Running. A row per team: its goal, a calm status line, a segment a part. */
+#tasks-teams .items { gap: 2px; }
+.team2-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; grid-template-areas: "dot goal frac" ". status status" ". segs segs"; align-items: center; column-gap: 8px; row-gap: 1px; width: 100%; min-width: 0; padding: 7px 8px 8px; border-radius: var(--radius); background: none; color: var(--text); font-weight: 400; text-align: left; }
+.team2-row:not(:disabled):hover { opacity: 1; background: var(--hover); }
+.team2-row .state { grid-area: dot; justify-self: center; }
+.team2-row .state.dot { width: 7px; height: 7px; }
+.team2-row .state.aside .dot { display: block; width: 7px; height: 7px; background: var(--muted); }
+.team2-row .goal { grid-area: goal; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.team2-row .frac { grid-area: frac; font-size: var(--small); color: var(--muted); font-variant-numeric: tabular-nums; }
+.team2-row .status { grid-area: status; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--small); color: var(--muted); }
+.team2-row .status.amber { color: var(--amber); }
+.team2-row .status.green { color: var(--green); }
+.team2-row .segs { grid-area: segs; display: flex; gap: 3px; height: 3px; margin-top: 5px; }
+.team2-row .segs i { flex: 1; border-radius: 2px; background: var(--line); }
+.team2-row .segs i.done { background: color-mix(in srgb, var(--green) 75%, var(--line)); }
+.team2-row .segs i.ended { background: color-mix(in srgb, var(--muted) 45%, var(--line)); }
+.team2-row .segs i.working { background: var(--accent); }
+.team2-row .segs i.waiting { background: var(--amber); }
+.team2-row .segs i.watching { background: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent); }
+.team2-row .check { width: 14px; height: 14px; fill: none; stroke: var(--green); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.team2-wrap { position: relative; }
+.team2-wrap .dismiss { position: absolute; right: 4px; top: 5px; display: grid; place-items: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: var(--radius); background: none; color: var(--muted); font-weight: 400; }
+.team2-wrap .dismiss:hover { opacity: 1; color: var(--text); background: var(--active); }
+.team2-wrap.done .frac { margin-right: 26px; }
+.past-teams { margin: 4px 0 0; }
+.past-teams > summary { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 8px; border-radius: var(--radius); list-style: none; cursor: pointer; font-size: var(--small); color: var(--muted); }
+.past-teams > summary::-webkit-details-marker { display: none; }
+.past-teams > summary::before { content: "▸"; width: 8px; }
+.past-teams[open] > summary::before { content: "▾"; }
+.past-teams > summary:hover { color: var(--text); }
+.past-teams > .show-more { margin-left: 22px; }
+.past-teams > .empty-hint { margin: 4px 0 0 22px; }
+.past-row { display: flex; align-items: baseline; gap: 8px; width: 100%; min-height: 30px; padding: 4px 8px 4px 22px; border-radius: var(--radius); background: none; color: var(--soft); font-weight: 400; text-align: left; }
+.past-row:hover { opacity: 1; color: var(--text); background: var(--hover); }
+.past-row .goal { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.past-row .when { flex: none; margin-left: auto; font-size: var(--small); color: var(--muted); }
+
+/* The sidebar: a team's line names its goal, its state and how far it is; its workers under it,
+   each with a rail in its part's color. */
+#session-list .team-line { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 28px; margin-top: 4px; padding: 0 12px 0 14px; background: none; color: var(--soft); font-size: var(--small); font-weight: 600; text-align: left; }
+#session-list .team-line:hover { opacity: 1; color: var(--text); }
+#session-list .team-line .dot { flex: none; width: 7px; height: 7px; }
 #session-list .team-line .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#session-list .team-line .frac { flex: none; margin-left: auto; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
+#session-list .team-line.selected { color: var(--text); background: var(--active); }
 #session-list .item.in-team { position: relative; }
 #session-list .item.in-team::before { content: ""; position: absolute; left: 2px; top: 7px; bottom: 7px; width: 2px; border-radius: 1px; background: var(--color); }
-#session-list .team-line.selected { color: var(--text); background: var(--active); }
-/* Needs you: a question between workers holding a task up (E129). */
+
+/* Needs you: a question that holds a worker up, in plain words, with one action. */
 .card.team-wait .head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.card.team-wait .head .label { font-weight: 600; min-width: 0; }
-.card.team-wait .asked { margin: 4px 0 0 30px; color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card.team-wait .head .label { min-width: 0; font-weight: 600; }
+.card.team-wait .asked { margin: 4px 0 0 30px; color: var(--soft); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .card.team-wait .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 0 30px; }
+.card.team-wait .in-team { margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--small); color: var(--muted); }
+
+/* Home's chat: a fold of team messages says its team's goal. */
+.fold-line .goal-name { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soft); font-weight: 600; }
+
+/* Read by a screen reader, not shown: the map in words. */
+.visually-hidden { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 
 /* Home: the conversation, and the panel with Needs you and Tasks */
 

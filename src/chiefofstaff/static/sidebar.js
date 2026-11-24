@@ -10,7 +10,7 @@ import { openSettings, watchGaps } from "./settings.js";
 import { ownTasks } from "./tasks.js";
 import { duck, setMood } from "./mascot.js";
 import { agentName, markOf } from "./agentpick.js";
-import { colorOf, showTeam, teamOf, teamWords } from "./team.js";
+import { sidebarTeams, teamLine } from "./team.js";
 // The captain beside the name says how Home stands, as the dots do: it salutes when something
 // needs the owner, steers while the Router or a worker is at work, keeps watch while tasks wait
 // on something, and is quiet otherwise; it cheers a moment when a task is done (and nothing
@@ -157,16 +157,18 @@ export function renderSidebar() {
   renderExternal();
   renderStatusLine();
 }
-// Workers of a team (E129) together, under its line (it opens their thread), when two or more
-// of them are here; the others as they come.
+// Workers of a team (Teams lite) together, under its line (it opens the team), while it is not
+// done; each with a rail in its part's color. The others as they come.
 function grouped(workers, where) {
   const nodes = [];
   const placed = new Set();
+  const teams = sidebarTeams();
+  const partOf = (found, id) => found.team.members.find((member) => member.session === id && !member.moved_out);
   for (const worker of workers) {
     if (placed.has(worker.id)) continue;
-    const team = teamOf(worker.id);
-    const together = team ? workers.filter((other) => team.members.includes(other.id)) : [];
-    if (together.length < 2) {
+    const found = teams.find((item) => partOf(item, worker.id));
+    const together = found ? workers.filter((other) => !placed.has(other.id) && partOf(found, other.id)) : [];
+    if (!together.length) {
       // A Compare's workers stay together (workerRows), a team or not.
       const group = worker.compare ? workers.filter((other) => other.compare?.id === worker.compare.id && !placed.has(other.id)) : [worker];
       for (const other of group) placed.add(other.id);
@@ -174,13 +176,10 @@ function grouped(workers, where) {
       continue;
     }
     for (const member of together) placed.add(member.id);
-    // A team that is one Compare and nothing more: its Compare line says it.
-    const compare = together[0].compare?.id;
-    const onlyCompare = compare && together.every((member) => member.compare?.id === compare);
-    const color = `c${colorOf(team.id)}`;
-    if (!onlyCompare) nodes.push(el("button", { type: "button", class: `team-line ${color}${state.selected === `team:${team.id}` ? " selected" : ""}`, title: `${team.name}: ${teamWords(team)}`, onclick: () => showTeam(team.id) }, el("span", { class: "swatch" }), el("span", { class: "name", text: team.name })));
+    nodes.push(teamLine(found));
     for (const node of workerRows(together, where)) {
-      if (!onlyCompare && node.classList.contains("item")) node.classList.add("in-team", color);
+      const part = node.classList.contains("item") && partOf(found, node.dataset.id);
+      if (part) node.classList.add("in-team", part.color);
       nodes.push(node);
     }
   }

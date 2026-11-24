@@ -48,7 +48,7 @@ CHUNK = 400
 PALETTE = ("c0", "c3", "c5", "c2", "c6", "c7", "c1", "c4")
 TEAM_ID = re.compile(r"^team-(\d+)-(t[0-9a-f]{7})$")
 SEEN_KEY = re.compile(r"^[0-9a-z]{1,32}$")
-LINK_KEYS = ("with:", "replacedby:", "supersededby:", "contextfrom:")
+LINK_KEYS = ("with:", "replacedby:", "supersededby:", "contextfrom:", "setaside:")
 
 
 def loads(text: str | None, default: Any) -> Any:
@@ -318,6 +318,10 @@ class TeamsLite:
                     "tasks": chain,
                     "session": tasks[now_on]["session_id"],
                     "title": tasks[now_on]["title"],
+                    # As it ended, for a part Home no longer lists (it finished long ago).
+                    "status": tasks[now_on]["status"],
+                    "ended_at": tasks[now_on]["ended_at"] or "",
+                    "set_aside": bool(links.get(f"setaside:{now_on}")),
                     "name": names[index],
                     "avatar": marks[index],
                     "color": PALETTE[index % len(PALETTE)],
