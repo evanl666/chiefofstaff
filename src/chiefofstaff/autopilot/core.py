@@ -206,6 +206,8 @@ class Autopilot(Answers, Results):
         self.verify_job: asyncio.Task | None = None
         # Reported questions being judged now (one pass at a time, off the periodic loop).
         self.questioning = False
+        # Workers being opened again asking first now (answers.reopen_asking), by id.
+        self.reopening: dict[str, asyncio.Task] = {}
         self.runner: Any = None
 
     # The switch.
