@@ -2,17 +2,22 @@
 
 ## Unreleased
 
-- **A PR in a stack on GitHub merges from its card.** *Merge* on a stacked PR failed with
-  GitHub's "part of a stack and must be merged using the asynchronous merge REST API" (each
-  click again). It now merges through GitHub's own merge for stacks, at the commit the card
-  showed, and the card says when GitHub is done (*Merging…* while it works in the background).
-  A PR above open PRs of its stack says first that those merge with it (GitHub merges a stack
-  from the bottom), and *Merge all 3* merges them as they were then; one GitHub can't merge
-  says why in words, and what to do. *Merge when ready* merges a stacked PR the same way, and
-  waits for any open PR below it to merge first.
-- **A PR a worker opens just before its report is in that result's receipts.** GitHub can lag a
-  moment on a new PR; its result's receipts then went without it (no PR on its card, no *Merge*
-  card). It is read again after a short pause.
+A busy worker's new task starts at once in a second worker with its context; a decision you
+made isn't asked again; a PR in a stack merges from its card; and Prepared for you (new, off
+by default) keeps your PRs moving.
+
+- **A busy worker's new task goes to a second worker with its context.** When the worker that
+  knows the subject is busy (at work with two or more tasks open, or for ten minutes without a
+  break) and a worker slot is free, its new task no longer waits behind its other work: a
+  second worker starts at once from that worker's conversation so far (up to its last finished
+  turn), in a folder and branch of its own from the project's base, while the first goes on
+  undisturbed. Work you want done in parallel with what a worker is doing goes there too, and a
+  new worker you ask for can start from an earlier worker's conversation. The Router chat says
+  *Started a second worker for “…” (context from “…”)*; the second worker sits under the first
+  in the sidebar, its task's row says *Worker from “…”*, and its team's *Tasks* say *⑂ forked
+  from …*. A worker on Codex or Claude Code, whose conversations are not forked yet, hands its
+  second worker a brief of its work instead (its tasks, what the finished ones found, its
+  folders and files). On by default; Settings → General turns it off.
 - **A decision you made is not asked again, and reconsidering one replaces it.** A worker that
   asked the same question again on its task (after being shown your answer) made a new card,
   and its task waited again; when it had found the first choice wrong, both answers stayed in
@@ -27,6 +32,17 @@
   is now a line in the Router's chat, once, on its task (the Router isn't woken for it), as is
   its answer to what you asked it there (an *Update*); a result its worker amends in the same
   turn shows there as amended, not as first reported.
+- **A PR in a stack on GitHub merges from its card.** *Merge* on a stacked PR failed with
+  GitHub's "part of a stack and must be merged using the asynchronous merge REST API" (each
+  click again). It now merges through GitHub's own merge for stacks, at the commit the card
+  showed, and the card says when GitHub is done (*Merging…* while it works in the background).
+  A PR above open PRs of its stack says first that those merge with it (GitHub merges a stack
+  from the bottom), and *Merge all 3* merges them as they were then; one GitHub can't merge
+  says why in words, and what to do. *Merge when ready* merges a stacked PR the same way, and
+  waits for any open PR below it to merge first.
+- **A PR a worker opens just before its report is in that result's receipts.** GitHub can lag a
+  moment on a new PR; its result's receipts then went without it (no PR on its card, no *Merge*
+  card). It is read again after a short pause.
 - **Claude's models say what they run, and an exact one can be pinned.** A Claude worker's model
   menu (its **⋯**, the chip's popover, Settings) listed "Default · Opus" and "Default
   (recommended)" without saying whose default each was, and only Claude Code's aliases. Now its
@@ -35,6 +51,28 @@
   model it stands for now and follows Claude Code's updates; and each of those exact models is a
   choice of its own, pinned, as Codex workers' are. The list is the one your account's workers
   report: Chief of Staff's offline check of Claude Code no longer replaces it with its own.
+- **Under *Needs you*, every dot is amber.** A result you had not opened yet had a blue dot,
+  Running's color, so beside the amber ones it read as still running. A task's dot now always
+  says where it is (amber: it needs you), opened or not, as the sidebar's dots do; a result you
+  have not opened yet says *New* before its title until you open it (hover the dot or the word
+  for what it means).
+- **A checkout of yours given to read stays read-only after a `cd` that fails.** A command
+  after a `cd` to a folder that isn't there (after `;`, `||`, a new line, `pushd`, in a
+  subshell or `sh -c`) runs where the line was, not in that folder, and is now read so: before,
+  `cd gone || echo y > ../app/notes.txt` from a worker's own folder wrote into your checkout
+  unrefused. The same on Windows: a `Set-Location` that fails goes on where it was, unless
+  `-ErrorAction Stop` ends the line; and cmd's `cd /d`.
+- **Paths with a space, tested everywhere.** Every test and live suite now runs Chief of Staff
+  with a data folder whose path has a space, as macOS's own has (`Application Support`). What
+  that found is fixed: a Claude Code run from a folder whose path has a space (by itself, or by
+  Node from its package) is known as Claude's, so a session open in it is never taken for
+  closed and resumed beside it; and a worker can add a local repository by a `file://` URL
+  whose path has a space.
+- **Java, Maven and Gradle in a worker's sandbox where a cache's path has a space** (a home
+  folder's). The truststore and Gradle's daemon folder are now quoted in `JAVA_TOOL_OPTIONS` and
+  `GRADLE_OPTS`, as the JVM and Gradle's script read quotes there; Maven's local repository goes
+  in `JAVA_TOOL_OPTIONS` then, since `mvn` splits `MAVEN_OPTS` at every space. Before, such a
+  path left every JVM unable to start.
 - **Fixes:** Continue with Copilot on a card for a worker whose work already went on with a new
   worker sends its message to that one, instead of making another; folded *System agents* says
   "The Router on Copilot for now" while its agent can't run it, not where it was put; a step of
@@ -42,40 +80,6 @@
   a worker without a team no longer shows "null" beside its tabs; new work you pick an agent for
   in the message box (`@claude`) is no longer given to a worker on another agent that knows the
   project: it starts on the agent you picked.
-- **A busy worker's new task goes to a second worker with its context.** When the worker that
-  knows the subject is busy (at work with two or more tasks open, or for ten minutes without a
-  break) and a worker slot is free, its new task no longer waits behind its other work: a
-  second worker starts at once from that worker's conversation so far (up to its last finished
-  turn), in a folder and branch of its own from the project's base, while the first goes on
-  undisturbed. Work you want done in parallel with what a worker is doing goes there too, and a
-  new worker you ask for can start from an earlier worker's conversation. The Router chat says
-  *Started a second worker for “…” (context from “…”)*; the second worker sits under the first
-  in the sidebar, its task's row says *Worker from “…”*, and its team's *Tasks* say *⑂ forked
-  from …*. A worker on Codex or Claude Code, whose conversations are not forked yet, hands its
-  second worker a brief of its work instead (its tasks, what the finished ones found, its
-  folders and files). On by default; Settings → General turns it off.
-- **Under *Needs you*, every dot is amber.** A result you had not opened yet had a blue dot,
-  Running's color, so beside the amber ones it read as still running. A task's dot now always
-  says where it is (amber: it needs you), opened or not, as the sidebar's dots do; a result you
-  have not opened yet says *New* before its title until you open it (hover the dot or the word
-  for what it means).
-- **Paths with a space, tested everywhere.** Every test and live suite now runs Chief of Staff
-  with a data folder whose path has a space, as macOS's own has (`Application Support`). What
-  that found is fixed: a Claude Code run from a folder whose path has a space (by itself, or by
-  Node from its package) is known as Claude's, so a session open in it is never taken for
-  closed and resumed beside it; and a worker can add a local repository by a `file://` URL
-  whose path has a space.
-- **A checkout of yours given to read stays read-only after a `cd` that fails.** A command
-  after a `cd` to a folder that isn't there (after `;`, `||`, a new line, `pushd`, in a
-  subshell or `sh -c`) runs where the line was, not in that folder, and is now read so: before,
-  `cd gone || echo y > ../app/notes.txt` from a worker's own folder wrote into your checkout
-  unrefused. The same on Windows: a `Set-Location` that fails goes on where it was, unless
-  `-ErrorAction Stop` ends the line; and cmd's `cd /d`.
-- **Java, Maven and Gradle in a worker's sandbox where a cache's path has a space** (a home
-  folder's). The truststore and Gradle's daemon folder are now quoted in `JAVA_TOOL_OPTIONS` and
-  `GRADLE_OPTS`, as the JVM and Gradle's script read quotes there; Maven's local repository goes
-  in `JAVA_TOOL_OPTIONS` then, since `mvn` splits `MAVEN_OPTS` at every space. Before, such a
-  path left every JVM unable to start.
 
 **Prepared for you** (new, off by default): Chief of Staff keeps your PRs moving. Turn it on in
 Settings → General (*Keep my PRs moving*); see
