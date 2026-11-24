@@ -941,10 +941,12 @@ for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
   to the task), your answer to a decision card in the page (your answer, not the card's
   question, which is the worker's), or a habit you wrote or kept in the page. Each answer quotes
   a whole sentence or clause of yours that says it, in the worker's chat too (*Autopilot
-  answered: Postgres, because you said “Postgres for v1”*). It decides with the Router's model
-  and effort (Settings → Models), on Copilot. What workers note, what the Router writes or
-  decides, files in a repository, away answers, Send to Chief notes and Slack messages are never
-  your word.
+  answered: Postgres, because you said “Postgres for v1”*): one that names the option it chose
+  (and no other you didn't say no to), or holds its whole answer, and never one that says no to
+  it (*Do not use Redis* never means Redis, in English or Chinese). It decides with the
+  Router's model and effort (Settings → Models), on Copilot. What workers note, what the Router
+  writes or decides, files in a repository, away answers, Send to Chief notes and Slack messages
+  are never your word.
 - What nothing you said settles waits for you under *Needs you*, saying why (*Set aside: nothing
   you said settles it*), as does a recommendation alone, any permission (pushing, publishing,
   deleting, merging, commenting…), and anything irreversible or outside this computer (a
@@ -970,7 +972,8 @@ usual settings. Writing to a worker yourself in the page hands it back to you.
 **Stop** stops it at once: nothing it queued goes out, the turns it continued (and the Router's,
 when one carries its work) are stopped, their tasks waiting with *Go on*, and what it was still
 deciding or checking is yours (a card it was judging is drawn for you, a result stays to
-review). What its judge and the turns it starts use counts against *Credits a day*; at the cap
+review; a question or decision it answered whose answer had not gone out yet is yours again,
+under *Needs you*, saying so). What its judge and the turns it starts use counts against *Credits a day*; at the cap
 it pauses until the next day and says so.
 
 **When it ends**, one card at the end of the Router's chat, *While you were away*, says what it
