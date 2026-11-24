@@ -493,6 +493,32 @@ async def test_a_part_continued_outside_its_request_has_moved_out(harness, monke
     assert stamp(harness, outside["task_id"]) is None
 
 
+async def test_a_moved_out_part_keeps_its_team_with_what_waited_on_it(harness, monkeypatch):
+    """Continue with… moves what waited on a part onto its continuation (outside the request):
+    still a link to the part it was, so the team stays, the part moved out."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    monkeypatch.setattr(runtime, "handoff_summary", _summary)
+    monkeypatch.setattr(runtime, "continue_checks", lambda row, agent: None)
+    await owner_turn(harness, runtime, "Export, then import.")
+    one = await spawn(runtime, router, "Sales report export")
+    two = await spawn(runtime, router, "Warehouse import", after=[one["task_id"]])
+    other = await owner_turn(harness, runtime, "Also archive.")
+    runtime.update_session(one["session_id"], status="idle")
+    made = await runtime.continue_on(
+        one["session_id"], "copilot", also="Archive.", also_request=other
+    )
+    assert [d["id"] for d in runtime.tasks.deps(two["task_id"])] == [made["task_id"]]
+    [team] = teams_of(runtime)
+    assert [m["moved_out"]["task"] if m["moved_out"] else "" for m in team["members"]] == [
+        made["task_id"],
+        "",
+    ]
+    assert [(e["from"], e["to"], e["state"]) for e in team["edges"]] == [
+        (one["task_id"], two["task_id"], "pending")
+    ]
+
+
 async def test_a_seen_mark_is_kept_as_given_first_look_per_key(harness):
     runtime = await harness.connect()
     team = "team-12-tabcdef0"

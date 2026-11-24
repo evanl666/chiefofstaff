@@ -1366,18 +1366,19 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
    color is a variable above; nothing moves (Phase 1 is static). */
 /* A part's avatar: its name's first character in its color; its state's ring; a tick when done. */
 .pa { position: relative; display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--color, var(--muted)); color: #fff; font-size: var(--small); font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
-.pa.lg { width: 30px; height: 30px; font-size: 13px; }
+.pa.lg { width: 30px; height: 30px; font-size: var(--body); }
 .pa .ring { position: absolute; inset: -4px; border-radius: 50%; pointer-events: none; }
 .pa .tick { position: absolute; right: -4px; bottom: -3px; width: 14px; height: 14px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 2px var(--card); display: grid; place-items: center; }
 .pa .tick svg { width: 9px; height: 9px; fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-.pa .bang { position: absolute; right: -6px; bottom: -4px; width: 13px; height: 13px; border-radius: 50%; background: var(--badge); box-shadow: 0 0 0 2px var(--card); color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center; }
+.pa .bang { position: absolute; right: -6px; bottom: -4px; width: 13px; height: 13px; border-radius: 50%; background: var(--badge); box-shadow: 0 0 0 2px var(--card); display: grid; place-items: center; }
+.pa .bang::after { content: "!"; color: #fff; font-size: 10px; font-weight: 700; line-height: 1; }
 
 /* A team's page: its request, the one thing that needs you, its map, what they handed each other. */
 #session-meta > .dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; vertical-align: 0; }
 .team-page { display: grid; gap: 20px; width: 100%; max-width: 920px; margin: 0 auto; min-width: 0; }
-.tv2-why { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: -4px 0 0; font-size: var(--small); color: var(--muted); }
+.tv2-why { display: flex; align-items: center; gap: 8px; min-width: 0; margin: -8px 0 -4px; font-size: var(--small); color: var(--muted); }
 .tv2-why .why-label { flex: none; }
-.tv2-why .quote { min-width: 0; min-height: 0; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; color: var(--soft); font-weight: 400; text-align: left; }
+.tv2-why .quote { min-width: 0; min-height: 28px; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; color: var(--soft); font-weight: 400; text-align: left; }
 .tv2-why .quote:hover { opacity: 1; color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
 .tv2-callout { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--line)); border-radius: var(--radius-lg); background: var(--amber-soft); }
 .tv2-callout .what { flex: 1; min-width: 0; }
@@ -1404,7 +1405,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tv2-node .name { display: flex; align-items: center; gap: 4px; min-width: 0; font-weight: 600; line-height: 18px; }
 .tv2-node .name > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tv2-node .name .agent-mark { margin: 0 0 0 3px; }
-.tv2-node .status { min-width: 0; font-size: var(--small); line-height: 16px; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.tv2-node .status { min-width: 0; font-size: var(--small); line-height: 16px; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .tv2-node.is-working .status { color: var(--soft); }
 .tv2-node.is-waiting .status, .tv2-node.is-review .status { color: var(--amber); }
 .tv2-node.is-done { background: color-mix(in srgb, var(--card) 70%, var(--bg)); }
@@ -1433,15 +1434,17 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tv2-map .head-amber { fill: var(--amber); }
 .tv2-map .head-red { fill: var(--red); }
 .tv2-map .head-soft { fill: var(--soft); fill-opacity: 0.7; }
-.tv2-label { position: absolute; min-height: 0; padding: 1px 5px; border: 0; border-radius: 9px; background: var(--card); color: var(--muted); font-size: var(--small); font-weight: 400; line-height: 16px; text-align: center; white-space: nowrap; pointer-events: auto; cursor: default; }
+.tv2-label { position: absolute; padding: 1px 5px; border-radius: 9px; background: var(--card); color: var(--muted); font-size: var(--small); line-height: 16px; text-align: center; white-space: nowrap; pointer-events: auto; cursor: default; }
 .tv2-label.start { text-align: left; }
 .tv2-label .piece { display: inline-block; border-radius: 6px; }
 .tv2-label .piece.amber { padding: 0 4px; color: var(--amber); background: var(--amber-soft); }
 .tv2-label .piece.red { color: var(--red); }
 .tv2-label .sep { color: var(--muted); }
-.tv2-label:not(:disabled):hover, .tv2-label.lit { opacity: 1; color: var(--text); }
+.tv2-label:hover, .tv2-label.lit { color: var(--text); }
 /* Narrow: top to bottom when three columns would not fit. */
 .tv2-map.vertical .grid { column-gap: 116px; row-gap: 56px; justify-content: stretch; }
+.tv2-map.tight:not(.vertical) .grid { row-gap: 24px; }
+.tv2-map.tight.vertical .grid { column-gap: 24px; }
 .tv2-map.vertical .tv2-node.spans { justify-self: center; width: calc(50% - 58px); }
 /* All N parts, beyond 8: a table under the map. */
 .tv2-all > summary { width: fit-content; min-height: 28px; font-size: var(--small); color: var(--accent); cursor: pointer; }
@@ -1476,10 +1479,10 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tv2-item .about { margin: 4px 0 0 30px; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
 .tv2-item .text { margin: 2px 0 0 30px; color: var(--soft); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: pre-line; }
 .tv2-item .text.whole { display: block; }
-.tv2-item .more { min-height: 24px; margin: 2px 0 0 24px; padding: 0 6px; background: none; color: var(--accent); font-size: var(--small); font-weight: 500; }
+.tv2-item .more { min-height: 28px; margin: 0 0 -4px 24px; padding: 0 6px; background: none; color: var(--accent); font-size: var(--small); font-weight: 500; }
 .tv2-item .more:hover { opacity: 1; text-decoration: underline; }
 .tv2-item .answer { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; margin: 8px 0 0 30px; padding: 6px 0 0 10px; border-left: 2px solid var(--line); }
-.tv2-item .answer .pa { grid-row: span 2; width: 18px; height: 18px; margin-top: 1px; font-size: 10px; }
+.tv2-item .answer .pa { grid-row: span 2; width: 20px; height: 20px; margin-top: 1px; }
 .tv2-item .answer .a-top { font-size: var(--small); color: var(--muted); }
 .tv2-item .answer .a-top strong { color: var(--soft); font-weight: 600; }
 .tv2-item .answer .a-text { color: var(--text); overflow-wrap: anywhere; white-space: pre-line; }

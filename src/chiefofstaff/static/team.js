@@ -447,7 +447,8 @@ function partStatus(part, st, team) {
   }
   if (part.state === "working") return firstLine(row?.progress || "") || "Working";
   if (part.next) {
-    const before = team.edges.filter((edge) => edge.kind === "after" && edge.to === part.id && edge.state !== "met");
+    const order = (id) => st.parts.findIndex((other) => other.id === id);
+    const before = team.edges.filter((edge) => edge.kind === "after" && edge.to === part.id && edge.state !== "met").sort((a, b) => order(a.from) - order(b.from));
     const owner = before.filter((edge) => edge.state === "owner").map((edge) => name(edge.from));
     if (owner.length) return `Starts after your OK on ${owner.join(" and ")}`;
     if (before.length) return `Starts after ${before.map((edge) => name(edge.from)).join(" and ")}`;

@@ -164,13 +164,28 @@ function grouped(workers, where) {
   const placed = new Set();
   const teams = sidebarTeams();
   const partOf = (found, id) => found.team.members.find((member) => member.session === id && !member.moved_out);
-  for (const worker of workers) {
+  // A worker with its second workers (forks.py), wherever each would rank: nested under it.
+  const byId = new Map(workers.map((worker) => [worker.id, worker]));
+  const rootOf = (worker) => {
+    let top = worker;
+    const seen = new Set([worker.id]);
+    for (let from = worker.fork_of?.id; from && !seen.has(from); from = byId.get(from)?.fork_of?.id) {
+      seen.add(from);
+      if (byId.has(from)) top = byId.get(from);
+    }
+    return top;
+  };
+  const family = (list) => {
+    const tops = new Set(list.map((worker) => worker.id));
+    return workers.filter((other) => !placed.has(other.id) && (tops.has(other.id) || tops.has(rootOf(other).id)));
+  };
+  for (const worker of workers.map(rootOf)) {
     if (placed.has(worker.id)) continue;
     const found = teams.find((item) => partOf(item, worker.id));
-    const together = found ? workers.filter((other) => !placed.has(other.id) && partOf(found, other.id)) : [];
+    const together = found ? family(workers.filter((other) => partOf(found, other.id))) : [];
     if (!together.length) {
       // A Compare's workers stay together (workerRows), a team or not.
-      const group = worker.compare ? workers.filter((other) => other.compare?.id === worker.compare.id && !placed.has(other.id)) : [worker];
+      const group = family(worker.compare ? workers.filter((other) => other.compare?.id === worker.compare.id) : [worker]);
       for (const other of group) placed.add(other.id);
       nodes.push(...workerRows(group, where));
       continue;

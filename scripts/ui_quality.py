@@ -1056,17 +1056,25 @@ async def needs_dots_views(runtime, browser, quality: Quality):
 
 
 async def teams_views(runtime, browser, quality: Quality):
-    """E129, E130: Home's chat with what workers told each other folded (one line: how many,
-    who, what waits) and the routing receipts folded, open; the Teams strip and a question held
-    up under Needs you; a team's view; a worker's Team tab; 800 to 1440 px, light and dark
-    (browser-shots/teams/)."""
-    from ui_edges import teams_held_up, teams_seeded
+    """E129: Home's chat with what workers told each other folded (one line: how many, who, what
+    waits) and the routing receipts folded, open. Teams lite: teams-list (Home's Teams rows and
+    Past teams), teams-needs (a held question's card, in a team and in none), teams-active (a
+    team at work: its map, what they handed each other), teams-idle (waiting on your OK),
+    teams-done (the calm Done row); 800 to 1440 px, light and dark (browser-shots/teams/)."""
+    import teams_scene
+    from ui_edges import teams_seeded
 
     folder = SHOTS / "teams"
     folder.mkdir(exist_ok=True)
-    seeded = await teams_seeded(runtime)
-    await teams_held_up(runtime, seeded)
-    team = f"team-{seeded['scout'][:8]}"
+    await teams_seeded(runtime)
+    found = await teams_scene.teams_lite_seeded(runtime)
+    await teams_scene.held_unteamed(runtime)
+    ids = found["ids"]
+    pages = {
+        "teams-active": next(i for g, i in ids.items() if g.startswith("设计")),
+        "teams-idle": next(i for g, i in ids.items() if g.startswith("Ship")),
+        "teams-done": next(i for g, i in ids.items() if g.startswith("给")),
+    }
     for scheme in ("light", "dark"):
         context = await browser.new_context(
             viewport={"width": 1440, "height": 1000}, color_scheme=scheme, bypass_csp=True
@@ -1087,54 +1095,43 @@ async def teams_views(runtime, browser, quality: Quality):
             await timeline.screenshot(path=folder / f"quality-{width}-{scheme}-chat.png")
             await quality.check(page, f"teams chat {width} {scheme}", "#timeline")
         await quality.contrast(page, f"teams chat {scheme}", "#timeline")
-        await expect(page.locator(f'#teams-strip .team-row[data-team="{team}"]')).to_be_visible()
+        await expect(page.locator("#tasks-teams .team2-row")).to_have_count(3)
         for width in WIDTHS:
             await page.set_viewport_size({"width": width, "height": 1000})
             await page.wait_for_timeout(150)
-            for tab, part in (("needs", "#needs"), ("tasks", "#teams-strip")):
+            for name, part, tab in (("teams-needs", "#needs", "needs"),
+                                    ("teams-list", "#tasks-teams", "tasks")):  # fmt: skip
                 if width < 1100:
                     await page.locator(f"#home-tabs [data-tab={tab}]").click()
                     await page.wait_for_timeout(150)
-                await page.locator(part).screenshot(
-                    path=folder / f"quality-{width}-{scheme}-{tab}.png"
-                )
-                await quality.check(page, f"teams {tab} {width} {scheme}", part, KNOWN_ROW_FINDINGS)
-        await quality.contrast(page, f"teams needs {scheme}", "#needs")
-        await quality.contrast(page, f"teams strip {scheme}", "#teams-strip")
-        await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
-        await expect(page.locator("#timeline .team-view .team-item")).to_have_count(6)
-        for width in WIDTHS:
-            await page.set_viewport_size({"width": width, "height": 1000})
-            await page.wait_for_timeout(150)
-            await page.locator("#main").screenshot(
-                path=folder / f"quality-{width}-{scheme}-team.png"
+                await page.locator(part).screenshot(path=folder / f"{name}-{width}-{scheme}.png")
+                await quality.check(page, f"{name} {width} {scheme}", part, KNOWN_ROW_FINDINGS)
+        await quality.contrast(page, f"teams-needs {scheme}", "#needs")
+        await quality.contrast(page, f"teams-list {scheme}", "#tasks-teams")
+        for name, team in pages.items():
+            await page.set_viewport_size({"width": 1440, "height": 1000})
+            await page.evaluate(
+                f"import('/static/team.js').then((m) => m.showTeam({json.dumps(team)}))"
             )
-            await quality.check(page, f"team view {width} {scheme}", "#main")
-        await quality.contrast(page, f"team view {scheme}", "#main")
-        await page.locator(".team-members .member", has_text="Column Maker").click()
-        await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
-        for width in WIDTHS:
-            await page.set_viewport_size({"width": width, "height": 1000})
-            await page.wait_for_timeout(150)
-            await page.locator("#main").screenshot(
-                path=folder / f"quality-{width}-{scheme}-worker-team.png"
-            )
-            await quality.check(page, f"worker team tab {width} {scheme}", "#main")
-        await quality.contrast(page, f"worker team tab {scheme}", "#main")
+            await expect(page.locator("#timeline .team-page .tv2-map")).to_be_visible()
+            for width in WIDTHS:
+                await page.set_viewport_size({"width": width, "height": 1000})
+                await page.wait_for_timeout(250)
+                await page.locator("#main").screenshot(path=folder / f"{name}-{width}-{scheme}.png")
+                await quality.check(page, f"{name} {width} {scheme}", "#main")
+            await quality.contrast(page, f"{name} {scheme}", "#main")
         quality.failures += [f"page error {scheme}: {error}" for error in errors]
         await context.close()
 
 
 async def relations_views(runtime, browser, quality: Quality):
-    """E130: a team its tasks' relations make: Home's line with its cue, the team's view (the
-    counts, a row per task with one relation) and a task's lineage open, a worker's Team tab
-    with its task's lineage; 800 to 1440 px, light and dark (browser-shots/relations/)."""
+    """E130: a worker's own tab (Notes) starting with its task's lineage, as 0.1.56 computes
+    it; 800 to 1440 px, light and dark (browser-shots/relations/)."""
     from ui_edges import relations_seeded
 
     folder = SHOTS / "relations"
     folder.mkdir(exist_ok=True)
     seeded = await relations_seeded(runtime)
-    team = f"team-{seeded['api'][:8]}"
     for scheme in ("light", "dark"):
         context = await browser.new_context(
             viewport={"width": 1440, "height": 1000}, color_scheme=scheme, bypass_csp=True
@@ -1143,43 +1140,20 @@ async def relations_views(runtime, browser, quality: Quality):
         errors: list[str] = []
         page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
         await page.goto(f"{BASE}/#token={TOKEN}")
-        row = page.locator(f'#teams-strip .team-row[data-team="{team}"]')
-        await expect(row).to_be_visible(timeout=15000)
-        for width in WIDTHS:
-            await page.set_viewport_size({"width": width, "height": 1000})
-            await page.wait_for_timeout(150)
-            if width < 1100:
-                await page.locator("#home-tabs [data-tab=tasks]").click()
-                await page.wait_for_timeout(150)
-            await page.locator("#teams-strip").screenshot(
-                path=folder / f"quality-{width}-{scheme}-strip.png"
-            )
-            await quality.check(page, f"relations strip {width} {scheme}", "#teams-strip")
-        await quality.contrast(page, f"relations strip {scheme}", "#teams-strip")
-        await row.click()
-        view = page.locator("#timeline .team-view")
-        await expect(view.locator(".team-tasks .trow")).to_have_count(6)
-        await view.locator(f'.trow[data-task="{seeded["ui_task"]}"] .main').click()
-        await expect(view.locator(".lineage .lnode.self")).to_have_count(1)
-        for width in WIDTHS:
-            await page.set_viewport_size({"width": width, "height": 1000})
-            await page.wait_for_timeout(150)
-            await page.locator("#main").screenshot(
-                path=folder / f"quality-{width}-{scheme}-team.png"
-            )
-            await quality.check(page, f"relations team view {width} {scheme}", "#main")
-        await quality.contrast(page, f"relations team view {scheme}", "#main")
-        await page.locator("#session-list .item", has_text="Release Notes").first.click()
-        await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
+        await expect(page.locator(".home-item")).to_be_visible(timeout=15000)
+        await page.evaluate(
+            f"import('/static/session.js').then((m) => m.select({json.dumps(seeded['notes'])}))"
+        )
+        await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Notes")).click()
         await expect(page.locator("#timeline > .team-lineage .lnode.self")).to_be_visible()
         for width in WIDTHS:
             await page.set_viewport_size({"width": width, "height": 1000})
             await page.wait_for_timeout(150)
             await page.locator("#main").screenshot(
-                path=folder / f"quality-{width}-{scheme}-worker-team.png"
+                path=folder / f"quality-{width}-{scheme}-worker-notes.png"
             )
-            await quality.check(page, f"relations worker team tab {width} {scheme}", "#main")
-        await quality.contrast(page, f"relations worker team tab {scheme}", "#main")
+            await quality.check(page, f"relations worker notes tab {width} {scheme}", "#main")
+        await quality.contrast(page, f"relations worker notes tab {scheme}", "#main")
         quality.failures += [f"page error {scheme}: {error}" for error in errors]
         await context.close()
 
@@ -1660,8 +1634,12 @@ async def main():
         quality = Quality()
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
-            # `UI_QUALITY_ONLY=shepherd`: only Prepared for you's views.
-            if os.environ.get("UI_QUALITY_ONLY") != "shepherd":
+            # `UI_QUALITY_ONLY=shepherd`: only Prepared for you's views; `=teams`: only Teams'.
+            only = os.environ.get("UI_QUALITY_ONLY", "")
+            if only == "teams":
+                await teams_views(runtime, browser, quality)
+                await relations_views(runtime, browser, quality)
+            elif only != "shepherd":
                 await report_views(runtime, browser, quality)
                 await run(runtime, seeded, browser, quality, phase)
                 log("Home, a worker, Settings and Usage: 800 to 1440 px, light and dark")
@@ -1680,16 +1658,17 @@ async def main():
                 await approvals_views(runtime, browser, quality)
                 log("Your OK and Handled for you (qa8-approvals/)")
                 await teams_views(runtime, browser, quality)
-                log("what workers told each other, folded on Home (teams/)")
+                log("what workers told each other, folded on Home; Teams lite (teams/)")
                 await usage_views(runtime, browser, quality)
                 log("Usage: as Copilot counts it, by task, a worker's tasks (usage/)")
                 await relations_views(runtime, browser, quality)
-                log("how a team's tasks are related (relations/)")
+                log("a task's lineage in its worker's tab (relations/)")
                 await needs_dots_views(runtime, browser, quality)
                 log("Needs you's dots, read or not, and a new result's word (needs-dots/)")
                 await fork_views(runtime, browser, quality)
                 log("a busy worker's second worker (fork/)")
-            await shepherd_views(runtime, browser, quality)
+            if only != "teams":
+                await shepherd_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True
         await serving

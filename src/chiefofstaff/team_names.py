@@ -93,14 +93,18 @@ def goal_name(request: str, titles: list[str]) -> str:
 
 
 def longest_common(one: str, other: str) -> str:
+    """The longest piece of `one` that `other` has too, whatever their case ("Sales report"
+    of "Export the sales report")."""
     best = ""
+    folded, within = one.casefold(), other.casefold()
+    if len(folded) != len(one):
+        folded, within = one, other  # (A letter whose case changes its length: as written.)
     for start in range(len(one)):
         end = start + len(best) + 1
         while end <= len(one):
-            piece = one[start:end]
-            if piece not in other:
+            if folded[start:end] not in within:
                 break
-            best = piece
+            best = one[start:end]
             end += 1
     return best.strip()
 

@@ -5200,10 +5200,6 @@ async def teams_seeded(runtime) -> dict:
     return {"scout": scout, "writer": writer, "open": second}
 
 
-# A question held up half an hour, the minutes as they pass while the round runs.
-WAITING_WORDS = re.compile(r"^2 workers · 8 messages · 1 waiting 3\d min$")
-
-
 async def teams_held_up(runtime, seeded: dict) -> str:
     """A third question, open 34 minutes, its asker at rest with its task open: held up."""
     asked = await call_tool(runtime, "ask_session", seeded["writer"], session_id=seeded["scout"],
@@ -5219,157 +5215,6 @@ async def teams_held_up(runtime, seeded: dict) -> str:
     await settle(runtime)
     runtime.publish_state()
     return question
-
-
-async def teams_views_checked(runtime, browser, failures, seeded, shots):
-    """E129/E130, phases 2-4: the Teams strip above Running, the sidebar's team, a question held
-    up half an hour under Needs you (Nudge, Open thread), the team's own view (who talks to
-    whom, the thread a question with its answer, filters) and a worker's tabs."""
-    from chiefofstaff.digest import needs_you
-
-    question = await teams_held_up(runtime, seeded)
-    scout, writer = seeded["scout"], seeded["writer"]
-    team = f"team-{scout[:8]}"
-    for width, scheme in itertools.product((1440, 1280, 800), ("light", "dark")):
-        context = await browser.new_context(
-            viewport={"width": width, "height": 1000}, color_scheme=scheme
-        )
-        page = await context.new_page()
-        errors: list[str] = []
-        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
-        await page.goto(f"{BASE}/#token={TOKEN}")
-        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
-        if width < 1100:
-            await page.locator("#home-tabs [data-tab=tasks]").click()
-        row = page.locator(f'#teams-strip .team-row[data-team="{team}"]')
-        await expect(row.locator(".name")).to_have_text("Token Scout & Column Maker")
-        await expect(row.locator(".words")).to_have_text(WAITING_WORDS)
-        await expect(row).to_have_class(re.compile(r"\bwaiting\b"))
-        # Above Running, its words whole or cut with an ellipsis, never past the panel.
-        assert await page.locator("#tasks > :first-child").get_attribute("id") == "teams-strip"
-        found = await page.locator("#teams-strip").evaluate(OVERFLOWS)
-        assert not found, (width, found)
-        await page.locator("#panel").screenshot(path=shots / f"strip-{width}-{scheme}.png")
-        if width < 1100:
-            await page.locator("#home-tabs [data-tab=needs]").click()
-        held = page.locator(f'#needs .card.team-wait[data-id="teamwait:{question}"]')
-        await expect(held.locator(".label")).to_have_text(
-            re.compile(r"^Column Maker has waited 3\d min for Token Scout$")
-        )
-        await expect(held.locator(".asked")).to_have_text("Which region rotates first?")
-        await expect(page.locator(".home-item .badge")).to_have_text(str(needs_you(runtime)))
-        await page.locator("#needs").screenshot(path=shots / f"needs-{width}-{scheme}.png")
-        if width >= 1100:
-            line = page.locator("#session-list .team-line", has_text="Token Scout & Column Maker")
-            await expect(line).to_be_visible()
-            members = page.locator("#session-list .item.in-team").filter(
-                has_text=re.compile("Token Scout|Column Maker")
-            )
-            await expect(members).to_have_count(2)
-            await page.locator("#sidebar").screenshot(path=shots / f"sidebar-{width}-{scheme}.png")
-        # Open thread: the team's view.
-        await held.get_by_role("button", name="Open thread").click()
-        await expect(page.locator("#session-title")).to_have_text(
-            "Team · Token Scout & Column Maker"
-        )
-        await expect(page.locator("#session-meta")).to_have_text(WAITING_WORDS)
-        view = page.locator("#timeline .team-view")
-        await expect(view.locator(".team-graph .node")).to_have_count(2)
-        await expect(view.locator(".team-graph .edge.open")).to_have_count(1)
-        await expect(view.locator(".team-thread > .team-item")).to_have_count(6)
-        await expect(view.locator(".team-item.ask .pill.answered")).to_have_count(2)
-        await expect(view.locator(".team-item.ask .pill.waiting")).to_have_text(
-            [re.compile(r"^waiting 3\d min$")]
-        )
-        await expect(view.locator(".team-item.ask .answer", has_text="Read only.")).to_have_count(1)
-        await expect(page.locator("#composer")).to_be_hidden()
-        found = await page.locator("#timeline").evaluate(OVERFLOWS)
-        assert not found, (width, found)
-        await page.locator("#main").screenshot(path=shots / f"team-{width}-{scheme}.png")
-        await view.get_by_role("button", name=re.compile("^Waiting")).click()
-        await expect(view.locator(".team-thread > .team-item")).to_have_count(1)
-        await expect(view.locator(".team-item")).to_contain_text("Which region rotates first?")
-        # A worker's tabs: its work with what its team told it in a line each; Team in full.
-        await view.locator(".team-members .member", has_text="Column Maker").click()
-        tabs = page.locator("#worker-tabs")
-        await expect(tabs.get_by_role("tab")).to_have_text(
-            ["Work", re.compile(r"^Team\d+$"), "Tools", "Reports"]
-        )
-        timeline = page.locator("#timeline")
-        await expect(timeline.locator(".peer-msg > .event").first).to_be_visible()
-        await expect(timeline.locator(".peer-msg > .card").first).to_be_hidden()
-        await page.locator("#main").screenshot(path=shots / f"worker-work-{width}-{scheme}.png")
-        await tabs.get_by_role("tab", name=re.compile("^Team")).click()
-        await expect(timeline.locator(".peer-msg > .card").first).to_be_visible()
-        await expect(timeline.locator(".peer-msg > .event").first).to_be_hidden()
-        # Its task's lineage first (one of a request's two parts: E130), once the thread is read;
-        # then only what its team told it.
-        await expect(timeline.locator(":scope > .team-lineage")).to_be_visible()
-        await expect(
-            timeline.locator(":scope > :not(.peer-msg, .team-lineage):visible")
-        ).to_have_count(0)
-        await page.locator("#main").screenshot(path=shots / f"worker-team-{width}-{scheme}.png")
-        await tabs.get_by_role("tab", name="Reports").click()
-        await expect(timeline.locator(".tab-empty")).to_have_text("No reports yet.")
-        await tabs.get_by_role("button", name="Team thread").click()
-        await expect(page.locator("#session-title")).to_have_text(
-            "Team · Token Scout & Column Maker"
-        )
-        await expect(page.locator(".team-members .member.focus")).to_contain_text("Column Maker")
-        assert not errors, errors
-        await context.close()
-    log("Teams: a line above Running, the sidebar's team, the team's view, a worker's tabs")
-
-    # Nudge: the one asked hears its teammate waits; the line says it was nudged.
-    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
-    page = await context.new_page()
-    page.on("pageerror", lambda error: failures.append(str(error)))
-    await page.goto(f"{BASE}/#token={TOKEN}")
-    held = page.locator(f'#needs .card.team-wait[data-id="teamwait:{question}"]')
-    await held.get_by_role("button", name="Nudge").click()
-    await expect(page.locator(".toast", has_text="Nudged “Token Scout”")).to_be_visible()
-    await expect(held.get_by_role("button", name=re.compile("^Nudged"))).to_be_disabled()
-    notes = [m["text"] for m in runtime.store.messages(scout) if m["meta"].get("nudge")]
-    assert len(notes) == 1 and re.fullmatch(
-        r"Nudged by the owner: “Column Maker” waits for your answer \(3\d min\)\.", notes[0]
-    ), notes
-    # A short name of the owner's: the lines, the strip and the thread say it.
-    await page.locator("#session-list .item.in-team", has_text="Column Maker").first.click()
-    await page.locator("#session-more-button").click()
-    name = page.get_by_label("Short name")
-    await name.fill("Client")
-    await name.press("Enter")
-    await expect(page.locator(".toast", has_text="Its short name: Client.")).to_be_visible()
-    assert runtime.view(runtime.store.session(writer))["label"] == "Client"
-    await page.locator("#back-home").click()
-    named = page.locator(f'#teams-strip .team-row[data-team="team-{scout[:8]}"] .name')
-    await expect(named).to_have_text("Token Scout & Client")
-    await call_tool(runtime, "answer_session", scout, question_id=question, answer="EU first.")
-    await expect(held).to_have_count(0, timeout=10000)
-    runtime.teams.set_label(writer, "")
-
-    # A team's workers' colors differ, even two whose ids would give them the same one.
-    def hashed(text):
-        value = 0
-        for char in text:
-            value = (value * 31 + ord(char)) % 2**32
-        return value % 8
-
-    one = "w-same-0"
-    two = next(f"w-same-{i}" for i in range(1, 200) if hashed(f"w-same-{i}") == hashed(one))
-    colors = await page.evaluate(
-        """async ([one, two]) => {
-          const { state } = await import("/static/state.js");
-          const { colorOf } = await import("/static/team.js");
-          const team = { id: "team-same", name: "", members: [one, two], labels: {} };
-          state.snapshot.teams = [...(state.snapshot.teams || []), team];
-          return [colorOf(one), colorOf(two)];
-        }""",
-        [one, two],
-    )
-    assert colors[0] == hashed(one) and colors[1] != colors[0], colors
-    await context.close()
-    log("Teams: Nudge tells the one asked; a short name of the owner's shows everywhere; colors")
 
 
 async def round_teams(runtime, browser, failures: list[str]):
@@ -5433,7 +5278,6 @@ async def round_teams(runtime, browser, failures: list[str]):
     await expect(team.locator(".fold-line .waiting")).to_have_count(0, timeout=10000)
     await context.close()
     log("Home: an answered question no longer waits")
-    await teams_views_checked(runtime, browser, failures, seeded, shots)
 
     # A run longer than a page: Load earlier brings the rest into the same fold.
     router = runtime.store.get("router_id")
@@ -5501,18 +5345,168 @@ async def relations_seeded(runtime) -> dict:
 
 
 async def round_relations(runtime, browser, failures: list[str]):
-    """E130, task relationships: a team its tasks' relations make (no messages); the counts
-    above (a chip lights its rows), a row per task with one relation (a wait is the amber pill),
-    a lineage on a click (its parts under it, at most five, a caption, a peek), the wait
-    clearing live (drawn solid once, then "✓ after …"), less motion when asked, Home's cue and
-    a worker's Team tab. Light and dark, 800, 1280 and 1440 px (browser-shots/relations/)."""
+    """E130, task relationships, as 0.1.56 computes them, in a worker's own tab (Notes, its task
+    in no team of the owner's requests): its task's lineage first (where it came from, what came
+    of it, a caption, a peek); a wait clearing draws its line solid once, then settles; less
+    motion asked, nothing moves. Light and dark, 800, 1280 and 1440 px (browser-shots/relations/).
+    No team: these tasks were made outside an owner's request."""
     shots = Path(os.environ.get("RELATIONS_SHOTS", SHOTS / "relations"))
     shots.mkdir(parents=True, exist_ok=True)
     seeded = await relations_seeded(runtime)
-    api = seeded["api"]
-    team = f"team-{api[:8]}"
-    [found] = [t for t in runtime.teams.view() if t["id"] == team]
-    assert found["cue"] == {"parts": [1, 3], "waiting": 1}, found["cue"]
+    assert not [
+        t for t in runtime.snapshot()["teams"] if t["members"][0]["task"] == seeded["api_task"]
+    ]
+    for width, scheme in itertools.product((1440, 1280, 800), ("light", "dark")):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 1000}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        await page.evaluate(
+            f"import('/static/session.js').then((m) => m.select({json.dumps(seeded['notes'])}))"
+        )
+        tabs = page.locator("#worker-tabs")
+        await expect(tabs.get_by_role("tab")).to_have_text(["Work", "Notes", "Tools", "Reports"])
+        await expect(tabs.locator(".team-link")).to_have_count(0)
+        await tabs.get_by_role("tab", name="Notes").click()
+        strip = page.locator("#timeline > .team-lineage .lineage")
+        await expect(strip.locator(".lnode.self")).to_have_count(1)
+        await expect(strip.locator(".caption")).to_have_text(
+            re.compile(r"^Release Notes waits on Checkout UI · \d+ min$")
+        )
+        await expect(strip.locator(".llink.pending")).to_have_count(1)
+        found = await strip.evaluate(OVERFLOWS)
+        assert not found, (width, found)
+        await page.locator("#main").screenshot(path=shots / f"worker-notes-{width}-{scheme}.png")
+        # Peek at the one it waits on: its title, worker, status and Open.
+        await strip.locator(f'.lnode[data-task="{seeded["ui_task"]}"]').click()
+        strip = page.locator("#timeline > .team-lineage .lineage")
+        await expect(strip.locator(".peek .who")).to_have_text("Checkout UI")
+        await page.locator("#worker-tabs").get_by_role("tab", name="Work").click()
+        await expect(page.locator("#timeline > .team-lineage")).to_be_hidden()
+        assert not errors, errors
+        await context.close()
+    log("Relations: a worker's Notes tab starts with its task's lineage, a peek")
+
+    # The wait clears while it is shown: drawn solid once, then "started once … delivered".
+    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+    await page.evaluate(
+        f"import('/static/session.js').then((m) => m.select({json.dumps(seeded['notes'])}))"
+    )
+    await page.locator("#worker-tabs").get_by_role("tab", name="Notes").click()
+    strip = page.locator("#timeline > .team-lineage .lineage")
+    await expect(strip.locator(".llink.pending")).to_have_count(1)
+    for _ in range(2):  # (Once more after the API's result reached it first.)
+        reported = await call_tool(runtime, "report", seeded["ui"], status="done",
+                                   summary="The v2 pages are in acme/checkout#482.",
+                                   task_id=seeded["ui_task"])  # fmt: skip
+        await settle(runtime)
+        if reported.result_type != "failure":
+            break
+    assert runtime.tasks.get(seeded["ui_task"])["status"] == "review", reported
+    strip = page.locator("#timeline > .team-lineage .lineage")
+    await expect(strip.locator(".caption")).to_have_text(
+        "Checkout UI delivered · Release Notes is unblocked", timeout=10000
+    )
+    await expect(strip.locator(".llink.drawing")).to_have_count(1)
+    drawn = await strip.locator(".llink.drawing .ink").evaluate(
+        "node => getComputedStyle(node).animationName"
+    )
+    assert drawn == "draw", drawn
+    await page.locator("#main").screenshot(path=shots / "unblocked-1280-light.png")
+    runtime.store.execute(
+        "UPDATE runs SET ended_at=? WHERE task_id=?",
+        ((datetime.now(UTC) - timedelta(minutes=5)).isoformat(), seeded["ui_task"]),
+    )
+    runtime.relations.memo = None
+    await page.evaluate(
+        f"import('/static/team.js').then((m) => m.workerLineage({json.dumps(seeded['notes'])}))"
+    )
+    await expect(page.locator("#timeline > .team-lineage .caption")).to_have_text(
+        "Release Notes started once Checkout UI delivered"
+    )
+    await context.close()
+    log("Relations: a wait clearing draws its line solid once, then settles")
+
+    # Less motion: nothing breathes or draws; the words alone say it.
+    context = await browser.new_context(viewport={"width": 1280, "height": 1000},
+                                        reduced_motion="reduce")  # fmt: skip
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+    await page.evaluate(
+        f"import('/static/session.js').then((m) => m.select({json.dumps(seeded['e2e'])}))"
+    )
+    await page.locator("#worker-tabs").get_by_role("tab", name="Notes").click()
+    strip = page.locator("#timeline > .team-lineage .lineage")
+    await expect(strip.locator(".caption")).to_have_text(
+        "3 workers, one request · ready when 3 of 3 land"
+    )
+    links = strip.locator(".llink .base")
+    for index in range(await links.count()):
+        moving = await links.nth(index).evaluate("node => getComputedStyle(node).animationName")
+        assert moving == "none", moving
+    await context.close()
+    log("Relations: less motion asked, nothing moves; a request's parts in words")
+
+
+# Teams lite (teams-v2.md v3.1): what a map's labels may never cover, and the words no node says.
+LABEL_CLASHES = """map => {
+  const boxes = (selector) => [...map.querySelectorAll(selector)]
+    .map((node) => node.getBoundingClientRect());
+  const over = (a, b) => a.left < b.right - 1 && b.left < a.right - 1
+    && a.top < b.bottom - 1 && b.top < a.bottom - 1;
+  const labels = boxes(".tv2-label");
+  const nodes = boxes(".tv2-node");
+  const found = [];
+  labels.forEach((label, index) => {
+    if (nodes.some((node) => over(label, node))) found.push(`label ${index} over a node`);
+    labels.slice(index + 1).forEach((other, at) => over(label, other)
+      && found.push(`labels ${index} and ${index + at + 1}`));
+  });
+  return found;
+}"""
+INTERNAL = re.compile(r"\b(handed|forked|worker:|Copilot|Codex|Claude|t[0-9a-f]{7})\b")
+# As OVERFLOWS, but for an avatar's ring and tick (drawn around it on purpose) and the map in
+# words (read by a screen reader, not shown).
+TEAM_OVERFLOWS = OVERFLOWS.replace(
+    'if (!box.width || node.closest("pre")) return false;',
+    'if (!box.width || node.closest("pre, .pa, .visually-hidden")) return false;',
+)
+
+
+async def team_row(page, team: str):
+    return page.locator(f'#tasks-teams .team2-row[data-team="{team}"]')
+
+
+async def round_teams_v2(runtime, browser, failures: list[str]):
+    """Teams lite: Home's Teams rows (a calm line, a segment a part, the Done row, Past teams),
+    the sidebar's team line, a team's page (its request, the one thing that needs you, the flow
+    map with one labelled line per pair and the map in words, All N parts beyond 8, what its
+    parts handed each other newest first, filters only from 8), a held question's card for a
+    question in no team (Nudge, Open), a part continued outside its team, a done team leaving 10
+    minutes after it was seen, keyboard; 800, 1280 and 1440 px, light and dark
+    (browser-shots/teams-v2/)."""
+    import teams_scene
+
+    shots = Path(os.environ.get("TEAMS_V2_SHOTS", SHOTS / "teams-v2"))
+    shots.mkdir(parents=True, exist_ok=True)
+    found = await teams_scene.teams_lite_seeded(runtime)
+    held = await teams_scene.held_unteamed(runtime)
+    await teams_scene.moved_out(runtime)
+    ids = found["ids"]
+    autopilot = next(i for g, i in ids.items() if g.startswith("设计"))
+    checkout = next(i for g, i in ids.items() if g.startswith("Ship"))
+    custom = next(i for g, i in ids.items() if g.startswith("给"))
+    [warehouse] = [t["id"] for t in runtime.snapshot()["teams"] if t["goal"].startswith("Export")]
     for width, scheme in itertools.product((1440, 1280, 800), ("light", "dark")):
         context = await browser.new_context(
             viewport={"width": width, "height": 1000}, color_scheme=scheme
@@ -5524,210 +5518,294 @@ async def round_relations(runtime, browser, failures: list[str]):
         await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
         if width < 1100:
             await page.locator("#home-tabs [data-tab=tasks]").click()
-        row = page.locator(f'#teams-strip .team-row[data-team="{team}"]')
-        # One cue: a task waiting on another's first (live R2), before the fan's parts.
-        await expect(row.locator(".words")).to_have_text("5 workers · 1 waiting")
-        await expect(row.locator(".cue .glyph.waits")).to_have_count(1)
-        found = await page.locator("#teams-strip").evaluate(OVERFLOWS)
-        assert not found, (width, found)
-        await page.locator("#teams-strip").screenshot(path=shots / f"strip-{width}-{scheme}.png")
-        await row.click()
-        view = page.locator("#timeline .team-view")
-        await expect(view.locator(".team-tasks .trow")).to_have_count(6)
-        # No messages between them: no graph of who talks to whom.
-        await expect(view.locator(".team-graph")).to_have_count(0)
-        chips = view.locator(".rel-summary .rel-chip")
-        await expect(chips).to_have_text(["3 parts", "1 waiting", "1 split", "#482"])
-        rows = {
-            key: view.locator(f'.trow[data-task="{seeded[key]}"]')
-            for key in ("api_task", "ui_task", "tests_task", "notes_task", "e2e_task")
-        }
-        await expect(rows["notes_task"].locator(".rel")).to_have_text(
-            re.compile(r"^waits on Checkout UI( · \d+ min)?$")
+        section = page.locator("#tasks-teams")
+        # Above Running; a row per team (the one on you first), a calm line, a segment a part.
+        order = await page.evaluate("[...document.querySelectorAll('#tasks > *')].map((n) => n.id)")
+        assert order.index("tasks-teams") < order.index("tasks-running"), order
+        rows = section.locator(".team2-row")
+        row = await team_row(page, checkout)
+        await expect(row.locator(".goal")).to_have_text("Ship checkout v2 for acme-shop")
+        await expect(row.locator(".status")).to_have_text("Waiting on you · review UI")
+        await expect(row.locator(".frac")).to_have_text("1/3")
+        await expect(row.locator(".segs i")).to_have_count(3)
+        await expect(row.locator(".segs i").nth(1)).to_have_class("waiting")
+        row = await team_row(page, autopilot)
+        await expect(row.locator(".goal")).to_have_text("设计 Chief of Staff 的 Autopilot 模式")
+        await expect(row.locator(".status")).to_have_text(
+            "1 working · 1 waiting on a teammate · 1 up next"
         )
-        await expect(rows["notes_task"].locator(".rel")).to_have_class(re.compile(r"\bwaiting\b"))
-        await expect(rows["notes_task"].locator(".more")).to_have_text("+1")
-        # Every part says the fan's state alike (not "1 of 3" as if it were the first).
-        for key in ("api_task", "ui_task", "e2e_task"):
-            await expect(rows[key].locator(".rel")).to_have_text("3 parts · 1 landed")
-        # Beside its worker's avatar, a title without the worker's own name; whole on hover.
-        await expect(rows["ui_task"].locator(".title")).to_have_text("The v2 pages")
-        await expect(rows["ui_task"].locator(".title")).to_have_attribute(
-            "title", "Checkout UI: the v2 pages"
+        await expect(row.locator(".frac")).to_have_text("1/4")
+        row = await team_row(page, custom)
+        await expect(row.locator(".status")).to_have_text(
+            re.compile(r"^Done · 3 parts · 1 h 4\d min$")
         )
-        await expect(rows["e2e_task"].locator(".title")).to_have_text("Checkout tests on Linux")
-        await expect(rows["tests_task"].locator(".rel")).to_have_text("handed to E2E Runner")
-        await expect(rows["tests_task"]).to_have_class(re.compile(r"\bover\b"))
-        # Its worker's own earlier task: by its title.
-        await expect(view.locator(f'.trow[data-task="{seeded["dark"]}"] .rel')).to_have_text(
-            "split from “The v2 pages”"
+        await expect(row.locator(".frac")).to_have_text("")
+        await expect(
+            section.locator(f'.team2-wrap:has([data-team="{custom}"]) .dismiss')
+        ).to_be_visible()
+        # A part continued in another request's work: moved out, finished for its team.
+        row = await team_row(page, warehouse)
+        await expect(row.locator(".frac")).to_have_text("1/2")
+        assert (await rows.first.get_attribute("data-team")) == checkout
+        found_overflow = await section.evaluate(TEAM_OVERFLOWS)
+        assert not found_overflow, (width, found_overflow)
+        await section.screenshot(path=shots / f"home-teams-{width}-{scheme}.png")
+        if width >= 1100:
+            # The sidebar: the team's line over its workers, each with its part's rail.
+            line = page.locator(
+                "#session-list .team-line", has_text="设计 Chief of Staff 的 Autopilot 模式"
+            )
+            await expect(line.locator(".frac")).to_have_text("1/4")
+            await expect(
+                page.locator("#session-list .team-line", has_text="给 Chief of Staff")
+            ).to_have_count(0)
+            await page.locator("#sidebar").screenshot(path=shots / f"sidebar-{width}-{scheme}.png")
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        # A question that holds its asker up, in no team: its card, Nudge and Open.
+        card = page.locator(f'#needs .card.team-wait[data-id="teamwait:{held["question"]}"]')
+        await expect(card.locator(".label")).to_have_text(
+            re.compile(r"^Invoice rounding bug waits on Billing research's answer · 3\d min$")
         )
-        # A count chip lights the rows it counts; again, it lets go.
-        await chips.filter(has_text="1 waiting").click()
-        await expect(view.locator(".trow.lit")).to_have_count(1)
-        await expect(rows["notes_task"]).to_have_class(re.compile(r"\blit\b"))
-        await chips.filter(has_text="1 waiting").click()
-        await expect(view.locator(".trow.lit")).to_have_count(0)
-        found = await page.locator("#timeline").evaluate(OVERFLOWS)
-        assert not found, (width, found)
-        await page.locator("#main").screenshot(path=shots / f"team-{width}-{scheme}.png")
-        # A part's lineage: the parts as one fan under it, what came of it, a caption.
-        await rows["ui_task"].locator(".main").click()
-        lineage = view.locator(f'.lineage[data-task="{seeded["ui_task"]}"]')
-        await expect(lineage.locator(".col.own .lnode.self")).to_have_count(1)
-        await expect(lineage.locator(".lnode")).to_have_count(5)
-        await expect(lineage.locator(".col.own .fan .lnode")).to_have_count(2)
-        await expect(lineage.locator(".caption")).to_have_text(
-            "3 workers, one request · ready when 3 of 3 land"
+        await expect(card.get_by_role("button", name="Nudge Billing research")).to_be_visible()
+        await expect(card.get_by_role("button", name="Open", exact=True)).to_be_visible()
+        await expect(card.locator(".in-team")).to_have_count(0)
+        await page.locator("#needs").screenshot(path=shots / f"needs-{width}-{scheme}.png")
+        # A team's page: the one at work.
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        await (await team_row(page, autopilot)).click()
+        await expect(page.locator("#session-title")).to_have_text(
+            "设计 Chief of Staff 的 Autopilot 模式"
         )
-        await expect(lineage.locator(".llink.pending")).to_have_count(1)
-        await expect(lineage.locator(".lnode.self .name")).to_have_text("The v2 pages")
-        await expect(lineage.locator(".peek .what")).to_have_text("The v2 pages")
-        found = await lineage.evaluate(OVERFLOWS)
-        assert not found, (width, found)
-        # Room enough at every width: no name of a row, a lineage or the peek cut short.
-        cut = await view.evaluate(TRUNCATED, ".trow .title, .lnode .name, .peek .what")
+        await expect(page.locator("#session-meta")).to_have_text(
+            re.compile(r"^Working · 1 of 4 parts done · started ")
+        )
+        team_page = page.locator("#timeline .team-page")
+        await expect(team_page.locator(".tv2-why")).to_contain_text("先出方案")
+        await expect(team_page.locator(".tv2-callout")).to_have_count(0)
+        map_ = team_page.locator(".tv2-map")
+        nodes = map_.locator(".tv2-node")
+        await expect(nodes.locator(".name > span:first-child")).to_have_text(
+            ["方案设计", "安全规则", "点对点直连", "可点击原型"]
+        )
+        await expect(nodes.nth(2).locator(".status")).to_have_text(
+            re.compile(r"^Waits on 安全规则's answer · 1\d min$")
+        )
+        await expect(nodes.nth(3).locator(".status")).to_have_text(
+            "Starts after 安全规则 and 点对点直连"
+        )
+        await expect(nodes.nth(0).locator(".status")).to_have_text(
+            re.compile(r"^Done · you accepted it at ")
+        )
+        # One line per pair, each with one label; none over a node or another label.
+        await expect(map_.locator("path.e")).to_have_count(5)
+        await expect(map_.locator(".tv2-label")).to_have_count(4)
+        await page.wait_for_timeout(200)
+        clashes = await map_.evaluate(LABEL_CLASHES)
+        assert not clashes, (width, scheme, clashes)
+        cut = await map_.evaluate(TRUNCATED, ".tv2-node .name > span:first-child")
         assert not cut, (width, scheme, cut)
-        await page.locator("#main").screenshot(path=shots / f"lineage-{width}-{scheme}.png")
-        # Peek at another: its title, worker, status, age and Open.
-        await lineage.locator(f'.lnode[data-task="{seeded["notes_task"]}"]').click()
-        lineage = view.locator(f'.lineage[data-task="{seeded["ui_task"]}"]')
-        await expect(lineage.locator(".peek .who")).to_have_text("Release Notes")
-        await expect(lineage.locator(".peek .state")).to_have_text(re.compile(r"^queued · "))
-        # The handed-on tests: who handed it to whom.
-        await rows["tests_task"].locator(".main").click()
-        lineage = view.locator(f'.lineage[data-task="{seeded["tests_task"]}"]')
-        await expect(lineage.locator(".caption")).to_have_text(
-            "Checkout tests handed this to E2E Runner"
+        statuses = await nodes.locator(".status").all_text_contents()
+        assert not [s for s in statuses if INTERNAL.search(s)], statuses
+        pair = map_.locator(".tv2-label", has_text="asked")
+        await expect(pair).to_have_text(re.compile(r"^asked · 1\d min · told$"))
+        await expect(pair).to_have_attribute(
+            "title",
+            re.compile(
+                r"^点对点直连 asked 安全规则, waiting 1\d min; 安全规则 told 点对点直连 1 thing$"
+            ),
         )
-        await expect(view.locator(".lineage")).to_have_count(1)
-        # Hovering a relation lights both ends.
-        await rows["notes_task"].locator(".rel").hover()
-        await expect(view.locator(".trow.lit")).to_have_count(2)
+        words = map_.locator(".tv2-words li")
+        await expect(words).to_have_count(4 + 5)
+        await expect(words.first).to_have_text(
+            re.compile(r"^方案设计: Done · you accepted it at .+\.$")
+        )
+        # What they handed each other: newest first, A → B, titled by the lead sentence; no
+        # filters under 8 entries.
+        history = team_page.locator(".tv2-history")
+        items = history.locator(".tv2-item")
+        await expect(items).to_have_count(3)
+        await expect(items.first.locator(".who")).to_have_text("点对点直连→安全规则")
+        await expect(items.first.locator(".about")).to_have_text(
+            "对端实例发来的内容\uff0c能直接当作请求执行吗\uff1f"
+        )
+        await expect(items.first.locator(".pill.waiting")).to_have_text(
+            re.compile(r"^waiting 1\d min · holds 点对点直连$")
+        )
+        await expect(items.nth(1).locator(".about")).to_have_text(
+            "Autopilot 方案把来自对端的内容当请求处理\uff0c这会绕过主人"
+        )
+        await expect(history.locator(".filters")).to_have_count(0)
+        await expect(history.locator(".tv2-event").last).to_have_text(
+            re.compile(r"^·Your request, in 4 parts: 方案设计, 安全规则, 点对点直连 and 可点击原型")
+        )
+        found_overflow = await page.locator("#timeline").evaluate(TEAM_OVERFLOWS)
+        assert not found_overflow, (width, found_overflow)
+        await page.locator("#main").screenshot(path=shots / f"team-active-{width}-{scheme}.png")
+        # The one waiting on the owner: one callout, one button.
+        await page.locator("#back-home").click()
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        await (await team_row(page, checkout)).click()
+        callout = page.locator("#timeline .tv2-callout")
+        await expect(callout.locator("strong")).to_have_text("UI's result is ready for you.")
+        await expect(callout).to_contain_text("Tests starts once you accept it.")
+        await expect(callout.locator("button")).to_have_text(["Review UI"])
+        await expect(page.locator("#session-meta")).to_have_text(
+            re.compile(r"^Waiting on you · 1 of 3 parts done · since ")
+        )
+        await expect(page.locator("#timeline .tv2-label", has_text="after your OK")).to_have_count(
+            1
+        )
+        answered = page.locator("#timeline .tv2-item", has_text="cents or in dollars")
+        await expect(answered.locator(".pill.answered")).to_have_count(1)
+        await expect(answered.locator(".answer .a-text")).to_have_text(
+            "Cents, always; the mock's dollars are a leftover."
+        )
+        await page.wait_for_timeout(200)
+        clashes = await page.locator("#timeline .tv2-map").evaluate(LABEL_CLASHES)
+        assert not clashes, (width, scheme, clashes)
+        await page.locator("#main").screenshot(path=shots / f"team-idle-{width}-{scheme}.png")
+        # A part that went on outside: its node and its line say where, in words.
+        await page.locator("#back-home").click()
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        await (await team_row(page, warehouse)).click()
+        first = page.locator("#timeline .tv2-node").first
+        await expect(first.locator(".status")).to_have_text(
+            "Continued in “Sales report export” outside this team"
+        )
+        await expect(
+            page.locator("#timeline .tv2-event", has_text="outside this team")
+        ).to_have_count(1)
+        await page.locator("#main").screenshot(path=shots / f"team-moved-{width}-{scheme}.png")
+        # The done one: a calm row, its history folded.
+        await page.locator("#back-home").click()
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        await (await team_row(page, custom)).click()
+        done = page.locator("#timeline .tv2-done")
+        await expect(done.locator("strong")).to_have_text(
+            re.compile(r"^Done · 3 parts · 1 h 4\d min$")
+        )
+        await expect(done).to_contain_text("Leaves Teams 10 min after you\u2019ve seen it")
+        await expect(page.locator("#timeline details.tv2-history")).not_to_have_attribute(
+            "open", ""
+        )
+        await expect(page.locator("#session-meta")).to_have_text(
+            re.compile(r"^Done at .+ · from your request at ")
+        )
+        await page.locator("#main").screenshot(path=shots / f"team-done-{width}-{scheme}.png")
         assert not errors, errors
         await context.close()
-    log("Relations: Home's cue, the counts, a row per task with one relation, a lineage, a peek")
+    log(
+        "Teams lite: rows, the sidebar, the page at work, on you, moved out and done; "
+        "a held question of no team"
+    )
 
-    # The wait clears while the view is open: drawn solid once, the waiting worker ringed, the
-    # words flip, then settle to "after …".
+    # Nudge on a question of no team; Open is its asker's chat.
     context = await browser.new_context(viewport={"width": 1280, "height": 1000})
     page = await context.new_page()
     page.on("pageerror", lambda error: failures.append(str(error)))
     await page.goto(f"{BASE}/#token={TOKEN}")
-    await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
-    view = page.locator("#timeline .team-view")
-    notes_row = view.locator(f'.trow[data-task="{seeded["notes_task"]}"]')
-    await notes_row.locator(".main").click()
-    await expect(view.locator(".lineage .llink.pending")).to_have_count(1)
-    for _ in range(2):  # (Once more after the API's result reached it first.)
-        reported = await call_tool(runtime, "report", seeded["ui"], status="done",
-                                   summary="The v2 pages are in acme/checkout#482.",
-                                   task_id=seeded["ui_task"])  # fmt: skip
-        await settle(runtime)
-        if reported.result_type != "failure":
+    card = page.locator(f'#needs .card.team-wait[data-id="teamwait:{held["question"]}"]')
+    await card.get_by_role("button", name="Nudge Billing research").click()
+    await expect(page.locator(".toast", has_text="Nudged “Billing research”")).to_be_visible()
+    await expect(card.get_by_role("button", name=re.compile("^Nudged"))).to_be_disabled()
+    nudges = [m for m in runtime.store.messages(held["expert"]) if m["meta"].get("nudge")]
+    assert len(nudges) == 1, nudges
+    await card.get_by_role("button", name="Open", exact=True).click()
+    await expect(page.locator(f'#session-list .item[data-id="{held["asker"]}"]')).to_have_class(
+        re.compile(r"\bselected\b")
+    )
+    # Keyboard: a team's row opens it with Enter.
+    await page.locator("#back-home").click()
+    await (await team_row(page, autopilot)).focus()
+    await page.keyboard.press("Enter")
+    await expect(page.locator("#session-title")).to_have_text(
+        "设计 Chief of Staff 的 Autopilot 模式"
+    )
+    await context.close()
+    log("Teams lite: Nudge on a question of no team; Open; a row by the keyboard")
+
+    # Filters only from 8 entries, never a zero; All N parts beyond 8.
+    await teams_scene.more_exchanges(runtime, found)
+    big = await teams_scene.big_team(runtime)
+    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await (await team_row(page, autopilot)).click()
+    filters = page.locator("#timeline .tv2-history .filters button")
+    await expect(filters).to_have_text(
+        [re.compile(r"^All\d+$"), "Waiting1", "Questions1", "Notes8"]
+    )
+    await filters.filter(has_text="Questions").click()
+    await expect(page.locator("#timeline .tv2-item")).to_have_count(1)
+    await page.locator("#back-home").click()
+    await (await team_row(page, big)).click()
+    await expect(page.locator("#timeline .tv2-node:not(.tv2-more)")).to_have_count(7)
+    await expect(page.locator("#timeline .tv2-more")).to_have_text("+4 more")
+    await page.locator("#timeline .tv2-all > summary").click()
+    await expect(page.locator("#timeline .tv2-all tbody tr")).to_have_count(11)
+    await expect(page.locator("#timeline .tv2-words li").first).to_be_attached()
+    await page.locator("#main").screenshot(path=shots / "team-all-parts-1280-light.png")
+    await context.close()
+    log("Teams lite: filters from 8 entries without a zero; All 11 parts")
+
+    # Done → stays unseen → seen (2 s in sight, focused) → gone 10 min later by the timer, to
+    # Past teams; Past teams · N alone, a page at a time.
+    await teams_scene.past_teams(runtime, 22)
+    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.clock.install()
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    row = await team_row(page, custom)
+    await expect(row).to_be_visible(timeout=15000)
+    await page.clock.run_for(3000)
+    for _ in range(50):
+        if runtime.snapshot()["teams"] and any(
+            t["id"] == custom and t["seen"] for t in runtime.snapshot()["teams"]
+        ):
             break
-    assert runtime.tasks.get(seeded["ui_task"])["status"] == "review", reported
-    await expect(notes_row.locator(".rel")).to_have_text("Checkout UI delivered · unblocked",
-                                                         timeout=10000)  # fmt: skip
-    await expect(notes_row).to_have_class(re.compile(r"\bunblocked\b"))
-    await expect(view.locator(".lineage .llink.drawing")).to_have_count(1)
-    drawn = await view.locator(".lineage .llink.drawing .ink").evaluate(
-        "node => getComputedStyle(node).animationName"
+        await page.wait_for_timeout(100)
+    seen = next(t["seen"] for t in runtime.snapshot()["teams"] if t["id"] == custom)
+    assert seen and not seen["dismissed"], seen
+    await expect(row).to_be_visible()
+    await page.clock.run_for(9 * 60 * 1000)
+    await expect(row).to_be_visible()
+    # Ten minutes after it was seen: gone by the page's one timer, with no event.
+    await page.clock.run_for(2 * 60 * 1000)
+    await expect(row).to_have_count(0, timeout=10000)
+    past = page.locator("#tasks-teams .past-teams")
+    await expect(past.locator("summary")).to_have_text("Past teams · 23")
+    await past.locator("summary").click()
+    await expect(past.locator(".past-row")).to_have_count(21)
+    await expect(past.locator(".past-row").first).to_contain_text(
+        "给 Chief of Staff 做用户自定义 UI"
     )
-    assert drawn == "draw", drawn
-    await page.locator("#main").screenshot(path=shots / "unblocked-1280-light.png")
-    # Settled: a muted "after …" (as after the moment has passed).
-    runtime.store.execute(
-        "UPDATE runs SET ended_at=? WHERE task_id=?",
-        ((datetime.now(UTC) - timedelta(minutes=5)).isoformat(), seeded["ui_task"]),
-    )
-    runtime.relations.memo = None
-    await page.evaluate("async () => (await import('/static/team.js')).refreshTeam()")
-    await expect(notes_row.locator(".rel")).to_have_text(re.compile(r"^after Checkout UI$"))
-    await expect(notes_row.locator(".rel")).to_have_class(re.compile(r"\bsettled\b"))
-    await expect(view.locator(".rel-summary .rel-chip", has_text="waiting")).to_have_count(0)
-    # The last part lands: every part says so, the caption closes the fan.
-    runtime.tasks.move(seeded["e2e_task"], "review")
-    api_row = view.locator(f'.trow[data-task="{seeded["api_task"]}"]')
-    await expect(api_row.locator(".rel")).to_have_text("3 parts · all landed", timeout=10000)
-    await api_row.locator(".main").click()
-    await expect(view.locator(".lineage .caption")).to_have_text(
-        re.compile(r"^All 3 parts landed · \d+ min$")
-    )
-    await context.close()
-    log("Relations: a wait clearing draws its line solid once, rings its worker, then settles")
-
-    # Less motion: nothing breathes, pulses or draws; the words alone say it.
-    context = await browser.new_context(viewport={"width": 1280, "height": 1000},
-                                        reduced_motion="reduce")  # fmt: skip
-    page = await context.new_page()
-    page.on("pageerror", lambda error: failures.append(str(error)))
-    await page.goto(f"{BASE}/#token={TOKEN}")
-    await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
-    view = page.locator("#timeline .team-view")
-    running = view.locator(f'.trow[data-task="{seeded["dark"]}"] .sdot.running')
-    assert await running.evaluate("node => getComputedStyle(node).animationName") == "none"
-    await context.close()
-
-    # A worker's Team tab: its current task's lineage first.
-    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
-    page = await context.new_page()
-    page.on("pageerror", lambda error: failures.append(str(error)))
-    await page.goto(f"{BASE}/#token={TOKEN}")
-    await page.locator("#session-list .item", has_text="Release Notes").first.click()
-    await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
-    strip = page.locator("#timeline > .team-lineage .lineage")
-    await expect(strip.locator(".lnode.self .name")).to_have_text("Checkout v2")
-    await expect(strip.locator(".lnode.self")).to_have_attribute(
-        "title", re.compile(r"^Release Notes: checkout v2 · Release Notes · ")
-    )
-    await expect(strip.locator(".caption")).to_have_text(
-        "Release Notes started once Checkout UI delivered"
-    )
-    await page.locator("#main").screenshot(path=shots / "worker-team-1280-light.png")
-    await page.locator("#worker-tabs").get_by_role("tab", name="Work").click()
-    await expect(page.locator("#timeline > .team-lineage")).to_be_hidden()
-    await context.close()
-    log("Relations: less motion asked, nothing moves; a worker's Team tab shows its lineage")
-
-    # A large team: its latest workers and tasks, the earlier ones "+N earlier" until asked.
-    router = runtime.store.get("router_id")
-    for name in ("Docs Site", "Changelog Bot", "Status Page"):
-        await call_tool(runtime, "spawn_worker", router, title=f"{name}: checkout v2",
-                        instructions=name, why_new="test",
-                        context_from=[seeded["api_task"]])  # fmt: skip
-    for number in range(4):
-        runtime.tasks.create(seeded["e2e"], f"E2E Runner: flaky case {number}", "More.",
-                             status="done")  # fmt: skip
-    await settle(runtime)
+    await past.get_by_role("button", name="Show more").click()
+    await expect(past.locator(".past-row")).to_have_count(23)
+    # Dismiss (its x) at once; every current team gone: the section is Past teams alone.
+    for task in runtime.tasks.listed():
+        if task["status"] in {"queued", "running", "waiting", "review"}:
+            runtime.tasks.move(task["id"], "cancelled")
     runtime.publish_state()
-    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
-    page = await context.new_page()
-    page.on("pageerror", lambda error: failures.append(str(error)))
-    await page.goto(f"{BASE}/#token={TOKEN}")
-    await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
-    view = page.locator("#timeline .team-view")
-    chips = view.locator(".team-members .member")
-    await expect(chips.filter(has_not_text="earlier")).to_have_count(6)
-    await expect(view.locator(".team-members .member.earlier")).to_have_text("+2 earlier")
-    await expect(view.locator(".team-tasks .trow")).to_have_count(8)
-    await expect(view.locator(".team-tasks .earlier-rows")).to_have_text("+5 earlier")
-    await page.locator("#main").screenshot(path=shots / "large-1280-light.png")
-    await view.locator(".team-members .member.earlier").click()
-    await expect(chips).to_have_count(8)
-    await view.locator(".team-tasks .earlier-rows").click()
-    await expect(view.locator(".team-tasks .trow")).to_have_count(13)
-    # What a task waits on failed: its wait says so (it will not clear by itself).
-    found = await call_tool(runtime, "spawn_worker", router, title="Deploy Note: checkout v2",
-                            instructions="Deploy note", why_new="test",
-                            after=[seeded["e2e_task"]])  # fmt: skip
-    deploy = json.loads(found.text_result_for_llm)["task_id"]
-    runtime.tasks.move(seeded["e2e_task"], "failed")
-    await expect(view.locator(f'.trow[data-task="{deploy}"] .rel')).to_have_text(
-        "waits on E2E Runner · it failed", timeout=10000
-    )
+    dismiss = page.locator("#tasks-teams .team2-wrap.done .dismiss")
+    await expect(dismiss.first).to_be_visible(timeout=10000)
+    while await dismiss.count():
+        await dismiss.first.click()
+        await page.wait_for_timeout(300)
+    await expect(page.locator("#tasks-teams > .items > *")).to_have_count(0, timeout=10000)
+    await expect(past.locator("summary")).to_have_text(re.compile(r"^Past teams · \d+$"))
+    await page.locator("#tasks-teams").screenshot(path=shots / "past-alone-1280-light.png")
     await context.close()
-    log("Relations: a large team shows its latest workers and tasks, the rest on asking")
+    log(
+        "Teams lite: a done team stays until seen, leaves 10 min later; dismissed at once; "
+        "Past teams alone, paged"
+    )
 
 
 async def main():
@@ -6090,7 +6168,7 @@ async def main():
                           round_qa8_approvals, round_e125, round_teams,
                           round_usage, round_relations, round_shepherd,
                           round_stacked_merge, round_fork, round_needs_dots,
-                          round_settings):  # fmt: skip
+                          round_settings, round_teams_v2):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -6799,7 +6877,8 @@ async def round_fork(runtime, browser, failures: list[str]):
             await expect(nested).to_have_class(re.compile(r"\bselected\b"))
             await context.close()
     log("a second worker: one line, nested under its worker, its row and chats linked")
-    # One team with the worker it came from: in the team's tasks, forked from it (⑂).
+    # Joined to the worker it came from (the Router's view of teams, as before); its own tab
+    # starts with its task's lineage: with whose context it started (⑂). No team of the owner's.
     team = runtime.teams.team_of(worker)
     assert team and {runtime.teams.team_of(other) for other in (second, third)} == {team}
     [task] = [
@@ -6809,24 +6888,21 @@ async def round_fork(runtime, browser, failures: list[str]):
     page = await context.new_page()
     page.on("pageerror", lambda error: failures.append(str(error)))
     await page.goto(f"{BASE}/#token={TOKEN}")
-    await page.locator(f'#teams-strip .team-row[data-team="{team}"]').click()
-    view = page.locator("#timeline .team-view")
-    rel = view.locator(f'.trow[data-task="{task}"] .rel')
-    await expect(rel).to_have_class(re.compile(r"\bbranched\b"))
-    await expect(rel.locator(".glyph.branched")).to_have_count(1)
-    label = runtime.teams.label(store.session(worker))
-    await expect(rel.locator(".words")).to_have_text(f"forked from {label}")
-    await expect(view.locator(".rel-summary .rel-chip", has_text="2 forks")).to_have_count(1)
-    await view.locator(f'.trow[data-task="{task}"] .main').click()
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+    await page.evaluate(f"import('/static/session.js').then((m) => m.select({json.dumps(second)}))")
+    await page.locator("#worker-tabs").get_by_role("tab", name="Notes").click()
+    strip = page.locator("#timeline > .team-lineage .lineage")
     mine = runtime.teams.label(store.session(second))
-    await expect(view.locator(f'.lineage[data-task="{task}"] .caption')).to_have_text(
-        f"{mine} started with {label}'s context"
-    )
-    found = await view.evaluate(OVERFLOWS)
+    orc = runtime.teams.label(store.session(third))
+    # Its current task's lineage (its Avro export): its context went on to a third worker.
+    await expect(strip.locator(".caption")).to_have_text(f"{mine}'s context went to {orc}")
+    await expect(strip.locator(".lnode.self")).to_have_count(1)
+    assert task
+    found = await strip.evaluate(OVERFLOWS)
     assert not found, found
     await page.locator("#main").screenshot(path=SHOTS / "fork-team-1280.png")
     await context.close()
-    log("its team: forked from the worker it came from (⑂), a caption saying with whose context")
+    log("its tab: its lineage says with whose context it started (⑂)")
     # The switch: one line in Settings → General, on; off when saved off.
     context = await browser.new_context(viewport={"width": 1280, "height": 900})
     page = await context.new_page()
@@ -10414,28 +10490,16 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             await ux_shoot(page, "task-marks", scheme, focus=task)
             assert not errors, errors
             await context.close()
-        # Its team's view (E130): the two sides side by side, each "vs" the other; the one the
-        # owner accepts is picked, the other dimmed.
-        team = runtime.teams.team_of(pair[0])
+        # A side's own tab (Notes: no team of the owner's) starts with its task's lineage: the
+        # same task on each agent, the one the owner accepts picked.
         sides = [worker["task_id"] for worker in made["workers"]]
         context, page, errors, _ = await agents_page(browser, "light")
         await at_home(page)
-        if await page.locator("#home-tabs").is_visible():
-            await page.locator("#home-tabs [data-tab=tasks]").click()
-        row = page.locator(f'#teams-strip .team-row[data-team="{team}"]')
-        # One name for both sides, once; each of its workers by its agent's mark.
-        await expect(row.locator(".name")).to_have_text("Speed up the importer \u00d72")
-        await row.click()
-        view = page.locator("#timeline .team-view")
-        marks = view.locator(".team-members .member .agent-mark")
-        await expect(marks).to_have_count(2)
-        await expect(marks.nth(1)).to_have_attribute("aria-label", re.compile(r"^Codex"))
-        first, second = (view.locator(f'.trow[data-task="{task}"]') for task in sides)
-        await expect(first.locator(".rel")).to_have_text("vs Codex")
-        await expect(second.locator(".rel")).to_have_text("vs Copilot")
-        await expect(view.locator(".rel-summary .rel-chip", has_text="compare")).to_have_count(1)
-        await first.locator(".main").click()
-        lineage = view.locator(".lineage")
+        await page.evaluate(
+            f"import('/static/session.js').then((m) => m.select({json.dumps(pair[0])}))"
+        )
+        await page.locator("#worker-tabs").get_by_role("tab", name="Notes").click()
+        lineage = page.locator("#timeline > .team-lineage .lineage")
         await expect(lineage.locator(".fan.compare .lnode")).to_have_count(1)
         await expect(lineage.locator(".caption")).to_have_text(
             "The same task on Copilot and Codex · yours to pick"
@@ -10443,10 +10507,13 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
         # Its peek names it once (its title is its worker's name).
         await expect(lineage.locator(".peek .what")).to_have_count(0)
         runtime.tasks.move(sides[1], "done")  # The owner accepts Codex's.
-        await expect(second.locator(".rel")).to_have_text("picked", timeout=10000)
-        await expect(first.locator(".rel")).to_have_text("Codex picked")
-        await expect(first).to_have_class(re.compile(r"\bover\b"))
-        await ux_shoot(page, "compare-team", "light", focus=view)
+        await page.evaluate(
+            f"import('/static/team.js').then((m) => m.workerLineage({json.dumps(pair[0])}))"
+        )
+        await expect(page.locator("#timeline > .team-lineage .caption")).to_have_text(
+            "The same task on Copilot and Codex · Codex picked", timeout=10000
+        )
+        await ux_shoot(page, "compare-team", "light", focus=page.locator("#timeline"))
         assert not errors, errors
         await context.close()
         # A worker on Codex in the @ list is a worker (to message), not the agent Codex.
