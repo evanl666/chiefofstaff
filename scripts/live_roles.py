@@ -4,7 +4,8 @@ on Copilot while its agent can't run it. Workers stay on Copilot (real). Each sh
 Chief of Staff; each scenario passes or fails on its own (a failure dumps the sessions and the
 shard goes on); the summary lists each, with the agent's tokens and the Copilot credits spent.
 
-Shard R, the Router on Codex (Settings → Coding agents → The Router runs on Codex):
+Shard R, the Router on Codex (Settings → Agents & models → Chief of Staff's own sessions →
+the Router runs on Codex):
 R1  told something on Copilot, put on Codex: one line says so, and it still knows it
 R2  routing: a question it answers itself, no worker started
 R3  a task: a worker (on Copilot) does it; its report comes back through the Router
@@ -132,7 +133,7 @@ async def router_view(ctx: Ctx) -> dict:
 
 
 async def put(ctx: Ctx, role: str, agent: str):
-    """Settings → Coding agents: where a role runs."""
+    """Settings → Agents & models (its own sessions): where a role runs."""
     on = {ctx.agent: {"enabled": True, **({"model": lc.CLAUDE_MODEL} if ctx.agent == "claude"
                                           else {})}}  # fmt: skip
     await la.settings(ctx, agents={**on, "roles": {role: agent}})
