@@ -3,7 +3,8 @@
 
 F1  a busy worker (at work, two tasks open) gets a related task: a second worker starts at once
     with its context (one line in the Router chat, linked to it), and does the task; the busy
-    worker's own tasks finish undisturbed, in its own folder
+    worker's own tasks finish undisturbed, in its own folder; a fork for new work makes no team
+    (Teams lite: the owner's Teams has none of these tasks)
 F2  the same kind of task once that worker is free: it takes the task itself (no second worker)
 F3  every worker slot taken: the task waits for the busy worker, as before (no second worker)
 F4  the second worker answers what only the busy worker's conversation held (a codename it read
@@ -199,6 +200,10 @@ async def f1_f4_a_busy_worker_hands_a_related_task_to_a_second_worker(run: Run) 
         (theirs / "slept.txt").exists() and not (theirs / "codename.txt").exists(),
         str(sorted(p.name for p in theirs.iterdir()) if theirs.exists() else "no folder"),
     )
+    mine = {line["meta"]["task_id"], *before}
+    teams = (await run.app.get("/api/state")).get("teams", [])
+    found = [t for t in teams if mine & {task for m in t["members"] for task in m["tasks"]}]
+    run.check("F1 a fork for new work: no team", not found, json.dumps(found)[:300])
     return worker
 
 

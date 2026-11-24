@@ -2529,6 +2529,12 @@ async def e5_ask_a_peer(ctx: Ctx):
              if i["kind"] == "ask" and i["from"] == seeker["session_id"]]  # fmt: skip
     log(f"E5: thread {[(i['status'], i['answer'][:60]) for i in asked]}")
     assert any(i["status"] == "answered" and word in i["answer"] for i in asked)
+    # The owner's Teams (Teams lite): two requests, so no team of theirs.
+    lite = [
+        team for team in (await state(ctx)).get("teams", [])
+        if {keeper["id"], seeker["id"]} & {t for m in team["members"] for t in m["tasks"]}
+    ]  # fmt: skip
+    assert not lite, f"two requests make no team: {lite}"
     log("E5 passed")
 
 
@@ -2574,6 +2580,17 @@ async def e7_one_to_two(ctx: Ctx):
     maker = await titled(ctx, since, "seed")
     takers = [await titled(ctx, since, "doubler"), await titled(ctx, since, "tripler")]
     await peers_ok(ctx, since, maker, takers, str(seed))
+    # The owner's Teams (Teams lite): one request in three parts, one team of them, each part
+    # named apart.
+    mine = {maker["id"], *(taker["id"] for taker in takers)}
+    lite = [
+        team for team in (await state(ctx)).get("teams", [])
+        if mine & {t for m in team["members"] for t in m["tasks"]}
+    ]  # fmt: skip
+    assert len(lite) == 1 and {m["task"] for m in lite[0]["members"]} == mine, lite
+    names = [m["name"] for m in lite[0]["members"]]
+    log(f"E7: Teams lite {lite[0]['goal']!r}: {names}")
+    assert len(set(names)) == 3 and all(names), names
     log("E7 passed")
 
 
@@ -2783,23 +2800,35 @@ async def e15_browser(ctx: Ctx):
         await card.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-ci-card.png")
         lines = page.locator("#timeline .event", has_text="told")
         assert await lines.count() >= 1, "who told whom, in the chat"
-        # Their teams (E129, E130): a line each above Running; a team's thread, a question
-        # with its answer; a worker's Team tab with what its team told it.
-        rows = page.locator("#teams-strip .team-row")
-        assert await rows.count() >= 1, "a line per team"
-        # The Seeker's (E5), while one of them is open; else the latest.
-        seeker = page.locator("#teams-strip .team-row", has_text="Seeker")
-        found = await seeker.count()
-        await (seeker if found else rows).first.click()
-        items = page.locator("#timeline .team-view .team-item")
-        await expect(items.first).to_be_visible(timeout=10000)
-        if found:
-            await expect(items.filter(has=page.locator(".pill.answered"))).to_have_count(1)
-        await page.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-team.png")
-        await page.locator(".team-members .member").first.click()
-        await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
-        await expect(page.locator("#timeline .peer-msg > .card").first).to_be_visible()
-        await page.locator("#back-home").click()
+        # Their teams (Teams lite): a row each above Running for a request in parts (E1's,
+        # E7's); a team's page, what its parts handed each other "A → B". The Seeker's
+        # question (E5, two requests): in no team, on its workers' Team or Notes tab.
+        teams = (await state(ctx)).get("teams", [])
+        log(f"E15: teams {[(t['goal'], [m['name'] for m in t['members']]) for t in teams]}")
+        rows = page.locator("#tasks-teams .team2-row")
+        if teams:
+            await expect(rows.first).to_be_visible(timeout=10000)
+            await rows.first.click()
+            team_page = page.locator("#timeline .team-page")
+            await expect(team_page.locator(".tv2-node").first).to_be_visible(timeout=10000)
+            await page.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-team.png")
+            await page.locator("#back-home").click()
+        told = next(
+            (s for s in (await state(ctx))["sessions"] if s["role"] == "worker"
+             and "seeker" in (s.get("title") or "").lower()),
+            None,
+        )  # fmt: skip
+        if told:
+            await page.evaluate(
+                f"import('/static/session.js').then((m) => m.select({json.dumps(told['id'])}))"
+            )
+            await (
+                page.locator("#worker-tabs")
+                .get_by_role("tab", name=re.compile("^(Team|Notes)"))
+                .click()
+            )
+            await expect(page.locator("#timeline .peer-msg > .card").first).to_be_visible()
+            await page.locator("#back-home").click()
         handle, panel = page.locator("#panel-resizer"), page.locator("#panel")
         before = (await panel.bounding_box())["width"]
         box = await handle.bounding_box()
