@@ -57,7 +57,7 @@ settings would add friction, not protection, so Chief of Staff doesn't: it reads
 keeps no copy of them and waits for nothing (Copilot workers load them as your own sessions do;
 Codex workers' threads trust their folder's `.codex/` as yours do). A planted hook or server stays
 in that folder, though, and loads in any later session there, a sandboxed worker's or yours: turn
-the worker sandbox on (Settings → Workers) for repositories you don't trust; their settings are
+the worker sandbox on (Settings → General → *Sandbox*) for repositories you don't trust; their settings are
 then protected as above. Chief of Staff's own git still runs through a git folder of its own and
 never runs what a worker's repository config names.
 
@@ -79,15 +79,15 @@ the held folder holds is not carried); one in your own checkout waits for you.
 
 **Yolo** turns off Chief of Staff's *Ask first* checks for workers, not the floor above. It is
 on by default, as in your own Copilot sessions, except for workers that read Slack (they keep
-the checks unless you choose yolo in their header); turn it off in Settings, or per worker with
-*Ask first*. With the sandbox on, the OS boundaries above still hold (a worker's `git` and `gh`
+the checks unless you choose yolo in their header); tick *Ask first* in Settings → General, or
+per worker in its **⋯**. With the sandbox on, the OS boundaries above still hold (a worker's `git` and `gh`
 still reach GitHub as you, through Copilot's proxy). With the sandbox off (or unsupported), yolo
 means a worker can do anything your user account can, but what the floor refuses. Whatever yolo
 says, the floor holds; Chief of Staff keeps a worker out of a checkout of yours given to read
 and out of its own private files (as far as a command line can be read, as above), a *Prepared
 for you* step reaches no GitHub, and the Router never asks a worker to merge or force-push. Yolo
 is on by default since 0.1.18, as your own Copilot sessions usually run: if workers read content
-you do not trust (PR comments from strangers, say), turn it off in Settings.
+you do not trust (PR comments from strangers, say), tick *Ask first* in Settings.
 
 **Abilities you add** (Settings → Connections → Skills, plugins and MCP servers) run as they would
 in your own Copilot sessions: a plugin's hooks and an MCP server run as you, outside the
@@ -343,13 +343,13 @@ Everything stays on your machine: a SQLite database and work folders in the data
 (owner-only permissions), plus Copilot's own session storage (`~/.copilot`). Chief of Staff sends
 no telemetry. To say when a newer release is out, it reads its own public page on PyPI
 (`pypi.org/pypi/chiefofstaff/json`) at most once a day, a plain request that sends nothing about
-you or your machine; Settings → General turns that off. Its *Update and restart* runs only on
+you or your machine; Settings → General → More turns that off. Its *Update and restart* runs only on
 your click on its page (no tool, Slack or Send to Chief reaches it): it runs `uvx` or `uv tool
 upgrade` for Chief of Staff alone, then starts the new version in its own process, which keeps
 the private link's token (in that process's environment, as its own variable, never a worker's).
 GitHub Copilot itself works under GitHub's terms and settings.
 
-To learn how you write (Settings → *How you work*), Chief of Staff stores your own words in that
+To learn how you write (Settings → *You*), Chief of Staff stores your own words in that
 database: Slack messages you sent, your PR reviews and review comments, your commit messages and
 what you asked your own Copilot sessions. Others' messages are not kept. The learning worker
 that reads them has no tools but its own (no shell, files or web). Turn the setting off to stop
