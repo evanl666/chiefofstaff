@@ -31,7 +31,7 @@ from ..envelope import wrap
 from ..store import now
 from . import basis as owner
 from . import judge
-from .logbook import PARKED
+from .logbook import PARKED, UNDONE
 from .origin import CARRIED
 
 if TYPE_CHECKING:
@@ -411,6 +411,41 @@ class Answers:
         self.runtime.bus.publish("draft", self.store.draft(card["id"]))
         self.runtime.alert(card["text"], session_id=row["id"], needs_action=True,
                            title=f"Decision · {row['title']}")  # fmt: skip
+
+    def change(self: Autopilot, entry_id: str) -> dict:  # type: ignore[misc]
+        """*Change* on a decision it made: the card again, for the owner; their answer is
+        recorded as theirs and every task that asked is told (Decisions.answer)."""
+        entry = self.book.entry(entry_id)
+        decided = self.book.decisions(card_id=(entry or {}).get("subject", "").partition(":")[2])
+        if not entry or entry["kind"] != "decided" or not decided:
+            raise ValueError("Only a decision Autopilot made can be changed here.")
+        decision = decided[-1]
+        if decision["status"] != "active":
+            raise ValueError("You changed it already.")
+        card = self.store.draft(decision["card_id"])
+        askers = [a for a in decision["askers"] if self.store.find_session(a["session_id"])]
+        if not askers:
+            raise ValueError("The workers that asked are gone: there's nothing to change.")
+        target = {**card["target"], "askers": askers, "changes": decision["id"],
+                  "previous": decision["choice"]}  # fmt: skip
+        fresh = self.store.create_draft(askers[0]["session_id"], "decision", target, card["text"])
+        self.runtime.add_message(askers[0]["session_id"], "draft", card["text"],
+                                 {"draft_id": fresh["id"], "label": "Decision"})  # fmt: skip
+        self.runtime.bus.publish("draft", fresh)
+        return fresh
+
+    def decision_changed(self: Autopilot, decision_id: str, choice: str):  # type: ignore[misc]
+        """The owner answered its *Change* card: theirs now, Autopilot's no longer in force."""
+        decision = self.book.decision(decision_id)
+        if not decision or not self.book.change_decision(decision_id, "owner"):
+            return
+        self.book.append(
+            decision["run_id"], UNDONE, f"Changed by you: → {choice}", state=UNDONE,
+            of=decision["entry"], subject=f"card:{decision['card_id']}",
+            why={"rule": "owner", "by": "you", "ingress": "page"},
+            payload={"was": decision["choice"], "now": choice},
+        )  # fmt: skip
+        self.runtime.publish_state()
 
     # A6: a question a worker reported, once the Router's turn on it is over.
 
