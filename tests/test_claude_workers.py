@@ -1508,6 +1508,8 @@ async def test_schedules_that_end_with_a_task_are_deleted_in_claude_before_a_ter
         await until(lambda: harness.store.get(f"agentschedules:{worker}"), 10)
         await until(lambda: len(kept_crons(worker)) == 1, 10)
         if not live:
+            # Chief of Staff takes its turn's end (session.idle) a loop step after Claude ends it.
+            await until(lambda: not runtime.states[worker].busy, 10)
             later = time.time() + workers_module.RELEASE_IDLE + 1
             runtime.store.set(f"scheduleshold:{worker}", "1")  # (Else they keep its process.)
             assert await runtime.workers.release_idle(later) == [worker]
