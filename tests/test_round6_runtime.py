@@ -466,7 +466,7 @@ async def test_a_worker_whose_model_copilot_refuses_starts_on_the_default(tmp_pa
     shown = [m["text"] for m in harness.store.messages(worker) if m["kind"] in {"notice", "error"}]
     assert shown == [
         "Copilot does not offer the model claude-sonet-9.9, so this worker uses Copilot's "
-        "default model. Choose another in Settings (Models) or in this worker's header."
+        "default model. Choose another in Settings → Agents & models or in this worker's header."
     ]
 
 

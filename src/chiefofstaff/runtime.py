@@ -484,7 +484,8 @@ class AgentConnection:
     connections: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     watch: asyncio.Task | None = None
-    # Whether the owner has it turned on (Settings → Coding agents): off, none of its workers runs.
+    # Whether the owner has it turned on (Settings → Agents & models): off, none of its workers
+    # runs.
     enabled: Callable[[], bool] = lambda: True
     # It stopped by itself and could not start again: it is tried again with its next worker's
     # message (Settings says so).
@@ -1778,7 +1779,7 @@ class Runtime:
     # Admission: whether another agent's worker may run now. Copilot's sessions always may.
 
     def turned_off(self, agent: str) -> str:
-        return f"{agents.display(agent)} is turned off in Settings → Coding agents."
+        return f"{agents.display(agent)} is turned off in Settings → Agents & models."
 
     @staticmethod
     def not_on_windows(agent: str) -> str:
@@ -1862,7 +1863,7 @@ class Runtime:
         return ""
 
     # Chief of Staff's own sessions on another agent (agent-roles.md): the Router and the
-    # Watchdog run where Settings → Coding agents puts them; on Copilot while that agent can't
+    # Watchdog run where Settings → Agents & models puts them; on Copilot while that agent can't
     # run them (said in one line), and back by themselves once it can.
 
     def role_key(self, row: dict) -> str:
@@ -2007,10 +2008,10 @@ class Runtime:
         return True
 
     async def role_waits(self, role: str, row: dict, target: str, why: str) -> bool:
-        """Whether a role waits for the owner now, its messages kept (Settings: If unavailable,
-        Ask me): its agent can't run it, and they have not said Use Copilot until then. Its card
-        in the Router's chat says why, with Sign in (or Install). Once it can run there again,
-        or they said Copilot, it goes on with what was kept."""
+        """Whether a role waits for the owner now, its messages kept (Settings: If it can't run
+        there, Ask me): its agent can't run it, and they have not said Use Copilot until then.
+        Its card in the Router's chat says why, with Sign in (or Install). Once it can run there
+        again, or they said Copilot, it goes on with what was kept."""
         wanted = agents.role_agent(self.store, role)
         waiting = self.role_wait(role)
         label = agents.ROLES[role]
@@ -2295,7 +2296,7 @@ class Runtime:
 
     def sandboxed_refusal(self, agent: str) -> str:
         """Why none of an agent's workers can start while workers are sandboxed, on its row in
-        Settings → Coding agents ("" when they can: Claude's, on a version whose sandbox held, or
+        Settings → Agents & models ("" when they can: Claude's, on a version whose sandbox held, or
         not checked yet, where your Claude settings would not widen its sandbox)."""
         refused = self.agent_refused(agent)
         why = refused.get("sandbox", "" if agent == "claude" else SANDBOX_UNPROVEN)
@@ -2573,7 +2574,7 @@ class Runtime:
         }
 
     async def agents_saved(self, before: dict[str, dict], chose: bool | None = None) -> list[str]:
-        """The owner saved the Coding agents tab (or answered a first-run card): an agent turned on
+        """The owner saved Agents & models (or answered a first-run card): an agent turned on
         starts with its first worker; one turned off drains (more-agents.md 5.11): its workers
         stop at once with their commands, its process ends, and with none on the Router's tools
         and prompt are as without agents. Workers whose model came from the group take the new
@@ -2610,13 +2611,23 @@ class Runtime:
         if was_on != now or (chose is not None and chose != agents.router_chooses(self.store)):
             await self.refresh(ROUTER)  # Its spawn_worker and prompt name the agents on.
         await self.place_roles()  # (Opened anew where it runs now, with those.)
-        retuned = {
-            name
+        # Sessions that take an agent's model or effort from Settings take a new one at rest:
+        # its workers and the roles on it, each but for what it chose itself (its ⋯, a task's
+        # chip).
+        changed = {
+            name: {
+                key
+                for key in ("model", "effort")
+                if (before.get(name, {}).get(key) or "") != (after.get(name, {}).get(key) or "")
+            }
             for name in now
-            if before.get(name, {}).get("model") != after.get(name, {}).get("model")
         }
-        for row in self.store.open_sessions(WORKER):
-            if self.agent(row["id"]) in retuned and not self.agent_choice(row["id"]).get("model"):
+        rows = [*self.store.open_sessions(WORKER)]
+        rows += [row for role in PLACED_ROLES if (row := self.role_row(role))]
+        for row in rows:
+            keys = changed.get(self.agent(row["id"])) or set()
+            own = self.agent_choice(row["id"])
+            if any(not own.get(key) for key in keys):
                 await self.refresh_session(row)
         relimited = {
             name for name in after if before.get(name, {}).get("limit") != after[name].get("limit")
@@ -2793,7 +2804,8 @@ class Runtime:
             why = f"Its token limit is {limit:,} now: Go on continues."
         else:
             why = (
-                f"Used its {limit:,}-token limit. Raise it in Settings → Coding agents, or cancel."
+                f"Used its {limit:,}-token limit. Raise it in Settings → Agents & models, or "
+                "cancel."
             )
         return {"spend_stop": "limit", "spend_why": why, "go_on": not self.agent_block(row)}
 
@@ -2915,7 +2927,7 @@ class Runtime:
         if tasks and tasks[-1]["status"] == "failed":
             return "Retry its task to accept that and let it continue."
         name = agents.display(self.agent(row["id"]))
-        return f"turn its limit off in Settings → Coding agents ({name}) to let it continue."
+        return f"turn its limit off in Settings → Agents & models ({name}) to let it continue."
 
     async def ensure_spend_card(self, row: dict) -> dict | None:
         """A worker with a token limit whose spend is partly unknown, not accepted: the Go on
@@ -5283,26 +5295,14 @@ class Runtime:
         return wanted[0] if wanted else None
 
     async def look_for_agents(self) -> dict:
-        """What Settings' Coding agents tab shows, looked for only once the
+        """What Settings' Agents & models page shows, looked for only once the
         owner opens it: each supported agent found on this computer (or on), with its version
-        and sign-in or why its workers cannot run here, and its models."""
+        and sign-in or why its workers cannot run here, and its models. One not installed is
+        not offered there (the @ list does that): listed only while on, to be turned off."""
         settings = self.store.settings()
         found = [await self.look_for_agent(name) for name in agents.NAMES]
         return {
             "agents": [entry for entry in found if entry["found"] or entry["enabled"]],
-            # Beside one found, each not installed, with Install (agentsetup.py).
-            **(
-                {"missing": missing}
-                if any(entry["found"] for entry in found)
-                and (
-                    missing := [
-                        {key: entry[key] for key in ("name", "label", "said", "fix", "install")}
-                        for entry in found
-                        if not entry["found"] and entry.get("install")
-                    ]
-                )
-                else {}
-            ),
             # What it supports, for when none is found ("the Codex CLI").
             "supported": [agents.INSTALL[name] for name in agents.NAMES],
             "new_workers": agents.new_workers_choice(self.store),
@@ -5319,7 +5319,8 @@ class Runtime:
                     "agents": sorted(agents.role_agents(role)),
                     "chosen": agents.role_agent(self.store, role),
                     "line": self.role_line(role),
-                    # If unavailable: use Copilot and tell me, or ask me (its own roles only).
+                    # If it can't run there: use Copilot and tell me, or ask me (its own roles
+                    # only).
                     **(
                         {"unavailable": agents.role_unavailable(self.store, role)}
                         if role in PLACED_ROLES
@@ -5345,6 +5346,7 @@ class Runtime:
             "label": agents.display(name),
             "enabled": bool(chosen.get("enabled")),
             "model": chosen.get("model") or "",
+            "effort": chosen.get("effort") or "",
             "limit": agents.limit(self.store, name),
             "found": True,
             "state": "",
@@ -5397,15 +5399,17 @@ class Runtime:
             entry["sandbox"] = self.sandboxed_refusal(name)
             if note := agents.SANDBOX_NOTES.get(name):
                 entry["sandbox_note"] = note
-        # Its plan's limit in words where its usage line does not say it already: reached with
-        # no percent known, or reached with extra usage carrying its workers on.
+        # Its plan's limit in words whenever it says something (extra usage carrying its workers
+        # on, a limit used up with no reset known, a rate limit), but a close one beside the
+        # percentages its meter shows.
         live = agents.live_limit(self.store, name, facts.get("limit"))
-        if (not usage or live.get("extra")) and (line := agents.limit_line(live, name=name)):
+        close = live.get("status") == "allowed_warning" and bool(usage)
+        if not close and (line := agents.limit_line(live, name=name)):
             entry["limit_line"] = line
         return entry
 
     def check_agents(self, plan: dict | None, settings: Settings):
-        """A Settings save as it leaves the agents (`plan`: the Coding agents group saved, or
+        """A Settings save as it leaves the agents (`plan`: the Agents & models group saved, or
         None): one turned on must be able to run here (not on Windows, nor while workers are
         sandboxed, nor while its own folder is in Also writable in the sandbox); while one is
         on, its folder stays out of that list. Turning one off is never refused."""
@@ -5419,7 +5423,7 @@ class Runtime:
         for name in after:
             label, fresh = agents.display(name), name not in before
             if fresh and sys.platform == "win32":
-                raise ValueError(f"{label}, Available for workers: {self.not_on_windows(name)}")
+                raise ValueError(f"{label}, Use for workers: {self.not_on_windows(name)}")
             if (
                 fresh
                 and settings.worker_sandbox
@@ -5427,7 +5431,7 @@ class Runtime:
                 and not agents.can_sandbox(name)
             ):
                 raise ValueError(
-                    f"{label}, Available for workers: {label} can't run while workers are "
+                    f"{label}, Use for workers: {label} can't run while workers are "
                     f"sandboxed: {SANDBOX_UNPROVEN}."
                 )
             for own in agents.folders(name, home):
@@ -5436,7 +5440,7 @@ class Runtime:
                         continue
                     if fresh:
                         raise ValueError(
-                            f"{label}, Available for workers: first take {folder} out of Also "
+                            f"{label}, Use for workers: first take {folder} out of Also "
                             f"writable in the sandbox: it holds {label}'s settings and hooks."
                         )
                     raise ValueError(
@@ -5733,7 +5737,7 @@ class Runtime:
         """Each agent installed and signed in that the owner was never asked about: a first-run
         card on Home (agent_offers), once a glance at it (its CLI's version and sign-in, in Chief
         of Staff's own folder: agents.glance) finds it can run. Its full look (an app-server,
-        its models and limits) waits until the owner opens Settings → Coding agents."""
+        its models and limits) waits until the owner opens Settings → Agents & models."""
         on = agents.turned_on(self.store)
         for name in self.agents_found():
             if name in on or self.store.get(f"{agents.OFFERED}{name}") or name in self.offers:
@@ -5919,7 +5923,7 @@ class Runtime:
             row["id"],
             "notice",
             f"Copilot does not offer the model {chosen}, so this worker uses Copilot's default "
-            "model. Choose another in Settings (Models) or in this worker's header.",
+            "model. Choose another in Settings → Agents & models or in this worker's header.",
         )
         return True
 
@@ -9358,7 +9362,7 @@ class Runtime:
             if chosen and chosen not in {COPILOT_AGENT, *self.agents_on()}:
                 # Chosen in the composer, then turned off before it was sent: said, not dropped.
                 raise ValueError(
-                    f"{agents.display(chosen)} is turned off in Settings → Coding agents: turn "
+                    f"{agents.display(chosen)} is turned off in Settings → Agents & models: turn "
                     "it on, or send this without choosing it."
                 )
         if row["closed_at"] and row["role"] == WORKER:
@@ -11028,7 +11032,7 @@ class Runtime:
             "settings": self.store.settings().model_dump(),
             # Only once Prepared for you was turned on: its rows, and where steps can run.
             **({"shepherd": kept} if (kept := self.shepherd.snapshot()) else {}),
-            # Only while another coding agent is on: Settings' Coding agents tab shows it.
+            # Only while another coding agent is on: Settings' Agents & models page shows it.
             **({"agents": self.agents_view()} if self.agents_on() else {}),
             # Only where another agent is installed: its Settings tab, and first-run cards.
             **({"agents_found": found} if (found := self.agents_found()) else {}),
@@ -11037,7 +11041,8 @@ class Runtime:
             **({"agent_offers": offers} if (offers := self.agent_offers()) else {}),
             # Sign-ins and installs started from the page, while they run (and their last words).
             **({"agent_setups": setups} if (setups := self.setups.view()) else {}),
-            # Roles waiting for the owner (If unavailable: Ask me), their cards' actions open.
+            # Roles waiting for the owner (If it can't run there: Ask me), their cards' actions
+            # open.
             **(
                 {"role_waits": waits}
                 if (waits := sorted(role for role in PLACED_ROLES if self.role_wait(role)))

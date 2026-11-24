@@ -180,8 +180,10 @@ def stopped_text(reasons: list[str]) -> str:
     many = len(reasons) > 1
     workers = f"{len(reasons)} worker{'s' if many else ''}"
     whys = list(dict.fromkeys(reasons))
-    if len(whys) == 1 and (off := TURNED_OFF.match(whys[0])):
-        name = off["name"]
+    # Turned off, in either release's words: one reason.
+    off = {found["name"] for why in whys if (found := TURNED_OFF.match(why))}
+    if len(off) == 1 and all(TURNED_OFF.match(why) for why in whys):
+        (name,) = off
         return (
             f"Stopped {workers} because {name} is off. Turn {name} on again, then press Go on "
             "under Needs you."
@@ -197,8 +199,11 @@ def stopped_text(reasons: list[str]) -> str:
     )
 
 
-# Why a worker on another agent stopped when the owner turned that agent off (agent_block).
-TURNED_OFF = re.compile(r"^(?P<name>\w+) is turned off in Settings → Coding agents\.$")
+# Why a worker on another agent stopped when the owner turned that agent off (agent_block): in
+# either release's words (0.1.57 and before said Coding agents; a stop may be in flight).
+TURNED_OFF = re.compile(
+    r"^(?P<name>\w+) is turned off in Settings → (?:Coding agents|Agents & models)\.$"
+)
 # Why one stopped when Ask first was turned on for it (agents.switched_to_ask_first).
 SWITCHED = re.compile(r"^(?P<name>\w+) takes up Ask first only in a new process\.$")
 
@@ -422,7 +427,7 @@ def create_app(
             return await runtime.agent_models(agent, start=True)
         return await runtime.available_models()
 
-    # Settings' Coding agents tab, once the owner shows it: never before.
+    # Settings' Agents & models page, once the owner shows it: never before.
     @app.get("/api/agents")
     async def coding_agents():
         return await runtime.look_for_agents()
@@ -943,7 +948,7 @@ def create_app(
         as the page showed them when the owner began: one changed since (in another tab) stays
         as it is now unless the owner changed it here too, which is refused, not overwritten."""
         base = changes.pop("base", None)
-        # The Coding agents group, sent only once the owner opened it: not a setting.
+        # The Agents & models group (agents.planned): not a setting.
         agents_change = changes.pop("agents", None)
         async with settings_lock:
             old = store.settings()

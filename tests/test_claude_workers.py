@@ -317,7 +317,7 @@ async def test_turning_claude_off_drains_its_workers_and_processes(tmp_path, cla
         assert any("sleep 300" in command for command in processes.values())
         stopped = await saved(runtime, {"claude": {"enabled": False}})
         await settle(runtime)
-        assert stopped == ["Claude is turned off in Settings → Coding agents."]
+        assert stopped == ["Claude is turned off in Settings → Agents & models."]
         assert runtime.connection("claude") == (None, 1) and not backend.alive()
 
         def gone():
@@ -524,7 +524,7 @@ async def test_claude_runs_no_sandboxed_worker_its_own_settings_would_widen(
         assert runtime.blocked_on("claude", row) == line, "where it would have started"
         found = await runtime.look_for_agents()
         (entry,) = [agent for agent in found["agents"] if agent["name"] == "claude"]
-        assert found["sandboxed"] and entry["sandbox"] == line, "and in Settings → Coding agents"
+        assert found["sandboxed"] and entry["sandbox"] == line, "and in Settings → Agents & models"
         harness.store.save_settings(Settings(worker_sandbox=False))
         assert runtime.blocked_on("claude", row) == "", "unsandboxed, its settings are its own"
         found = await runtime.look_for_agents()

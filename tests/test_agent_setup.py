@@ -604,16 +604,28 @@ async def test_a_claude_turn_that_says_its_login_expired_shows_sign_in_needed(
         await runtime.stop()
 
 
-async def test_settings_lists_an_agent_not_installed_beside_one_found_with_install(
+async def test_settings_lists_no_agent_not_installed_but_one_still_on_to_turn_off(
     tmp_path, codex_installed
 ):
+    """Beside one found, an agent not installed has no row (nothing offers it), unless it is
+    still on: then its row says Not installed, so it can be turned off."""
+    from test_agents import saved
+
     _, runtime = await started(tmp_path)
     try:
         found = await runtime.look_for_agents()
         assert [entry["name"] for entry in found["agents"]] == ["codex"]
-        (claude,) = found["missing"]
-        assert (claude["name"], claude["said"]) == ("claude", "Not installed")
-        assert claude["install"][0]["command"] == "curl -fsSL https://claude.ai/install.sh | bash"
+        assert "missing" not in found, found["missing"]
+        await saved(runtime, {"claude": {"enabled": True}})
+        found = await runtime.look_for_agents()
+        assert [entry["name"] for entry in found["agents"]] == ["codex", "claude"]
+        claude = found["agents"][1]
+        assert (claude["found"], claude["enabled"], claude["said"]) == (
+            False,
+            True,
+            "Not installed",
+        )
+        assert "missing" not in found
     finally:
         await runtime.stop()
 

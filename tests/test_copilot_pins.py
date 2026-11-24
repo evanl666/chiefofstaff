@@ -595,7 +595,7 @@ async def test_a_model_copilot_does_not_offer_at_a_start_falls_back_as_it_did(tm
     await settle(runtime)
     assert notices(harness, worker) == [
         "Copilot does not offer the model smart-model, so this worker uses Copilot's default "
-        "model. Choose another in Settings (Models) or in this worker's header."
+        "model. Choose another in Settings → Agents & models or in this worker's header."
     ]
     assert "model" not in harness.session(worker).options
     assert harness.store.get("refused_models") == '["smart-model"]'

@@ -913,7 +913,7 @@ async def test_a_turn_codex_starts_on_its_own_work_is_admitted_as_any(codex, tmp
 
     async def admit(session):
         admitted.append(session.session_id)
-        return "" if len(admitted) == 1 else "Codex is turned off in Settings → Coding agents."
+        return "" if len(admitted) == 1 else "Codex is turned off in Settings → Agents & models."
 
     codex.admit = admit
     await session.send("Start a turn by yourself after this one. Reply with just: first")
@@ -1988,7 +1988,7 @@ def test_which_codex_runs_and_which_runs_workers_that_ask_first(version, runs, a
     [
         ({"FAKE_CODEX_VERSION": "0.167.1"}, "older than the versions tested"),
         ({"FAKE_CODEX_VERSION": "unknown"}, "could not tell which version of Codex"),
-        ({"FAKE_CODEX_SIGNED_OUT": "1"}, "not signed in: sign in from Settings → Coding agents"),
+        ({"FAKE_CODEX_SIGNED_OUT": "1"}, "not signed in: sign in from Settings → Agents & models"),
     ],
 )
 async def test_a_codex_it_cannot_run_on_says_why(tmp_path, monkeypatch, env, why):
@@ -2202,7 +2202,7 @@ async def test_a_codex_worker_runs_only_where_it_may(tmp_path, monkeypatch):
         )
         agents.configure(harness.store, "codex", enabled=False)
         row = harness.store.session(worker)
-        assert runtime.agent_block(row) == "Codex is turned off in Settings → Coding agents."
+        assert runtime.agent_block(row) == "Codex is turned off in Settings → Agents & models."
         with pytest.raises(RuntimeError, match="turned off"):
             await runtime.connect_agent("codex")
         agents.configure(harness.store, "codex", enabled=True)
@@ -2290,7 +2290,7 @@ async def test_a_change_as_a_turn_begins_stops_it_though_its_status_is_not_said_
         assert changed and changed[0] != "working", "its status did not say it yet"
         stopped = {
             "Stopped by Settings.",
-            "Stopped: Codex is turned off in Settings → Coding agents.",
+            "Stopped: Codex is turned off in Settings → Agents & models.",
         }
         await until(lambda: stopped & {text for _, text in harness.kinds(worker)}, 30)
         await until(lambda: harness.store.session(worker)["status"] != "working", 30)
@@ -3401,7 +3401,7 @@ async def test_a_codex_worker_stops_at_its_token_limit(tmp_path, monkeypatch):
         assert notices == [stopped], "one line says it"
         (said,) = [m for m in harness.store.messages(worker) if m["text"] == stopped]
         assert said["meta"]["full"] == (
-            "Used its 150-token limit. Raise it in Settings → Coding agents, or cancel."
+            "Used its 150-token limit. Raise it in Settings → Agents & models, or cancel."
         ), "its card's words, in full, on hover"
         task = runtime.tasks.for_session(worker)[-1]
         assert task["status"] == "waiting" and harness.store.get(f"stopped:{task['id']}")
@@ -3410,7 +3410,7 @@ async def test_a_codex_worker_stops_at_its_token_limit(tmp_path, monkeypatch):
         assert (
             view["attention_why"]
             == view["spend_why"]
-            == ("Used its 150-token limit. Raise it in Settings → Coding agents, or cancel.")
+            == ("Used its 150-token limit. Raise it in Settings → Agents & models, or cancel.")
         )
         assert view["go_on"] is False, "no Go on until its limit is raised"
         with pytest.raises(RuntimeError, match="token limit"):
