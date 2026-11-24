@@ -80,9 +80,13 @@ class Answers:
 
     # The judge: one item at a time, its proposal through its one tool.
 
-    async def ask_judge(self: Autopilot, text: str) -> judge.ProposeAnswer | None:  # type: ignore[misc]
-        """The judge's proposal for one item (None when it gave none in time)."""
+    async def ask_judge(self: Autopilot, text: str,  # type: ignore[misc]
+                        ticket: tuple[str, int] | None = None) -> judge.ProposeAnswer | None:  # type: ignore[misc]  # fmt: skip
+        """The judge's proposal for one item (None when it gave none in time, or Stop came
+        while another item was judged before it: never asked then)."""
         async with self.judge_lock:
+            if ticket is not None and not self.holds(ticket):
+                return None
             future: asyncio.Future = asyncio.get_running_loop().create_future()
             self.proposal = future
             token = CARRIED.set(None)  # The judge is Autopilot's own, never continued work.
@@ -138,6 +142,7 @@ class Answers:
         why: str,
         task: dict,
         context: str,
+        ticket: tuple[str, int] | None = None,
     ) -> tuple[judge.Verdict, list[owner.Item]]:
         """Code's verdict on one item (the judge asked only when code can't settle it)."""
         if judge.permission(question, *options):
@@ -149,7 +154,7 @@ class Answers:
             return judge.Verdict(parked="today's credits for Autopilot are used"), offered
         text = judge.prompt(kind=kind, question=question, options=options, why=why, task=task,
                             offered=offered, context=context)  # fmt: skip
-        proposal = await self.ask_judge(text)
+        proposal = await self.ask_judge(text, ticket)
         if proposal is None:
             return judge.Verdict(parked="it couldn't be judged just now"), offered
         cited = [cite.model_dump() for cite in proposal.basis]
@@ -236,7 +241,7 @@ class Answers:
                 verdict, offered = await asyncio.wait_for(
                     self.judged(kind="question", question=target.get("question") or draft["text"],
                                 options=list(target.get("choices") or []), why="", task=task,
-                                context=self.context_of(task)),
+                                context=self.context_of(task), ticket=ticket),
                     DECIDING,
                 )  # fmt: skip
             reason = verdict.parked or ("" if verdict.answer else "it couldn't be judged in time")
@@ -431,7 +436,7 @@ class Answers:
                     verdict, offered = await asyncio.wait_for(
                         self.judged(kind="decision", question=target["question"], options=options,
                                     why=target.get("why", ""), task=task,
-                                    context=self.context_of(task)),
+                                    context=self.context_of(task), ticket=ticket),
                         DECIDING,
                     )  # fmt: skip
                 reason = verdict.parked or ("" if verdict.answer else "it wasn't judged in time")
@@ -593,6 +598,7 @@ class Answers:
             verdict, offered = await self.judged(
                 kind="question", question=text, options=list(question.get("options") or []),
                 why=question.get("why") or "", task=task, context=self.context_of(task),
+                ticket=ticket,
             )  # fmt: skip
             reason = verdict.parked
             if not reason:
