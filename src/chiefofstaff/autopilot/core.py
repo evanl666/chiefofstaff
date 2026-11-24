@@ -354,6 +354,7 @@ class Autopilot(Answers, Results):
                 self.book.bump()
                 withdrawn = self.book.withdraw(why, run["id"])
             self.abandon()
+            self.draw_returned(withdrawn)
             continued = await self.stop_continued(run, stopping)
             await self.end(run, by=by, at_its_time=False)
         parts = [grammar.said_off(True, language)]
@@ -363,9 +364,8 @@ class Autopilot(Answers, Results):
                 f"wait{'' if continued != 1 else 's'} with Go on"
             )
         if withdrawn:
-            parts.append(
-                f"{withdrawn} answer{'s' if withdrawn != 1 else ''} not yet delivered withdrawn"
-            )
+            count = len(withdrawn)
+            parts.append(f"{count} answer{'s' if count != 1 else ''} not yet delivered withdrawn")
         return {**self.state(), "said": " · ".join(parts)}
 
     async def stop_continued(self, run: dict, stopping: dict) -> int:
@@ -524,7 +524,9 @@ class Autopilot(Answers, Results):
                     self.book.release(claimed["id"])  # Delivered later, once.
                     continue
                 except Withdrawn as exc:
-                    self.book.withdraw_claimed(claimed, str(exc))  # Stop came since its claim.
+                    # Stop came since its claim (or what it answers was settled meanwhile).
+                    if self.book.withdraw_claimed(claimed, str(exc)):
+                        self.draw_returned([claimed])
                     continue
                 except Exception as exc:
                     logger.warning("An Autopilot delivery failed.", exc_info=True)

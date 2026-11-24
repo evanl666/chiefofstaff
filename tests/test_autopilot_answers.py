@@ -11,6 +11,7 @@ from conftest import Harness, call_tool, settle
 
 from chiefofstaff import ingress
 from chiefofstaff.autopilot.judge import PARKED_ANSWER
+from chiefofstaff.autopilot.logbook import RETURNED
 from chiefofstaff.models import Settings
 
 
@@ -547,6 +548,147 @@ async def test_a_reported_question_is_answered_once_the_routers_turn_is_over(har
     assert 'type="autopilot"' in sent and "sessions_v1" in sent
     assert runtime.tasks.get(made["task_id"])["status"] == "running"
     assert [e["kind"] for e in entries(runtime, "answered")] == ["answered"]
+
+
+async def reported(harness, said="Name it sessions_v1."):
+    """A worker's reported question under Needs you, the Router's turn on it over, its task
+    waiting for the answer; and a second worker (to want a slot)."""
+    runtime = harness.runtime
+    await on(runtime)
+    made = await worker(runtime, harness.router_id)
+    other = await worker(runtime, harness.router_id, title="Cache store")
+    session = made["session_id"]
+    owner = await said_in_page(runtime, session, said)
+    await call_tool(runtime, "report", session, status="question", task_id=made["task_id"],
+                    summary="What should the table be called?")  # fmt: skip
+    for _ in range(5):
+        await settle(runtime)
+        if harness.store.session(harness.router_id)["status"] != "working":
+            break
+        harness.session(harness.router_id).emit("session.idle")
+    return made, other, owner
+
+
+def questions(harness) -> list[str]:
+    """Open questions under Needs you (on their task's card while it waits): their ids."""
+    return [key.removeprefix("ownerq:") for key in harness.store.keys("ownerq:")]
+
+
+def slot_wanted(runtime, monkeypatch):
+    """The owner's work wants a worker slot: Autopilot's deliveries wait (Later)."""
+    monkeypatch.setattr(runtime.workers, "wants_slot", lambda row: True)
+
+
+async def test_stop_while_an_answer_waits_for_a_slot_gives_the_question_back(harness, monkeypatch):
+    """Re-review 3 (reproduced): answered, its delivery waiting for a slot, then Stop: the
+    question is under Needs you still, set aside with why; its task stays as it was; nothing
+    reaches the worker."""
+    runtime = await harness.connect()
+    made, _, owner = await reported(harness)
+    session = made["session_id"]
+    [question] = questions(harness)
+    status = runtime.tasks.get(made["task_id"])["status"]
+    sent = len(harness.session(session).sent)
+    slot_wanted(runtime, monkeypatch)
+    tick = asyncio.ensure_future(runtime.autopilot.tick())
+    await judge_proposes(harness, answer="sessions_v1", basis=[cite(owner, "Name it sessions_v1")])
+    await asyncio.wait_for(tick, 5)
+    await until(lambda: entries(runtime, "answered"))
+    await settle(runtime)
+    assert [i["state"] for i in runtime.autopilot.book.outbox("queued")] == ["queued"]
+    assert questions(harness) == [question], "still the owner's until it goes out"
+    await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    await settle(runtime)
+    assert questions(harness) == [question]
+    assert runtime.snapshot()["autopilot"]["set_aside"][question] == RETURNED
+    assert runtime.tasks.get(made["task_id"])["status"] == status
+    assert len(harness.session(session).sent) == sent
+    assert runtime.autopilot.origins.of(session) is None
+
+
+async def test_the_owner_answering_first_withdraws_its_answer(harness, monkeypatch):
+    """Re-review 3: its answer waiting for a slot, the owner answers the question themselves:
+    theirs goes, Autopilot's never does."""
+    runtime = await harness.connect()
+    made, _, owner = await reported(harness)
+    session = made["session_id"]
+    [question] = questions(harness)
+    slot_wanted(runtime, monkeypatch)
+    tick = asyncio.ensure_future(runtime.autopilot.tick())
+    await judge_proposes(harness, answer="sessions_v1", basis=[cite(owner, "Name it sessions_v1")])
+    await asyncio.wait_for(tick, 5)
+    await until(lambda: entries(runtime, "answered"))
+    with ingress.through(ingress.PAGE):
+        await runtime.task_actions.answer_question(question, "Call it sessions_v2.")
+    monkeypatch.undo()
+    await runtime.autopilot.dispatch()
+    await settle(runtime)
+    assert [e["why"]["reason"] for e in entries(runtime, "withdrawn")] == [
+        "Its question was answered before it went out."
+    ]
+    assert not [m for m in harness.store.messages(session) if (m["meta"] or {}).get("outbox")]
+    assert "sessions_v2" in harness.session(session).sent[-1]
+
+
+async def test_stop_while_a_decision_waits_for_a_slot_gives_its_card_back(harness, monkeypatch):
+    """Re-review 3: decided, its delivery waiting for a slot, then Stop: the card is pending
+    again and drawn for the owner, set aside with why; Autopilot's decision is withdrawn (never
+    in force); its task stays as it was."""
+    runtime = await harness.connect()
+    await on(runtime)
+    made = await worker(runtime, harness.router_id)
+    await worker(runtime, harness.router_id, title="Cache store")
+    session = made["session_id"]
+    owner = await said_in_page(runtime, session, "Postgres for v1.")
+    await call_tool(runtime, "ask_decision", session, question="Which store for sessions?",
+                    options=[{"choice": "Postgres", "effect": "a"},
+                             {"choice": "Redis", "effect": "b"}])  # fmt: skip
+    status = runtime.tasks.get(made["task_id"])["status"]
+    slot_wanted(runtime, monkeypatch)
+    await judge_proposes(harness, answer="Postgres", basis=[cite(owner, "Postgres for v1")])
+    await until(lambda: runtime.autopilot.book.decisions(task_id=made["task_id"]))
+    await settle(runtime)
+    [card] = [d for d in harness.store.drafts("answered") if d["kind"] == "decision"]
+    await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    await settle(runtime)
+    card = harness.store.draft(card["id"])
+    assert (card["status"], card["outcome"]) == ("pending", "")
+    [decided] = runtime.autopilot.book.decisions(task_id=made["task_id"])
+    assert decided["status"] == "withdrawn"
+    assert runtime.snapshot()["autopilot"]["set_aside"][card["id"]] == RETURNED
+    drawn = [m for m in harness.store.messages(session) if m["kind"] == "draft"]
+    assert [(m["meta"] or {}).get("draft_id") for m in drawn] == [card["id"]]
+    assert runtime.tasks.get(made["task_id"])["status"] == status
+    assert not [m for m in harness.store.messages(session) if (m["meta"] or {}).get("outbox")]
+
+
+async def test_a_delivery_stopped_while_its_worker_is_made_ready_changes_nothing(harness):
+    """Re-review 3: Stop while its worker is made ready (an await, after the first check): what
+    the first check does is nothing; its task is not set going nor does the worker carry its
+    origin; the question is the owner's, set aside."""
+    runtime = await harness.connect()
+    made, _, owner = await reported(harness)
+    session = made["session_id"]
+    status = runtime.tasks.get(made["task_id"])["status"]
+    gate, readying = asyncio.Event(), asyncio.Event()
+
+    async def slow_ready(row, origin):
+        readying.set()
+        await gate.wait()
+        return True
+
+    runtime.autopilot.ready = slow_ready
+    tick = asyncio.ensure_future(runtime.autopilot.tick())
+    await judge_proposes(harness, answer="sessions_v1", basis=[cite(owner, "Name it sessions_v1")])
+    await asyncio.wait_for(tick, 5)
+    await asyncio.wait_for(readying.wait(), 10)
+    await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    gate.set()
+    await settle(runtime)
+    assert runtime.autopilot.origins.of(session) is None, "never kept"
+    assert runtime.tasks.get(made["task_id"])["status"] == status, "not set going"
+    assert questions(harness), "the owner's still"
+    assert [i["state"] for i in runtime.autopilot.book.outbox("withdrawn")] == ["withdrawn"]
 
 
 async def test_its_tick_never_waits_for_the_judge(harness, monkeypatch):

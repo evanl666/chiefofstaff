@@ -84,8 +84,11 @@ PARKED, WITHDRAWN, UNDONE = "parked", "withdrawn", "undone"
 # outcome is unknown until it is recorded), and its ends.
 QUEUED, CLAIMED = "queued", "claimed"
 ITEM_ENDED = frozenset({DONE, FAILED, WITHDRAWN, UNKNOWN})
-# An Autopilot decision's states: in force, or changed by the owner (Change).
+# An Autopilot decision's states: in force, changed by the owner (Change), or withdrawn before
+# any worker was told (its card the owner's again).
 ACTIVE, CHANGED = "active", "changed"
+# Why what an answer withdrawn was for is the owner's again (a line under it in Needs you).
+RETURNED = "Autopilot was stopped before its answer went out"
 
 # The hash before the first entry.
 GENESIS = "0" * 64
@@ -530,7 +533,7 @@ class Logbook:
             if not cursor.rowcount:
                 return False
             action = self.entry(row["entry"]) or {}
-            self.append(
+            withdrawn = self.append(
                 row["run_id"],
                 WITHDRAWN,
                 f"Withdrawn: {action.get('title') or row['kind']}",
@@ -541,6 +544,7 @@ class Logbook:
                 why={"rule": "stopped", "reason": why},
                 payload={"item": row["id"], "kind": row["kind"]},
             )
+            self.give_back(row, withdrawn["id"])
         return True
 
     def withdraw_claimed(self, row: dict, why: str) -> bool:
@@ -555,7 +559,7 @@ class Logbook:
             if not cursor.rowcount:
                 return False
             action = self.entry(row["entry"]) or {}
-            self.append(
+            withdrawn = self.append(
                 row["run_id"],
                 WITHDRAWN,
                 f"Withdrawn: {action.get('title') or row['kind']}",
@@ -566,13 +570,48 @@ class Logbook:
                 why={"rule": "stopped", "reason": why},
                 payload={"item": row["id"]},
             )
+            self.give_back(row, withdrawn["id"])
         return True
 
-    def withdraw(self, why: str, run_id: str = "") -> int:
-        """Every queued item (of one run, or all): none of them goes out."""
+    def give_back(self, row: dict, entry_id: str) -> str:
+        """What a withdrawn answer was for is the owner's again, as if Autopilot never decided
+        it (in the withdrawal's transaction): a question stays under Needs you (it is taken
+        from there only as the answer is stored for its worker), set aside with why; a decision
+        no worker was told of is withdrawn and its card pending again. Returns the card's id
+        ("" for none)."""
+        payload = row.get("payload") or {}
+        if row.get("kind") != "worker":
+            return ""
+        returned = json.dumps({"why": RETURNED, "entry": entry_id})
+        if (asked := payload.get("question")) and self.store.get(f"ownerq:{asked['id']}"):
+            self.store.set(f"autopilot:setaside:{asked['id']}", returned)
+        decision = self.decision(payload.get("decision") or "")
+        if not decision or decision["status"] != ACTIVE:
+            return ""
+        told = self.store.value(
+            "SELECT count(*) FROM autopilot_outbox WHERE kind='worker' AND "
+            "json_extract(payload, '$.decision')=? AND (state=? OR message_id IS NOT NULL)",
+            (decision["id"], DONE),
+        )
+        if told:
+            return ""  # In force for a worker told of it (Change is the owner's way back).
+        self.store.execute(
+            "UPDATE autopilot_decisions SET status=?, changed_by=?, changed_at=? WHERE id=? "
+            "AND status=?",
+            (WITHDRAWN, "stop", now(), decision["id"], ACTIVE),
+        )
+        card = self.store.draft(decision["card_id"])
+        if not card or card["status"] != "answered":
+            return ""
+        self.store.update_draft(card["id"], status="pending", resolved_at=None, outcome="")
+        self.store.set(f"autopilot:setaside:{card['id']}", returned)
+        return card["id"]
+
+    def withdraw(self, why: str, run_id: str = "") -> list[dict]:
+        """Every queued item (of one run, or all): none of them goes out. Returns them."""
         with self.store.transaction():
             rows = [row for row in self.outbox(QUEUED) if not run_id or row["run_id"] == run_id]
-            return sum(self.withdraw_item(row, why) for row in rows)
+            return [row for row in rows if self.withdraw_item(row, why)]
 
     # Autopilot's decisions: never in `decisions` or `task_decisions`.
 

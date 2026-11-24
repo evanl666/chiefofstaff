@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from typing import TYPE_CHECKING
 
 from . import agents, compat
@@ -145,15 +145,17 @@ class Delivery:
         if row["role"] == WORKER and not self.states.handle(session_id):
             # Not attached: what it did in a terminal meanwhile goes first, before this.
             await self.runtime.workers.catch_up(row)
-        if check is not None:
-            check()
-        # The exact prompt is kept so a queued worker or a restart can replay it.
-        message = self.runtime.add_message(
-            session_id,
-            kind,
-            prompt if display is None else display,
-            {**(meta or {}), "prompt": prompt},
-        )
+        # The exact prompt is kept so a queued worker or a restart can replay it. With a
+        # `check`, in one transaction with what it does (all of it stored, or none).
+        with self.store.transaction() if check is not None else nullcontext():
+            if check is not None:
+                check()
+            message = self.runtime.add_message(
+                session_id,
+                kind,
+                prompt if display is None else display,
+                {**(meta or {}), "prompt": prompt},
+            )
         if row["role"] == WORKER:
             # A worktree removed under it (by hand, a cleanup) is back before it reads this.
             with suppress(Exception):

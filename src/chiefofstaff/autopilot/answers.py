@@ -31,7 +31,7 @@ from ..envelope import wrap
 from ..store import now
 from . import basis as owner
 from . import judge
-from .logbook import PARKED, UNDONE
+from .logbook import ACTIVE, PARKED, UNDONE, WITHDRAWN
 from .origin import CARRIED
 
 if TYPE_CHECKING:
@@ -659,7 +659,7 @@ class Answers:
                 why={"rule": "owner-basis", "basis": list(verdict.basis), "judge": verdict.reason},
                 payload={"question": text, "answer": verdict.answer},
             )  # fmt: skip
-            self.store.delete(f"ownerq:{question['id']}")
+            # Under Needs you until the answer is stored for its worker (deliver_worker).
             self.book.queue(run_id, entry["id"], "worker", {
                 "session_id": row["id"], "task_id": (task or {}).get("id", ""),
                 "text": f"Your question: {text}\n\nAnswered for the owner by Autopilot (they are "
@@ -667,9 +667,9 @@ class Answers:
                         f"{because[0].upper() + because[1:]}.",
                 "display": f"Autopilot answered: {verdict.answer}, {because}.",
                 "go_on": True,
+                "question": {"id": question["id"], "at": question.get("at", ""), "text": text,
+                             "task_id": question.get("task_id") or ""},
             }, ticket[1])  # fmt: skip
-        # The Router hears it is no longer open (with its next message), as when a worker moves on.
-        self.runtime.asks.closed(row["id"], [question], "")
         self.runtime.publish_state()
         await self.dispatch()
 
@@ -697,20 +697,62 @@ class Answers:
         if not await self.ready(row, origin):
             raise Later("its worker is at work in a process that acts without asking")
 
-        def still():
-            """Just before it is stored for the worker (nothing awaited after): Stop since its
-            claim withdraws it; else the worker carries it from here, its task going on."""
+        def holds():
+            """Stop since its claim withdraws it (Withdrawn); nothing else is done here."""
             if not self.ticked or self.book.generation() != item["generation"]:
                 raise Withdrawn("Autopilot was stopped before it went out.")
-            self.origins.keep(row["id"], origin)
-            if task and payload.get("go_on") and task["status"] == "waiting":
-                self.runtime.asks.go_on(task, chat=False)
 
-        still()
+        def still():
+            """In the transaction that stores it for the worker (nothing awaited after): still
+            Autopilot's to give (else withdrawn); then what it answers leaves Needs you, and the
+            worker carries its origin from here, its task going on."""
+            holds()
+            if asked := payload.get("question"):
+                current = self.runtime.asks.owner_question(asked["id"])
+                if not current or current.get("at") != asked.get("at"):
+                    raise Withdrawn("Its question was answered before it went out.")
+                self.store.delete(f"ownerq:{asked['id']}")
+                self.store.delete(f"autopilot:setaside:{asked['id']}")
+                # The Router hears it is no longer open (with its next message).
+                self.runtime.asks.closed(row["id"], [asked], "")
+            decided = payload.get("decision")
+            if decided and (self.book.decision(decided) or {}).get("status") != ACTIVE:
+                raise Withdrawn("Its decision was changed before it went out.")
+            self.origins.keep(row["id"], origin)
+            fresh = self.runtime.tasks.find(task["id"]) if task else None
+            if fresh and payload.get("go_on") and fresh["status"] == "waiting":
+                self.runtime.asks.go_on(fresh, chat=False)
+
+        holds()
         with self.origins.carrying(origin):
             message = await self.runtime.delivery.deliver(
                 row["id"], prompt, kind="notice", display=payload["display"], meta=meta,
                 check=still,
             )  # fmt: skip
         self.book.stored(item["id"], message["id"])
+        if payload.get("question"):
+            self.runtime.publish_state()
         return ""
+
+    def draw_returned(self: Autopilot, rows: list[dict]):  # type: ignore[misc]
+        """What withdrawn answers were for, the owner's again (Logbook.give_back): each card
+        drawn for them, with its notification, as one set aside is; Needs you says why."""
+        drawn = set()
+        for row in rows:
+            decision = self.book.decision((row.get("payload") or {}).get("decision") or "")
+            if not decision or decision["status"] != WITHDRAWN or decision["card_id"] in drawn:
+                continue
+            card = self.store.draft(decision["card_id"])
+            if not card or card["status"] != "pending":
+                continue
+            drawn.add(card["id"])
+            asker = (decision["askers"] or [{}])[0].get("session_id") or ""
+            session = self.store.find_session(asker or row["payload"].get("session_id", ""))
+            if session and not session["closed_at"]:
+                self.runtime.add_message(session["id"], "draft", card["text"],
+                                         {"draft_id": card["id"], "label": "Decision"})  # fmt: skip
+                self.runtime.alert(card["text"], session_id=session["id"], needs_action=True,
+                                   title=f"Decision · {session['title']}")  # fmt: skip
+            self.runtime.bus.publish("draft", card)
+        if rows:
+            self.runtime.publish_state()
