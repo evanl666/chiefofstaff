@@ -211,6 +211,57 @@ async def test_a_step_has_none_of_the_workers_mcp_servers(world, monkeypatch, tm
     assert options["available_tools"] == list(STEP_TOOLS)
 
 
+@pytest.mark.parametrize(
+    ("manifest", "hosts"),
+    [
+        ("Cargo.toml", ("index.crates.io", "static.crates.io")),
+        ("pyproject.toml", ("pypi.org", "files.pythonhosted.org")),
+    ],
+)
+async def test_a_step_reaches_where_its_project_downloads_from_not_a_registrys_api(
+    world, manifest, hosts
+):
+    """crates.io itself is its registry's API, which takes a `cargo publish`: cargo downloads
+    from static.crates.io (its sparse index says so), so a Rust project's step reaches that
+    and the index only."""
+    runtime = await claimed(world)
+    (Path(runtime.store.session(world.worker)["cwd"]) / manifest).write_text("")
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    assert runtime.shepherd.control.open_step(TARGET)["state"] == "running"
+    policy = world.session().options["sandbox_config"]
+    assert (policy.allowed_hosts, policy.outbound) == (hosts, True)
+
+
+async def test_a_step_never_reads_the_owners_registry_or_cloud_credentials(world):
+    """With them, a registry it downloads from would take a publish as the owner (npm, PyPI,
+    cargo), and storage.googleapis.com an upload: they are unreadable, as for a worker that
+    reads Slack."""
+    from step_sandbox import SANDBOX_EXEC
+    from step_sandbox import run as sandboxed
+
+    home = Path.home()
+    secrets = [home / ".npmrc", home / ".cargo" / "credentials.toml", home / ".pypirc",
+               home / ".config" / "gcloud" / "credentials.db"]  # fmt: skip
+    for path in secrets:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("//registry.npmjs.org/:_authToken=npm_owners\n")
+    try:
+        runtime = await claimed(world)
+        await runtime.shepherd.fix_it(TARGET)
+        await settle(runtime)
+        step = runtime.shepherd.control.open_step(TARGET)
+        policy = world.session().options["sandbox_config"]
+        for path in [*secrets[:3], secrets[3].parent]:
+            assert str(path) in policy.denied, path
+        if SANDBOX_EXEC:
+            read = sandboxed(policy, f"cat '{secrets[0]}'", step["tree"])
+            assert read.returncode != 0 and "npm_owners" not in read.stdout
+    finally:
+        for path in secrets:
+            path.unlink()
+
+
 @pytest.mark.parametrize("slack", [False, True])
 async def test_a_step_reaches_only_what_the_owner_allowed_and_a_slack_reader_nothing(world, slack):
     """The owner's extra hosts and the repository's own servers reach a step; a worker that
