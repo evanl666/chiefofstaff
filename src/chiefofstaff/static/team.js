@@ -14,7 +14,7 @@ import { closeMentions, setRecipient } from "./mention.js";
 import { lineageOf } from "./relations.js";
 import { markOf } from "./agentpick.js";
 import { needsYou, scheduleHome } from "./inbox.js";
-import { duration, latestOf, minutesSince, pendingFor, teamState } from "./teamstate.js";
+import { duration, headerWords, latestOf, minutesSince, pendingFor, teamState } from "./teamstate.js";
 import { flowMap, partAvatar } from "./teammap.js";
 
 // A color per worker, from its id: the same on every page and after a reload.
@@ -420,14 +420,6 @@ export function scheduleTeam() {
     refreshTeam();
   }, 300);
 }
-// Its words as the page says them: "Working · 1 of 4 parts done · started 9:12".
-function headerWords(team, st) {
-  const done = `${st.finished} of ${st.total} parts done`;
-  if (st.done) return st.endedAt ? `Done at ${clock(st.endedAt)} · from your request at ${clock(team.request.at)}` : `Done · from your request at ${clock(team.request.at)}`;
-  if (st.state === "needs") return `Waiting on you · ${done} · since ${clock(latestOf(st.needing.row) || team.request.at)}`;
-  const word = st.state === "blocked" ? (st.held ? "Waiting on a teammate" : "Working") : { working: "Working", watching: "Watching" }[st.state];
-  return `${word} · ${done} · started ${clock(team.request.at)}`;
-}
 const NODE_CLASS = { needs: "is-review", blocked: "is-waiting", working: "is-working", watching: "is-watching" };
 function nodeClass(part) {
   if (part.finished) return part.accepted ? "is-done" : "is-done is-ended";
@@ -446,6 +438,7 @@ function partStatus(part, st, team) {
     return part.phase?.why || "Needs you";
   }
   if (part.state === "working") return firstLine(row?.progress || "") || "Working";
+  if (part.outside) return `Waiting on “${part.outside.join("” and “")}” (outside this team)`;
   if (part.next) {
     const order = (id) => st.parts.findIndex((other) => other.id === id);
     const before = team.edges.filter((edge) => edge.kind === "after" && edge.to === part.id && edge.state !== "met").sort((a, b) => order(a.from) - order(b.from));
@@ -702,7 +695,7 @@ function renderPage() {
   title.textContent = team.goal;
   title.title = "";
   const meta = $("#session-meta");
-  meta.replaceChildren(...(st.done ? [] : [el("span", { class: `dot ${stateDot(st)}`, "aria-hidden": "true" })]), headerWords(team, st));
+  meta.replaceChildren(...(st.done ? [] : [el("span", { class: `dot ${stateDot(st)}`, "aria-hidden": "true" })]), headerWords(team, st, clock));
   meta.title = "";
   const actions = $("#session-actions");
   const menuKey = `team:${team.id}:${st.done}`;

@@ -5538,9 +5538,13 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         await expect(
             section.locator(f'.team2-wrap:has([data-team="{custom}"]) .dismiss')
         ).to_be_visible()
-        # A part continued in another request's work: moved out, finished for its team.
+        # A part continued in another request's work: moved out, finished for its team; the
+        # part that waits on it says so, plainly.
         row = await team_row(page, warehouse)
         await expect(row.locator(".frac")).to_have_text("1/2")
+        await expect(row.locator(".status")).to_have_text(
+            "Waiting on “Sales report export” (outside this team)"
+        )
         assert (await rows.first.get_attribute("data-team")) == checkout
         found_overflow = await section.evaluate(TEAM_OVERFLOWS)
         assert not found_overflow, (width, found_overflow)
@@ -5671,6 +5675,9 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         await expect(first.locator(".status")).to_have_text(
             "Continued in “Sales report export” outside this team"
         )
+        await expect(page.locator("#timeline .tv2-node").nth(1).locator(".status")).to_have_text(
+            "Waiting on “Sales report export” (outside this team)"
+        )
         await expect(
             page.locator("#timeline .tv2-event", has_text="outside this team")
         ).to_have_count(1)
@@ -5698,6 +5705,31 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         "Teams lite: rows, the sidebar, the page at work, on you, moved out and done; "
         "a held question of no team"
     )
+
+    # Every team in the same words on Home's row, the sidebar's line and its page's header.
+    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+    for team in (checkout, autopilot, warehouse, custom):
+        row = await team_row(page, team)
+        status = await row.locator(".status").text_content()
+        goal = await row.locator(".goal").text_content()
+        line = page.locator("#session-list .team-line", has_text=goal)
+        if await line.count():
+            assert await line.get_attribute("title") == f"{goal}: {status}", (goal, status)
+        await row.click()
+        await expect(page.locator("#session-title")).to_have_text(goal)
+        header = await page.locator("#session-meta").text_content()
+        lead = header.split(" · ")[0]
+        if lead.startswith("Done"):
+            assert status.startswith("Done"), (goal, status, header)
+        else:
+            assert lead.casefold() in status.casefold(), (goal, status, header)
+        await page.locator("#back-home").click()
+    await context.close()
+    log("Teams lite: each team's words the same on its row, the sidebar and its page")
 
     # Nudge on a question of no team; Open is its asker's chat.
     context = await browser.new_context(viewport={"width": 1280, "height": 1000})
