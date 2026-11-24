@@ -3200,19 +3200,25 @@ class Runtime:
         return row["role"] == WORKER and self.sandbox_for(bool(row["slack"]))
 
     def sandbox_policy(
-        self, row: dict, writes: list[str] | None = None, trees: Sequence[dict] = ()
+        self,
+        row: dict,
+        writes: list[str] | None = None,
+        trees: Sequence[dict] = (),
+        private: str = "",
     ) -> SandboxPolicy | None:
         """What a worker's shell commands may touch; None when they run unsandboxed, like the
         owner's own Copilot sessions (whose Copilot sandbox settings then apply, if any).
         `writes`: a shepherd step's folders instead of the worker's (Shepherd.step_policy, which
         narrows it further), whatever the worker's own sandbox: its caches, held files and
         denials as the worker's, with `trees` (the worktrees it made) as the worker's own, and
-        nothing the owner added for workers (folders, their SSH agent)."""
+        nothing the owner added for workers (folders, their SSH agent). Its git: `private`, its
+        own folder (stepgit.py), with its HEAD and index its own; never the repositories its
+        checkouts share with the owner and other workers, which stay read-only to it."""
         step = writes is not None
         if not step and not self.sandboxed(row):
             return None
         checkouts = [*self.workspaces.checkouts(row), *trees]
-        repositories = git_dirs(checkouts)
+        repositories = ([private] if private else []) if step else git_dirs(checkouts)
         settings = self.store.settings()
         writes = self.workspaces.writes(row) if writes is None else writes
         writable = [*writes, *repositories, *([] if step else settings.sandbox_writable)]
@@ -3220,7 +3226,9 @@ class Runtime:
         cached = self.cache_plan(row)
         writable += cached.readwrite
         protected = [
-            path for git_dir in repositories for path in protected_git_paths(git_dir, checkouts)
+            path
+            for git_dir in repositories
+            for path in protected_git_paths(git_dir, checkouts, own_head=step)
         ]
         # One not there yet is held only where it would change what git runs or which
         # repository it uses (each held path costs every command a little): denied on macOS,

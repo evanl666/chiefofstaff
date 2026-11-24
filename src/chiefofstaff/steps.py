@@ -21,13 +21,13 @@ from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from . import integrity
+from . import integrity, stepgit
 from .backend import stop_background
 from .control import PREPARED, QUEUED, RUNNING
 from .envelope import UNTRUSTED, wrap
 from .store import now
 from .workers import logged_call
-from .workspaces import SAFE_GIT, admin_dir, checkout_git, command, git
+from .workspaces import SAFE_GIT, admin_dir, checkout_git, command, git, git_pins
 
 if TYPE_CHECKING:
     from .shepherd import Shepherd
@@ -162,7 +162,7 @@ class Steps:
         run = self.runtime.tasks.start_run(task["id"], f"shepherd:{step['kind']}")
         evidence = {**(step["evidence"] or {}), "hosts": prepared["hosts"], "log_offset": offset,
                     "reused": prepared["reused"], "git_config": prepared["git_config"],
-                    "checkout": prepared["checkout"]}  # fmt: skip
+                    "checkout": prepared["checkout"], "private": prepared["private"]}  # fmt: skip
         self.control.move_step(
             step_id, RUNNING, tree=prepared["tree"], folder=prepared["folder"],
             evidence=evidence, run_id=run["id"],
@@ -196,6 +196,7 @@ class Steps:
 
     async def give_up(self: Shepherd, session_id: str, step: dict, state: str, why: str):  # type: ignore[misc]
         """An attempt that ended before its turn began: its worker let go of, its slot freed."""
+        await self.release_git(step)
         self.unmark(session_id)
         with suppress(Exception):
             await self.runtime.detach(session_id)
@@ -271,7 +272,10 @@ class Steps:
         dirty = (
             await checkout_git(checkout, path, "status", "--porcelain", "--untracked-files=no")
         ).strip()
-        reused = head == step["h0"] and not dirty
+        # Its own worktree of the repository (never the owner's checkout, nor one in it).
+        pins = None if clone else await asyncio.to_thread(git_pins, checkout, path)
+        own = clone or bool(pins and pins.get("GIT_DIR") != pins.get("GIT_COMMON_DIR"))
+        reused = head == step["h0"] and not dirty and own
         tree, used = path, checkout
         if not reused:
             if clone:
@@ -283,6 +287,7 @@ class Steps:
             await git("-C", top, "worktree", "add", "--detach", "--quiet", tree, step["h0"],
                       limit=300)  # fmt: skip
             used = await asyncio.to_thread(made_tree, checkout, tree)
+        private = None if clone else await self.private_git(step, used, tree, str(folder), reused)
         root = Path(tree)
         hosts = [
             host
@@ -294,8 +299,73 @@ class Steps:
         from .shepherd import git_config_files
 
         return {"tree": tree, "folder": str(folder), "hosts": list(dict.fromkeys(hosts)),
-                "reused": reused, "top": top, "checkout": used,
+                "reused": reused, "top": top, "checkout": used, "private": private,
                 "git_config": await asyncio.to_thread(git_config_files)}  # fmt: skip
+
+    async def private_git(
+        self: Shepherd,  # type: ignore[misc]
+        step: dict,
+        checkout: dict,
+        tree: str,
+        folder: str,
+        reused: bool,
+    ) -> dict:
+        """The step's own git folder (stepgit.py), its worktree's `.git` pointed at it: its HEAD
+        (on its worker's branch, where it works in its worker's worktree), index and refs, the
+        repository's objects borrowed. Recorded before the worktree points at it, so a stop at
+        any moment finds what to put back (release_git)."""
+        pins = await asyncio.to_thread(git_pins, checkout, tree)
+        if not pins or not pins.get("GIT_DIR"):
+            raise ValueError(f"the worktree {tree} can't be found in its repository")
+        branch = ""
+        if reused:
+            with suppress(ValueError):
+                found = (await checkout_git(checkout, tree, "symbolic-ref", "-q", "HEAD")).strip()
+                branch = found if found.startswith("refs/heads/") else ""
+        record = await asyncio.to_thread(
+            stepgit.make, pins["GIT_COMMON_DIR"], pins["GIT_DIR"], tree, folder, step["h0"], branch
+        )
+        evidence = {
+            **((self.control.step(step["id"]) or step)["evidence"] or {}),
+            "private": record,
+        }
+        self.control.move_step(step["id"], RUNNING, evidence=evidence)
+        await asyncio.to_thread(stepgit.point, record)
+        return record
+
+    async def release_git(self: Shepherd, step: dict | None):  # type: ignore[misc]
+        """The step's own git folder let go of, once its commands ended: its worktree's `.git`
+        back at its own folder in the repository; where it worked in its worker's worktree, its
+        commits taken into the repository and the worker's branch moved to them (only on top of
+        where it began, and only if the branch is still there), as a commit there would have.
+        Then the folder goes (kept while its worktree could not be given back: tried again as
+        Chief of Staff starts). Never raises."""
+        current = self.control.step(step["id"]) if step else None
+        record = ((current or {}).get("evidence") or {}).get("private")
+        if not current or not record or record.get("released"):
+            return
+        try:
+            tip = await asyncio.to_thread(stepgit.head_of, record)
+            await asyncio.to_thread(stepgit.restore, record)
+        except Exception:
+            logger.warning("Could not give step %s's worktree back.", current["id"], exc_info=True)
+            return
+        if record.get("branch") and tip and tip != record["h0"]:
+            try:
+                await asyncio.to_thread(stepgit.take, record, tip, record["h0"])
+                await asyncio.to_thread(stepgit.move_branch, record, tip)
+                checkout = (current["evidence"] or {}).get("checkout") or {}
+                await checkout_git(checkout, current["tree"], "reset", "-q", "--mixed", tip)
+            except Exception:
+                logger.info("Step %s: its worker's branch stays where it was.", current["id"],
+                            exc_info=True)  # fmt: skip
+        await asyncio.to_thread(stepgit.remove, record)
+        released = {**record, "released": True}
+        for _ in range(3):
+            found = self.control.step(current["id"]) or current
+            evidence = {**(found["evidence"] or {}), "private": released}
+            if self.control.move_step(current["id"], found["state"], evidence=evidence):
+                break
 
     async def checkout_for(self: Shepherd, row: dict, repo: str) -> tuple[dict, str]:  # type: ignore[misc]
         """The worker's checkout of this GitHub repository (by its origin)."""
@@ -429,13 +499,22 @@ class Steps:
             if step["level"] != "prepare":
                 raise ValueError("This step is a diagnosis: change nothing, report diagnosis.")
             tree, checkout = step["tree"], self.tree_of(step)
+            private = (step["evidence"] or {}).get("private")
             try:
-                full = (
-                    await checkout_git(checkout, tree, "rev-parse", "--verify",
-                                       f"{commit}^{{commit}}")
-                ).strip()  # fmt: skip
-                head = (await checkout_git(checkout, tree, "rev-parse", "HEAD")).strip()
-                await checkout_git(checkout, tree, "merge-base", "--is-ancestor", step["h0"], full)
+                if private:
+                    # In its own git folder: read as files, its objects borrowed and taken into
+                    # the repository by the repository's own git (stepgit.py).
+                    full = await asyncio.to_thread(stepgit.resolve, private, commit)
+                    head = await asyncio.to_thread(stepgit.head_of, private)
+                    await asyncio.to_thread(stepgit.take, private, full, step["h0"])
+                else:
+                    full = (
+                        await checkout_git(checkout, tree, "rev-parse", "--verify",
+                                           f"{commit}^{{commit}}")
+                    ).strip()  # fmt: skip
+                    head = (await checkout_git(checkout, tree, "rev-parse", "HEAD")).strip()
+                    await checkout_git(checkout, tree, "merge-base", "--is-ancestor", step["h0"],
+                                       full)  # fmt: skip
             except ValueError as exc:
                 raise ValueError(
                     f"{commit} is not a commit on top of {step['h0'][:7]} in {tree}."
@@ -543,6 +622,8 @@ class Steps:
             if step and step["state"] == RUNNING and (step["evidence"] or {}).get("planned"):
                 await self.run_frozen(step, handle)
                 step = self.control.step(step["id"]) or step
+        await self.release_git(step)
+        step = self.control.step(step["id"]) if step else None
         self.unmark(session_id)
         await self.runtime.detach(session_id)
         if (row := self.store.find_session(session_id)) and row["status"] == "working":
@@ -605,6 +686,8 @@ class Steps:
             with suppress(Exception):
                 await handle.abort()
             await stop_background(handle)
+        await self.release_git(step)
+        step = self.control.step(step["id"]) if step else None
         self.unmark(session_id)
         await self.runtime.detach(session_id)
         runtime_state.busy = False

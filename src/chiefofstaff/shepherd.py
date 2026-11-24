@@ -44,7 +44,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import agents, integrity, threads
+from . import agents, integrity, stepgit, threads
 from .backend import COPILOT_AGENT, StepSandboxPolicy
 from .control import (
     APPLYING,
@@ -321,8 +321,9 @@ class Shepherd(Keeping, Steps):
     # The step profile.
 
     def step_policy(self, row: dict, step: dict) -> StepSandboxPolicy:
-        """What a step's commands may touch: its worktree (and its git folder, but what runs code
-        for the owner), the frozen worktrees, its folder, and its worker's caches and temporary
+        """What a step's commands may touch: its worktree and its own git folder (but what runs
+        code for the owner; the repository it shares with the owner and other workers, read
+        only), the frozen worktrees, its folder, and its worker's caches and temporary
         folder (the owner's caches and its toolchains read-only beneath, as for a sandboxed
         worker, Runtime.sandbox_policy); no credentials, no GitHub, only the hosts its project's
         install needs and the owner allowed; this computer's own servers only where the owner
@@ -334,7 +335,9 @@ class Shepherd(Keeping, Steps):
                  if c.get("worktree")]  # fmt: skip
         frozen = list((evidence.get("frozen") or {}).values())
         writes = [path for path in [step["tree"], *frozen, step["folder"]] if path]
-        base = self.runtime.sandbox_policy(row, writes=writes, trees=trees)
+        # Its git: its own folder (stepgit.py), never the repository it shares.
+        private = (evidence.get("private") or {}).get("git") or ""
+        base = self.runtime.sandbox_policy(row, writes=writes, trees=trees, private=private)
         if base is None:  # (Never: a step's is made whatever its worker's.)
             raise ValueError("no sandbox for it")
         # The owner's git configuration, to read: without the credential proxy Copilot keeps it
@@ -551,6 +554,11 @@ class Shepherd(Keeping, Steps):
             await reconcile_all(self)
         for session_id, step_id in list(self.stepping.items()):
             await self.crashed(session_id, step_id)
+        for step in self.control.steps(""):
+            # A step's own git folder not let go of (a stop mid-step, its worktree not given
+            # back): now, before its worker runs again.
+            if (step.get("evidence") or {}).get("private"):
+                await self.release_git(step)
         for step in self.control.steps("", RUNNING):
             # Running, with no worker marked for it: ended with the run before.
             self.control.move_step(step["id"], RUNNING, state="interrupted", ended_at=now(),
@@ -568,6 +576,7 @@ class Shepherd(Keeping, Steps):
         """A worker left marked by a stop mid-attempt: never continued in its normal profile;
         its attempt is interrupted, and admitted again later only if still current."""
         step_id = step_id or self.stepping.get(session_id, "")
+        await self.release_git(self.control.step(step_id) if step_id else None)
         self.unmark(session_id)
         with suppress(Exception):
             await self.runtime.detach(session_id)
@@ -888,6 +897,8 @@ class Shepherd(Keeping, Steps):
             if step["folder"]:
                 with suppress(OSError):
                     shutil.rmtree(step["folder"])
+                with suppress(OSError):
+                    shutil.rmtree(stepgit.folder_of(step["folder"]))
 
     async def vanished_checks(self, claim: dict, details: dict):
         """CI's check set on a head Chief of Staff pushed must include the one before's: a check
@@ -1197,6 +1208,12 @@ def prepare_downgrade(store) -> list[str]:
     stopped = []
     for session_id, step_id in store.items("step:").items():
         store.delete(f"step:{session_id}")
+        step = control.step(step_id) if control.exists() else None
+        record = ((step or {}).get("evidence") or {}).get("private")
+        if record and not record.get("released"):
+            # Its worktree's .git back at its own folder (an earlier version knows no other).
+            with suppress(OSError):
+                stepgit.restore(record)
         if control.exists():
             control.move_step(step_id, RUNNING, state="interrupted", ended_at=now(),
                               why="Stopped before a downgrade")  # fmt: skip
