@@ -1051,6 +1051,7 @@ async def su3_prepare(ctx: Ctx):
     assert plan["h0"] == h0 and evidence["holds"] and evidence["checked"], evidence
     assert any("test_timeout" in name for name in evidence["fixed"]), evidence
     assert not evidence["missing"], evidence
+    step_git_given_back(ctx, view["action"]["step"], plan["h1"])
     await ctx.approve(view["action"]["step"])
     from live_e2e import wait_for
 
@@ -1061,6 +1062,25 @@ async def su3_prepare(ctx: Ctx):
     )
     assert await ctx.repo.ci(plan["h1"]) == "success"
     ctx.notes["su3"] = (target, number, plan["h1"])
+
+
+def step_git_given_back(ctx: Ctx, step_id: str, h1: str):
+    """The step's git was its own (its record in Chief of Staff's database): once it ended, its
+    worktree's .git is its own folder's in the repository again, the step's folder is gone, and
+    its commit is in the repository its worktree shares with the owner's clone."""
+    import sqlite3
+
+    database = f"{(ctx.root / DATA / 'chiefofstaff.db').as_uri()}?mode=ro"
+    with contextlib.closing(sqlite3.connect(database, uri=True)) as db:
+        row = db.execute("SELECT evidence FROM shepherd_steps WHERE id=?", (step_id,)).fetchone()
+    record = json.loads(row[0]).get("private")
+    if record is None:
+        return  # (A clone in its worker's own folder: nothing it shares.)
+    assert record["released"], record
+    assert not Path(record["git"]).exists(), record["git"]
+    assert Path(record["pointer"]).read_text() == record["was"], record["pointer"]
+    found = run(["git", "cat-file", "-t", h1], cwd=ctx.repo.clone).strip()
+    assert found == "commit", found
 
 
 async def _async(value):
