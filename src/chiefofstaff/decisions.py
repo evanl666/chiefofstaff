@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from . import ingress
 from .asks import asks_back, clock
 from .envelope import wrap
 from .ledger import related, same_value
@@ -574,6 +575,9 @@ class Decisions:
         choice = clean(decision.text, 500)
         if not choice:
             raise ValueError("Pick an option or write your decision.")
+        if channel := ingress.current():
+            # How their answer came in (the page, an away answer): see ingress.py.
+            self.store.set(f"ingress:{card['id']}", channel)
         if kept and target.get("options") and not self.named(target, choice):
             # A reconsideration answered in words that pick none of its options (E154: "try
             # more variants first" replaced the decision in force and reopened six finished

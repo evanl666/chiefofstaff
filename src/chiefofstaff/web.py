@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import agents
+from . import agents, ingress
 from .bus import Bus
 from .models import (
     AgentInstall,
@@ -317,7 +317,11 @@ def create_app(
             )
             if not secrets.compare_digest(candidate.encode(), token.encode()):
                 return JSONResponse({"detail": "Open the private launch URL to sign in."}, 401)
-        response = await call_next(request)
+            # Signed in with the launch token: what the owner sends here is their word (ingress).
+            with ingress.through(ingress.PAGE):
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
