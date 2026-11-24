@@ -55,6 +55,41 @@
   Linux, which has no one way to read them, the setting says *minutes without using Chief of
   Staff*.
 
+Settings has one page for agents and models, and Connections reads as a list.
+
+- **Agents & models.** *Models* and *Coding agents* are one page. Its first line, *New workers run
+  on*, says which agent and model new work uses; then a row per agent (Copilot's always; Codex's
+  and Claude Code's each once installed, or while still on, saying *Not installed*, to turn it
+  off): its status in a few words, a small meter of the
+  most-used of its plan's limits (each limit and its reset on hover or focus), its one action
+  (*Sign in*) and *Use for workers*. What costs money or stops work is a line under the
+  row, never folded away: extra usage carrying its workers on, a limit used up (also when Codex did
+  not say when it resets, and a rate limit, which Settings dropped beside Codex's percentages), a
+  sign-in ending within a week, why it can't run here. A row unfolds to its workers' model,
+  **effort** (new: an agent's effort can now be set, and reaches its workers without one of their
+  own, and a Router or Watchdog placed on it, from their next turn; its model now reaches those
+  too) and limit per worker, then its version, sign-in and whose plan it uses, shown rather than
+  in a tooltip. Copilot's row holds the workers' model and effort, the credit limit per worker and
+  the Copilot command; *Chief of Staff's own sessions*, folded, where the Router, Slack and the
+  Watchdog run (a role on another agent says it uses that agent's model and effort; its Copilot
+  ones are kept), the Watchdog's switch and the default model. Model and effort menus list what
+  the chosen model offers and keep a saved value they can't list. An agent that is on can be turned
+  off in any state, also while it is checked or after its check failed. Opening Settings starts no
+  agent; installed agents are looked at once the page is shown, as before.
+- **Connections** is a list: Slack, GitHub reviews, Watches, When you're away, Skills, plugins
+  and MCP servers (was *Abilities*; one *Add a skill…*), Send to Chief, each with where it stands
+  in one line and at most one action (*Scan now*, *Send a test*, *Retry*, *Set up*); a row opens
+  its details in place. *Slack check* is in Slack's *More*. *Pause watching* is at the end of the
+  list, saying what it stops, and the sidebar's *Watchers paused* has *Resume*. The sidebar's
+  Slack, Watches and away lines open their connection.
+- **One form.** What you change in Settings stays as written while you move between pages,
+  connections and rows, until Save or Cancel; a connection with unsaved changes says so. A
+  problem on Save opens its page, connection and fold and puts the cursor in the field. The pages
+  are a tablist (arrow keys, Home, End); below 900 px they are tabs over the page. Old names
+  (*Models*, *Coding agents*) and links open the new place. Our own tooltips show inside Settings,
+  kept clear of its list of pages.
+- Messages that named *Settings → Coding agents* or *Models* name *Settings → Agents & models*.
+
 ## 0.1.56 (2026-11-23)
 
 A busy worker's new task starts at once in a second worker with its context; a decision you
