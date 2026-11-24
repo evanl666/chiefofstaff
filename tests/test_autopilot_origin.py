@@ -2,6 +2,7 @@
 writes to it in the page; the Router carries it for a turn that takes in anything that carries
 it, and passes it on to what that turn starts; a turn that carries it never publishes."""
 
+import asyncio
 import json
 
 from conftest import Harness, call_tool, settle, slack_tool
@@ -256,8 +257,11 @@ async def claude_done(tmp_path, monkeypatch):
     await saved(runtime, {"claude": {"enabled": True}})
     made = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: Fixed.",
                           agent="claude")  # fmt: skip
-    await until(lambda: harness.store.session(made["session_id"])["status"] == "done", 30)
-    assert runtime.states[made["session_id"]].opened_asking is False
+    worker = made["session_id"]
+    await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+    # Its turn over too (its report comes before its turn ends): at rest.
+    await until(lambda: not runtime.states[worker].busy and worker not in runtime.begun, 30)
+    assert runtime.states[worker].opened_asking is False
     return harness, runtime, made
 
 
@@ -286,6 +290,112 @@ async def test_a_router_turn_it_led_to_reopens_a_claude_worker_asking_first(
     assert runtime.states[worker].opened_asking is True, "opened again asking first"
     assert runtime.states.handle(worker).worker is not before
     assert harness.store.settings().worker_yolo is True, "never the owner's setting"
+
+
+async def test_a_turn_still_going_after_its_report_is_never_stopped_to_open_it_asking_first(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Review 3 (CI, macOS): its report filed ("done"), its turn not settled yet, a Router turn
+    that carries Autopilot's origin messages it. Its slot is that turn's, not this send's: what
+    it is given waits for that turn to end (never a Settings stop of it, nor its task left
+    waiting for Go on), then reaches a process opened asking first."""
+    from test_claude_workers import until
+
+    harness, runtime, made = await claude_done(tmp_path, monkeypatch)
+    worker = made["session_id"]
+    before = runtime.states.handle(worker).worker
+    runtime.begun.add(worker)  # Its turn, after its report: begun, not settled.
+    runtime.states[worker].busy = True
+    entry = await autopilot_entry(runtime)
+    router = harness.store.session(harness.router_id)
+    runtime.autopilot.origins.taken(router, [{"meta": {TAG: {"entries": [entry["id"]],
+                                                             "ask_first": True}}}])  # fmt: skip
+    told = await call_tool(runtime, "message_session", router["id"], session_id=worker,
+                           text="Report done: Again.", task="new", title="Fix it again",
+                           why_new="t")  # fmt: skip
+    assert told.result_type != "failure", told.text_result_for_llm
+    await settle(runtime)
+    state = runtime.states[worker]
+    assert state.reopen_asking and state.confined, "held for that turn's end"
+    assert state.busy, "that turn's slot, kept"
+    assert not [m for m in harness.store.messages(worker) if (m["meta"] or {}).get("stopped")]
+    assert not [t for t in runtime.tasks.for_session(worker) if t["status"] == "waiting"]
+    assert runtime.states.handle(worker).worker is before, "not stopped mid-turn"
+    runtime.agent_settled(harness.store.session(worker))  # That turn ends.
+    state.busy = False
+    await runtime.events.reattached(harness.store.session(worker), state, owed=False)
+    await until(lambda: any(t["title"] == "Fix it again" and t["status"] in {"review", "done"}
+                            for t in runtime.tasks.for_session(worker)), 30)  # fmt: skip
+    assert state.opened_asking is True
+    assert runtime.states.handle(worker).worker is not before
+
+
+async def test_a_queued_worker_started_in_its_turn_is_opened_asking_first_then_given_it(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Review 3: what carries Autopilot's origin, queued for a worker (no slot free): started in
+    its turn (Workers.start says "working" before it sends), it is opened again asking first
+    and given it; it never waits for a turn of its own to end."""
+    from test_claude_workers import until
+
+    harness, runtime, made = await claude_done(tmp_path, monkeypatch)
+    worker = made["session_id"]
+    before = runtime.states.handle(worker).worker
+    entry = await autopilot_entry(runtime)
+    router = harness.store.session(harness.router_id)
+    runtime.autopilot.origins.taken(router, [{"meta": {TAG: {"entries": [entry["id"]],
+                                                             "ask_first": True}}}])  # fmt: skip
+    running = runtime.workers.running
+    monkeypatch.setattr(runtime.workers, "running", lambda: 99)  # No slot free.
+    told = await call_tool(runtime, "message_session", router["id"], session_id=worker,
+                           text="Report done: Again.", task="new", title="Fix it again",
+                           why_new="t")  # fmt: skip
+    assert told.result_type != "failure", told.text_result_for_llm
+    assert harness.store.session(worker)["status"] == "queued"
+    monkeypatch.setattr(runtime.workers, "running", running)
+    await runtime.workers.pump()
+    await until(lambda: any(t["title"] == "Fix it again" and t["status"] in {"review", "done"}
+                            for t in runtime.tasks.for_session(worker)), 30)  # fmt: skip
+    assert runtime.states[worker].opened_asking is True
+    assert runtime.states.handle(worker).worker is not before
+
+
+async def test_a_slot_taken_for_a_send_as_it_is_opened_again_is_waited_for_not_a_turn(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Review 3: a send takes its slot just as the worker is opened again asking first (held,
+    it gives it back): a slot without a turn is waited for, never taken for a turn to end after;
+    then it is opened again and given what it holds, nothing of it stopped."""
+    from test_claude_workers import until
+
+    harness, runtime, made = await claude_done(tmp_path, monkeypatch)
+    worker = made["session_id"]
+    state = runtime.states[worker]
+    reopen = runtime.autopilot.reopen_asking
+
+    async def meanwhile(row, carried):
+        state.busy = True  # A send's claim, given back a moment later.
+
+        async def given_back():
+            await asyncio.sleep(0.3)
+            state.busy = False
+
+        runtime.background(given_back())
+        await reopen(row, carried)
+
+    monkeypatch.setattr(runtime.autopilot, "reopen_asking", meanwhile)
+    entry = await autopilot_entry(runtime)
+    router = harness.store.session(harness.router_id)
+    runtime.autopilot.origins.taken(router, [{"meta": {TAG: {"entries": [entry["id"]],
+                                                             "ask_first": True}}}])  # fmt: skip
+    told = await call_tool(runtime, "message_session", router["id"], session_id=worker,
+                           text="Report done: Again.", task="new", title="Fix it again",
+                           why_new="t")  # fmt: skip
+    assert told.result_type != "failure", told.text_result_for_llm
+    await until(lambda: any(t["title"] == "Fix it again" and t["status"] in {"review", "done"}
+                            for t in runtime.tasks.for_session(worker)), 30)  # fmt: skip
+    assert state.opened_asking is True and not state.confined
+    assert not [m for m in harness.store.messages(worker) if (m["meta"] or {}).get("stopped")]
 
 
 async def test_a_claude_worker_at_work_takes_it_only_once_opened_again_asking_first(

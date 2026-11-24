@@ -497,11 +497,12 @@ class Delivery:
             not m["meta"].get("deferred") for m in self.store.prompts(session_id, after=mark)
         )
 
-    def held_to_ask_first(self, row: dict, pending: list[dict]) -> bool:
+    def held_to_ask_first(self, row: dict, pending: list[dict], claimed: bool) -> bool:
         """Whether what a worker is given waits for its process to open again asking first
         (autopilot/answers.py reopen_first): what it carries Autopilot's origin, asking first,
         and its process (another agent's) was opened acting on its own. Not at work: opened
-        again now, then given it; at work: once its turn is over (never mid-turn)."""
+        again now, then given it; at work: once its turn is over (never mid-turn). `claimed`:
+        this send took its slot (not one joining a turn); held, it gives it back."""
         autopilot = self.runtime.autopilot
         carried = None
         for message in pending:
@@ -511,22 +512,27 @@ class Delivery:
             return False
         state = self.states[row["id"]]
         if state.reopen_asking:
+            self.give_back(row["id"], claimed)
             return True  # Being opened again, or once its turn is over.
-        how = autopilot.reopen_first(row, carried, claimed=True)
+        how = autopilot.reopen_first(row, carried, claimed=claimed)
         if not how:
             return False
         # It carries the origin from now (its next process opens asking first: Runtime.yolo).
         autopilot.origins.keep(row["id"], carried)
         state.reopen_asking = True
+        self.give_back(row["id"], claimed)
         if how == "after":
             # Kept for its next process (Runtime.reattach, once its turn is over).
             state.confined = state.stale = True
             return True
-        if state.busy and row["status"] not in {"working", "starting"}:
-            state.busy = False  # The slot claimed for this goes back until it is given.
-            self.runtime.background(self.runtime.workers.pump())
         self.runtime.background(autopilot.reopen_asking(row, carried))
         return True
+
+    def give_back(self, session_id: str, claimed: bool):
+        """A slot this send took (claimed), nothing sent: free until it is given what it holds."""
+        if claimed and self.states[session_id].busy:
+            self.states[session_id].busy = False
+            self.runtime.background(self.runtime.workers.pump())
 
     async def flush(
         self,
@@ -561,7 +567,7 @@ class Delivery:
             # No turn starts while its folder's agent settings are changed (see deliver).
             self.runtime.background(self.runtime.settings_stop(session_id))
             return False
-        if worker["role"] == WORKER and self.held_to_ask_first(worker, pending):
+        if worker["role"] == WORKER and self.held_to_ask_first(worker, pending, not joins):
             return False
         if any(TAG in message["meta"] for message in pending):
             # Messages that carry Autopilot's origin: so does the turn that takes them in.
