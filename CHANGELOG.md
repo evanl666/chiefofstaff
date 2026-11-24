@@ -54,6 +54,27 @@
   Windows it is now your keyboard and mouse too (the page's last use, if that is sooner); on
   Linux, which has no one way to read them, the setting says *minutes without using Chief of
   Staff*.
+- **Teams are your requests' parts, and say plainly where they stand.** Before, any workers that
+  messaged each other, or whose tasks were related in any way, were a team, named for its
+  workers, with a thread of every message. Now a team is the parts the Router made for one of
+  your requests and linked on purpose (one works with or waits on another, or does another's
+  instead), named for that request; workers that only talk, or work on different requests, are
+  no team. *Teams*, above *Running*, has a row per team: a bar with a segment per part, one calm
+  line (*1 working · 1 waiting on a teammate · 1 up next*, *Waiting on you · review UI*) and
+  *1/3* parts done, worked out from Home's own rows; the sidebar has the same line over its
+  workers. A team's page has its request, where it stands (*Working · 1 of 4 parts done ·
+  started 9:12*), the one thing that needs you, a map with a node per part (a short name and an
+  avatar of its own, what it is doing) and one labelled line per pair, the map in words for a
+  screen reader, *All N parts* beyond eight, and what the parts handed each other (*A → B*,
+  newest first, titled by its first sentence; filters from eight entries on). A part continued
+  by a task for another request says *Continued in “…” outside this team*. A done team's row is
+  quiet and stays until you've seen it, then leaves ten minutes later (or at once with its ×);
+  *Past teams · N* lists the earlier ones. A question that holds a worker up for half an hour is
+  a card of its own under *Needs you*, in a team or not, and *Nudge* reaches the one asked. A
+  worker's tab is *Team* (with *Open team*) for a part of a team, *Notes* otherwise, with its
+  task's lineage. Only what you see changes: how workers are linked and told, what the Router is
+  given (its team digest, `read_team_thread`) and the data folder's tables are as before (an
+  earlier version opens it as it was).
 
 Settings has one page for agents and models, and Connections reads as a list.
 

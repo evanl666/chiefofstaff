@@ -176,46 +176,50 @@ reaches the ones still at work. What workers tell each other is information, nev
 when one should change course (scope, another approach, overlapping work), it asks the Router,
 which decides or asks you. Independent tasks started together are not linked.
 
-**Teams.** Workers that work together are a team: each has a short name (from its first task,
-*Token Scout*; yours in its **⋯** → *Short name*) and a color, the same everywhere. Home shows
-each message in a line by those names (*↔ Token Scout told Token Writer: …*); several in a row
-are one line, how many, who and what still waits (*↔ 5 team messages · TS TW · 1 waiting 9
-min*), opening to the last three, its *Open* to their thread. *Teams*, above *Running*, has a
-line per team (*2 workers · 8 messages · 1 waiting 9 min*, or *all answered*), and the sidebar
-lists a team's workers together under its name. A team's thread shows who talks to whom (wider
-lines for more messages, amber while a question waits) and everything they told and asked each
-other, each question with its answer (*answered in 3 min*) or how long it has waited (*waiting
-9 min*), with *All*, *Waiting*, *Questions* and *Told*. In a worker's chat, *Work* shows what
-its team told it in a line each; *Team* shows those in full (and *Team thread*), *Tools* its
-steps and *Reports* its reports. A question that holds its asker's task up for half an hour
-comes under *Needs you*, one line per team: *Nudge* tells the one asked that its teammate waits
-(once every half hour), *Open thread* shows it. The Router is not handed the messages: its next
-turn gets a short digest (who told or asked whom, what waits), and it reads a team's thread
-only when you ask about it or a question there holds a task up, so it never passes on what one
-worker handed another.
+**Teams.** When the Router splits one of your requests into parts that work together (two
+sides of one change, a value one finds that another uses, a part that starts once others are
+done), those parts are a team, named for your request (*Ship checkout v2 for acme-shop*). Only
+the tasks made for that one message and linked on purpose (one works with or waits on another,
+or does another's instead) make one: workers that only talk, work on another of your requests or
+were started on their own never do. *Teams*, above *Running*, has a row per team: its request, a
+bar with a segment per part, where it stands in a calm line (*1 working · 1 waiting on a teammate
+· 1 up next*, *Waiting on you · review UI*) and how many parts are done (*1/3*); the sidebar puts
+its workers under one line with the same count. A team's page says what it's for (*For your
+request at 9:12: …*), where it stands (*Working · 1 of 4 parts done · started 9:12*), the one
+thing that needs you if there is one, and a map: a node per part, by a short name from its task
+(each its own in the team, with an avatar of its own) and what it is doing, and one labelled
+line per pair (*result ✓ · told*, *asked · 12 min*); the map in words too, for a screen reader,
+and *All N parts* as a table beyond eight. Below it, *What they handed each other*, newest
+first (*Checkout API → Checkout UI · note*, titled by its first sentence), with *All*,
+*Waiting*, *Questions* and *Notes* from eight entries on. A part continued by a task for another
+of your requests says *Continued in “…” outside this team* (a link) and counts as finished. A
+team's state is what Home's own rows say: a part waiting on your review or your answer has the
+team waiting on you. Once every part is done its row says so, quietly (*Done · 3 parts · 1 h 40
+min*), and stays until you've seen it; it leaves ten minutes later (at once with its ×), and
+*Past teams · N* lists the earlier ones. Teams change only what you see: how workers are linked,
+what they are told and what the Router gets are as before.
 
-**How a team's tasks are related.** Workers whose tasks are related are a team too, even if
-they never message: one that waits on another's result, does a task instead of another (*handed
-to E2E Runner*), builds on what another found (*picks up from Token Scout*) or was split off,
-the parts of one request worked on side by side (a task that waits on another follows it, and
-is told so: no part), and a Compare's sides (*vs Codex*; the one you accept *picked*, the
-other dimmed: in the sidebar, a team that is only a Compare keeps its *Compare* line). A team's
-view says it in counts first (*⇉ 3 parts ●●○ · ⇢ 1 waiting · ⑂ 1 split · #482*; click one to
-light the tasks it counts), then *Tasks*, a row per
-task with its status and the one relation that matters most: what it waits on (*waits on
-Checkout UI · 9 min*, amber like a question waiting), the task that replaced it (its row
-dimmed), its part of a request (*3 parts · 1 landed*, the same on each part), where it
-branched from, what it continues, *+2* for the rest. Click a task for its lineage: where it
-came from and what came of it, its other parts under it, in one line with a caption (*3
-workers, one request · ready when 3 of 3 land*, *All 3 parts landed · 42 min*, *Checkout tests
-handed this to E2E Runner*); click any task in it for its title, worker, status and *Open*.
-Beside a worker's avatar, a title leaves out the worker's own name (*The v2 pages* for
-*Checkout UI: the v2 pages*; all of it on hover). When a wait clears while you look, its
-line draws itself solid and the row says *Checkout UI delivered · unblocked*, then *✓ after
-Checkout UI*. A PR or project the tasks share is a chip, never a link that makes a team. On
-Home, a team's line adds one cue (*⇢ 1 waiting* first, else *●●○ 2 of 3 parts*); a worker's
-*Team* tab starts with its task's lineage. With *Reduce motion* on in your system, nothing
-moves; the words say it.
+Workers are named in the Router's lines and in each other's chats by a short name (from their
+first task, *Token Scout*; yours in its **⋯** → *Short name*). In a worker's chat, *Work* shows
+what other workers told it in a line each; *Team* (for a part of a team, with *Open team*;
+*Notes* otherwise) shows those in full, *Tools* its steps and *Reports* its reports. In the Router
+chat, several such messages in a row are one line (*↔ 5 team messages · 1 waiting 9 min*), with
+its team's request when they are between its parts, opening to the last three, its *Open* to the
+team (or to the chat of the one last told). A question that holds its asker's task up for half
+an hour comes under *Needs you*, a card per question, in a team or not: *Nudge* tells the one
+asked that its asker waits (once every half hour), *Open* shows the team or the asker's chat. The
+Router is not handed the messages: its next turn gets a short digest (who told or asked whom,
+what waits), and it reads the workers' thread only when you ask about it or a question there
+holds a task up, so it never passes on what one worker handed another.
+
+**How a task is related.** A worker's *Team* or *Notes* tab starts with its task's lineage: where
+it came from and what came of it, in one line with a caption (*3 workers, one request · ready
+when 3 of 3 land*, *All 3 parts landed · 42 min*, *Checkout tests handed this to E2E Runner*,
+*Release Notes waits on Checkout UI · 9 min*): the task it waits on, the one that replaced it,
+the one it continues or branched from, a Compare's other side. Click any task in it for its
+title, worker, status and *Open*. When a wait clears while you look, its line draws itself solid
+(*Checkout UI delivered · Release Notes is unblocked*). With *Reduce motion* on in your system,
+nothing moves; the words say it.
 
 **Routing to the right worker** matters most. Your message reaches the Router together with
 the workers whose record matches it (title, task, files, branches, reports; keyword search,
@@ -240,7 +244,7 @@ fork, up to its last finished turn) and a note from Chief of Staff on what the f
 doing now and where. It works in a folder and branch of its own (from the project's base); the
 busy worker goes on undisturbed. The Router chat says *Started a second worker for “…” (context
 from “…”)*; in the sidebar the second worker sits under the first, and its task's row says
-*Worker from “…”*; in its team's *Tasks* it is *⑂ forked from …*. With every slot taken, or
+*Worker from “…”*; its *Notes* tab's lineage has it *⑂ forked from …*. With every slot taken, or
 when only that worker can do it (its branch or PR, or you asked for it), the task waits for it
 as before. Work you ask for in parallel (meanwhile, at the same time) with what a worker is
 doing goes to a second worker at once too, busy or not. When you ask for a new worker for
