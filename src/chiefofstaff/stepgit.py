@@ -23,10 +23,11 @@ from pathlib import Path
 from .settings_guard import read_regular
 from .workspaces import SAFE_GIT
 
-# What a step's git folder takes of its repository, as links (held read-only in its sandbox):
-# the hooks and info/ git runs and reads there, which commits are whole (shallow), submodules'
-# folders and git-lfs's objects, as a worktree of the repository has them.
-SHARED = ("hooks", "info", "shallow", "modules", "lfs")
+# What a step's git folder copies of its repository's (held read-only in its sandbox): what
+# git leaves out (info/exclude) and how it reads files (info/attributes), and which commits are
+# whole (shallow). Its hooks and git-lfs's objects are the repository's, by its configuration
+# (config_text). Copies and settings, never links: a sandbox binds a path, not a link.
+COPIED = ("info/exclude", "info/attributes", "shallow")
 SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 REF = re.compile(r"refs/[A-Za-z0-9._/-]{1,250}")
 # Most of a step's commit taken into the repository (its new objects, as a pack).
@@ -94,9 +95,11 @@ def make(
         (place / branch).write_text(f"{head}\n")
     (place / "HEAD").write_text(f"ref: {branch}\n" if branch else f"{head}\n")
     (place / "config").write_text(config_text(common))
-    for name in SHARED:
-        if os.path.lexists(Path(common) / name):
-            (place / name).symlink_to(Path(common) / name)
+    for name in COPIED:
+        with suppress(OSError):
+            data = read_regular(Path(common) / name)
+            (place / name).parent.mkdir(parents=True, exist_ok=True)
+            (place / name).write_bytes(data)
     copied = False
     with suppress(OSError):
         shutil.copyfile(Path(admin) / "index", place / "index")
@@ -140,9 +143,19 @@ def newest(tree: str, pins: dict[str, str]) -> int:
 def config_text(common: str) -> str:
     """The step's git folder's configuration: the repository's own, included (its filters,
     remotes, settings), with its format and extensions (but how it stores refs: here, as
-    files)."""
+    files), and, where nothing names others, the repository's hooks and git-lfs's objects."""
     lines = ["[core]", "\trepositoryformatversion = 0"]
     extensions = []
+    named = {}
+    with suppress(ValueError):
+        found = run("--git-dir", common, "config", "--get-regexp",
+                    r"^(core\.hookspath|lfs\.storage)$", cwd=common,
+                    env=environment()).decode(errors="replace")  # fmt: skip
+        named = dict(line.partition(" ")[::2] for line in found.splitlines())
+    if "core.hookspath" not in named:
+        lines.append(f"\thooksPath = {quote(common + '/hooks')}")
+    if "lfs.storage" not in named and os.path.isdir(f"{common}/lfs"):  # noqa: PTH112
+        lines += ["[lfs]", f"\tstorage = {quote(common + '/lfs')}"]
     with suppress(ValueError):
         found = run("config", "--file", f"{common}/config", "--get-regexp",
                     r"^(core\.repositoryformatversion|extensions\.)", cwd=common,
@@ -156,9 +169,13 @@ def config_text(common: str) -> str:
     if extensions:
         lines[1] = "\trepositoryformatversion = 1"
         lines += ["[extensions]", *extensions]
-    quoted = common.replace("\\", "\\\\").replace('"', '\\"')
-    lines += ["[include]", f'\tpath = "{quoted}/config"']
+    lines += ["[include]", f"\tpath = {quote(common + '/config')}"]
     return "\n".join(lines) + "\n"
+
+
+def quote(value: str) -> str:
+    """A value for git's configuration file, as it reads one in quotes."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def write_pointer(path: Path, text: str):
