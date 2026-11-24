@@ -42,6 +42,10 @@ logger = logging.getLogger(__name__)
 # The longest a card waits, not drawn, while it is judged; and the judge's own time.
 DECIDING = 120.0
 JUDGE_SECONDS = 110.0
+# How long a worker opened again asking first waits for a slot taken for a send meanwhile to be
+# given back (reopen_asking): REOPEN_WAITS of REOPEN_PAUSE seconds.
+REOPEN_PAUSE = 0.05
+REOPEN_WAITS = 200
 # Card kinds it answers in a worker's turn, and those it only parks.
 ANSWERED = frozenset({"question"})
 PARKED_ONLY = frozenset({"form", "link"})
@@ -279,8 +283,10 @@ class Answers:
         that asks first reaches it (`carried`, else what it carries): "" no (on Copilot, which
         takes the checks per request; asking first already; no process open, so it opens
         asking first), "now" (not at work), or "after" (at work: once its turn is over, never
-        mid-turn). `claimed`: its slot was just taken for this, not by a turn. Never the
-        owner's saved setting."""
+        mid-turn). `claimed`: its slot was just taken for this send (Workers.claim_slot), which
+        it gets only with no turn holding it: then only a turn its agent began and has not
+        settled (Runtime.begun), or a command it left running, is one at work. Never the owner's
+        saved setting."""
         if row.get("role") != "worker" or self.runtime.agent(row["id"]) == COPILOT_AGENT:
             return ""
         origin = carried or self.origins.sticky.get(row["id"])
@@ -289,10 +295,18 @@ class Answers:
         state = self.runtime.states[row["id"]]
         if state.opened_asking is not False or not state.handle:
             return ""
-        busy = state.busy and not claimed
-        if row["status"] in {"working", "starting"} or busy or state.held:
-            return "after"
-        return "now"
+        turn = state.held or row["id"] in self.runtime.begun
+        if not claimed:
+            turn = turn or state.busy or row["status"] in {"working", "starting"}
+        return "after" if turn else "now"
+
+    async def reopen_now(self: Autopilot, session_id: str):  # type: ignore[misc]
+        """Its process ends (nothing of it at work: as Runtime.agent_mode_changed does it for one
+        at rest, never stopping a turn); its next message opens it in a new one, asking first."""
+        await self.runtime.detach(session_id)
+        backend, _ = self.runtime.connection(self.runtime.agent(session_id))
+        if retire := getattr(backend, "retire", None):
+            await retire(session_id)
 
     async def reopen_asking(self: Autopilot, row: dict, carried: dict):  # type: ignore[misc]
         """A worker held what carries its origin (Delivery.held_to_ask_first): its process is
@@ -300,15 +314,23 @@ class Answers:
         given what it holds."""
         state = self.runtime.states[row["id"]]
         try:
-            fresh = self.store.find_session(row["id"])
-            if not fresh or fresh["closed_at"]:
-                return
-            how = self.reopen_first(fresh, carried)
-            if how == "now":
-                await self.runtime.agent_mode_changed(fresh, asks_first=True)
-            elif how == "after":
-                state.confined = state.stale = True  # Its turn began meanwhile: after it.
-                return
+            for _ in range(REOPEN_WAITS):
+                fresh = self.store.find_session(row["id"])
+                if not fresh or fresh["closed_at"]:
+                    return
+                if not self.reopen_first(fresh, carried):
+                    break
+                if self.reopen_first(fresh, carried, claimed=True) == "after":
+                    state.confined = state.stale = True  # Its turn began meanwhile: after it.
+                    return
+                if not state.busy and fresh["status"] not in {"working", "starting"}:
+                    await self.reopen_now(row["id"])
+                    break
+                # Its slot taken for a send meanwhile: that send is held (reopen_asking) and
+                # gives it back.
+                await asyncio.sleep(REOPEN_PAUSE)
+            else:
+                await self.reopen_now(row["id"])  # (A slot never given back: freed with it.)
             state.reopen_asking = False
             await self.runtime.delivery.resume(row["id"])
         finally:
@@ -322,7 +344,7 @@ class Answers:
         if how == "after":
             return False
         if how == "now":
-            await self.runtime.agent_mode_changed(row, asks_first=True)
+            await self.reopen_now(row["id"])
         return True
 
     def answer_card(self: Autopilot, row: dict, draft: dict, answer: asyncio.Future, task: dict,  # type: ignore[misc]
