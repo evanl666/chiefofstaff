@@ -315,7 +315,7 @@ class Steps:
         repository's objects borrowed. Recorded before the worktree points at it, so a stop at
         any moment finds what to put back (release_git)."""
         pins = await asyncio.to_thread(git_pins, checkout, tree)
-        if not pins or not pins.get("GIT_DIR"):
+        if not pins or pins.get("GIT_DIR") in {None, pins.get("GIT_COMMON_DIR")}:
             raise ValueError(f"the worktree {tree} can't be found in its repository")
         branch = ""
         if reused:

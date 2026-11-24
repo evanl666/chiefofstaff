@@ -131,7 +131,7 @@ def newest(tree: str, pins: dict[str, str]) -> int:
     found = 0
     with suppress(ValueError):
         listed = run(*SAFE_GIT, "ls-files", "-z", cwd=tree, env=pins)
-        for name in listed.split(b"\0"):
+        for name in filter(None, listed.split(b"\0")):
             with suppress(OSError):
                 found = max(found, int((Path(tree) / os.fsdecode(name)).lstat().st_mtime))
     return found
