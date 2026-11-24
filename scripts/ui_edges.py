@@ -723,11 +723,12 @@ async def this_round(runtime, browser, failures: list[str]):
     # cards in their timelines.
     await expect(page.locator("#timeline .event", has_text="Filter opt-outs told Opt-out "
                               "client")).to_be_visible(timeout=5000)  # fmt: skip
-    # In a worker's chat (E130): a line in its Work, the card on its Team tab.
+    # In a worker's chat (E130): a line in its Work, the card on its Notes tab (Team for a part
+    # of one of the owner's requests: these were started on their own).
     await page.locator("#session-list .item", has_text="Opt-out client").click()
     await expect(page.locator("#timeline .peer-msg > .event", has_text="Filter opt-outs:"))\
         .to_be_visible()  # fmt: skip
-    await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Team")).click()
+    await page.locator("#worker-tabs").get_by_role("tab", name=re.compile("^Notes")).click()
     await expect(page.locator("#timeline .card", has_text="From Filter opt-outs")).to_be_visible()
     await page.locator("#session-list .item", has_text="Filter opt-outs").click()
     await expect(page.locator("#timeline .peer-msg > .event", has_text="Told Opt-out client:"))\
