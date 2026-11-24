@@ -120,3 +120,38 @@ async def test_a_step_stopped_by_a_restart_or_a_downgrade_gives_its_worktree_bac
     await runtime.shepherd.start()
     assert (tree / ".git").read_text() == pointer
     assert run("git", "rev-parse", "HEAD", cwd=tree) == world.h0
+
+
+async def test_in_its_workers_detached_worktree_the_worktrees_head_moves_to_its_commit(world):
+    """A worker's worktree at the PR's head without a branch: the step's commit is where its
+    HEAD is once the step ends, as a commit there did before."""
+    from test_shepherd import fixed
+
+    runtime = await world.start()
+    await runtime.shepherd.tick()
+    await settle(runtime)
+    worker_tree = runtime.store.session(world.worker)["cwd"]
+    run("git", "checkout", "-q", "--detach", cwd=worker_tree)
+    branch = run("git", "rev-parse", "chief/fix-login", cwd=world.clone)
+    step, sha = await fixed(world, runtime)
+    assert step["state"] == "prepared" and step["tree"] == worker_tree, step
+    assert run("git", "rev-parse", "HEAD", cwd=worker_tree) == sha
+    assert run("git", "status", "--porcelain", cwd=worker_tree) == ""
+    assert run("git", "rev-parse", "chief/fix-login", cwd=world.clone) == branch
+
+
+async def test_a_step_folder_put_elsewhere_by_a_link_is_never_used(world):
+    """Its git folder's place must be one the step can't write: a link in its place (a worker
+    could make one in its own folder) refuses the attempt."""
+    runtime = await world.start()
+    await runtime.shepherd.tick()
+    await settle(runtime)
+    workspace = Path(runtime.workspaces.workspace(runtime.store.session(world.worker)))
+    elsewhere = Path(runtime.store.session(world.worker)["cwd"]) / "elsewhere"
+    elsewhere.mkdir()
+    (workspace / ".shepherd").symlink_to(elsewhere)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    [step] = runtime.shepherd.control.steps(TARGET)
+    assert step["state"] == "failed" and "is a link" in step["why"], step
+    assert not list(elsewhere.glob("*.git"))

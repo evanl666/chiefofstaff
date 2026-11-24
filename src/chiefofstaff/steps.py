@@ -323,8 +323,9 @@ class Steps:
                 found = (await checkout_git(checkout, tree, "symbolic-ref", "-q", "HEAD")).strip()
                 branch = found if found.startswith("refs/heads/") else ""
         record = await asyncio.to_thread(
-            stepgit.make, pins["GIT_COMMON_DIR"], pins["GIT_DIR"], tree, folder, step["h0"], branch
-        )
+            stepgit.make, pins["GIT_COMMON_DIR"], pins["GIT_DIR"], tree, folder, step["h0"],
+            branch, reused,
+        )  # fmt: skip
         evidence = {
             **((self.control.step(step["id"]) or step)["evidence"] or {}),
             "private": record,
@@ -350,11 +351,15 @@ class Steps:
         except Exception:
             logger.warning("Could not give step %s's worktree back.", current["id"], exc_info=True)
             return
-        if record.get("branch") and tip and tip != record["h0"]:
+        if record.get("own") and tip and tip != record["h0"]:
+            checkout = (current["evidence"] or {}).get("checkout") or {}
             try:
                 await asyncio.to_thread(stepgit.take, record, tip, record["h0"])
-                await asyncio.to_thread(stepgit.move_branch, record, tip)
-                checkout = (current["evidence"] or {}).get("checkout") or {}
+                if record.get("branch"):
+                    await asyncio.to_thread(stepgit.move_branch, record, tip)
+                else:  # (Its worktree's HEAD, detached.)
+                    await checkout_git(checkout, current["tree"], "update-ref", "--no-deref",
+                                       "HEAD", tip, record["h0"])  # fmt: skip
                 await checkout_git(checkout, current["tree"], "reset", "-q", "--mixed", tip)
             except Exception:
                 logger.info("Step %s: its worker's branch stays where it was.", current["id"],
