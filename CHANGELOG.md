@@ -54,6 +54,23 @@
   Windows it is now your keyboard and mouse too (the page's last use, if that is sooner); on
   Linux, which has no one way to read them, the setting says *minutes without using Chief of
   Staff*.
+- **Prepared for you holds its limits more tightly.** While a worker prepares a fix:
+  - **Your repository is read-only to it.** Its git now keeps its own branch, staging area and
+    commits in a folder of its own, reading your repository's history without writing it, and
+    Chief of Staff moves its commit into your repository and onto the worker's branch once it
+    ends. Before, a command it ran could delete or move your branches, other workers' branches
+    and tags, or the repository's history, in the repository a worker's folder shares with
+    yours.
+  - **None of your package registry or cloud sign-ins can be read** (npm, PyPI, cargo, RubyGems,
+    Gradle, Maven, Docker, AWS, Google Cloud and the like), so nothing can be published or
+    uploaded as you through the hosts it downloads from. A registry that needs your sign-in to
+    download from can't be used while it prepares.
+  - **A Rust project reaches only where cargo downloads from** (index.crates.io and
+    static.crates.io), not crates.io itself, which takes publishes.
+  - **Still on Copilot workers only.** On Claude Code, preparing stays off: Claude's sandbox
+    can't keep commands from your keychain, and its network rules are now set so that a fix's
+    limits would hold or nothing runs. The guide and SECURITY.md say exactly what the limits
+    are, and what they don't stop.
 
 ## 0.1.56 (2026-11-23)
 

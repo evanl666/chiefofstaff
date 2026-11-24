@@ -46,7 +46,7 @@ makes a mistake.
 | Only your own reaction delegates a Slack message (others reacting with the same emoji do nothing) | **Chief of Staff** (the watcher searches `hasmy::emoji:`, your reactions only) | Always |
 | A delegated message is acted on for what it asks, but risky requests in it are confirmed with you | **The model**, guided by instructions | As far as the model follows its instructions. Delegate only messages you would forward to a colleague |
 | Workers stay on their task, and don't speak as you where the floor above doesn't reach (an MCP server's write tools, a script) | **The model**, guided by instructions; the Watchdog flags drift | As far as the model follows its instructions |
-| While a worker prepares a fix for *Prepared for you*, its commands reach no GitHub host and no credentials (no `gh` or `git` sign-in, no SSH keys, no keychain), only its project's package registries and the hosts you list; its session has no MCP servers, no Slack and only the tools that turn needs | **OS sandbox**, always on for that turn, and **Copilot** (that turn's tool allowlist); Chief of Staff's permission check refuses the rest | *Prepared for you* is on (off by default) and this Copilot version passed Chief of Staff's check of those limits on this computer; until then no fix is prepared |
+| While a worker prepares a fix for *Prepared for you*, its commands reach no GitHub host and no credentials (no `gh` or `git` sign-in, no SSH keys, no keychain, none of your package registry or cloud sign-ins), only its project's package registries and the hosts you list; your repository (the one a worker's checkout shares with yours) is read-only to them: their git keeps its branch, staging area and commits in a folder of its own, and Chief of Staff moves the commit in; its session has no MCP servers, no Slack and only the tools that turn needs | **OS sandbox**, always on for that turn, and **Copilot** (that turn's tool allowlist); Chief of Staff's permission check refuses the rest | *Prepared for you* is on (off by default), the worker runs on Copilot (Codex has no sandbox for it; Claude Code's can't keep commands from the keychain) and this Copilot version passed Chief of Staff's check of those limits on this computer; until then no fix is prepared. The registries it reaches can still take uploads by someone else's account (see *Prepared for you* below) |
 | What *Prepared for you* publishes (a push, replies, a resolved conversation, a review asked again, a CI run again) is exactly what you approved, sent by Chief of Staff as your account: a push only to the PR's own branch, only if that branch is still at the commit the plan was made on, never with git hooks | **Chief of Staff** (each operation journaled before it is sent, checked against the plan, checked again just before it is sent, after every wait: turned off, paused, stopped, the PR changed hands or approved over an hour ago, it is withdrawn, never sent; read back on GitHub after a stop as your account's only, posted since it began to go out, with exactly its text, and left unknown when two could be it; never sent twice) | Always while it is on. Branches that are protected, require signed commits or have rules a push might not meet are left to you |
 | *Merge when ready* merges only a commit you accepted, or fixes you approved on top of it, once required checks pass and reviews approve | **Chief of Staff** (`gh pr merge --match-head-commit` with that exact commit, every condition read again just before; for a PR in a stack on GitHub, GitHub's asynchronous merge with that commit as its `sha`, direct, never bypassing rules, and never while a PR below it in the stack is open, which it would merge too) | You turned it on for that PR. A commit nobody approved pauses the PR until you accept it |
 
@@ -332,10 +332,37 @@ replies for your PRs in their worker, and publishes only what you approve:
 - **A commit nobody explains stops it.** Any commit on the PR that Chief of Staff did not push
   from an approved plan (a teammate's, yours, a worker's in an ordinary turn) pauses the PR
   until you resume it, and is never merged before you accept it.
+- **Its git is its own.** The worktree a step works in (its worker's, or a fresh one) points, for
+  that turn, at a git folder of the step's own: its HEAD, index and refs, its new objects, the
+  repository's history borrowed read-only (alternates). The repository the worktree shares with
+  your checkout and other workers is read-only to its commands, so none can move or delete a
+  branch, a tag or an object there. Once its commands have ended, Chief of Staff (outside any
+  sandbox) puts the worktree's `.git` back, takes the step's commit into the repository with its
+  own git (each object checked as it is stored; nothing the step wrote but the objects is read),
+  and, in the worker's own worktree, moves the worker's branch to it only from the commit the
+  step began at. A stop mid-step, a restart or `--prepare-downgrade` puts the worktree back too.
+- **Its network.** Only the hosts its project downloads from (by the files it has: npm's
+  registry and yarn's, PyPI and its files host, Go's module proxy, checksum database and the
+  storage host the proxy sends large downloads to, crates.io's index and downloads but not its
+  API, RubyGems, Maven Central and Gradle's), the hosts you list, and never GitHub's. None of your
+  registry or cloud credential files can be read (as for a worker that reads Slack), so nothing
+  is published or uploaded as you.
 - **Limits:** the check runs your installed Copilot's sandbox on this computer and trusts it as
-  the worker sandbox is trusted. A fix's tests run your project's code in that sandbox. A fix
-  can change tests or CI only with your approval of those parts, which the review shows first;
-  test names are compared for pytest, Go, cargo and vitest only.
+  the worker sandbox is trusted. A fix's tests run your project's code, and its dependencies', in
+  that sandbox, and those hosts take writes from anyone with an account or link of their own:
+  npm and yarn's registries and RubyGems a publish, Gradle's plugin portal a plugin, Go's storage
+  host an upload to a link someone signed, and Go's proxy fetches any module path it is asked for
+  (data can ride in the path). So code that means to can carry the checkout's contents out
+  through them, by its author's account, never yours. A registry that needs your sign-in to
+  download from can't be used while it prepares. A fix can change tests or CI only with your
+  approval of those parts, which the review shows first; test names are compared for pytest, Go,
+  cargo and vitest only.
+- **Only on Copilot workers.** A worker on Codex (no sandbox for it) or Claude Code (its sandbox
+  lets every command reach the keychain's service on macOS) never prepares a fix: its row says
+  why. Chief of Staff's translation of the step's limits to Claude's sandbox (its network closed
+  but for the hosts listed, GitHub's denied, nothing asked about) refuses to run on macOS rather
+  than run without the keychain held, and a worker on another agent is never opened in a step's
+  place.
 
 ## Your data
 
