@@ -937,12 +937,14 @@ for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
 **What it does.** It adds no capability: it changes who answers. While it is on:
 
 - A worker's question or decision card is answered only from what you said yourself: a message
-  you typed in the page (in that worker's chat, or to the Router when the task's instructions
-  quote it), a decision card you answered in the page, or a habit you wrote or kept in the page.
-  Each answer quotes it, in the worker's chat too (*Autopilot answered: Postgres, because you
-  said “Postgres for v1”*). It decides with the Router's model and effort (Settings → Models),
-  on Copilot. What workers note, what the Router writes or decides, files in a
-  repository, away answers, Send to Chief notes and Slack messages are never your word.
+  you typed in the page (in that worker's chat, or to the Router when it gave that very message
+  to the task), your answer to a decision card in the page (your answer, not the card's
+  question, which is the worker's), or a habit you wrote or kept in the page. Each answer quotes
+  a whole sentence or clause of yours that says it, in the worker's chat too (*Autopilot
+  answered: Postgres, because you said “Postgres for v1”*). It decides with the Router's model
+  and effort (Settings → Models), on Copilot. What workers note, what the Router writes or
+  decides, files in a repository, away answers, Send to Chief notes and Slack messages are never
+  your word.
 - What nothing you said settles waits for you under *Needs you*, saying why (*Set aside: nothing
   you said settles it*), as does a recommendation alone, any permission (pushing, publishing,
   deleting, merging, commenting…), and anything irreversible or outside this computer (a
@@ -959,14 +961,17 @@ for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
   would send (a reply you handed over, a note to another session) waits for you as a card.
 
 **Workers ask first.** On (the default), every turn Autopilot continues runs with Ask first,
-whatever your setting for workers, and keeps it until that turn ends, after Stop too; a Codex or
-Claude worker is reopened in Ask first before it is continued, never mid-turn (its question waits
-for the turn). Your own turns are as you set them. Off, workers keep your usual settings.
-Writing to a worker yourself in the page hands it back to you.
+whatever your setting for workers, and keeps it until that turn ends, after Stop too; so does
+every turn its work leads to (a message the Router sends from it, a note from another worker).
+A Codex or Claude worker is reopened in Ask first before any of it reaches it, never mid-turn
+(it waits for that turn to end). Your own turns are as you set them. Off, workers keep your
+usual settings. Writing to a worker yourself in the page hands it back to you.
 
-**Stop** stops it at once: nothing it queued goes out, and the turns it continued are stopped,
-their tasks waiting with *Go on*. What its judge and the turns it starts use counts against
-*Credits a day*; at the cap it pauses until the next day and says so.
+**Stop** stops it at once: nothing it queued goes out, the turns it continued (and the Router's,
+when one carries its work) are stopped, their tasks waiting with *Go on*, and what it was still
+deciding or checking is yours (a card it was judging is drawn for you, a result stays to
+review). What its judge and the turns it starts use counts against *Credits a day*; at the cap
+it pauses until the next day and says so.
 
 **When it ends**, one card at the end of the Router's chat, *While you were away*, says what it
 did and left for you: each row opens its entry in the record, with *Undo* on an acceptance and
