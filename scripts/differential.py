@@ -461,7 +461,7 @@ FIXES: list[Allow] = [
     Allow(
         "Teams lite: a task's request, a request's tasks, a part's teammates, a task's "
         "exchanges, the owner's look at a done team (passive marks)",
-        data=r"\.db\.kv\.(req|reqtasks|with|xchg|teamseen):",
+        data=r"\.db\.kv\.(req|reqtasks|with|withpending|xchg|teamseen):",
     ),
     Allow(
         "Teams lite: the tasks an exchange was between, in its message's meta",
@@ -471,6 +471,26 @@ FIXES: list[Allow] = [
         "Teams lite: the tasks an exchange was between, in its message's meta (as stored)",
         data=r"messages.*\.meta$",
         without=r', "(from|to)_task": "[^"]*"|"(from|to)_task": "[^"]*", ',
+    ),
+    # Home counts a question holding a worker up as one card each (it was one a team): the
+    # Router's count of what needs the owner is Home's (list_sessions' needs_owner, a fresh
+    # Router's handover), and the daily digest's line counts the workers held up.
+    Allow(
+        "Teams lite: the Router's count of what needs the owner, a held question one each "
+        "(list_sessions' needs_owner)",
+        data=r"^backend\.(turns|sessions)\.router:",
+        without=r'"needs_owner": \{"count": \d+, "summary": "[^"]*"',
+    ),
+    Allow(
+        "Teams lite: the Router's count of what needs the owner, a held question one each "
+        "(a fresh Router's handover)",
+        data=r"^backend\.(turns|sessions)\.router:",
+        without=r"Under the owner's Needs you now \(Home's count\): \d+: [^\n]*",
+    ),
+    Allow(
+        "Teams lite: the daily digest's workers held up by another's answer",
+        data=r"notices\[\d+\]\.text$",
+        without=r"\d+ workers? waiting on another one's answer",
     ),
     Allow(
         "Teams lite: Home's Teams rows, the sidebar's team line, a held question's card",
