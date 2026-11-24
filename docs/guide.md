@@ -192,11 +192,12 @@ line per pair (*result ✓ · told*, *asked · 12 min*); the map in words too, f
 and *All N parts* as a table beyond eight. Below it, *What they handed each other*, newest
 first (*API → UI · note*, by the parts' short names, titled by its first sentence), with *All*,
 *Waiting*, *Questions* and *Notes* from eight entries on. A part continued by a task for another
-of your requests says *Continued in “…” outside this team* (a link) and counts as finished. A
-team's state is what Home's own rows say: a part waiting on your review or your answer has the
-team waiting on you. Once every part is done its row says so, quietly (*Done · 3 parts · 1 h 40
-min*), and stays until you've seen it; it leaves ten minutes later (at once with its ×), and
-*Past teams · N* lists the earlier ones. Teams change only what you see: how workers are linked,
+of your requests says *Continued in “…” outside this team* (a link) and counts as finished; one
+that waits on it says *Waiting on “…” (outside this team)*. A team's state is what Home's own
+rows say (a part waiting on your review or your answer has the team waiting on you), in the
+same words on its row, the sidebar and its page. Once every part is done its row says so,
+quietly (*Done · 3 parts · 1 h 40 min*), and stays until you've seen it; it leaves ten minutes
+later (at once with its ×), and *Past teams · N* lists the earlier ones. Teams change only what you see: how workers are linked,
 what they are told and what the Router gets are as before.
 
 Workers are named in the Router's lines and in each other's chats by a short name (from their

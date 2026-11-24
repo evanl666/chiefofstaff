@@ -67,7 +67,8 @@
   avatar of its own, what it is doing) and one labelled line per pair, the map in words for a
   screen reader, *All N parts* beyond eight, and what the parts handed each other (*A → B*,
   newest first, titled by its first sentence; filters from eight entries on). A part continued
-  by a task for another request says *Continued in “…” outside this team*. A done team's row is
+  by a task for another request says *Continued in “…” outside this team*, and one that waits on
+  it *Waiting on “…” (outside this team)*, on its row and its page alike. A done team's row is
   quiet and stays until you've seen it, then leaves ten minutes later (or at once with its ×);
   *Past teams · N* lists the earlier ones. A question that holds a worker up for half an hour is
   a card of its own under *Needs you*, in a team or not, and *Nudge* reaches the one asked. A
