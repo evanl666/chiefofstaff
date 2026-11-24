@@ -11656,6 +11656,21 @@ async def round_autopilot(runtime, browser, failures: list[str]):
     assert runtime.tasks.get(seeded["login"]["task_id"])["status"] != "done"
     await page.locator("#back-home").click()
     await expect(page.locator("#session-title")).to_have_text("Home")
+    # A link to an entry alone (as the Router's answers have them): that entry's run opens, the
+    # entry unfolded, though a newer run is on.
+    await page.evaluate(
+        """(id) => {
+          const link = Object.assign(document.createElement("a"), { href: `#autopilot/${id}`,
+            id: "autopilot-entry-link", textContent: "its entry" });
+          document.querySelector("#timeline").append(link);
+        }""",
+        first["id"],
+    )
+    await page.locator("#autopilot-entry-link").click()
+    linked = page.locator(f'.autopilot-record [data-entry="{first["id"]}"]')
+    await expect(linked).to_be_visible()
+    await expect(linked.locator(".autopilot-line")).to_have_attribute("aria-expanded", "true")
+    await page.locator("#back-home").click()
     log("Autopilot: its card opens its record; filters, rows, Copy, Change and Undo by keyboard")
 
     # Unticked: the run ends, everything of it goes from the page, its record stays.
