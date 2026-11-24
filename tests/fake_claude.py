@@ -1404,8 +1404,15 @@ class Fake:
             url = next(w for w in words if "://" in w)
             host = url.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
             allowed = network.get("allowedDomains")
-            listed = allowed is None or any(host == d or host.endswith("." + d) for d in allowed)
-            if not listed:
+
+            def matched(domains: list) -> bool:
+                names = [str(d).removeprefix("*.") for d in domains]
+                return any(host == d or host.endswith("." + d) for d in names)
+
+            # Denied always wins; with strictAllowlist, a host off the list is not asked about.
+            denied = matched(network.get("deniedDomains") or [])
+            listed = not denied and (allowed is None or matched(allowed))
+            if not listed and not denied and not network.get("strictAllowlist"):
                 reply = await self.ask(
                     {"subtype": "can_use_tool", "tool_name": "SandboxNetworkAccess",
                      "input": {"host": host}, "tool_use_id": call, "permission_suggestions": []}

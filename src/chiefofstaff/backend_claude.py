@@ -63,6 +63,7 @@ from . import agents
 from .backend import (
     ATTACHED,
     Capabilities,
+    StepSandboxPolicy,
     attached_text,
     attachment_paths,
     descendants,
@@ -914,6 +915,13 @@ def sandbox_settings(policy: Any) -> dict:
     }
     if policy.allowed_hosts:
         network["allowedDomains"] = list(policy.allowed_hosts)
+    if isinstance(policy, StepSandboxPolicy):
+        # A shepherd step's: only its hosts (none without outbound traffic), never its blocked
+        # ones, and no host asked about. Claude restricts the network only where allowedDomains
+        # is set (2.1.322: without it, every command reaches every host).
+        network["allowedDomains"] = list(policy.allowed_hosts) if policy.outbound else []
+        network["deniedDomains"] = list(policy.blocked_hosts)
+        network["strictAllowlist"] = True
     return {
         "enabled": True,
         "failIfUnavailable": True,
@@ -930,6 +938,27 @@ def sandbox_settings(policy: Any) -> dict:
         },
         "network": network,
     }
+
+
+# What Claude's sandbox can't hold of a policy: on macOS its profile lets every command reach
+# the keychain's service (2.1.322 always allows com.apple.SecurityServer), whatever its settings.
+KEYCHAIN_OPEN = (
+    "Claude Code's sandbox can't keep commands from your keychain, so this can't run on Claude."
+)
+
+
+def sandbox_unheld(policy: Any) -> str:
+    """Why Claude's sandbox can't hold this policy ("" when it can): one that keeps commands
+    from the keychain (a shepherd step's), on macOS. Refused rather than run with less."""
+    if getattr(policy, "keychain", None) is False and sys.platform == "darwin":
+        return KEYCHAIN_OPEN
+    return ""
+
+
+def restricts_hosts(policy: Any) -> bool:
+    """Whether a policy's commands reach only the hosts it lists (none, a shepherd step's
+    without outbound traffic)."""
+    return bool(policy.allowed_hosts) or isinstance(policy, StepSandboxPolicy)
 
 
 def sandbox_widened(
@@ -1337,7 +1366,9 @@ class ClaudeWorker:
         effort: Any = self.process_effort or None
         settings: dict[str, Any] = {"autoMemoryEnabled": False, "sandbox": {"enabled": False}}
         if policy := self.options.get("sandbox"):
-            local, restricted = bool(policy.local_network), bool(policy.allowed_hosts)
+            if why := sandbox_unheld(policy):
+                raise RuntimeError(why)
+            local, restricted = bool(policy.local_network), restricts_hosts(policy)
             if why := sandbox_widened(self.cwd, trusted, local, restricted):
                 raise RuntimeError(why)
             settings["sandbox"] = sandbox_settings(policy)
@@ -2802,9 +2833,15 @@ class ClaudeWorker:
 
     def network_refused(self, host: str) -> str:
         """Why a sandboxed command may not reach this host ("" when it may): only the hosts its
-        sandbox lists (GitHub's, for a worker that reads Slack), any other otherwise."""
+        sandbox lists (GitHub's, for a worker that reads Slack), any other otherwise; for a
+        shepherd step's, none without outbound traffic, and never one it blocks."""
         policy = self.options.get("sandbox")
         hosts = getattr(policy, "allowed_hosts", ()) if policy else ()
+        blocked = [str(h).removeprefix("*.") for h in getattr(policy, "blocked_hosts", ()) or ()]
+        if blocked and host_allowed(host, blocked):
+            return f"Chief of Staff's sandbox never lets this worker's commands reach {host}."
+        if getattr(policy, "outbound", True) is False:
+            return f"Chief of Staff's sandbox lets this worker's commands reach no host, not {host}."
         if not hosts or host_allowed(host, hosts):
             return ""
         return (
