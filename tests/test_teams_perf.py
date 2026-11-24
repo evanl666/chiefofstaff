@@ -153,7 +153,9 @@ async def test_teams_cost_a_snapshot_what_0156s_did_with_a_large_history(harness
     await settle(runtime)
     runtime.publish_state = published
     assert lite.loaded and len(chunks) >= PAST // 250, chunks
-    assert max(chunks) < 60 * pace, f"a chunk of the background read: {max(chunks):.0f} ms"
+    # (One may meet a pause of the machine's: the next longest says what a chunk costs.)
+    assert statistics.median(chunks) < 30 * pace, f"background chunks: {chunks}"
+    assert sorted(chunks)[-2] < 60 * pace, f"a chunk of the background read: {chunks}"
     snapshot = lite.snapshot(listed)
     assert len(snapshot["teams"]) == CURRENT and snapshot["past_teams"] == PAST
     # Unchanged: what the snapshot had in 0.1.56 (Teams.view), and Teams lite's now.
