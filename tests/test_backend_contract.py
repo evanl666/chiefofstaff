@@ -862,7 +862,7 @@ async def test_claude_sources_a_workers_env_file_before_each_sandboxed_command(b
     folder.mkdir()
     scripts.mkdir()
     script = scripts / "init.sh"
-    script.write_text(f"export npm_config_cache={tmp_path / 'tier' / 'npm'}\n")
+    script.write_text(f"export npm_config_cache={quoted(tmp_path / 'tier' / 'npm')}\n")
     session, turn = await open_session(
         backend, folder, sandbox=SandboxPolicy(readwrite=(str(folder),)), env_file=str(script)
     )
@@ -885,7 +885,7 @@ async def test_claude_starts_no_project_mcp_server_chief_of_staff_turned_off(bac
     (folder / ".claude").mkdir(parents=True)
     (folder / ".claude" / "settings.json").write_text('{"enableAllProjectMcpServers": true}\n')
     marker = tmp_path / "started"
-    server = {"command": "/bin/sh", "args": ["-c", f"echo run >> {marker}; sleep 5"]}
+    server = {"command": "/bin/sh", "args": ["-c", f"echo run >> {quoted(marker)}; sleep 5"]}
     (folder / ".mcp.json").write_text(json.dumps({"mcpServers": {"x": server}}))
     state = Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
     trusted = {"projects": {str(folder): {"hasTrustDialogAccepted": True}}}
@@ -987,9 +987,14 @@ async def fake_allowed(self, *args, **kwargs) -> str:
     return ""
 
 
+def quoted(path: Path) -> str:
+    """A path as a command takes it, whole: the tests' folders have a space (conftest)."""
+    return shlex.quote(str(path))
+
+
 def marking(markers: Path, name: str) -> dict:
     """Hooks (settings' format) that mark `name` as run before each Bash command."""
-    command = {"type": "command", "command": f"echo {name} >> {markers / name}"}
+    command = {"type": "command", "command": f"echo {name} >> {quoted(markers / name)}"}
     return {"PreToolUse": [{"matcher": "Bash", "hooks": [command]}]}
 
 
@@ -998,7 +1003,7 @@ def marking_frontmatter(markers: Path, name: str, what: str) -> str:
     return (
         f"---\nname: {what}\ndescription: A {what} that marks.\nhooks:\n  PreToolUse:\n"
         "    - matcher: Bash\n      hooks:\n        - type: command\n"
-        f'          command: "echo {name} >> {markers / name}"\n---\nDo as you are told.\n'
+        f'          command: "echo {name} >> {quoted(markers / name)}"\n---\nDo as you are told.\n'
     )
 
 
@@ -1102,7 +1107,8 @@ async def test_the_owners_edit_rules_widen_claudes_sandbox_so_a_sandboxed_worker
     monkeypatch.setattr(backend_claude, "sandbox_widened", lambda *a, **k: "")
     session, turn = await open_session(backend, work, sandbox=policy)
     await session.send(
-        f"Run the shell command `echo x > {outside}/made.txt`, then reply with just: ran"
+        f"Run the shell command `echo x > {quoted(outside / 'made.txt')}`, then reply with "
+        "just: ran"
     )
     await turn.wait()
     assert (outside / "made.txt").exists(), "the rule widens Claude's sandbox on this version"
@@ -1161,11 +1167,11 @@ async def test_claudes_shell_stays_where_a_command_cd_d_and_its_next_command_is_
 
     session, turn = await open_session(backend, tmp_path, on_permission_request=check)
     await session.send(
-        f'Use Claude\'s Bash tool with {{"command": "cd {sub}"}}. '
+        f'Use Claude\'s Bash tool with {{"command": "cd {quoted(sub)}"}}. '
         'Use Claude\'s Bash tool with {"command": "pwd"}. Then reply with just: ok'
     )
     await turn.wait()
-    assert [c for c, _ in seen] == [f"cd {sub}", "pwd"], turn.kinds()
+    assert [c for c, _ in seen] == [f"cd {quoted(sub)}", "pwd"], turn.kinds()
     # (As given, or as the system resolves it: macOS's /var is /private/var.)
     assert seen[0][1] in {str(tmp_path), str(tmp_path.resolve())}
     assert seen[1][1] in {str(sub), str(sub.resolve())}, "where its shell is now"
@@ -2254,8 +2260,8 @@ async def test_a_yolo_codex_workers_command_writing_in_the_owners_checkout_is_re
         [copy] = it.copies()
         assert OWN_COPY.format(path=copy["path"], left_out="") in it.notices(), it.notices()
         await it.session.send(
-            f"Run the shell command `head -1 README.md > {own / 'first.txt'}`. Then reply with "
-            "just: done"
+            f"Run the shell command `head -1 README.md > {quoted(own / 'first.txt')}`. Then "
+            "reply with just: done"
         )
         await it.turn.wait()
         assert (own / "first.txt").read_text() == readme.splitlines()[0] + "\n", "read, written"
@@ -2368,7 +2374,7 @@ async def test_a_claude_workers_command_writing_where_its_shell_went_in_the_owne
         readme = (app / "README.md").read_text()
         for folder in (app, own):
             await it.session.send(
-                f'Use Claude\'s Bash tool with {{"command": "cd {folder}"}}. '
+                f'Use Claude\'s Bash tool with {{"command": "cd {quoted(folder)}"}}. '
                 'Use Claude\'s Bash tool with {"command": "echo y >> README.md"}. '
                 "Then reply with just: done"
             )
@@ -2899,18 +2905,19 @@ async def test_codex_settings_a_worker_wrote_in_its_folder_never_load(tmp_path, 
         )
         (wt / ".codex" / "config.toml").write_text(
             'model = "contract-mini"\n'
-            f'[mcp_servers.planted]\ncommand = "sh"\nargs = ["-c", "touch {marks}/mcp"]\n'
+            '[mcp_servers.planted]\ncommand = "sh"\n'
+            f'args = ["-c", "touch {quoted(marks / "mcp")}"]\n'
             '[shell_environment_policy]\nset = { PLANTED = "yes" }\n'
         )
         planted = (
-            f"Run the shell command `touch {marks}/ran`. "
-            f"Run the shell command `sh -c 'echo planted=$PLANTED > {marks}/env'`. "
+            f"Run the shell command `touch {quoted(marks / 'ran')}`. "
+            f"Run the shell command `sh -c 'echo planted=$PLANTED > \"{marks}/env\"'`. "
             "Then reply with just: done"
         )
         fresh, turn = await open_session(codex, wt, **options)
         await fresh.send(planted)
         await turn.wait()
-        assert f"touch {marks}/ran" in asked, "the planted rule did not load"
+        assert f"touch {quoted(marks / 'ran')}" in asked, "the planted rule did not load"
         assert (marks / "env").read_text() == "planted=\n", "nor its environment"
         assert not (marks / "mcp").exists(), "nor its MCP server"
         assert {body.get("model") for body in model.bodies} == {scripted_model.MODEL}
@@ -2924,7 +2931,9 @@ async def test_codex_settings_a_worker_wrote_in_its_folder_never_load(tmp_path, 
         turn = Turn(resumed)
         await resumed.send(planted)
         await turn.wait()
-        assert f"touch {marks}/ran" in asked and not (marks / "mcp").exists(), "after a resume"
+        assert f"touch {quoted(marks / 'ran')}" in asked and not (marks / "mcp").exists(), (
+            "after a resume"
+        )
         assert {body.get("model") for body in model.bodies} == {scripted_model.MODEL}
     finally:
         await codex.stop()
