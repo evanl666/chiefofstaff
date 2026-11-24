@@ -12,6 +12,7 @@ import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
 import { agentName, agentsOn, markOf, ready, statusOf } from "./agentpick.js";
 import { showChanges } from "./diff.js";
 import { keptButton, keptLine, keptMenu } from "./prepared.js";
+import { showRecord } from "./autopilot.js";
 // Chief of Staff's own helpers (learning how the owner works, checks, the profile): their
 // results come as cards to approve; the work itself is not the owner's.
 const HELPER_TITLES = new Set(["Learn how you work", "Learn checks from mistakes", "Distill owner profile"]);
@@ -798,6 +799,17 @@ function taskCard(task, phase = phaseOf(task)) {
   showActions();
   return node;
 }
+// Accepted for the owner by Autopilot (its own offline run of the checks passed): said so, with
+// its entry in the record.
+function acceptedLine(task) {
+  if (task.status !== "done" || task.accepted_by !== "autopilot") return null;
+  return el(
+    "div",
+    { class: "why-line autopilot-accepted" },
+    "Accepted by Autopilot",
+    task.accepted_entry ? el("button", { type: "button", class: "link quiet", text: "Why", title: "Its entry in the Autopilot record", onclick: (event) => { event.stopPropagation(); showRecord({ entry: task.accepted_entry }); } }) : null,
+  );
+}
 function taskBody(task, phase = {}) {
   const worker = byId(task.session_id);
   if (task.status === "queued" && !task.blocked) {
@@ -816,7 +828,7 @@ function taskBody(task, phase = {}) {
     // Monitoring: what it waits on; under Needs you for its PR: what is wrong there.
     const waits = phase.section === "monitoring" || [...PR_TO_FIX, "runs-unknown"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
-    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, keptLine(task), found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
+    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, acceptedLine(task), waits, keptLine(task), found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
   if (task.status === "review") {
@@ -1262,7 +1274,7 @@ export function finishedWords(task, phase) {
   const said = gist(task.result || task.progress || "");
   if (task.status === "cancelled") return !said ? "Cancelled" : /^cancel/i.test(said) ? said : `Cancelled: ${said}`;
   if (phase.marker === "set-aside") return said ? `Set aside, not accepted: ${said}` : phase.why;
-  return said || phase.why || "Accepted";
+  return said || phase.why || (task.accepted_by === "autopilot" ? "Accepted by Autopilot" : "Accepted");
 }
 // A worker between turns on a running task: how long it has been quiet, and what it follows.
 function quiet(worker) {

@@ -11595,6 +11595,23 @@ async def round_autopilot(runtime, browser, failures: list[str]):
     page.on("pageerror", lambda error: failures.append(str(error)))
     await page.goto(f"{BASE}/#token={TOKEN}")
     await expect(page.locator("#application")).to_be_visible()
+    # What it accepted says so under Recently finished, its entry a click away; never "you".
+    await page.locator("#home-tabs [data-tab=tasks]").click()
+    recent = page.locator("#tasks-recent")
+    await expect(recent.locator(":scope > summary")).to_have_attribute(
+        "data-tip", re.compile("results you or Autopilot accepted")
+    )
+    row = recent.locator(f'.card.task[data-task="{seeded["login"]["task_id"]}"]')
+    await row.locator(".head .title").click()
+    line = row.locator(".autopilot-accepted")
+    await expect(line).to_contain_text("Accepted by Autopilot")
+    await page.screenshot(path=shots / "accepted-row-800.png")
+    await line.get_by_role("button", name="Why").click()
+    login_entry = runtime.autopilot.accepted_entry(runtime.tasks.get(seeded["login"]["task_id"]))
+    entry_row = page.locator(f'.autopilot-record [data-entry="{login_entry}"]')
+    await expect(entry_row).to_be_visible()
+    await expect(entry_row.locator(".autopilot-line")).to_have_attribute("aria-expanded", "true")
+    await page.locator("#back-home").click()
     await page.locator("#home-tabs [data-tab=chat]").click()
     card = page.locator(".card.autopilot-summary").first
     await expect(card).to_contain_text("While you were away")

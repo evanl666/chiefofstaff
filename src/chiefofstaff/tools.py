@@ -2375,9 +2375,13 @@ class Tools:
             )
         elif params.after:
             result["note"] = (
-                "Starts automatically once the owner accepted the tasks it depends on."
-                if params.wait_for == "accepted"
-                else "Starts automatically when the tasks it depends on are done."
+                "Starts automatically when the tasks it depends on are done."
+                if params.wait_for != "accepted"
+                # (Autopilot on: it may accept them; autopilot/results.py.)
+                else "Starts automatically once the tasks it depends on are accepted (by the "
+                "owner, or by Autopilot while it is on)."
+                if self.runtime.autopilot.run()
+                else "Starts automatically once the owner accepted the tasks it depends on."
             )
         elif row["status"] == "queued" and row["activity"].startswith("waiting for memory"):
             result["note"] = (
@@ -2608,7 +2612,8 @@ class Tools:
             )
         if task and params.task == "continue" and task["status"] == "done":
             raise ValueError(
-                f"Its task {task['id']} “{task['title']}” was accepted by the owner and is done. "
+                f"Its task {task['id']} “{task['title']}” was accepted by {self.accepter(task)} "
+                "and is done. "
                 "More work, or another subject: task='new' with a title. Only telling it "
                 "something (an answer, an acknowledgement): task='note'."
             )
@@ -3046,7 +3051,7 @@ class Tools:
         last = at or recent[-1]
         was = {
             "cancelled": "was cancelled",
-            "done": "was accepted by the owner and is done",
+            "done": f"was accepted by {self.accepter(last)} and is done",
         }.get(last["status"], f"is finished ({last['status']})")
         listed = "; ".join(f"{t['id']} “{t['title']}” ({t['status']})" for t in reversed(recent))
         raise ValueError(
@@ -3056,6 +3061,10 @@ class Tools:
             "accepted work, or another subject: task='new' with a title. Only telling it "
             "something: task='note'."
         )
+
+    def accepter(self, task: dict) -> str:
+        """Who accepted a done task, in the Router's words."""
+        return "Autopilot" if self.runtime.autopilot.accepted_entry(task) else "the owner"
 
     @staticmethod
     def not_in_parallel(target: dict, why: str) -> str:

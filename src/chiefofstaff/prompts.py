@@ -1129,7 +1129,8 @@ def with_shepherd_rule(prompt: str) -> str:
 AUTOPILOT_RULE = (
     "- Autopilot can be turned on by the owner: then Chief of Staff answers workers from what "
     "the owner said and accepts results it verified itself. Answer what Autopilot did only from "
-    "autopilot_log, entry by entry, with counts and each entry's link; never infer one."
+    "autopilot_log, entry by entry, with counts and each entry's link; never infer one. A task "
+    'Autopilot accepted says "accepted by Autopilot": say so, never that the owner accepted it.'
 )
 
 

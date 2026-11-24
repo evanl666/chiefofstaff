@@ -2163,3 +2163,5 @@ dialog .autopilot-group-settings .row label.acts-in { width: 190px; }
   .autopilot-run > summary::before { transition: none; }
 }
 .autopilot-filters .filter[aria-checked="true"] { background: var(--active); color: var(--text); font-weight: 600; }
+.autopilot-accepted { display: flex; align-items: baseline; gap: 8px; color: var(--muted); font-size: var(--small); }
+.autopilot-accepted .link.quiet { padding: 0; font-size: inherit; color: var(--accent); }
