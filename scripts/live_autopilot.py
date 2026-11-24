@@ -425,6 +425,17 @@ async def b1_accepted_its_dependent_starts_undo(run: Run):
     )
     released = await run.entry_for(second["id"], {"released"}, 300)
     run.check("B1 what waited on it started", bool(released), released["text"])
+    # Said as Autopilot's, never the owner's: its task, its worker's chat.
+    task = await run.app.get(f"/api/tasks/{first['id']}")
+    run.check(
+        "B1 its task says accepted by Autopilot",
+        (task.get("accepted_by"), task.get("accepted_entry")) == ("autopilot", entry["id"]),
+    )
+    chat = await run.app.get(f"/api/sessions/{first['session_id']}/messages")
+    run.check(
+        "B1 its worker's chat says Autopilot accepted it",
+        any(m["kind"] == "notice" and m["text"].startswith("Autopilot accepted it") for m in chat),
+    )
     said = await run.app.post(f"/api/autopilot/entries/{entry['id']}/undo")
     task = await run.app.get(f"/api/tasks/{first['id']}")
     run.check("B1 Undo: back for the owner's Accept", task["status"] == "review", said["said"])
