@@ -237,7 +237,7 @@ async def test_a_step_never_reads_the_owners_registry_or_cloud_credentials(world
     """With them, a registry it downloads from would take a publish as the owner (npm, PyPI,
     cargo), and storage.googleapis.com an upload: they are unreadable, as for a worker that
     reads Slack."""
-    from step_sandbox import SANDBOX_EXEC
+    from step_sandbox import SANDBOX
     from step_sandbox import run as sandboxed
 
     home = Path.home()
@@ -254,7 +254,7 @@ async def test_a_step_never_reads_the_owners_registry_or_cloud_credentials(world
         policy = world.session().options["sandbox_config"]
         for path in [*secrets[:3], secrets[3].parent]:
             assert str(path) in policy.denied, path
-        if SANDBOX_EXEC:
+        if SANDBOX:
             read = sandboxed(policy, f"cat '{secrets[0]}'", step["tree"])
             assert read.returncode != 0 and "npm_owners" not in read.stdout
     finally:

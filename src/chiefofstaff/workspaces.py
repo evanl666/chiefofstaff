@@ -1403,12 +1403,13 @@ def identity_of(path: str) -> list:
     return ["o", info.st_dev, info.st_ino]
 
 
-def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
+def protected_git_paths(git_dir: str, checkouts: list[dict], own_head: bool = False) -> list[str]:
     """Parts of a repository's .git that a worker must not change, though it commits there.
 
     Hooks and config run code when the owner uses the repository; so do the configs of its
     submodules (modules/) and of the owner's other worktrees, whose private folders also hold
-    their HEAD and index. The worker's own worktrees stay writable.
+    their HEAD and index. The worker's own worktrees stay writable. `own_head`: a shepherd
+    step's own git folder (stepgit.py), whose HEAD and index are the step's.
     """
     root = Path(git_dir)
     own = set()
@@ -1444,7 +1445,7 @@ def protected_git_paths(git_dir: str, checkouts: list[dict]) -> list[str]:
         pointer = Path(checkout.get("worktree") or "") / ".git"
         if checkout.get("worktree") and pointer.is_file():
             paths.append(pointer)
-    if not shared:
+    if not shared and not own_head:
         # The owner's own checkout: its branch and staged changes are theirs. (A worker that
         # works in the owner's checkout itself needs them.)
         paths += [root / name for name in ("HEAD", "index") if (root / name).exists()]
