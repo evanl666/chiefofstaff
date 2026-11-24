@@ -401,6 +401,43 @@ async def test_a_downgrade_drains_a_turn_it_continued_whose_answer_went_out(
     assert Logbook(reread).check().ok
 
 
+async def test_a_downgrade_strips_what_carries_its_origin_wherever_it_waits(harness, monkeypatch):
+    """Review 4: a message that carries Autopilot's origin and was not sent yet, for a session
+    that keeps no origin of its own (the Router's queue; a worker given it while at work): its
+    prompt is taken out (no version replays it), and the session is drained too."""
+    from chiefofstaff import __main__ as entry
+    from chiefofstaff.autopilot.origin import TAG
+
+    runtime = await harness.connect()
+    await tick(runtime)
+    state = await runtime.autopilot.start(None, by="home")
+    worker = await spawn(runtime, harness.router_id, "Write the client")
+    await settle(runtime)
+    book, store = runtime.autopilot.book, harness.store
+    session, task_id, router = worker["session_id"], worker["task_id"], harness.router_id
+    answered = book.append(state["run"], "answered", "Answered", task_id=task_id)
+    tag = {TAG: {"entries": [answered["id"]], "ask_first": True}}
+    for sid in (session, router):
+        last = store.value("SELECT max(id) FROM messages WHERE session_id=?", (sid,))
+        store.set(f"sent:{sid}", str(last))
+    report = store.add_message(router, "inbound", "Done.", {"prompt": "<report/>", **tag})
+    note = store.add_message(session, "notice", "Told.", {"prompt": "<note/>", **tag})
+    mine = store.add_message(session, "owner", "And the docs.", {"prompt": "<owner/>"})
+    store.update_session(session, status="working")
+    store.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+    assert not store.keys("autopilot:origin:") and not store.keys("autopilot:turn:")
+    monkeypatch.setattr(entry, "lock_data_file", lambda handle: None)
+    assert entry.prepare_downgrade(None, store.directory) == 0
+    reread = Store(store.directory)
+    for message in (report, note):
+        meta = reread.message(message["id"])["meta"]
+        assert "prompt" not in meta and meta["withdrawn"], message["text"]
+    assert "prompt" in reread.message(mine["id"])["meta"], "the owner's own stays theirs"
+    assert reread.session(session)["status"] == "idle"
+    assert reread.get(f"stopped:{task_id}") == "you"
+    assert Logbook(reread).check().ok
+
+
 async def test_stop_stops_a_turn_it_continued_and_its_task_waits_with_go_on(harness):
     runtime = await harness.connect()
     await tick(runtime)
@@ -421,6 +458,31 @@ async def test_stop_stops_a_turn_it_continued_and_its_task_waits_with_go_on(harn
     assert harness.store.get(f"stopped:{other['task_id']}") is None, "the owner's own goes on"
     row = harness.store.session(worker["session_id"])
     assert runtime.yolo(row) is False, "Ask first stays until the owner writes to it"
+
+
+async def test_stop_stops_a_router_turn_that_carries_it(harness, monkeypatch):
+    """Review 2: a Router turn that took in what Autopilot's work led to (its origin, this turn)
+    is stopped too; one that carries none goes on."""
+    runtime = await harness.connect()
+    await tick(runtime)
+    state = await runtime.autopilot.start(None, by="home")
+    answered = runtime.autopilot.book.append(state["run"], "answered", "Answered")
+    router = harness.store.session(harness.router_id)
+    runtime.autopilot.origins.taken(router, [
+        {"meta": {"autopilot_origin": {"entries": [answered["id"]], "ask_first": True}}}
+    ])  # fmt: skip
+    harness.store.update_session(router["id"], status="working")
+    stopped = []
+    interrupt = runtime.workers.interrupt
+
+    async def spy(session_id, **how):
+        stopped.append((session_id, how.get("by")))
+        await interrupt(session_id, **how)
+
+    monkeypatch.setattr(runtime.workers, "interrupt", spy)
+    await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    await settle(runtime)
+    assert stopped == [(router["id"], "Autopilot's Stop")]
 
 
 async def test_the_router_answers_what_it_did_from_its_record_only_once_ticked(harness):

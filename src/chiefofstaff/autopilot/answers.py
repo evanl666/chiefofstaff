@@ -47,12 +47,22 @@ ANSWERED = frozenset({"question"})
 PARKED_ONLY = frozenset({"form", "link"})
 # What the judge's helper session is called (store.py HELPER_KINDS).
 JUDGE = "judge"
+# A session at work (its turn not over).
+BUSY = frozenset({"queued", "starting", "working"})
 # A report question asking for one of these waits for the owner, whatever was said.
 OWNER_ONLY = ("access", "a key", "the key", "money", "budget", "account", "sign in", "log in")
 
 
+# Why what was in flight when Autopilot stopped goes to the owner instead.
+STOPPED = "Autopilot was stopped before it decided"
+
+
 class Later(Exception):  # noqa: N818  (not an error: delivered later)
     """A delivery that waits (stays queued): the owner's work goes first."""
+
+
+class Withdrawn(Exception):  # noqa: N818  (not an error: Stop came first)
+    """A delivery Stop overtook after its claim: never stored for its session."""
 
 
 def clock(iso: str) -> str:
@@ -79,6 +89,13 @@ class Answers:
             started = datetime.now(UTC).timestamp()
             session_id = ""
             try:
+                for _ in range(60):  # Its last turn ending (it ends once it proposed): 30 s.
+                    last = self.runtime.toolset.last_special(JUDGE)
+                    if future.done() or not last or last["status"] not in BUSY:
+                        break
+                    await asyncio.sleep(0.5)
+                if future.done():
+                    return None  # Stopped meanwhile (abandon).
                 made = await self.runtime.toolset.start_special(JUDGE, "Autopilot's judge", text)
                 session_id = made["session_id"]
                 return await asyncio.wait_for(future, JUDGE_SECONDS)
@@ -97,7 +114,12 @@ class Answers:
         if self.proposal is None or self.proposal.done():
             raise ValueError("Nothing is being judged now.")
         self.proposal.set_result(params)
-        return "Proposed. End your turn."
+        # Its task is over with its proposal: its turn ends there (no report owed, so no turn
+        # after it that would keep the next item from being judged).
+        task = self.runtime.tasks.current(caller)
+        if task and task["status"] not in {"done", "cancelled"}:
+            self.runtime.tasks.move(task["id"], "done", result="Proposed an answer.")
+        return "Proposed. You are done: end your turn, and do not call report."
 
     def usage_since(self: Autopilot, session_id: str, since: float) -> float:  # type: ignore[misc]
         return float(
@@ -131,7 +153,7 @@ class Answers:
         if proposal is None:
             return judge.Verdict(parked="it couldn't be judged just now"), offered
         cited = [cite.model_dump() for cite in proposal.basis]
-        refusal = owner.refusal(self.runtime, task, cited, offered)
+        refusal = owner.refusal(self.runtime, task, cited, offered, proposal.answer)
         verdict = judge.accepted(proposal, question=question, options=options, offered=offered,
                                  basis_refusal=refusal)  # fmt: skip
         return verdict, offered
@@ -139,7 +161,7 @@ class Answers:
     def basis_still(self: Autopilot, task: dict, verdict: judge.Verdict,  # type: ignore[misc]
                     offered: list[owner.Item]) -> str:  # type: ignore[misc]  # fmt: skip
         """Its basis checked again just before the answer is delivered."""
-        return owner.refusal(self.runtime, task, list(verdict.basis), offered)
+        return owner.refusal(self.runtime, task, list(verdict.basis), offered, verdict.answer)
 
     def because(self: Autopilot, verdict: judge.Verdict, offered: list[owner.Item]) -> str:  # type: ignore[misc]
         """“because you said “Postgres for v1” (Mon 10:02 AM)”."""
@@ -164,6 +186,16 @@ class Answers:
         found = {r.lower() for r in json.loads(row.get("repos") or "[]") if isinstance(r, str)}
         return bool(found & set(repos))
 
+    def given(self: Autopilot, task_id: str, ids: list[int]):  # type: ignore[misc]
+        """The owner's messages to the Router a task was given by their refs ({owner:<ref>}):
+        in its scope from then on (basis.py). Kept only while its line is ticked."""
+        if not self.ticked or not task_id or not ids:
+            return
+        key = f"{owner.REFS}{task_id}"
+        kept = set(json.loads(self.store.get(key) or "[]"))
+        if not set(ids) <= kept:
+            self.store.set(key, json.dumps(sorted(kept | set(ids))))
+
     def task_of(self: Autopilot, session_id: str, task_id: str = "") -> dict | None:  # type: ignore[misc]
         tasks = self.runtime.tasks
         return (tasks.find(task_id) if task_id else None) or tasks.current(session_id)
@@ -187,6 +219,7 @@ class Answers:
     async def decide_card(self: Autopilot, row: dict, draft: dict, answer: asyncio.Future):  # type: ignore[misc]
         """A card held from the page while it is judged: answered into its turn, or parked (then
         drawn, once, with its notification)."""
+        ticket = self.ticket()  # What it acts for: filed only if still so (holds).
         self.deciding.add(draft["id"])
         self.runtime.publish_state()
         target, kind = draft["target"], draft["kind"]
@@ -212,10 +245,12 @@ class Answers:
                 return  # The owner answered it first.
             if not reason and task:
                 reason = self.basis_still(task, verdict, offered)
-            if reason:
-                self.park_card(row, draft, answer, task, reason, verdict.reason)
-            else:
-                self.answer_card(row, draft, answer, task or {}, verdict, offered)
+            if not self.holds(ticket):
+                self.release_card(row, draft, task, ticket)
+            elif reason:
+                self.park_card(row, draft, answer, task, reason, verdict.reason, ticket=ticket)
+            elif not self.answer_card(row, draft, answer, task or {}, verdict, offered, ticket):
+                self.release_card(row, draft, task, ticket)
         finally:
             self.deciding.discard(draft["id"])
             self.runtime.publish_state()
@@ -233,29 +268,69 @@ class Answers:
             return True
         return self.runtime.states[row["id"]].opened_asking is True
 
-    async def ready(self: Autopilot, row: dict) -> bool:  # type: ignore[misc]
-        """Before Autopilot continues a worker on another agent with *workers ask first* on: its
-        process, opened acting on its own, is opened again asking first, only when it is not at
-        work (then this waits). Never the owner's saved setting."""
-        if self.runtime.agent(row["id"]) == COPILOT_AGENT:
-            return True
-        if not self.store.settings().autopilot_ask_first:
-            return True
+    def reopen_first(self: Autopilot, row: dict, carried: dict | None = None,  # type: ignore[misc]
+                     claimed: bool = False) -> str:  # type: ignore[misc]  # fmt: skip
+        """Whether a worker on another agent must be opened again asking first before an origin
+        that asks first reaches it (`carried`, else what it carries): "" no (on Copilot, which
+        takes the checks per request; asking first already; no process open, so it opens
+        asking first), "now" (not at work), or "after" (at work: once its turn is over, never
+        mid-turn). `claimed`: its slot was just taken for this, not by a turn. Never the
+        owner's saved setting."""
+        if row.get("role") != "worker" or self.runtime.agent(row["id"]) == COPILOT_AGENT:
+            return ""
+        origin = carried or self.origins.sticky.get(row["id"])
+        if not origin or not origin.get("ask_first"):
+            return ""
         state = self.runtime.states[row["id"]]
         if state.opened_asking is not False or not state.handle:
-            return True  # Asking first already, or opened afresh (asking first) for this.
-        if row["status"] in {"working", "starting"} or state.busy or state.held:
+            return ""
+        busy = state.busy and not claimed
+        if row["status"] in {"working", "starting"} or busy or state.held:
+            return "after"
+        return "now"
+
+    async def reopen_asking(self: Autopilot, row: dict, carried: dict):  # type: ignore[misc]
+        """A worker held what carries its origin (Delivery.held_to_ask_first): its process is
+        opened again asking first, if it still must be and is still not at work, then it is
+        given what it holds."""
+        state = self.runtime.states[row["id"]]
+        try:
+            fresh = self.store.find_session(row["id"])
+            if not fresh or fresh["closed_at"]:
+                return
+            how = self.reopen_first(fresh, carried)
+            if how == "now":
+                await self.runtime.agent_mode_changed(fresh, asks_first=True)
+            elif how == "after":
+                state.confined = state.stale = True  # Its turn began meanwhile: after it.
+                return
+            state.reopen_asking = False
+            await self.runtime.delivery.resume(row["id"])
+        finally:
+            if not state.confined:
+                state.reopen_asking = False
+
+    async def ready(self: Autopilot, row: dict, origin: dict) -> bool:  # type: ignore[misc]
+        """Before Autopilot continues a worker with `origin`: on another agent, opened again
+        asking first (reopen_first) when not at work; at work, this waits (False)."""
+        how = self.reopen_first(row, origin)
+        if how == "after":
             return False
-        await self.runtime.agent_mode_changed(row, asks_first=True)
+        if how == "now":
+            await self.runtime.agent_mode_changed(row, asks_first=True)
         return True
 
     def answer_card(self: Autopilot, row: dict, draft: dict, answer: asyncio.Future, task: dict,  # type: ignore[misc]
-                    verdict: judge.Verdict, offered: list[owner.Item]):  # type: ignore[misc]  # fmt: skip
-        run = self.run() or {}
+                    verdict: judge.Verdict, offered: list[owner.Item],  # type: ignore[misc]
+                    ticket: tuple[str, int] | None) -> bool:  # type: ignore[misc]  # fmt: skip
+        """Its answer into the turn, filed under the run it was judged in, if that still holds
+        (else nothing: False)."""
         because = self.because(verdict, offered)
         with self.store.transaction():
+            if not ticket or not self.holds(ticket):
+                return False
             entry = self.book.append(
-                run.get("id", ""), "answered",
+                ticket[0], "answered",
                 f"Answered “{draft['text'][:120]}”: {verdict.answer}",
                 subject=f"card:{draft['id']}", task_id=task.get("id", ""),
                 why={"rule": "owner-basis", "basis": list(verdict.basis), "judge": verdict.reason},
@@ -273,15 +348,34 @@ class Answers:
                           f"they said: {because.removeprefix('because you said ')}.)",
                 "wasFreeform": verdict.answer not in (draft["target"].get("choices") or []),
             })  # fmt: skip
+        return True
+
+    def release_card(self: Autopilot, row: dict, draft: dict, task: dict | None,  # type: ignore[misc]
+                     ticket: tuple[str, int] | None):  # type: ignore[misc]  # fmt: skip
+        """Stopped while it was judged: the card is the owner's, drawn as if Autopilot had never
+        held it (its turn waits for their answer), saying why; nothing answered."""
+        if ticket:
+            with self.store.transaction():
+                entry = self.book.append(
+                    ticket[0], PARKED, f"Set aside “{draft['text'][:120]}”: {STOPPED}",
+                    state=PARKED, subject=f"card:{draft['id']}",
+                    task_id=(task or {}).get("id", ""),
+                    why={"rule": "parked", "reason": STOPPED},
+                    payload={"question": draft["text"], "kind": draft["kind"]},
+                )  # fmt: skip
+                self.store.set(f"autopilot:setaside:{draft['id']}",
+                               json.dumps({"why": STOPPED, "entry": entry["id"]}))  # fmt: skip
+        self.deciding.discard(draft["id"])
+        self.runtime.asks.draw(row, draft)
 
     def park_card(self: Autopilot, row: dict, draft: dict, answer: asyncio.Future,  # type: ignore[misc]
-                  task: dict | None, reason: str, judged: str = ""):  # type: ignore[misc]  # fmt: skip
+                  task: dict | None, reason: str, judged: str = "",  # type: ignore[misc]
+                  ticket: tuple[str, int] | None = None):  # type: ignore[misc]  # fmt: skip
         """Its turn goes on without it; it waits under Needs you, saying why, drawn once."""
-        run = self.run() or {}
         kind = draft["kind"]
         with self.store.transaction():
             entry = self.book.append(
-                run.get("id", ""), PARKED, f"Set aside “{draft['text'][:120]}”: {reason}",
+                ticket[0] if ticket else "", PARKED, f"Set aside “{draft['text'][:120]}”: {reason}",
                 state=PARKED, subject=f"card:{draft['id']}", task_id=(task or {}).get("id", ""),
                 why={"rule": "parked", "reason": reason, "judge": judged},
                 payload={"question": draft["text"], "kind": kind},
@@ -320,6 +414,7 @@ class Answers:
 
     async def decide_decision(self: Autopilot, row: dict, card: dict):  # type: ignore[misc]
         """A decision card held from the page while it is judged."""
+        ticket = self.ticket()  # What it acts for: filed only if still so (holds).
         self.deciding.add(card["id"])
         self.runtime.publish_state()
         try:
@@ -345,32 +440,38 @@ class Answers:
                 return  # The owner (or the Router) decided it first.
             if not reason and task:
                 reason = self.basis_still(task, verdict, offered)
-            if reason:
-                self.park_decision(row, card, task, reason, verdict.reason)
-            else:
-                self.decide(row, card, task or {}, verdict, offered)
+            if not self.holds(ticket):
+                self.park_decision(row, card, task, STOPPED, ticket=ticket)
+            elif reason:
+                self.park_decision(row, card, task, reason, verdict.reason, ticket=ticket)
+            elif not self.decide(row, card, task or {}, verdict, offered, ticket):
+                self.park_decision(row, card, task, STOPPED, ticket=ticket)
         finally:
             self.deciding.discard(card["id"])
             self.runtime.publish_state()
 
     def decide(self: Autopilot, row: dict, card: dict, task: dict, verdict: judge.Verdict,  # type: ignore[misc]
-               offered: list[owner.Item]):  # type: ignore[misc]  # fmt: skip
-        run = self.run() or {}
+               offered: list[owner.Item], ticket: tuple[str, int] | None) -> bool:  # type: ignore[misc]  # fmt: skip
+        """Its decision, filed under the run it was judged in if that still holds (else nothing:
+        False; True too when the owner decided first)."""
         target = card["target"]
         because = self.because(verdict, offered)
         with self.store.transaction():
             fresh = self.store.draft(card["id"])
             if fresh["status"] != "pending":
-                return
+                return True
+            if not ticket or not self.holds(ticket):
+                return False
+            run_id = ticket[0]
             entry = self.book.append(
-                run.get("id", ""), "decided", f"“{target['question'][:120]}” → {verdict.answer}",
+                run_id, "decided", f"“{target['question'][:120]}” → {verdict.answer}",
                 subject=f"card:{card['id']}", task_id=task.get("id", ""),
                 why={"rule": "owner-basis", "basis": list(verdict.basis), "judge": verdict.reason},
                 payload={"question": target["question"], "options": target.get("options") or [],
                          "choice": verdict.answer},
             )  # fmt: skip
             decided = self.book.decide(
-                run_id=run.get("id", ""), entry_id=entry["id"], card_id=card["id"],
+                run_id=run_id, entry_id=entry["id"], card_id=card["id"],
                 question=target["question"], options=target.get("options") or [],
                 choice=verdict.answer, basis=list(verdict.basis), askers=target.get("askers") or [],
             )  # fmt: skip
@@ -384,21 +485,21 @@ class Answers:
                     if because
                     else ""
                 )
-                self.book.queue(run.get("id", ""), entry["id"], "worker", {
+                self.book.queue(run_id, entry["id"], "worker", {
                     "session_id": asker["session_id"], "task_id": asker.get("task_id") or "",
                     "text": said, "display": f"Autopilot decided: {verdict.answer}",
                     "decision": decided, "go_on": True,
-                }, self.book.generation())  # fmt: skip
+                }, ticket[1])  # fmt: skip
         self.runtime.bus.publish("draft", self.store.draft(card["id"]))
         self.runtime.background(self.dispatch())
+        return True
 
     def park_decision(self: Autopilot, row: dict, card: dict, task: dict | None, reason: str,  # type: ignore[misc]
-                      judged: str = ""):  # type: ignore[misc]  # fmt: skip
+                      judged: str = "", ticket: tuple[str, int] | None = None):  # type: ignore[misc]  # fmt: skip
         """It stays for the owner, now drawn, with why; its worker goes on meanwhile."""
-        run = self.run() or {}
         with self.store.transaction():
             entry = self.book.append(
-                run.get("id", ""), PARKED,
+                ticket[0] if ticket else "", PARKED,
                 f"Set aside “{card['target']['question'][:120]}”: {reason}", state=PARKED,
                 subject=f"card:{card['id']}", task_id=(task or {}).get("id", ""),
                 why={"rule": "parked", "reason": reason, "judge": judged},
@@ -452,6 +553,7 @@ class Answers:
     async def check_questions(self: Autopilot):  # type: ignore[misc]
         """Questions under Needs you that came in this run, the Router's turn over: judged."""
         run = self.run()
+        ticket = self.ticket()
         if run is None:
             return
         router = self.store.find_session(self.runtime.router_id())
@@ -473,9 +575,13 @@ class Answers:
             if not row or not self.takes(row) or question.get("about_draft"):
                 continue
             self.store.set(key, question.get("at", ""))
-            await self.decide_question(row, question)
+            await self.decide_question(row, question, ticket)
+            if not self.holds(ticket):
+                return  # Stopped: the rest wait for the owner.
 
-    async def decide_question(self: Autopilot, row: dict, question: dict):  # type: ignore[misc]
+    async def decide_question(self: Autopilot, row: dict, question: dict,  # type: ignore[misc]
+                              ticket: tuple[str, int] | None = None):  # type: ignore[misc]  # fmt: skip
+        ticket = ticket or self.ticket()
         task = self.task_of(row["id"], question.get("task_id") or "")
         reason, verdict, offered = "", judge.Verdict(), []
         text = question["text"]
@@ -491,14 +597,18 @@ class Answers:
             reason = verdict.parked
             if not reason:
                 reason = self.basis_still(task, verdict, offered)
-        run = self.run() or {}
         current = self.runtime.asks.owner_question(question["id"])
         if not current or current.get("at") != question.get("at"):
             return  # Answered (by the owner, the Router) meanwhile, or asked again.
+        if not ticket:
+            return
+        run_id = ticket[0]
+        if not self.holds(ticket):
+            reason = STOPPED.replace("decided", "answered")
         if reason:
             with self.store.transaction():
                 entry = self.book.append(
-                    run.get("id", ""), PARKED, f"Set aside “{text[:120]}”: {reason}",
+                    run_id, PARKED, f"Set aside “{text[:120]}”: {reason}",
                     state=PARKED, subject=f"question:{question['id']}",
                     task_id=(task or {}).get("id", ""),
                     why={"rule": "parked", "reason": reason, "judge": verdict.reason},
@@ -510,21 +620,23 @@ class Answers:
             return
         because = self.because(verdict, offered)
         with self.store.transaction():
+            if not self.holds(ticket):
+                return  # (Not reached: nothing awaited since holds was read.)
             entry = self.book.append(
-                run.get("id", ""), "answered", f"Answered “{text[:120]}”: {verdict.answer}",
+                run_id, "answered", f"Answered “{text[:120]}”: {verdict.answer}",
                 subject=f"question:{question['id']}", task_id=(task or {}).get("id", ""),
                 why={"rule": "owner-basis", "basis": list(verdict.basis), "judge": verdict.reason},
                 payload={"question": text, "answer": verdict.answer},
             )  # fmt: skip
             self.store.delete(f"ownerq:{question['id']}")
-            self.book.queue(run.get("id", ""), entry["id"], "worker", {
+            self.book.queue(run_id, entry["id"], "worker", {
                 "session_id": row["id"], "task_id": (task or {}).get("id", ""),
                 "text": f"Your question: {text}\n\nAnswered for the owner by Autopilot (they are "
                         f"away), from what they said: {verdict.answer}. "
                         f"{because[0].upper() + because[1:]}.",
                 "display": f"Autopilot answered: {verdict.answer}, {because}.",
                 "go_on": True,
-            }, self.book.generation())  # fmt: skip
+            }, ticket[1])  # fmt: skip
         # The Router hears it is no longer open (with its next message), as when a worker moves on.
         self.runtime.asks.closed(row["id"], [question], "")
         self.runtime.publish_state()
@@ -551,14 +663,23 @@ class Answers:
         others = [o for o in self.store.open_sessions("worker") if o["id"] != row["id"]]
         if any(self.runtime.workers.wants_slot(other) for other in others):
             raise Later("the owner's work waits for a slot")
-        self.origins.keep(row["id"], origin)
-        if not await self.ready(row):
+        if not await self.ready(row, origin):
             raise Later("its worker is at work in a process that acts without asking")
-        if task and payload.get("go_on") and task["status"] == "waiting":
-            self.runtime.asks.go_on(task, chat=False)
+
+        def still():
+            """Just before it is stored for the worker (nothing awaited after): Stop since its
+            claim withdraws it; else the worker carries it from here, its task going on."""
+            if not self.ticked or self.book.generation() != item["generation"]:
+                raise Withdrawn("Autopilot was stopped before it went out.")
+            self.origins.keep(row["id"], origin)
+            if task and payload.get("go_on") and task["status"] == "waiting":
+                self.runtime.asks.go_on(task, chat=False)
+
+        still()
         with self.origins.carrying(origin):
             message = await self.runtime.delivery.deliver(
-                row["id"], prompt, kind="notice", display=payload["display"], meta=meta
-            )
+                row["id"], prompt, kind="notice", display=payload["display"], meta=meta,
+                check=still,
+            )  # fmt: skip
         self.book.stored(item["id"], message["id"])
         return ""

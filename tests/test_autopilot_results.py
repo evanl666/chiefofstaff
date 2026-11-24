@@ -195,6 +195,50 @@ async def test_what_autopilot_accepted_says_so_wherever_it_is_said(tmp_path, git
     assert "was accepted by the owner and is done" in said.text_result_for_llm
 
 
+async def test_stop_cancels_a_verification_in_flight_and_its_result_stays_for_you(
+    tmp_path, git_repo, offline
+):
+    """Review 2: Stop while Chief's own run of the checks is under way: cancelled; nothing is
+    accepted or recorded for it; its result waits for the owner, verified again in a later run."""
+    harness, runtime = await project(tmp_path, git_repo)
+    info, _ = await finished(harness, runtime, git_repo)
+    started, gate = asyncio.Event(), asyncio.Event()
+
+    async def slow(copy, steps):
+        started.set()
+        await gate.wait()
+        return await local(copy, steps)
+
+    runtime.autopilot.runner = slow
+    await runtime.autopilot.check_results()
+    await asyncio.wait_for(started.wait(), 10)
+    job = runtime.autopilot.verify_job
+    await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    gate.set()
+    await settle(runtime)
+    assert job is not None and job.cancelled()
+    assert runtime.tasks.get(info["task_id"])["status"] == "review"
+    assert entries(runtime, "accepted", "not-done") == []
+    assert not harness.store.get(f"autopilot:tried:{info['task_id']}"), "tried again later"
+    assert not runtime.autopilot.verifying
+
+
+async def test_a_result_verified_across_a_stop_is_not_accepted(tmp_path, git_repo, offline):
+    """Review 2: its checks passed, but Stop came while they ran (its generation): left for the
+    owner, never filed under that run or the next."""
+    harness, runtime = await project(tmp_path, git_repo)
+    info, _ = await finished(harness, runtime, git_repo)
+
+    async def braked(copy, steps):
+        runtime.autopilot.book.bump()  # Stop's brake, while the checks run.
+        return await local(copy, steps)
+
+    runtime.autopilot.runner = braked
+    await verified(runtime)
+    assert runtime.tasks.get(info["task_id"])["status"] == "review"
+    assert entries(runtime, "accepted") == []
+
+
 async def test_what_waited_on_it_starts_carrying_its_origin(tmp_path, git_repo, offline):
     harness, runtime = await project(tmp_path, git_repo)
     info, _ = await finished(harness, runtime, git_repo)

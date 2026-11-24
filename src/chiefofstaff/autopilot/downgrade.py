@@ -5,6 +5,9 @@ may go on there.
 - The run ends, with its `stopping` entry; items claimed and unfinished are unknown.
 - Every Autopilot prompt stored and not yet transmitted is withdrawn (its prompt removed, so no
   version replays it), and the task it was for is left stopped by the owner, with Go on.
+- **Every message that carries its origin and was not sent yet** (`meta.autopilot_origin`,
+  after its session's `sent:` mark: the Router's queue too) has its prompt taken out, as
+  withdrawn answers do, and its session is drained as below.
 - **Every session that carries Autopilot's origin** (a worker it continued, transmitted
   answers too; the Router in a turn that carried it) is drained: at work, it is left idle; its
   open tasks stopped by the owner (Go on); what it was sent and not yet received waits for its
@@ -21,7 +24,7 @@ import json
 
 from ..store import Store, now
 from .logbook import CLAIMED, ENDED, ON, STOPPING, UNKNOWN, WITHDRAWN, Logbook
-from .origin import STICKY, TURN
+from .origin import STICKY, TAG, TURN, merged
 
 WHY = "before a downgrade"
 
@@ -99,16 +102,42 @@ def leave_stopped(store: Store, task_ids: list[str]) -> list[str]:
     return titles
 
 
+def strip_tagged(store: Store) -> dict[str, dict]:
+    """Messages that carry Autopilot's origin and were not sent yet (after their session's
+    `sent:` mark), wherever they wait: their prompts taken out (withdrawn), so no version gives
+    them to anyone. Returns their sessions, with the origin they held."""
+    found: dict[str, dict] = {}
+    rows = store.all(
+        "SELECT id, session_id FROM messages WHERE json_extract(meta, ?) IS NOT NULL "
+        "AND json_extract(meta, '$.prompt') IS NOT NULL ORDER BY id",
+        (f"$.{TAG}",),
+    )
+    for row in rows:
+        if row["id"] <= int(store.get(f"sent:{row['session_id']}") or 0):
+            continue
+        meta = store.message(row["id"])["meta"]
+        kept = {k: v for k, v in meta.items() if k not in {"prompt", "deferred"}}
+        store.update_message_meta(row["id"], {**kept, "withdrawn": True})
+        origin = meta.get(TAG) if isinstance(meta.get(TAG), dict) else None
+        found[row["session_id"]] = merged(found.get(row["session_id"]), origin) or {}
+    return found
+
+
 def drain(store: Store, book: Logbook) -> list[str]:
-    """Every session carrying Autopilot's origin left as the owner's Stop leaves it, nothing of
-    it to wake or replay. Returns their titles."""
+    """Every session carrying Autopilot's origin, or given something that carries it and not
+    sent yet, left as the owner's Stop leaves it, nothing of it to wake or replay. Returns
+    their titles."""
     carried: dict[str, dict] = {}
+    with store.transaction():
+        stripped = strip_tagged(store)
     for prefix in (STICKY, TURN):
         for session_id, value in store.items(prefix).items():
             try:
                 carried[session_id] = json.loads(value)
             except ValueError:
                 carried[session_id] = {}
+    for session_id, origin in stripped.items():
+        carried[session_id] = merged(carried.get(session_id) or None, origin or None) or {}
     titles = []
     for session_id, origin in carried.items():
         row = store.find_session(session_id)

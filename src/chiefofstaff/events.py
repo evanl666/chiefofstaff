@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from . import agents, prompts, receipts, settings_guard, threads
+from .autopilot.origin import CARRIED
 from .backend import COPILOT_AGENT, running_background, stop_background
 from .delivery import digest
 from .envelope import SWITCHED, from_owner, news_tasks, tasks_named, wrap
@@ -479,8 +480,9 @@ class Events:
         handler = self.handlers.get(kind)
         row = self.store.find_session(session_id)
         if handler and row and not row["closed_at"]:
-            if self.runtime.autopilot.origins.any():
-                # What its turn causes (a report filed, a notice to a peer) carries its origin.
+            if self.runtime.autopilot.origins.any() or CARRIED.get() is not None:
+                # What its turn causes (a report filed, a notice to a peer) carries its origin,
+                # and only that.
                 with self.runtime.autopilot.origins.acting(session_id):
                     handler(row, event)
             else:

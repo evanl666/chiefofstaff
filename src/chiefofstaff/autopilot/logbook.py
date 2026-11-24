@@ -95,6 +95,15 @@ INLINE = 8192
 # What an entry keeps of a blob's text, to show folded.
 HEAD = 400
 BLOB = "$blob"
+
+
+def sources_of(entry: dict) -> list[str]:
+    """The entries an `after` entry follows: those its payload lists, else its `of`."""
+    payload = entry.get("payload")
+    listed = payload.get("of") if isinstance(payload, dict) else None
+    return [str(x) for x in listed] if isinstance(listed, list) and listed else [entry["of"]]
+
+
 # What each entry's hash covers, in this order (its why, evidence and payload as stored).
 HASHED = (
     "id", "run_id", "of", "at", "kind", "state", "subject", "task_id", "title", "why",
@@ -356,6 +365,24 @@ class Logbook:
             return None
         return raw
 
+    def stash(self, value: Any) -> dict:
+        """A value kept whole as one blob, whatever its size: its reference (read back as its
+        JSON text by `whole`)."""
+        raw = canonical(value).encode()
+        return {BLOB: self.put(raw), "size": len(raw), "head": raw[:HEAD].decode(errors="ignore")}
+
+    def afters(self, entry_id: str) -> list[dict]:
+        """The `after` entries an entry led to (one may list several: its payload's `of`)."""
+        if not entry_id or not self.exists():
+            return []
+        rows = self.store.all(
+            "SELECT * FROM autopilot_log WHERE kind='after' AND (of=? OR instr(payload, ?) > 0) "
+            "ORDER BY seq",
+            (entry_id, json.dumps(entry_id)),
+        )
+        found = [loaded(row, *ENTRY_JSON) or {} for row in rows]
+        return [e for e in found if e["of"] == entry_id or entry_id in sources_of(e)]
+
     def kept(self, value: Any) -> Any:
         """A payload as stored: each string longer than INLINE as a blob, its start kept."""
         if isinstance(value, str) and len(value) > INLINE:
@@ -513,6 +540,31 @@ class Logbook:
                 task_id=action.get("task_id") or "",
                 why={"rule": "stopped", "reason": why},
                 payload={"item": row["id"], "kind": row["kind"]},
+            )
+        return True
+
+    def withdraw_claimed(self, row: dict, why: str) -> bool:
+        """A claimed item Stop overtook before it was stored for its session: withdrawn, with
+        its entry (one transaction)."""
+        with self.store.transaction():
+            cursor = self.store.execute(
+                "UPDATE autopilot_outbox SET state=?, outcome=?, ended_at=? WHERE id=? AND state=? "
+                "AND message_id IS NULL",
+                (WITHDRAWN, why, now(), row["id"], CLAIMED),
+            )
+            if not cursor.rowcount:
+                return False
+            action = self.entry(row["entry"]) or {}
+            self.append(
+                row["run_id"],
+                WITHDRAWN,
+                f"Withdrawn: {action.get('title') or row['kind']}",
+                state=WITHDRAWN,
+                of=row["entry"],
+                subject=action.get("subject") or "",
+                task_id=action.get("task_id") or "",
+                why={"rule": "stopped", "reason": why},
+                payload={"item": row["id"]},
             )
         return True
 

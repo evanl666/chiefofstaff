@@ -65,6 +65,7 @@ from .backend import (
     attached_text,
     attachment_paths,
     descendants,
+    detached,
     end_processes,
     image_type,
     isolated,
@@ -966,10 +967,11 @@ class CodexBackend:
             os.close(read)
         self.lifeline = write
         self.epoch = uuid4().hex
-        self.reader = asyncio.ensure_future(self.read())
-        self.errors = asyncio.ensure_future(self.read_errors())
+        # Its reader in a context of its own: what it reads carries nothing of who opened it.
+        self.reader = detached(self.read())
+        self.errors = detached(self.read_errors())
         if self.owner is not None:
-            self.tasks.add(asyncio.ensure_future(self.watch(self.process)))
+            self.tasks.add(detached(self.watch(self.process)))
         try:
             answer = await self.request(
                 "initialize",
@@ -1970,7 +1972,7 @@ class CodexBackend:
         if previous := self.sessions.get(session.session_id):
             session.carry(previous)
         self.sessions[session.session_id] = session
-        session.pump = asyncio.ensure_future(session.handle_events())
+        session.pump = detached(session.handle_events())  # (As its process's reader.)
         return session
 
     async def mcp_sign_in_url(self, session: Any, server: str) -> str:

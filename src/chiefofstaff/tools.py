@@ -25,6 +25,7 @@ from . import agents, prompts, receipts, threads
 from .asks import AnswerSession, AskSession, RecordSetup, clock
 from .autopilot.core import AutopilotLog
 from .autopilot.judge import ProposeAnswer
+from .autopilot.origin import CARRIED
 from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .digest import NEEDS_WORDS, Needs, needs, task_words, waiting_parts
@@ -1874,8 +1875,8 @@ class Tools:
             asked = self.states[caller].turn_request if caller == self.runtime.router_id() else ""
             mark = TURN_REQUEST.set(asked)
             try:
-                if self.runtime.autopilot.origins.any():
-                    # What it causes carries its turn's origin (autopilot/origin.py).
+                if self.runtime.autopilot.origins.any() or CARRIED.get() is not None:
+                    # What it causes carries its turn's origin, and only that (origin.py).
                     with self.runtime.autopilot.origins.acting(caller):
                         result = await handler(params, caller)
                 else:
@@ -1986,6 +1987,22 @@ class Tools:
         status = self.store.session(session_id)["status"]
         return {"task_id": task["id"], "session_id": session_id, "status": status}
 
+    def owner_refs(self, text: str) -> list[int]:
+        """The owner's messages a text names by their refs ({owner:<ref>}): their ids, for
+        Autopilot's scope (only while its line is ticked)."""
+        if not self.runtime.autopilot.ticked:
+            return []
+        found = []
+        for ref in OWNER_REF.findall(text):
+            row = self.store.one(
+                "SELECT id FROM messages WHERE session_id=? AND kind='owner' "
+                "AND json_extract(meta, '$.ref')=?",
+                (self.runtime.router_id(), ref),
+            )
+            if row:
+                found.append(row["id"])
+        return found
+
     def owner_words(self, text: str) -> str:
         """The owner's messages in place of {owner:<ref>}."""
 
@@ -2047,6 +2064,7 @@ class Tools:
             return await self.spawn_fork_of(params, caller, fork_of, request)
         if not special and not agent and not fork and (compared := self.compared(params, caller)):
             return await self.spawn_compare(params, caller, compared, request)
+        refs = self.owner_refs(params.instructions)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
         if not special and (asked := risky(params.instructions)):
             raise ValueError(
@@ -2288,6 +2306,7 @@ class Tools:
         )
         if request and params.works_with:
             self.runtime.teams_lite.record_with(task["id"], request, params.works_with)
+        self.runtime.autopilot.given(task["id"], refs)  # (Its scope, while ticked: basis.py.)
         if params.review:
             self.store.set(f"reviewreq:{task['id']}", "1")
         if context_from:
@@ -2631,6 +2650,7 @@ class Tools:
         self.caller(caller, ROUTER)
         request = self.request_of(request)
         quoted = bool(OWNER_REF.search(params.text))  # The owner's own words, passed on.
+        refs = self.owner_refs(params.text)
         params = params.model_copy(update={"text": self.owner_words(params.text)})
         try:
             target = self.store.session(params.session_id)
@@ -2998,6 +3018,8 @@ class Tools:
         self.runtime.follow(
             target["id"], to_follow, task_id=task["id"] if task else "", asked=params.follow
         )
+        if task:
+            self.runtime.autopilot.given(task["id"], refs)  # (Its scope, while ticked.)
         if task and (handed := self.runtime.drafts.handed_to(task["id"])):
             prompt += "\n\n" + wrap("system", "context", self.runtime.drafts.handed_note(handed))
         elif (

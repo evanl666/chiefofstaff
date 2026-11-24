@@ -84,12 +84,13 @@ class Origins:
     @contextmanager
     def acting(self, session_id: str) -> Iterator[None]:
         """Code that acts for this session (a tool it called, an event of its turn): what it
-        stores for another session carries the session's origin."""
+        stores for another session carries exactly the session's own origin, or none; never
+        what the code around it carried (a task that outlived the turn that made it)."""
         origin = self.of(session_id) if (self.sticky or self.turns) else None
-        if origin is None:
+        if origin is None and CARRIED.get() is None:
             yield
             return
-        token = CARRIED.set(merged(CARRIED.get(), origin))
+        token = CARRIED.set(origin)
         try:
             yield
         finally:

@@ -47,6 +47,9 @@ class SessionState:
     stale: bool = False
     # Another agent's process: whether it was opened asking first (None: not opened here).
     opened_asking: bool | None = None
+    # What it was given carries Autopilot's origin, asking first, and its process acts on its
+    # own: held until it is opened again asking first (now, or once its turn is over).
+    reopen_asking: bool = False
     # The worker sandbox went on during this turn, which ends as it began: nothing more goes
     # into it (what it is sent meanwhile waits for its new, sandboxed session).
     confined: bool = False

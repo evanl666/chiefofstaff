@@ -37,7 +37,8 @@ class Results:
     async def check_results(self: Autopilot):  # type: ignore[misc]
         """Results waiting for Accept, in this run's scope: verified one at a time, at the lowest
         priority (never while the owner's work waits for a slot)."""
-        if self.verifying or self.run() is None:
+        ticket = self.ticket()
+        if self.verifying or ticket is None:
             return
         workers = self.store.open_sessions("worker")
         if any(self.runtime.workers.wants_slot(row) for row in workers):
@@ -55,7 +56,7 @@ class Results:
                 continue
             self.store.set(f"autopilot:tried:{task['id']}", version)
             self.verifying = task["id"]
-            self.runtime.background(self.verify_and_accept(task))
+            self.verify_job = self.runtime.background(self.verify_and_accept(task, ticket))
             return
 
     def result_version(self: Autopilot, task: dict) -> str:  # type: ignore[misc]
@@ -65,19 +66,26 @@ class Results:
         )
         return (found or {}).get("id") or task["updated_at"]
 
-    async def verify_and_accept(self: Autopilot, task: dict):  # type: ignore[misc]
+    async def verify_and_accept(self: Autopilot, task: dict, ticket: tuple[str, int]):  # type: ignore[misc]
+        """Verified, then accepted or left, under the run it began in only if that still holds:
+        else (Stop, the run's end) it stays in review, to verify in a later run."""
+        filed = False
         try:
             outcome = await verify.verify(self.runtime, task, self.runner)
             if outcome["passed"] and not await self.head_holds(task, outcome["record"]["commit"]):
                 outcome = {**outcome, "passed": False, "why": "its branch moved on since"}
             if outcome["passed"]:
-                self.accept_verified(task, outcome["record"])
+                filed = self.accept_verified(task, outcome["record"], ticket)
             else:
-                self.not_accepted(task, outcome["why"], outcome["record"])
+                filed = self.not_accepted(task, outcome["why"], outcome["record"], ticket)
         except Exception:
             logger.warning("Autopilot could not verify %s.", task["id"], exc_info=True)
+            filed = True
         finally:
+            if not filed:
+                self.store.delete(f"autopilot:tried:{task['id']}")  # (Cancelled too: Stop.)
             self.verifying = ""
+            self.verify_job = None
             self.runtime.publish_state()
 
     async def head_holds(self: Autopilot, task: dict, commit: str) -> bool:  # type: ignore[misc]
@@ -100,14 +108,18 @@ class Results:
             return ""
         return self.store.get(f"autopilot:accepted:{task['id']}") or ""
 
-    def accept_verified(self: Autopilot, task: dict, record: dict):  # type: ignore[misc]
-        run = self.run() or {}
+    def accept_verified(self: Autopilot, task: dict, record: dict,  # type: ignore[misc]
+                        ticket: tuple[str, int]) -> bool:  # type: ignore[misc]  # fmt: skip
+        """Accepted, if the run it was verified in still holds (else nothing: False)."""
+        run = {"id": ticket[0]}
         tasks = self.runtime.tasks
         released = []
         with self.store.transaction():
             fresh = tasks.find(task["id"])
             if not fresh or fresh["status"] != "review":
-                return  # The owner accepted it (or sent it back) first.
+                return True  # The owner accepted it (or sent it back) first.
+            if not self.holds(ticket):
+                return False
             self.store.delete(f"news:{task['id']}")
             self.store.delete(f"setaside:{task['id']}")
             tasks.move(task["id"], "done")
@@ -135,13 +147,18 @@ class Results:
                 released.append(waiting["id"])
             self.book.queue(run.get("id", ""), entry["id"], "accepted",
                             {"task_id": task["id"], "released": released},
-                            self.book.generation())  # fmt: skip
+                            ticket[1])  # fmt: skip
         self.runtime.background(self.dispatch())
+        return True
 
-    def not_accepted(self: Autopilot, task: dict, why: str, record: dict):  # type: ignore[misc]
-        """It waits for the owner's Accept, saying why (once per result)."""
-        run = self.run() or {}
+    def not_accepted(self: Autopilot, task: dict, why: str, record: dict,  # type: ignore[misc]
+                     ticket: tuple[str, int]) -> bool:  # type: ignore[misc]  # fmt: skip
+        """It waits for the owner's Accept, saying why (once per result), if the run it was
+        verified in still holds (else nothing: False)."""
+        run = {"id": ticket[0]}
         with self.store.transaction():
+            if not self.holds(ticket):
+                return False
             entry = self.book.append(
                 run.get("id", ""), "not-done", f"Left “{task['title']}” for you: {why}",
                 state="parked", subject=f"task:{task['id']}", task_id=task["id"],
@@ -150,6 +167,7 @@ class Results:
             self.store.set(f"autopilot:setaside:{task['id']}",
                            json.dumps({"why": f"Not accepted for you: {why}",
                                        "entry": entry["id"]}))  # fmt: skip
+        return True
 
     async def deliver_accepted(self: Autopilot, item: dict) -> str:  # type: ignore[misc]
         """After an acceptance commits: its task shown done, a line in its worker's chat (as
@@ -221,4 +239,4 @@ class Results:
                     "session_id": row["id"], "task_id": task["id"], "text": text,
                     "display": "Autopilot asked where it stands.",
                 }, self.book.generation())  # fmt: skip
-        await self.dispatch()
+        self.runtime.background(self.dispatch())  # (Not awaited: the periodic round goes on.)

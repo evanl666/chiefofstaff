@@ -68,6 +68,7 @@ from .backend import (
     attached_text,
     attachment_paths,
     descendants,
+    detached,
     end_processes,
     image_type,
     isolated,
@@ -1484,7 +1485,7 @@ class ClaudeWorker:
         # What it spends in this process counts from what it restores on (its probe).
         self.restored, self.told_usage, self.last_told = None, False, {}
         self.tally = Tally()
-        self.task = asyncio.ensure_future(self.run())
+        self.task = detached(self.run())  # Its reader and its tools run in a context of their own.
         try:
             await asyncio.wait_for(asyncio.shield(self.ready), OPEN_SECONDS)
         except TimeoutError:
