@@ -69,6 +69,24 @@ def test_a_new_data_directory_and_its_launch_link_are_the_owners_alone(tmp_path)
 
 
 @windows
+async def test_away_on_windows_is_read_from_the_keyboard_and_mouse(monkeypatch):
+    """ "Away" was how long since the owner last used Chief of Staff's page, while Settings said
+    "minutes without keyboard or mouse": it is the session's last input now (GetLastInputInfo),
+    or the page's last use where that is sooner or the input can't be read."""
+    from chiefofstaff import connector
+
+    assert connector.idle_reading() == "input"
+    found = connector.windows_idle()
+    assert found is None or 0 <= found <= 0xFFFFFFFF / 1000, found  # (None: a service's session.)
+    owner = SimpleNamespace(last_seen=time.time() - 3600)
+    monkeypatch.delenv("CHIEFOFSTAFF_IDLE_FILE", raising=False)
+    monkeypatch.setattr(connector, "windows_idle", lambda: 5.0)
+    assert await connector.Connector.idle_seconds(owner) == 5.0
+    monkeypatch.setattr(connector, "windows_idle", lambda: None)
+    assert 3599 < await connector.Connector.idle_seconds(owner) < 3660
+
+
+@windows
 def test_running_checks_a_process_without_ending_it():
     from chiefofstaff.backend import process_table, running, start_times
 
@@ -168,7 +186,7 @@ async def test_windows_opens_a_folder_through_the_shell(monkeypatch, tmp_path, a
     monkeypatch.setattr(os.path, "isdir", lambda path: True)
     monkeypatch.setattr(os, "startfile", started.append, raising=False)
     owner = SimpleNamespace(store=SimpleNamespace(session=lambda _: {"cwd": "C:/a & b"}))
-    assert await Runtime.open_folder(owner, "s", app) == {"ok": True}  # type: ignore[arg-type]
+    assert await Runtime.open_folder(owner, "s", app) == {"ok": True}
     assert started == [opened]
 
 

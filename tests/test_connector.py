@@ -1,5 +1,6 @@
 import json
 import re
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -130,6 +131,23 @@ async def away(harness):
 
     runtime.connector.idle_seconds = idle
     return runtime
+
+
+async def test_away_is_read_where_it_can_be_and_settings_say_from_what(harness, monkeypatch):
+    """On Linux (and Windows, before) "away" meant time since the owner last used Chief of
+    Staff's page, while Settings said "minutes without keyboard or mouse". What it is read from
+    here is in Settings' view, for its label; where it is the page, the page's last use is it."""
+    from chiefofstaff import connector as connector_module
+
+    runtime = await harness.connect()
+    reading = "input" if sys.platform in {"darwin", "win32"} else "app"
+    assert runtime.connector.view()["away"]["idle"] == reading
+    monkeypatch.setattr(connector_module, "idle_reading", lambda: "app")
+    runtime.connector.last_seen = time.time() - 600
+    assert 599 < await runtime.connector.idle_seconds() < 660
+    assert runtime.connector.view()["away"]["idle"] == "app"
+    if sys.platform != "win32":
+        assert connector_module.windows_idle() is None
 
 
 async def test_away_the_owner_is_told_where_they_are_and_answers_from_there(tmp_path):

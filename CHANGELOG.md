@@ -42,6 +42,12 @@
   watching* also stops *Prepared for you* (it works from what GitHub brings in, and nothing
   should run unasked while paused), and withdraws what it had ready, but its label didn't say
   so. It now ends with *and Prepared for you*, and its tip says what is withdrawn.
+- **"Away" is read as the setting says.** *Away after (minutes without keyboard or mouse)*
+  was read that way on macOS only; on Windows and Linux it was the time since you last used
+  Chief of Staff's page, so notifications could go out while you worked in other apps. On
+  Windows it is now your keyboard and mouse too (the page's last use, if that is sooner); on
+  Linux, which has no one way to read them, the setting says *minutes without using Chief of
+  Staff*.
 
 ## 0.1.56 (2026-11-23)
 

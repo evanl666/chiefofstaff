@@ -708,6 +708,8 @@ export function renderConnections() {
   $("#watch-scan").disabled = Boolean(connector.scanning);
   $("#watch-activity").hidden = !connector.session_id;
   const away = connector.away || {};
+  // What away is read from on this system: keyboard and mouse (macOS, Windows), else this page.
+  $("#away-after").textContent = away.idle === "app" ? "Away after (minutes without using Chief of Staff)" : "Away after (minutes without keyboard or mouse)";
   const tried = away.last || {};
   // What this way can do, as tried (the test, and notifications and reads as they happen).
   const can = away.can || {};

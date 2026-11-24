@@ -4385,11 +4385,29 @@ async def round_fourteen(runtime, browser, failures: list[str]):
     runtime.publish_state()
     await expect(summary).to_have_text("On · Slack DM to you", timeout=10000)
     assert not await summary.evaluate("n => n.classList.contains('error')")
+    # What "away" is read from here, said as it is: keyboard and mouse (macOS, Windows), else
+    # this page (Linux).
+    from chiefofstaff import connector as connector_module
+
+    after = page.locator("#away-after")
+    keys = "Away after (minutes without keyboard or mouse)"
+    page_use = "Away after (minutes without using Chief of Staff)"
+    await expect(after).to_have_text(keys if sys.platform in {"darwin", "win32"} else page_use)
+    reading = connector_module.idle_reading
+    connector_module.idle_reading = lambda: "app"
+    runtime.publish_state()
+    await expect(after).to_have_text(page_use)
+    connector_module.idle_reading = lambda: "input"
+    runtime.publish_state()
+    await expect(after).to_have_text(keys)
+    connector_module.idle_reading = reading
+    runtime.publish_state()
     await page.keyboard.press("Escape")
     await expect(page.locator("#status-line .bad", has_text="Away notice")).to_have_count(0)
     store.save_settings(store.settings().model_copy(update={"away_notify": False}))
     runtime.publish_state()
     log("E72: an away notice not delivered, red in the sidebar and in Settings until one is")
+    log("away is read from the keyboard and mouse, or this page: its setting says which")
     assert not errors, errors
     await context.close()
 

@@ -1155,7 +1155,8 @@ voice even where Slack is reached through another tool.
 ## When you are away
 
 Turn on Settings → Connections → *When you're away* and say how to reach you, for example
-"DM me on Slack through the acmebot plugin". After that many minutes without keyboard or mouse,
+"DM me on Slack through the acmebot plugin". After that many minutes without keyboard or mouse
+(on Linux, where Chief of Staff can't read those: without using its page, as the setting says),
 what needs you (cards, questions from workers, a question the Router asked you in the chat,
 tasks you stopped, failed tasks (of the last three days, as under *Needs you*)) is sent to you
 that way, once: a

@@ -441,6 +441,33 @@ RETRY_WORDS = {"retry", "重试"}
 HID_IDLE = re.compile(r'"HIDIdleTime" = (\d+)')
 
 
+def idle_reading() -> str:
+    """What tells that the owner is away on this system: "input" (no keyboard or mouse use:
+    macOS's HID system, Windows' last input), else "app" (no use of Chief of Staff's page)."""
+    return "input" if sys.platform in {"darwin", "win32"} else "app"
+
+
+def windows_idle() -> float | None:
+    """Seconds since this Windows session's last keyboard or mouse input (GetLastInputInfo);
+    None elsewhere, or when it can't be read."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class LastInput(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+    found = LastInput(ctypes.sizeof(LastInput), 0)
+    try:
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(found)):
+            return None
+        ticks = ctypes.windll.kernel32.GetTickCount()
+    except (AttributeError, OSError):
+        return None
+    return ((ticks - found.dwTime) & 0xFFFFFFFF) / 1000  # (Both wrap after 49.7 days.)
+
+
 def later(first: str, second: str) -> bool:
     """Whether ISO time `first` is after `second` (False when either cannot be read)."""
     try:
@@ -1559,14 +1586,17 @@ class Connector:
                 },
                 "where": channel_only(yours(self.store.get("away_where") or "")),
                 "can": self.capabilities(),
+                # What "away" is read from here: its setting's label says it.
+                "idle": idle_reading(),
             },
         }
 
     # Away
 
     async def idle_seconds(self) -> float:
-        """How long the owner has not used this computer (keyboard, mouse); on other systems,
-        since they last used the app."""
+        """How long the owner has not used this computer (keyboard, mouse) on macOS and Windows
+        (on Windows, or the app if that is less); on other systems, since they last used the
+        app (idle_reading)."""
         app = time.time() - self.last_seen
         if fake := os.environ.get("CHIEFOFSTAFF_IDLE_FILE"):
             # Tests: away (or not) whatever the machine's owner does.
@@ -1574,8 +1604,11 @@ class Connector:
                 text = await asyncio.to_thread(Path(fake).read_text)
                 return float(text.strip() or 0)
             return 0
-        if sys.platform != "darwin":
+        if idle_reading() == "app":
             return app
+        if sys.platform == "win32":
+            found = windows_idle()
+            return app if found is None else min(app, found)
         try:
             process = await asyncio.create_subprocess_exec(
                 "ioreg", "-c", "IOHIDSystem", "-d", "4",
