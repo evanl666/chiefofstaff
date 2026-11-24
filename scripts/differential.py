@@ -409,6 +409,39 @@ FIXES: list[Allow] = [
         element=".card.task .head:has(> .dot.unread, > .new-tag)",
         views=r"^home",
     ),
+    # 0.1.57: Settings → Workers says what holds either way, yolo or not (the floor: no worker
+    # speaks on GitHub as the owner, force-pushes or pushes to main unasked).
+    Allow(
+        "Settings → Workers: what holds either way, yolo or not",
+        element="#settings-dialog label:has(> input[name=worker_yolo]) + small",
+        views=r"^settings-workers-",
+    ),
+    # 0.1.57: Pause watching names Prepared for you, which it pauses too.
+    Allow(
+        "Settings → Advanced: Pause watching names Prepared for you",
+        element="#settings-dialog label:has(> input[name=paused])",
+        views=r"^settings-advanced-",
+    ),
+    # 0.1.57: "away" is read from the keyboard and mouse (macOS, Windows) or the page (Linux),
+    # in the state, and its setting's label says which (the same words here, on macOS).
+    Allow("what away is read from, in the state", data=r"/api/state\.connector\.away\.idle$"),
+    Allow(
+        "Settings → Connections: Away after's label, said from what it is read",
+        element="#settings-dialog label:has(> input[name=away_minutes]) > span",
+        views=r"^settings-connections-",
+    ),
+    # 0.1.57: the daily summary's Handled counts what Handled for you lists (here, nothing: the
+    # line goes), not the replies the owner sent themselves.
+    Allow(
+        "the daily summary: no Handled line for the owner's own replies",
+        data=r"(/api/sessions/[^.]+/messages|\.db\.messages)\[\d+\]\.text$",
+        lines=r"^• Handled: \d+ repl(y|ies) sent, \d+ thread follow-ups? without the Router$",
+    ),
+    Allow(
+        "the daily summary, a line shorter",
+        element="#timeline .card.update:has(li > strong.key)",
+        views=r"^home",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
