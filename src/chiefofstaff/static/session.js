@@ -1,5 +1,6 @@
 // The main pane: Home or one session, with its header, model settings and timeline.
 
+import { autopilotNotice, RECORD, showRecord, summaryCard } from "./autopilot.js";
 import { $, api, blobLive, blobUrl, el, foldable, freshButton, toast, whenNearScreen } from "./dom.js";
 import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, shorten, slackText, threadLabel } from "./text.js";
 import { byId, closedWorkers, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, RECONNECTING, routerId, state, STATUS_TEXT, tasks, uncertainDrafts, upsertSession, viewedId, workerTitle } from "./state.js";
@@ -537,6 +538,11 @@ export async function select(sessionId, { task = "" } = {}) {
     await showTeam(sessionId.slice(TEAM.length));
     return;
   }
+  // The Autopilot record (autopilot.js).
+  if (sessionId === RECORD) {
+    await showRecord();
+    return;
+  }
   openedAt = { session: task ? sessionId : "", task };
   // The Router's chat and the inbox of earlier versions are Home.
   if (sessionId === "inbox" || sessionId === routerId()) sessionId = HOME;
@@ -1039,7 +1045,10 @@ function homeEntry(message) {
       // A worker's answer to what the owner wrote it on Home (@): there too, in a line.
       return answerLine(meta.session_id, meta.from_title, gist(text) || firstLine(text), { time, body: text, view: () => select(meta.session_id, meta.task_id ? { task: meta.task_id } : {}), viewText: "Open" });
     case "update":
-      if (meta.digest) return null;
+      // The daily summary and Autopilot's card: cards on Home too (a run where nothing came up:
+      // one quiet line).
+      if (meta.autopilot_summary?.quiet) return eventLine({ text: meta.autopilot_summary.said, time });
+      if (meta.digest || meta.autopilot_summary) return null;
       return eventLine({ mark: meta.needs_action || meta.urgent ? "!" : "·", kind: meta.needs_action || meta.urgent ? "waiting" : "", text: firstLine(text), time, body: text.includes("\n") || text.length > 140 ? text : "" });
     case "draft": {
       const node = eventLine({ mark: "✎", text: `${meta.label || "Draft"}: ${firstLine(text)}`, time, body: text });
@@ -1270,6 +1279,8 @@ function renderOne(original) {
       return node;
     }
     case "update": {
+      // While you were away: an Autopilot run's card (autopilot.js).
+      if (meta.autopilot_summary) return summaryCard(meta.autopilot_summary, time);
       if (meta.digest) {
         return card({ label: "Daily summary", body: message.text.replace(/^Daily summary\n/, ""), className: "update", time });
       }
@@ -1303,6 +1314,8 @@ function renderOne(original) {
               : null;
       // A stop its task's card says more of (another agent's spend): that, in full, on hover.
       const title = meta.full ? `${meta.full}\n${clock(time)}` : clock(time);
+      // Autopilot's own line (an answer it gave, its on line): marked as its own, never as yours.
+      if (meta.autopilot) return el("div", { class: "line notice autopilot-notice", title }, ...autopilotNotice(meta, message.text));
       // Handled for the owner (E123, a folder picked): Change, while it can still be.
       const handled = meta.handled && (state.snapshot?.handled || []).some((entry) => entry.id === meta.handled.id && entry.status === "done") ? handledButton(meta.handled) : null;
       return el("div", { class: `line notice${open ? " link" : ""}${settings || handled ? " wide" : ""}`, title, onclick: open }, el("span", { text: message.text }), settings, handled);

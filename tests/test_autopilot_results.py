@@ -128,6 +128,8 @@ async def test_a_committed_result_whose_checks_pass_offline_is_accepted(
         or record["steps"][0]["tests"] == []
     )
     assert harness.store.get(f"autopilot:accepted:{info['task_id']}") == accepted["id"]
+    # Its task says who accepted it (the page: "Accepted by Autopilot").
+    assert runtime.task_actions.view(task)["accepted_by"] == "autopilot"
     assert not harness.store.all("SELECT id FROM feedback WHERE kind='accept'"), "nothing learned"
     assert not (harness.store.directory / "autopilot-verify").exists() or not any(
         (harness.store.directory / "autopilot-verify").iterdir()
@@ -136,6 +138,7 @@ async def test_a_committed_result_whose_checks_pass_offline_is_accepted(
     said = runtime.autopilot.undo(accepted["id"])
     assert "waits for your Accept again" in said
     assert runtime.tasks.get(info["task_id"])["status"] == "review"
+    assert "accepted_by" not in runtime.task_actions.view(runtime.tasks.get(info["task_id"]))
     with pytest.raises(ValueError, match="undone already"):
         runtime.autopilot.undo(accepted["id"])
     await verified(runtime)
