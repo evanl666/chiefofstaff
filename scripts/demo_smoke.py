@@ -279,9 +279,12 @@ async def run(scheme: str):
             )
             log("changed a decision: the affected result was redone, and its worker confirmed")
 
-            # Settings → General: the switch for where other Copilot sessions stand, on by default.
+            # Settings → General → More: the switch for where other Copilot sessions stand, on by
+            # default.
             await page.click("#settings-button")
             await page.click("#settings-tabs [data-tab=general]")
+            await page.click("#general-more > summary")
+            await page.locator("#others-line").scroll_into_view_if_needed()
             switch = page.locator("#settings-form input[name=other_sessions]")
             line = page.locator("#settings-form label.check").filter(
                 has=page.locator("input[name=other_sessions]")
@@ -292,7 +295,7 @@ async def run(scheme: str):
                 path=SHOTS / f"demo-{scheme}-5-settings-general{OFF}.png"
             )
             await page.click("#settings-cancel")
-            log("Settings → General: one switch line for other Copilot sessions")
+            log("Settings → General → More: one switch line for other Copilot sessions")
 
             # Learn now: "Learning…" at once in the open dialog, then how it went.
             await page.click("#settings-button")

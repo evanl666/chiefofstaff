@@ -484,12 +484,30 @@ async def run(runtime, seeded, browser, quality: Quality, phase: str):
         await page.set_viewport_size({"width": 1280, "height": 900})
         await page.locator("#settings-button").click()
         # Each page, and each connection's details in place of its list, at every width
-        # (settings-v2.md §10.3; 900 px and below, the pages are tabs over the page).
-        views = [(tab, None) for tab in ("general", "workers", "agents", "connections", "you",
-                                         "advanced")] + [("connections", key) for key in CONNECTIONS]  # fmt: skip
+        # (settings-v2.md §10.3; 900 px and below, the pages are tabs over the page); General's
+        # More and Sandbox's Options unfolded, and You's lists.
+        unfolded = {
+            "general-more": ("general", "#general-more > summary", "#general-more"),
+            "general-sandbox": ("general", "#sandbox-options", "#general-workers"),
+            "you-open": ("you", "#settings-page-you details.section", None),
+        }
+        views = [(tab, None) for tab in ("general", "agents", "connections", "you")]
+        views += [("connections", key) for key in CONNECTIONS] + [(view, "") for view in unfolded]
         for tab, key in views:
             await page.set_viewport_size({"width": 1280, "height": 900})
-            await page.locator(f"#settings-tabs [data-tab={tab}]").click()
+            if tab in unfolded:
+                page_name, opener, seen = unfolded[tab]
+                await page.locator(f"#settings-tabs [data-tab={page_name}]").click()
+                if opener.endswith("details.section"):
+                    await page.locator(opener).evaluate_all(
+                        "ds => ds.forEach((d) => { d.open = true; })"
+                    )
+                else:
+                    await page.locator(opener).click()
+                if seen:
+                    await page.locator(seen).scroll_into_view_if_needed()
+            else:
+                await page.locator(f"#settings-tabs [data-tab={tab}]").click()
             if key:
                 await page.locator(f".conn[data-conn={key}] .conn-open").click()
             name = key or tab
@@ -2027,7 +2045,9 @@ async def shepherd_views(runtime, browser, quality: Quality):
             await page.locator("#settings-button").click()
             await page.locator("#settings-tabs [data-tab=general]").click()
             await page.screenshot(path=folder / f"settings-general-1280-{scheme}.png")
-            await page.locator("#settings-tabs [data-tab=proactive]").click()
+            await page.locator("#prs-options").click()
+            await page.locator("#prs-hosts > summary").click()
+            await page.locator("#proactive-line").scroll_into_view_if_needed()
             for width in (800, 1280):
                 await page.set_viewport_size({"width": width, "height": 900})
                 await page.wait_for_timeout(100)
@@ -2040,7 +2060,7 @@ async def shepherd_views(runtime, browser, quality: Quality):
             await page.locator("#settings-cancel").click()
             await context.close()
         assert seeded["step"]
-    log("Prepared for you: Home, a fix's review, its Settings tab (browser-shots/shepherd/)")
+    log("Prepared for you: Home, a fix's review, its Options in Settings (browser-shots/shepherd/)")
 
 
 async def main():
