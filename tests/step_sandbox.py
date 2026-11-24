@@ -42,14 +42,15 @@ def profile(policy) -> str:
 
 
 def bwrap_arguments(policy) -> list[str]:
+    """Each path bound where it really is (a link's target: bubblewrap binds paths, not links)."""
     found = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
-    for path in policy.readwrite:
+    for path in map(os.path.realpath, policy.readwrite):
         if os.path.exists(path):  # noqa: PTH110
             found += ["--bind", path, path]
-    for path in policy.readonly:
+    for path in map(os.path.realpath, policy.readonly):
         if os.path.exists(path):  # noqa: PTH110
             found += ["--ro-bind", path, path]
-    for path in policy.denied:
+    for path in map(os.path.realpath, policy.denied):
         if os.path.isdir(path):  # noqa: PTH112
             found += ["--tmpfs", path]
         elif os.path.exists(path):  # noqa: PTH110

@@ -155,3 +155,37 @@ async def test_a_step_folder_put_elsewhere_by_a_link_is_never_used(world):
     [step] = runtime.shepherd.control.steps(TARGET)
     assert step["state"] == "failed" and "is a link" in step["why"], step
     assert not list(elsewhere.glob("*.git"))
+
+
+def hooked(common: Path, marker: Path):
+    """The repository's own pre-commit hook and exclude."""
+    (common / "hooks").mkdir(exist_ok=True)
+    hook = common / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\necho pre-commit >> '{marker}'\n")
+    hook.chmod(0o755)
+    (common / "info").mkdir(exist_ok=True)
+    (common / "info" / "exclude").write_text("*.log\n")
+
+
+def links_in(place: Path) -> list[Path]:
+    return [path for path in place.rglob("*") if path.is_symlink()]
+
+
+async def test_its_git_folder_holds_no_link_and_runs_the_repositorys_hooks(world):
+    """A sandbox binds paths, not links (bubblewrap can't bind onto one): the step's git folder
+    has none. Its git still runs the repository's hooks and leaves out what it leaves out, as
+    in a worktree of the repository."""
+    marker = world.root / "hook-ran"
+    runtime = await world.start()
+    await asyncio.to_thread(hooked, world.clone / ".git", marker)
+    await runtime.shepherd.tick()
+    await settle(runtime)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step["state"] == "running", step
+    assert not await asyncio.to_thread(links_in, Path(step["evidence"]["private"]["git"]))
+    await asyncio.to_thread((Path(step["tree"]) / "scratch.log").write_text, "left out\n")
+    assert run("git", "status", "--porcelain", cwd=step["tree"]) == ""
+    world.commit_fix(step["tree"])
+    assert await asyncio.to_thread(marker.read_text) == "pre-commit\n"
