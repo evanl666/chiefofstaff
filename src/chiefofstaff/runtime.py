@@ -106,7 +106,7 @@ from .forks import Forks
 from .habits import Habits
 from .handled import Handled
 from .learning import Learning
-from .models import AS_SAVED, Attachment, SentItem, Settings
+from .models import AS_SAVED, Attachment, Role, SentItem, Settings
 from .notify import mac_notification
 from .others import Others
 from .peers import Peers
@@ -826,6 +826,9 @@ class Runtime:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.status = {"state": "starting", "error": ""}
         self.models_cache: tuple[float, list[dict]] = (0.0, [])
+        # Autopilot's judge sessions (kv `judge:<id>`), read once: they think with the Router's
+        # model and effort (model_role).
+        self.judge_ids: set[str] | None = None
         # Copilot workers that wait for the owner to say to use their folder's changed agent
         # settings (settings_stop): not started from the queue meanwhile; and why, in words.
         self.settings_held: set[str] = set()
@@ -5834,7 +5837,20 @@ class Runtime:
         """The model chosen for the session: its own, its role's, or the default ("" for
         Copilot's)."""
         settings = self.store.settings()
-        return row.get("model") or settings.role_models.get(row["role"]) or settings.model
+        return row.get("model") or settings.role_models.get(self.model_role(row)) or settings.model
+
+    def model_role(self, row: dict) -> Role:
+        """The role whose model and effort in Settings a session takes: its own; Autopilot's
+        judge, which decides for the owner, the Router's (it runs on Copilot, as every helper
+        but Watch for you does)."""
+        if row["role"] == WORKER and row.get("id") in self.judges():
+            return "router"
+        return row["role"]
+
+    def judges(self) -> set[str]:
+        if self.judge_ids is None:
+            self.judge_ids = {key.split(":", 1)[1] for key in self.store.keys("judge:")}
+        return self.judge_ids
 
     def fallback(self, row: dict) -> str:
         """How far Copilot's refusal took the session ("tuning": its model without the effort
@@ -5875,7 +5891,9 @@ class Runtime:
         model switch keeps the previous effort unless told, so `switching` also sets defaults.
         """
         info = self.model_info(self.effective_model(row))
-        effort = row.get("effort") or self.store.settings().role_efforts.get(row["role"], "")
+        effort = row.get("effort") or self.store.settings().role_efforts.get(
+            self.model_role(row), ""
+        )
         if self.fallback(row):
             # Copilot refused this session's model with these options: the model's own defaults.
             if not info:
