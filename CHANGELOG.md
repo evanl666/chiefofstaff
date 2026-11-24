@@ -54,6 +54,11 @@
   Windows it is now your keyboard and mouse too (the page's last use, if that is sooner); on
   Linux, which has no one way to read them, the setting says *minutes without using Chief of
   Staff*.
+- **An answer you asked for stands out on Home.** When the Router asks a worker something for
+  you, or you ask one on Home with @, its answer was one muted line like every routine one,
+  named by its task's title, cut short. Its line now starts with a small *Answer* label, then
+  the worker's short name and the answer's first line in the text's colour; it still opens in
+  place to the whole answer. Progress, done, blocked and Watchdog lines are as they were.
 
 ## 0.1.56 (2026-11-23)
 

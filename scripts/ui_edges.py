@@ -1655,7 +1655,11 @@ async def round_five(runtime, browser, failures: list[str]):
 
     timeline = page.locator("#timeline")
     answer = timeline.locator(".event", has_text="3 of them are slow")
-    await expect(answer).to_contain_text("Count the tests: 3 of them are slow", timeout=10000)
+    # Labelled an answer, by its worker's short name (0.1.57).
+    await expect(answer.locator(".chip.answer")).to_have_text("Answer", timeout=10000)
+    await expect(answer.locator(".what")).to_have_text(
+        "Count the tests · 3 of them are slow: the e2e ones."
+    )
     log("a worker's answer to the owner's @ from Home is on Home")
 
     told = timeline.locator(".event", has_text="Write the second plan").first
@@ -6083,7 +6087,8 @@ async def main():
                           round_layout, round_fresh_start, round_qa8_auth,
                           round_qa8_approvals, round_e125, round_teams,
                           round_usage, round_relations, round_shepherd,
-                          round_stacked_merge, round_fork, round_needs_dots):  # fmt: skip
+                          round_stacked_merge, round_fork, round_needs_dots,
+                          round_answer_label):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -6191,6 +6196,186 @@ def needs_dots_done(runtime, seeded: dict):
     for session, task in seeded.values():
         runtime.tasks.move(task, "done")
         runtime.update_session(session, status="idle")
+    runtime.bus.publish("state")
+
+
+# An answer the owner waits for, long and in Chinese: its line cuts it short.
+SLY_ANSWER = (
+    "Top 10 已完成 7 个，剩下 3 个在等画面验证：老街烧鹅、阿婆牛杂和巷口糖水"  # noqa: RUF001
+    "都在等店家回复菜单照片，预计今晚八点前能全部确认，到时我再把最终排序发给你。"  # noqa: RUF001
+    "\n\n- 已确认：七家，菜单和营业时间都对得上"  # noqa: RUF001
+)
+INVOICE_ANSWER = (
+    "Found 12 invoices this week; 2 don't match the bank statement (Mar 3 and Mar 9), both from "
+    "the same vendor, and I drafted a note asking them for corrected copies."
+)
+
+
+async def round_answer_label(runtime, browser, failures: list[str]):
+    """0.1.57 (owner report): an answer the owner asked for (the Router asked a worker for them,
+    or they asked it on Home) stands apart from the routine lines beside it on Home: a small
+    Answer label, the worker's short name (not its task's title cut short) and the answer's
+    first line, in the text's colour; it opens in place as before, View or Open beside it.
+    Progress, done, blocked and Watchdog lines are as they were."""
+    seeded = answer_label_seeded(runtime)
+    shots = Path(os.environ.get("ANSWER_LABEL_SHOTS", SHOTS / "answer-label"))
+    shots.mkdir(parents=True, exist_ok=True)
+    text_color = """() => { const n = document.createElement("span"); n.style.color = "var(--text)";
+      document.body.append(n); const c = getComputedStyle(n).color; n.remove(); return c; }"""
+    label_box = """n => { const b = n.getBoundingClientRect(); return { width: b.width,
+      height: b.height, cut: n.scrollWidth > n.clientWidth + 1 }; }"""
+    routine = {
+        "Sly Town: 按推荐定下今晚吃什么 reported progress": "",
+        "Rotate the API token finished: Rotated the token; the old one is revoked.": "done",
+        "Watchdog: “Upgrade the payments SDK” looks stuck": "waiting",
+        "Upgrade the payments SDK couldn't go on: Version 5 is on a private index.": "waiting",
+    }
+    answered = {
+        "Top 10 已完成 7 个": ("Sly Town · Top 10 已完成 7 个，剩下 3 个在等画面验证", "View"),  # noqa: RUF001
+        "Found 12 invoices": ("整理本周发票并和银行流水对账 · Found 12 invoices this week", "Open"),
+        "staging deploy is healthy": ("Staging · The staging deploy is healthy", "Open"),
+    }
+    pages = {}
+    # As the owner sees them, in both schemes before any check (so the old lines' are taken too).
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 900}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await answer_label_shots(page, shots, scheme)
+        pages[scheme] = page
+    for scheme, page in pages.items():
+        timeline = page.locator("#timeline")
+        text = await page.evaluate(text_color)
+        lines = {key: timeline.locator(".event.answer", has_text=key) for key in answered}
+        for key, (words, link) in answered.items():
+            line = lines[key]
+            await expect(line).to_have_count(1)
+            await expect(line.locator(".line > .chip.answer")).to_have_text("Answer")
+            await expect(line.locator(".what")).to_have_text(re.compile(f"^{re.escape(words)}"))
+            # Read as words: its toggle's name says it is an answer, and whose.
+            await expect(line.locator("button.line")).to_have_accessible_name(
+                re.compile(rf"Answer\s+{re.escape(words[:12])}")
+            )
+            await expect(line.get_by_role("button", name=link, exact=True)).to_have_count(1)
+            # In the text's colour, not the muted lines' (nor bold).
+            what = line.locator(".what")
+            assert await what.evaluate("n => getComputedStyle(n).color") == text, (scheme, key)
+            assert await what.evaluate("n => getComputedStyle(n).fontWeight") == "400", key
+        for words, kind in routine.items():
+            exact = re.compile(f"^{re.escape(words)}$")
+            line = timeline.locator(".event").filter(has=page.locator(".what", has_text=exact))
+            await expect(line).to_have_count(1)
+            classes = f"^event( opens)?{' ' + kind if kind else ''}$"
+            await expect(line).to_have_class(re.compile(classes))
+            await expect(line.locator(".chip")).to_have_count(0)
+            color = await line.locator(".what").evaluate("n => getComputedStyle(n).color")
+            assert color != text, (scheme, words)
+        # The label stays whole and on one line at every width; a long answer is cut short.
+        sizes = []
+        for width in (1440, 1024, 800):
+            await page.set_viewport_size({"width": width, "height": 900})
+            if await page.locator("#home-tabs").is_visible():
+                await page.locator("#home-tabs [data-tab=chat]").click()
+            for key, line in lines.items():
+                box = await line.locator(".chip.answer").evaluate(label_box)
+                assert box["height"] <= 20 and not box["cut"], (width, key, box)
+                sizes.append(box["width"])
+                found = await line.evaluate(OVERFLOWS)
+                assert not found, (width, key, found)
+                row = await line.locator(".row").bounding_box()
+                assert row and row["height"] <= 30, (width, key, row)
+            cut = await timeline.evaluate(TRUNCATED, ".event.answer .what")
+            assert any("Top 10" in item for item in cut), (width, cut)
+        assert max(sizes) - min(sizes) < 0.5, sizes
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        # It opens in place to the whole answer, by click or by key, as before.
+        sly = lines["Top 10 已完成 7 个"]
+        toggle = sly.locator("button.line")
+        await toggle.click()
+        await expect(toggle).to_have_attribute("aria-expanded", "true")
+        await expect(sly.locator(".markdown")).to_contain_text("菜单和营业时间都对得上")
+        box = await sly.locator(".chip.answer").evaluate(label_box)
+        assert box["height"] <= 20 and not box["cut"], box
+        await sly.scroll_into_view_if_needed()
+        await page.mouse.move(1, 1)
+        await page.wait_for_timeout(250)
+        await page.screenshot(path=shots / f"opened-1440-{scheme}.png")
+        await toggle.click()
+        await expect(sly.locator(".markdown")).to_be_hidden()
+        invoices = lines["Found 12 invoices"].locator("button.line")
+        await invoices.focus()
+        await page.keyboard.press("Enter")
+        await expect(invoices).to_have_attribute("aria-expanded", "true")
+        await page.keyboard.press("Space")
+        await expect(invoices).to_have_attribute("aria-expanded", "false")
+        await page.context.close()
+    answer_label_done(runtime, seeded)
+    log("Home: an answer is labelled Answer, by its worker's short name; routine lines as were")
+
+
+async def answer_label_shots(page, shots: Path, scheme: str):
+    """Home's last lines, the page and the lines alone, at 1440, 1024 and 800 px."""
+    timeline = page.locator("#timeline")
+    first = timeline.locator(".event", has_text="reported progress").last
+    last = timeline.locator(".event", has_text="staging deploy is healthy")
+    await expect(last).to_have_count(1, timeout=15000)
+    for width in (1440, 1024, 800):
+        await page.set_viewport_size({"width": width, "height": 900})
+        if await page.locator("#home-tabs").is_visible():
+            await page.locator("#home-tabs [data-tab=chat]").click()
+        await last.scroll_into_view_if_needed()
+        await page.mouse.move(1, 1)
+        await page.wait_for_timeout(250)
+        await page.screenshot(path=shots / f"home-{width}-{scheme}.png")
+        top, bottom = await first.bounding_box(), await last.bounding_box()
+        side = await timeline.bounding_box()
+        assert top and bottom and side, width
+        clip = {"x": side["x"], "y": top["y"] - 12, "width": side["width"],
+                "height": bottom["y"] + bottom["height"] - top["y"] + 24}  # fmt: skip
+        await page.screenshot(path=shots / f"lines-{width}-{scheme}.png", clip=clip)
+    await page.set_viewport_size({"width": 1440, "height": 900})
+
+
+def answer_label_seeded(runtime) -> dict:
+    """Workers whose news reaches Home: two answers the Router asked for, one the owner asked
+    on Home, and the routine lines around them. {key: (worker, task)}."""
+    store = runtime.store
+    router = store.get("router_id")
+    titles = {"sly": "Sly Town: 按推荐定下今晚吃什么", "invoices": "整理本周发票并和银行流水对账",
+              "staging": "Staging: check the deploy", "token": "Rotate the API token",
+              "sdk": "Upgrade the payments SDK"}  # fmt: skip
+    seeded = {}
+    for key, title in titles.items():
+        session = f"wanswer{key}"
+        store.create_session(session, "worker", title, "idle", cwd=str(Path.home()))
+        seeded[key] = (session, runtime.tasks.create(session, title, title, status="running")["id"])
+    runtime.bus.publish("state")
+
+    def report(key: str, status: str, text: str):
+        session, task = seeded[key]
+        meta = {"from": session, "title": titles[key], "status": status, "task_id": task}
+        runtime.add_message(router, "inbound", text, meta)
+
+    report("sly", "progress", "已看完 4 家的画面。")
+    report("token", "done", "Rotated the token; the old one is revoked.")
+    report("sly", "answer", SLY_ANSWER)
+    report("sdk", "watchdog: stuck", "No output for 40 minutes.")
+    runtime.add_message(router, "inbound", INVOICE_ANSWER, {
+        "answered_by": seeded["invoices"][0], "title": f"“{titles['invoices']}”",
+        "task_id": seeded["invoices"][1]})  # fmt: skip
+    report("sdk", "blocked", "Version 5 is on a private index.")
+    runtime.add_message(router, "answer", "The staging deploy is healthy: all 14 checks pass.", {
+        "session_id": seeded["staging"][0], "task_id": seeded["staging"][1],
+        "from_title": titles["staging"]})  # fmt: skip
+    return seeded
+
+
+def answer_label_done(runtime, seeded: dict):
+    for _session, task in seeded.values():
+        runtime.tasks.move(task, "done")
     runtime.bus.publish("state")
 
 

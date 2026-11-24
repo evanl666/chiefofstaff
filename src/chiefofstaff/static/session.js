@@ -857,6 +857,13 @@ const REPORTED = {
 };
 // Reports whose line says what they came to (or why not), and opens to the whole report.
 const SAYS_WHY = new Set(["done", "blocked", "failed"]);
+// An answer the owner asked for (or the Router, for them) stands apart from routine lines: a
+// small Answer label, its worker's short name (not its task's title, cut short), its words.
+function answerLine(id, title = "", said, line) {
+  const node = eventLine({ mark: "↩", kind: "answer", text: `${labelOf(id, title.replace(/^“|”$/g, ""))} · ${said}`, ...line });
+  node.querySelector(".what").before(el("span", { class: "chip answer", text: "Answer" }));
+  return node;
+}
 // Where something that reached the Router came from: a watch's finding is the watch's, whatever
 // source it found it in.
 const SOURCES = { slack: "Slack", github: "GitHub", watch: "a watch" };
@@ -880,9 +887,7 @@ function homeEntry(message) {
         return eventLine({ mark: "⚠", kind: "waiting", text: `Watchdog: “${meta.title}” looks ${meta.status.replace("watchdog: ", "").replace("_", " ")}`, time, body: text });
       }
       if (meta.from && meta.status) {
-        if (meta.status === "answer") {
-          return eventLine({ mark: "↩", text: `Answer/Update from “${meta.title}”: ${firstLine(text)}`, time, body: text, view: () => focusTask(meta.task_id, meta.from) });
-        }
+        if (meta.status === "answer") return answerLine(meta.from, meta.title, firstLine(text), { time, body: text, view: () => focusTask(meta.task_id, meta.from) });
         const [mark, kind, what] = REPORTED[meta.status] || ["·", "", meta.status];
         // What it found, or why it could not go on, in a line (the whole report opens here;
         // its card has the receipts).
@@ -890,7 +895,7 @@ function homeEntry(message) {
         return eventLine({ mark, kind, text: `${meta.title} ${what}${said ? `: ${said}` : ""}`, time, body: said ? text : "", view: () => focusTask(meta.task_id, meta.from) });
       }
       if (meta.asked_by) return eventLine({ mark: "?", text: `Question from “${meta.title}”: ${firstLine(text)}`, time, body: text, view: () => select(meta.asked_by), viewText: "Open" });
-      if (meta.answered_by) return eventLine({ mark: "↩", text: `Answer from ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.answered_by), viewText: "Open" });
+      if (meta.answered_by) return answerLine(meta.answered_by, meta.title, firstLine(text), { time, body: text, view: () => select(meta.answered_by), viewText: "Open" });
       if (meta.review) return eventLine({ mark: "·", text: `Review · ${meta.title}: ${firstLine(text)}`, time, body: text, view: () => select(meta.review), viewText: "Open" });
       if (meta.thread) return eventLine({ mark: "↘", text: `${threadLabel(meta.thread)}: ${firstLine(text)}`, time, body: text });
       if (meta.source === "capture") return sentEntry(meta, text, time);
@@ -912,7 +917,7 @@ function homeEntry(message) {
     }
     case "answer":
       // A worker's answer to what the owner wrote it on Home (@): there too, in a line.
-      return eventLine({ mark: "↩", text: `${meta.from_title}: ${gist(text) || firstLine(text)}`, time, body: text, view: () => select(meta.session_id, meta.task_id ? { task: meta.task_id } : {}), viewText: "Open" });
+      return answerLine(meta.session_id, meta.from_title, gist(text) || firstLine(text), { time, body: text, view: () => select(meta.session_id, meta.task_id ? { task: meta.task_id } : {}), viewText: "Open" });
     case "update":
       if (meta.digest) return null;
       return eventLine({ mark: meta.needs_action || meta.urgent ? "!" : "·", kind: meta.needs_action || meta.urgent ? "waiting" : "", text: firstLine(text), time, body: text.includes("\n") || text.length > 140 ? text : "" });

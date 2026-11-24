@@ -516,9 +516,9 @@ async def report_views(runtime, browser, quality: Quality):
         page = await context.new_page()
         await page.goto(f"{BASE}/#token={TOKEN}")
         await expect(page.locator("#application")).to_be_visible()
-        await expect(
-            page.locator("#timeline .event", has_text="Answer/Update from")
-        ).to_contain_text("six services")
+        await expect(page.locator("#timeline .event.answer", has_text="Answer")).to_contain_text(
+            "six services"
+        )
         for width in (800, 1280):
             await page.set_viewport_size({"width": width, "height": 900})
             if await page.locator("#home-tabs").is_visible():
