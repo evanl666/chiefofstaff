@@ -48,6 +48,7 @@ from . import workspaces as workspaces_module
 from .abilities import Abilities
 from .accounts import Accounts
 from .asks import Asks
+from .autopilot import Autopilot
 from .backend import (
     CLIENT_NAME,
     COPILOT_AGENT,
@@ -922,6 +923,8 @@ class Runtime:
         self.cache_seeded = 0.0
         # Prepared for you: keeping the owner's PRs moving, while the setting is on.
         self.shepherd = Shepherd(self)
+        # Autopilot: Chief of Staff answers for the owner while they turn it on (autopilot/).
+        self.autopilot = Autopilot(self)
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -951,6 +954,7 @@ class Runtime:
         self.after_update()
         # Before anything else resumes: a worker left in a shepherd step is not continued.
         await self.shepherd.start()
+        await self.autopilot.started()
         await self.recover_agents()
         for source in self.all_sources():
             await source.start()
@@ -9351,6 +9355,15 @@ class Runtime:
             and (said := await self.settings_typed(row, text, settings_digest, task_id))
         ):
             return said
+        if (
+            typed
+            and row["role"] == ROUTER
+            and not attachments
+            and not agent
+            and not compare
+            and (said := await self.autopilot.typed(row, text))
+        ):
+            return said  # An Autopilot command, answered without the Router's model.
         for chosen in (agent, *compare) if row["role"] == ROUTER else ():
             if chosen and chosen not in {COPILOT_AGENT, *self.agents_on()}:
                 # Chosen in the composer, then turned off before it was sent: said, not dropped.
@@ -10390,6 +10403,8 @@ class Runtime:
                 self.storage.tick,
                 # Prepared for you, while on (shepherd.py).
                 self.shepherd.tick,
+                # Autopilot, while its line is ticked (autopilot/).
+                self.autopilot.tick,
             )
             for job in jobs:
                 try:
@@ -10943,7 +10958,8 @@ class Runtime:
         rows = self.store.all(
             "SELECT id, text, meta, created_at FROM messages WHERE session_id=? AND kind='update'"
             " AND created_at > ? AND id > coalesce((SELECT id FROM messages WHERE session_id=?"
-            " AND kind='owner' AND json_extract(meta, '$.to') IS NULL ORDER BY id DESC LIMIT 1),"
+            " AND kind='owner' AND json_extract(meta, '$.to') IS NULL"
+            " AND json_extract(meta, '$.autopilot_command') IS NULL ORDER BY id DESC LIMIT 1),"
             " 0) ORDER BY id",
             (router, hours_ago(72), router),
         )
@@ -11025,6 +11041,8 @@ class Runtime:
             "settings": self.store.settings().model_dump(),
             # Only once Prepared for you was turned on: its rows, and where steps can run.
             **({"shepherd": kept} if (kept := self.shepherd.snapshot()) else {}),
+            # Only while Autopilot's line is ticked: its run, for Home's header.
+            **({"autopilot": run} if (run := self.autopilot.snapshot()) else {}),
             # Only while another coding agent is on: Settings' Coding agents tab shows it.
             **({"agents": self.agents_view()} if self.agents_on() else {}),
             # Only where another agent is installed: its Settings tab, and first-run cards.
@@ -11085,6 +11103,8 @@ class Runtime:
             await self.shepherd.settings_changed(old, new)
         if old.proactive != new.proactive:
             await self.refresh(ROUTER)  # Its one rule and its tools' shepherd field.
+        if old.autopilot or new.autopilot:
+            await self.autopilot.settings_changed(old, new)
         if old.other_sessions != new.other_sessions:
             # First, before anything awaits: once the save returns, nothing more is told.
             self.others.switch(new.other_sessions)
