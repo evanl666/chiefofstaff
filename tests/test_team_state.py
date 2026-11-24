@@ -172,3 +172,61 @@ def test_home_pending_items_are_attributed_to_a_task_or_its_worker():
         "return { tasks: [...p.tasks].sort(), sessions: [...p.sessions].sort() };"
     )
     assert found == {"tasks": ["t1", "t2", "t4", "t6"], "sessions": ["s3", "s5"]}
+
+
+def test_a_teams_words_are_the_same_on_its_row_the_sidebar_and_its_page():
+    """Home's row and the sidebar's line say a team's words; its page's header starts with
+    their headline: the same words for every state, a part waiting on work that went on
+    outside the team too (said plainly, not "Watching")."""
+    found = lite(
+        "const clock = () => '9:12';\n"
+        "const base = { id: 'team-1-t1', request: { at: '2026-11-24T09:12:00Z' }, "
+        "waiting: [], edges: [] };\n"
+        "const out = member('a', { moved_out: { task: 'x', title: 'Sales report export', "
+        "session: 'sx' } });\n"
+        "const after = [{ kind: 'after', from: 'a', to: 'b', state: 'pending' }];\n"
+        "const run = { section: 'running', marker: '' };\n"
+        "const next = { section: 'monitoring', marker: 'queued' };\n"
+        "const watch = { section: 'monitoring', marker: 'watching' };\n"
+        "const done = { section: 'finished', marker: 'done' };\n"
+        "const cases = {\n"
+        "  needs: [[member('a'), member('b')], {}, { a: { section: 'needs', marker: 'review' },"
+        " b: run }],\n"
+        "  held: [[member('a'), member('b')], { waiting: [{ id: 'q1', from: 'a', to: 'b', "
+        "blocks: true, minutes: 34 }] }, { a: { section: 'monitoring', marker: 'waiting' }, "
+        "b: run }],\n"
+        "  mixed: [[member('a'), member('b'), member('c')], {}, { a: run, b: next, c: watch }],\n"
+        "  next: [[member('a'), member('b')], {}, { a: done, b: next }],\n"
+        "  watching: [[member('a'), member('b')], {}, { a: done, b: watch }],\n"
+        "  outside: [[out, member('b')], { edges: after }, { b: next }],\n"
+        "  outsideMixed: [[out, member('b'), member('c')], { edges: after }, { b: next, c: run }"
+        "],\n"
+        "  done: [[member('a'), member('b')], {}, { a: done, b: done }],\n"
+        "  aside: [[member('a'), member('b')], {}, { a: { section: 'finished', marker: "
+        "'set-aside' }, b: { section: 'finished', marker: 'cancelled' } }],\n"
+        "};\n"
+        "const found = {};\n"
+        "for (const [name, [members, extra, phases]] of Object.entries(cases)) {\n"
+        "  const team = { ...base, ...extra, members };\n"
+        "  const st = ts.teamState(team, ctx(phases));\n"
+        "  found[name] = [st.words, st.headline, ts.headerWords(team, st, clock)];\n"
+        "}\n"
+        "return found;"
+    )
+    for name, (words, headline, header) in found.items():
+        assert header.startswith(headline), (name, header, headline)
+        assert headline.casefold() in words.casefold(), (name, words, headline)
+    assert found["outside"] == [
+        "Waiting on “Sales report export” (outside this team)",
+        "Waiting on “Sales report export” (outside this team)",
+        "Waiting on “Sales report export” (outside this team) · 1 of 2 parts done · started 9:12",
+    ]
+    assert found["outsideMixed"][:2] == [
+        "1 working · 1 waiting on “Sales report export” (outside this team)",
+        "Working",
+    ]
+    assert found["next"][:2] == ["1 up next", "Up next"], "never Watching for up next"
+    assert found["watching"][:2] == ["1 watching", "Watching"]
+    assert found["mixed"][:2] == ["1 working · 1 up next · 1 watching", "Working"]
+    assert found["needs"][1] == "Waiting on you" and found["held"][1] == "Pa waits on Pb's answer"
+    assert found["aside"][0] == "Done · set aside" and found["done"][2].startswith("Done")

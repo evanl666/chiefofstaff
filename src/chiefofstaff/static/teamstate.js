@@ -93,6 +93,12 @@ export function teamState(team, ctx) {
     if (!part.held || question.minutes > part.held.minutes) part.held = question;
     part.state = "blocked";
   }
+  // Up next, but only on work a part went on with outside the team: it says so.
+  for (const part of parts) {
+    if (part.state !== "watching" || !part.next) continue;
+    const before = (team.edges || []).filter((edge) => edge.kind === "after" && edge.to === part.id && edge.state !== "met").map((edge) => byId.get(edge.from));
+    if (before.length && before.every((other) => other?.moved)) part.outside = [...new Set(before.map((other) => other.moved_out?.title || other.name))];
+  }
   const state = STATES.find((one) => parts.some((part) => part.state === one)) || "done";
   const done = state === "done";
   const finished = parts.filter((part) => part.finished).length;
@@ -106,27 +112,39 @@ export function teamState(team, ctx) {
   const endedAt = parts.map((part) => part.row?.ended_at || part.ended_at || "").filter(Boolean).sort().pop() || "";
   const name = (id) => byId.get(id)?.name || "";
   let words;
+  let headline;
   let tone = "";
   const needing = parts.find((part) => part.state === "needs");
   const held = parts.filter((part) => part.held && part.held.minutes >= BLOCKING_MINUTES).sort((a, b) => b.held.minutes - a.held.minutes)[0];
+  // One headline, the same on Home's row, the sidebar and the team's page: its row's words
+  // say it first.
   if (needing) {
-    words = `Waiting on you · ${needsWords(needing.marker, needing.name)}`;
+    headline = "Waiting on you";
+    words = `${headline} · ${needsWords(needing.marker, needing.name)}`;
     tone = "amber";
   } else if (held) {
-    words = `${held.name} waits on ${name(held.held.to)}'s answer · ${duration(held.held.minutes)}`;
+    headline = `${held.name} waits on ${name(held.held.to)}'s answer`;
+    words = `${headline} · ${duration(held.held.minutes)}`;
     tone = "amber";
   } else if (done) {
     const took = endedAt ? duration(minutesSince(team.request.at, Date.parse(endedAt))) : "";
+    headline = "Done";
     words = accepted ? ["Done", `${parts.length} parts`, took].filter(Boolean).join(" · ") : "Done · set aside";
     tone = accepted ? "green" : "";
   } else {
+    const away = [...new Set(parts.flatMap((part) => part.outside || []))];
+    const awayWords = away.length === 1 ? `waiting on “${away[0]}” (outside this team)` : "waiting on work outside this team";
     const pieces = [
       [count((part) => part.state === "working"), "working"],
       [count((part) => part.state === "blocked"), "waiting on a teammate"],
-      [count((part) => part.state === "watching" && part.next), "up next"],
+      [count((part) => Boolean(part.outside)), awayWords],
+      [count((part) => part.state === "watching" && part.next && !part.outside), "up next"],
       [count((part) => part.state === "watching" && !part.next), "watching"],
-    ];
-    words = pieces.filter(([n]) => n).map(([n, what]) => `${n} ${what}`).join(" · ");
+    ].filter(([n]) => n);
+    const [first = [0, "watching"]] = pieces;
+    headline = capitalized(first[1]);
+    // Waiting on work outside alone: the plain words, no count.
+    words = pieces.length === 1 && first[1] === awayWords ? headline : pieces.map(([n, what]) => `${n} ${what}`).join(" · ");
   }
   const segment = (part) => (part.finished ? (part.accepted ? "done" : "ended") : part.state === "needs" || part.state === "blocked" ? "waiting" : part.state === "watching" ? (part.next ? "next" : "watching") : part.state);
   return {
@@ -142,11 +160,23 @@ export function teamState(team, ctx) {
     left,
     endedAt,
     words,
+    headline,
     tone,
     segments: parts.map(segment),
     needing,
     held: held || null,
   };
+}
+
+const capitalized = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
+// The team page's header: its headline (as on Home's row and the sidebar), how many parts are
+// done, since when. `clock` formats a moment ("9:12").
+export function headerWords(team, st, clock) {
+  const done = `${st.finished} of ${st.total} parts done`;
+  if (st.done) return st.endedAt ? `Done at ${clock(st.endedAt)} · from your request at ${clock(team.request.at)}` : `Done · from your request at ${clock(team.request.at)}`;
+  if (st.state === "needs") return `${st.headline} · ${done} · since ${clock(latestOf(st.needing.row) || team.request.at)}`;
+  return `${st.headline} · ${done} · started ${clock(team.request.at)}`;
 }
 
 // What Home's pending cards and questions are for (inbox.js needsYou): task ids, and workers
