@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, create_model
 
 from . import agents, prompts, receipts, threads
 from .asks import AnswerSession, AskSession, RecordSetup, clock
+from .autopilot.judge import ProposeAnswer
 from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .digest import NEEDS_WORDS, Needs, needs, task_words, waiting_parts
@@ -1385,6 +1386,12 @@ class Tools:
                 "Update one section of how the owner writes; it applies at once.",
                 UpdateStyle,
                 self.runtime.habits.t_update_style,
+            ),
+            (
+                "propose_answer",
+                "Propose the answer the owner's own words give to one question, or park it.",
+                ProposeAnswer,
+                self.runtime.autopilot.t_propose_answer,
             ),
             (
                 "propose_checks",

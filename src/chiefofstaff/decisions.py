@@ -422,13 +422,21 @@ class Decisions:
                 subject=subject["id"] if subject else "",
                 join=False,
             )
-            self.runtime.add_message(
-                caller, "draft", question, {"draft_id": card["id"], "label": "Decision"}
-            )
-            self.bus.publish("draft", card)
-            self.runtime.alert(
-                question, session_id=caller, needs_action=True, title=f"Decision · {row['title']}"
-            )
+            autopilot = self.runtime.autopilot
+            if autopilot.ticked and autopilot.holds_decision(row):
+                # Autopilot decides it first: not drawn meanwhile (autopilot/answers.py).
+                self.runtime.background(autopilot.decide_decision(row, card))
+            else:
+                self.runtime.add_message(
+                    caller, "draft", question, {"draft_id": card["id"], "label": "Decision"}
+                )
+                self.bus.publish("draft", card)
+                self.runtime.alert(
+                    question,
+                    session_id=caller,
+                    needs_action=True,
+                    title=f"Decision · {row['title']}",
+                )
         if task and task["status"] in OPEN:
             self.tasks.move(task["id"], "waiting", progress=f"Needs your decision: {question}")
         self.runtime.update_session(caller, status="waiting")

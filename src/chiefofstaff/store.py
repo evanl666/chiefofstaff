@@ -53,7 +53,7 @@ LAST_ID = 2**63 - 1
 
 # Chief of Staff's own helper workers (learning, checks, profile, connector, messenger): not the
 # owner's tasks, never listed with them.
-HELPER_KINDS = ("learner", "checker", "distill", "connector", "messenger")
+HELPER_KINDS = ("learner", "checker", "distill", "connector", "messenger", "judge")
 # Constant SQL, made of the constant kinds above.
 HELPERS = " UNION ".join(
     f"SELECT substr(key, {len(kind) + 2}) FROM kv WHERE key >= '{kind}:' AND key < '{kind}:\uffff'"  # noqa: S608
