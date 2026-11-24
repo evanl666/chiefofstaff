@@ -59,8 +59,9 @@ Copilot session，跟踪所有进展，只在需要我做决定、或者有草�
 - 用你现有的 Copilot：订阅、模型、插件、skill、MCP server 和公司策略，也可以在 Settings 里再加。不需要别的 AI 服务或 API key。
 - 如果你也用 Codex，可以在 Settings 里让 worker 改用 Codex，用你自己的 Codex 登录（[怎么设置](docs/guide.md#workers-on-other-coding-agents)，英文）。
 - 每个 worker 有自己的文件夹和 git worktree，不会动你的代码目录。worker 和你自己的 Copilot
-  session 一样运行（读 Slack 的 worker 默认带权限检查）；可以在 Settings 里给所有 worker 打开
-  *Ask first*（不推 `main`、不 force push、不写自己文件夹以外的地方）或系统沙箱。
+  session 一样运行，但没有你点头，不会以你的名义在 GitHub 上评论、review、merge 或关闭，也不会
+  推 `main` 或 force push 别人的分支；可以在 Settings 里打开 *Ask first* 加更多检查（完全不
+  force push、不用 `sudo`）或系统沙箱。
 
 ## 安装
 

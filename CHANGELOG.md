@@ -33,13 +33,17 @@
   you sent yourself and follow-ups on threads, and left out everything under *Handled for you*.
   Its line is now *Handled for you: 3, listed on Home*: what that list shows for the day, less
   what you undid.
-- **What yolo lets through, said as it is.** Settings → Workers said that either way nothing
-  is force-pushed, pushed to `main` or posted as you without your OK. With yolo on (the
-  default), Chief of Staff doesn't check workers' commands, so only their instructions hold them
-  back from those; the line now says so, and the guide and SECURITY.md say what holds either
-  way (your checkouts given to read, Chief of Staff's private files, the sandbox, a *Prepared
-  for you* step, the Router never asking a worker to merge or force-push). Yolo itself is
-  unchanged.
+- **No worker speaks on GitHub as you on its own, yolo or not.** With yolo on (the default),
+  Chief of Staff didn't check workers' commands, so only its instructions kept a worker from
+  commenting on, reviewing, merging or closing a PR as you, changing issues, writing through
+  `gh api` or GitHub's MCP server, force-pushing or pushing to `main`, and Settings → Workers
+  said otherwise. Whatever its mode, these are now refused for every worker, on Copilot, Codex
+  and Claude Code: it asks you, or hands you the text as a draft to approve. It still pushes to
+  its own branches (forced too, with yolo), opens PRs and reads anything. On Codex, ChatGPT's
+  apps are off for every worker (they act on Codex's own approvals, out of Chief of Staff's
+  checks); on Claude Code, a Workflow, a share link and a subagent whose definition can't be
+  found are refused for every worker. *Ask first* (yolo off) keeps all its checks. The write
+  tools of other MCP servers you added still act as you (SECURITY.md, *Known limits*).
 - **Pause watching says it pauses *Prepared for you* too.** Settings → Advanced's *Pause
   watching* also stops *Prepared for you* (it works from what GitHub brings in, and nothing
   should run unasked while paused), and withdraws what it had ready, but its label didn't say

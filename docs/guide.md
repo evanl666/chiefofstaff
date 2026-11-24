@@ -1384,29 +1384,38 @@ alone: its card under *Needs you* has it.
 
 ## What runs without asking
 
-Workers act without asking inside their folders. With *Ask first* (below), Chief of Staff also
-refuses (the worker must ask you): writes outside its folders, `sudo`, force pushes, pushes to `main`/`master`,
-`gh pr merge|close|review|comment`, `gh issue` changes, `gh api` writes, GitHub MCP writes,
-piping downloads into a shell, and system-level destructive commands. Workers that read Slack
-cannot fetch URLs, and their network reaches only GitHub when sandboxed. These checks read
-commands as text, which can't be fully parsed: the push and delete checks are a best effort (a
-push whose branch a command doesn't say plainly, a script fed to a shell on a line that pushes,
-and a command line too long or complex to check, are refused, saying so; what they don't read:
+**Whatever the mode**, no worker does these as you on its own: comment on, review, merge or
+close a PR (`gh pr comment|review|merge|close`), open, change, comment on or close an issue
+(`gh issue create|edit|comment|close`), write through `gh api` or GitHub's MCP server, force-push
+a branch that isn't its own (`--force-with-lease` too), or push to `main`/`master`. Chief of Staff
+refuses it and the worker asks you, or hands you the text as a draft to approve. Its own
+branches it pushes to as it likes, and it opens PRs and reads anything; a push whose branch the
+command doesn't say plainly is refused too, saying so. The same for workers on Codex (whose
+ChatGPT apps are off for that reason) and Claude Code.
+
+**With *Ask first*** (yolo off), Chief of Staff also refuses, and the worker asks you: writes
+outside its folders, `sudo`, any force push, piping downloads into a shell, system-level
+destructive commands and `gh issue delete`. Workers that read Slack cannot fetch URLs, and their
+network reaches only GitHub when sandboxed. These checks read commands as text, which can't be
+fully parsed: the push and delete checks are a best effort (a push whose branch a command doesn't
+say plainly, a script fed to a shell on a line that pushes, and a command line too long or
+complex to check, are refused, saying so; what they don't read:
 [Known limits](../SECURITY.md#known-limits)). Protect your default branch on GitHub as well.
 
-**Yolo** is on by default, as in your own Copilot sessions: workers run without these checks, so
-only their instructions keep them from force-pushing, pushing to `main`, or commenting, reviewing
-or merging on GitHub as you (their `git` and `gh` act as you, in the sandbox too). Turn it off in
-Settings → *Workers* (or per worker in its header's **⋯**: *Ask first*) to have them enforced.
-Workers that read Slack keep the checks unless you choose yolo for them there. Either way, the
-sandbox applies when it is on; a worker is kept out of a checkout of yours given to read and out
-of Chief of Staff's private files; a *Prepared for you* step can't reach GitHub; and the Router never
-asks a worker to merge or force-push.
+**Yolo** is on by default, as in your own Copilot sessions: workers then run without the *Ask
+first* checks. Turn it off in Settings → *Workers* (or per worker in its header's **⋯**: *Ask
+first*). Workers that read Slack keep the checks unless you choose yolo for them there. Either
+way, the sandbox applies when it is on; a worker is kept out of a checkout of yours given to read
+and out of Chief of Staff's private files; a *Prepared for you* step can't reach GitHub; and the
+Router never asks a worker to merge or force-push.
 
-What Chief of Staff sends as you itself (a Slack reply, a PR review or reply from its card,
-what *Prepared for you* publishes) goes only once you approve it (a reply to a message you
-reacted to for it is approved by your reaction), and no worker gets your Slack connection. See [SECURITY.md](../SECURITY.md) for which of these boundaries the OS enforces and
-which rely on the model.
+Nothing is sent as you without your approval: what Chief of Staff sends itself (a Slack reply, a
+PR review or reply from its card, what *Prepared for you* publishes) goes only once you approve
+it (a reply to a message you reacted to for it is approved by your reaction), and no worker gets
+your Slack connection. Write tools of MCP servers you added yourself are the exception: they run
+as in your own sessions ([Known limits](../SECURITY.md#known-limits)). See
+[SECURITY.md](../SECURITY.md) for which of these boundaries the OS enforces and which rely on the
+model.
 
 ## Models and usage
 
@@ -1598,8 +1607,8 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   2.1.322, each version checked on this machine, without a model, before its first worker). A
   check that could not finish (a machine busy with other work) is tried again by itself, and
   whenever a worker or the Router wants that agent; what waits for it goes on once it has run.
-  Codex: ChatGPT's apps and its subagents are off for such a worker, and your own Codex rules and
-  `PermissionRequest` hooks can allow what those checks would refuse. Claude: your own Claude
+  Codex: its subagents are off for such a worker (ChatGPT's apps are, for every worker), and your
+  own Codex rules and `PermissionRequest` hooks can allow what those checks would refuse. Claude: your own Claude
   hooks are off for such a worker (one could approve what Chief of Staff refused); its name's
   tooltip says so. A version that is not shown to ask first runs workers that act on their own;
   their **⋯** says why *Ask first* is off. Codex takes up a switch to *Ask first* only in a new

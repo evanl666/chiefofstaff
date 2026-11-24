@@ -72,9 +72,9 @@ only with a decision to make or a draft to approve.
   allow them on Home or in Settings, and pick one for a task with `@codex` or `@claude`
   ([how](docs/guide.md#workers-on-other-coding-agents)).
 - Every worker gets its own folder and git worktree, so your checkouts stay untouched. Workers
-  run like your own Copilot sessions (those that read Slack keep permission checks by default); turn on
-  *Ask first* for all of them (no pushes to `main`, no force pushes, no writes outside their
-  folders) or an OS sandbox in Settings.
+  run like your own Copilot sessions, but none comments, reviews, merges or closes on GitHub as
+  you, pushes to `main` or force-pushes others' branches without your OK; turn on *Ask first*
+  for more checks (no force pushes at all, no `sudo`) or an OS sandbox in Settings.
 
 ## Install
 

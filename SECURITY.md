@@ -36,8 +36,8 @@ makes a mistake.
 | Workers that read Slack reach only GitHub hosts over the network, and not localhost. Other workers may use localhost (servers their tests start, their build daemon) and so reach your local services; the tokens of your Gradle daemons and Jupyter servers are unreadable to them, and Unix sockets (Docker's) stay closed | **OS sandbox** | Sandbox is on |
 | The Router, the Slack session and the Watchdog have no shell, file or web tools | **Copilot** (session tool allowlist); on Codex or Claude (the Router, the Watchdog), **that agent** with its own tools, servers, hooks and plugins off, read back as each session opens (see below) | Always |
 | Slack messages are sent only after you approve a draft | **Chief of Staff** (Slack write tools are refused; only the app sends) | Always for the Slack tools; sessions are never given your Slack token |
-| PR reviews are published only after you approve a draft | **Chief of Staff** (permission check refuses GitHub MCP writes, `gh pr review/merge/comment` and `gh api` writes) | Yolo is off for the worker (it is on by default, except for workers that read Slack). With yolo on, a worker's `gh` can still write to GitHub |
-| No force pushes, no pushes to `main`/`master`, no recursive delete of home or root, no `sudo`, no `curl \| sh` | **Chief of Staff** (permission check on each command) | Yolo is off for the worker (on by default, except for workers that read Slack). These checks read commands as text, which can't be fully parsed: the push and delete checks are a best effort, not a sandbox, and an agent determined to evade them can (protect your default branch on the server, too) |
+| No worker comments on, reviews, merges or closes a PR, opens, changes, comments on or closes an issue, writes through `gh api` or GitHub's MCP server, force-pushes a branch that isn't its own or pushes to `main`/`master`: PR reviews and replies go out only from a draft you approve | **Chief of Staff** (the floor: a check on each command and MCP call of every worker, before its mode is looked at; on Codex, ChatGPT's apps are off and GitHub's MCP servers made to ask) | Always, yolo or not, on Copilot, Codex and Claude Code. It reads commands as text, which can't be fully parsed: the push check is a best effort, not a sandbox, and an agent determined to evade it can (protect your default branch on the server, too). What a command does through another program (`curl` to GitHub's API with a token, a script), or a Codex rule of yours that lets a command run unasked, is not read |
+| No force push at all, no recursive delete of home or root, no `sudo`, no `curl \| sh` | **Chief of Staff** (permission check on each command) | Yolo is off for the worker (on by default, except for workers that read Slack). These checks read commands as text, which can't be fully parsed: they are a best effort, not a sandbox |
 | A worker does not write outside its folders with Copilot's file-edit tool | **Chief of Staff** (permission check) and Copilot (best effort) | Yolo is off for the worker |
 | The connector (watches, notifications when you are away) only looks, and messages nobody but you | **The model**, guided by instructions; it runs as a worker that reads Slack (sandboxed, permission checks on, Slack writes refused) | As far as the model follows its instructions. It can use every MCP server your Copilot has, including ones that can send: give it a way to reach you that can message only you if you can |
 | A message cannot pretend to come from you or the Router | **Chief of Staff** (envelopes: only the app writes the sender; text inside is escaped) | Always |
@@ -45,7 +45,7 @@ makes a mistake.
 | Content from Slack, GitHub and the web is treated as data, not instructions | **The model**, guided by marked envelopes (`trust="untrusted"`) | As far as the model follows its instructions |
 | Only your own reaction delegates a Slack message (others reacting with the same emoji do nothing) | **Chief of Staff** (the watcher searches `hasmy::emoji:`, your reactions only) | Always |
 | A delegated message is acted on for what it asks, but risky requests in it are confirmed with you | **The model**, guided by instructions | As far as the model follows its instructions. Delegate only messages you would forward to a colleague |
-| Workers stay on their task, don't merge PRs, don't speak publicly as you | **The model**, guided by instructions; the Watchdog flags drift | As far as the model follows its instructions |
+| Workers stay on their task, and don't speak as you where the floor above doesn't reach (an MCP server's write tools, a script) | **The model**, guided by instructions; the Watchdog flags drift | As far as the model follows its instructions |
 | While a worker prepares a fix for *Prepared for you*, its commands reach no GitHub host and no credentials (no `gh` or `git` sign-in, no SSH keys, no keychain), only its project's package registries and the hosts you list; its session has no MCP servers, no Slack and only the tools that turn needs | **OS sandbox**, always on for that turn, and **Copilot** (that turn's tool allowlist); Chief of Staff's permission check refuses the rest | *Prepared for you* is on (off by default) and this Copilot version passed Chief of Staff's check of those limits on this computer; until then no fix is prepared |
 | What *Prepared for you* publishes (a push, replies, a resolved conversation, a review asked again, a CI run again) is exactly what you approved, sent by Chief of Staff as your account: a push only to the PR's own branch, only if that branch is still at the commit the plan was made on, never with git hooks | **Chief of Staff** (each operation journaled before it is sent, checked against the plan, checked again just before it is sent, after every wait: turned off, paused, stopped, the PR changed hands or approved over an hour ago, it is withdrawn, never sent; read back on GitHub after a stop as your account's only, posted since it began to go out, with exactly its text, and left unknown when two could be it; never sent twice) | Always while it is on. Branches that are protected, require signed commits or have rules a push might not meet are left to you |
 | *Merge when ready* merges only a commit you accepted, or fixes you approved on top of it, once required checks pass and reviews approve | **Chief of Staff** (`gh pr merge --match-head-commit` with that exact commit, every condition read again just before; for a PR in a stack on GitHub, GitHub's asynchronous merge with that commit as its `sha`, direct, never bypassing rules, and never while a PR below it in the stack is open, which it would merge too) | You turned it on for that PR. A commit nobody approved pauses the PR until you accept it |
@@ -77,18 +77,17 @@ takes it back while nothing has changed since. A worker in a worktree Chief of S
 waits 15 minutes has its task done by a new worker in a fresh worktree from the same base (what
 the held folder holds is not carried); one in your own checkout waits for you.
 
-**Yolo** turns off Chief of Staff's permission prompts and checks for workers. It is on by
-default, as in your own Copilot sessions, except for workers that read Slack (they keep the
-checks unless you choose yolo in their header); turn it off in Settings, or per worker with
-*Ask first*. With the sandbox on, the OS boundaries above still hold, but a worker's `git` and
-`gh` still act as you on GitHub (through Copilot's proxy): only its instructions keep it from
-force-pushing, pushing to `main`, or commenting, reviewing or merging as you. With the sandbox off (or unsupported), yolo means a
-worker can do anything your user account can. Whatever yolo says, Chief of Staff keeps a
-worker out of a checkout of yours given to read and out of its own private files (as far as a
-command line can be read, as above), a *Prepared for you* step reaches no GitHub, and the Router
-never asks a worker to merge or force-push. Yolo is on by default since 0.1.18, as your own
-Copilot sessions usually run: if workers read content you do not trust (PR comments from
-strangers, say), turn it off in Settings.
+**Yolo** turns off Chief of Staff's *Ask first* checks for workers, not the floor above. It is
+on by default, as in your own Copilot sessions, except for workers that read Slack (they keep
+the checks unless you choose yolo in their header); turn it off in Settings, or per worker with
+*Ask first*. With the sandbox on, the OS boundaries above still hold (a worker's `git` and `gh`
+still reach GitHub as you, through Copilot's proxy). With the sandbox off (or unsupported), yolo
+means a worker can do anything your user account can, but what the floor refuses. Whatever yolo
+says, the floor holds; Chief of Staff keeps a worker out of a checkout of yours given to read
+and out of its own private files (as far as a command line can be read, as above), a *Prepared
+for you* step reaches no GitHub, and the Router never asks a worker to merge or force-push. Yolo
+is on by default since 0.1.18, as your own Copilot sessions usually run: if workers read content
+you do not trust (PR comments from strangers, say), turn it off in Settings.
 
 **Abilities you add** (Settings → Connections: skills, plugins, MCP servers) run as they would
 in your own Copilot sessions: a plugin's hooks and an MCP server run as you, outside the
@@ -132,9 +131,9 @@ Settings → *Coding agents*). For such a worker:
 - **Ask first** (Codex versions before 0.168; Claude from 2.1.322): every command, edit and MCP
   call asks Chief of Staff, which refuses what it refuses for a Copilot worker (`gh` writes and
   GitHub MCP writes among them, so PR reviews stay drafts); Claude's commands are read as the
-  shell Claude runs them in. Codex: ChatGPT's apps and its subagents (which could open another
-  worker's conversation) are off, and your own Codex rules and hooks can allow what those checks
-  would refuse. Claude: your own Claude hooks are off (one could approve what Chief of Staff
+  shell Claude runs them in. Codex: its subagents (which could open another worker's
+  conversation) are off (ChatGPT's apps are, for every worker), and your own Codex rules and
+  hooks can allow what those checks would refuse. Claude: your own Claude hooks are off (one could approve what Chief of Staff
   refused); its subagents are checked as the worker; a cloud agent or a routine (which would run
   where no check reaches) needs your OK each time, and is refused to a worker that asks first or
   has a token limit. Chief of Staff checks once per version of each agent, on this machine,
@@ -386,8 +385,10 @@ the checks you approved run.
 - A worker in a shared project folder (not isolated) writes to that folder itself.
 - MCP servers are not sandboxed: they are what you or your company configured for Copilot
   (including your plugins' and, in a repository you trust, the repository's own), and run as they
-  do there. A worker can use any MCP server Copilot offers it. A worktree of a repository you
-  trust in Copilot is added to Copilot's trusted folders.
+  do there. A worker can use any MCP server Copilot offers it, and the write tools of any but
+  GitHub's (a bot that posts to Slack as you, a mail server) act as you without asking you
+  first, Ask first or not. Add only servers whose writes you'd let a worker make. A worktree of
+  a repository you trust in Copilot is added to Copilot's trusted folders.
 - Workers that do not read Slack can search Copilot's record of your past sessions, as your own
   sessions can. The Router, the Slack session and workers that read Slack are not recorded
   there (from 0.1.13; earlier versions recorded them), so Slack messages do not reach workers
