@@ -133,7 +133,8 @@ async def test_workers_a_relation_joins_are_one_team_a_shared_pr_alone_never(har
     for task in (solo, also):
         harness.store.set(f"prs:{task}", json.dumps(["https://github.com/acme/api/pull/482"]))
     assert runtime.peers.of(scout) == [] and runtime.peers.of(writer) == []
-    teams = runtime.snapshot()["teams"]
+    # The Router's teams (teams.py, as before; the owner's are Teams lite's).
+    teams = runtime.teams.view()
     assert [team["members"] for team in teams] == [[scout, writer]]
     assert teams[0]["cue"] == {"parts": None, "waiting": 1}
     views = {s["id"]: s for s in runtime.snapshot()["sessions"]}
@@ -156,7 +157,7 @@ async def test_a_requests_parts_are_one_fan_ready_only_when_every_part_landed(ha
     [group] = runtime.relations.graph().groups
     assert (group["kind"], group["tasks"], group["total"]) == ("parts", [a, b, c], 3)
     assert (group["landed"], group["state"]) == (0, "pending")
-    assert runtime.snapshot()["teams"][0]["cue"] == {"parts": [0, 3], "waiting": 0}
+    assert runtime.teams.view()[0]["cue"] == {"parts": [0, 3], "waiting": 0}
     await done(runtime, api)
     await done(runtime, ui)
     [group] = runtime.relations.graph().groups
@@ -173,7 +174,7 @@ async def test_a_requests_parts_are_one_fan_ready_only_when_every_part_landed(ha
     harness.store.execute("UPDATE tasks SET status='review' WHERE id=?", (d,))
     [group] = runtime.relations.graph().groups
     assert (group["landed"], group["state"]) == (3, "resolved") and group["landed_at"]
-    assert runtime.snapshot()["teams"][0]["cue"]["parts"] is None, "landed: nothing to say"
+    assert runtime.teams.view()[0]["cue"]["parts"] is None, "landed: nothing to say"
 
 
 def task(task_id, created="2026-11-21T10:00:00+00:00", status="running"):
@@ -282,7 +283,7 @@ async def test_relations_cost_a_snapshot_a_few_queries_whatever_the_teams(harnes
         snapshot = runtime.snapshot()
     finally:
         harness.store.db.set_trace_callback(None)
-    assert len(snapshot["teams"]) == 10
+    assert snapshot["sessions"] and len(runtime.teams.view()) == 10
     read = [s for s in statements if "task_deps" in s and "JOIN" not in s]
     assert len(read) <= 2, "read once (again only after a change), not per worker or team"
     runtime.relations.memo = None
@@ -349,7 +350,7 @@ async def test_a_task_that_waits_on_another_of_its_request_is_a_chain_not_a_part
     note, write = await spawn(runtime, router, "Release Note", after=[build], works_with=[build])
     assert json.loads(harness.store.get(f"parts:{write}") or "[]") == []
     assert [g for g in runtime.relations.graph().groups if g["kind"] == "parts"] == []
-    [team] = runtime.snapshot()["teams"]
+    [team] = runtime.teams.view()
     assert team["cue"] == {"parts": None, "waiting": 1}
     rows = {row["id"]: row for row in runtime.teams.thread_view(team["id"])["tasks"]}
     assert (rows[write]["relation"]["kind"], rows[write]["relation"]["state"]) == (
