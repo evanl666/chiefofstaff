@@ -1,5 +1,5 @@
 """Chief of Staff's own sessions on another coding agent (agent-roles.md): the Router and the
-Watchdog where Settings → Coding agents puts them, with nothing but their own tools; a switch
+Watchdog where Settings → Agents & models puts them, with nothing but their own tools; a switch
 that hands the Router what it knew; Copilot while that agent can't run them, said in one line,
 and back by themselves once it can; Watch for you and Slack kept on Copilot. Codex and Claude
 are the stand-in CLIs (tests/fake_codex.py, fake_claude.py) on the PATH, under the real
@@ -55,7 +55,7 @@ async def started(tmp_path):
 
 
 async def saved(runtime, part: dict) -> list[str]:
-    """The Coding agents group saved, as the page's Save does."""
+    """The Agents & models group saved, as the page's Save does."""
     before = agents.configured(runtime.store)
     plan = agents.planned(runtime.store, part)
     runtime.check_agents(plan, runtime.store.settings())
@@ -144,7 +144,7 @@ async def test_settings_lists_the_roles_an_agent_can_run_and_why_one_is_on_copil
         router = next(r for r in looked["roles"] if r["role"] == "router")
         assert router["chosen"] == "codex"
         assert router["line"] == (
-            "On Copilot for now: Codex is not signed in: sign in from Settings → Coding agents."
+            "On Copilot for now: Codex is not signed in: sign in from Settings → Agents & models."
         )
     finally:
         await runtime.stop()
@@ -224,6 +224,35 @@ async def test_the_router_runs_on_codex_with_nothing_but_its_tools(tmp_path, cod
         await runtime.stop()
 
 
+async def test_the_router_on_codex_takes_its_agents_new_model_and_effort_unless_its_own(
+    tmp_path, codex_log
+):
+    """Settings v2 (§9.1, finding 15): a Router placed on Codex kept the model and effort it
+    was opened with when Codex's changed in Settings; it takes them now, at rest, as Codex's
+    workers do. An effort chosen in its own chat stays."""
+    harness, runtime = await started(tmp_path)
+    router = harness.router_id
+    try:
+        await saved(runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"}})
+        assert runtime.agent(router) == "codex" and runtime.states.handle(router)
+        await saved(runtime, {"codex": {"effort": "high"}})
+        assert runtime.states.handle(router) is None, "opened again with the new effort"
+        options = runtime.role_options(harness.store.session(router))
+        assert options["reasoning_effort"] == "high"
+        await runtime.session_for(router)
+        assert runtime.states.handle(router)
+        await saved(runtime, {"codex": {"model": "gpt-mini"}})
+        assert runtime.states.handle(router) is None, "opened again with the new model"
+        assert runtime.role_options(harness.store.session(router))["model"] == "gpt-mini"
+        await runtime.session_for(router)
+        harness.store.set(f"agentmodel:{router}", json.dumps({"model": "", "effort": "low"}))
+        await saved(runtime, {"codex": {"effort": "medium"}})
+        assert runtime.states.handle(router), "its own effort stays: not opened again"
+        assert runtime.role_options(harness.store.session(router))["reasoning_effort"] == "low"
+    finally:
+        await runtime.stop()
+
+
 async def test_the_router_goes_back_to_copilot_with_what_it_knew_on_codex(tmp_path, codex_log):
     harness, runtime = await started(tmp_path)
     router = harness.router_id
@@ -280,7 +309,7 @@ async def test_a_signed_out_codex_leaves_the_router_on_copilot_until_it_is_back(
         assert runtime.agent(router) == "copilot"
         assert notices(harness, router) == [
             "The Router runs on Copilot for now: Codex is not signed in: sign in from Settings → "
-            "Coding agents."
+            "Agents & models."
         ]
         await runtime.owner_send(router, "Hello")
         await settle(runtime)
@@ -780,5 +809,5 @@ def test_if_unavailable_is_copilot_unless_ask_me_is_chosen(tmp_path):
     agents.save(store, plan)
     plan = agents.planned(store, {"role_unavailable": {"watchdog": "copilot"}})
     assert "role_unavailable" not in plan
-    with pytest.raises(ValueError, match="If unavailable"):
+    with pytest.raises(ValueError, match="If it can't run there"):
         agents.planned(store, {"role_unavailable": {"watchdog": "later"}})

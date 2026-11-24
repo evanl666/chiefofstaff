@@ -1,5 +1,5 @@
 """Other coding agents as the owner sees and sets them (more-agents.md 5.9-5.11, section 8): the
-Coding agents tab in Settings and what it saves, the Router's choice of an agent,
+Agents & models page in Settings and what it saves, the Router's choice of an agent,
 workers on one in the page, and an agent turned off. Codex is the stand-in CLI
 (tests/fake_codex.py) on the PATH, under the real supervisor."""
 
@@ -108,7 +108,7 @@ def stored(data) -> dict:
     return json.loads(row[0]) if row else {}
 
 
-# Settings' Coding agents tab
+# Settings' Agents & models page
 
 
 def test_agents_are_looked_for_only_once_the_group_is_opened(web, codex_on_path):
@@ -137,7 +137,7 @@ def test_agents_are_looked_for_only_once_the_group_is_opened(web, codex_on_path)
     [
         (
             {"FAKE_CODEX_SIGNED_OUT": "1"},
-            "Codex is not signed in: sign in from Settings → Coding agents.",
+            "Codex is not signed in: sign in from Settings → Agents & models.",
         ),
         ({"FAKE_CODEX_VERSION": "0.167.1"}, "Codex 0.167.1 is older than the versions tested"),
         (
@@ -171,7 +171,7 @@ def test_on_windows_codex_is_found_but_not_offered_and_never_run(web, codex_on_p
     refused = save(web, {"codex": {"enabled": True}})
     assert refused.status_code == 400
     assert refused.json()["detail"] == (
-        "Codex, Available for workers: Codex workers need macOS or Linux for now."
+        "Codex, Use for workers: Codex workers need macOS or Linux for now."
     )
 
 
@@ -216,21 +216,91 @@ def test_saving_the_group_with_nothing_turned_on_stores_nothing(web, codex_on_pa
         ({"codex": {"enabled": True, "limit": 1.5}}, "Limit per worker: a whole number"),
         ({"codex": {"enabled": True, "limit": True}}, "Limit per worker: a whole number"),
         ({"codex": {"enabled": True, "limit": 10**12 + 1}}, "Limit per worker: at most"),
-        ({"codex": {"enabled": "yes"}}, "Codex, Available for workers: on or off."),
+        ({"codex": {"enabled": "yes"}}, "Codex, Use for workers: on or off."),
         ({"codex": {"enabled": True, "model": 5}}, "Model: a model's name"),
-        ({"codex": {"enabled": True, "effort": "high"}}, "Coding agents: unknown setting"),
-        ({"gemini": {"enabled": True}}, "Coding agents: Chief of Staff does not run 'gemini'."),
+        ({"codex": {"enabled": True, "effort": "loud"}}, "Effort: none, low, medium, high,"),
+        ({"codex": {"enabled": True, "effort": 3}}, "Effort: none, low, medium, high,"),
+        ({"codex": {"enabled": True, "speed": "high"}}, "Agents & models: unknown setting"),
+        ({"gemini": {"enabled": True}}, "Agents & models: Chief of Staff does not run 'gemini'."),
         (
             {"new_workers": "codex"},
-            "New workers start on: Copilot, Last used, or an agent turned on below.",
+            "New workers run on: Copilot, Last used, or an agent turned on below.",
         ),
-        ([], "Coding agents: expected each agent's settings."),
+        ([], "Agents & models: expected each agent's settings."),
     ],
 )
 def test_the_group_is_checked_field_by_field(web, codex_on_path, part, detail):
     refused = web.post("/api/settings", json={"agents": part})
     assert refused.status_code == 400 and refused.json()["detail"].startswith(detail)
     assert stored(web.data) == {}
+
+
+def test_an_agents_effort_is_saved_kept_and_shown_in_its_row(web, codex_on_path):
+    """Settings v2 (§9.1): an agent's effort, which its workers and the roles on it already
+    take, can be set; a save that does not name it keeps it."""
+    assert save(web, {"codex": {"enabled": True, "effort": "high"}}).status_code == 200
+    assert stored(web.data)["codex"] == {"enabled": True, "effort": "high"}
+    assert save(web, {"codex": {"limit": 9000}}).status_code == 200
+    assert stored(web.data)["codex"] == {"enabled": True, "effort": "high", "limit": 9000}
+    (codex,) = web.get("/api/agents").json()["agents"]
+    assert codex["effort"] == "high"
+    assert save(web, {"codex": {"effort": ""}}).status_code == 200
+    assert stored(web.data)["codex"]["effort"] == ""
+    (codex,) = web.get("/api/agents").json()["agents"]
+    assert codex["effort"] == ""
+
+
+def test_the_look_never_starts_an_agent_or_lists_its_models_by_starting_it(
+    web, codex_on_path, monkeypatch
+):
+    """Settings v2 (§3.6): opening Agents & models looks (a short process of its own); it
+    never starts an agent's backend, even with the agent on and its models not known yet."""
+    assert save(web, {"codex": {"enabled": True}}).status_code == 200
+    runtime = web.app.state.runtime
+    runtime.agent_models_cache.clear()
+    started = []
+
+    async def connect_agent(name, *args, **kwargs):
+        started.append(name)
+        raise AssertionError("an agent's backend started for Settings")
+
+    monkeypatch.setattr(runtime, "connect_agent", connect_agent)
+    (codex,) = web.get("/api/agents").json()["agents"]
+    assert [model["id"] for model in codex["models"]] == ["gpt-test", "gpt-mini"]
+    assert all("efforts" in model for model in codex["models"]), "its efforts come with it"
+    assert started == []
+
+
+@pytest.mark.parametrize(
+    ("kept", "line"),
+    [
+        (
+            {"status": "limited"},
+            "Codex is refusing requests for a rate limit; it didn't say for how long",
+        ),
+        (
+            {"status": "rejected", "window": "seven_day"},
+            "Codex's weekly limit is used up; it didn't say when it resets",
+        ),
+    ],
+)
+def test_a_limit_the_meter_cannot_show_is_said_beside_known_percentages(
+    web, codex_on_path, kept, line
+):
+    """Settings v2 (§3.3, finding 16): a rate limit, or a limit used up with no reset known,
+    reached Settings only when no percentage was known: beside Codex's it was dropped."""
+    web.app.state.runtime.store.set("agentlimit:codex", json.dumps(kept))
+    (codex,) = web.get("/api/agents").json()["agents"]
+    assert codex["usage"], "Codex says how much of its plan is used"
+    assert codex["limit_line"] == line
+
+
+def test_a_close_limit_is_left_to_the_meter_beside_known_percentages(web, codex_on_path):
+    web.app.state.runtime.store.set(
+        "agentlimit:codex", json.dumps({"status": "allowed_warning", "window": "five_hour"})
+    )
+    (codex,) = web.get("/api/agents").json()["agents"]
+    assert codex["usage"] and "limit_line" not in codex
 
 
 def test_a_model_codex_does_not_offer_is_refused_once_its_models_are_known(web, codex_on_path):
@@ -254,7 +324,7 @@ def test_codex_is_not_turned_on_while_workers_are_sandboxed(web, codex_on_path):
     refused = save(web, {"codex": {"enabled": True}})
     assert refused.status_code == 400
     assert refused.json()["detail"] == (
-        "Codex, Available for workers: Codex can't run while workers are sandboxed: its sandbox "
+        "Codex, Use for workers: Codex can't run while workers are sandboxed: its sandbox "
         "has not passed Chief of Staff's checks yet."
     )
     assert codex["found"]
@@ -266,7 +336,7 @@ def test_codex_folder_stays_out_of_what_the_sandbox_may_write(web, codex_on_path
     refused = save(web, {"codex": {"enabled": True}})
     assert refused.status_code == 400
     assert refused.json()["detail"] == (
-        f"Codex, Available for workers: first take {folder} out of Also writable in the sandbox: "
+        f"Codex, Use for workers: first take {folder} out of Also writable in the sandbox: "
         "it holds Codex's settings and hooks."
     )
     assert web.post("/api/settings", json={"sandbox_writable": []}).status_code == 200
@@ -312,7 +382,7 @@ async def started(tmp_path, settings=None):
 
 
 async def saved(runtime, part: dict) -> list[str]:
-    """The Coding agents group saved, as the page's Save does."""
+    """The Agents & models group saved, as the page's Save does."""
     before = agents.configured(runtime.store)
     plan = agents.planned(runtime.store, part)
     runtime.check_agents(plan, runtime.store.settings())
@@ -448,7 +518,7 @@ async def test_a_named_agent_that_cannot_run_is_an_error_not_copilot(
         assert result.result_type == "failure"
         assert result.error.startswith(
             "Not started: Codex could not start: Codex is not signed in: sign in from Settings → "
-            "Coding agents. The owner sees this on a card in this chat"
+            "Agents & models. The owner sees this on a card in this chat"
         )
         assert len(harness.store.open_sessions()) == before, "no worker made"
         slack = await spawn_on(
@@ -584,12 +654,12 @@ async def test_turning_codex_off_drains_it_to_as_without_agents(tmp_path, codex_
         stopped = await saved(runtime, {"codex": {"enabled": False}})
         await settle(runtime)
 
-        assert stopped == ["Codex is turned off in Settings → Coding agents."]
+        assert stopped == ["Codex is turned off in Settings → Agents & models."]
         assert runtime.admission_generation > generation, "nothing admitted before begins"
         assert runtime.connection("codex") == (None, 1) and not backend.alive()
         await until(lambda: not any(alive(pid) for pid in processes), 10)
         row = harness.store.session(worker)
-        assert runtime.agent_block(row) == "Codex is turned off in Settings → Coding agents."
+        assert runtime.agent_block(row) == "Codex is turned off in Settings → Agents & models."
         with pytest.raises(RuntimeError, match="turned off"):
             await runtime.session_for(worker)
         off = router_options(harness, runtime)
@@ -884,7 +954,21 @@ def test_a_save_that_stops_workers_says_how_many_and_why():
         "Stopped 1 worker because Codex is off. Turn Codex on again, then press Go on under "
         "Needs you."
     )
-    assert stopped_text(["Codex is turned off in Settings → Coding agents."] * 2) == (
+    # A release that says Agents & models: a stop in flight from the one before is said alike.
+    assert stopped_text(["Codex is turned off in Settings → Agents & models."]) == (
+        "Stopped 1 worker because Codex is off. Turn Codex on again, then press Go on under "
+        "Needs you."
+    )
+    assert stopped_text(
+        [
+            "Codex is turned off in Settings → Coding agents.",
+            "Codex is turned off in Settings → Agents & models.",
+        ]
+    ) == (
+        "Stopped 2 workers because Codex is off. Turn Codex on again, then press Go on under "
+        "Needs you."
+    )
+    assert stopped_text(["Codex is turned off in Settings → Agents & models."] * 2) == (
         "Stopped 2 workers because Codex is off. Turn Codex on again, then press Go on under "
         "Needs you."
     )
@@ -960,7 +1044,7 @@ async def test_an_agent_never_turned_on_is_said_to_be_off(tmp_path, codex_on_pat
             )
         )
         assert refused.error.startswith(
-            "Not started: Codex is turned off in Settings → Coding agents. The owner sees this"
+            "Not started: Codex is turned off in Settings → Agents & models. The owner sees this"
         )
     finally:
         await runtime.stop()
@@ -979,7 +1063,7 @@ async def test_the_router_gives_no_task_to_a_worker_whose_agent_is_off(tmp_path,
                 text="Also count the rows.", **how,
             )  # fmt: skip
             assert refused.error.startswith(
-                "Not sent: Codex is turned off in Settings → Coding agents."
+                "Not sent: Codex is turned off in Settings → Agents & models."
             ), refused
         assert [t["id"] for t in runtime.tasks.for_session(worker)] == [task_id]
         assert runtime.tasks.get(task_id)["status"] == "review", "not reopened"
@@ -1000,6 +1084,26 @@ async def test_codex_workers_take_a_new_model_from_the_group_with_their_next_tur
         assert runtime.states.handle(worker) is None, "reconnects with the new model"
         assert runtime.states.handle(own), "its own model stays"
         assert runtime.agent_options(harness.store.session(worker))["model"] == "gpt-mini"
+    finally:
+        await runtime.stop()
+
+
+async def test_codex_workers_take_a_new_effort_from_the_group_unless_their_own(
+    tmp_path, codex_on_path
+):
+    """Settings v2 (§9.1, finding 15): a changed agent effort reached no open worker (only a
+    changed model did); a worker with an effort of its own keeps it."""
+    harness, runtime, worker, _ = await codex_worker(tmp_path)
+    try:
+        own = (await spawn_on(harness, runtime, title="Own", instructions="Report done: Ok.",
+                              effort="medium"))["session_id"]  # fmt: skip
+        await until(lambda: harness.store.session(own)["status"] == "done", 30)
+        assert runtime.states.handle(worker) and runtime.states.handle(own)
+        await saved(runtime, {"codex": {"enabled": True, "effort": "high"}})
+        assert runtime.states.handle(worker) is None, "reconnects with the new effort"
+        assert runtime.states.handle(own), "its own effort stays"
+        assert runtime.agent_options(harness.store.session(worker))["reasoning_effort"] == "high"
+        assert runtime.agent_options(harness.store.session(own))["reasoning_effort"] == "medium"
     finally:
         await runtime.stop()
 

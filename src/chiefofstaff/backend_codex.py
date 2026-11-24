@@ -97,7 +97,7 @@ OLDEST_CODEX = "0.167.2"
 LOOK_SECONDS = 30
 # Where Codex was never set up (no CODEX_HOME, ~/.codex), nothing of it runs: any run makes that
 # folder and its databases (0.167.2).
-NOT_SET_UP = "Not set up: sign in to Codex from Settings → Coding agents."
+NOT_SET_UP = "Not set up: sign in to Codex from Settings → Agents & models."
 # What a look's own process turns off: the plugin sync each app-server runs as it starts,
 # which rewrites the records in Codex's plugin cache (0.167.2). Workers keep it.
 LOOK_SETTINGS = [
@@ -983,7 +983,9 @@ class CodexBackend:
                 raise RuntimeError(why)
             await self.check_requirements()
             if self.needs_sign_in and not (await self.get_auth_status()).isAuthenticated:
-                raise RuntimeError("Codex is not signed in: sign in from Settings → Coding agents.")
+                raise RuntimeError(
+                    "Codex is not signed in: sign in from Settings → Agents & models."
+                )
         except BaseException:
             await self.stop()
             raise
@@ -3672,7 +3674,7 @@ async def glance(command: str = "codex", folder: Path | None = None) -> dict:
     account = next((kind for phrase, kind in LOGIN_KINDS if phrase in said), "") if signed else ""
     del said
     if not signed:
-        raise RuntimeError("Codex is not signed in: sign in from Settings → Coding agents.")
+        raise RuntimeError("Codex is not signed in: sign in from Settings → Agents & models.")
     return {"version": version, **sign_in_facts(account)}
 
 

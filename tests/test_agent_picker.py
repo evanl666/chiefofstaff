@@ -120,7 +120,7 @@ async def test_a_codex_never_set_up_is_not_offered_and_nothing_of_it_runs_or_is_
         await runtime.offer_agents()
         assert "agent_offers" not in runtime.snapshot()
         (entry,) = (await runtime.look_for_agents())["agents"]
-        assert entry["problem"] == "Not set up: sign in to Codex from Settings → Coding agents."
+        assert entry["problem"] == "Not set up: sign in to Codex from Settings → Agents & models."
         with pytest.raises(RuntimeError, match=r"^Not set up: sign in to Codex"):
             await CodexAgent("codex").start()
         assert not runs.exists(), "nothing of Codex ran"
@@ -131,7 +131,7 @@ async def test_a_codex_never_set_up_is_not_offered_and_nothing_of_it_runs_or_is_
 
 async def test_settings_look_runs_codex_without_its_plugin_sync(tmp_path, codex_installed):
     # Each app-server syncs plugins as it starts, rewriting Codex's plugin cache (0.167.2): the
-    # look Settings → Coding agents takes (its models, limits) turns that off for its own
+    # look Settings → Agents & models takes (its models, limits) turns that off for its own
     # process; workers keep it. Startup's first-run card runs no app-server at all.
     _, runs = codex_installed
     _, runtime = await started(tmp_path)
@@ -229,7 +229,7 @@ async def test_signed_in_again_settings_says_ready_and_new_workers_start_there(
     _, runtime = await started(tmp_path)
     try:
         runtime.agent_failed["codex"] = (
-            "Codex is not signed in: sign in from Settings → Coding agents."
+            "Codex is not signed in: sign in from Settings → Agents & models."
         )
         assert runtime.agent_status("codex")["said"] == "Sign-in needed"
         assert (await runtime.look_for_agent("codex"))["said"] == "Ready", "looked at again"
@@ -837,7 +837,7 @@ async def test_an_agent_chosen_in_the_composer_is_kept_or_refused_never_dropped(
         assert runtime.agent(made["session_id"]) == "codex"
         await saved(runtime, {"codex": {"enabled": False}})
         before = len(harness.store.messages(harness.router_id))
-        with pytest.raises(ValueError, match="Codex is turned off in Settings → Coding agents"):
+        with pytest.raises(ValueError, match="Codex is turned off in Settings → Agents & models"):
             await runtime.owner_send(harness.router_id, "And the lexer", agent="codex")
         assert len(harness.store.messages(harness.router_id)) == before, "nothing sent"
     finally:

@@ -27,10 +27,10 @@ CONFIG = "agents"
 NAMES = {"codex": "Codex", "claude": "Claude"}
 COPILOT = "copilot"
 # In the configuration, beside each agent's settings: the agent new workers use, and whether
-# the Router chooses one for each new worker (Settings → Coding agents, off unless chosen).
+# the Router chooses one for each new worker (Settings → Agents & models, off unless chosen).
 NEW_WORKERS = "new_workers"
 ROUTER_CHOOSES = "router_chooses"
-# "New workers start on: Last used": the agent the owner last chose for a worker (kv LAST_USED;
+# "New workers run on: Last used": the agent the owner last chose for a worker (kv LAST_USED;
 # Copilot until they chose one), never a default unless picked.
 LAST = "last"
 LAST_USED = "agentlast"
@@ -108,7 +108,7 @@ def new_workers(store: Store) -> str:
 
 
 def new_workers_choice(store: Store) -> str:
-    """ "New workers start on" as chosen: Copilot, an agent, or Last used."""
+    """ "New workers run on" as chosen: Copilot, an agent, or Last used."""
     chosen = stored(store).get(NEW_WORKERS)
     return chosen if isinstance(chosen, str) and chosen in (LAST, *turned_on(store)) else COPILOT
 
@@ -197,11 +197,16 @@ def switched_to_ask_first(name: str) -> str:
     return f"{display(name)} takes up Ask first only in a new process."
 
 
+# An agent's effort as Settings saves it: one of Copilot's thinking efforts (models.Effort), or
+# "" for its model's own default.
+EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+
+
 def planned(store: Store, change: Any) -> dict[str, Any]:
-    """The Coding agents group of a Settings save, checked as the page names its fields: the
+    """The Agents & models group of a Settings save, checked as the page names its fields: the
     configuration it leaves (each agent's entry, and who new workers use)."""
     if not isinstance(change, dict):
-        raise ValueError("Coding agents: expected each agent's settings.")
+        raise ValueError("Agents & models: expected each agent's settings.")
     plan: dict[str, Any] = {**stored(store)}
     for name, entry in change.items():
         if name in {NEW_WORKERS, ROLE_CHOICES, ROLE_UNAVAILABLE}:
@@ -212,19 +217,27 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
             plan[ROUTER_CHOOSES] = entry
             continue
         if name not in NAMES or not isinstance(entry, dict):
-            raise ValueError(f"Coding agents: Chief of Staff does not run {name!r}.")
-        if unknown := set(entry) - {"enabled", "model", "limit"}:
-            raise ValueError(f"Coding agents: unknown setting {min(unknown)!r}.")
+            raise ValueError(f"Agents & models: Chief of Staff does not run {name!r}.")
+        if unknown := set(entry) - {"enabled", "model", "effort", "limit"}:
+            raise ValueError(f"Agents & models: unknown setting {min(unknown)!r}.")
         fresh = {**configured(store).get(name, {})}
         if "enabled" in entry:
             if not isinstance(entry["enabled"], bool):
-                raise ValueError(f"{display(name)}, Available for workers: on or off.")
+                raise ValueError(f"{display(name)}, Use for workers: on or off.")
             fresh["enabled"] = entry["enabled"]
         if "model" in entry:
             model = entry["model"].strip() if isinstance(entry["model"], str) else None
             if model is None or len(model) > 200:
                 raise ValueError("Model: a model's name, or empty for the agent's default.")
             fresh["model"] = model
+        if "effort" in entry:
+            # Its workers' and the roles' on it (Runtime.agent_options, role_options).
+            if entry["effort"] not in ("", *EFFORTS):
+                raise ValueError(
+                    "Effort: none, low, medium, high, xhigh or max, or empty for the model's "
+                    "default."
+                )
+            fresh["effort"] = entry["effort"]
         if "limit" in entry:
             limit = 0 if entry["limit"] in (None, "") else entry["limit"]
             if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
@@ -239,9 +252,7 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
     chosen = change.get(NEW_WORKERS, stored(store).get(NEW_WORKERS, COPILOT))
     if chosen not in (COPILOT, LAST, *on):
         if NEW_WORKERS in change:
-            raise ValueError(
-                "New workers start on: Copilot, Last used, or an agent turned on below."
-            )
+            raise ValueError("New workers run on: Copilot, Last used, or an agent turned on below.")
         chosen = COPILOT  # The agent they used is off now.
     plan[NEW_WORKERS] = chosen
     # Each role on the agent chosen for it: one turned off puts it back on Copilot.
@@ -250,10 +261,10 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
     if ROLE_CHOICES in change:
         asked = change[ROLE_CHOICES]
         if not isinstance(asked, dict):
-            raise ValueError("Coding agents: expected the agent of each role.")
+            raise ValueError("Agents & models: expected the agent of each role.")
         for role, agent in asked.items():
             if role not in ROLES:
-                raise ValueError(f"Coding agents: no role {role!r}.")
+                raise ValueError(f"Agents & models: no role {role!r}.")
             if agent not in (COPILOT, *on):
                 raise ValueError(f"{ROLES[role]} runs on: Copilot, or an agent turned on below.")
             if why := role_refusal(role, agent):
@@ -269,10 +280,12 @@ def planned(store: Store, change: Any) -> dict[str, Any]:
     if ROLE_UNAVAILABLE in change:
         asked = change[ROLE_UNAVAILABLE]
         if not isinstance(asked, dict):
-            raise ValueError("Coding agents: expected what each role does if its agent can't run.")
+            raise ValueError(
+                "Agents & models: expected what each role does if its agent can't run."
+            )
         for role, how in asked.items():
             if role not in ROLES or how not in (COPILOT, ASK):
-                raise ValueError("If unavailable: use Copilot and tell me, or ask me.")
+                raise ValueError("If it can't run there: use Copilot and tell me, or ask me.")
             if how == ASK:
                 waits[role] = ASK
             else:

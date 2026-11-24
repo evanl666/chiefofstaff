@@ -115,9 +115,9 @@ SDK_OLDEST = (0, 2, 182)
 SDK_BEFORE = (0, 3, 0)
 EXTRA = "Needs Chief of Staff's Claude extra: `uv tool install 'chiefofstaff[claude]'`"
 NOT_FOUND = "Not found on this computer: install Claude Code."
-NOT_SIGNED_IN = "Not signed in to Claude Code: sign in from Settings → Coding agents."
+NOT_SIGNED_IN = "Not signed in to Claude Code: sign in from Settings → Agents & models."
 # Claude never set up for the owner (no state file): `claude auth status` would make its files.
-NOT_SET_UP = "Not set up: sign in to Claude Code from Settings → Coding agents."
+NOT_SET_UP = "Not set up: sign in to Claude Code from Settings → Agents & models."
 # How long Settings waits for `claude --version` and `claude auth status`.
 LOOK_SECONDS = 30.0
 # How long a hook of Chief of Staff's may take before Claude blocks what it was asked about.
