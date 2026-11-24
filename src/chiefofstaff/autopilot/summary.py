@@ -29,7 +29,8 @@ SHOWN = 3
 
 
 def window(started: str | None, ended: str | None) -> str:
-    """2:10 to 6:00 PM, as "2:10 PM \u2013 6:00 PM" (with the day when they differ)."""
+    """2:10 to 6:00 PM, as "2:10 \u2013 6:00 PM" (one time when they are the same minute, the day
+    with each when they differ)."""
 
     def at(value: str | None) -> datetime | None:
         try:
@@ -46,7 +47,12 @@ def window(started: str | None, ended: str | None) -> str:
         return f"{moment.hour % 12 or 12}:{moment.minute:02d} {half}"
 
     if start.date() == end.date():
-        return f"{shown(start)} \u2013 {shown(end)}"
+        first, last = shown(start), shown(end)
+        if first == last:
+            return first
+        if first[-2:] == last[-2:]:
+            first = first[:-3]
+        return f"{first} \u2013 {last}"
     return f"{start.strftime('%a')} {shown(start)} \u2013 {end.strftime('%a')} {shown(end)}"
 
 
@@ -90,8 +96,12 @@ def card(autopilot: Autopilot, run: dict) -> tuple[str, dict[str, Any]]:
             if name == "Waiting for you" and not still_waits(autopilot, entry):
                 continue
             undone = bool(book.entries(of=entry["id"], kinds=("undone",), limit=1))
+            # Under *Waiting for you*, what waits and why ("Set aside" is the group's name).
+            text = entry["title"]
+            if name == "Waiting for you":
+                text = text.removeprefix("Set aside ")
             rows.append({
-                "entry": entry["id"], "text": entry["title"], "kind": entry["kind"],
+                "entry": entry["id"], "text": text, "kind": entry["kind"],
                 "action": "" if undone else ACTION.get(entry["kind"], "Open"),
                 "then": "; ".join(later.get(entry["id"], [])[-2:]),
                 "undone": undone, "task_id": entry["task_id"], "subject": entry["subject"],
@@ -118,10 +128,11 @@ def card(autopilot: Autopilot, run: dict) -> tuple[str, dict[str, Any]]:
         end = datetime.fromisoformat(ended).astimezone() if ended else moment
         text = f"Autopilot ended at {grammar.clock(end, moment, 'en')}: nothing came up."
     else:
-        text = (
-            f"Autopilot did {counts['done']} thing{'s' if counts['done'] != 1 else ''} and left "
-            f"{counts['left']} for you. {spent:g} of {cap:g} credits."
-        )
+        did = f"did {counts['done']} thing{'s' if counts['done'] != 1 else ''}"
+        left = f"left {counts['left']} for you"
+        shares = ((did, counts["done"]), (left, counts["left"]))
+        what = " and ".join(part for part, count in shares if count)
+        text = f"Autopilot {what}. {spent:g} of {cap:g} credits."
     lines = [f"While you were away · {when}", text]
     if counts["done"] or counts["left"]:
         lines.append(settings_line)

@@ -1,5 +1,6 @@
 // Home: the conversation with the Router, and beside it what needs the owner and every task.
 
+import { autopilot, autopilotControl, autopilotMeta, autopilotRun, deciding as autopilotDeciding, emptyWords, openAutopilotLink, setAsideLine } from "./autopilot.js";
 import { $, api, checkTip, el, freshButton, keepingFocus, moreMenu, once, reconcile, submits, toast, watchPanel } from "./dom.js";
 import { clock, markdown, shortPath, slackText } from "./text.js";
 import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, ownerUpdates, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
@@ -17,7 +18,8 @@ import { avatar, blockedTeams, labelOf, showTeam, teamRows } from "./team.js";
 // worker's question whose task does not show it (cancelled, finished, or none); the Router's
 // notes that need the owner, until seen. A task waiting on a decision card shows as that card.
 export function needsYou() {
-  const pending = pendingDrafts();
+  // (Not a card Autopilot is deciding: drawn, if at all, once it set it aside.)
+  const pending = pendingDrafts().filter((draft) => !autopilotDeciding(draft.id));
   const found = board();
   const deciding = new Set(pending.filter((draft) => draft.kind === "decision").flatMap((draft) => draft.target.askers.map((asker) => asker.task_id)));
   const waiting = found.sections.needs.filter((task) => !(task.status === "waiting" && deciding.has(task.id)));
@@ -104,15 +106,23 @@ export function renderHomeHeader() {
   const until = focusUntil();
   const router = byId(routerId());
   $("#session-title").textContent = "Home";
-  $("#session-meta").textContent = until ? `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` : "";
+  // Autopilot's line while a run is on (autopilot.js), else Focus's.
+  const autopilotLine = autopilotMeta(needsCount());
+  if (autopilotLine) $("#session-meta").replaceChildren(autopilotLine);
+  else $("#session-meta").textContent = until ? `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` : "";
   $("#session-meta").title = "";
   const actions = $("#session-actions");
   // Rebuilt only when they change: an open Focus menu stays open as tasks move. (Stop is on
   // the "Thinking…" line, where the Router is seen working.)
+  // (Autopilot's part of it kept off the page's markup: unticked, the header is as it was.)
+  const run = autopilotRun();
+  const pilot = autopilot() ? (run ? `${run.run}:${run.until}` : "off") : "";
   const key = `home:${Boolean(until)}:${state.snapshot.runtime.state}:${Boolean(router)}`;
-  if (actions.dataset.key === key) return;
+  if (actions.dataset.key === key && (actions.pilot || "") === pilot) return;
   actions.dataset.key = key;
-  actions.replaceChildren(state.snapshot.runtime.state === "ready" ? focusControl() : "");
+  actions.pilot = pilot;
+  const ready = state.snapshot.runtime.state === "ready";
+  actions.replaceChildren(ready ? focusControl() : "", ready ? autopilotControl(() => { renderHeader(); renderStatusLine(); scheduleHome(); }) || "" : "");
 }
 // Focus: notifications wait, the Router handles what it can, one summary at the end.
 function focusControl() {
@@ -250,16 +260,19 @@ function renderPanel() {
   const needCount = needsCount();
   counted(needs, needCount);
   shownIf(needs.querySelector(".empty-hint"), !needCount);
+  // (Autopilot on: says so.)
+  const emptyText = [...needs.querySelector(":scope > .empty-hint").childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
+  if (emptyText && emptyText.textContent !== emptyWords()) emptyText.textContent = emptyWords();
   // A card per thing to do: a task's own row holds all it waits for (a result to accept, its
   // question), once.
   const embedded = new Set();
   const needItems = [
     ...items.updates.map(updateItem),
     ...okItem(items.ok),
-    ...items.drafts.map((draft) => draftItem(draft, tasks.phases, embedded)),
+    ...items.drafts.map((draft) => setAside(draftItem(draft, tasks.phases, embedded), draft.id)),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
-    ...items.tasks.map((task) => taskItem(task, tasks.phases.get(task.id))),
-    ...items.questions.map(questionItem),
+    ...items.tasks.map((task) => setAside(taskItem(task, tasks.phases.get(task.id)), task.id)),
+    ...items.questions.map((question) => setAside(questionItem(question), question.id)),
     ...items.teams.map(teamWaitItem),
   ];
   // Folded, it opens by itself when something new needs the owner.
@@ -382,6 +395,8 @@ function handledLine(needs) {
       entry.at ? el("time", { text: writtenAt(entry.at), title: `Handled ${clock(entry.created_at)}` }) : el("time", { text: ago(entry.created_at) }),
       // What it is about, where it is (a reply sent for the owner: in Slack).
       /^https:\/\//.test(entry.link || "") ? el("a", { class: "link quiet", href: entry.link, target: "_blank", rel: "noreferrer", text: "Open in Slack ↗" }) : null,
+      // An Autopilot run: its record.
+      /^#autopilot/.test(entry.link || "") ? el("button", { type: "button", class: "link quiet", text: "Open", onclick: () => openAutopilotLink(entry.link) }) : null,
       undo,
     );
   });
@@ -532,6 +547,17 @@ export async function focusQuestion(questionId) {
 }
 // A worker's question to the owner, kept here until answered: its task may have been cancelled
 // or finished meanwhile (the task card shows it otherwise).
+// What Autopilot set aside says why, under its card (autopilot.js).
+function setAside(item, ...ids) {
+  const line = setAsideLine(...ids);
+  if (!line) return item;
+  const build = () => {
+    const node = item.build();
+    node.append(setAsideLine(...ids));
+    return node;
+  };
+  return { ...item, key: `${item.key}:aside:${line.textContent}`, build };
+}
 function questionItem(question) {
   return {
     key: `question:${question.id}:${question.at}`,

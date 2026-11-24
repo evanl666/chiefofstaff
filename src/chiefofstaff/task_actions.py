@@ -4643,6 +4643,15 @@ class TaskActions:
         unknown = frozenset(item["url"] for item in monitoring if item.get("unknown"))
         return {
             **task,
+            # Accepted for the owner by Autopilot (only then: autopilot/results.py; not looked
+            # up where it was never used).
+            **(
+                {"accepted_by": "autopilot"}
+                if task["status"] == "done"
+                and self.runtime.autopilot.book.made
+                and self.store.get(f"autopilot:accepted:{task['id']}")
+                else {}
+            ),
             # Its state, apart: where its run is (queued, running, waiting, finished,
             # cancelled, failed), what the owner has to do about it now (attention, with why;
             # "" for nothing), and what Chief of Staff still follows up for it (monitoring).

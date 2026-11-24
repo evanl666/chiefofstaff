@@ -266,6 +266,8 @@ function taskMeta(task, phase = {}) {
     phase.inDraft && phase.marker === "review" ? "Sending what is drafted for it accepts this result: one decision for both" : "",
     phase.marker === "review" && phase.why ? phase.why : "",
     [`Task ${task.id}`, ended ? `finished ${since(task.ended_at || task.updated_at)}` : `started ${since(task.created_at)}`].join(" · "),
+    // Accepted for the owner by Autopilot, once its own run of the checks passed.
+    task.accepted_by === "autopilot" ? "Accepted by Autopilot" : "",
     task.worker && task.worker !== task.title ? `Worker: ${shorten(task.worker, 60)}` : "",
     earlier ? `Earlier names: ${shorten(earlier, 80)}` : "",
     // On another coding agent: which, and its tokens (its credits are Copilot's).

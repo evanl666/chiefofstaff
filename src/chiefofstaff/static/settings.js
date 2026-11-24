@@ -1,5 +1,6 @@
 // The settings and usage dialogs.
 
+import { autopilot, showRecord } from "./autopilot.js";
 import { $, api, el, submits, toast } from "./dom.js";
 import { codeHtml, lines, plural, since } from "./text.js";
 import { closedWorkers, followOthers, HOME, loadState, sessions, state } from "./state.js";
@@ -182,6 +183,8 @@ export function bindSettings() {
   $("#send-on").addEventListener("click", () => saveSend(true));
   // Prepared for you: its tab is there while its switch is on (before it is saved, to set it up).
   $("#settings-form").proactive.addEventListener("change", renderProactiveTab);
+  // Autopilot: its small group under its line, while the line is ticked.
+  $("#settings-form").autopilot.addEventListener("change", renderAutopilotGroup);
   $("#send-cancel").addEventListener("click", () => {
     renderSendLine();
     sendSwitch.focus();
@@ -440,6 +443,8 @@ export function fillSettings() {
   form.update_notice.checked = settings.update_notice !== false;
   form.proactive.checked = Boolean(settings.proactive);
   renderProactiveTab();
+  form.autopilot.checked = Boolean(settings.autopilot);
+  renderAutopilotGroup();
   // When none of them can say where it stands, its line says why.
   const why = settings.other_sessions ? state.othersWhy : "";
   if (why) form.other_sessions.parentElement.title = why;
@@ -950,6 +955,8 @@ export function settingsBody() {
     update_notice: form.update_notice.checked,
     proactive: form.proactive.checked,
     ...proactiveFields(),
+    autopilot: form.autopilot.checked,
+    ...autopilotFields(),
     watchdog_enabled: form.watchdog_enabled.checked,
     slack_enabled: form.slack_enabled.checked,
     slack_poll_seconds: number("slack_poll_seconds"),
@@ -1538,6 +1545,57 @@ function renderProactiveTab() {
     $("#settings-pane").insertBefore(fresh, document.querySelector('#settings-pane .tab[data-tab="you"]'));
   }
   form.step_hosts.value = (settings.step_hosts || []).join("\n");
+}
+// Autopilot's group (autopilot.md §8): its credits a day, where it acts, its record, and whether
+// workers ask first while it is on. Drawn only while its line is ticked.
+function renderAutopilotGroup() {
+  const form = $("#settings-form");
+  const line = $("#autopilot-line");
+  const group = $("#autopilot-group");
+  if (!form.autopilot.checked) {
+    group?.remove();
+    return;
+  }
+  if (group) return;
+  const settings = state.snapshot.settings;
+  const repos = settings.autopilot_repos || [];
+  const only = el("textarea", { name: "autopilot_repos", rows: 2, placeholder: "owner/name, one per line", "aria-label": "Only these repositories", hidden: !repos.length });
+  only.value = repos.join("\n");
+  const scope = el(
+    "select",
+    { name: "autopilot_scope", onchange: () => { only.hidden = scope.value !== "only"; if (!only.hidden) only.focus(); } },
+    el("option", { value: "all", text: "All your projects", selected: !repos.length }),
+    el("option", { value: "only", text: "Only these…", selected: Boolean(repos.length) }),
+  );
+  const record = autopilot()?.record
+    ? el("button", { type: "button", class: "link quiet autopilot-record-link", text: "Autopilot record", onclick: () => { $("#settings-dialog").close(); showRecord(); } })
+    : null;
+  const sandbox = state.snapshot.sandbox || {};
+  const fresh = el(
+    "div",
+    { id: "autopilot-group", class: "autopilot-group-settings" },
+    el(
+      "div",
+      { class: "row" },
+      el("label", { class: "short" }, el("span", { text: "Credits a day" }), el("input", { name: "autopilot_credits", type: "number", min: "0", max: "10000", step: "1", value: String(settings.autopilot_credits ?? 100) })),
+      el("label", { class: "acts-in" }, el("span", { text: "Acts in" }), scope),
+      record,
+    ),
+    only,
+    el("label", { class: "check", "data-tip": "Turns Autopilot continues get the Ask-first checks, whatever your setting for workers; your own turns don't" }, el("input", { name: "autopilot_ask_first", type: "checkbox", checked: settings.autopilot_ask_first !== false }), " While Autopilot is on, workers ask first"),
+    sandbox.supported === false ? el("small", { text: "Here it can't verify results offline: this computer has no sandbox for it. It answers and sets questions aside; results wait for you." }) : null,
+  );
+  line.after(fresh);
+}
+function autopilotFields() {
+  const form = $("#settings-form");
+  const settings = state.snapshot.settings;
+  if (!$("#autopilot-group")) return {};
+  return {
+    autopilot_credits: numberField(form.autopilot_credits, settings.autopilot_credits ?? 100),
+    autopilot_repos: form.autopilot_scope.value === "only" ? lines(form.autopilot_repos.value) : [],
+    autopilot_ask_first: form.autopilot_ask_first.checked,
+  };
 }
 const round = (value) => Math.round((value || 0) * 10) / 10;
 function proactiveFields() {

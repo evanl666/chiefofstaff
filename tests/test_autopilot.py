@@ -139,7 +139,7 @@ async def test_stop_withdraws_what_was_queued_and_ends_with_its_summary(harness)
     assert run["state"] == "ended" and run["ended_by"] == "you"
     summary = harness.store.messages(harness.router_id)[-1]
     assert summary["kind"] == "update" and summary["meta"]["autopilot_summary"]["run"] == run["id"]
-    said = "Autopilot did 1 thing and left 0 for you. 0 of 100 credits."
+    said = "Autopilot did 1 thing. 0 of 100 credits."
     assert summary["text"].splitlines()[1] == said
     assert summary["meta"]["autopilot_summary"]["groups"][0]["name"] == "Done"
     assert summary["meta"]["deferred"], "the Router hears it is off with its next message"

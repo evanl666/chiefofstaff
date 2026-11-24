@@ -7,6 +7,7 @@ import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, selec
 import { scheduleHome } from "./inbox.js";
 import { upsertTask } from "./tasks.js";
 import { isTeamView, scheduleTeam } from "./team.js";
+import { isRecordView } from "./autopilot.js";
 import { refreshUsageLink, renderConnections, renderLearning } from "./settings.js";
 import { heardSetup } from "./agentsetup.js";
 // Home: the Router's conversation, with what needs the owner and every task beside it.
@@ -136,7 +137,7 @@ export async function loadState(again = false) {
   // the one shown.
   if (othersOn() && (first || again)) await syncOthers();
   let known =
-    state.selected === HOME || current() || closedWorkers().some((item) => item.id === state.selected) || state.external.some((item) => item.id === state.selected) || isTeamView();
+    state.selected === HOME || current() || closedWorkers().some((item) => item.id === state.selected) || state.external.some((item) => item.id === state.selected) || isTeamView() || isRecordView();
   // One of them in neither list (closed for long, the group never unfolded): asked for by its
   // id before it is given up for Home.
   if (!known && othersOn()) known = otherItem(state.selected) || (await findOther(state.selected));
