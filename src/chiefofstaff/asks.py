@@ -437,14 +437,7 @@ class Asks:
             # Autopilot decides it first: not drawn meanwhile (autopilot/answers.py).
             self.runtime.background(autopilot.decide_card(row, draft, answer))
         else:
-            self.runtime.add_message(
-                session_id, "draft", text, {"draft_id": draft["id"], "label": LABELS[kind]}
-            )
-            self.bus.publish("draft", draft)
-            who = "Chief of Staff" if row["role"] != "worker" else self.runtime.display_title(row)
-            self.runtime.alert(
-                text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}"
-            )
+            self.draw(row, draft)
         self.requests[draft["id"]] = answer
         self.states[session_id].asking[draft["id"]] = text
         self.runtime.publish_session(self.store.session(session_id))
@@ -567,6 +560,19 @@ class Asks:
         return draft
 
     # Copilot callbacks (workers only, except the sign-in check)
+
+    def draw(self, row: dict, draft: dict):
+        """A card in its chat and under Needs you, with its notification (one Autopilot held
+        while it judged it, too, when it goes to the owner)."""
+        kind, text = draft["kind"], draft["text"]
+        self.runtime.add_message(
+            row["id"], "draft", text, {"draft_id": draft["id"], "label": LABELS[kind]}
+        )
+        self.bus.publish("draft", self.store.draft(draft["id"]) or draft)
+        who = "Chief of Staff" if row["role"] != "worker" else self.runtime.display_title(row)
+        self.runtime.alert(
+            text, session_id=row["id"], needs_action=True, title=f"{LABELS[kind]} · {who}"
+        )
 
     async def on_user_input(self, request: dict, context: dict) -> dict:
         session_id = self.runtime.row_id(context.get("sessionId") or context.get("session_id", ""))

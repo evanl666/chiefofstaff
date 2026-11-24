@@ -424,7 +424,7 @@ TOOL_SCHEMAS: dict[str, tuple[int, str]] = {
     "list_sessions": (387, "1a7cd32acbf4370d535391cf0fcc777f7cb70dc682395dc77ff675e1e994e939"),
     "message_session": (4223, "98175d95ebcf1b0ee490df9291af8e0f52dfab70e45a1b9c1a8e28bfda6a9ce7"),
     "notify_owner": (932, "226014f3937727081727ba9cc2e3f7159b4a863bbef8e7133aabfac71e9b4801"),
-    "propose_answer": (2292, "cee4bca40639c4fd9a56a84beb2f11efa3611e8b72035dcad0b1e3733fcf34a5"),
+    "propose_answer": (2322, "65b62b6ed4da9d400f84c4b631a2cff2875afa9111ca5e2e448e946ac2a5a406"),
     "propose_checks": (1633, "bc0fff0cc551ca97236f4c657864d62089afac9a23654017ed11cb143f2fb153"),
     "propose_lessons": (1504, "620f5327bee6d0b57eb7397df29db8bb62dcab9b8bb6b6632543767f55dd70e9"),
     "propose_profile": (507, "0f4e7a031c4c8fe4fc6a04ce3f4e2a9977afd218ea5e524b9dbdabfbfab3400d"),

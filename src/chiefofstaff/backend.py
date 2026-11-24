@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextvars
 import functools
 import hashlib
 import importlib.metadata
@@ -242,6 +243,13 @@ CLI_VERSION = re.compile(r"\b(\d+\.\d+\.\d+(?:-\d+)?)\b")
 # release was tested with (the SDK's own pinned runtime, 1.0.105, lacks what Chief of Staff
 # reads of later ones, such as which client last ran a session).
 FALLBACK_CLI = "1.0.112"
+
+
+def detached(coroutine: Any) -> asyncio.Task:
+    """A task of an agent's process (its life, its reader, its events): in a context of its
+    own, so nothing of the turn or the request that opened it (Autopilot's origin, how the
+    owner's word came in, a check under way) carries over to what it reads from then on."""
+    return asyncio.get_running_loop().create_task(coroutine, context=contextvars.Context())
 
 
 def fallback_runtime() -> str:

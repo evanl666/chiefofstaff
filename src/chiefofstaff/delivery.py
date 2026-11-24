@@ -17,11 +17,12 @@ import hashlib
 import json
 import logging
 import os
+from collections.abc import Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from . import agents, compat
-from .autopilot.origin import TAG
+from .autopilot.origin import TAG, merged
 from .backend import (
     COPILOT_AGENT,
     NotStartedError,
@@ -126,12 +127,14 @@ class Delivery:
         meta: dict | None = None,
         steer: bool = False,
         batch: bool = False,
+        check: Callable[[], None] | None = None,
     ) -> dict:
         """Give a session a message: stored first, then sent with what else it has not received.
 
         `steer` (the owner's messages) reaches a session that is working within its current
         turn. `batch` (events and reports for the Router or the Slack session) waits until
-        the session is idle and a short burst has passed, so several become one turn.
+        the session is idle and a short burst has passed, so several become one turn. `check`
+        runs just before it is stored (nothing awaited between): it raises to store nothing.
         """
         row = self.store.session(session_id)
         if row["closed_at"]:
@@ -142,6 +145,8 @@ class Delivery:
         if row["role"] == WORKER and not self.states.handle(session_id):
             # Not attached: what it did in a terminal meanwhile goes first, before this.
             await self.runtime.workers.catch_up(row)
+        if check is not None:
+            check()
         # The exact prompt is kept so a queued worker or a restart can replay it.
         message = self.runtime.add_message(
             session_id,
@@ -420,6 +425,37 @@ class Delivery:
             not m["meta"].get("deferred") for m in self.store.prompts(session_id, after=mark)
         )
 
+    def held_to_ask_first(self, row: dict, pending: list[dict]) -> bool:
+        """Whether what a worker is given waits for its process to open again asking first
+        (autopilot/answers.py reopen_first): what it carries Autopilot's origin, asking first,
+        and its process (another agent's) was opened acting on its own. Not at work: opened
+        again now, then given it; at work: once its turn is over (never mid-turn)."""
+        autopilot = self.runtime.autopilot
+        carried = None
+        for message in pending:
+            carried = merged(carried, message["meta"].get(TAG))
+        carried = carried or autopilot.origins.sticky.get(row["id"])
+        if not carried:
+            return False
+        state = self.states[row["id"]]
+        if state.reopen_asking:
+            return True  # Being opened again, or once its turn is over.
+        how = autopilot.reopen_first(row, carried, claimed=True)
+        if not how:
+            return False
+        # It carries the origin from now (its next process opens asking first: Runtime.yolo).
+        autopilot.origins.keep(row["id"], carried)
+        state.reopen_asking = True
+        if how == "after":
+            # Kept for its next process (Runtime.reattach, once its turn is over).
+            state.confined = state.stale = True
+            return True
+        if state.busy and row["status"] not in {"working", "starting"}:
+            state.busy = False  # The slot claimed for this goes back until it is given.
+            self.runtime.background(self.runtime.workers.pump())
+        self.runtime.background(autopilot.reopen_asking(row, carried))
+        return True
+
     async def flush(
         self,
         session_id: str,
@@ -452,6 +488,8 @@ class Delivery:
         if worker["role"] == WORKER and await self.runtime.settings_refusal(worker):
             # No turn starts while its folder's agent settings are changed (see deliver).
             self.runtime.background(self.runtime.settings_stop(session_id))
+            return False
+        if worker["role"] == WORKER and self.held_to_ask_first(worker, pending):
             return False
         if any(TAG in message["meta"] for message in pending):
             # Messages that carry Autopilot's origin: so does the turn that takes them in.

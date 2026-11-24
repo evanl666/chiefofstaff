@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .core import ACTIONS
-from .logbook import PARKED, UNDONE
+from .logbook import PARKED, UNDONE, sources_of
 from .summary import ACTION, still_waits
 
 if TYPE_CHECKING:
@@ -49,8 +49,9 @@ def actions(autopilot: Autopilot, run_id: str) -> list[dict]:
     broken = chain.seq if not chain.ok else 0
     later: dict[str, list[dict]] = {}
     for entry in entries:
-        if entry["of"]:
-            later.setdefault(entry["of"], []).append(entry)
+        for source in sources_of(entry) if entry["kind"] == "after" else [entry["of"]]:
+            if source:
+                later.setdefault(source, []).append(entry)
     shown = []
     for entry in reversed(entries):
         if entry["kind"] not in SHOWN:
@@ -85,8 +86,16 @@ def entry(autopilot: Autopilot, entry_id: str) -> dict:
         "evidence": book.whole(found["evidence"]), "payload": book.whole(found["payload"]),
         "later": [{"at": e["at"], "kind": e["kind"], "text": e["title"],
                    "evidence": book.whole(e["evidence"])}
-                  for e in book.entries(of=entry_id, limit=200)],
+                  for e in later_of(book, entry_id)],
     }  # fmt: skip
+
+
+def later_of(book: Any, entry_id: str) -> list[dict]:
+    """What came of an entry, as written: its later states, and the `after` entries it led to
+    (one may list it with others)."""
+    found = {e["id"]: e for e in book.entries(of=entry_id, limit=200)}
+    found |= {e["id"]: e for e in book.afters(entry_id)}
+    return sorted(found.values(), key=lambda e: e["seq"])
 
 
 def markdown(autopilot: Autopilot, run_id: str) -> str:

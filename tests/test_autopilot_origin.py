@@ -9,7 +9,7 @@ from test_delegate_reply import ASK, DM, handed, reactions, reply, sends
 from test_slack_source import search_answer, thread_answer
 
 from chiefofstaff import ingress
-from chiefofstaff.autopilot.origin import TAG
+from chiefofstaff.autopilot.origin import CARRIED, TAG
 from chiefofstaff.models import Settings
 
 
@@ -177,3 +177,170 @@ async def test_nothing_is_tagged_or_kept_when_autopilot_never_acted(harness):
     await settle(runtime)
     assert not runtime.autopilot.origins.any() and not harness.store.keys("autopilot:")
     assert not any(TAG in m["meta"] for s in (router, session) for m in harness.store.messages(s))
+
+
+async def test_a_claude_process_it_opened_carries_nothing_once_the_owner_writes(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Review 5: Autopilot's answer reaches a Claude worker whose process was closed: its new
+    process (and the tasks that read it) opens with no origin of its own; once the owner
+    writes to that worker in the page, nothing it does carries Autopilot's origin."""
+    from test_claude_workers import PASSED, saved, spawn_on, until
+
+    from chiefofstaff import backend_claude
+
+    async def check(self, folder):
+        return dict(PASSED)
+
+    monkeypatch.setattr(backend_claude.ClaudeAgent, "check", check)
+    monkeypatch.setattr(backend_claude, "LISTED", {})
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    await saved(runtime, {"claude": {"enabled": True}})
+    made = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: Fixed.",
+                          agent="claude")  # fmt: skip
+    worker = made["session_id"]
+    await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+    claude = runtime.states.handle(worker).worker
+    await runtime.agent_mode_changed(harness.store.session(worker), asks_first=False)
+    await until(lambda: claude.task is None or claude.task.done(), 30)  # Its process ended.
+    assert runtime.states.handle(worker) is None
+    entry = await autopilot_entry(runtime)
+    run = runtime.autopilot.run()
+    runtime.autopilot.book.queue(run["id"], entry["id"], "worker", {
+        "session_id": worker, "task_id": made["task_id"], "text": "Report done: Answered.",
+        "display": "Autopilot answered.", "go_on": True,
+    }, runtime.autopilot.book.generation())  # fmt: skip
+    await runtime.autopilot.dispatch()
+    router = harness.router_id
+
+    def reports() -> list[dict]:
+        return [m for m in harness.store.messages(router)
+                if m["kind"] == "inbound" and m["meta"].get("from") == worker]  # fmt: skip
+
+    await until(lambda: len(reports()) >= 2, 30)
+    assert TAG in reports()[-1]["meta"], "the turn Autopilot continued carries it"
+    await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+    acting = []
+    add = runtime.add_message
+
+    def stored(session_id, kind, text, meta=None, **how):
+        if session_id != worker:  # What its turn causes elsewhere: the origin it acts with.
+            acting.append(CARRIED.get())
+        return add(session_id, kind, text, meta, **how)
+
+    monkeypatch.setattr(runtime, "add_message", stored)
+    with ingress.through(ingress.PAGE):
+        await runtime.owner_send(worker, "Report done: Mine now.")
+    await until(lambda: len(reports()) >= 3, 30)
+    await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+    assert acting and all(origin is None for origin in acting), acting
+    assert TAG not in reports()[-1]["meta"], "the owner's own turn carries nothing"
+    assert runtime.autopilot.origins.of(worker) is None
+
+
+async def claude_done(tmp_path, monkeypatch):
+    """A Claude worker (the stand-in) that did its task, in a process opened acting on its own
+    (the owner's setting for workers)."""
+    from test_claude_workers import PASSED, saved, spawn_on, until
+
+    from chiefofstaff import backend_claude
+
+    async def check(self, folder):
+        return dict(PASSED)
+
+    monkeypatch.setattr(backend_claude.ClaudeAgent, "check", check)
+    monkeypatch.setattr(backend_claude, "LISTED", {})
+    harness = Harness(tmp_path / "data", Settings(worker_yolo=True, fork_busy=False))
+    runtime = await harness.connect()
+    await saved(runtime, {"claude": {"enabled": True}})
+    made = await spawn_on(harness, runtime, title="Fix it", instructions="Report done: Fixed.",
+                          agent="claude")  # fmt: skip
+    await until(lambda: harness.store.session(made["session_id"])["status"] == "done", 30)
+    assert runtime.states[made["session_id"]].opened_asking is False
+    return harness, runtime, made
+
+
+async def test_a_router_turn_it_led_to_reopens_a_claude_worker_asking_first(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Review 3: workers ask first reaches every path that gives a worker Autopilot's origin,
+    not only Autopilot's own deliveries: a Router turn that carries it messages a Claude worker
+    opened acting on its own; that worker's process is opened again asking first before the
+    message reaches it (never mid-turn), and the owner's setting stays as it was."""
+    from test_claude_workers import until
+
+    harness, runtime, made = await claude_done(tmp_path, monkeypatch)
+    worker = made["session_id"]
+    before = runtime.states.handle(worker).worker
+    entry = await autopilot_entry(runtime)
+    router = harness.store.session(harness.router_id)
+    runtime.autopilot.origins.taken(router, [{"meta": {TAG: {"entries": [entry["id"]],
+                                                             "ask_first": True}}}])  # fmt: skip
+    told = await call_tool(runtime, "message_session", router["id"], session_id=worker,
+                           text="Report done: Again.", task="new", title="Fix it again",
+                           why_new="t")  # fmt: skip
+    assert told.result_type != "failure", told.text_result_for_llm
+    await until(lambda: len([t for t in runtime.tasks.for_session(worker)
+                             if t["status"] in {"review", "done"}]) >= 2, 30)  # fmt: skip
+    assert runtime.states[worker].opened_asking is True, "opened again asking first"
+    assert runtime.states.handle(worker).worker is not before
+    assert harness.store.settings().worker_yolo is True, "never the owner's setting"
+
+
+async def test_a_claude_worker_at_work_takes_it_only_once_opened_again_asking_first(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Review 3: the same, the worker at work in its own process: what carries Autopilot's
+    origin waits for that turn to end (never into it), then reaches a process opened asking
+    first."""
+    from test_claude_workers import until
+
+    harness, runtime, made = await claude_done(tmp_path, monkeypatch)
+    worker = made["session_id"]
+    router = harness.store.session(harness.router_id)
+    await call_tool(runtime, "message_session", router["id"], session_id=worker,
+                    text="Run the shell command `sleep 2` Report done: Slept.", task="new",
+                    title="Sleep a while", why_new="t")  # fmt: skip
+    await until(lambda: harness.store.session(worker)["status"] == "working", 30)
+    first = runtime.states.handle(worker).worker
+    entry = await autopilot_entry(runtime)
+    runtime.autopilot.origins.taken(router, [{"meta": {TAG: {"entries": [entry["id"]],
+                                                             "ask_first": True}}}])  # fmt: skip
+    told = await call_tool(runtime, "message_session", router["id"], session_id=worker,
+                           text="Report done: Again.", task="new", title="Fix it again",
+                           why_new="t", earlier="keep")  # fmt: skip
+    assert told.result_type != "failure", told.text_result_for_llm
+    assert runtime.states[worker].reopen_asking, "held: its turn goes on as it began"
+    await until(lambda: any(t["title"] == "Fix it again" and t["status"] in {"review", "done"}
+                            for t in runtime.tasks.for_session(worker)), 30)  # fmt: skip
+    assert runtime.states[worker].opened_asking is True
+    assert runtime.states.handle(worker).worker is not first
+    assert first.task is None or first.task.done(), "the process acting on its own ended"
+
+
+async def test_a_turn_from_two_entries_writes_one_after_entry_its_receipts_once(harness):
+    """Review 8: a turn several entries led to ends with one `after` entry listing them all (in
+    one transaction), its receipts kept once, as a blob its hash names; each entry's record
+    shows what came next."""
+    from chiefofstaff.autopilot import view
+    from chiefofstaff.autopilot.logbook import BLOB
+
+    runtime = await harness.connect()
+    router = harness.router_id
+    worker, first = await continued(runtime, router)
+    second = runtime.autopilot.book.append(first["run_id"], "decided", "Decided: Redis")
+    runtime.autopilot.origins.keep(worker["session_id"], {"entries": [second["id"]],
+                                                          "ask_first": True})  # fmt: skip
+    session = worker["session_id"]
+    runtime.autopilot.turn_ended(harness.store.session(session))
+    [after] = runtime.autopilot.book.entries(kinds=("after",))
+    assert after["payload"]["of"] == [first["id"], second["id"]]
+    blob = after["evidence"]["receipts"]
+    assert set(blob) == {BLOB, "size", "head"}
+    assert runtime.autopilot.book.blob(blob[BLOB]) is not None
+    shown = {a["id"]: a["then"] for a in view.actions(runtime.autopilot, first["run_id"])}
+    assert shown[first["id"]] == shown[second["id"]] == [after["title"].removeprefix("then: ")]
+    for source in (first, second):
+        later = view.entry(runtime.autopilot, source["id"])["later"]
+        assert [x["kind"] for x in later] == ["after"]

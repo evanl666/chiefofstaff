@@ -30,7 +30,7 @@ from ..envelope import wrap
 from ..models import AS_SAVED, Settings
 from ..store import now
 from . import grammar, summary
-from .answers import Answers, Later
+from .answers import Answers, Later, Withdrawn
 from .logbook import (
     CLAIMED,
     DONE,
@@ -200,9 +200,12 @@ class Autopilot(Answers, Results):
         self.deciding: set[str] = set()
         self.judge_lock = asyncio.Lock()
         self.proposal: asyncio.Future | None = None
-        # The result being verified now ("" for none); how verification runs its plan (tests run
-        # it without Copilot; None: in a sandboxed session of Chief's own).
+        # The result being verified now ("" for none), and its job; how verification runs its
+        # plan (tests run it without Copilot; None: in a sandboxed session of Chief's own).
         self.verifying = ""
+        self.verify_job: asyncio.Task | None = None
+        # Reported questions being judged now (one pass at a time, off the periodic loop).
+        self.questioning = False
         self.runner: Any = None
 
     # The switch.
@@ -213,6 +216,28 @@ class Autopilot(Answers, Results):
             return None
         found = self.book.open_runs()
         return next((run for run in found if run["state"] == ON), None)
+
+    def ticket(self) -> tuple[str, int] | None:
+        """What work in flight acts for: the run on now and its generation (None: none on)."""
+        run = self.run()
+        return (run["id"], self.book.generation()) if run else None
+
+    def holds(self, ticket: tuple[str, int] | None) -> bool:
+        """Whether work that began under `ticket` may still be filed: that run is still on and
+        no Stop came since (its generation). Read in the caller's transaction."""
+        if not ticket or not self.ticked:
+            return False
+        run = self.book.run(ticket[0])
+        return bool(run) and run["state"] == ON and self.book.generation() == ticket[1]
+
+    def abandon(self):
+        """Stop, or a run's end: what is in flight stops at once (the judge's wait ends with no
+        proposal; a verification is cancelled). Anything judged before is filed nowhere
+        (holds)."""
+        if self.proposal is not None and not self.proposal.done():
+            self.proposal.set_result(None)
+        if self.verify_job is not None and not self.verify_job.done():
+            self.verify_job.cancel()
 
     def morning_time(self) -> str:
         return self.store.settings().digest_time or grammar.MORNING
@@ -326,6 +351,7 @@ class Autopilot(Answers, Results):
                 )
                 self.book.bump()
                 withdrawn = self.book.withdraw(why, run["id"])
+            self.abandon()
             continued = await self.stop_continued(run, stopping)
             await self.end(run, by=by, at_its_time=False)
         parts = [grammar.said_off(True, language)]
@@ -342,8 +368,15 @@ class Autopilot(Answers, Results):
 
     async def stop_continued(self, run: dict, stopping: dict) -> int:
         """Turns it continued that are running now: stopped as Stop stops one (their tasks wait
-        with Go on, and Ask first stays on them until they end)."""
+        with Go on, and Ask first stays on them until they end); the Router's and the Slack
+        session's turns that carry it too. Returns how many of the workers'."""
         ours = {entry["id"] for entry in self.book.entries(run_id=run["id"], limit=100000)}
+        for session_id, carried in list(self.origins.turns.items()):
+            row = self.store.find_session(session_id)
+            if not row or row["closed_at"] or not ours & set(carried.get("entries") or []):
+                continue
+            if row["status"] in {"working", "starting"} or self.runtime.states[session_id].busy:
+                await self.runtime.workers.interrupt(session_id, by="Autopilot's Stop")
         stopped = 0
         for session_id, carried in list(self.origins.sticky.items()):
             if not ours & set(carried.get("entries") or []):
@@ -359,6 +392,7 @@ class Autopilot(Answers, Results):
 
     async def end(self, run: dict, *, by: str, at_its_time: bool):
         """The run's end: its `ended` entry, the head kept, the summary card, the Router told."""
+        self.abandon()
         with self.store.transaction():
             if not self.book.move_run(
                 run["id"], (ON, STOPPING), state=ENDED, ended_at=now(), ended_by=by
@@ -487,6 +521,9 @@ class Autopilot(Answers, Results):
                 except Later:
                     self.book.release(claimed["id"])  # Delivered later, once.
                     continue
+                except Withdrawn as exc:
+                    self.book.withdraw_claimed(claimed, str(exc))  # Stop came since its claim.
+                    continue
                 except Exception as exc:
                     logger.warning("An Autopilot delivery failed.", exc_info=True)
                     self.book.finish(claimed["id"], FAILED, str(exc)[:500])
@@ -568,18 +605,30 @@ class Autopilot(Answers, Results):
         self.runtime.background(self.dispatch())
 
     async def tick(self):
-        """Periodic: a run at its end ends; what is queued goes out."""
+        """Periodic: a run at its end ends; what is queued goes out; questions are judged,
+        results verified, stalled work nudged. Never waits for a judgment, a verification or a
+        delivery: each is a job of its own (one at a time), so no other periodic job waits."""
         if not self.ticked:
             return
         run = self.run()
         if run and (until := parsed(run["until"])) and until <= datetime.now(UTC):
             await self.end(run, by="time", at_its_time=True)
-        if self.book.outbox(QUEUED):
-            await self.dispatch()
+        if self.book.outbox(QUEUED) and not self.dispatch_lock.locked():
+            self.runtime.background(self.dispatch())
         if self.run() is not None:
-            await self.check_questions()
+            if not self.questioning:
+                self.questioning = True
+                self.runtime.background(self.question_pass())
             await self.check_results()
             await self.check_stalled()
+
+    async def question_pass(self):
+        """One pass over the questions waiting for the owner (check_questions), off the
+        periodic loop; the next tick starts none while it runs."""
+        try:
+            await self.check_questions()
+        finally:
+            self.questioning = False
 
     async def settings_changed(self, old: Settings, new: Settings):
         """Ticked: its tables (once). Unticked: a run on stops as Stop stops it."""
@@ -628,8 +677,9 @@ class Autopilot(Answers, Results):
             self.origins.seen(row["id"], moment)
 
     def after(self, row: dict, carried: dict, since: str):
-        """One `after` entry per entry that led to this turn: what it did, from its receipts,
-        and the settings it ran under."""
+        """One `after` entry for the turn, listing every entry that led to it: what it did,
+        from its receipts (kept once, as a blob its hash names), and the settings it ran
+        under; in one transaction."""
         if not self.book.exists():
             return
         done = receipts_since(self.store, row["id"], since, worker=row["role"] == "worker")
@@ -644,19 +694,22 @@ class Autopilot(Answers, Results):
             # A turn it started itself (a nudge): on its credits.
             moment = datetime.fromisoformat(since).timestamp() if since else 0
             self.spend(self.usage_since(row["id"], moment))
-        for entry_id in carried["entries"]:
-            source = self.book.entry(entry_id)
-            if not source:
-                continue
+        found = [source for source in sources if source]
+        if not found:
+            return
+        latest = found[-1]
+        with self.store.transaction():
+            receipts = self.book.stash(done)
             self.book.append(
-                source["run_id"],
+                latest["run_id"],
                 "after",
                 "then: " + said_receipts(done),
-                of=entry_id,
+                of=latest["id"],
                 subject=f"session:{row['id']}",
-                task_id=(task or {}).get("id") or source.get("task_id") or "",
+                task_id=(task or {}).get("id") or latest.get("task_id") or "",
                 why={"rule": RULES, "settings": mode},
-                evidence=done,
+                evidence={"receipts": receipts},
+                payload={"of": [source["id"] for source in found]},
             )
 
     # The Router's tool.

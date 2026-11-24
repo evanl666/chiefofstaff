@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from . import grammar
+from .logbook import sources_of
 
 if TYPE_CHECKING:
     from .core import Autopilot
@@ -85,7 +86,8 @@ def card(autopilot: Autopilot, run: dict) -> tuple[str, dict[str, Any]]:
     later = {}
     for entry in entries:
         if entry["kind"] == "after" and entry["of"]:
-            later.setdefault(entry["of"], []).append(entry["title"].removeprefix("then: "))
+            for source in sources_of(entry):
+                later.setdefault(source, []).append(entry["title"].removeprefix("then: "))
     groups = []
     counts = {"done": 0, "left": 0}
     for name, kinds in GROUPS:

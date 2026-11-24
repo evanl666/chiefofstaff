@@ -6250,7 +6250,14 @@ class Runtime:
         what waited for its new session (sent while its sandbox went on) goes to it there."""
         note, self.states[session_id].after_refresh = self.states[session_id].after_refresh, ""
         waited = self.states[session_id].confined
+        reopen, self.states[session_id].reopen_asking = self.states[session_id].reopen_asking, False
         await self.detach(session_id)
+        if reopen:
+            # Held for Autopilot's origin (Delivery.held_to_ask_first): its process ends, and
+            # the next opens asking first.
+            backend, _ = self.connection(self.agent(session_id))
+            if retire := getattr(backend, "retire", None):
+                await retire(session_id)
         row = self.store.find_session(session_id)
         if waited and not note and row and not row["closed_at"]:
             self.background(self.delivery.resume(session_id))
@@ -8710,10 +8717,15 @@ class Runtime:
     async def session_for(self, session_id: str):
         if session := self.states.handle(session_id):
             return session
-        row = self.store.find_session(session_id) if self.agents else None
-        if row and (role := self.role_key(row)) in PLACED_ROLES:
-            return await self.role_session(row, role)
-        return await self.open_session(session_id)
+        # What it opens carries no origin of what opened it (autopilot/origin.py).
+        token = origin.CARRIED.set(None)
+        try:
+            row = self.store.find_session(session_id) if self.agents else None
+            if row and (role := self.role_key(row)) in PLACED_ROLES:
+                return await self.role_session(row, role)
+            return await self.open_session(session_id)
+        finally:
+            origin.CARRIED.reset(token)
 
     async def role_session(self, row: dict, role: str):
         """A role's session where it runs now (place_role): its agent's, or Copilot's while
