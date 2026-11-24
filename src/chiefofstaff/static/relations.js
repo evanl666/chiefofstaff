@@ -1,6 +1,5 @@
-// Task relationships (E130): how a team's tasks are related, as its view shows them. Counts
-// above (a chip lights the rows it counts), a row per task with its one relation, and a task's
-// lineage when asked: where it came from, what came of it, in a line that never crosses.
+// Task relationships (E130): how a worker's task is related to others, on its Team or Notes
+// tab: its lineage, where it came from and what came of it, in a line that never crosses.
 // Five verbs, each drawn: waits on, continues, branched, parts, vs. Color stays for workers
 // and status; the voice is in the words.
 
@@ -124,17 +123,6 @@ export function chipWords(data, row, chip) {
       return ["continues", "related", ""];
   }
 }
-// A fan's parts as dots: one filled for each that landed, hollow for the rest.
-export function dots(landed, total) {
-  return el("span", { class: "dots", "aria-hidden": "true" }, ...Array.from({ length: Math.min(total, 6) }, (_, index) => el("span", { class: index < landed ? "on" : "" })));
-}
-// The tasks at either end of a row's relation (both lit on hover, its rows and graph nodes).
-function ends(data, row, chip) {
-  if (!chip) return [row.id];
-  if (chip.others) return [row.id, ...chip.others];
-  if (chip.other) return [row.id, chip.other];
-  return [row.id];
-}
 export function light(view, taskIds, on) {
   const data = indexed(view);
   for (const id of taskIds) {
@@ -142,18 +130,6 @@ export function light(view, taskIds, on) {
     const session = data.get(id)?.session_id;
     if (session) view.root?.querySelector(`.team-graph .node[data-session="${session}"]`)?.classList.toggle("lit", on);
   }
-}
-function chipNode(view, row) {
-  const chip = row.relation;
-  if (!chip) return null;
-  const [verb, words, kind] = chipWords(view, row, chip);
-  const node = el("span", { class: `rel ${VERB[chip.kind] || "continues"}${kind ? ` ${kind}` : ""}`, "data-kind": chip.kind }, glyph(verb), el("span", { class: "words", text: words }));
-  const other = chip.other ? indexed(view).get(chip.other) : null;
-  node.title = other ? `${words}\n${other.title} · ${labelOf(other.session_id)} · ${statusWord(other)} · ${ago(ageOf(other))}` : words;
-  const lit = ends(view, row, chip);
-  node.addEventListener("mouseenter", () => light(view, lit, true));
-  node.addEventListener("mouseleave", () => light(view, lit, false));
-  return node;
 }
 const STATUS = { queued: "queued", running: "running", waiting: "waiting", review: "to review", done: "done", failed: "failed", cancelled: "cancelled" };
 export const statusWord = (row) => STATUS[row.status] || row.status;
@@ -166,86 +142,9 @@ function isOver(row) {
   return chip?.kind === "compare" && Boolean(chip.picked) && chip.picked !== row.id;
 }
 
-// The view's counts, chips above its rows: a fan's parts landing, tasks waiting on another's,
-// what branched, a compare to pick, and the PRs or project the tasks share.
-export function summaryChips(view, onPick) {
-  const { summary = {}, anchors = [], groups = [] } = view;
-  const chips = [];
-  for (const parts of summary.parts || []) {
-    const group = groups.find((item) => item.id === parts.group);
-    const words = parts.state === "resolved" ? `All ${parts.total} parts landed${group?.landed_at ? ` · ${span(group.started_at, group.landed_at)}` : ""}` : `${parts.landed} of ${parts.total} landed: ready when ${parts.total} of ${parts.total} land`;
-    chips.push({ key: `group:${parts.group}`, verb: "parts", text: `${parts.total} parts`, extra: dots(parts.landed, parts.total), title: words, tasks: group?.tasks || [] });
-  }
-  if (summary.waiting) chips.push({ key: "waiting", verb: "waits", text: `${summary.waiting} waiting`, title: "Tasks that start once another's result is in", tasks: (view.tasks || []).filter((row) => row.relation?.kind === "after" && row.relation.side === "to" && row.relation.state === "pending").map((row) => row.id) });
-  const branched = (summary.split || 0) + (summary.fork || 0);
-  if (branched) chips.push({ key: "branched", verb: "branched", text: summary.fork && !summary.split ? plural(summary.fork, "fork") : summary.split && !summary.fork ? plural(summary.split, "split") : `${branched} branched`, title: "Split off or forked from another task", tasks: relatedTo(view, ["split", "fork"]) });
-  if (summary.compare) chips.push({ key: "compare", verb: "vs", text: plural(summary.compare, "compare"), title: "The same task on several agents", tasks: groups.filter((group) => group.kind === "compare").flatMap((group) => group.tasks) });
-  for (const anchor of anchors) chips.push({ key: `anchor:${anchor.label}`, verb: "", text: anchor.label, title: anchor.kind === "pr" ? `${anchor.title} · ${plural(anchor.tasks.length, "task")}` : anchor.title, tasks: anchor.tasks || (view.tasks || []).filter((row) => (anchor.workers || []).includes(row.session_id)).map((row) => row.id), anchor: true });
-  if (!chips.length) return null;
-  return el(
-    "div",
-    { class: "rel-summary", role: "group", "aria-label": "How its tasks are related" },
-    ...chips.map((chip) =>
-      el("button", { type: "button", class: `rel-chip${chip.anchor ? " anchor" : ""}`, "data-key": chip.key, "aria-pressed": String(view.lit === chip.key), title: chip.title, onclick: () => onPick(view.lit === chip.key ? "" : chip.key, chip.tasks) }, chip.verb ? glyph(chip.verb) : null, el("span", { text: chip.text }), chip.extra || null),
-    ),
-  );
-}
-function relatedTo(view, kinds) {
-  const found = new Set();
-  for (const edge of view.relations || []) {
-    if (kinds.includes(edge.kind)) {
-      found.add(edge.from_task);
-      found.add(edge.to_task);
-    }
-  }
-  return [...found];
-}
 // "42 min", "2 h": how long from one moment to another.
 function span(from, to) {
   return minutes(Math.max(0, Math.round((new Date(to) - new Date(from)) / 60000)));
-}
-
-// The Tasks section: a row per task, its latest ROWS (the earlier on asking), each with its
-// one relation and how many more; a click opens its lineage under it (one at a time).
-const ROWS = 8;
-export function taskList(view, rerender) {
-  const rows = view.tasks || [];
-  if (!rows.length) return null;
-  const hidden = view.allRows ? 0 : Math.max(0, rows.length - ROWS);
-  const shown = rows.slice(hidden);
-  const earlier = hidden + (view.earlier || 0);
-  const lit = new Set(view.litTasks || []);
-  return el(
-    "section",
-    { class: "team-tasks", "aria-label": "Tasks" },
-    el("h3", { class: "title" }, "Tasks", el("span", { class: "count", text: String(rows.length + (view.earlier || 0)) })),
-    hidden
-      ? el("button", { type: "button", class: "link earlier-rows", text: `+${earlier} earlier`, onclick: () => { view.allRows = true; rerender(); } })
-      : view.earlier
-        ? el("p", { class: "earlier-rows", text: `+${view.earlier} earlier` })
-        : null,
-    el(
-      "div",
-      { class: "rows" },
-      ...shown.flatMap((row) => {
-        const open = view.open === row.id;
-        const node = el(
-          "div",
-          { class: `trow${isOver(row) ? " over" : ""}${lit.has(row.id) ? " lit" : ""}${view.cleared?.has(row.id) ? " unblocked" : ""}`, "data-task": row.id, "data-session": row.session_id },
-          el(
-            "button",
-            { type: "button", class: "main", "aria-expanded": String(open), title: open ? "Close its lineage" : row.lineage ? "Where it came from and what came of it" : "About this task", onclick: () => { view.open = open ? "" : row.id; view.peek = ""; rerender(); } },
-            avatar(row.session_id),
-            el("span", { class: `sdot ${row.status}`, title: statusWord(row) }),
-            el("span", { class: "title", text: shownTitle(row), title: row.title }),
-          ),
-          chipNode(view, row),
-          row.more ? el("span", { class: "more", text: `+${row.more}`, title: `${plural(row.more, "more relation")}: open its lineage` }) : null,
-        );
-        return open ? [node, lineageOf(view, row, rerender)] : [node];
-      }),
-    ),
-  );
 }
 
 // A task's lineage: its columns left to right (where it came from, it with its parts or
@@ -385,13 +284,4 @@ function fanWords(view, group) {
   const workers = new Set(group.tasks.map((id) => indexed(view).get(id)?.session_id).filter(Boolean)).size;
   const failed = group.failed ? ` · ${group.failed} won't` : "";
   return `${workers} workers, one request · ready when ${group.total} of ${group.total} land${failed}`;
-}
-
-// Home's line of a team: one word-sized cue of its tasks, as a row's relation is chosen: tasks
-// waiting on another's first, else a fan landing; or nothing.
-export function cueNode(team) {
-  const cue = team.cue || {};
-  if (cue.waiting) return el("span", { class: "cue" }, glyph("waits"), `${cue.waiting} waiting`);
-  if (cue.parts) return el("span", { class: "cue" }, dots(cue.parts[0], cue.parts[1]), `${cue.parts[0]} of ${cue.parts[1]} parts`);
-  return null;
 }

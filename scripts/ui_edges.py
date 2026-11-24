@@ -5764,6 +5764,8 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
     await page.goto(f"{BASE}/#token={TOKEN}")
     row = await team_row(page, custom)
     await expect(row).to_be_visible(timeout=15000)
+    # In sight (other rounds' work may have put it below the fold).
+    await row.scroll_into_view_if_needed()
     await page.clock.run_for(3000)
     for _ in range(50):
         if runtime.snapshot()["teams"] and any(

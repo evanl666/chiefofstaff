@@ -65,7 +65,8 @@ const COLUMN_MOST = 4;
 function fillLabel(node, line, stacked) {
   node.replaceChildren();
   line.pieces.forEach((piece, index) => {
-    if (index) node.append(stacked ? el("br") : el("span", { class: "sep", text: " · " }));
+    // Stacked, a piece a line (its words the same to read and to copy).
+    if (index) node.append(...(stacked ? [el("span", { class: "visually-hidden", text: " · " }), el("br")] : [el("span", { class: "sep", text: " · " })]));
     node.append(el("span", { class: `piece${piece.tone ? ` ${piece.tone}` : ""}`, text: piece.text }));
   });
 }
@@ -104,7 +105,7 @@ function geometry(map, line, placed) {
     const y = (A.cy + B.cy) / 2;
     const x1 = A.r + 2 + (head.start ? 6 : 0);
     const x2 = B.l - 2 - (head.end ? 6 : 0);
-    return { d: `M${x1} ${y} L${x2} ${y}`, heads: head, label: { x: (A.r + B.l) / 2, y: y - 7, anchor: "above", stacked: true } };
+    return { d: `M${x1} ${y} L${x2} ${y}`, heads: head, label: { x: (A.r + B.l) / 2, y: y - 7, anchor: "above", stacked: true, room: B.l - A.r - 8 } };
   }
   if (pa.col > pb.col) {
     [A, B] = [B, A];
