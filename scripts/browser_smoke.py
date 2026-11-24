@@ -49,7 +49,10 @@ async def run(page, app: App, project: Path, workspace: Workspace, errors: list[
     await page.get_by_role("button", name="Settings").click()
     form = page.locator("#settings-form")
     await expect(form.locator("input[name=code_folder]")).to_have_value(str(project.parent))
-    await form.locator("input[name=mac_notifications]").uncheck()
+    # (Its line is there only where desktop notifications can show: macOS.)
+    notify = form.locator("input[name=mac_notifications]")
+    if await notify.is_visible():
+        await notify.uncheck()
     await page.locator("#settings-tabs [data-tab=connections]").click()
     await page.locator(".conn[data-conn=slack] .conn-open").click()
     await form.locator("input[name=slack_enabled]").check()

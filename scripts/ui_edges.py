@@ -66,8 +66,10 @@ SETTINGS_FIELDS |= {
 # (With Copilot alone, as here: other agents' fields are made only where one is installed or on.)
 # Prepared for you: its switch in General (its tab's fields come only while it is on).
 SETTINGS_FIELDS |= {"proactive"}
-FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours"} | {
-    "slack_token", "profile", "setup_notes", "report_footer",
+# (Ask first is worker_yolo the other way round: its field has its own name.)
+FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours",
+                                "worker_yolo"} | {
+    "ask_first", "slack_token", "profile", "setup_notes", "report_footer",
     *(f"{kind}_{role}" for kind in ("model", "effort")
       for role in ("router", "worker", "slack", "watchdog")),
 }  # fmt: skip
@@ -215,6 +217,12 @@ async def memory(runtime, browser, failures: list[str]):
         await page.locator("#settings-button").click()
         section = page.locator("#settings-dialog")
         await section.locator("#settings-tabs [data-tab=you]").click()
+        # Each list folded with its count (settings-v2.md §6), unfolded here to be seen.
+        await expect(section.locator("#styles-count")).to_have_text("2")
+        await expect(section.locator("#checks-count")).to_have_text("1")
+        await expect(section.locator("#styles")).to_be_hidden()
+        await section.locator("#you-styles > summary").click()
+        await section.locator("#you-checks > summary").click()
         await expect(section.locator("#styles li")).to_have_count(2)
         await expect(section.locator("#checks li")).to_have_count(1)
         await expect(section.locator("#learn-status")).to_contain_text("4 Slack DMs")
@@ -248,6 +256,8 @@ async def memory(runtime, browser, failures: list[str]):
     await page.locator("#settings-button").click()
     dialog = page.locator("#settings-dialog")
     await dialog.locator("#settings-tabs [data-tab=you]").click()
+    await dialog.locator("#you-styles > summary").click()
+    await dialog.locator("#you-checks > summary").click()
     await expect(dialog.locator("#checks li")).to_have_count(2)
     first = dialog.locator("#checks li").first
     await first.get_by_role("button", name="Turn off").click()
@@ -374,7 +384,7 @@ async def home(runtime, browser, failures: list[str]):
         "d => [...d.querySelectorAll('[name]')].map(n => n.name)"
     ))  # fmt: skip
     assert names == FORM_NAMES, names ^ FORM_NAMES
-    for tab in ("general", "workers", "agents", "connections", "you", "advanced"):
+    for tab in ("general", "agents", "connections", "you"):
         await dialog.locator(f"#settings-tabs [data-tab={tab}]").click()
         await expect(dialog.locator(f".tab[data-tab={tab}]")).to_be_visible()
         await expect(page.locator("#settings-form footer button[type=submit]")).to_be_visible()
@@ -785,9 +795,7 @@ async def this_round(runtime, browser, failures: list[str]):
     await dialog.locator("#settings-tabs [data-tab=you]").click()
     habits = dialog.locator("#lessons")
     await expect(habits.locator("li")).to_have_count(26)  # With "Run a smoke test first".
-    await expect(habits.locator("xpath=preceding-sibling::h4[1]")).to_have_attribute(
-        "data-count", "26"
-    )
+    await expect(dialog.locator("#lessons-count")).to_have_text("26")
     sizes = await habits.evaluate(
         "(list) => ({client: list.clientHeight, scroll: list.scrollHeight, "
         "rows: [...list.children].map((row) => row.getBoundingClientRect().height)})"
@@ -1180,10 +1188,17 @@ async def round_three(runtime, browser, failures: list[str]):
 
     await page.locator("#session-more-button").click()
     await expect(page.locator("#session-more")).to_be_visible()
+    # Its permission checks in Settings → General's words (Ask first: settings-v2.md §7.2).
+    await expect(page.locator("#session-more option[value=on]")).to_have_text(
+        "Yolo (acts without asking)"
+    )
+    await expect(page.locator("#session-more option[value=off]")).to_have_text(
+        "Ask first (asks before risky commands)"
+    )
     await page.mouse.click(700, 500)
     await expect(page.locator("#session-more")).to_be_hidden()
     await page.locator("#back-home").click()
-    log("the session's ⋯ menu closes on a click elsewhere")
+    log("the session's ⋯ menu closes on a click elsewhere; its checks said as Settings says them")
 
     await page.locator("#settings-button").click()
     await page.locator('#settings-tabs [data-tab="you"]').click()
@@ -8612,7 +8627,7 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     order = await page.locator("#settings-tabs [role=tab]").evaluate_all(
         "b => b.filter((x) => !x.hidden).map((x) => x.dataset.tab)"
     )
-    assert order == ["general", "workers", "agents", "connections", "you", "advanced"], order
+    assert order == ["general", "agents", "connections", "you"], order
     claude_runs = runs.parent / "claude-runs"
     claude_ran = claude_runs.read_text().count("\n") if claude_runs.exists() else 0
     await quiet_for(page, 300)
@@ -8622,7 +8637,6 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     assert (claude_runs.read_text().count("\n") if claude_runs.exists() else 0) == claude_ran
     # By keyboard: arrows move along the pages; the page looks once it is shown.
     await page.locator("#settings-tabs [data-tab=general]").focus()
-    await page.keyboard.press("ArrowDown")
     await page.keyboard.press("ArrowDown")
     await expect(button).to_be_focused()
     await expect(button).to_have_attribute("aria-selected", "true")
@@ -11316,10 +11330,11 @@ async def round_stacked_merge(runtime, browser, failures: list[str]):
 
 async def round_shepherd(runtime, browser, failures: list[str]):
     """Prepared for you (shepherd.py): off, one line in Settings → General and nothing else;
-    turned on, its tab comes at once, and saved; Home's section with three rows, All found with
-    why not, Hand to a worker; a worker PR's row: the fix's review (Request changes… and back,
-    Push), its line after, Resume on a paused one, its menu (Stop looking after this PR, Accept
-    this commit…, What it did); the tab's choices saved; turned off, everything of it goes."""
+    turned on, its Options come at once, and saved; Home's section with three rows, All found
+    with why not, Hand to a worker; a worker PR's row: the fix's review (Request changes… and
+    back, Push), its line after, Resume on a paused one, its menu (Stop looking after this PR,
+    Accept this commit…, What it did); its Options' choices saved; turned off, everything of it
+    goes."""
     from shepherd_world import TARGET, seed_page
 
     from chiefofstaff import discovery
@@ -11329,25 +11344,29 @@ async def round_shepherd(runtime, browser, failures: list[str]):
     page.on("pageerror", lambda error: failures.append(str(error)))
     await page.goto(f"{BASE}/#token={TOKEN}")
     await expect(page.locator("#application")).to_be_visible()
-    # Off: the switch's line in General, no tab, no section.
+    # Off: the switch's line in General, its Options not offered; no page of its own.
     await page.locator("#settings-button").click()
     await page.locator("#settings-tabs [data-tab=general]").click()
     line = page.locator("#proactive-line")
     await expect(line).to_contain_text("Keep my PRs moving")
     await expect(line.locator("input")).not_to_be_checked()
     await expect(page.locator("#settings-tabs [data-tab=proactive]")).to_have_count(0)
-    # On: its tab comes before it is saved, and is hidden if unticked (what was written kept).
+    options = page.locator("#prs-options")
+    await expect(options).to_be_hidden()
+    # On: its Options come before it is saved; unticked, they go (what was written kept).
     await line.locator("input").check()
-    tab = page.locator("#settings-tabs [data-tab=proactive]")
-    await expect(tab).to_have_text("Prepared for you")
+    await options.click()
+    await expect(options).to_have_attribute("aria-expanded", "true")
+    await expect(page.locator("#prs-more select[name=level_fix-ci]")).to_be_visible()
     await line.locator("input").uncheck()
-    await expect(tab).to_be_hidden()
+    await expect(options).to_be_hidden()
+    await expect(page.locator("#prs-more")).to_be_hidden()
     await line.locator("input").check()
     await page.locator("#settings-form footer button[type=submit]").click()
     await until(lambda: runtime.store.settings().proactive, 15)
     await expect(page.locator("#settings-dialog")).not_to_be_visible()
     await context.close()
-    log("Prepared for you: one line in General while off; its tab once ticked")
+    log("Prepared for you: one line in General while off; its Options once ticked")
 
     root = Path(tempfile.mkdtemp(prefix="cos-ui-shepherd-", dir=runtime.store.directory.parent))
     seeded = await seed_page(runtime, root)
@@ -11451,12 +11470,21 @@ async def round_shepherd(runtime, browser, failures: list[str]):
         await page.keyboard.press("Escape")
         log("a kept PR's row: Resume, Accept this commit…, What it did, Stop looking after this PR")
 
-        # The tab's choices, saved.
-        await page.locator("#settings-button").click()
-        await page.locator("#settings-tabs [data-tab=proactive]").click()
-        pane = page.locator('#settings-pane .tab[data-tab="proactive"]')
+        # Its Options' choices, saved (Prepared for you's old page opens them: its old name).
+        await page.evaluate(
+            "() => import('/static/settings.js').then((m) => m.openSettings('proactive'))"
+        )
+        pane = page.locator("#prs-more")
+        await expect(pane).to_be_visible()
+        await expect(page.locator("#settings-tabs [data-tab=general]")).to_have_attribute(
+            "aria-selected", "true"
+        )
         await pane.locator("select[name=level_fix-ci]").select_option("prepare")
         await pane.locator("input[name=proactive_budget]").fill("12")
+        await expect(page.locator("#proactive-help")).to_contain_text(
+            "Prepares fixes for failing CI, suggests replies to reviews · up to 12 credits"
+        )
+        await pane.locator("#prs-hosts > summary").click()
         await pane.locator("textarea[name=step_hosts]").fill("registry.acme.dev")
         repo = pane.locator('.repo-row[data-repo="acme/api"]')
         await repo.locator("select.disclosure").select_option("yes")
@@ -11468,28 +11496,32 @@ async def round_shepherd(runtime, browser, failures: list[str]):
         assert settings.step_hosts == ["registry.acme.dev"], settings.step_hosts
         choice = settings.proactive_repos["acme/api"]
         assert choice.disclosure == "yes" and choice.localhost, choice
-        # GitHub is never a host steps may reach: said where it was typed.
+        # GitHub is never a host steps may reach: said where it was typed (its folds opened).
         await page.locator("#settings-button").click()
-        await page.locator("#settings-tabs [data-tab=proactive]").click()
-        await pane.locator("textarea[name=step_hosts]").fill("api.github.com")
+        await page.locator("#settings-tabs [data-tab=general]").click()
+        await expect(pane).to_be_hidden()
+        hosts = pane.locator("textarea[name=step_hosts]")
+        await hosts.evaluate("t => { t.value = 'api.github.com'; }")
+        await page.locator("#settings-tabs [data-tab=you]").click()
         await page.locator("#settings-form footer button[type=submit]").click()
         await expect(page.locator("#settings-error")).to_contain_text("api.github.com is GitHub's")
+        await expect(hosts).to_be_focused()
         assert runtime.store.settings().step_hosts == ["registry.acme.dev"]
         await page.locator("#settings-cancel").click()
-        log("the tab's choices saved; GitHub refused as a host")
+        log("its Options' choices saved; GitHub refused as a host, its field opened")
 
         # Off: its tab, its section and its words on rows go.
         await page.locator("#settings-button").click()
         await page.locator("#settings-tabs [data-tab=general]").click()
         await page.locator("#proactive-line input").uncheck()
-        await expect(page.locator("#settings-tabs [data-tab=proactive]")).to_be_hidden()
+        await expect(page.locator("#prs-options")).to_be_hidden()
         await page.locator("#settings-form footer button[type=submit]").click()
         await until(lambda: not runtime.store.settings().proactive, 15)
         await expect(page.locator("#prepared")).to_have_count(0)
         await expect(row.locator(".kept-line")).to_have_count(0)
         await expect(row.get_by_role("button", name="Review fix")).to_have_count(0)
         await context.close()
-        log("turned off: its tab, its section and its words on rows go")
+        log("turned off: its Options, its section and its words on rows go")
     finally:
         discovery.hand = real_hand
 
@@ -11550,6 +11582,8 @@ async def round_settings(runtime, browser, failures: list[str]):
         await settings_validation(runtime, browser)
         await settings_keyboard_and_names(runtime, browser)
         await settings_paused(runtime, browser)
+        await settings_general(runtime, browser)
+        await settings_you(runtime, browser)
         folder, _ = codex_on_path()
         runtime.found_cache = (float("-inf"), [])
         try:
@@ -11591,9 +11625,9 @@ async def settings_drafts(runtime, browser):
     log("settings: a connection's draft survives Back, another connection and another page")
     # Cancel: drafts on three pages and in a folded row, gone; Save then changes nothing.
     await page.locator("#settings-button").click()
-    await page.locator("#settings-tabs [data-tab=workers]").click()
-    await page.locator("input[name=worker_sandbox]").check()
     await page.locator("#settings-tabs [data-tab=general]").click()
+    await page.locator("input[name=worker_sandbox]").check()
+    await page.locator("#general-more > summary").click()
     await page.locator("input[name=worker_idle_hours]").fill("48")
     await page.locator("#settings-tabs [data-tab=agents]").click()
     await page.locator("#agent-copilot .fold").click()
@@ -11602,8 +11636,10 @@ async def settings_drafts(runtime, browser):
     await page.locator("#settings-cancel").click()
     assert not store.settings().worker_sandbox
     await page.locator("#settings-button").click()
-    await page.locator("#settings-tabs [data-tab=workers]").click()
+    await page.locator("#settings-tabs [data-tab=general]").click()
     await expect(page.locator("input[name=worker_sandbox]")).not_to_be_checked()
+    await expect(page.locator("#general-more")).not_to_have_attribute("open", "")
+    await page.locator("#general-more > summary").click()
     await expect(page.locator("input[name=worker_idle_hours]")).to_have_value(
         str(store.settings().worker_idle_hours)
     )
@@ -11616,7 +11652,11 @@ async def settings_drafts(runtime, browser):
     for key in ("worker_sandbox", "worker_idle_hours", "worker_credit_limit"):
         assert body[key] == saved[key], (key, body[key], saved[key])
     log("settings: Cancel discards drafts on every page and in a folded row")
-    # Scan now in the middle: the watches saved, the emoji still a draft until Save.
+    # Scan now in the middle: the watches saved, the emoji still a draft until Save. (A scan an
+    # earlier round left at work would keep Scan now off: that one is over.)
+    if runtime.connector.busy():
+        runtime.update_session(runtime.connector.session()["id"], status="idle", activity="")
+        runtime.publish_state()
     await page.locator("#settings-button").click()
     await page.locator("#settings-tabs [data-tab=connections]").click()
     await page.locator(".conn[data-conn=slack] .conn-open").click()
@@ -11728,9 +11768,9 @@ async def settings_retained(runtime, browser):
 
 
 async def settings_validation(runtime, browser):
-    """A problem opens its field wherever the owner is: the browser's (a number in General, from
-    Connections), the page's (MCP servers in a connection's details, from General) and the
-    server's (the code folder, from You)."""
+    """A problem opens its field wherever the owner is: the browser's (a number in General's More,
+    folded, from Connections), the page's (MCP servers in a connection's details, from General)
+    and the server's (the code folder, from You; Task folders in More, folded, by its name)."""
     context, page, errors, _, posted = await settings_page(browser)
     await page.locator("#settings-button").click()
     await page.locator("#settings-tabs [data-tab=general]").click()
@@ -11739,6 +11779,7 @@ async def settings_validation(runtime, browser):
     await page.locator("#settings-tabs [data-tab=connections]").click()
     await page.locator("#settings-form footer button[type=submit]").click()
     await expect(page.locator("#settings-page-general")).to_be_visible()
+    await expect(page.locator("#general-more")).to_have_attribute("open", "")
     await expect(idle).to_be_focused()
     await idle.fill("24")
     mcp = page.locator("textarea[name=mcp_servers]")
@@ -11759,6 +11800,16 @@ async def settings_validation(runtime, browser):
     await expect(code).to_be_focused()
     await expect(code).to_have_attribute("aria-invalid", "true")
     assert all(body.get("code_folder") != "/nope/not/here" or True for body in posted)
+    await page.locator("#settings-cancel").click()
+    await page.locator("#settings-button").click()
+    await page.locator("#settings-tabs [data-tab=general]").click()
+    scratch = page.locator("input[name=scratch_directory]")
+    await scratch.evaluate("i => { i.value = 'relative/tasks'; }")
+    await page.locator("#settings-tabs [data-tab=you]").click()
+    await page.locator("#settings-form footer button[type=submit]").click()
+    await expect(page.locator("#settings-error")).to_contain_text("Task folders")
+    await expect(page.locator("#general-more")).to_have_attribute("open", "")
+    await expect(scratch).to_be_focused()
     await page.locator("#settings-cancel").click()
     assert not [e for e in errors if "422" not in e], errors
     await context.close()
@@ -11782,22 +11833,26 @@ async def settings_keyboard_and_names(runtime, browser):
         await expect(page.locator(f"#{tab_id}")).to_have_attribute(
             "aria-controls", await panel.get_attribute("id")
         )
+    await expect(tabs.locator("[role=tab]")).to_have_text(
+        ["General", "Agents & models", "Connections", "You"]
+    )
     await page.keyboard.press("Home")
     await expect(tabs.locator("[data-tab=general]")).to_be_focused()
     await page.keyboard.press("ArrowUp")
-    await expect(tabs.locator("[data-tab=advanced]")).to_be_focused()
-    await expect(page.locator("#settings-page-advanced")).to_be_visible()
+    await expect(tabs.locator("[data-tab=you]")).to_be_focused()
+    await expect(page.locator("#settings-page-you")).to_be_visible()
     await page.keyboard.press("ArrowRight")
     await expect(tabs.locator("[data-tab=general]")).to_have_attribute("aria-selected", "true")
     await page.keyboard.press("End")
-    await expect(tabs.locator("[data-tab=advanced]")).to_have_attribute("aria-selected", "true")
+    await expect(tabs.locator("[data-tab=you]")).to_have_attribute("aria-selected", "true")
     await page.keyboard.press("Escape")
     # Old names and connections' own.
     for name, tab, shown_part in (
         ("models", "agents", "#settings-page-agents"),
         ("agents", "agents", "#settings-page-agents"),
-        ("workers", "workers", "#settings-page-workers"),
-        ("advanced", "advanced", "#settings-page-advanced"),
+        ("workers", "general", "#general-workers"),
+        ("advanced", "general", "#general-more [name=report_footer]"),
+        ("proactive", "general", "#proactive-line"),
         ("connections", "connections", "#conn-list"),
         ("connections/watches", "connections", "[data-conn-detail=watches]"),
         ("whatever", "general", "#settings-page-general"),
@@ -11824,6 +11879,143 @@ async def settings_keyboard_and_names(runtime, browser):
     assert not errors, errors
     await context.close()
     log("settings: a tablist by keyboard; old names; Back by keyboard to its row")
+
+
+async def settings_general(runtime, browser):
+    """Settings v2, phase 2 (§4, §7.2): General's groups; Ask first is worker_yolo the other way
+    round, its line in a worker's ⋯ words, and under it, always, what holds either way;
+    Sandbox's Options offered whether it is on or off (off, they apply to Slack readers); More
+    folded with what most never change; Desktop notifications only where they can show."""
+    import sys
+
+    store = runtime.store
+    before = store.settings()
+    try:
+        store.save_settings(
+            before.model_copy(update={"worker_yolo": True, "worker_sandbox": False})
+        )
+        runtime.publish_state()
+        context, page, errors, _, posted = await settings_page(browser)
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=general]").click()
+        general = page.locator("#settings-page-general")
+        await expect(general.locator(".settings-group > h4")).to_have_text(
+            ["Your work", "Workers", "On its own", "Keep me posted"]
+        )
+        ask = page.locator("input[name=ask_first]")
+        await expect(ask).not_to_be_checked()
+        # Two lines: what this way does, and (always) what holds either way.
+        floor = page.locator("#ask-first-floor")
+        either = (
+            "Either way, no worker posts, reviews or merges on GitHub as you, pushes to main, or "
+            "force-pushes others' branches."
+        )
+        await expect(page.locator("#ask-first-help")).to_have_text(
+            "Workers act without asking, as in your own Copilot sessions."
+        )
+        await expect(floor).to_have_text(either)
+        await ask.check()
+        await expect(page.locator("#ask-first-help")).to_have_text(
+            "Workers ask before risky commands."
+        )
+        await expect(floor).to_be_visible()
+        await expect(ask).to_have_attribute("aria-describedby", "ask-first-help ask-first-floor")
+        # Sandbox: its line as the switch is, and (always) that Slack readers are sandboxed; off,
+        # its Options still there, saying whom they apply to.
+        sandbox_says = page.locator("#sandbox-help")
+        await expect(sandbox_says).to_have_text(
+            "Workers can change any of your files, as your own sessions can."
+        )
+        await expect(page.locator("#sandbox-slack")).to_have_text(
+            "Workers that read Slack are always sandboxed."
+        )
+        await expect(page.locator("#sandbox-more")).to_be_hidden()
+        await page.locator("#sandbox-options").click()
+        await expect(page.locator("#sandbox-options")).to_have_attribute("aria-expanded", "true")
+        await expect(page.locator("#sandbox-when-off")).to_be_visible()
+        writable = tempfile.mkdtemp(prefix="cos-ui-writable-")
+        await page.locator("textarea[name=sandbox_writable]").fill(writable)
+        await page.locator("input[name=worker_sandbox]").check()
+        await expect(page.locator("#sandbox-when-off")).to_be_hidden()
+        await expect(sandbox_says).to_have_text(
+            "Workers can change files only in their own folders."
+        )
+        await expect(page.locator("#sandbox-slack")).to_be_visible()
+        await page.locator("input[name=worker_sandbox]").uncheck()
+        # More: folded, what it holds named on its line.
+        more = page.locator("#general-more")
+        await expect(more.locator("summary")).to_have_text(
+            "More: idle workers, overdue tasks, folders, updates"
+        )
+        await expect(more.locator("input[name=stall_hours]")).to_be_hidden()
+        await save_settings_dialog(page)
+        assert posted[-1]["worker_yolo"] is False, posted[-1]["worker_yolo"]
+        saved = store.settings()
+        assert not saved.worker_yolo and len(saved.sandbox_writable) == 1, saved.sandbox_writable
+        # Saved: checked when it opens again; unticked, yolo again.
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=general]").click()
+        await expect(ask).to_be_checked()
+        await expect(page.locator("#sandbox-more")).to_be_hidden()
+        await ask.uncheck()
+        await save_settings_dialog(page)
+        assert store.settings().worker_yolo is True
+        assert not [e for e in errors if "422" not in e], errors
+        await context.close()
+        # Off macOS no banner can show: no line for it (its value kept).
+        real = sys.platform
+        sys.platform = "linux"
+        try:
+            context, page, errors, _, posted = await settings_page(browser)
+            await page.locator("#settings-button").click()
+            await page.locator("#settings-tabs [data-tab=general]").click()
+            await expect(page.locator("#notifications-line")).to_be_hidden()
+            await save_settings_dialog(page)
+            assert posted[-1]["mac_notifications"] == before.mac_notifications
+            await context.close()
+        finally:
+            sys.platform = real
+    finally:
+        store.save_settings(before)
+        runtime.publish_state()
+    log("settings: General's groups; Ask first both ways; Sandbox's Options on or off; More")
+
+
+async def settings_you(runtime, browser):
+    """Settings v2, phase 2 (§6): You's lists folded with their counts (Habits open, to add one;
+    an empty list not shown); the profile with its first line or that a draft waits; the notes
+    with how many."""
+    profile = runtime.snapshot().get("profile") or ""
+    notes = runtime.snapshot().get("setup_notes") or {}
+    initial = "\n".join(f"{topic}: {entry['note']}" for topic, entry in notes.items())
+    await runtime.toolset.save_profile("Backend engineer on acme-api.\nPrefers small PRs.")
+    await runtime.asks.edit_setup_notes("gh: signed in\ndocker: colima", initial)
+    runtime.publish_state()
+    context, page, errors, _, _ = await settings_page(browser)
+    await page.locator("#settings-button").click()
+    await page.locator("#settings-tabs [data-tab=you]").click()
+    you = page.locator("#settings-page-you")
+    await expect(you.locator(".page-head h3")).to_have_text("You")
+    await expect(you.locator("#you-habits")).to_have_attribute("open", "")
+    await expect(you.locator("#lesson-text")).to_be_visible()
+    for fold in ("#you-styles", "#you-checks", "#you-profile", "#you-notes"):
+        await expect(you.locator(fold)).not_to_have_attribute("open", "")
+    await expect(you.locator("#profile-preview")).to_have_text("Backend engineer on acme-api.")
+    await expect(you.locator("#notes-count")).to_have_text("2 notes")
+    for name, count in (("styles", "#styles li"), ("checks", "#checks li")):
+        shown = await you.locator(count).count()
+        fold = you.locator(f"#you-{name}")
+        if shown:
+            await expect(fold.locator(f"#{name}-count")).to_have_text(str(shown))
+        else:
+            await expect(fold).to_be_hidden()
+    await page.locator("#settings-cancel").click()
+    assert not errors, errors
+    await context.close()
+    await runtime.toolset.save_profile(profile)
+    await runtime.asks.edit_setup_notes(initial, "gh: signed in\ndocker: colima")
+    runtime.publish_state()
+    log("settings: You's lists folded with their counts; profile and notes with their lines")
 
 
 async def settings_paused(runtime, browser):
