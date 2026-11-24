@@ -7,7 +7,8 @@ sent item's line on Home (browser-shots/send/); Monitoring's runs and Artifacts'
 (browser-shots/agents-m2/); a task's life: its cards, a failed task out of Needs you, failing
 Watch scans (browser-shots/qa7-life/); Your OK and Handled for you (browser-shots/qa8-approvals/);
 a busy worker's second worker: its line, its place in the sidebar, its row and chat, and its
-switch in Settings (browser-shots/fork/).
+switch in Settings (browser-shots/fork/); Autopilot: its Settings line, Home's header, its card,
+its record (browser-shots/autopilot/).
 
 Fails on: horizontal scrolling; elements overflowing their card or overlapping each other;
 more than one main (filled) button per card or dialog footer; controls under 28 px tall or
@@ -1575,6 +1576,139 @@ async def shepherd_views(runtime, browser, quality: Quality):
     log("Prepared for you: Home, a fix's review, its Settings tab (browser-shots/shepherd/)")
 
 
+async def autopilot_views(runtime, browser, quality: Quality):
+    """Autopilot (autopilot.js): its line in Settings → General, off and ticked with its group;
+    Home's header with its menu, then on (its line and Stop); a card it set aside with why; its
+    card when a run ends; a worker's chat with its marked line; its record, a run open and an
+    action unfolded; 800 to 1440 px, light and dark (browser-shots/autopilot/)."""
+    from autopilot_world import seed_page
+
+    folder = SHOTS / "autopilot"
+    folder.mkdir(exist_ok=True)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        await expect(page.locator("#session-actions .menu-wrap.autopilot")).to_have_count(0)
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=general]").click()
+        await expect(page.locator("#autopilot-line")).to_be_visible()
+        await expect(page.locator("#autopilot-group")).to_have_count(0)
+        await page.locator("#autopilot-line").scroll_into_view_if_needed()
+        await page.screenshot(path=folder / f"settings-off-1280-{scheme}.png")
+        await page.locator("#settings-cancel").click()
+        await context.close()
+    seeded = await seed_page(runtime)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        meta = page.locator("#session-meta .autopilot-meta")
+        await expect(meta).to_contain_text("Autopilot · until ")
+        await expect(meta).to_contain_text("4 done")
+        stop = page.locator("#session-actions .autopilot-stop")
+        await expect(stop).to_have_attribute(
+            "aria-label", re.compile(r"^Stop Autopilot \(on until ")
+        )
+        await expect(page.locator("#needs .autopilot-why")).to_have_text(
+            "Set aside: it asks for a permission only you can give."
+        )
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            await page.wait_for_timeout(150)
+            name = f"home-{width}-{scheme}"
+            await page.screenshot(path=folder / f"{name}.png")
+            await quality.check(page, f"autopilot {name}", known=KNOWN_HOME_FINDINGS)
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=chat]").click()
+                await page.wait_for_timeout(100)
+            summary = page.locator(".card.autopilot-summary").last
+            await summary.scroll_into_view_if_needed()
+            await page.wait_for_timeout(100)
+            await summary.screenshot(path=folder / f"card-{width}-{scheme}.png")
+            await quality.check(page, f"autopilot card {width} {scheme}", ".card.autopilot-summary")
+        await quality.contrast(page, f"autopilot home {scheme}")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        summary = page.locator(".card.autopilot-summary").last
+        await expect(summary).to_contain_text("While you were away")
+        await expect(summary).to_contain_text("Workers asked first while Autopilot was on")
+        await expect(summary.locator(".autopilot-then").first).to_contain_text("then: ")
+        await quality.contrast(page, f"autopilot card {scheme}", ".card.autopilot-summary")
+        # A worker's chat: Autopilot's line, marked as its own.
+        await page.locator("#sidebar").get_by_text("Session store").first.click()
+        notice = page.locator(".line.autopilot-notice")
+        await expect(notice).to_contain_text("Autopilot decided: Postgres")
+        await page.wait_for_timeout(100)
+        await page.screenshot(path=folder / f"worker-1280-{scheme}.png")
+        await quality.check(page, f"autopilot worker {scheme}", "#timeline")
+        # Its record, from the header's "4 done".
+        await page.locator("#back-home").click()
+        await meta.get_by_role("button", name="4 done").click()
+        record = page.locator(".autopilot-record")
+        await expect(record.locator(".autopilot-run")).to_have_count(2)
+        await expect(record.locator(".autopilot-run[open] .autopilot-item")).to_have_count(4)
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            await page.wait_for_timeout(150)
+            await page.screenshot(path=folder / f"record-{width}-{scheme}.png")
+            await quality.check(page, f"autopilot record {width} {scheme}", "#timeline")
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        earlier = record.locator(".autopilot-run").nth(1)
+        await earlier.locator("summary").click()
+        line = earlier.get_by_role("button", name=re.compile("Accepted “Fix the flaky login test”"))
+        await line.click()
+        detail = earlier.locator(".autopilot-detail")
+        await expect(detail).to_contain_text("uv run pytest -q")
+        await detail.scroll_into_view_if_needed()
+        await page.wait_for_timeout(100)
+        await page.screenshot(path=folder / f"record-entry-1280-{scheme}.png")
+        await quality.check(page, f"autopilot entry {scheme}", "#timeline")
+        await quality.contrast(page, f"autopilot record {scheme}", "#timeline")
+        # Settings → General with its line ticked: its small group.
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=general]").click()
+        group = page.locator("#autopilot-group")
+        await expect(group).to_be_visible()
+        for width in (800, 1280):
+            await page.set_viewport_size({"width": width, "height": 900})
+            await group.scroll_into_view_if_needed()
+            await page.wait_for_timeout(100)
+            await page.screenshot(path=folder / f"settings-on-{width}-{scheme}.png")
+            await quality.check(page, f"autopilot settings {width} {scheme}", "#settings-dialog")
+        await quality.contrast(page, f"autopilot settings {scheme}", "#settings-dialog")
+        await page.locator("#settings-cancel").click()
+        await context.close()
+    # Stopped: Home's menu to turn it on again.
+    await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        menu = page.locator("#session-actions .menu-wrap.autopilot")
+        await menu.locator("button.menu-button").click()
+        await expect(menu.get_by_role("menuitem", name="For 2 hours")).to_be_visible()
+        await expect(menu.get_by_role("menuitem", name="Until I turn it off")).to_be_visible()
+        await page.wait_for_timeout(150)
+        await page.screenshot(path=folder / f"menu-1280-{scheme}.png")
+        await quality.check(page, f"autopilot menu {scheme}", "#session-actions")
+        await context.close()
+    assert seeded["earlier"]
+    log(
+        "Autopilot: Settings, Home, its card, a worker's line, its record (browser-shots/autopilot/)"
+    )
+
+
 async def main():
     from chiefofstaff import machine
 
@@ -1619,8 +1753,9 @@ async def main():
         quality = Quality()
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
-            # `UI_QUALITY_ONLY=shepherd`: only Prepared for you's views.
-            if os.environ.get("UI_QUALITY_ONLY") != "shepherd":
+            # `UI_QUALITY_ONLY=shepherd` (or `autopilot`): only Prepared for you's (Autopilot's).
+            only = os.environ.get("UI_QUALITY_ONLY", "")
+            if not only:
                 await report_views(runtime, browser, quality)
                 await run(runtime, seeded, browser, quality, phase)
                 log("Home, a worker, Settings and Usage: 800 to 1440 px, light and dark")
@@ -1648,7 +1783,10 @@ async def main():
                 log("Needs you's dots, read or not, and a new result's word (needs-dots/)")
                 await fork_views(runtime, browser, quality)
                 log("a busy worker's second worker (fork/)")
-            await shepherd_views(runtime, browser, quality)
+            if only in {"", "shepherd"}:
+                await shepherd_views(runtime, browser, quality)
+            if only in {"", "autopilot"}:
+                await autopilot_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True
         await serving
