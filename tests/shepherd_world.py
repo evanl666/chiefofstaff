@@ -17,7 +17,7 @@ from conftest import Harness, settle
 from chiefofstaff.backend import TESTED_CLI
 from chiefofstaff.models import Settings
 from chiefofstaff.roles import WORKER
-from chiefofstaff.sources.github import GitHubError
+from chiefofstaff.sources.github import GitHubError, github_time
 
 REPO = "acme/api"
 NUMBER = 12
@@ -64,6 +64,11 @@ def test_timeout():
 def ran_line(line: str) -> subprocess.CompletedProcess:
     """A shell line, run as Copilot's shell tool runs it."""
     return subprocess.run(line, shell=True, capture_output=True, text=True, check=False)  # noqa: S602
+
+
+def github_now() -> str:
+    """Now, as GitHub writes a comment's time."""
+    return github_time(time.time())
 
 
 class FakeGitHub:
@@ -281,6 +286,7 @@ class FakeGitHub:
                 "in_reply_to_id": int(arguments[1].split("/")[-2]),
                 "html_url": f"https://github.com/{REPO}/pull/{NUMBER}#r{7000 + len(self.posted)}",
                 "user": {"login": "me"},
+                "created_at": github_now(),
             }
             self.posted.append(reply)
             self.writes.append(("reply", arguments, token, body))

@@ -5,17 +5,19 @@ what a crash leaves, the Router's handing over, and the owner's other PRs found 
 import asyncio
 import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from conftest import call_tool, settle
-from shepherd_world import BRANCH, REPO, TARGET, World, run
+from shepherd_world import BRANCH, REPO, TARGET, World, github_now, run
 from test_shepherd import STANCES, addressed, claimed, comments, fixed, said, step_result
 
 from chiefofstaff import publish, workspaces
 from chiefofstaff.publish import approve, reconcile_all
 from chiefofstaff.shepherd import MARGIN, PERMITTED, PROBE_RETRY_SECONDS
+from chiefofstaff.store import now
 
 # What an unasked attempt reserves of the day's budget: what it may spend, and the margin.
 RESERVE = PERMITTED["fix-ci"] + MARGIN
@@ -1058,7 +1060,7 @@ async def test_a_reply_the_owner_posted_themselves_is_not_posted_again(world):
     step, _ = await addressed(world, runtime, STANCES)
     world.github.posted.append(
         {"id": 6999, "body": "Done: renamed it.", "in_reply_to_id": 501,
-         "html_url": "https://x/6999", "user": {"login": "me"}}
+         "html_url": "https://x/6999", "user": {"login": "me"}, "created_at": github_now()}
     )  # fmt: skip
     await approve(runtime.shepherd, step["id"], {"disclosure": "no"})
     await settle(runtime)
@@ -1297,7 +1299,8 @@ async def test_each_operation_is_read_back_on_github(world, kind, payload, githu
     fake = world.github
     if "posted" in github:
         fake.posted.append({"id": 7001, "body": github["posted"], "in_reply_to_id": 501,
-                            "html_url": "https://x/7001", "user": {"login": "me"}})  # fmt: skip
+                            "html_url": "https://x/7001", "user": {"login": "me"},
+                            "created_at": github_now()})  # fmt: skip
     if "resolved" in github:
         fake.threads = [{"id": "PRRT_1", "isResolved": True, "isOutdated": False, "path": "a",
                          "line": 1, "comments": {"nodes": []}}]  # fmt: skip
@@ -1318,8 +1321,46 @@ async def test_each_operation_is_read_back_on_github(world, kind, payload, githu
 
     runtime.github.raw = gh
     operation = {"kind": kind, "repo": REPO, "number": 12, **payload}
-    found, _ = await reconcile(runtime.shepherd, {"id": "a1", "payload": operation})
+    action = {"id": "a1", "payload": operation, "account": "me", "updated_at": now()}
+    found, _, _ = await reconcile(runtime.shepherd, action)
     assert found == state
+
+
+@pytest.mark.parametrize(
+    ("posted", "state"),
+    [
+        ([("maya", 0)], "failed"),  # Someone else's, the same words: not ours.
+        ([("me", -3600)], "failed"),  # Ours, from before it was sent: another reply.
+        ([("maya", 0), ("me", 5)], "sent"),
+        ([("me", 5), ("me", 9)], "uncertain"),  # Two that could be it: which one is not known.
+    ],
+)
+async def test_a_reply_whose_send_is_unknown_is_read_back_as_ours_only(world, posted, state):
+    """Reading back a reply whose send was interrupted took any reply in its conversation with
+    its text for it: someone else's, or an older one. Only one posted as its account, since it
+    began to go out, with exactly its text is it; more than one stays not known, saying why."""
+    from chiefofstaff.publish import reconcile
+    from chiefofstaff.sources.github import github_time
+
+    runtime = await claimed(world)
+    began = time.time()
+    for number, (login, after) in enumerate(posted):
+        world.github.posted.append(
+            {"id": 7100 + number, "body": "Done.", "in_reply_to_id": 501,
+             "html_url": f"https://x/{7100 + number}", "user": {"login": login},
+             "created_at": github_time(began + after)}
+        )  # fmt: skip
+    operation = {"kind": "reply", "repo": REPO, "number": 12, "in_reply_to": 501, "text": "Done."}
+    since = datetime.fromtimestamp(began, UTC).isoformat()
+    action = {"id": "a1", "payload": operation, "account": "me", "updated_at": since}
+    read = await reconcile(runtime.shepherd, action)
+    assert read[0] == state
+    assert read[1] == ("https://x/7101" if state == "sent" else "")
+    if state == "uncertain":
+        assert read[2] == (
+            "Not known whether it went out: 2 replies with its text are there, posted as you "
+            "since it was sent. Look on the PR."
+        )
 
 
 MINE = [

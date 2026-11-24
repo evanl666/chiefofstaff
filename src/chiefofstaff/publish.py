@@ -25,6 +25,7 @@ from .control import (
 )
 from .policy import DEFAULT_BRANCHES, operation_denial
 from .receipts import listed
+from .sources.github import UnsureError
 from .store import now
 from .workspaces import SAFE_GIT, checkout_git
 
@@ -315,8 +316,8 @@ async def send(shepherd: Shepherd, step: dict, action: dict, claim: dict) -> boo
             # Never transmitted (its barrier not passed): nothing to read back.
             control.finish(action["id"], "failed", f"{exc}"[:300])
             return False
-        state, link = await reconcile(shepherd, current)
-        control.finish(action["id"], state, f"{exc}"[:300], link)
+        state, link, said = await reconcile(shepherd, current)
+        control.finish(action["id"], state, (said or f"{exc}")[:300], link)
         return operation["kind"] != "push" or state == "sent"
     finally:
         shepherd.transmitting.discard(action["id"])
@@ -456,8 +457,16 @@ async def send_reply(
         raise RefusedError("its conversation was resolved meanwhile")
     target = {"repo": operation["repo"], "number": operation["number"],
               "in_reply_to": operation["in_reply_to"], "task_id": step["task_id"]}  # fmt: skip
-    if found := await github.find_reply(target, operation["text"]):
-        return found  # Posted already (by a send whose answer was lost, or the owner).
+    # Posted already, from this plan's text (by a send whose answer was lost, or by the owner):
+    # as the bound account, since the attempt began.
+    try:
+        found = await github.find_reply(
+            target, operation["text"], authors=[login], since=step.get("created_at") or ""
+        )
+    except UnsureError as exc:
+        raise RefusedError(f"it may be posted already: {exc}") from exc
+    if found:
+        return found
     path = (f"repos/{operation['repo']}/pulls/{int(operation['number'])}/comments/"
             f"{int(operation['in_reply_to'])}/replies")  # fmt: skip
     argv = ["gh", "api", path, "--method=POST", "--input=-"]
@@ -598,8 +607,17 @@ SEND = {
 # Reconciling: what became of an operation whose outcome is not known.
 
 
-async def reconcile(shepherd: Shepherd, action: dict) -> tuple[str, str]:
-    """Whether an operation went out, read on GitHub: (sent | failed | uncertain, link)."""
+async def reconcile(shepherd: Shepherd, action: dict) -> tuple[str, str, str]:
+    """Whether an operation went out, read on GitHub: (sent | failed | uncertain, its link, and
+    why it is uncertain when GitHub shows more than one thing that could be it)."""
+    try:
+        state, link = await read_back(shepherd, action)
+    except UnsureError as exc:
+        return "uncertain", "", f"Not known whether it went out: {exc}. Look on the PR."
+    return state, link, ""
+
+
+async def read_back(shepherd: Shepherd, action: dict) -> tuple[str, str]:
     operation, github = action["payload"], shepherd.runtime.github
     try:
         if operation["kind"] == "push":
@@ -612,7 +630,14 @@ async def reconcile(shepherd: Shepherd, action: dict) -> tuple[str, str]:
         if operation["kind"] == "reply":
             target = {"repo": operation["repo"], "number": operation["number"],
                       "in_reply_to": operation["in_reply_to"]}  # fmt: skip
-            found = await github.find_reply(target, operation["text"])
+            # Ours only: as its account, since it began to go out (when it was journaled as
+            # dispatching), its whole text.
+            found = await github.find_reply(
+                target,
+                operation["text"],
+                authors=[account] if (account := action.get("account")) else [],
+                since=action.get("updated_at") or "",
+            )
             return ("sent", found) if found else ("failed", "")
         if operation["kind"] == "resolve":
             details = await github.pr_details(operation["repo"], int(operation["number"]))
@@ -639,6 +664,8 @@ async def reconcile(shepherd: Shepherd, action: dict) -> tuple[str, str]:
                 state = {"merged": "sent", "failed": "failed"}.get(str(found.get("status")))
                 return state or "uncertain", ""
             return "failed", ""
+    except UnsureError:
+        raise
     except Exception:
         logger.info("Could not reconcile %s.", action["id"], exc_info=True)
     return "uncertain", ""
@@ -663,8 +690,8 @@ async def reconcile_all(shepherd: Shepherd):
     """Operations left dispatching (a crash, turning off mid-send): read on GitHub, never sent
     again blindly."""
     for action in shepherd.control.actions("", DISPATCHING):
-        state, link = await reconcile(shepherd, action)
-        shepherd.control.finish(action["id"], state, "Reconciled after a stop.", link)
+        state, link, said = await reconcile(shepherd, action)
+        shepherd.control.finish(action["id"], state, said or "Reconciled after a stop.", link)
         if state == "sent" and action["payload"]["kind"] == "push":
             payload = action["payload"]
             shepherd.control.published(action["target"], payload["commit"])

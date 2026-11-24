@@ -1004,6 +1004,11 @@ named in it; not a later task of that worker that only asks about it), and once 
 finished task goes back to where it was. A worker that only read or reviewed a PR someone else's
 task made is not asked too, except for replies to its own review comments.
 
+**A send a restart interrupted** is looked for on GitHub (or Slack) first. On GitHub it counts as
+sent only if it is there as your account's, posted since it began to go out, with exactly its
+text (a teammate's reply in the same words is not it); when two could be it, its card says it
+can't tell which, for you to look and mark it sent or send it again.
+
 **Several GitHub accounts** (a personal one active in `gh`, your company's signed in as well):
 Chief of Staff reaches each repository with the account that can see it, and remembers it per
 organization. Sign in with each once (`gh auth login`); you need not switch. Workers are told the
@@ -1075,8 +1080,9 @@ approved is checked again just before each part of it is sent: turned off, pause
 looking after this PR*, or the PR changing hands withdraws what hasn't gone out yet (a reply
 waiting its turn to be sent too), and nothing goes out more than an hour after you approved it.
 If Chief of Staff stops while it publishes what you approved, it reads on GitHub what went out
-when it starts again, and sends the rest once, within that hour (replies to a fix whose push
-did not go out are not sent). While **Update and
+when it starts again (a reply only as your account's, since it began to go out, with exactly
+its text: when two could be it, the attempt says it can't tell), and sends the rest once, within
+that hour (replies to a fix whose push did not go out are not sent). While **Update and
 restart** waits for no turn running, no attempt starts.
 
 **Replies and the AI line.** The first time it would post a reply in a repository, the review

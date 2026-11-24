@@ -20,7 +20,7 @@ from .learning import SENSITIVE
 from .models import DraftDecision, OkItem
 from .peers import clip
 from .roles import ROUTER, SLACK, WORKER
-from .sources.github import REVIEW_EVENTS, MergePending, StackBelow, merge_refusal
+from .sources.github import REVIEW_EVENTS, MergePending, StackBelow, UnsureError, merge_refusal
 from .sources.slack import describe, message_keys, plain
 from .store import hours_ago, now
 from .tasks import OPEN
@@ -314,6 +314,8 @@ class Drafts:
                 draft_id, {**draft["target"], "verdict": verdict}
             )
         self.store.update_draft(draft_id, status="sending", final_text=final)
+        # When it began to go out: what a check after a restart reads back from (check_uncertain).
+        self.store.set(f"sendingat:{draft_id}", now())
         try:
             if draft["kind"] == "slack":
                 outcome = await self.runtime.slack.send(draft["target"], final)
@@ -324,6 +326,7 @@ class Drafts:
                 ):
                     outcome += await self.resolve_conversation(draft)
         except Exception as exc:
+            self.store.delete(f"sendingat:{draft_id}")
             error = describe(exc)[:1000]
             if STALE_DRAFT.search(error):
                 # It cannot go as it is (the PR moved on): its session drafts it again.
@@ -354,6 +357,7 @@ class Drafts:
             # Failed for good when stale: nothing to check before sending it again.
             then = "" if stale else " Check before retrying."
             raise RuntimeError(f"Sending failed: {error.rstrip('.')}.{then}") from exc
+        self.store.delete(f"sendingat:{draft_id}")
         draft = self.store.update_draft(
             draft_id, status="sent", outcome=(outcome or "")[:1000], resolved_at=now()
         )
@@ -1216,27 +1220,43 @@ class Drafts:
         The lookups run outside draft_lock; the owner may settle a draft meanwhile, so each
         result is applied under the lock and only to a draft that is still uncertain.
         """
+        github = self.runtime.github
         for draft in self.store.drafts("uncertain"):
             text = self.final(draft)
             created = datetime.fromisoformat(draft["created_at"]).timestamp()
+            # Only what was posted as the owner since it began to go out is it (by 0.1.56: since
+            # it was drafted, a few minutes early as GitHub's clock and this one's may differ).
+            since = self.store.get(f"sendingat:{draft['id']}") or (
+                datetime.fromtimestamp(created - 300, UTC).isoformat()
+            )
             try:
                 if draft["kind"] == "slack":
                     found = await self.runtime.slack.find_sent(draft["target"], text, created)
                 elif draft["kind"] == "github" and draft["target"].get("in_reply_to"):
-                    found = await self.runtime.github.find_reply(draft["target"], text)
+                    found = await github.find_reply(draft["target"], text, since=since)
                 elif draft["kind"] == "github" and draft["target"].get("reply_to_comment"):
-                    found = await self.runtime.github.find_conversation_reply(draft["target"], text)
+                    found = await github.find_conversation_reply(draft["target"], text, since)
                 elif draft["kind"] == "github":
-                    # A few minutes early: GitHub's clock and this machine's may differ.
-                    since = datetime.fromtimestamp(created - 300, UTC).strftime("%Y-%m-%dT%H:%M:%S")
-                    found = await self.runtime.github.find_review(draft["target"], text, since)
+                    found = await github.find_review(draft["target"], text, since)
                 else:
                     continue
+            except UnsureError as exc:
+                unsure = (
+                    f"Not known whether it was posted: {exc}. Look on GitHub, then mark it as "
+                    "sent or send it again."
+                )
+                async with self.draft_lock:
+                    if self.store.draft(draft["id"])["status"] == "uncertain":
+                        self.bus.publish(
+                            "draft", self.store.update_draft(draft["id"], outcome=unsure)
+                        )
+                continue
             except Exception:
                 logger.warning("Could not check draft %s.", draft["id"], exc_info=True)
                 continue
             async with self.draft_lock:
                 if self.store.draft(draft["id"])["status"] == "uncertain":
+                    self.store.delete(f"sendingat:{draft['id']}")
                     await self.settle_checked(draft, found)
 
     async def settle_checked(self, draft: dict, found: str):

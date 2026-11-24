@@ -9,7 +9,7 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -540,6 +540,47 @@ def same_text(posted: str, drafted: str) -> bool:
     if shorter in longer and len(shorter) >= 0.6 * len(longer):
         return True
     return SequenceMatcher(None, posted, drafted, autojunk=False).ratio() >= 0.8
+
+
+# GitHub's clock and this computer's may differ: what was sent is looked for from this long
+# before it was sent.
+CLOCK_SLACK = 60
+
+
+class UnsureError(Exception):
+    """More than one item on GitHub could be what was sent: which one, if any, is not known."""
+
+
+def sent_as(item: dict, text: str, accounts: set[str], since: str) -> bool:
+    """Whether a comment or review on GitHub may be what was sent: posted by one of `accounts`,
+    at `since` or after (ISO: when it was sent; CLOCK_SLACK earlier), with exactly that text
+    (the mark it once carried aside). One whose author or time can't be read is not."""
+    if ((item.get("user") or {}).get("login") or "").lower() not in accounts:
+        return False
+    if since and not posted_since(item, since):
+        return False
+    return unmarked(item.get("body")).replace("\r\n", "\n") == text.strip().replace("\r\n", "\n")
+
+
+def posted_since(item: dict, since: str) -> bool:
+    """Whether a comment or review was posted at `since` (ISO) or after, CLOCK_SLACK earlier."""
+    try:
+        when = datetime.fromisoformat(item.get("created_at") or item.get("submitted_at") or "")
+        start = datetime.fromisoformat(since)
+    except ValueError:
+        return False
+    start = start if start.tzinfo else start.replace(tzinfo=UTC)
+    when = when if when.tzinfo else when.replace(tzinfo=UTC)
+    return when.timestamp() >= start.timestamp() - CLOCK_SLACK
+
+
+def the_one(found: list[dict], what: str, published: str) -> str:
+    """The URL of the one item found that is what was sent, "" for none; UnsureError for more."""
+    if len(found) > 1:
+        raise UnsureError(
+            f"{len(found)} {what} with its text are there, posted as you since it was sent"
+        )
+    return (found[0].get("html_url") or published) if found else ""
 
 
 def pages(text: str) -> list:
@@ -1316,19 +1357,20 @@ class GitHubSource:
         return found
 
     async def find_review(self, target: dict, body: str, since: str = "") -> str:
-        """The URL of a published review with this body on the target PR, or "". One without a
-        body (a bare approval, line comments only) is told by who submitted it, on which
-        commit, with which verdict, and when (`since`, ISO: when it was drafted)."""
+        """The URL of a published review with this body on the target PR, or "": posted as the
+        owner at `since` (ISO: when it was sent) or after (UnsureError when more than one is).
+        One without a body (a bare approval, line comments only) is told by who submitted it,
+        on which commit, with which verdict, and when."""
         reviews = pages(
             await self.gh(
                 "api", f"repos/{target['repo']}/pulls/{int(target['number'])}/reviews", "--paginate"
             )
         )
         if body.strip():
-            for review in reviews:
-                if unmarked(review.get("body")) == body.strip():
-                    return review.get("html_url") or "Review published."
-            return ""
+            # Read back as find_reply reads a reply: posted as the owner, since, this body.
+            accounts = await self.logins()
+            found = [review for review in reviews if sent_as(review, body, accounts, since)]
+            return the_one(found, "reviews", "Review published.")
         login = await self.acting_login(target["repo"])
         event = REVIEW_EVENTS.get(target.get("verdict", ""), "COMMENT")
         state = {"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}.get(
@@ -1341,7 +1383,7 @@ class GitHubSource:
                 and review.get("state") == state
                 and review.get("commit_id") == target.get("head_sha")
                 and not (review.get("body") or "").strip()
-                and (not since or (review.get("submitted_at") or "") >= since[:19])
+                and (not since or posted_since(review, since))
             ):
                 return review.get("html_url") or "Review published."
         return ""
@@ -1396,13 +1438,17 @@ class GitHubSource:
             self.posted(f"github:issuecomment:{posted['id']}", text, target)
         return posted.get("html_url", "Reply published.")
 
-    async def find_conversation_reply(self, target: dict, text: str) -> str:
-        """The URL of a published comment with this text on the target PR, or ""."""
+    async def find_conversation_reply(self, target: dict, text: str, since: str = "") -> str:
+        """The URL of the comment sent on the target PR's conversation, read back as find_reply
+        reads a reply: exactly this text, posted as the owner at `since` or after."""
+        accounts = await self.logins()
         path = f"repos/{target['repo']}/issues/{int(target['number'])}/comments"
-        for comment in pages(await self.gh("api", path, "--paginate")):
-            if unmarked(comment.get("body")) == text.strip():
-                return comment.get("html_url") or "Reply published."
-        return ""
+        found = [
+            comment
+            for comment in pages(await self.gh("api", path, "--paginate"))
+            if sent_as(comment, text, accounts, since)
+        ]
+        return the_one(found, "comments", "Reply published.")
 
     async def graphql(self, repo: str, query: str, **variables: str) -> dict:
         """A GraphQL call as the account that reaches the repository (the one that posts
@@ -1648,16 +1694,22 @@ class GitHubSource:
                 return item.get("html_url") or "Posted."
         return ""
 
-    async def find_reply(self, target: dict, text: str) -> str:
-        """The URL of a published reply with this text to the target comment, or ""."""
+    async def find_reply(
+        self, target: dict, text: str, *, authors: Iterable[str] = (), since: str = ""
+    ) -> str:
+        """The URL of the reply sent to the target comment, read back: exactly this text, on
+        that PR in that conversation, posted as one of `authors` (the owner's own accounts when
+        none is named) at `since` (ISO: when it was sent) or after; "" when none is.
+        UnsureError when more than one is: which one, if any, was sent is not known."""
+        accounts = {author.lower() for author in authors} or await self.logins()
         path = f"repos/{target['repo']}/pulls/{int(target['number'])}/comments"
-        comments = pages(await self.gh("api", path, "--paginate"))
-        for comment in comments:
-            if comment.get("in_reply_to_id") == target["in_reply_to"] and (
-                unmarked(comment.get("body")) == text.strip()
-            ):
-                return comment.get("html_url") or "Reply published."
-        return ""
+        found = [
+            comment
+            for comment in pages(await self.gh("api", path, "--paginate"))
+            if str(comment.get("in_reply_to_id")) == str(target["in_reply_to"])
+            and sent_as(comment, text, accounts, since)
+        ]
+        return the_one(found, "replies", "Reply published.")
 
     async def publish_reply(self, target: dict, text: str) -> str:
         repo, number = target["repo"], int(target["number"])

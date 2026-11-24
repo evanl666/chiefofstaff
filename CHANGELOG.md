@@ -20,6 +20,13 @@
   Each part is now checked again just before it is sent; what may no longer go out is withdrawn,
   never sent, and turning it off or *Stop looking after this PR* withdraws at once what waits.
   Nothing goes out more than an hour after you approved it (after a long stop, say).
+- **A send that was interrupted is read back as yours only.** After a stop, Chief of Staff
+  looks on GitHub for what it was sending when it stopped (a reply *Prepared for you* was
+  posting, or a reply, comment or review of yours from its card). It took any reply in that
+  conversation with the same words for it, so a teammate's "Thanks, fixed." or an older reply of
+  yours could settle it as sent. It now counts only one posted as your account since it began
+  to go out, with exactly its text; when two could be it, it says it can't tell which, for you
+  to look (and mark it sent or send it again).
 
 ## 0.1.56 (2026-11-23)
 

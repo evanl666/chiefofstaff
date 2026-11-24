@@ -13,7 +13,7 @@ from conftest import FakeSession, Harness, call_tool, settle, task_of
 
 from chiefofstaff.delivery import digest
 from chiefofstaff.models import DraftDecision, Settings
-from chiefofstaff.sources.github import POSTED_MARK
+from chiefofstaff.sources.github import POSTED_MARK, github_time
 
 
 def interrupt_after_send(harness, session_id, status="idle"):
@@ -275,21 +275,74 @@ async def test_an_interrupted_review_and_reply_posted_with_the_mark_are_found(ha
         harness.router_id, "github", {**target, "in_reply_to": 21}, "Fixed in f61047fa."
     )
     harness.store.execute("UPDATE drafts SET status='uncertain'")
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "active": True, "state": "success"}]}}
+    )
+    posted = {"user": {"login": "me"}, "created_at": github_time(time.time())}
     harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps(
         [
             {
                 "body": f"Looks good.\n\n{POSTED_MARK}",
                 "html_url": "https://github.com/acme/app/pull/7#r1",
+                "user": posted["user"],
+                "submitted_at": posted["created_at"],
             }
         ]
     )
     harness.gh_replies["api repos/acme/app/pulls/7/comments"] = json.dumps(
         [{"in_reply_to_id": 21, "body": f"Fixed in f61047fa.\n\n{POSTED_MARK}",
-          "html_url": "https://github.com/acme/app/pull/7#discussion_r2"}]
+          "html_url": "https://github.com/acme/app/pull/7#discussion_r2", **posted}]
     )  # fmt: skip
     await runtime.drafts.check_uncertain()
     assert harness.store.draft(review["id"])["status"] == "sent"
     assert harness.store.draft(reply["id"])["status"] == "sent"
+
+
+async def test_an_interrupted_reply_is_read_back_as_the_owners_only(harness):
+    """After a restart, a reply, a comment or a review whose send was interrupted was taken as
+    posted when anyone's on the PR had its text (a teammate's "Thanks, fixed."), or an older one
+    of the owner's. Only one posted as the owner since it began to go out is it; two that could
+    be it leave it unknown, saying why."""
+    runtime = await harness.connect()
+    target = {"repo": "acme/app", "number": 7, "head_sha": "abc"}
+    reply = harness.store.create_draft(
+        harness.router_id, "github", {**target, "in_reply_to": 21}, "Thanks, fixed."
+    )
+    comment = harness.store.create_draft(
+        harness.router_id, "github", {**target, "reply_to_comment": 30}, "Thanks, fixed."
+    )
+    review = harness.store.create_draft(harness.router_id, "github", target, "Thanks, fixed.")
+    twice = harness.store.create_draft(
+        harness.router_id, "github", {**target, "number": 8, "in_reply_to": 22}, "On it."
+    )
+    harness.store.execute("UPDATE drafts SET status='uncertain'")
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "active": True, "state": "success"}]}}
+    )
+    late, early = github_time(time.time()), github_time(time.time() - 3 * 3600)
+    theirs = {"body": "Thanks, fixed.", "user": {"login": "bob"}, "created_at": late,
+              "html_url": "https://github.com/acme/app/pull/7#bob"}  # fmt: skip
+    older = {**theirs, "user": {"login": "me"}, "created_at": early}
+    harness.gh_replies["api repos/acme/app/pulls/7/comments"] = json.dumps(
+        [{**theirs, "in_reply_to_id": 21}, {**older, "in_reply_to_id": 21}]
+    )
+    harness.gh_replies["api repos/acme/app/issues/7/comments"] = json.dumps([theirs, older])
+    harness.gh_replies["api repos/acme/app/pulls/7/reviews"] = json.dumps(
+        [{**theirs, "submitted_at": late}, {**older, "submitted_at": early}]
+    )
+    ours = {"body": "On it.", "in_reply_to_id": 22, "user": {"login": "me"}, "created_at": late}
+    harness.gh_replies["api repos/acme/app/pulls/8/comments"] = json.dumps(
+        [{**ours, "html_url": "https://x/1"}, {**ours, "html_url": "https://x/2"}]
+    )
+    await runtime.drafts.check_uncertain()
+    for draft in (reply, comment, review):
+        assert harness.store.draft(draft["id"])["status"] == "pending", draft["target"]
+    unknown = harness.store.draft(twice["id"])
+    assert unknown["status"] == "uncertain"
+    assert unknown["outcome"] == (
+        "Not known whether it was posted: 2 replies with its text are there, posted as you "
+        "since it was sent. Look on GitHub, then mark it as sent or send it again."
+    )
 
 
 async def test_an_interrupted_approval_without_a_body_is_found_not_reposted(harness):
