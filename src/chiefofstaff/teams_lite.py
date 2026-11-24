@@ -5,8 +5,10 @@ read_team_thread are teams.py's, as before.
 
 A few passive stamps are written as things happen: `req:<task>` and `reqtasks:<message>` (the
 owner request a task was made for), `with:<task>` (the tasks of its request it was told to work
-with), `from_task`/`to_task` in an exchange's message and `xchg:<task>` (the exchanges of a
-task), `teamseen:<team>` (the owner's look at a done team). A team is computed from them on
+with; `withpending:<message>`, the names it gave of ones not made yet, until a task of that
+request so named is made or none of its tasks is open), `from_task`/`to_task` in an exchange's
+message and `xchg:<task>` (the exchanges of a task), `teamseen:<team>` (the owner's look at a
+done team). A team is computed from them on
 every read: the tasks of one request joined by a link the Router made on purpose (works_with by
 name, after, a replacement), on two or more workers. The server returns candidates; the page
 says where each stands from Home's own board (static/team.js), the one lifecycle authority.
@@ -24,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from .peers import same as same_words
 from .tasks import OPEN
 from .team_names import avatars, goal_name, message_title, part_names
-from .teams import BLOCKING_MINUTES, iso, minutes_between
+from .teams import BLOCKING_MINUTES, iso, minutes_between, short_label
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -35,6 +37,8 @@ OWNER_REF = re.compile(r'^<message from="owner" type="message" ref="(o[0-9a-f]{6
 RECENT_OWNER = 50
 # Exchanges kept per task (xchg:<task>): its latest.
 EXCHANGES_KEPT = 500
+# Names a request's tasks gave in works_with of tasks not made yet: at most this many kept.
+PENDING_KEPT = 50
 # A team is current (the snapshot's) while a task of its request is open, listed on Home, or
 # changed this recently; older ones come a page at a time (Past teams).
 WINDOW_DAYS = 7
@@ -109,15 +113,15 @@ class TeamsLite:
 
     def record_with(self, task_id: str, request: str, references: list[str]):
         """`with:<task>`: the tasks of its own request a new task was told to work with, by id,
-        by its worker or by exact title, as they are now (never one made later, nor a worker's
-        `wants:` or candidates: those link workers as before, and make no team)."""
+        by its worker, or by its title or short name, as they are now. A name no task of the
+        request has yet waits for one made later in it (`withpending:<request>`). Never a task
+        of another request, nor a worker's `wants:` or candidates: those link workers as before,
+        and make no team."""
         mine = [
             task for task in loads(self.store.get(f"reqtasks:{request}"), []) if task != task_id
         ]
-        if not mine:
-            return
-        rows = self.rows("SELECT id, title FROM tasks WHERE id IN ({})", mine)
-        found = []
+        rows = self.rows("SELECT id, session_id, title FROM tasks WHERE id IN ({})", mine)
+        found, waiting = [], []
         for reference in references:
             reference = " ".join(reference.split()).removeprefix("worker:")
             if not reference:
@@ -126,13 +130,61 @@ class TeamsLite:
                 named = self.runtime.task_actions.task_for(reference)
             except ValueError:
                 named = None
-            if named:
-                found += [named["id"]] if named["id"] in mine else []
+            if named and named["id"] in mine:
+                found.append(named["id"])
                 continue
-            found += [row["id"] for row in rows if same_words(reference, row["title"])]
-        if found := list(dict.fromkeys(found)):
-            self.store.set(f"with:{task_id}", json.dumps(found))
-            self.dirty.add(request)
+            matched = [row["id"] for row in rows if self.named(reference, row)]
+            found += matched
+            if not matched and not named:
+                waiting.append({"task": task_id, "name": reference})
+        if found:
+            self.add_with(task_id, request, found)
+        if waiting:
+            pending = loads(self.store.get(f"withpending:{request}"), [])
+            self.store.set(
+                f"withpending:{request}", json.dumps([*pending, *waiting][-PENDING_KEPT:])
+            )
+
+    def named(self, name: str, task: dict) -> bool:
+        """A task the Router names so in works_with: its title or its short name, or its worker's
+        (as peers.py matches a title, case and spaces aside)."""
+        if same_words(name, task["title"]) or same_words(name, short_label(task["title"])):
+            return True
+        row = self.store.find_session(task["session_id"]) if task.get("session_id") else None
+        return bool(row) and same_words(name, self.runtime.teams.label(row))
+
+    def add_with(self, task_id: str, request: str, others: list[str]):
+        known = loads(self.store.get(f"with:{task_id}"), [])
+        merged = list(dict.fromkeys([*known, *others]))
+        if merged != known:
+            self.store.set(f"with:{task_id}", json.dumps(merged))
+        self.dirty.add(request)
+
+    def resolve_pending(self, task: dict, request: str):
+        """A task made (or renamed) in a request whose earlier task named it before it was made:
+        linked both ways now. Once no task of the request is open, its names that never came
+        go."""
+        pending = loads(self.store.get(f"withpending:{request}"), [])
+        if not pending:
+            return
+        left = []
+        for entry in pending:
+            if entry.get("task") != task["id"] and self.named(entry.get("name", ""), task):
+                self.add_with(entry["task"], request, [task["id"]])
+                self.add_with(task["id"], request, [entry["task"]])
+            else:
+                left.append(entry)
+        mine = loads(self.store.get(f"reqtasks:{request}"), [])
+        if left and not any(
+            row["status"] in OPEN
+            for row in self.rows("SELECT status FROM tasks WHERE id IN ({})", mine)
+        ):
+            left = []
+        if left != pending:
+            if left:
+                self.store.set(f"withpending:{request}", json.dumps(left))
+            else:
+                self.store.delete(f"withpending:{request}")
 
     def recipient_task(self, target: str, from_task: str) -> str:
         """The task an exchange reaches when that is plain: the one its recipient is at work
@@ -163,9 +215,11 @@ class TeamsLite:
             self.store.set(f"xchg:{task}", json.dumps([*known, message_id][-EXCHANGES_KEPT:]))
 
     def task_changed(self, task: dict):
-        """A task was made or changed: its request's teams are read again."""
+        """A task was made or changed: its request's teams are read again (and a name an earlier
+        task of it gave, waiting for a task so named, is looked at)."""
         if request := self.store.get(f"req:{task['id']}"):
             self.dirty.add(request)
+            self.resolve_pending(task, request)
 
     # Reading, by key or by an index only.
 
