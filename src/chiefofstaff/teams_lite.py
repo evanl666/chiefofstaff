@@ -255,6 +255,14 @@ class TeamsLite:
             parent[root(one)] = root(other)
 
         after: dict[str, str] = {}  # A task -> the one of its request that replaced it.
+        # A part continued outside its request: what waited on it waits on its continuation
+        # now (as a replacement moves waits), still a link to the part it was.
+        moved = {
+            new: task
+            for task in entry.tasks
+            if (new := links.get(f"replacedby:{task}") or links.get(f"supersededby:{task}"))
+            and new not in inside
+        }
         for task in entry.tasks:
             for other in loads(links.get(f"with:{task}"), []):
                 if other in inside:
@@ -264,14 +272,14 @@ class TeamsLite:
                 join(task, new)
                 after[task] = new
             for dep in deps.get(task, []):
-                if dep["depends_on"] in inside:
-                    join(task, dep["depends_on"])
+                if (source := moved.get(dep["depends_on"], dep["depends_on"])) in inside:
+                    join(task, source)
         groups: dict[str, list[str]] = {}
         for task in entry.tasks:
             groups.setdefault(root(task), []).append(task)
         teams = []
         for group in groups.values():
-            team = self.team(entry, group, tasks, links, deps, after, message)
+            team = self.team(entry, group, tasks, links, deps, after, message, moved)
             if team:
                 teams.append(team)
         return teams
@@ -285,6 +293,7 @@ class TeamsLite:
         deps: dict[str, list[dict]],
         after: dict[str, str],
         message: dict | None,
+        continued: dict[str, str],
     ) -> dict | None:
         # A part: the tasks one replaced another in (oldest first), by the task it is now.
         def latest(task: str) -> str:
@@ -338,10 +347,11 @@ class TeamsLite:
         for task in group:
             for dep in deps.get(task, []):
                 source = dep["depends_on"]
-                if source not in part_of or part_of[source] == part_of[task]:
+                part = part_of.get(source) or part_of.get(continued.get(source, ""))
+                if not part or part == part_of[task] or source not in tasks:
                     continue
                 state = dep_state(tasks[source]["status"], dep["needs"])
-                key = (part_of[source], part_of[task])
+                key = (part, part_of[task])
                 known = edges.get(key)
                 if not known or STATE_RANK[state] < STATE_RANK[known["state"]]:
                     edges[key] = {"kind": "after", "from": key[0], "to": key[1], "state": state}

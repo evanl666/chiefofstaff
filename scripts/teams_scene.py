@@ -146,3 +146,100 @@ async def teams_lite_seeded(runtime, done_team: bool = True) -> dict:
     teams = {team["goal"]: team["id"] for team in runtime.snapshot()["teams"]}
     found["ids"] = teams
     return found
+
+
+async def spawned(runtime, title, **extra):
+    router = runtime.store.get("router_id")
+    result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                             why_new="test", **extra)  # fmt: skip
+    await settle(runtime)
+    found = json.loads(result.text_result_for_llm)
+    return found["session_id"], found["task_id"]
+
+
+async def held_unteamed(runtime) -> dict:
+    """Two workers of two requests: one asked the other 34 minutes ago and waits (no team)."""
+    owner_request(runtime, "Research how billing stores invoices.", minutes_ago=50)
+    expert, _ = await spawned(runtime, "Billing research")
+    owner_request(runtime, "Fix the invoice rounding bug.", minutes_ago=45)
+    asker, asker_task = await spawned(runtime, "Invoice rounding bug")
+    runtime.states[runtime.store.get("router_id")].turn_request = ""
+    asked = await call_tool(runtime, "ask_session", asker, session_id=expert,
+                            question="Which column holds the invoice total, and is it in cents?")  # fmt: skip
+    question = asked.text_result_for_llm.split("(")[1].split(")")[0]
+    runtime.store.execute(
+        "UPDATE questions SET asked=? WHERE id=?", (time.time() - 34 * 60, question)
+    )
+    runtime.update_session(asker, status="idle")
+    runtime.publish_state()
+    return {"expert": expert, "asker": asker, "asker_task": asker_task, "question": question}
+
+
+async def moved_out(runtime) -> dict:
+    """A request in two parts; one part goes on in a new worker for work of another request
+    too (Continue with…, its card's message of that request): it has moved out."""
+
+    async def summary(row, agent):
+        return f"Go on with {row['title']}."
+
+    owner_request(
+        runtime, "Export the sales report, then import it into the warehouse.", minutes_ago=30
+    )
+    export, export_task = await spawned(runtime, "Sales report export")
+    load, _ = await spawned(runtime, "Warehouse import", after=[export_task])
+    other = owner_request(runtime, "Also archive last year's reports.", minutes_ago=20)
+    runtime.states[runtime.store.get("router_id")].turn_request = ""
+    saved = runtime.handoff_summary, runtime.continue_checks
+    runtime.handoff_summary, runtime.continue_checks = summary, lambda row, agent: None
+    try:
+        runtime.update_session(export, status="idle")
+        made = await runtime.continue_on(export, "copilot", also="Archive last year's reports too.",
+                                         also_request=other)  # fmt: skip
+    finally:
+        runtime.handoff_summary, runtime.continue_checks = saved
+    await settle(runtime)
+    runtime.publish_state()
+    return {"export": export, "load": load, "export_task": export_task, "new": made}
+
+
+async def big_team(runtime, parts: int = 11) -> str:
+    """One request in many parts, each working with the one before (All N parts)."""
+    owner_request(runtime, "Translate the help center into eleven languages: one worker a language.",
+                  minutes_ago=15)  # fmt: skip
+    languages = ["French", "German", "Spanish", "Italian", "Dutch", "Polish", "Czech",
+                 "Swedish", "Danish", "Finnish", "Greek"][:parts]  # fmt: skip
+    previous = ""
+    for language in languages:
+        _, task = await spawned(runtime, f"Help center in {language}",
+                                **({"works_with": [previous]} if previous else {}))  # fmt: skip
+        previous = task
+    runtime.states[runtime.store.get("router_id")].turn_request = ""
+    runtime.publish_state()
+    return next(t["id"] for t in runtime.snapshot()["teams"] if t["goal"].startswith("Translate"))
+
+
+async def past_teams(runtime, count: int) -> None:
+    """Done teams of requests older than the current window (Past teams, a page at a time)."""
+    store = runtime.store
+    for number in range(count):
+        request = owner_request(runtime, f"Old job {number}: two parts.", minutes_ago=60 * 24 * 30)
+        _, one_task = await spawned(runtime, f"Old job {number} part one")
+        _, two_task = await spawned(runtime, f"Old job {number} part two", works_with=[one_task])
+        for task in (one_task, two_task):
+            runtime.tasks.move(task, "done", result="Done.")
+        old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        store.execute("UPDATE tasks SET updated_at=?, ended_at=? WHERE id IN (?, ?)",
+                      (old, old, one_task, two_task))  # fmt: skip
+        assert request
+    runtime.states[store.get("router_id")].turn_request = ""
+    runtime.teams_lite.loaded = 0  # Read again: their times changed under it.
+    runtime.publish_state()
+
+
+async def more_exchanges(runtime, found: dict, count: int = 6) -> None:
+    """More notes between two parts at work (a history long enough for filters)."""
+    rules, direct = found["autopilot"]["rules"], found["autopilot"]["direct"]
+    for number in range(count):
+        await call_tool(runtime, "tell_session", rules, session_id=direct,
+                        text=f"规则第 {number + 1} 条已写进 docs/autopilot/security.md。请按它分发。")  # fmt: skip
+    runtime.publish_state()

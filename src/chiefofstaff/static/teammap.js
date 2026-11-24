@@ -31,7 +31,19 @@ export function layout(parts, lines) {
     return found;
   };
   for (const part of parts) depth(part.id);
-  const columns = Math.max(0, ...column.values()) + 1;
+  // Many side by side: four a column at most, the rest in the next (a long column reads badly).
+  const depths = Math.max(0, ...column.values()) + 1;
+  const firstOf = [];
+  let columns = 0;
+  for (let at = 0; at < depths; at++) {
+    firstOf.push(columns);
+    columns += Math.max(1, Math.ceil(parts.filter((part) => column.get(part.id) === at).length / COLUMN_MOST));
+  }
+  const seen = new Array(depths).fill(0);
+  for (const part of parts) {
+    const at = column.get(part.id);
+    column.set(part.id, firstOf[at] + Math.floor(seen[at]++ / COLUMN_MOST));
+  }
   const counts = Array.from({ length: columns }, (_, index) => parts.filter((part) => column.get(part.id) === index).length);
   const rows = Math.max(1, ...counts);
   const placed = new Map();
@@ -42,8 +54,11 @@ export function layout(parts, lines) {
     const span = counts[col] === 1 ? rows : 1;
     placed.set(part.id, { col, row: next[col]++, span });
   }
-  return { placed, columns, rows };
+  // Room between rows for a label only where a line joins two parts of one column.
+  const tight = !lines.some((line) => placed.get(line.parts[0])?.col === placed.get(line.parts[1])?.col);
+  return { placed, columns, rows, tight };
 }
+const COLUMN_MOST = 4;
 
 // A label's pieces, the one that needs attention first: in one line (" · ") where there is room,
 // else one a line.
@@ -162,7 +177,8 @@ function draw(map) {
     area.append(svg("path", { d: shape.d, class: `e ${line.style}`, "data-line": line.id, "marker-end": shape.heads.end ? head : null, "marker-start": shape.heads.start ? head : null }));
     if (line.quiet) continue;
     const say = line.fan ? line.fan.map((other) => other.say).join("; ") : line.say;
-    const label = el("button", { type: "button", class: "tv2-label", "data-line": line.id, "aria-label": say, title: say, onmouseenter: () => light(map, line.id), onmouseleave: () => light(map, ""), onfocus: () => light(map, line.id), onblur: () => light(map, "") });
+    // Its words on hover; a screen reader reads the map in words (below), every line's sentence.
+    const label = el("span", { class: "tv2-label", "data-line": line.id, "aria-hidden": "true", title: say, onmouseenter: () => light(map, line.id), onmouseleave: () => light(map, "") });
     // (Through the CSSOM: the page's policy allows no style attribute.)
     Object.assign(label.style, { left: `${shape.label.x}px`, top: `${shape.label.y}px`, transform: SHIFT[shape.label.anchor] });
     if (shape.label.anchor === "left") label.classList.add("start");
@@ -219,11 +235,15 @@ export function flowMap(model, { label = "How the work moves: parts left to righ
   map.model = model;
   map.layout = layout(model.parts, model.lines);
   if (more) {
+    // In the last column's next free place.
     more.dataset.part = "more";
-    map.layout.placed.set("more", { col: map.layout.columns - 1, row: map.layout.rows, span: 1 });
-    map.layout.rows += 1;
+    const col = map.layout.columns - 1;
+    const row = [...map.layout.placed.values()].filter((at) => at.col === col).reduce((most, at) => Math.max(most, at.row + at.span), 0);
+    map.layout.placed.set("more", { col, row, span: 1 });
+    map.layout.rows = Math.max(map.layout.rows, row + 1);
   }
   map.placed = map.layout.placed;
+  map.classList.toggle("tight", map.layout.tight);
   const redraw = () => {
     if (!map.isConnected) return;
     place(map);
@@ -258,6 +278,6 @@ export function partAvatar(part, { large = false, mark = part.cls } = {}) {
     tick.append(svg("path", { d: "M2.2 5.3l1.9 1.9 3.8-4.2" }));
     node.append(el("span", { class: "tick" }, tick));
   }
-  if (/\bis-review\b/.test(mark || "")) node.append(el("span", { class: "bang", text: "!" }));
+  if (/\bis-review\b/.test(mark || "")) node.append(el("span", { class: "bang" }));
   return node;
 }
