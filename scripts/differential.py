@@ -450,6 +450,33 @@ FIXES: list[Allow] = [
         element="#timeline .card.update:has(li > strong.key)",
         views=r"^home",
     ),
+    # 0.1.57, Teams lite (teams-v2.md): only what the owner sees of teams. The state's teams are
+    # the owner's requests in parts (`teams`, declared above), with Past teams and the questions
+    # that hold a worker up; Home's Teams rows, the sidebar's team line, a team's page, a
+    # Needs-you card per question, a worker's Team or Notes tab (declared above); passive marks of
+    # which request the Router made a task for, and which tasks an exchange was between. What
+    # workers and the Router are given is the same.
+    Allow("Teams lite: Past teams, how many", data=r"/api/state\.past_teams$"),
+    Allow("Teams lite: questions holding a worker up", data=r"/api/state\.held_questions$"),
+    Allow(
+        "Teams lite: a task's request, a request's tasks, a part's teammates, a task's "
+        "exchanges, the owner's look at a done team (passive marks)",
+        data=r"\.db\.kv\.(req|reqtasks|with|xchg|teamseen):",
+    ),
+    Allow(
+        "Teams lite: the tasks an exchange was between, in its message's meta",
+        data=r"messages.*\.meta\.(from_task|to_task)$",
+    ),
+    Allow(
+        "Teams lite: the tasks an exchange was between, in its message's meta (as stored)",
+        data=r"messages.*\.meta$",
+        without=r', "(from|to)_task": "[^"]*"|"(from|to)_task": "[^"]*", ',
+    ),
+    Allow(
+        "Teams lite: Home's Teams rows, the sidebar's team line, a held question's card",
+        element="#tasks-teams, #session-list .team-line, #needs .card.team-wait",
+        views=r"^(home|sidebar)",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
