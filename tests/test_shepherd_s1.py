@@ -1614,3 +1614,47 @@ async def test_what_waits_to_go_out_is_withdrawn_once_its_consent_goes(
     assert actions[held]["outcome"].startswith("Not sent: "), actions[held]["outcome"]
     assert all(a["state"] in {"sent", "withdrawn"} for a in actions.values())
     assert shepherd.control.step(step["id"])["state"] in {"partly", "failed"}
+
+
+@pytest.mark.parametrize("held", ["reply", "push"])
+async def test_what_an_approval_too_old_left_unsent_is_offered_again(world, monkeypatch, held):
+    """Withdrawn as the owner's approval was over an hour old by the time it could go out, what
+    was left unsent was lost with no word. Its PR's row says so, with the one action to review
+    it again; approved again, only what did not go out goes."""
+    shepherd = (runtime := await world.start()).shepherd
+    comments(world)
+    await shepherd.tick()
+    step, sha = await addressed(world, runtime, STANCES)
+    waiting, release = asyncio.Event(), asyncio.Event()
+    name, owner = ("write_slot", publish) if held == "reply" else ("bound_token", runtime.github)
+    real = getattr(owner, name)
+
+    async def held_until_released(*arguments, **options):
+        waiting.set()
+        await release.wait()
+        return await real(*arguments, **options)
+
+    monkeypatch.setattr(owner, name, held_until_released)
+    await approve(shepherd, step["id"], {"disclosure": "no"})
+    await asyncio.wait_for(waiting.wait(), 10)
+    monkeypatch.setattr(publish, "APPROVAL_LASTS", 0)  # Approved over an hour ago, now.
+    release.set()
+    await settle(runtime)
+    await settle(runtime)
+    assert not world.github.writes
+    again = shepherd.control.open_step(TARGET)
+    assert again and again["state"] == "prepared" and again["plan"]["again"] == step["id"]
+    view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
+    assert view["line"] == "Not sent: you approved it over an hour ago."
+    assert view["action"] == {"kind": "review", "label": "Review again", "step": again["id"]}
+    monkeypatch.setattr(owner, name, real)
+    monkeypatch.setattr(publish, "APPROVAL_LASTS", 3600)
+    await approve(shepherd, again["id"], {})
+    await settle(runtime)
+    await settle(runtime)
+    kinds = [action["kind"] for action in shepherd.control.actions(again["id"])]
+    pushed = held == "reply"
+    assert kinds == ([] if pushed else ["push"]) + ["reply", "reply", "request-review"]
+    assert shepherd.control.step(again["id"])["state"] == "published"
+    assert world.github.head() == sha
+    assert [write[0] for write in world.github.writes] == ["reply", "reply", "request-review"]

@@ -19,7 +19,9 @@
   stopped looking after its PR or the PR changed hands: that was checked only before the wait.
   Each part is now checked again just before it is sent; what may no longer go out is withdrawn,
   never sent, and turning it off or *Stop looking after this PR* withdraws at once what waits.
-  Nothing goes out more than an hour after you approved it (after a long stop, say).
+  Nothing goes out more than an hour after you approved it (after a long stop, say): its PR's
+  row then says *Not sent: you approved it over an hour ago*, with *Review again* to approve
+  what didn't go out.
 - **A send that was interrupted is read back as yours only.** After a stop, Chief of Staff
   looks on GitHub for what it was sending when it stopped (a reply *Prepared for you* was
   posting, or a reply, comment or review of yours from its card). It took any reply in that

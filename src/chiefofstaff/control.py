@@ -81,6 +81,9 @@ OPEN = frozenset({QUEUED, RUNNING, PREPARED, APPLYING})
 # An operation's states: planned (in an approved plan, not sent), dispatching (being sent: its
 # outcome is unknown until it is journaled), and its ends.
 PLANNED, DISPATCHING = "planned", "dispatching"
+# Why an operation approved too long ago is withdrawn (publish.APPROVAL_LASTS): what it left
+# unsent is the owner's to review again (publish.review_again).
+AGED = "you approved it over an hour ago"
 OP_ENDED = frozenset({"sent", "failed", "uncertain", "withdrawn", "skipped"})
 # A claim's states.
 IDLE, STEPPING, HANDING, PAUSED, CLAIM_ENDED = "idle", "stepping", "handing-over", "paused", "ended"
@@ -661,7 +664,7 @@ class Control:
                 "it is changing hands"
             )  # fmt: skip
         if by and time.time() > by:
-            return "your approval is too old to send it now"
+            return AGED
         return ""
 
     def finish(self, action_id: str, state: str, outcome: str = "", link: str = ""):

@@ -12,6 +12,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from .control import (
+    AGED,
     APPLYING,
     CLAIM_ENDED,
     DISPATCHING,
@@ -466,6 +467,10 @@ class Keeping:
             return {"line": f"Preparing {what}…", "rank": 2}
         if step["state"] == APPLYING:
             return {"line": "Publishing what you approved…", "rank": 2}
+        if plan.get("again"):
+            # What an approval too old to send left unsent (publish.review_again).
+            action = {"kind": "review", "label": "Review again", "step": step["id"]}
+            return {"line": f"Not sent: {AGED}.", "rank": 0, "action": action}
         if plan.get("kind") == "diagnosis":
             first = (plan.get("summary") or "").strip().split("\n", 1)[0][:200]
             return {"line": first or "It found the cause", "rank": 1,

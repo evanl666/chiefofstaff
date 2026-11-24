@@ -1080,8 +1080,9 @@ watching* (Settings → Advanced) pauses Prepared for you too, as it stops readi
 had ready is withdrawn, and it looks at your PRs again once you resume. What you
 approved is checked again just before each part of it is sent: turned off, paused, *Stop
 looking after this PR*, or the PR changing hands withdraws what hasn't gone out yet (a reply
-waiting its turn to be sent too), and nothing goes out more than an hour after you approved it.
-If Chief of Staff stops while it publishes what you approved, it reads on GitHub what went out
+waiting its turn to be sent too), and nothing goes out more than an hour after you approved it:
+its row then says *Not sent: you approved it over an hour ago*, and *Review again* offers what
+didn't go out for you to approve again. If Chief of Staff stops while it publishes what you approved, it reads on GitHub what went out
 when it starts again (a reply only as your account's, since it began to go out, with exactly
 its text: when two could be it, the attempt says it can't tell), and sends the rest once, within
 that hour (replies to a fix whose push did not go out are not sent). While **Update and

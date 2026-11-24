@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from .control import (
+    AGED,
     APPLYING,
     DISPATCHING,
     IDLE,
@@ -169,7 +170,7 @@ def operations_of(plan: dict, threads: list[dict], disclose: bool, step: dict) -
                  "run": run["id"], "attempt": run.get("attempt") or 1, "head": step["h0"]}
                 for run in plan.get("runs") or []]  # fmt: skip
     operations: list[dict] = []
-    if plan.get("h1"):
+    if plan.get("h1") and not plan.get("pushed"):  # (Pushed already: a plan to review again.)
         operations.append({
             "kind": "push", "repo": repo, "number": number, "head_repo": plan["head_repo"],
             "head_repo_id": plan["head_repo_id"], "ref": plan["ref"], "lease": plan["h0"],
@@ -335,6 +336,8 @@ def finish_applying(shepherd: Shepherd, step_id: str):
     if any(action["state"] == "uncertain" for action in actions):
         state = "partly" if sent else "failed"
     step = control.move_step(step_id, APPLYING, state=state, ended_at=now())
+    if step and any(a["state"] == "withdrawn" and AGED in a["outcome"] for a in actions):
+        review_again(shepherd, step, actions)
     if step:
         claim = control.claim(step["target"])
         if claim and claim["state"] == "stepping":
@@ -343,6 +346,41 @@ def finish_applying(shepherd: Shepherd, step_id: str):
         shepherd.read_at[step["target"]] = 0
         shepherd.runtime.background(shepherd.read(step["target"]))
         shepherd.publish_task(step)
+
+
+def review_again(shepherd: Shepherd, step: dict, actions: list[dict]) -> dict | None:
+    """What an approval too old to send left unsent (control.AGED) goes back to the owner, never
+    silently lost: the same plan, less what went out, prepared again for their review (its row:
+    "Not sent: you approved it over an hour ago", Review again). None when nothing is left, or
+    the PR changed hands."""
+    control = shepherd.control
+    claim = control.claim(step["target"])
+    if not claim or claim["holder"] != step["holder"] or control.open_step(step["target"]):
+        return None
+    sent = [action for action in actions if action["state"] == "sent"]
+    pushed = any(action["kind"] == "push" for action in sent)
+    posted = {action["payload"].get("in_reply_to") for action in sent if action["kind"] == "reply"}
+    plan = dict(step["plan"] or {})
+    plan["threads"] = [t for t in plan.get("threads") or [] if t.get("last") not in posted]
+    plan["again"] = step["id"]
+    if pushed:
+        plan["pushed"] = True
+        if plan.get("kind") == "fix":
+            plan["kind"] = "replies"
+    threads = [{**t, "choice": t.get("choice") or "post"} for t in plan["threads"]]
+    if not operations_of(plan, threads, False, step):
+        return None
+    head = plan.get("h1") if pushed else step["h0"]
+    again = control.add_step(
+        step["target"], step["kind"], step["level"], state=PREPARED,
+        session_id=step["session_id"], task_id=step["task_id"], holder=claim["holder"],
+        generation=claim["generation"], consent=control.generation(), h0=head or step["h0"],
+        h1=step["h1"], signal=step["signal"], fingerprint=step["fingerprint"],
+        threads=step["threads"], plan=plan, evidence=step["evidence"], folder=step["folder"],
+        tree=step["tree"], clicked=step["clicked"], started_at=now(),
+    )  # fmt: skip
+    shepherd.publish_task(again)
+    return again
 
 
 async def write_slot(shepherd: Shepherd, login: str):
