@@ -42,6 +42,7 @@ from .logbook import (
     Logbook,
 )
 from .origin import Origins
+from .results import Results
 
 if TYPE_CHECKING:
     from ..runtime import Runtime
@@ -162,7 +163,7 @@ def said_receipts(done: dict) -> str:
     return ", ".join(parts) or "nothing more"
 
 
-class Autopilot(Answers):
+class Autopilot(Answers, Results):
     """The switch and its runs, the outbox, and the hooks (inert while the line is unticked)."""
 
     def __init__(self, runtime: Runtime):
@@ -179,6 +180,7 @@ class Autopilot(Answers):
             "router-note": self.deliver_router_note,
             "summary": self.deliver_summary,
             "worker": self.deliver_worker,
+            "accepted": self.deliver_accepted,
         }
         self.dispatch_lock = asyncio.Lock()
         self.run_lock = asyncio.Lock()
@@ -186,6 +188,10 @@ class Autopilot(Answers):
         self.deciding: set[str] = set()
         self.judge_lock = asyncio.Lock()
         self.proposal: asyncio.Future | None = None
+        # The result being verified now ("" for none); how verification runs its plan (tests run
+        # it without Copilot; None: in a sandboxed session of Chief's own).
+        self.verifying = ""
+        self.runner: Any = None
 
     # The switch.
 
@@ -522,6 +528,8 @@ class Autopilot(Answers):
             await self.dispatch()
         if self.run() is not None:
             await self.check_questions()
+            await self.check_results()
+            await self.check_stalled()
 
     async def settings_changed(self, old: Settings, new: Settings):
         """Ticked: its tables (once). Unticked: a run on stops as Stop stops it."""
@@ -581,6 +589,11 @@ class Autopilot(Answers):
             else "acted without asking, your usual setting"
         )
         task = self.runtime.tasks.current(row["id"]) if row["role"] == "worker" else None
+        sources = [self.book.entry(entry_id) for entry_id in carried["entries"]]
+        if row["role"] == "worker" and any(s and s["kind"] == "nudged" for s in sources):
+            # A turn it started itself (a nudge): on its credits.
+            moment = datetime.fromisoformat(since).timestamp() if since else 0
+            self.spend(self.usage_since(row["id"], moment))
         for entry_id in carried["entries"]:
             source = self.book.entry(entry_id)
             if not source:
