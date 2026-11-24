@@ -35,6 +35,10 @@ M8  Codex's limit used up again (after M7): M7's worker paused, set to go on at 
 M9  Claude's models, from the stand-in Claude (as Claude Code 2.1.322 lists them: each alias with
     the exact model it stands for now): its Model choices are its aliases and those exact models;
     a worker pinned to one (claude-haiku-5-5) runs its next turn on that very model
+M10 Codex's effort, set in Settings → Agents & models (settings-v2.md §9.1): its row says it; a
+    new worker on Codex with no effort of its own runs its turns with it; changed in Settings
+    while that worker rests, its next turn takes the new one (each turn's effort as Codex was
+    asked it)
 
 Signs in to Copilot with COPILOT_GITHUB_TOKEN, else the gh CLI's token (a Copilot home of its own;
 ~/.copilot is not used). Uses a few premium requests (the Router: LIVE_SMOOTH_MODEL, else
@@ -235,6 +239,8 @@ def stand_ins(root: Path) -> dict[str, str]:
         "CODEX_HOME": str(root / "codex-home"),
         "CLAUDE_CONFIG_DIR": str(root / "claude-config"),
         "FAKE_CODEX_HOME": str(root / "fake-codex-home"),
+        # What Chief of Staff asked the stand-in Codex, one request a line (M10).
+        "FAKE_CODEX_LOG": str(root / "codex-log.jsonl"),
         "FAKE_CLAUDE_HOME": str(root / "fake-claude-home"),
         "FAKE_CLAUDE_PASTE": PASTE,
         # Its models as Claude Code lists them to a worker (M9).
@@ -686,9 +692,62 @@ async def m9_claude_models(ctx: Ctx):
     log(f"M9 passed (its turns ran on {ran})")
 
 
+def codex_turns(ctx: Ctx) -> list[dict]:
+    """Each turn Chief of Staff asked the stand-in Codex to start (its thread, its effort)."""
+    log_file = ctx.root / "codex-log.jsonl"
+    if not log_file.exists():
+        return []
+    entries = [json.loads(line) for line in log_file.read_text().splitlines() if line.strip()]
+    return [e["params"] for e in entries if e.get("method") == "turn/start"]
+
+
+async def m10_effort(ctx: Ctx):
+    settings = (await ctx.state())["settings"]
+    await ctx.app.post(
+        "/api/settings",
+        {**settings, "agents": {"codex": {"enabled": True, "effort": "high"}}},
+    )
+    (row,) = [a for a in (await ctx.app.get("/api/agents"))["agents"] if a["name"] == "codex"]
+    assert row["effort"] == "high", row
+    before = {r["id"] for r in await ctx.workers_on("codex")}
+    turns = len(codex_turns(ctx))
+    await ctx.say(
+        f"In {ctx.project}, how many lines does README.md have? Give the worker this line word "
+        "for word: Report done: counted.",
+        agent="codex",
+    )
+
+    async def done():
+        fresh = [r for r in await ctx.workers_on("codex") if r["id"] not in before]
+        return next((r for r in fresh if r["status"] in {"done", "idle"}), None)
+
+    worker = await wait_for("a new worker on Codex reports", done, 300, ctx.app)
+    first = codex_turns(ctx)[turns:]
+    assert first and all(t.get("effort") == "high" for t in first), first
+    thread = first[-1]["threadId"]
+    # Changed in Settings while it rests: its next turn takes the new effort.
+    settings = (await ctx.state())["settings"]
+    await ctx.app.post("/api/settings", {**settings, "agents": {"codex": {"effort": "low"}}})
+    turns = len(codex_turns(ctx))
+    after = max(m["id"] for m in await ctx.app.get(f"/api/sessions/{worker['id']}/messages"))
+    await ctx.app.post(f"/api/sessions/{worker['id']}/messages", {"text": "Report done: again."})
+
+    async def reported():
+        found = await ctx.app.get(f"/api/sessions/{worker['id']}/messages?after={after}")
+        return next((m for m in found if m["kind"] == "report"), None)
+
+    await wait_for("its next turn", reported, 180, ctx.app)
+    later = codex_turns(ctx)[turns:]
+    assert later and later[-1].get("effort") == "low", later
+    log(f"M10 passed (its thread {thread[:8]}…: high, then low)")
+    settings = (await ctx.state())["settings"]
+    await ctx.app.post("/api/settings", {**settings, "agents": {"codex": {"effort": ""}}})
+    ctx.no_real_agent()
+
+
 SCENARIOS = [
     m1_install, m2_sign_in, m3_once, m4_no_replay, m5_claude_live, m6_in_place, m7_limit,
-    m8_continued_once, m9_claude_models,
+    m8_continued_once, m9_claude_models, m10_effort,
 ]  # fmt: skip
 
 
