@@ -16,6 +16,7 @@ bounds, see [SECURITY.md](../SECURITY.md).
 - [How you work: learned, and kept up to date](#how-you-work-learned-and-kept-up-to-date)
 - [Checks learned from mistakes](#checks-learned-from-mistakes)
 - [Focus](#focus)
+- [Autopilot](#autopilot)
 - [Slack](#slack)
 - [GitHub reviews](#github-reviews)
 - [Prepared for you: keeping your PRs moving](#prepared-for-you-keeping-your-prs-moving)
@@ -1066,6 +1067,69 @@ through. The chat says *Focusing for 1h*; the top of Home shows until when. When
 you get one summary: the messages and PR activity that came in, replies drafted (not those
 replaced or withdrawn since), tasks finished, and how many things need you, counted as
 *Needs you* counts them.
+
+## Autopilot
+
+Off by default. Tick *Autopilot: Chief of Staff acts for you while it's on, instead of waiting*
+in Settings → General; a small group comes under it: *Credits a day* (100 by default), *Acts in*
+(*All your projects*, or *Only these…*: one `owner/name` per line), *While Autopilot is on,
+workers ask first* (on), and *Autopilot record* once it has run.
+
+**Turning it on.** Home's *Autopilot* menu: *For 2 hours*, *Until 9:00 AM* (your daily summary's
+time) or *Until I turn it off*. Or write one of its commands to the Router, exactly:
+`autopilot on` (2 hours, or until that morning time if it comes sooner), `autopilot until 5pm`,
+`autopilot for 3h`, `autopilot until I turn it off`, `autopilot off` or `stop autopilot`; in
+Chinese `开 autopilot`, `开 autopilot 到下午5点`, `autopilot 开两个小时`, `关 autopilot`. Chief of
+Staff answers it itself, saying until when; anything else, a near miss too, goes to the Router as
+any message. While it runs, Home's header says *Autopilot · until 6:00 PM · 4 done · 2 waiting
+for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
+
+**What it does.** It adds no capability: it changes who answers. While it is on:
+
+- A worker's question or decision card is answered only from what you said yourself: a message
+  you typed in the page (in that worker's chat, or to the Router when the task's instructions
+  quote it), a decision card you answered in the page, or a habit you wrote or kept in the page.
+  Each answer quotes it, in the worker's chat too (*Autopilot answered: Postgres, because you
+  said “Postgres for v1”*). What workers note, what the Router writes or decides, files in a
+  repository, away answers, Send to Chief notes and Slack messages are never your word.
+- What nothing you said settles waits for you under *Needs you*, saying why (*Set aside: nothing
+  you said settles it*), as does a recommendation alone, any permission (pushing, publishing,
+  deleting, merging, commenting…), and anything irreversible or outside this computer (a
+  migration, a release).
+- A finished result is accepted only after its own run of the task's checks: at the exact
+  commit, in a private copy, offline (no network, no credentials, no keychain), with only the
+  dependencies already there, the tree checked before and after. Uncommitted work, a weakened
+  test or checks that reach outside the copy are left for you; where this computer can't run them
+  offline, results wait for you (*Couldn't verify offline: it waits for you*). What waited on an
+  accepted result starts; a stalled worker is asked once more where it stands.
+- Nothing goes out in your name: no Slack reply, PR, comment or merge. What a turn it continued
+  would send (a reply you handed over, a note to another session) waits for you as a card.
+
+**Workers ask first.** On (the default), every turn Autopilot continues runs with Ask first,
+whatever your setting for workers, and keeps it until that turn ends, after Stop too; a Codex or
+Claude worker is reopened in Ask first before it is continued, never mid-turn (its question waits
+for the turn). Your own turns are as you set them. Off, workers keep your usual settings.
+Writing to a worker yourself in the page hands it back to you.
+
+**Stop** stops it at once: nothing it queued goes out, and the turns it continued are stopped,
+their tasks waiting with *Go on*. What its judge and the turns it starts use counts against
+*Credits a day*; at the cap it pauses until the next day and says so.
+
+**When it ends**, one card at the end of the Router's chat, *While you were away*, says what it
+did and left for you: each row opens its entry in the record, with *Undo* on an acceptance and
+*Change* on a decision; under an answer or an acceptance, *then:* what its worker did next. A daily
+summary or Focus summary due during a run of a day or less is folded into it; a longer run gets
+its part in each daily summary. *Handled for you* gets one row per run.
+
+**The record** (from *4 done*, *View all*, *Handled for you* or Settings): every run, newest first,
+each action with what it rested on, its evidence and what came next; *Left for you* shows only
+what waits; *Copy as Markdown*. It is append-only and hash-chained: *Undo* and *Change* add
+entries, and a record changed outside Chief of Staff says so. Ask the Router "what did autopilot
+do last night?": it answers from the record only, each entry linked.
+
+Before installing an earlier version, `chiefofstaff --prepare-downgrade` ends a run and stops the
+turns it continued (their tasks stopped by you, their check-backs removed), so the earlier version
+resumes none of them; the record stays.
 
 ## Slack
 
