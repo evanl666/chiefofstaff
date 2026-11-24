@@ -21,6 +21,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from . import agents, compat
+from .autopilot.origin import TAG
 from .backend import (
     COPILOT_AGENT,
     NotStartedError,
@@ -524,6 +525,9 @@ class Delivery:
             # No turn starts while its folder's agent settings are changed (see deliver).
             self.runtime.background(self.runtime.settings_stop(session_id))
             return False
+        if any(TAG in message["meta"] for message in pending):
+            # Messages that carry Autopilot's origin: so does the turn that takes them in.
+            self.runtime.autopilot.origins.taken(worker, pending)
         prompts = [self.runtime.told_prompt(message) for message in pending]
         # What workers that work together told each other since: who and how often, with what
         # still waits (Teams.digest), riding along with this turn of the Router's.

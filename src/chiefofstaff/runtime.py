@@ -62,7 +62,7 @@ from . import workspaces as workspaces_module
 from .abilities import Abilities
 from .accounts import Accounts
 from .asks import Asks
-from .autopilot import Autopilot
+from .autopilot import Autopilot, origin
 from .backend import (
     CLIENT_NAME,
     COPILOT_AGENT,
@@ -4223,6 +4223,10 @@ class Runtime:
         """Whether this worker acts without permission checks (a session choice, else Settings).
         Never while it is in a shepherd step: its checks apply then, whatever its mode."""
         if row["role"] == WORKER and self.shepherd.marked(row["id"]):
+            return False
+        if row["role"] == WORKER and self.autopilot.origins.asks_first(row["id"]):
+            # A turn Autopilot continued, with *workers ask first* on: the Ask-first checks,
+            # whatever the owner's mode, until the owner writes to it in the page.
             return False
         return self.yolo_choice(row)
 
@@ -10155,6 +10159,13 @@ class Runtime:
             # How the owner's word came in (the page, an away answer): only the page's is theirs
             # for Autopilot (ingress.py). Never drawn, never in a prompt.
             meta = {**(meta or {}), "ingress": channel}
+        if meta and "prompt" in meta and origin.CARRIED.get() is not None:
+            # Stored to deliver by code acting in a turn Autopilot continued: it carries that
+            # origin (autopilot/origin.py). A worker not at work keeps it now (its next turn
+            # takes it in: opened asking first, if it must); one at work, as its turn takes it.
+            row = self.store.session(session_id)
+            idle = row["status"] != "working" and not self.states[session_id].busy
+            meta = self.autopilot.origins.tag(row, meta, keep=idle)
         message = self.store.add_message(session_id, kind, text, meta)
         if kind in DOING and self.store.get(f"untouched:{session_id}"):
             # Its first step: Restart on… gives way to Continue with… (its view says so with
@@ -10456,6 +10467,9 @@ class Runtime:
             await self.workers.reopen(session_id, restore=True)
         if row["role"] == WORKER:
             self.release_schedules(session_id)  # The owner's word: its schedules fire again.
+        if row["role"] == WORKER and ingress.current() == ingress.PAGE:
+            # Written in the page: its work is the owner's again, not Autopilot's (origin.py).
+            self.autopilot.handed_back(row)
         # The task this is about: the one whose question it answers, the one the owner looks
         # at, the one it is on… (see chat_task).
         about = self.chat_task(session_id, task_id) if row["role"] == WORKER else None

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -38,6 +39,7 @@ from .logbook import (
     UNKNOWN,
     Logbook,
 )
+from .origin import Origins
 
 if TYPE_CHECKING:
     from ..runtime import Runtime
@@ -69,6 +71,95 @@ def local_now() -> datetime:
     return datetime.now().astimezone()
 
 
+COMMIT = re.compile(r"\bgit\b[^\n;&|]*\bcommit\b")
+PUSH = re.compile(r"\bgit\b[^\n;&|]*\bpush\b(?P<rest>[^\n;&|]*)")
+PULL_REQUEST = re.compile(r"\bgh\s+pr\s+(?P<verb>create|merge|comment|review|close|edit|ready)\b")
+
+
+def receipts_since(store, session_id: str, since: str, *, worker: bool = True) -> dict:
+    """What a session did since a moment, from its receipts: the commands it ran (tests and
+    their result, commits, pushes and their branches, PRs touched), the drafts it made, the
+    permissions it was refused, the tasks it started (the Router's)."""
+    commands = store.all(
+        "SELECT command, kind, exit_code, started_at FROM commands WHERE session_id=? "
+        "AND started_at>=? ORDER BY id",
+        (session_id, since),
+    )
+    tests = [row for row in commands if row["kind"] == "test"]
+    pushes = []
+    for row in commands:
+        if found := PUSH.search(row["command"]):
+            words = [w for w in found["rest"].split() if not w.startswith("-")]
+            branch = words[-1] if len(words) >= 2 else ""
+            pushes.append({"branch": branch, "exit": row["exit_code"]})
+    drafts = store.all(
+        "SELECT id, kind, status FROM drafts WHERE session_id=? AND created_at>=? ORDER BY rowid",
+        (session_id, since),
+    )
+    refused = store.all(
+        "SELECT text FROM messages WHERE session_id=? AND kind='notice' AND created_at>=? "
+        "AND json_extract(meta, '$.refused') IS NOT NULL ORDER BY id",
+        (session_id, since),
+    )
+    # The Router's: the tasks it started or messaged with the origin (their workers' messages
+    # carry it).
+    started = (
+        []
+        if worker
+        else store.all(
+            "SELECT id, title FROM tasks WHERE created_at>=? AND session_id IN (SELECT "
+            "session_id FROM messages WHERE created_at>=? AND session_id!=? AND "
+            "json_extract(meta, '$.autopilot_origin') IS NOT NULL) ORDER BY created_at",
+            (since, since, session_id),
+        )
+    )
+    return {
+        "commands": [
+            {"command": row["command"][:2000], "kind": row["kind"], "exit": row["exit_code"]}
+            for row in commands
+        ],
+        "tests": {
+            "runs": len(tests),
+            "passed": sum(1 for row in tests if row["exit_code"] == 0),
+            "failed": sum(1 for row in tests if row["exit_code"] not in (0, None)),
+        },
+        "commits": sum(1 for row in commands if COMMIT.search(row["command"])),
+        "pushes": pushes,
+        "pull_requests": [
+            found["verb"] for row in commands if (found := PULL_REQUEST.search(row["command"]))
+        ],
+        "drafts": [
+            {"id": row["id"], "kind": row["kind"], "status": row["status"]} for row in drafts
+        ],
+        "refused": [row["text"][:300] for row in refused],
+        "started": [{"id": row["id"], "title": row["title"]} for row in started],
+    }
+
+
+def said_receipts(done: dict) -> str:
+    """The *then:* line: committed 2, ran 14 tests (passed), pushed chief/x."""
+    parts = []
+    if done["commits"]:
+        parts.append(f"committed {done['commits']} time{'s' if done['commits'] != 1 else ''}")
+    tests = done["tests"]
+    if runs := tests["runs"]:
+        result = "passed" if not tests["failed"] else f"{tests['failed']} failed"
+        parts.append(f"ran tests {runs} time{'s' if runs != 1 else ''} ({result})")
+    if pushed := [p["branch"] or "a branch" for p in done["pushes"] if p["exit"] == 0]:
+        parts.append("pushed " + ", ".join(dict.fromkeys(pushed)))
+    if done["pull_requests"]:
+        parts.append("PR " + ", ".join(dict.fromkeys(done["pull_requests"])))
+    if done["drafts"]:
+        parts.append(f"drafted {len(done['drafts'])} for you")
+    if done["refused"]:
+        parts.append(f"{len(done['refused'])} refused (asked first)")
+    if done["started"]:
+        parts.append("started " + ", ".join(f"“{t['title']}”" for t in done["started"][:3]))
+    if not parts and (count := len(done["commands"])):
+        parts.append(f"ran {count} command{'s' if count != 1 else ''}")
+    return ", ".join(parts) or "nothing more"
+
+
 class Autopilot:
     """The switch and its runs, the outbox, and the hooks (inert while the line is unticked)."""
 
@@ -76,6 +167,8 @@ class Autopilot:
         self.runtime = runtime
         self.store = runtime.store
         self.book = Logbook(runtime.store)
+        # Which turns carry its origin (origin.py): inert until it first acts.
+        self.origins = Origins(runtime.store)
         # The line, as last saved: every hook returns at once while False.
         self.ticked = self.store.settings().autopilot
         # Outbox deliveries by kind (each its own part: the note to the Router here; answers,
@@ -419,6 +512,65 @@ class Autopilot:
         if self.run():
             await self.stop(by="settings", why="you unticked Autopilot in Settings")
         self.ticked = False
+
+    # Its origin: the turns it continued, and what came of them.
+
+    def handed_back(self, row: dict):
+        """The owner wrote to this worker in the page: its turns are theirs again (no more
+        Ask-first checks for Autopilot's sake, nothing it does is Autopilot's)."""
+        carried = self.origins.handed_back(row["id"])
+        if not carried or not self.book.exists():
+            return
+        first = self.book.entry(carried["entries"][0]) or {}
+        self.book.append(
+            first.get("run_id") or "",
+            "handed-back",
+            f"You wrote to “{row['title']}”: its work is yours again",
+            of=first.get("id") or "",
+            subject=f"session:{row['id']}",
+            task_id=first.get("task_id") or "",
+            why={"rule": RULES, "by": "you", "ingress": "page"},
+            payload={"entries": carried["entries"]},
+        )
+
+    def turn_ended(self, row: dict):
+        """A turn that carried its origin ended: the Router's or the Slack session's stops
+        carrying it; a worker's keeps it, and the record says what the turn did (`after`)."""
+        if row["role"] != "worker":
+            if carried := self.origins.turn_ended(row["id"]):
+                self.after(row, carried, carried.get("since") or now())
+            return
+        if carried := self.origins.sticky.get(row["id"]):
+            moment = now()
+            self.after(row, carried, carried.get("seen") or carried.get("since") or moment)
+            self.origins.seen(row["id"], moment)
+
+    def after(self, row: dict, carried: dict, since: str):
+        """One `after` entry per entry that led to this turn: what it did, from its receipts,
+        and the settings it ran under."""
+        if not self.book.exists():
+            return
+        done = receipts_since(self.store, row["id"], since, worker=row["role"] == "worker")
+        mode = (
+            "asked first"
+            if carried.get("ask_first") or not self.runtime.yolo_choice(row)
+            else "acted without asking, your usual setting"
+        )
+        task = self.runtime.tasks.current(row["id"]) if row["role"] == "worker" else None
+        for entry_id in carried["entries"]:
+            source = self.book.entry(entry_id)
+            if not source:
+                continue
+            self.book.append(
+                source["run_id"],
+                "after",
+                "then: " + said_receipts(done),
+                of=entry_id,
+                subject=f"session:{row['id']}",
+                task_id=(task or {}).get("id") or source.get("task_id") or "",
+                why={"rule": RULES, "settings": mode},
+                evidence=done,
+            )
 
     # What the page shows.
 
