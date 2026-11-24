@@ -730,7 +730,7 @@ function taskCard(task, phase = phaseOf(task)) {
       shown = [viewing, following, changes];
       more = [copy, pr, named, splitOff, worker];
     } else if (task.status === "waiting" && task.stopped && task.spend_stop && !task.go_on) {
-      // Its token limit used: nothing goes on until it is raised (Settings → Coding agents).
+      // Its token limit used: nothing goes on until it is raised (Settings → Agents & models).
       more = [named, worker, cancel];
     } else if (task.status === "waiting" && task.stopped === PLAN_STOP) {
       // Paused by its agent's limit: it goes on by itself once that resets (where its agent

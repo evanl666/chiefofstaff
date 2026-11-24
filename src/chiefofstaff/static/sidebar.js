@@ -280,7 +280,7 @@ export function renderStatusLine() {
         "div",
         { class: "bad" },
         `Slack: ${snap.slack.error} `,
-        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections") }),
+        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections/slack") }),
         " · ",
         el("button", { type: "button", class: "link", text: "Turn off", title: "Stop watching Slack (turn it on again in Settings → Connections)", onclick: turnOffSlack }),
       ),
@@ -307,7 +307,7 @@ export function renderStatusLine() {
         "div",
         { class: "bad", title: `First failed ${since(failed.since)}: ${failed.reason}` },
         `Watch scan failed${failed.count > 1 ? ` (${failed.count} in a row)` : ""} `,
-        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections") }),
+        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections/watches") }),
       ),
     );
   }
@@ -320,7 +320,7 @@ export function renderStatusLine() {
         "div",
         { class: "bad", title: [...missed.map((item) => `Watch ${item.watch}: not searched (${item.reason})`), ...partial.map((item) => `Watch ${item.watch}: partly covered (${item.reason})`)].join("\n") },
         `Watches: ${[many(missed, "not searched"), many(partial, "only partly covered")].filter(Boolean).join(", ")} `,
-        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections") }),
+        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections/watches") }),
       ),
     );
   }
@@ -332,12 +332,24 @@ export function renderStatusLine() {
         "div",
         { class: "bad", title: `Could not reach you${away.where ? ` via ${away.where}` : ""}: ${away.error || "unknown error"}` },
         `Away notice not delivered · ${since(away.at)} `,
-        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections") }),
+        el("button", { type: "button", class: "link", text: "Settings", onclick: () => openSettings("connections/away") }),
       ),
     );
   }
-  if (snap.settings.paused) nodes.push(el("div", { text: "Watchers paused" }));
+  // Paused (Settings → Connections): where the owner sees it, the way back.
+  if (snap.settings.paused) nodes.push(el("div", {}, "Watchers paused ", el("button", { type: "button", class: "link", text: "Resume", "aria-label": "Resume watching", onclick: resume })));
   line.replaceChildren(...nodes);
+}
+async function resume(event) {
+  event.currentTarget.disabled = true;
+  try {
+    state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { paused: false } })) };
+    renderStatusLine();
+    toast("Watching again.");
+  } catch (error) {
+    toast(error.message, "error");
+    renderStatusLine();
+  }
 }
 async function turnOffSlack() {
   try {

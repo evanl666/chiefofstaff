@@ -1,27 +1,68 @@
 // The settings and usage dialogs.
 
 import { $, api, el, submits, toast } from "./dom.js";
-import { codeHtml, lines, plural, since } from "./text.js";
+import { lines, plural, since } from "./text.js";
 import { closedWorkers, followOthers, HOME, loadState, sessions, state } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
-import { EFFORTS, renderHeader, select } from "./session.js";
-import { agentMark, fixLine, modelOptions, statusText } from "./agentpick.js";
-import { openSetup, setupLine, setupWords } from "./agentsetup.js";
-// Settings opens on the tab last used, or the one asked for ("you" for what was learned).
+import { renderHeader, select } from "./session.js";
+import { agentsBody, agentsSaved, agentsShown, agentsStateChanged, modelsArrived, renderAgentsPage, setupChanged } from "./agentspage.js";
+
+// Settings' pages (docs/design/settings-v2.md): what each name opens, old names included, so a
+// link, a toast, a timeline line's `meta.settings` and the last page kept in localStorage open
+// the right place. `connections/<row>` opens that connection's details.
+const PLACES = {
+  general: { tab: "general" },
+  workers: { tab: "workers" },
+  advanced: { tab: "advanced" },
+  proactive: { tab: "proactive" },
+  models: { tab: "agents", unfold: "models" },
+  agents: { tab: "agents" },
+  connections: { tab: "connections" },
+  you: { tab: "you" },
+};
+const CONNECTIONS = ["slack", "github", "watches", "away", "tools", "send"];
+export function settingsPlace(name = "") {
+  const [head, row] = String(name || "").split("/");
+  if (head === "connections" && CONNECTIONS.includes(row)) return { tab: "connections", connection: row };
+  return PLACES[head] || { tab: "general" };
+}
+// Settings opens on the page last used, or the one asked for ("you" for what was learned).
 const TAB = "cos.settingsTab";
-export function showSettingsTab(tab) {
-  const tabs = [...document.querySelectorAll("#settings-form .tab")];
-  const shown = tabs.find((section) => section.dataset.tab === tab) || tabs[0];
+const tabButtons = () => [...document.querySelectorAll("#settings-tabs [role=tab]")].filter((button) => !button.hidden);
+export function showSettingsTab(name, { focus = false } = {}) {
+  const place = settingsPlace(name);
+  const tabs = [...document.querySelectorAll("#settings-pane > .tab")];
+  // (Prepared for you's page is there only while its switch is on.)
+  const wanted = tabs.find((section) => section.dataset.tab === place.tab && !("off" in section.dataset));
+  const shown = wanted || tabs[0];
   localStorage.setItem(TAB, shown.dataset.tab);
   for (const section of tabs) section.hidden = section !== shown;
-  for (const button of document.querySelectorAll("#settings-tabs button")) button.setAttribute("aria-selected", String(button.dataset.tab === shown.dataset.tab));
+  for (const button of document.querySelectorAll("#settings-tabs [role=tab]")) {
+    const on = button.dataset.tab === shown.dataset.tab;
+    button.setAttribute("aria-selected", String(on));
+    button.tabIndex = on ? 0 : -1;
+  }
   tabInView();
   $("#settings-pane").scrollTop = 0;
-  // Coding agents looks for them each time it is shown (only then).
-  if (shown.dataset.tab === "agents" && !agentsLooked) lookForAgents();
+  if (place.connection) openConnection(place.connection, { focus });
+  if (place.unfold === "models") {
+    // The models it named: Chief of Staff's own sessions where a role has one, else Copilot's.
+    const roles = state.snapshot?.settings?.role_models || {};
+    if (Object.entries(roles).some(([role, model]) => role !== "worker" && model)) $("#own-sessions").open = true;
+    else unfoldAgent("copilot");
+  }
+  // Agents & models looks at the installed agents when it is shown (at most once an opening).
+  if (shown.dataset.tab === "agents") agentsShown();
+  if (focus && !place.connection) document.querySelector(`#settings-tabs [role=tab][data-tab="${shown.dataset.tab}"]`)?.focus();
 }
-// On a phone the tabs scroll sideways: the one shown is in view, whole, also as the width
-// changes (a phone turned, a window narrowed while Settings is open). Only the strip scrolls.
+function unfoldAgent(name) {
+  const fold = document.querySelector(`#agent-${name} .fold`);
+  if (!fold) return;
+  fold.setAttribute("aria-expanded", "true");
+  document.getElementById(fold.getAttribute("aria-controls")).hidden = false;
+}
+// Narrow (900 px and below) the pages are tabs over the page, scrolling sideways where they
+// don't fit: the one shown is in view, whole, also as the width changes. Only the strip scrolls.
 function tabInView() {
   const strip = $("#settings-tabs");
   const button = strip?.querySelector('[aria-selected="true"]');
@@ -32,8 +73,15 @@ function tabInView() {
   if (at.left < box.left + edge) strip.scrollLeft -= box.left + edge - at.left;
   else if (at.right > box.right - edge) strip.scrollLeft += at.right - box.right + edge;
 }
-window.addEventListener("resize", tabInView);
-export function openSettings(tab = "") {
+const narrow = window.matchMedia?.("(max-width: 900px)");
+function tabsOrientation() {
+  $("#settings-tabs")?.setAttribute("aria-orientation", narrow?.matches ? "horizontal" : "vertical");
+}
+window.addEventListener("resize", () => {
+  tabInView();
+  tabsOrientation();
+});
+export function openSettings(where = "") {
   const dialog = $("#settings-dialog");
   // Opened first: a part that fails to render must not keep Settings shut.
   if (!dialog.open) dialog.showModal();
@@ -43,7 +91,8 @@ export function openSettings(tab = "") {
     console.error(error);
     settingsError(`Part of Settings could not be shown: ${error.message}`);
   }
-  showSettingsTab(tab || localStorage.getItem(TAB) || "general");
+  tabsOrientation();
+  showSettingsTab(where || localStorage.getItem(TAB) || "general", { focus: true });
   // Feedback, the owner's words and checks come in all the time; what was learned is read fresh.
   api("/api/state")
     .then((data) => {
@@ -58,23 +107,101 @@ export function openSettings(tab = "") {
     })
     .catch((error) => console.error(error));
 }
+// A connection's details, in place of the list (its fields were there all along).
+export function openConnection(key, { focus = true } = {}) {
+  $("#conn-list").hidden = true;
+  for (const detail of document.querySelectorAll("#settings-pane [data-conn-detail]")) detail.hidden = detail.dataset.connDetail !== key;
+  $("#settings-pane").scrollTop = 0;
+  if (focus) document.querySelector(`[data-conn-detail="${key}"] h3`)?.focus();
+}
+// Back to the list: focus on the row it came from.
+export function closeConnection({ focus = true } = {}) {
+  const open = document.querySelector("#settings-pane [data-conn-detail]:not([hidden])");
+  for (const detail of document.querySelectorAll("#settings-pane [data-conn-detail]")) detail.hidden = true;
+  $("#conn-list").hidden = false;
+  if (focus && open) document.querySelector(`#conn-list .conn[data-conn="${open.dataset.connDetail}"] .conn-open`)?.focus();
+}
+// Where a field is, opened: its page, its connection, every fold above it; scrolled to and
+// focused. Every problem goes through it: the browser's, the page's and the server's.
+export function revealField(input) {
+  const pane = input?.closest?.("#settings-pane > .tab");
+  if (!pane) return;
+  showSettingsTab(pane.dataset.tab);
+  const detail = input.closest("[data-conn-detail]");
+  if (detail) openConnection(detail.dataset.connDetail, { focus: false });
+  for (let node = input.parentElement; node && node !== pane; node = node.parentElement) {
+    if (node.tagName === "DETAILS") node.open = true;
+    if (node.hidden && !node.matches("[data-conn-detail]")) {
+      node.hidden = false;
+      if (node.id) document.querySelector(`[aria-controls="${node.id}"]`)?.setAttribute("aria-expanded", "true");
+    }
+  }
+  input.scrollIntoView?.({ block: "center" });
+  input.focus();
+}
 export function bindSettings() {
   const dialog = $("#settings-dialog");
+  const form = $("#settings-form");
   $("#lesson-save").addEventListener("click", addLesson);
   $("#lesson-text").addEventListener("keydown", (event) => {
     if (!submits(event)) return;
     event.preventDefault();  // Not the settings form's submit.
     addLesson();
   });
-  // (Coding agents' button, made only when it is offered, is listened to as it is made.)
-  $("#settings-tabs").addEventListener("click", (event) => {
-    const button = event.target.closest("#settings-tabs button");
+  const tabs = $("#settings-tabs");
+  tabs.addEventListener("click", (event) => {
+    const button = event.target.closest("[role=tab]");
     if (button) showSettingsTab(button.dataset.tab);
   });
-  // A field the browser finds invalid on Save may be on another tab: show that tab.
-  $("#settings-form").addEventListener("invalid", (event) => showSettingsTab(event.target.closest(".tab")?.dataset.tab), true);
-  $("#settings-form").addEventListener("submit", saveSettings);
+  // A tablist: arrows (either way), Home and End move between pages.
+  tabs.addEventListener("keydown", (event) => {
+    const steps = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 };
+    const buttons = tabButtons();
+    const at = buttons.indexOf(document.activeElement);
+    if (at < 0 || !(event.key in steps || event.key === "Home" || event.key === "End")) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (at + steps[event.key] + buttons.length) % buttons.length;
+    showSettingsTab(buttons[next].dataset.tab, { focus: true });
+  });
+  form.addEventListener("submit", saveSettings);
   $("#settings-cancel").addEventListener("click", () => dialog.close());
+  // A draft: marked changed (a menu then sends its value), and its connection's row says it is
+  // not saved yet. Nothing is drawn anew.
+  const drafted = (event) => {
+    const input = event.target;
+    if (!input.matches?.("input, select, textarea") || input.type === "file") return;
+    input.dataset.dirty = "1";
+    if (input.closest("[data-conn-detail]")) renderConnectionList();
+  };
+  form.addEventListener("input", drafted);
+  form.addEventListener("change", drafted);
+  $("#settings-pane").addEventListener("click", (event) => {
+    if (event.target.closest("[data-back]")) {
+      closeConnection();
+      return;
+    }
+    const act = event.target.closest(".conn .conn-act");
+    if (act) {
+      connectionAction(act.closest(".conn").dataset.conn, act.dataset.act);
+      return;
+    }
+    const row = event.target.closest(".conn");
+    if (row) openConnection(row.dataset.conn);
+    const activity = event.target.closest("#watch-activity, #slack-activity, #watchdog-activity");
+    if (activity) {
+      const find = {
+        "watch-activity": () => state.snapshot.connector?.session_id,
+        "slack-activity": () => sessions().find((session) => session.role === "slack")?.id,
+        "watchdog-activity": () => sessions().find((session) => session.role === "watchdog")?.id,
+      }[activity.id];
+      const sessionId = find();
+      if (!sessionId) return;
+      dialog.close();
+      select(sessionId);
+    }
+  });
+  // Copilot's models came after Settings opened: its menus again, their values kept.
+  window.addEventListener("models", modelsArrived);
   $("#profile-use").addEventListener("click", () => {
     $("#settings-form").profile.value = state.snapshot.profile_draft;
     $("#profile-draft").hidden = true;
@@ -105,8 +232,9 @@ export function bindSettings() {
   $("#skill-file").addEventListener("change", async () => {
     const file = $("#skill-file").files[0];
     $("#skill-file").value = "";
-    if (file) await addSkill(await file.text());
+    if (file && (await addSkill(await file.text()))) $("#skill-paste-box").hidden = true;
   });
+  // Add a skill…: paste it, or upload its SKILL.md.
   $("#skill-paste").addEventListener("click", () => {
     $("#skill-paste-box").hidden = false;
     $("#skill-text").focus();
@@ -121,7 +249,7 @@ export function bindSettings() {
     }
   });
   $("#plugins-retry").addEventListener("click", () => settingsAction("/api/plugins/retry", "Retrying the plugins that failed."));
-  $("#settings-form").mcp_servers.addEventListener("input", () => {
+  form.mcp_servers.addEventListener("input", () => {
     try {
       const note = mcpNote(mcpServers());
       $("#mcp-error").textContent = note;
@@ -138,36 +266,16 @@ export function bindSettings() {
     }
     const row = watchRow({ what: "", how: "", enabled: true });
     $("#watch-list").append(row);
-    watchSummary();
+    renderConnectionList();
     row.querySelector(".what").focus();
   });
   // Scanning uses the watches as written here: saved first (a watch just added counts).
-  $("#watch-scan").addEventListener("click", async () => {
-    if (!(await saveWatches())) return;
-    await settingsAction("/api/watch/scan", "Scanning now.");
-  });
-  $("#watch-list").addEventListener("input", watchSummary);
-  $("#watch-list").addEventListener("change", watchSummary);
+  $("#watch-scan").addEventListener("click", scanNow);
   // The test uses how to reach the owner as written here: saved first, as Scan now does.
-  $("#away-test").addEventListener("click", async () => {
-    if (!(await saveAway())) return;
-    await settingsAction("/api/away/test", "");
-  });
-  for (const [id, find] of [
-    ["#watch-activity", () => state.snapshot.connector?.session_id],
-    ["#slack-activity", () => sessions().find((session) => session.role === "slack")?.id],
-    ["#watchdog-activity", () => sessions().find((session) => session.role === "watchdog")?.id],
-  ]) {
-    $(id).addEventListener("click", () => {
-      const sessionId = find();
-      if (!sessionId) return;
-      dialog.close();
-      select(sessionId);
-    });
-  }
+  $("#away-test").addEventListener("click", sendTest);
   // Send to Chief: turning it on unfolds its consent in place, saved only with Turn on; off is
   // saved at once (its socket closes).
-  const sendSwitch = $("#settings-form").send_to_chief;
+  const sendSwitch = form.send_to_chief;
   sendSwitch.addEventListener("change", () => {
     if (sendSwitch.checked) {
       $("#send-how").hidden = true;
@@ -181,7 +289,7 @@ export function bindSettings() {
   });
   $("#send-on").addEventListener("click", () => saveSend(true));
   // Prepared for you: its tab is there while its switch is on (before it is saved, to set it up).
-  $("#settings-form").proactive.addEventListener("change", renderProactiveTab);
+  form.proactive.addEventListener("change", showProactiveTab);
   $("#send-cancel").addEventListener("click", () => {
     renderSendLine();
     sendSwitch.focus();
@@ -199,11 +307,21 @@ export function bindSettings() {
       const snapshot = await api("/api/slack/token", { method: "DELETE" });
       state.snapshot = { ...state.snapshot, ...snapshot };
       showSlackToken();
+      renderConnectionList();
     } catch (error) {
       settingsError(error.message);
     }
   });
+  form.slack_delegate_emoji.addEventListener("input", () => {
+    const emoji = form.slack_delegate_emoji.value.trim().replace(/^:|:$/g, "") || "robot_face";
+    $("#slack-delegate-reply").textContent = `Reply directly when you react with :${emoji}:`;
+  });
 }
+// The page's state changed while Settings is open: what it says, not what the owner wrote.
+export function settingsStateChanged() {
+  agentsStateChanged();
+}
+export { setupChanged };
 function startOfDay(date) {
   const day = new Date(date);
   day.setHours(0, 0, 0, 0);
@@ -408,10 +526,16 @@ export function slackStatusText() {
   if ((slack.token_saved || env) && slack.connected && !slack.can_send) parts.push("This token cannot send messages (chat:write).");
   return parts.join(" ");
 }
+// Every field of every page, connection and fold, from what is saved: Settings is one form, its
+// pages only shown and hidden, so a draft stays wherever the owner goes until Save or Cancel
+// (Cancel closes; the next opening fills every field again).
 export function fillSettings() {
   const form = $("#settings-form");
   const settings = state.snapshot.settings;
   shown = JSON.parse(JSON.stringify(settings));
+  for (const input of form.querySelectorAll("[data-dirty]")) delete input.dataset.dirty;
+  for (const input of form.querySelectorAll("[aria-invalid]")) input.removeAttribute("aria-invalid");
+  closeConnection({ focus: false });
   form.projects.value = settings.projects.join("\n");
   const missing = state.snapshot.missing_projects || [];
   $("#projects-missing").textContent = missing.length ? `Folder not found: ${missing.join(", ")}. Restore it, or remove it here.` : "";
@@ -440,11 +564,11 @@ export function fillSettings() {
   form.update_notice.checked = settings.update_notice !== false;
   form.proactive.checked = Boolean(settings.proactive);
   renderProactiveTab();
+  showProactiveTab();
   // When none of them can say where it stands, its line says why.
   const why = settings.other_sessions ? state.othersWhy : "";
   if (why) form.other_sessions.parentElement.title = why;
   else form.other_sessions.parentElement.removeAttribute("title");
-  form.watchdog_enabled.checked = settings.watchdog_enabled;
   form.slack_enabled.checked = settings.slack_enabled;
   form.slack_token.value = "";
   form.slack_poll_seconds.value = settings.slack_poll_seconds;
@@ -453,28 +577,9 @@ export function fillSettings() {
   document.getElementById("slack-delegate-reply").textContent = `Reply directly when you react with :${settings.slack_delegate_emoji || "robot_face"}:`;
   form.github_enabled.checked = settings.github_enabled;
   form.github_repos.value = settings.github_repos.join("\n");
-  form.copilot_command.value = settings.copilot_command;
-  form.model.value = settings.model;
-  for (const role of ["router", "worker", "slack", "watchdog"]) {
-    form[`model_${role}`].value = settings.role_models[role] || "";
-    const select = form[`effort_${role}`];
-    select.replaceChildren(
-      el("option", { value: "", text: "Default" }),
-      ...["low", "medium", "high", "xhigh", "max"].map((level) => el("option", { value: level, text: EFFORTS[level] })),
-    );
-    select.value = settings.role_efforts[role] || "";
-  }
-  // An effort applies to a model; Auto (Copilot's model picker) takes none.
-  const effortHint = () => {
-    const auto = (role) => (form[`model_${role}`].value.trim() || form.model.value.trim()).toLowerCase() === "auto";
-    $("#effort-hint").hidden = !["router", "worker", "slack", "watchdog"].some((role) => auto(role) && form[`effort_${role}`].value);
-  };
-  for (const name of ["model", "model_router", "model_worker", "model_slack", "model_watchdog", "effort_router", "effort_worker", "effort_slack", "effort_watchdog"]) {
-    form[name].oninput = effortHint;
-    form[name].onchange = effortHint;
-  }
-  effortHint();
-  form.worker_credit_limit.value = settings.worker_credit_limit || "";
+  // Agents & models: Copilot's row (its workers' model, effort and limit, its command), each
+  // other agent's, and Chief of Staff's own sessions.
+  renderAgentsPage();
   form.digest_time.value = settings.digest_time;
   form.profile.value = state.snapshot.profile || "";
   form.setup_notes.value = notesText();
@@ -494,7 +599,6 @@ export function fillSettings() {
   $("#mcp-error").textContent = mcpNote(servers);
   $("#mcp-error").hidden = !$("#mcp-error").textContent;
   $("#watch-list").replaceChildren(...(settings.watches || []).map(watchRow));
-  watchSummary();
   const [from, to] = (settings.watch_hours || "09:00-18:00").split("-");
   $("#watch-from").value = from;
   $("#watch-to").value = to;
@@ -503,8 +607,8 @@ export function fillSettings() {
   form.away_notify.checked = Boolean(settings.away_notify);
   form.away_minutes.value = settings.away_minutes ?? 10;
   form.away_how.value = settings.away_how || "";
+  $("#skill-paste-box").hidden = true;
   renderSendLine();
-  renderAgentsLine();
   renderConnections();
   showSlackToken();
   const github = state.snapshot.github;
@@ -522,7 +626,7 @@ function watchRow(watch) {
     el("label", { class: "check", title: "On" }, el("input", { class: "on", type: "checkbox", checked: watch.enabled !== false, "aria-label": "On" })),
     el("button", { type: "button", class: "link remove", text: "×", title: "Remove", "aria-label": "Remove watch", onclick: (event) => {
       event.currentTarget.closest("li").remove();
-      watchSummary();
+      renderConnectionList();
     } }),
   );
 }
@@ -629,20 +733,13 @@ export function watchGaps(last = {}) {
 export function coverageGaps(connector = {}) {
   return (connector.gaps || []).map((gap) => gap.text || `Could not check “${gap.watch}”`);
 }
+// Connections: a row each, its status in one line and at most one action (connectionStatus);
+// each one's details as they stand (its lists, its last scan or test), the fields untouched.
 export function renderConnections() {
   const snap = state.snapshot;
   if (!snap) return;
   const settings = snap.settings;
-  const slack = snap.slack || {};
-  $("#slack-summary").textContent = !settings.slack_enabled ? "Off" : slack.error ? "Problem" : slack.connected ? "Watching" : "On";
-  const repos = settings.github_repos.length;
-  $("#github-summary").textContent = settings.github_enabled ? `${repos} ${repos === 1 ? "repository" : "repositories"}` : "Off";
   const abilities = snap.abilities || { skills: [], plugins: {} };
-  const servers = Object.keys(settings.mcp_servers || {}).length;
-  const off = Object.keys(settings.mcp_servers_off || {}).length;
-  // As many as are listed below (one written twice is listed once).
-  const pluginCount = abilities.plugins ? Object.keys(abilities.plugins).length : new Set(settings.plugins || []).size;
-  $("#abilities-summary").textContent = [abilities.skills.length ? plural(abilities.skills.length, "skill") : "", pluginCount ? plural(pluginCount, "plugin") : "", servers + off ? `${plural(servers + off, "MCP server")}${off ? ` (${off} off)` : ""}` : ""].filter(Boolean).join(" · ") || "None added";
   $("#skills").replaceChildren(
     ...abilities.skills.map((skill) =>
       el(
@@ -694,7 +791,6 @@ export function renderConnections() {
       : connector.scanned_at
         ? `Scanned ${since(connector.scanned_at)}${last.found !== undefined ? ` · ${last.found} found` : ""}${problems ? ` · ${problems}` : ""}`
         : "";
-  watchSummary();
   $("#watch-state").textContent = [scanned, uncovered].filter(Boolean).join(" · ");
   // After hours (the schedule above): how often it scans now, and why; "not scanning" only when
   // after hours is 0. Nothing to say while it scans, or with no watch on.
@@ -714,10 +810,6 @@ export function renderConnections() {
   // What this way can do, as tried (the test, and notifications and reads as they happen).
   const can = away.can || {};
   const coverage = can.coverage || {};
-  // Its last notice not delivered (bug E72): said here, in red, until one is.
-  const undelivered = Boolean(settings.away_notify && tried.at && !tried.ok);
-  $("#away-summary").textContent = !settings.away_notify ? "Off" : undelivered ? `Away notice not delivered · ${since(tried.at)}` : ["On", away.where, can.send_only ? "Send only" : ""].filter(Boolean).join(" · ");
-  $("#away-summary").classList.toggle("error", undelivered);
   const reached = tried.at ? (tried.ok ? `Reached you${tried.where ? ` via ${tried.where}` : ""} ${since(tried.at)}` : `Could not reach you ${since(tried.at)}: ${tried.error || "unknown error"}`) : "";
   const limited = settings.away_notify && coverage.limited ? `Coverage limited: ${coverage.detail}` : "";
   $("#away-state").textContent = [reached, limited].filter(Boolean).join(" · ");
@@ -739,7 +831,143 @@ export function renderConnections() {
   $("#away-can").replaceChildren(...rows.map(([status, text]) => el("li", { class: status === "yes" ? "ok" : status, text })));
   $("#away-can").hidden = !rows.length;
   $("#slack-activity").hidden = !sessions().some((session) => session.role === "slack");
-  $("#watchdog-activity").hidden = !sessions().some((session) => session.role === "watchdog");
+  const watchdog = $("#watchdog-activity");
+  if (watchdog) watchdog.hidden = !sessions().some((session) => session.role === "watchdog");
+  renderConnectionList();
+}
+// A connection's status in one line, from what its details say (shortened): its tone (ok: it
+// runs, warn: something needs a look, bad: it fails) and its one action, only when there is
+// one next step. `written`: the watches as the form has them now.
+export function connectionStatus(key, snap, { written, unsaved: drafts = false } = {}) {
+  const settings = snap.settings || {};
+  const connector = snap.connector || {};
+  if (key === "slack") {
+    const slack = snap.slack || {};
+    if (!settings.slack_enabled) return { text: "Off" };
+    if (slack.error) return { text: `Problem: ${slack.error}`, tone: "bad" };
+    if (!slack.token_saved && slack.token_source !== "env") return { text: "Token needed", tone: "warn", action: ["setup", "Set up"] };
+    if (slack.connected) return { text: `Watching${slack.last_checked ? ` · checked ${since(slack.last_checked)}` : ""}`, tone: "ok" };
+    return { text: "On" };
+  }
+  if (key === "github") {
+    const github = snap.github || {};
+    const repos = (settings.github_repos || []).length;
+    const listed = repos ? `${repos} ${repos === 1 ? "repository" : "repositories"}` : "";
+    if (!settings.github_enabled) return { text: ["Off", listed ? `${listed} listed` : ""].filter(Boolean).join(" · ") };
+    if (github.error) return { text: `Problem: ${github.error}`, tone: "bad" };
+    if (github.connected) return { text: `Watching ${listed || "no repositories"}${github.last_checked ? ` · checked ${since(github.last_checked)}` : ""}`, tone: "ok" };
+    return { text: ["On", listed].filter(Boolean).join(" · ") };
+  }
+  if (key === "watches") {
+    const watches = written || settings.watches || [];
+    if (!watches.length) return { text: "None" };
+    const on = watches.filter((watch) => watch.enabled !== false).length;
+    const scan = on ? ["scan", "Scan now"] : null;
+    // Written, not saved yet: how many are on (its last scan was of others).
+    if (drafts) return { text: `${on} on`, action: scan };
+    const connection = connector.connection_needed;
+    if (connector.scanning) return { text: `${on} on · scanning now…`, tone: "ok" };
+    if (connection) return { text: `Connection needed: ${connection.source || connection.server}`, tone: "warn", action: ["card", "Open card"] };
+    const failed = connector.failed;
+    if (failed) return { text: `Scan failed ${since(failed.at)}: ${failed.reason}`, tone: "bad", action: scan };
+    const { missed, partial } = watchGaps(connector.last);
+    const gaps = [missed.length ? `${missed.length} not searched` : "", partial.length ? `${partial.length} only partly covered` : ""].filter(Boolean).join(" · ");
+    const found = connector.last?.found;
+    const scanned = connector.scanned_at ? `scanned ${since(connector.scanned_at)}${found !== undefined ? ` · ${found} found` : ""}` : "not scanned yet";
+    return { text: [`${on} on`, scanned, gaps].filter(Boolean).join(" · "), tone: gaps ? "warn" : on && connector.scanned_at ? "ok" : "", action: scan };
+  }
+  if (key === "away") {
+    const away = connector.away || {};
+    const tried = away.last || {};
+    if (!settings.away_notify) return { text: "Off" };
+    // Its last notice not delivered (bug E72): said, in red, until one is.
+    if (tried.at && !tried.ok) return { text: `Away notice not delivered · ${since(tried.at)}`, tone: "bad", action: ["test", "Send a test"] };
+    return { text: ["On", away.where, away.can?.send_only ? "Send only" : ""].filter(Boolean).join(" · "), tone: "ok" };
+  }
+  if (key === "tools") {
+    const abilities = snap.abilities || { skills: [], plugins: {} };
+    const servers = Object.keys(settings.mcp_servers || {}).length;
+    const off = Object.keys(settings.mcp_servers_off || {});
+    // As many as are listed (one written twice is listed once).
+    const plugins = abilities.plugins ? Object.values(abilities.plugins) : [...new Set(settings.plugins || [])];
+    const failing = plugins.filter((status) => status?.state === "failed").length;
+    const counts = [
+      (abilities.skills || []).length ? plural(abilities.skills.length, "skill") : "",
+      plugins.length && !failing ? plural(plugins.length, "plugin") : "",
+      servers + off.length ? plural(servers + off.length, "MCP server") : "",
+    ].filter(Boolean);
+    if (failing) return { text: [`${plural(failing, "plugin")} could not be installed`, ...counts].join(" · "), tone: "warn", action: ["retry", "Retry"] };
+    if (off.length) return { text: [`MCP server ${off[0]} is off until fixed`, ...counts.filter((part) => !part.includes("MCP"))].join(" · "), tone: "warn" };
+    return { text: counts.join(" · ") || "None added" };
+  }
+  if (key === "send") {
+    if (!settings.send_to_chief) return { text: "Off" };
+    if (snap.send_problem) return { text: `Problem: ${snap.send_problem}`, tone: "bad" };
+    return { text: "On", tone: "ok" };
+  }
+  return { text: "" };
+}
+// What the owner changed in a connection's details and has not saved: said on its row (a field
+// that saves at once, Send to Chief's switch, aside).
+function unsaved(key, written) {
+  if (key === "watches" && !sameWatches(written, state.snapshot.settings.watches || [])) return true;
+  return [...document.querySelectorAll(`[data-conn-detail="${key}"] [data-dirty]`)].some((input) => input.name !== "send_to_chief");
+}
+// Saved at once (Scan now, Send a test, Save token): those fields are no longer drafts.
+function savedNow(selector) {
+  for (const input of document.querySelectorAll(selector)) delete input.dataset.dirty;
+}
+const CONNECTION_NAMES = { slack: "Slack", github: "GitHub reviews", watches: "Watches", away: "When you're away", tools: "Skills, plugins and MCP servers", send: "Send to Chief from the command line" };
+export function renderConnectionList() {
+  const snap = state.snapshot;
+  if (!snap || !$("#conn-list")) return;
+  const written = watchFields().watches;
+  for (const row of document.querySelectorAll("#conn-list .conn")) {
+    const key = row.dataset.conn;
+    const drafts = unsaved(key, written);
+    const status = connectionStatus(key, snap, { written: key === "watches" ? written : undefined, unsaved: drafts });
+    const text = `${status.text}${drafts ? " · not saved yet" : ""}`;
+    const said = row.querySelector(".state");
+    said.textContent = text;
+    said.className = `state${status.tone ? ` ${status.tone}` : ""}`;
+    row.querySelector(".conn-open").setAttribute("aria-label", `${CONNECTION_NAMES[key]}: ${text}`);
+    const act = row.querySelector(".conn-act");
+    act.hidden = !status.action;
+    if (status.action) {
+      act.dataset.act = status.action[0];
+      act.textContent = status.action[1];
+      act.setAttribute("aria-label", `${status.action[1]}: ${CONNECTION_NAMES[key]}`);
+    }
+    const head = document.querySelector(`[data-conn-state="${key}"]`);
+    if (head) {
+      head.textContent = text;
+      head.className = `state${status.tone ? ` ${status.tone}` : ""}`;
+    }
+  }
+}
+// A row's one action, as its details would do it.
+async function connectionAction(key, act) {
+  if (act === "setup") {
+    openConnection(key, { focus: false });
+    $("#settings-form").slack_token.focus();
+  } else if (act === "scan") {
+    await scanNow();
+  } else if (act === "card") {
+    $("#settings-dialog").close();
+    select(HOME);
+  } else if (act === "test") {
+    await sendTest();
+  } else if (act === "retry") {
+    await settingsAction("/api/plugins/retry", "Retrying the plugins that failed.");
+  }
+}
+async function scanNow() {
+  if (!(await saveWatches())) return;
+  await settingsAction("/api/watch/scan", "Scanning now.");
+}
+async function sendTest() {
+  if (!(await saveAway())) return;
+  await settingsAction("/api/away/test", "");
 }
 // What sessions learned from the owner's feedback, and how often the owner now agrees.
 const SCOPE = (scope) => (!scope ? "everywhere" : scope === "slack" ? "Slack replies" : `in ${scope.replace("project:", "").split("/").pop()}`);
@@ -928,11 +1156,20 @@ export function settingsError(message) {
   node.textContent = message;
   node.hidden = !message;
 }
-// What Save sends: the settings as the form has them, every other one as it is, and `base`.
+// A menu's value only once the owner changed it; else what is saved (a model it does not list,
+// an effort the model does not offer, a list not loaded yet: never replaced).
+function kept(name, saved) {
+  const input = $("#settings-form")[name];
+  return input?.dataset?.dirty ? input.value.trim() : saved;
+}
+const ROLES = ["router", "worker", "slack", "watchdog"];
+// What Save sends: the settings as the form has them, wherever each field is, every other one
+// as it is, and `base`.
 export function settingsBody() {
   const form = $("#settings-form");
   const settings = state.snapshot.settings;
   const number = (name, fallback = settings[name]) => numberField(form[name], fallback);
+  const named = (name) => form[name];
   const body = {
     // Settings this page does not show are sent back as they are, not reset.
     ...settings,
@@ -952,22 +1189,18 @@ export function settingsBody() {
     update_notice: form.update_notice.checked,
     proactive: form.proactive.checked,
     ...proactiveFields(),
-    watchdog_enabled: form.watchdog_enabled.checked,
+    watchdog_enabled: named("watchdog_enabled") ? named("watchdog_enabled").checked : settings.watchdog_enabled,
     slack_enabled: form.slack_enabled.checked,
     slack_poll_seconds: number("slack_poll_seconds"),
     slack_delegate_emoji: form.slack_delegate_emoji.value.trim(),
     slack_delegate_reply: form.slack_delegate_reply.checked,
     github_enabled: form.github_enabled.checked,
     github_repos: lines(form.github_repos.value),
-    copilot_command: form.copilot_command.value.trim(),
-    model: form.model.value.trim(),
-    role_models: Object.fromEntries(
-      ["router", "worker", "slack", "watchdog"].map((role) => [role, form[`model_${role}`].value.trim()]).filter(([, value]) => value),
-    ),
-    role_efforts: Object.fromEntries(
-      ["router", "worker", "slack", "watchdog"].map((role) => [role, form[`effort_${role}`].value]).filter(([, value]) => value),
-    ),
-    worker_credit_limit: Number(form.worker_credit_limit.value || 0),
+    copilot_command: named("copilot_command") ? named("copilot_command").value.trim() : settings.copilot_command,
+    model: kept("model", settings.model),
+    role_models: Object.fromEntries(ROLES.map((role) => [role, kept(`model_${role}`, settings.role_models[role] || "")]).filter(([, value]) => value)),
+    role_efforts: Object.fromEntries(ROLES.map((role) => [role, kept(`effort_${role}`, settings.role_efforts[role] || "")]).filter(([, value]) => value)),
+    worker_credit_limit: named("worker_credit_limit") ? Number(named("worker_credit_limit").value || 0) : settings.worker_credit_limit,
     digest_time: form.digest_time.value,
     learn_from_work: form.learn_from_work.checked,
     learn_checks: form.learn_checks.checked,
@@ -990,22 +1223,29 @@ export function settingsBody() {
 async function saveSettings(event) {
   event.preventDefault();
   const form = $("#settings-form");
+  settingsError("");
+  // The browser's own checks, on any field, shown where the field is (folded or on another
+  // page: the form has novalidate, so none is "not focusable").
+  const invalid = [...form.querySelectorAll(":invalid")].find((input) => !input.closest("[data-off]"));
+  if (invalid) {
+    revealField(invalid);
+    invalid.reportValidity();
+    return;
+  }
   const body = settingsBody();
   try {
     body.mcp_servers = mcpServers();
   } catch (error) {
-    $("#conn-abilities").open = true;
-    showSettingsTab("connections");
     settingsError(error.message);
+    revealField(form.mcp_servers);
     return;
   }
   let agents;
   try {
     agents = agentsBody();
   } catch (error) {
-    showSettingsTab("agents");
     settingsError(error.message);
-    $(`#settings-form [aria-invalid="true"]`)?.focus();
+    if (error.field) revealField(error.field);
     return;
   }
   try {
@@ -1023,6 +1263,7 @@ async function saveSettings(event) {
       snapshot = await api("/api/profile", { method: "POST", body: { text: form.profile.value } });
     }
     state.snapshot = { ...state.snapshot, ...snapshot };
+    if (agents) agentsSaved();
     $("#settings-dialog").close();
     followOthers();
     renderSidebar();
@@ -1032,21 +1273,26 @@ async function saveSettings(event) {
     showProblem(error);
   }
 }
-// The field a server's error is about (named by the server, or by its label at the start of
-// the message, "Parallel workers: …"), shown on its tab, its part open.
-function showProblem(error) {
+// The field a server's error is about: named by the server, or by its label at the start of
+// the message ("Parallel workers: …", "Workers model: …"), shown where it is (revealField).
+const MODEL_LABELS = { "Default model:": "model", "Router model:": "model_router", "Workers model:": "model_worker", "Slack model:": "model_slack", "Watchdog model:": "model_watchdog", "The code folder ": "code_folder" };
+export function problemField(error) {
   const form = $("#settings-form");
+  const byLabel = Object.entries(MODEL_LABELS).find(([words]) => error.message.startsWith(words));
+  if (byLabel) return form.elements.namedItem(byLabel[1]);
   const named = (error.fields || []).map((name) => form.elements.namedItem(name)).find((field) => field?.closest);
+  if (named) return named;
   const labelled = [...form.querySelectorAll(".tab label")].find((label) => {
     const words = (label.querySelector("span") || label).textContent.trim();
     return words && error.message.startsWith(`${words}:`);
   });
-  const field = named || labelled?.querySelector("input, textarea, select");
-  const tab = (field || labelled)?.closest(".tab");
-  if (!tab) return;
-  showSettingsTab(tab.dataset.tab);
-  for (let part = (field || labelled).closest("details"); part; part = part.parentElement.closest("details")) part.open = true;
-  field?.focus();
+  return labelled?.querySelector("input, textarea, select") || null;
+}
+function showProblem(error) {
+  const field = problemField(error);
+  if (!field) return;
+  field.setAttribute("aria-invalid", "true");
+  revealField(field);
 }
 // The watches as written in the form, with when they run.
 function watchFields() {
@@ -1083,318 +1329,13 @@ async function saveAway() {
   try {
     state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...fields, base: shown } })) };
     savedHere(fields);
+    savedNow("[data-conn-detail=away] [data-dirty]");
     renderConnections();
     return true;
   } catch (error) {
     settingsError(error.message);
     return false;
   }
-}
-// Other coding agents (more-agents.md 5.10; the agent picker's Settings): their own tab, after
-// Models, made only where one is installed or on (with Copilot alone, Settings is as it always
-// was, with nothing of them). The tab looks for them (GET /api/agents) each time it is shown,
-// never before.
-const AGENTS = { codex: "Codex", claude: "Claude" };
-let agentsLooked = null; // What the tab showed when it looked: the agents found, as saved.
-function agentsTab() {
-  const help = "https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#workers-on-other-coding-agents";
-  const button = el("button", { type: "button", role: "tab", "data-tab": "agents", id: "agents-tab", text: "Coding agents" });
-  $("#settings-tabs [data-tab=models]").after(button);
-  // Where new workers start and where Chief of Staff's own sessions run (once another agent is
-  // on), a row per agent, how to ask for one for a single task, and what stays on Copilot.
-  const select = el("select", { name: "agent_new_workers", "aria-describedby": "agents-choice-pays" });
-  // Picking an agent there makes it available (as its row's switch says).
-  select.addEventListener("change", () => choicePays(select.value));
-  select.addEventListener("change", () => {
-    const box = $("#settings-form")[`agent_${select.value}_enabled`];
-    if (box && !box.checked) {
-      box.checked = true;
-      box.dispatchEvent(new Event("change"));
-    }
-  });
-  const section = el(
-    "section",
-    { class: "tab agents-tab", "data-tab": "agents", hidden: true },
-    el(
-      "div",
-      { id: "agents-places", class: "agents-places", hidden: true },
-      el("label", { id: "agents-choice", class: "agents-choice", hidden: true }, el("span", { text: "New workers start on" }), select),
-      el("small", { id: "agents-choice-pays", class: "agents-role-line agents-choice-pays", hidden: true }),
-      // Where Chief of Staff's own sessions run: folded away (Copilot unless chosen).
-      el("details", { id: "agents-system", class: "agents-system", hidden: true }, el("summary", { text: "System agents" }), el("div", { id: "agents-roles", class: "agents-roles" })),
-    ),
-    el("div", { id: "agents-rows", class: "agents-rows" }),
-    el("small", { id: "agents-hint", class: "agents-hint", hidden: true }),
-    el("small", { class: "agents-intro" }, "Workers, the Router and the Watchdog can also run on another coding agent you have installed and signed in to. Slack and Watch for you stay on Copilot. ", el("a", { class: "link", href: help, target: "_blank", rel: "noreferrer", text: "What differs" })),
-  );
-  $("#settings-form .tab[data-tab=models]").after(section);
-}
-function renderAgentsLine() {
-  const shown = Boolean(state.snapshot.agents || state.snapshot.agents_found?.length);
-  agentsLooked = null;
-  if (!shown) {
-    $("#agents-tab")?.remove();
-    $("#settings-form .tab[data-tab=agents]")?.remove();
-    return;
-  }
-  if (!$("#agents-tab")) agentsTab();
-  $("#agents-rows").replaceChildren();
-  $("#agents-roles").replaceChildren();
-  $("#settings-form").agent_new_workers.replaceChildren(el("option", { value: "copilot", text: "Copilot" }));
-  $("#agents-choice").hidden = true;
-  $("#agents-choice-pays").hidden = true;
-  $("#agents-places").hidden = true;
-  $("#agents-hint").hidden = true;
-}
-async function lookForAgents() {
-  const looking = Symbol("looking");
-  agentsLooked = looking;
-  // Loading: each row says so until the agents answer.
-  const loading = (state.snapshot.agents_found || Object.keys(AGENTS)).map((name) => agentRow({ name, label: AGENTS[name] || name, found: true, state: "Checking…", problem: "", models: [] }, true));
-  $("#agents-rows").replaceChildren(...loading);
-  $("#agents-roles").replaceChildren();
-  $("#agents-choice").hidden = true;
-  $("#agents-choice-pays").hidden = true;
-  $("#agents-places").hidden = true;
-  $("#agents-hint").hidden = true;
-  let found;
-  try {
-    found = await api("/api/agents");
-  } catch (error) {
-    if (agentsLooked !== looking) return;
-    agentsLooked = null;  // Looked for again when shown next.
-    $("#agents-rows").replaceChildren(...Object.entries(AGENTS).map(([name, label]) => agentRow({ name, label, found: true, state: "", problem: `Could not check: ${error.message}`, models: [] }, true)));
-    return;
-  }
-  if (agentsLooked !== looking) return;
-  agentsLooked = found;
-  // Sandboxed, an agent whose workers can't start then says why on its row (its sandbox not
-  // shown to hold, or your Claude settings widening it).
-  $("#agents-rows").replaceChildren(
-    ...(found.agents.length ? found.agents.map((agent) => agentRow(found.sandboxed && agent.sandbox ? { ...agent, problem: agent.sandbox } : agent, false)) : [el("small", { class: "agents-none", role: "status", text: noAgentWords(found.supported) })]),
-    // Each one not installed, beside one that is: Install, its command shown before it runs.
-    ...(found.missing || []).map((agent) => el("div", { class: "agent-row agent-missing", "data-agent": agent.name }, el("div", { class: "agent-head" }, agentMark(agent.name), el("strong", { text: agent.label }), el("small", { class: "agent-problem", role: "status", text: setupWords(agent.name) || agent.said })), el("small", { class: "agent-note" }, setupLine({ ...agent, status: "missing" }) || fixLine(agent.fix)))),
-  );
-  $("#agents-roles").replaceChildren(...(found.roles || []).map(roleRow));
-  newWorkersChoices(found.new_workers);
-}
-// Where one of Chief of Staff's own sessions runs ("The Router runs on"): shown only while an
-// agent it can run on is on, listing only those; under it, why it runs on Copilot for now.
-function roleRow(role) {
-  const lineId = `role-${role.role}-line`;
-  const select = el("select", { name: `role_${role.role}`, "data-chosen": role.chosen });
-  if (role.line) select.setAttribute("aria-describedby", lineId);
-  select.addEventListener("change", () => newWorkersChoices($("#settings-form").agent_new_workers.value));
-  // If its agent can't run it (signed out, not installed, a limit): Copilot and tell me, or ask.
-  const fallback = role.unavailable
-    ? el(
-        "label",
-        { class: "agents-choice agents-unavailable" },
-        el("span", { text: "If unavailable" }),
-        el("select", { name: `unavailable_${role.role}`, "data-chosen": role.unavailable }, el("option", { value: "copilot", text: "Use Copilot and tell me" }), el("option", { value: "ask", text: "Ask me" })),
-      )
-    : "";
-  if (fallback) fallback.querySelector("select").value = role.unavailable;
-  return el(
-    "div",
-    { class: "agents-role", "data-role": role.role, "data-agents": role.agents.join(" "), hidden: true },
-    el("label", { class: "agents-choice" }, el("span", { text: `${role.label} runs on` }), select),
-    fallback,
-    role.line ? el("small", { id: lineId, class: "agents-role-line", role: "status", text: role.line }) : "",
-    el("div", { class: "role-setup" }),
-  );
-}
-// A token count as the page shows it (200,000), and as the owner types it: grouped or not, as
-// their locale groups digits; null when it is not a whole number of tokens.
-const grouped = (count) => count.toLocaleString();
-const GROUP = new Intl.NumberFormat().formatToParts(10000).find((part) => part.type === "group")?.value || ",";
-const MOST_TOKENS = 1e12; // As agents.MOST_TOKENS: a typo's extra zeros are refused.
-function tokenCount(raw) {
-  const digits = raw.trim().split(GROUP).join("").replace(/[\s,]/g, "");
-  if (digits === "") return 0;
-  return /^\d+$/.test(digits) && Number(digits) <= MOST_TOKENS ? Number(digits) : null;
-}
-// Its limit field says what is wrong with what was typed, beside it (and only then).
-function checkLimit(input) {
-  const count = tokenCount(input.value);
-  const error = $(`#${input.getAttribute("aria-describedby")}`);
-  const wrong = count === null;
-  error.textContent = wrong ? "A whole number of tokens, or empty for no limit." : "";
-  error.hidden = !wrong;
-  if (wrong) input.setAttribute("aria-invalid", "true");
-  else input.removeAttribute("aria-invalid");
-  return count;
-}
-// How much of its plan's limits it used, where the agent says it: "42% of your 5-hour limit,
-// resets 3:40 pm". At 80% and over, a chip beside its name says so.
-const USED_CHIP = 80;
-function usageLine(usage) {
-  return (usage || []).map((entry) => `${entry.used}% of your ${entry.label}${entry.resets_at ? `, resets ${resetTime(entry.resets_at)}` : ""}`).join(" · ");
-}
-function resetTime(seconds) {
-  const at = new Date(seconds * 1000);
-  const today = at.toDateString() === new Date().toDateString();
-  return today ? at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : at.toLocaleDateString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
-}
-// One agent's row: its name and state ("version · signed in with …"), Available for workers,
-// how much of its plan it used, and, while it is on, its model and limit per worker.
-function agentRow(agent, disabled) {
-  const id = `agent-${agent.name}-state`;
-  const box = el("input", { type: "checkbox", name: `agent_${agent.name}_enabled`, "aria-describedby": id });
-  box.checked = Boolean(agent.enabled);
-  // Off, it is turned on only once it is ready (installed, signed in) and can run here; on, it
-  // can always be turned off.
-  const unready = Boolean(agent.status) && agent.status !== "ready";
-  box.disabled = disabled || (!agent.enabled && (Boolean(agent.problem) || unready));
-  // Its status as the @ picker says it ("Ready · Uses your ChatGPT sign-in"), its version on
-  // hover; why it can't run, else; the command that makes it ready, under it.
-  const said = unready && setupWords(agent.name) ? setupWords(agent.name) : unready && agent.fix ? agent.said : agent.status && !agent.problem ? statusText({ ...agent, on: true }) : agent.problem || agent.state || "";
-  const line = el("small", { id, role: "status", class: agent.problem || unready ? "agent-problem" : "agent-state", title: agent.state || undefined, html: codeHtml(said) });
-  // Sign in (or Install) where it says so, its command to copy beside; signed in, Sign in again.
-  const fix = unready && agent.fix ? el("small", { class: "agent-note" }, setupLine(agent) || fixLine(agent.fix)) : null;
-  const again =
-    !unready && agent.status === "ready" && agent.ways?.length
-      ? el("button", { type: "button", class: "link sign-in-again", text: "Sign in again", "aria-label": `Sign in to ${agent.label} again`, onclick: () => openSetup(agent.name, { again: true }) })
-      : null;
-  const most = Math.max(0, ...(agent.usage || []).map((entry) => entry.used));
-  const chip = most >= USED_CHIP ? el("span", { class: `chip ${most >= 100 ? "blocked" : "waiting"}`, text: `${most}% used`, title: usageLine(agent.usage) }) : null;
-  const usage = agent.usage?.length ? el("small", { class: "agent-usage", text: usageLine(agent.usage) }) : null;
-  // A plan's limit as its workers last heard it, the one line its sign-in calls for, and what
-  // its workers do differently sandboxed.
-  const notes = [agent.limit_line, ...(agent.problem ? [] : [agent.note, agent.sandbox_note])].filter(Boolean).map((text) => el("small", { class: "agent-note", text }));
-  // Its models by name, as the popover lists them (a model named that it does not list, kept);
-  // typed where it lists none.
-  const listed = agent.models || [];
-  const modelField = listed.length
-    ? el(
-        "select",
-        { name: `agent_${agent.name}_model` },
-        ...modelOptions(agent.name, listed, { settings: true, label: "Agent's default" }),
-        ...(agent.model && agent.model !== "default" && !listed.some((model) => model.id === agent.model) ? [el("option", { value: agent.model, text: agent.model })] : []),
-      )
-    : el("input", { name: `agent_${agent.name}_model`, placeholder: "Agent's default", value: agent.model || "", autocomplete: "off" });
-  // (Claude Code's default chosen by name is its first choice: the same.)
-  if (listed.length) modelField.value = agent.name === "claude" && agent.model === "default" ? "" : agent.model || "";
-  const errorId = `agent-${agent.name}-limit-error`;
-  const limit = el("input", { name: `agent_${agent.name}_limit`, type: "text", inputmode: "numeric", placeholder: "No limit", value: agent.limit ? grouped(agent.limit) : "", autocomplete: "off", "aria-describedby": errorId });
-  limit.addEventListener("blur", () => {
-    const count = checkLimit(limit);
-    if (count) limit.value = grouped(count);
-  });
-  limit.addEventListener("input", () => limit.hasAttribute("aria-invalid") && checkLimit(limit));
-  const fields = el(
-    "div",
-    { class: "agent-fields" },
-    el("label", {}, el("span", { text: "Model" }), modelField),
-    el("div", { class: "agent-limit" }, el("label", {}, el("span", { text: "Limit per worker (tokens)" }), limit), el("small", { id: errorId, class: "field-error", hidden: true })),
-  );
-  fields.hidden = !box.checked;
-  box.addEventListener("change", () => {
-    fields.hidden = !box.checked;
-    newWorkersChoices($("#settings-form").agent_new_workers.value);
-  });
-  const head = el("div", { class: "agent-head" }, agentMark(agent.name), el("strong", { text: agent.label }), chip, again, el("label", { class: "check agent-switch" }, box, " Available for workers"));
-  // One that cannot be turned on looks it, its reason in its line.
-  return el("div", { class: `agent-row${box.disabled ? " disabled" : ""}`, "data-agent": agent.name }, head, line, fix, usage, ...notes, fields);
-}
-// New workers start on Copilot or on an agent available above that can run now (as the form
-// has it, saved or not): the line shows once another agent is on, with how to ask for one for
-// a single task. One turned off there goes back to Copilot.
-function newWorkersChoices(chosen) {
-  const form = $("#settings-form");
-  const on = (agentsLooked?.agents || []).filter((agent) => form[`agent_${agent.name}_enabled`]?.checked);
-  const ready = on.filter((agent) => !agent.problem && !(agentsLooked.sandboxed && agent.sandbox));
-  const select = form.agent_new_workers;
-  // Last used: the agent last chosen for a worker (never the default unless picked).
-  select.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...ready.map((agent) => el("option", { value: agent.name, text: agent.label })), el("option", { value: "last", text: "Last used" }));
-  select.value = chosen === "last" || ready.some((agent) => agent.name === chosen) ? chosen : "copilot";
-  $("#agents-choice").hidden = !on.length;
-  choicePays(select.value);
-  for (const row of document.querySelectorAll("#agents-roles .agents-role")) {
-    const runs = on.filter((agent) => row.dataset.agents.split(" ").includes(agent.name));
-    const choice = row.querySelector("select");
-    const kept = choice.value || choice.dataset.chosen;
-    choice.replaceChildren(el("option", { value: "copilot", text: "Copilot" }), ...runs.map((agent) => el("option", { value: agent.name, text: agent.label })));
-    choice.value = runs.some((agent) => agent.name === kept) ? kept : "copilot";
-    row.hidden = !runs.length;
-    // One of them not ready: Sign in (or Install) here too, never hidden.
-    const unready = runs.filter((agent) => agent.status && agent.status !== "ready");
-    row.querySelector(".role-setup")?.replaceChildren(
-      ...unready
-        .map((agent) => [agent, setupLine(agent)])
-        .filter(([, setup]) => setup)
-        .map(([agent, setup]) => el("small", { class: "agent-note" }, agentMark(agent.name), ` ${agent.label}: ${agent.said} `, setup)),
-    );
-    const fallback = row.querySelector(".agents-unavailable");
-    if (fallback) fallback.hidden = choice.value === "copilot";
-  }
-  // Folded, its line saying where any of them runs other than on Copilot: where it runs now
-  // (on Copilot for now, where its agent can't run it: its line says why), as saved.
-  const system = $("#agents-system");
-  const shownRoles = [...document.querySelectorAll("#agents-roles .agents-role:not([hidden])")];
-  system.hidden = !shownRoles.length;
-  const elsewhere = shownRoles
-    .map((row) => [row.querySelector(".agents-choice span").textContent.replace(/ runs on$/, ""), row.querySelector("select"), row])
-    .filter(([, choice]) => choice.value !== "copilot")
-    .map(([label, choice, row]) =>
-      choice.value === choice.dataset.chosen && row.querySelector(".agents-role-line")?.textContent
-        ? `${label} on Copilot for now`
-        : `${label} on ${choice.selectedOptions[0]?.text || choice.value}`,
-    );
-  system.querySelector("summary").textContent = ["System agents", ...elsewhere].join(" · ");
-  $("#agents-places").hidden = !on.length;
-  const hint = $("#agents-hint");
-  hint.hidden = !on.length;
-  if (on.length) hint.textContent = `For a single task, say \u201cdo this with ${on[0].label}\u201d or type ${on.map((agent) => `@${agent.name}`).join(" or ")}.`;
-}
-// Under where new workers start: whose plan or key the chosen agent uses, as its row says (for
-// Last used, the agent it starts them on now).
-function choicePays(chosen) {
-  const line = $("#agents-choice-pays");
-  if (!line) return;
-  const looked = agentsLooked?.agents || [];
-  const agent = chosen === "last" ? agentsLooked?.last_used || "copilot" : chosen;
-  const pays = agent === "copilot" ? "Uses your Copilot plan" : looked.find((found) => found.name === agent)?.pays || "";
-  const named = agent === "copilot" ? "Copilot" : looked.find((found) => found.name === agent)?.label || agent;
-  line.textContent = chosen === "last" ? [`Now ${named}`, pays].filter(Boolean).join(" · ") : pays;
-  line.hidden = !line.textContent || $("#agents-choice").hidden;
-}
-// The tab as the form has it, for Save: only once it was looked at, and only what changed.
-function agentsBody() {
-  if (!agentsLooked?.agents) return null;
-  const form = $("#settings-form");
-  const body = {};
-  for (const agent of agentsLooked.agents) {
-    const enabled = form[`agent_${agent.name}_enabled`].checked;
-    const model = form[`agent_${agent.name}_model`].value.trim();
-    const input = form[`agent_${agent.name}_limit`];
-    const limit = checkLimit(input);
-    if (limit === null) {
-      input.closest(".agent-fields").hidden = false;  // Said beside the field; Save goes no further.
-      showSettingsTab("agents");
-      throw new Error("Limit per worker: enter a whole number of tokens.");
-    }
-    if (enabled !== Boolean(agent.enabled) || model !== (agent.model || "") || limit !== (agent.limit || 0)) body[agent.name] = { enabled, model, limit };
-  }
-  if (form.agent_new_workers.value !== agentsLooked.new_workers) body.new_workers = form.agent_new_workers.value;
-  const roles = {};
-  const unavailable = {};
-  for (const row of document.querySelectorAll("#agents-roles .agents-role")) {
-    const choice = row.querySelector("select");
-    const value = row.hidden ? "copilot" : choice.value;
-    if (value !== choice.dataset.chosen) roles[row.dataset.role] = value;
-    const fallback = row.querySelector(".agents-unavailable select");
-    if (fallback && fallback.value !== fallback.dataset.chosen) unavailable[row.dataset.role] = fallback.value;
-  }
-  if (Object.keys(roles).length) body.roles = roles;
-  if (Object.keys(unavailable).length) body.role_unavailable = unavailable;
-  return Object.keys(body).length ? body : null;
-}
-// None of the coding agents it supports is on this computer (bug E80): which they are, and
-// what to do.
-function noAgentWords(supported = ["the Codex CLI"]) {
-  const listed = supported.length > 1 ? `${supported.slice(0, -1).join(", ")} or ${supported[supported.length - 1]}` : supported[0];
-  return `No supported coding agent found. Supported: ${listed} — install ${supported.length > 1 ? "one" : "it"}, then open this again.`;
 }
 // Send to Chief's line as saved: off, the switch alone; on, the command and the recipes, or why
 // its socket could not open.
@@ -1444,6 +1385,7 @@ async function saveWatches() {
   try {
     state.snapshot = { ...state.snapshot, ...(await api("/api/settings", { method: "POST", body: { ...fields, base: shown } })) };
     savedHere(fields);
+    savedNow("[data-conn-detail=watches] [data-dirty]");
     renderConnections();
     return true;
   } catch (error) {
@@ -1451,22 +1393,14 @@ async function saveWatches() {
     return false;
   }
 }
-// How many watches are on, as written now; "not saved" until they are.
-function watchSummary() {
-  const snap = state.snapshot;
-  const connector = snap.connector || {};
-  const written = watchFields().watches;
-  const on = written.filter((watch) => watch.enabled !== false).length;
-  const unsaved = !sameWatches(written, snap.settings.watches || []);
-  const scanned = connector.scanning ? "scanning now…" : connector.scanned_at ? `scanned ${since(connector.scanned_at)}` : "not scanned yet";
-  $("#watches-summary").textContent = written.length ? [`${on} on`, unsaved ? "not saved yet" : scanned].filter(Boolean).join(" · ") : "None";
-}
 export async function saveToken() {
   const form = $("#settings-form");
   const snapshot = await api("/api/slack/token", { method: "POST", body: { token: form.slack_token.value.trim() } });
   state.snapshot = { ...state.snapshot, ...snapshot };
   form.slack_token.value = "";
+  savedNow("[name=slack_token]");
   showSlackToken();
+  renderConnectionList();
 }
 // A token set by the environment is the one used, whatever is saved here: it is changed there.
 function showSlackToken() {
@@ -1482,24 +1416,16 @@ function showSlackToken() {
 // reach, and per repository whether replies say they were drafted with an AI assistant.
 const LEVELS = [["off", "Off"], ["suggest", "Suggest"], ["prepare", "Prepare"]];
 const KIND_NAMES = [["fix-ci", "CI failures"], ["address-review", "Review comments"]];
+// Made when Settings opens with it on, or once its switch is turned on (from what is saved);
+// then only shown and hidden as the switch goes, so what was written there stays.
 function renderProactiveTab() {
   const form = $("#settings-form");
-  const on = form.proactive.checked;
-  let button = document.querySelector('#settings-tabs button[data-tab="proactive"]');
-  const section = document.querySelector('#settings-pane .tab[data-tab="proactive"]');
-  if (!on) {
-    const showing = section && !section.hidden;
-    button?.remove();
-    section?.remove();
-    if (showing) showSettingsTab("general");
-    return;
-  }
+  document.querySelector('#settings-tabs [data-tab="proactive"]')?.remove();
+  document.querySelector('#settings-pane .tab[data-tab="proactive"]')?.remove();
+  if (!form.proactive.checked) return;
   const settings = state.snapshot.settings;
-  if (!button) {
-    button = el("button", { type: "button", role: "tab", "data-tab": "proactive", text: "Prepared for you" });
-    button.addEventListener("click", () => showSettingsTab("proactive"));
-    $("#settings-tabs").insertBefore(button, document.querySelector('#settings-tabs button[data-tab="you"]'));
-  }
+  const button = el("button", { type: "button", role: "tab", id: "settings-tab-proactive", "data-tab": "proactive", "aria-controls": "settings-page-proactive", tabindex: "-1", text: "Prepared for you" });
+  $("#settings-tabs").insertBefore(button, document.querySelector('#settings-tabs [data-tab="you"]'));
   const kept = state.snapshot.shepherd || {};
   const levels = settings.proactive_levels || {};
   const level = (kind, name) =>
@@ -1532,28 +1458,40 @@ function renderProactiveTab() {
     repos.length ? el("h4", { text: "Repositories" }) : null,
     repos.length ? el("ul", { class: "repo-list" }, ...repos) : null,
   ].filter(Boolean);
-  const fresh = el("section", { class: "tab", "data-tab": "proactive", hidden: true }, ...content);
-  if (section) {
-    fresh.hidden = section.hidden;
-    section.replaceWith(fresh);
-  } else {
-    $("#settings-pane").insertBefore(fresh, document.querySelector('#settings-pane .tab[data-tab="you"]'));
-  }
+  const fresh = el("section", { class: "tab", role: "tabpanel", id: "settings-page-proactive", "data-tab": "proactive", "aria-labelledby": "settings-tab-proactive", hidden: true }, ...content);
+  $("#settings-pane").insertBefore(fresh, document.querySelector('#settings-pane .tab[data-tab="you"]'));
   form.step_hosts.value = (settings.step_hosts || []).join("\n");
+}
+// Its tab while its switch is on (saved or not); off, hidden, what was written in it kept.
+function showProactiveTab() {
+  const on = $("#settings-form").proactive.checked;
+  if (on && !document.querySelector('#settings-pane .tab[data-tab="proactive"]')) renderProactiveTab();
+  const button = document.querySelector('#settings-tabs [data-tab="proactive"]');
+  const section = document.querySelector('#settings-pane .tab[data-tab="proactive"]');
+  if (!section) return;
+  const showing = !section.hidden;
+  button.hidden = !on;
+  if (on) delete section.dataset.off;
+  else section.dataset.off = "";
+  if (!on && showing) showSettingsTab("general");
 }
 const round = (value) => Math.round((value || 0) * 10) / 10;
 function proactiveFields() {
   const form = $("#settings-form");
   const settings = state.snapshot.settings;
-  if (!document.querySelector('#settings-pane .tab[data-tab="proactive"]')) return {};
+  if (!form.proactive.checked || !document.querySelector('#settings-pane .tab[data-tab="proactive"]')) return {};
+  // A repository's choices and a kind's level, only once changed here (a Save of nothing
+  // changed leaves them as saved: settings-v2.md §8.7).
   const repos = { ...(settings.proactive_repos || {}) };
   for (const row of document.querySelectorAll("#settings-pane .repo-row")) {
+    if (!row.querySelector("[data-dirty]")) continue;
     repos[row.dataset.repo] = { disclosure: row.querySelector(".disclosure").value, localhost: row.querySelector(".localhost").checked };
   }
+  const levels = settings.proactive_levels || {};
   return {
     proactive_worker_prs: form.proactive_worker_prs.checked,
     proactive_my_prs: form.proactive_my_prs.checked,
-    proactive_levels: Object.fromEntries(KIND_NAMES.map(([kind]) => [kind, form[`level_${kind}`].value])),
+    proactive_levels: Object.fromEntries(KIND_NAMES.map(([kind]) => [kind, kept(`level_${kind}`, levels[kind] || "")]).filter(([, level]) => level)),
     proactive_budget: numberField(form.proactive_budget, settings.proactive_budget || 0),
     step_hosts: lines(form.step_hosts.value),
     proactive_repos: repos,

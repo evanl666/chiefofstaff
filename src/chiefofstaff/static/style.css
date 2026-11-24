@@ -817,14 +817,6 @@ button.setup-action.compact { min-height: 24px; padding: 2px 10px; font-size: va
 .card .card-outcome { margin: 6px 0 0; color: var(--muted); font-size: var(--small); }
 .card.agent-refused .resuming { display: inline-flex; align-items: center; color: var(--soft); font-size: var(--small); }
 #mention-list .role-tag { flex: none; margin-left: -2px; padding: 0 5px; border-radius: 4px; background: var(--bubble); color: var(--muted); font-size: var(--small); font-weight: 500; }
-.agent-head button.sign-in-again { margin-left: 4px; padding: 0 4px; font-size: var(--small); color: var(--accent); }
-.agent-missing .agent-head small { margin-left: 4px; }
-.role-setup { display: grid; gap: 4px; }
-.role-setup:empty { display: none; }
-.role-setup .agent-note { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
-/* System agents: where Chief of Staff's own sessions run, folded. */
-.agents-system summary { cursor: pointer; color: var(--soft); }
-.agents-system[open] summary { margin-bottom: 10px; }
 #file-dialog { width: min(900px, calc(100vw - 32px)); }
 #file-dialog .file-head {
   display: flex;
@@ -902,13 +894,15 @@ dialog details[open] { display: grid; gap: 10px; }
 dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 dialog footer button { min-height: 32px; padding: 0 16px; }
 
-/* Settings: sections on the left, Save and Cancel always in view */
-#settings-dialog { width: min(780px, calc(100vw - 32px)); }
+/* Settings: its pages on the left (tabs over the page at 900 px and below), Save and Cancel
+   always in view. One form: pages, rows and connections only show and hide. */
+#settings-dialog { width: min(880px, calc(100vw - 32px)); }
 #settings-form {
+  position: relative;
   display: grid;
-  grid-template-columns: 172px minmax(0, 1fr);
+  grid-template-columns: 196px minmax(0, 1fr);
   grid-template-rows: auto 1fr auto;
-  height: min(680px, 88vh);
+  height: min(720px, 88vh);
   max-height: none;
   padding: 0;
   gap: 0;
@@ -917,10 +911,10 @@ dialog footer button { min-height: 32px; padding: 0 16px; }
 #settings-form > h2 { grid-area: 1 / 1; margin: 0; padding: 24px 20px 12px; background: var(--side); }
 #settings-tabs { grid-area: 2 / 1; display: flex; flex-direction: column; gap: 2px; padding: 0 12px 12px; background: var(--side); border-right: 1px solid var(--line); }
 #settings-form > h2 { border-right: 1px solid var(--line); }
-#settings-tabs button { background: none; color: var(--soft); text-align: left; min-height: 32px; padding: 0 12px; font-weight: 400; }
+#settings-tabs button { background: none; color: var(--soft); text-align: left; min-height: 34px; padding: 0 12px; font-weight: 400; }
 #settings-tabs button:not(:disabled):hover { background: var(--hover); color: var(--text); opacity: 1; }
 #settings-tabs button[aria-selected="true"] { background: var(--active); color: var(--text); font-weight: 600; }
-#settings-pane { grid-area: 1 / 2 / 3 / 3; overflow-y: auto; min-height: 0; padding: 24px 28px; }
+#settings-pane { grid-area: 1 / 2 / 3 / 3; overflow-y: auto; min-height: 0; padding: 28px 32px 32px; scroll-padding-top: 16px; }
 #settings-pane .tab { display: grid; gap: 12px; align-content: start; }
 #settings-pane .tab:not([hidden]) { animation: fade 0.12s var(--ease); }
 @keyframes fade { from { opacity: 0; } }
@@ -931,9 +925,6 @@ dialog footer button { min-height: 32px; padding: 0 16px; }
 #settings-pane label > small { margin-top: 1px; }
 #settings-form > footer { grid-area: 3 / 1 / 4 / 3; margin: 0; padding: 12px 20px; border-top: 1px solid var(--line); align-items: center; }
 #settings-form > footer .error { flex: 1; }
-.model-grid { display: grid; grid-template-columns: 76px minmax(0, 1fr) 150px; gap: 8px 12px; align-items: center; font-size: var(--body); }
-.model-grid > span { color: var(--soft); font-size: var(--small); font-weight: 500; }
-.model-grid > small { color: var(--muted); font-size: var(--small); }
 .learn-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 details.section { border: 1px solid var(--line); border-radius: var(--radius-lg); }
 details.section + details.section { margin-top: -4px; }
@@ -947,7 +938,6 @@ details.section > summary small.error { color: var(--red); }
 details.section > .section-body { display: grid; gap: 12px; padding: 4px 16px 16px; }
 .inline-actions { display: flex; gap: 8px; align-items: center; }
 .paste-box { display: grid; gap: 8px; }
-.check-row { display: flex; align-items: center; gap: 8px; }
 button.link.quiet { padding: 0 4px; font-size: var(--small); }
 #settings-pane .mono, .mono { font-family: var(--mono); font-size: var(--small); }
 ul.watch-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
@@ -963,46 +953,137 @@ label.hours input { width: 118px; }
 #learn-state { font-size: var(--small); color: var(--soft); }
 #learn-state.error { color: var(--red); }
 #learn-state:empty { display: none; }
-/* Coding agents: where new workers start (once another agent is on), a row per agent (its name,
-   Available for workers, its state and plan usage, its model and limit while on), a hint, and
-   what stays on Copilot. */
-.agents-tab { display: grid; gap: 18px; align-content: start; }
-.agents-tab small a { text-decoration: underline; }
-.agents-tab small code, .card.signin .note code { font: var(--small) var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
-.agents-intro { max-width: 64ch; line-height: 1.5; }
-.agents-rows { display: grid; gap: 10px; }
-.agent-row { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); }
-.agent-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.agent-head strong { font-weight: 600; }
-.agent-head .agent-switch { margin-left: auto; white-space: nowrap; }
-.agent-row .agent-state, .agent-row .agent-usage { color: var(--soft); }
-.agent-row .agent-problem { color: var(--soft); }
-.agent-row .agent-note { color: var(--muted); }
-/* One that cannot be turned on looks it (its reason in the line under it). */
-.agent-row.disabled .agent-switch { color: var(--muted); cursor: default; }
-.agent-row.disabled .agent-switch input { opacity: 0.4; }
-.agent-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px); align-items: start; gap: 8px 12px; max-width: 580px; margin-top: 6px; }
+/* A page's head (its name, what it is for in one line); a quiet box of rows, as details.section
+   draws one. */
+#settings-pane .tab.agents-page, #agents-page, #settings-pane .conn-page, #settings-pane .conn-detail { gap: 20px; }
+#agents-page { display: grid; }
+#connections-extra:empty { display: none; }
+#plugins-retry { justify-self: start; }
+#settings-pane .page-head { display: grid; gap: 2px; }
+#settings-pane .page-head h3 { margin: 0; font-size: var(--body); font-weight: 600; }
+#settings-pane .page-head p { margin: 0; color: var(--muted); font-size: var(--small); }
+#settings-pane .box { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); }
+#settings-pane .box > .agent + .agent, #settings-pane .box > .conn + .conn { border-top: 1px solid var(--line); }
+#settings-pane .page-foot { color: var(--muted); }
+#settings-pane .page-foot a { text-decoration: underline; text-underline-offset: 2px; }
+/* "More": what most owners never change, folded under its words. */
+#settings-pane details.more-fold { display: grid; gap: 8px; }
+#settings-pane details.more-fold > summary { display: inline-flex; align-items: center; gap: 6px; justify-self: start; min-height: 28px; margin: 0; padding: 0 2px; color: var(--muted); font-size: var(--small); list-style: none; }
+#settings-pane details.more-fold > summary::-webkit-details-marker { display: none; }
+#settings-pane details.more-fold > summary::before { content: ""; width: 5px; height: 5px; margin: 0 3px 0 1px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform 0.12s var(--ease); }
+#settings-pane details.more-fold[open] > summary::before { transform: rotate(45deg); margin-top: -3px; }
+#settings-pane details.more-fold > summary:hover { color: var(--text); }
+
+/* Agents & models: new workers run on (the answer at a glance); a row per agent (its mark and
+   name, its status in a few words, its plan's meter, its one action, its switch; what must not
+   be folded away under it; unfolded, its model, effort and limit, and its details); Chief of
+   Staff's own sessions, folded. */
+.default-line { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 6px 14px; padding: 14px 16px; }
+.default-line .lead { color: var(--soft); }
+.default-line .pick { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
+.default-line .pick .agent-mark { margin: 0 0 0 2px; }
+.default-line .pick strong { font-weight: 600; }
+.default-line .pick .sep { color: var(--muted); }
+#settings-pane .default-line .pick select { width: auto; min-width: 150px; font-weight: 500; }
+.default-line > small { grid-column: 1 / -1; color: var(--muted); }
+.agent { display: grid; }
+.agent-line { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 56px; padding: 8px 16px 8px 8px; }
+.agent-line .fold { display: grid; place-items: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: var(--radius); background: none; color: var(--muted); font-weight: 400; }
+.agent-line .fold:not(:disabled):hover { background: var(--hover); color: var(--text); opacity: 1; }
+.agent-line .fold::before { content: ""; width: 6px; height: 6px; margin-left: -2px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform 0.12s var(--ease); }
+.agent-line .fold[aria-expanded="true"]::before { margin: -3px 0 0; transform: rotate(45deg); }
+.agent-line .who { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
+.agent-line .who .agent-mark { align-self: center; margin: 0 4px 0 2px; }
+.agent-line .who strong { font-weight: 600; white-space: nowrap; }
+/* Its status: a few words, wrapping within its column, never under the controls. */
+.agent-line .status { min-width: 0; color: var(--soft); font-size: var(--small); overflow-wrap: anywhere; }
+.agent-line .status.ready { color: var(--green); }
+.agent-line .status.warn { color: var(--amber); }
+.agent-line .status.bad { color: var(--red); }
+.agent-line .status.off { color: var(--muted); }
+.agent-line .aside { display: flex; align-items: center; justify-self: end; gap: 14px; }
+.agent-line .aside:empty { display: none; }
+.agent-line .always { color: var(--muted); font-size: var(--small); }
+.agent-line button.setup-action.compact { min-height: 28px; }
+#settings-pane .agent-line label.check { min-height: 28px; gap: 6px; color: var(--soft); font-size: var(--small); white-space: nowrap; }
+#settings-pane .agent-line label.check.locked { color: var(--muted); }
+.agent-line label.check.locked input { opacity: 0.4; }
+.agent.unready .agent-line .who strong { color: var(--soft); }
+.agent-alerts { display: grid; gap: 2px; margin-top: -6px; padding: 0 16px 10px 48px; }
+.agent-alerts[hidden] { display: none; }
+.agent-alert { margin: 0; color: var(--amber); font-size: var(--small); line-height: 1.5; }
+.agent-alert.bad { color: var(--red); }
+/* A plan's use: the most-used window in a small meter; each window and its reset on hover or
+   focus, and for screen readers. */
+.plan-meter { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; padding: 0 4px; border-radius: var(--radius); color: var(--soft); font-size: var(--small); font-variant-numeric: tabular-nums; white-space: nowrap; cursor: default; }
+.plan-meter .track { position: relative; width: 56px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.plan-meter .fill { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--soft); }
+.plan-meter.high .fill { background: var(--amber); }
+.plan-meter.full .fill { background: var(--red); }
+.plan-meter.full { color: var(--red); }
+.agent-body { display: grid; gap: 14px; padding: 2px 16px 16px 48px; }
+.agent-body[hidden] { display: none; }
+.agent-fields { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 12px; }
 .agent-fields[hidden] { display: none; }
-.agent-limit { display: grid; gap: 4px; align-content: start; }
-.agent-limit .field-error { color: var(--red); }
-.agents-choice { display: grid; gap: 6px; max-width: 260px; }
-/* Where new workers start, then where the Router and the Watchdog run: label and select on one
-   line each, aligned; why one runs on Copilot for now under it. */
-.agents-places { display: grid; gap: 10px; }
-.agents-roles { display: grid; gap: 10px; }
-.agents-roles:empty { display: none; }
-.agents-places .agents-choice { grid-template-columns: 170px minmax(0, 200px); align-items: center; gap: 12px; max-width: none; }
-.agents-places .agents-choice-pays { color: var(--muted); margin-top: -6px; }
-.agents-role { display: grid; gap: 4px; }
-.agents-role-line { color: var(--soft); padding-left: 182px; }
-.agents-hint, .agents-intro { color: var(--muted); }
-@media (max-width: 560px) {
-  .agents-places .agents-choice { grid-template-columns: minmax(0, 1fr); gap: 6px; }
-  .agents-role-line { padding-left: 0; }
-  .agent-head { flex-wrap: wrap; }
-  .agent-head .agent-switch { margin-left: 0; flex-basis: 100%; }
-  .agent-fields { grid-template-columns: minmax(0, 1fr); }
-}
+.agent-fields .field-error { color: var(--red); }
+.agent-details { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding-top: 12px; border-top: 1px dashed var(--line); color: var(--muted); font-size: var(--small); }
+.agent-details[hidden] { display: none; }
+.agent-details code { padding: 1px 5px; border-radius: 5px; background: var(--hover); color: var(--soft); font: var(--small) var(--mono); }
+.agent-details button.link { padding: 0; color: var(--accent); font-size: var(--small); }
+#settings-pane .agent-details .cmd { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-size: var(--small); }
+#settings-pane .agent-details .cmd > span { color: var(--muted); font-weight: 400; }
+#settings-pane .agent-details .cmd input { width: 160px; min-height: 28px; padding: 2px 8px; font: var(--small) var(--mono); }
+.agent-note { margin: 0; color: var(--muted); font-size: var(--small); }
+/* Chief of Staff's own sessions: where each runs, with which model and effort. */
+details.section.own > summary small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.own-grid { display: grid; grid-template-columns: 118px minmax(0, 1fr) minmax(0, 2.4fr); align-items: center; gap: 10px 12px; }
+.own-grid > .h { color: var(--muted); font-size: var(--small); }
+.own-grid > .role { display: flex; align-items: center; gap: 8px; min-height: 28px; font-weight: 500; }
+.own-grid > .fixed, .own-grid .runs > .fixed { padding-left: 2px; color: var(--soft); font-size: var(--small); }
+.own-grid > .runs { min-width: 0; }
+.own-grid > .runs [hidden] { display: none; }
+.own-grid > .cells { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 12px; }
+.own-grid > .cells[hidden], .own-grid > .inherits[hidden], .own-grid > .sub[hidden] { display: none; }
+.own-grid > .inherits { color: var(--soft); font-size: var(--small); }
+.own-grid > .sub { grid-column: 2 / -1; margin-top: -6px; color: var(--muted); font-size: var(--small); }
+#settings-pane .own-grid > .sub select { width: auto; min-height: 26px; padding: 0 8px; font-size: var(--small); }
+.own-foot { color: var(--muted); font-size: var(--small); }
+.own-foot button.link.quiet { padding: 0; }
+
+/* Connections: a list of rows (its name and where it stands, one action when it needs one, ›
+   to open it); a row opens its details in place (‹ Connections). */
+.conn { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 56px; padding: 0 12px 0 0; cursor: pointer; }
+.box > .conn:first-child { border-top-left-radius: var(--radius-lg); border-top-right-radius: var(--radius-lg); }
+.box > .conn:last-child { border-bottom-left-radius: var(--radius-lg); border-bottom-right-radius: var(--radius-lg); }
+.conn:hover { background: var(--side); }
+#settings-pane .conn .conn-open { display: block; align-self: stretch; min-height: 56px; padding: 8px 0 8px 16px; border-radius: 0; background: none; color: var(--text); font-weight: 400; text-align: left; }
+#settings-pane .conn .conn-open:hover { opacity: 1; }
+#settings-pane .conn .conn-open:focus-visible { outline-offset: -2px; border-radius: var(--radius-lg); }
+.conn .words { display: grid; gap: 1px; min-width: 0; }
+.conn .name { font-weight: 500; }
+.conn .state { overflow: hidden; color: var(--muted); font-size: var(--small); text-overflow: ellipsis; white-space: nowrap; }
+.conn .state.ok, .detail-head .state.ok { color: var(--soft); }
+.conn .state.ok::before, .detail-head .state.ok::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--green); vertical-align: 1px; }
+.conn .state.warn, .detail-head .state.warn { color: var(--amber); }
+.conn .state.bad, .detail-head .state.bad { color: var(--red); }
+.conn .go { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+#settings-pane .conn .go button { min-height: 28px; padding: 2px 10px; font-size: var(--small); }
+.conn .go .chev { width: 16px; font-size: 18px; line-height: 1; text-align: center; }
+#conn-list[hidden], .conn-detail[hidden] { display: none; }
+#conn-list, .conn-detail { display: grid; align-content: start; }
+#settings-pane .back-link { justify-self: start; display: inline-flex; align-items: center; gap: 4px; min-height: 28px; margin: -6px 0 -8px -6px; padding: 0 6px; background: none; color: var(--muted); font-size: var(--small); font-weight: 400; }
+#settings-pane .back-link:hover { background: var(--hover); color: var(--text); opacity: 1; }
+.detail-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+#settings-pane .detail-head h3 { margin: 0; font-size: var(--body); font-weight: 600; }
+.detail-head h3:focus { outline: none; }
+.detail-head .state { color: var(--soft); font-size: var(--small); }
+.conn-fields { display: grid; gap: 14px; }
+#settings-pane .conn-fields h4 { margin: 4px 0 -6px; }
+.schedule-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--soft); font-size: var(--small); }
+#settings-pane .schedule-line input { width: auto; }
+#settings-pane .schedule-line input[type="number"] { width: 72px; text-align: right; }
+.pause-line { display: grid; padding: 0 2px; }
+.pause-line .help { margin-left: 28px; color: var(--muted); }
 /* Send to Chief: one line at the end of Connections; its consent, and what it says once on,
    unfold under its words. */
 .send-line { display: grid; gap: 6px; }
@@ -1051,13 +1132,26 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .clamp { min-width: 0; color: var(--soft); display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .clamp.open { -webkit-line-clamp: unset; white-space: pre-wrap; }
 .clamped .more { flex: none; padding: 0; font-size: var(--small); color: var(--accent); }
-@media (max-width: 640px) {
+/* 900 px and below: the pages are tabs over the page, which gets the full width. */
+@media (max-width: 900px) {
   #settings-form { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr auto; }
-  #settings-form > h2 { grid-area: 1 / 1; border-right: 0; }
-  #settings-tabs { grid-area: 2 / 1; flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 0 10px 8px; }
-  #settings-tabs button { flex: none; }
-  #settings-pane { grid-area: 3 / 1; }
+  #settings-form > h2 { grid-area: 1 / 1; padding: 20px 24px 8px; border-right: 0; }
+  #settings-tabs { grid-area: 2 / 1; flex-direction: row; gap: 4px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 0 16px 10px; }
+  #settings-tabs button { flex: none; padding: 0 14px; }
+  #settings-pane { grid-area: 3 / 1; padding: 22px 24px 28px; }
   #settings-form > footer { grid-area: 4 / 1; }
+  .agent-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .agent-fields > :first-child { grid-column: 1 / -1; }
+  .own-grid { grid-template-columns: 108px minmax(0, 1fr) minmax(0, 2.2fr); }
+}
+/* Under 600 px a line's controls go under its words. */
+@media (max-width: 600px) {
+  .agent-line { grid-template-columns: 28px minmax(0, 1fr); }
+  .agent-line .aside { grid-column: 2; justify-self: start; }
+  .agent-fields { grid-template-columns: minmax(0, 1fr); }
+  .own-grid { grid-template-columns: minmax(0, 1fr); }
+  .own-grid > .sub { grid-column: 1; }
+  .default-line { grid-template-columns: minmax(0, 1fr); }
 }
 .error { color: var(--red); font-size: var(--small); margin: 0; white-space: pre-line; }
 .error:empty { display: none; }

@@ -795,7 +795,7 @@ function agentOfferCard() {
     try {
       await api(`/api/agents/${offer.name}/offer`, { method: "POST", body: { allow } });
       await loadState();
-      toast(allow ? `${offer.label} is available for workers. Ask for it with @${offer.name}, or choose it in Settings → Coding agents.` : `Not now. ${offer.label} stays off; turn it on any time in Settings → Coding agents.`);
+      toast(allow ? `${offer.label} is available for workers. Ask for it with @${offer.name}, or choose it in Settings → Agents & models.` : `Not now. ${offer.label} stays off; turn it on any time in Settings → Agents & models.`);
     } catch (error) {
       button.disabled = false;
       toast(error.message, "error");

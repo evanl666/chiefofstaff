@@ -1,13 +1,13 @@
 // What the page knows, and the server events that keep it current.
 
-import { $, api, el, toast, withKey } from "./dom.js";
+import { $, api, toast, withKey } from "./dom.js";
 import { firstLine, shorten } from "./text.js";
 import { renderOthers, renderSidebar } from "./sidebar.js";
 import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, select, showDeliveries, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { scheduleHome } from "./inbox.js";
 import { upsertTask } from "./tasks.js";
 import { isTeamView, scheduleTeam } from "./team.js";
-import { refreshUsageLink, renderConnections, renderLearning } from "./settings.js";
+import { refreshUsageLink, renderConnections, renderLearning, settingsStateChanged, setupChanged } from "./settings.js";
 import { heardSetup } from "./agentsetup.js";
 // Home: the Router's conversation, with what needs the owner and every task beside it.
 export const HOME = "home";
@@ -155,16 +155,19 @@ export async function loadState(again = false) {
   if ($("#settings-dialog").open) {
     renderLearning();
     renderConnections();
+    settingsStateChanged();
   }
 }
+// Copilot's models, once Copilot lists them: the header's menus, and anything open that lists
+// them (Settings' menus, kept as they are) hears `models`.
 export async function loadModels() {
   try {
     state.models = await api("/api/models");
   } catch {
     return;
   }
-  $("#model-options").replaceChildren(...state.models.map((model) => el("option", { value: model.id, text: model.name })));
   renderHeader();
+  window.dispatchEvent(new Event("models"));
 }
 function scheduleReload() {
   clearTimeout(state.reloadTimer);
@@ -244,6 +247,7 @@ function handleEvent({ type, data }) {
     notify(data);
   } else if (type === "agent_setup") {
     heardSetup(data);
+    setupChanged();
   } else if (type === "prepared") {
     // Prepared for you (shepherd.py): what it found, and whether steps can run here.
     if (state.snapshot) state.snapshot.shepherd = data;
