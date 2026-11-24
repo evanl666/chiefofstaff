@@ -733,6 +733,115 @@ async def test_the_sandbox_keeps_what_runs_code_outside_it_read_only(backend, tm
         assert "marker" not in contents(target), target
 
 
+async def a_steps_policy(harness, root):
+    """A shepherd step's actual policy (Shepherd.step_policy), from a step in a test world: its
+    worker's worktree shares the owner's clone's repository; no registry (offline)."""
+    from conftest import settle
+    from shepherd_world import TARGET, World
+
+    world = World(harness, root)
+    runtime = await world.start()
+    await runtime.shepherd.tick()
+    await settle(runtime)
+    await runtime.shepherd.fix_it(TARGET)
+    await settle(runtime)
+    step = runtime.shepherd.control.open_step(TARGET)
+    assert step and step["state"] == "running", step
+    return world, step, world.session().options["sandbox_config"]
+
+
+def refs_of(clone) -> str:
+    return subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname) %(objectname)"], cwd=clone,
+        capture_output=True, text=True, check=True,
+    ).stdout  # fmt: skip
+
+
+@pytest.mark.copilot
+async def test_copilots_sandbox_holds_a_steps_actual_policy(harness, tmp_path):
+    """Copilot's own sandbox with a step's actual policy (no model call: each command through
+    the session's own tool pipeline, as the step's probe runs them): it commits its fix, and
+    changes no branch or object of the repository it shares, reaches no GitHub host."""
+    if not (REAL and sandbox_supported()):
+        pytest.skip("Set CHIEFOFSTAFF_TEST_COPILOT=1 on a machine with Copilot's sandbox.")
+    from chiefofstaff.step_probe import RAN, REACHED, run_tool, say
+
+    world, step, policy = await a_steps_policy(harness, tmp_path)
+    clone, common = world.clone, world.clone / ".git"
+    from shepherd_world import run
+
+    run("git", "branch", "chief/other-worker", world.h0, cwd=clone)
+    before = refs_of(clone)
+    packs = sorted((common / "objects" / "pack").iterdir())
+    backend = copilot_backend(COPILOT_CLI)
+    await backend.start()
+    session_id = str(uuid4())
+    try:
+        options = {
+            "working_directory": step["tree"], "sandbox_config": backend.sandbox(policy),
+            "available_tools": ["bash"], "enable_config_discovery": False,
+            "on_permission_request": lambda request, inv: PermissionDecisionApproveOnce(),
+        }  # fmt: skip
+        created = await backend.create_session(
+            session_id=session_id, name="contract test", **options
+        )
+        await created.disconnect()
+        session = await backend.resume_session(session_id, **options)  # (As the probe's.)
+        with contextlib.suppress(Exception):
+            await session.rpc.tools.initialize_and_validate(timeout=60)
+        for line in (
+            "git update-ref -d refs/heads/main",
+            "git branch -D chief/other-worker",
+            f"rm -f {shlex.quote(str(common))}/objects/pack/*",
+            f"curl -sS --max-time 10 -o /dev/null https://api.github.com && {say(REACHED)}",
+            f"( exec 3<>/dev/tcp/github.com/443 ) && {say(REACHED)}",
+        ):
+            _, text, sandboxed = await run_tool(session, "bash", {"command": f"{say(RAN)}; {line}"})
+            assert RAN in text and sandboxed and REACHED not in text, (line, text)
+        _, text, _ = await run_tool(session, "bash", {"command": (
+            f"{say(RAN)}; git -c user.name=t -c user.email=t@t commit -q --allow-empty -m fix "
+            f"&& {say(REACHED)}"
+        )})  # fmt: skip
+        assert REACHED in text, text
+    finally:
+        with contextlib.suppress(Exception):
+            await backend.client.delete_session(session_id)
+        await backend.stop()
+    assert refs_of(clone) == before
+    assert sorted((common / "objects" / "pack").iterdir()) == packs
+
+
+async def test_claudes_sandbox_reaches_only_a_steps_hosts(backend, harness, tmp_path):
+    """Claude Code's own sandbox (2.1.322, its stand-in model) with a step's actual policy:
+    refused outright on macOS (its sandbox lets commands reach the keychain); its network, as
+    it would hold it there and does on Linux: a listed host reached, GitHub's and any other
+    not, and none at all offline."""
+    if getattr(backend, "catcher", None) is None or not isinstance(backend, ClaudeAgent):
+        pytest.skip("What the real Claude Code does (CHIEFOFSTAFF_TEST_CLAUDE=1).")
+    if not sandbox_supported():
+        pytest.skip("Claude's sandbox does not run on this machine.")
+    _, _, policy = await a_steps_policy(harness, tmp_path / "world")
+    folder = tmp_path / "step"
+    folder.mkdir()
+    if sys.platform == "darwin":
+        with pytest.raises(Exception, match="can't keep commands from your keychain"):
+            await open_session(backend, folder, sandbox=policy)
+        policy = dataclasses.replace(policy, keychain=None)
+    hosts = ("pypi.org", "github.com", "example.org")
+    command = "; ".join(f"curl -sS --max-time 5 -o /dev/null https://{host}/" for host in hosts)
+    for listed in (("pypi.org",), ()):
+        backend.catcher.seen.clear()
+        held = dataclasses.replace(policy, allowed_hosts=listed, outbound=bool(listed),
+                                   readwrite=(*policy.readwrite, str(folder)))  # fmt: skip
+        session, turn = await open_session(backend, folder, sandbox=held)
+        await session.send(f"Run the shell command `{command}` and then reply with just: done")
+        await turn.wait()
+        await session.disconnect()
+        reached = {host for host in hosts if any(host in line for line in backend.catcher.seen)}
+        assert reached == set(listed), (listed, backend.catcher.seen)
+    backend.catcher.seen.clear()
+
+
 async def test_claudes_sandbox_adds_only_its_staging_folder_to_the_global_git_ignore(
     backend, tmp_path
 ):
