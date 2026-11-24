@@ -146,12 +146,12 @@ def config_text(common: str) -> str:
     files), and, where nothing names others, the repository's hooks and git-lfs's objects."""
     lines = ["[core]", "\trepositoryformatversion = 0"]
     extensions = []
-    named = {}
+    named: set[str] = set()
     with suppress(ValueError):
         found = run("--git-dir", common, "config", "--get-regexp",
                     r"^(core\.hookspath|lfs\.storage)$", cwd=common,
                     env=environment()).decode(errors="replace")  # fmt: skip
-        named = dict(line.partition(" ")[::2] for line in found.splitlines())
+        named = {line.partition(" ")[0] for line in found.splitlines()}
     if "core.hookspath" not in named:
         lines.append(f"\thooksPath = {quote(common + '/hooks')}")
     if "lfs.storage" not in named and os.path.isdir(f"{common}/lfs"):  # noqa: PTH112
