@@ -940,7 +940,8 @@ for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
   you typed in the page (in that worker's chat, or to the Router when the task's instructions
   quote it), a decision card you answered in the page, or a habit you wrote or kept in the page.
   Each answer quotes it, in the worker's chat too (*Autopilot answered: Postgres, because you
-  said “Postgres for v1”*). What workers note, what the Router writes or decides, files in a
+  said “Postgres for v1”*). It decides with the Router's model and effort (Settings → Models),
+  on Copilot. What workers note, what the Router writes or decides, files in a
   repository, away answers, Send to Chief notes and Slack messages are never your word.
 - What nothing you said settles waits for you under *Needs you*, saying why (*Set aside: nothing
   you said settles it*), as does a recommendation alone, any permission (pushing, publishing,
@@ -950,8 +951,10 @@ for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
   commit, in a private copy, offline (no network, no credentials, no keychain), with only the
   dependencies already there, the tree checked before and after. Uncommitted work, a weakened
   test or checks that reach outside the copy are left for you; where this computer can't run them
-  offline, results wait for you (*Couldn't verify offline: it waits for you*). What waited on an
-  accepted result starts; a stalled worker is asked once more where it stands.
+  offline, results wait for you (*Couldn't verify offline: it waits for you*). A result it
+  accepted says *Accepted by Autopilot* (*Why* opens its entry), in its worker's chat too, and is
+  never said to be yours. What waited on it starts; a stalled worker is asked once more where it
+  stands.
 - Nothing goes out in your name: no Slack reply, PR, comment or merge. What a turn it continued
   would send (a reply you handed over, a note to another session) waits for you as a card.
 
