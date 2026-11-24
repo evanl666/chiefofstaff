@@ -1629,9 +1629,13 @@ class Connector:
             asker = self.runtime.tasks.find(question["task_id"]) if question["task_id"] else None
             if asker and about(asker, question.get("text") or ""):
                 continue  # Told as its draft: deciding that answers it (settle_question).
-            items.append(
-                {"id": f"question:{question['session_id']}:{question['at']}", "question": question}
+            # A question card nobody answered in time is the same item still: its code works.
+            item_id = (
+                f"draft:{question['draft_id']}"
+                if question.get("draft_id")
+                else f"question:{question['session_id']}:{question['at']}"
             )
+            items.append({"id": item_id, "question": question})
         if (ask := self.router_question()) and not self.relays(ask, tasks):
             items.append({"id": f"router:{ask['id']}", "ask": ask})
         for task in tasks:

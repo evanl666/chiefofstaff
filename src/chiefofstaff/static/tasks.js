@@ -371,11 +371,14 @@ function deliveryNote(task) {
 const questionOf = (task) => (task.stopped ? null : ownerQuestions().find((question) => question.task_id === task.id) || task.question || null);
 const askedOf = (task) => {
   const question = questionOf(task);
-  return question ? [question.id, question.text, question.why, question.options, question.next] : null;
+  return question ? [question.id, question.text, question.why, question.options, question.next, ...(question.went_on ? [true] : [])] : null;
 };
 export function questionParts(question, answer) {
   const options = (Array.isArray(question.options) ? question.options : []).map((option) => String(option?.choice ?? option?.text ?? option ?? "").trim()).filter(Boolean);
+  // Asked on a card nobody answered in time: its worker went on, and an answer still reaches it.
+  const movedFrom = question.moved_from?.title ? ` (asked on “${question.moved_from.title}”)` : "";
   return [
+    question.went_on ? el("div", { class: "q-went-on", text: `It went on without your answer; a reply still reaches it${movedFrom}.` }) : "",
     question.why ? el("div", { class: "q-why" }, el("span", { class: "muted", text: "Why: " }), question.why) : "",
     options.length ? el("div", { class: "q-options", role: "group", "aria-label": "Answers it offers" }, ...options.map((option) => el("button", { type: "button", class: "secondary q-option", text: option, "data-tip": `Answer “${option}”`, onclick: () => answer(option) }))) : "",
     question.next ? el("div", { class: "q-next" }, el("span", { class: "muted", text: "Then: " }), question.next) : "",

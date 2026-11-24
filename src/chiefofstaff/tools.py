@@ -2886,12 +2886,15 @@ class Tools:
                 for old in earlier:
                     # What waited for it waits for the new task now, never blocked on it.
                     waited += self.move_dependents(old, task)
-                    with suppress(ValueError):
+                    # The new task instead of it (relations.py: "replaced by"), known as it
+                    # ends (a question its worker went on without goes there: Asks.task_ended).
+                    self.store.set(f"supersededby:{old['id']}", task["id"])
+                    try:
                         await self.runtime.task_actions.cancel(
                             old["id"], f"Superseded by “{task['title']}”.", by="the Router"
                         )
-                        # The new task instead of it (relations.py: "replaced by").
-                        self.store.set(f"supersededby:{old['id']}", task["id"])
+                    except ValueError:
+                        self.store.delete(f"supersededby:{old['id']}")
                 if waited:
                     listed = "; ".join(f"{found['id']} “{found['title']}”" for found in waited)
                     said = (

@@ -3,9 +3,11 @@ import json
 import time
 
 import pytest
-from conftest import call_tool, env, settle
+from conftest import Harness, call_tool, env, settle
 
+from chiefofstaff import asks
 from chiefofstaff.asks import form_values
+from chiefofstaff.digest import needs_you
 from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.store import Store
 
@@ -591,3 +593,162 @@ async def test_a_peer_waited_for_by_its_name_or_id_under_a_long_title(harness):
     assert not mentions("Token Scout", "Token Scout: generate"), (
         "only when it says whom it waits for"
     )
+
+
+async def went_on(runtime, worker, question="8080 or 9090?", choices=("8080", "9090")):
+    """The worker asks on a card that nobody answers in time: what its ask_user gets."""
+    request = {"question": question, "choices": list(choices)}
+    return await asyncio.wait_for(runtime.asks.on_user_input(request, {"sessionId": worker}), 5)
+
+
+async def test_a_question_nobody_answers_in_time_stays_until_answered(harness, monkeypatch):
+    """A worker's question card nobody answered within the hour expired and left Needs you:
+    the owner, back later, never saw it, and an answer could no longer reach the worker. Its
+    turn still goes on after the hour; the question stays, saying so, until it is answered:
+    the worker then hears, on its task, which question the answer is to."""
+    monkeypatch.setattr(asks, "REQUEST_TIMEOUT", 0.05)
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Pick a port")
+    task = runtime.tasks.current(worker)
+    said = await went_on(runtime, worker)
+    assert said["answer"].startswith("(No answer from the owner yet. Go on without it")
+    assert "comes to you as a message on this task" in said["answer"]
+    [question] = runtime.snapshot()["questions"]
+    assert question["text"] == "8080 or 9090?" and question["options"] == ["8080", "9090"]
+    assert question["went_on"] and question["task_id"] == task["id"]
+    assert question["task_status"] == "running" and needs_you(runtime) == 1
+    assert runtime.view(harness.store.session(worker))["status"] != "waiting", "not blocked"
+    # It goes on and reports: the question is still the owner's (as is one asked again later
+    # on another card, which stays one of its own).
+    await call_tool(runtime, "report", worker, status="progress", summary="On 8080 for now.")
+    assert [q["id"] for q in runtime.snapshot()["questions"]] == [question["id"]]
+
+    session = harness.session(worker)
+    await runtime.task_actions.answer_question(question["id"], "9090")
+    await settle(runtime)
+    told = session.sent[-1]
+    assert "9090" in told and "“8080 or 9090?”" in told and "went on without" in told
+    assert runtime.snapshot()["questions"] == []
+    assert runtime.tasks.get(task["id"])["status"] == "running"
+    closed = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
+    assert closed[-1] == "You answered “Pick a port”'s question"
+
+
+async def test_a_question_gone_on_without_is_dismissed_or_asked_again(harness, monkeypatch):
+    monkeypatch.setattr(asks, "REQUEST_TIMEOUT", 0.05)
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Pick a port")
+    await went_on(runtime, worker)
+    [question] = runtime.snapshot()["questions"]
+    runtime.asks.dismiss(question["id"])
+    assert runtime.snapshot()["questions"] == []
+    # Asked again on a new card, the one it went on without gives way to it.
+    await went_on(runtime, worker)
+    asking = asyncio.create_task(
+        runtime.asks.on_user_input({"question": "8080 or 9090?"}, {"sessionId": worker})
+    )
+    await pending(harness, "question")
+    assert runtime.snapshot()["questions"] == [], "the card is the question now"
+    asking.cancel()
+
+
+async def test_a_question_gone_on_without_ends_with_its_task(harness, monkeypatch):
+    """It is moot once its task is accepted, failed or cancelled; the owner's Go on to that task
+    is no answer to it."""
+    monkeypatch.setattr(asks, "REQUEST_TIMEOUT", 0.05)
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Pick a port")
+    task = runtime.tasks.current(worker)
+    await went_on(runtime, worker)
+    await runtime.workers.interrupt(worker)
+    await runtime.task_actions.follow_up(task["id"], "Go on where you stopped.")
+    assert len(runtime.snapshot()["questions"]) == 1
+    await call_tool(runtime, "report", worker, status="done", summary="Port 8080 is set.")
+    [question] = runtime.snapshot()["questions"]
+    assert question["task_status"] == "review", "a result to accept may still change"
+    runtime.task_actions.accept(task["id"])
+    assert runtime.snapshot()["questions"] == []
+
+    other = await spawn(runtime, harness.router_id, "Pick a host")
+    await went_on(runtime, other, "Which host?", ())
+    await runtime.task_actions.cancel(runtime.tasks.current(other)["id"], "Not needed")
+    assert runtime.snapshot()["questions"] == []
+
+
+async def test_a_question_gone_on_without_follows_its_work(harness, monkeypatch):
+    """Its task done instead by another (replaced, or superseded by a new task of its worker):
+    the question goes there, and the answer to that task's worker. Its worker closed: it
+    stays, and the answer reopens the worker."""
+    monkeypatch.setattr(asks, "REQUEST_TIMEOUT", 0.05)
+    runtime = await harness.connect()
+    router = harness.router_id
+    worker = await spawn(runtime, router, "Pick a port")
+    task = runtime.tasks.current(worker)
+    await went_on(runtime, worker)
+    again = {"title": "Pick a port again", "instructions": "Pick a port", "why_new": "test"}
+    made = await call_tool(runtime, "spawn_worker", router, replaces=[task["id"]], **again)
+    new = json.loads(made.text_result_for_llm)
+    [question] = runtime.snapshot()["questions"]
+    assert question["session_id"] == new["session_id"] and question["task_id"] == new["task_id"]
+    assert question["moved_from"] == {"task_id": task["id"], "title": "Pick a port"}
+    await runtime.task_actions.answer_question(question["id"], "9090")
+    await settle(runtime)
+    told = harness.session(new["session_id"]).sent[-1]
+    assert "9090" in told and f"asked earlier on task {task['id']} “Pick a port”" in told
+    assert runtime.snapshot()["questions"] == []
+
+    # Superseded by a new task of its worker: it goes there too (dropped only with none).
+    picking = await spawn(runtime, router, "Pick a color")
+    first = runtime.tasks.current(picking)
+    await went_on(runtime, picking, "Red or blue?", ())
+    await call_tool(runtime, "message_session", router, session_id=picking, task="new",
+                    title="Pick a shade", text="Pick a shade instead", earlier="superseded",
+                    why_new="test")  # fmt: skip
+    shade = runtime.tasks.current(picking)
+    assert shade["id"] != first["id"] and runtime.tasks.get(first["id"])["status"] == "cancelled"
+    [question] = runtime.snapshot()["questions"]
+    assert question["text"] == "Red or blue?" and question["task_id"] == shade["id"]
+    assert question["moved_from"] == {"task_id": first["id"], "title": "Pick a color"}
+    runtime.asks.dismiss(question["id"])
+
+    closing = await spawn(runtime, router, "Pick a host")
+    await went_on(runtime, closing, "Which host?", ())
+    await runtime.workers.close(closing, by="you")
+    [question] = runtime.snapshot()["questions"]
+    assert question["closed"] and question["text"] == "Which host?"
+    await runtime.task_actions.answer_question(question["id"], "db-1")
+    await settle(runtime)
+    assert not harness.store.session(closing)["closed_at"], "reopened for the answer"
+    assert "db-1" in harness.session(closing).sent[-1]
+
+
+async def test_a_question_open_at_a_restart_stays_and_its_worker_goes_on(tmp_path):
+    first = Harness(tmp_path / "data")
+    runtime = await first.connect()
+    worker = await spawn(runtime, first.router_id, "Pick a port")
+    task = runtime.tasks.current(worker)
+    asking = asyncio.create_task(
+        runtime.asks.on_user_input({"question": "8080 or 9090?"}, {"sessionId": worker})
+    )
+    card = await pending(first, "question")
+    # One a version before this one showed (its card says nothing of its task): on the task
+    # its worker is on.
+    older = first.store.create_draft(worker, "question", {"question": "Tabs?"}, "Tabs?")
+    await runtime.stop()
+    asking.cancel()
+
+    second = Harness(tmp_path / "data", client=first.client)
+    second.runtime.asks.expire_requests()  # As it starts.
+    restarted = await second.connect()
+    await restarted.resume_working()
+    await settle(restarted)
+    assert second.store.draft(card["id"])["status"] == "expired"
+    question, before = restarted.snapshot()["questions"]
+    assert question["went_on"] and question["task_id"] == task["id"]
+    assert before["text"] == "Tabs?" and before["task_id"] == task["id"]
+    assert second.store.draft(older["id"])["status"] == "expired"
+    sent = "\n".join(second.session(worker).sent[-3:])
+    assert "restarted while you waited for the owner's answer to “8080 or 9090?”" in sent
+    # Answered from away with the code the card was told with: the same item still.
+    items = [i["id"] for i in restarted.connector.waiting_items() if i.get("question")]
+    assert items == [f"draft:{card['id']}", f"draft:{older['id']}"]

@@ -27,6 +27,7 @@ from .envelope import sender, short, wrap
 from .models import DraftDecision
 from .peers import clip
 from .store import now
+from .tasks import ENDED
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -37,6 +38,13 @@ REQUEST_KINDS = {"question", "form", "link", "signin"}
 LABELS = {"question": "Question", "form": "Form", "link": "Link to open", "signin": "Sign-in"}
 # How long a session waits for the owner before it is told to go on without an answer.
 REQUEST_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_REQUEST_TIMEOUT", "3600"))
+NO_ANSWER = "(No answer from the owner in time. Go on without it or ask later.)"
+# A worker's question card unanswered in time: its turn goes on, the question stays the owner's.
+WENT_ON = (
+    "(No answer from the owner yet. Go on without it, and say in your report what you assumed. "
+    "Your question stays with the owner: if they answer later, the answer comes to you as a "
+    "message on this task.)"
+)
 MAX_NOTES = 40
 MAX_OPEN_QUESTIONS = 5
 # A question between sessions that nobody answers in this long is given up.
@@ -151,6 +159,10 @@ class Asks:
     # replaces its last): its id is "<session id>:<task id>". Each question without a task (the
     # Slack session's, about different conversations) is one of its own: "<session id>:-:<n>".
 
+    # A question card (Copilot's ask_user) nobody answered in time, which its worker went on
+    # without (`went_on`), is one of its own too: "<session id>:<task id or ->:<card id>". It
+    # stays until the owner answers or dismisses it, or its task ends (task_ended).
+
     def migrate_questions(self):
         """Questions kept by 0.1.23 and before, one per worker ("ownerq:<session>"): under the
         task they were asked on, so answering that task clears them."""
@@ -233,15 +245,23 @@ class Asks:
                 found.append({**QUESTION_FIELDS, **question, "id": key.removeprefix("ownerq:")})
         return sorted(found, key=lambda question: question["at"])
 
-    def answered(self, session_id: str, task_id: str | None = None, by: str = "owner"):
+    def answered(
+        self,
+        session_id: str,
+        task_id: str | None = None,
+        by: str = "owner",
+        went_on: bool = True,
+    ):
         """The owner answered (or someone did for them), or the worker moved on: the question
         of that task ("": those it asked with no task), or (no task named) all of the
         worker's. `by`: "owner" (the Router hears it is no longer open), "router" or
-        "worker"."""
+        "worker". `went_on`: also those it went on without (never when it is the worker that
+        moves on: it did so without their answer)."""
         questions = [
             question
             for question in self.session_questions(session_id)
-            if task_id is None or (question.get("task_id") or "") == task_id
+            if (task_id is None or (question.get("task_id") or "") == task_id)
+            and not (question.get("went_on") and (by == "worker" or not went_on))
         ]
         gone = []
         for question in questions:
@@ -356,6 +376,97 @@ class Asks:
             for question in self.session_questions(question_id):
                 self.dismiss(question["id"], how)
 
+    def keep_unanswered(self, draft: dict) -> bool:
+        """A worker's question card nobody answered in time, or still open at a restart: its
+        worker goes on without the answer, and the question stays under Needs you on the task it
+        was asked on (one it went on without before, asked the same, gives way to it), with the
+        choices it gave. Not once that task has ended. Whether it was kept."""
+        row = self.store.find_session(draft["session_id"])
+        if not row or row["role"] != "worker" or row["closed_at"]:
+            return False
+        target = draft["target"]
+        # (A card shown by 0.1.56 or before has no task: the one it is on.)
+        task_id = target["task_id"] if "task_id" in target else self.runtime.working_on(row["id"])
+        task = self.runtime.tasks.find(task_id) if task_id else None
+        if task_id and (not task or task["status"] in ENDED):
+            return False
+        text = draft["text"].strip()[:6000]
+        self.drop_went_on(row["id"], task_id, text)
+        question = {
+            **QUESTION_FIELDS,
+            "text": text,
+            "task_id": task_id,
+            "at": draft["created_at"],
+            "options": [str(choice)[:200] for choice in target.get("choices") or []][:8],
+            "went_on": True,
+            "draft_id": draft["id"],
+        }
+        self.store.set(f"ownerq:{row['id']}:{task_id or '-'}:{draft['id']}", json.dumps(question))
+        self.runtime.publish_state()
+        return True
+
+    def went_on(self, draft: dict) -> dict:
+        """What a worker's ask_user gets when its card had no answer in time: go on without it.
+        Its turn is never held longer than REQUEST_TIMEOUT; the question stays (keep_unanswered)."""
+        try:
+            kept = self.keep_unanswered(draft)
+        except Exception:
+            logger.warning("Could not keep %s's question.", draft["session_id"], exc_info=True)
+            kept = False
+        return {"answer": WENT_ON if kept else NO_ANSWER, "wasFreeform": True}
+
+    def drop_went_on(self, session_id: str, task_id: str, text: str):
+        """It asks again what it went on without (a new card, after a restart say): the earlier
+        one leaves Needs you, as the new card takes its place."""
+        same = [
+            question
+            for question in self.session_questions(session_id)
+            if question.get("went_on")
+            and (question.get("task_id") or "") == task_id
+            and question.get("text") == text.strip()
+        ]
+        for question in same:
+            self.store.delete(f"ownerq:{question['id']}")
+        if same:
+            self.closed(session_id, same, "")
+            self.runtime.publish_state()
+
+    def task_ended(self, task: dict):
+        """A task ended (accepted, failed, cancelled): the questions its worker went on without
+        leave Needs you with it, unless its work goes on: in the task that replaced or
+        superseded it, whenever there is one still open (they go there, to the worker doing it
+        now: answered, that worker hears it), or in its worker, reopened (cancelled as its
+        worker was closed, as a question it waited on stays then)."""
+        ended = [
+            question
+            for question in self.session_questions(task["session_id"])
+            if question.get("went_on") and question.get("task_id") == task["id"]
+        ]
+        if not ended or (
+            task["status"] == "cancelled" and self.store.get(f"closedtask:{task['id']}")
+        ):
+            return
+        instead = self.runtime.tasks.find(
+            self.store.get(f"replacedby:{task['id']}")
+            or self.store.get(f"supersededby:{task['id']}")
+            or ""
+        )
+        for question in ended:
+            self.store.delete(f"ownerq:{question['id']}")
+            if not instead or instead["status"] in ENDED:
+                continue
+            moved = {key: value for key, value in question.items() if key != "id"} | {
+                "task_id": instead["id"],
+                "moved_from": question.get("moved_from")
+                or {"task_id": task["id"], "title": task["title"]},
+            }
+            card = question.get("draft_id") or uuid4().hex[:8]
+            self.store.set(
+                f"ownerq:{instead['session_id']}:{instead['id']}:{card}", json.dumps(moved)
+            )
+        self.closed(task["session_id"], ended, "")
+        self.runtime.publish_state()
+
     def owner_questions(self) -> list[dict]:
         """Open questions of workers whose task does not show them already (a task waiting for
         the owner is its own card under Needs you)."""
@@ -388,6 +499,26 @@ class Asks:
     # Requests
 
     def expire_requests(self, reason: str = "Chief of Staff restarted before an answer."):
+        # A worker's question card still open: it stays under Needs you, and the worker, which
+        # goes on after the restart (Runtime.resume_working), hears with that why no answer
+        # came, and that one still may.
+        for draft in self.store.drafts():
+            if draft["kind"] != "question" or not self.keep_unanswered(draft):
+                continue
+            asked = " ".join(draft["text"].split())[:300]
+            self.delivery.hold(
+                draft["session_id"],
+                wrap(
+                    "system",
+                    "context",
+                    f"Chief of Staff restarted while you waited for the owner's answer to “{asked}”"
+                    ". Go on without it, and say in your report what you assumed. Your question "
+                    "stays with the owner: if they answer later, the answer comes to you as a "
+                    "message on this task.",
+                ),
+                kind="notice",
+                display="Its question stays under Needs you; it goes on without the answer.",
+            )
         # A watch the Router proposed (Asks.offer) waits for nothing: it would never hear that
         # its card went. It does, with its next message, and may propose it again.
         for draft in self.store.drafts():
@@ -423,8 +554,10 @@ class Asks:
         text: str,
         *,
         done: asyncio.Event | None = None,
+        on_expiry: Callable[[dict], dict] | None = None,
     ) -> dict | None:
-        """Show the owner a card and wait for the answer (or for `done`); None on timeout.
+        """Show the owner a card and wait for the answer (or for `done`); None on timeout, or
+        what `on_expiry` makes of the card then.
 
         The session shows as waiting while a card is open (see `view`); its stored status is
         left alone, so turns and reports keep their own bookkeeping.
@@ -454,8 +587,9 @@ class Asks:
             if finished in ready:
                 self.close_request(draft["id"], "answered", "Done")
                 return {"action": "done"}
+            said = on_expiry(draft) if on_expiry else None
             self.close_request(draft["id"], "expired", "No answer in time.")
-            return None
+            return said
         finally:
             self.requests.pop(draft["id"], None)
             if finished:
@@ -571,13 +705,16 @@ class Asks:
             "choices": [str(choice)[:200] for choice in (request.get("choices") or [])][:8],
             "allow_freeform": request.get("allowFreeform", True) is not False,
         }
-        result = await self.ask_owner(session_id, "question", target, question[:2000])
-        if result is None:
-            return {
-                "answer": "(No answer from the owner in time. Go on without it or ask later.)",
-                "wasFreeform": True,
-            }
-        return result
+        row = self.store.find_session(session_id)
+        if row and row["role"] == "worker":
+            # The task it asks on: where its question stays if nobody answers in time.
+            task = self.runtime.at_work(session_id)
+            target["task_id"] = task["id"] if task else ""
+            self.drop_went_on(session_id, target["task_id"], question[:2000])
+        result = await self.ask_owner(
+            session_id, "question", target, question[:2000], on_expiry=self.went_on
+        )
+        return result if result is not None else {"answer": NO_ANSWER, "wasFreeform": True}
 
     async def on_elicitation(self, context: dict) -> dict:
         session_id = self.runtime.row_id(context.get("session_id", ""))

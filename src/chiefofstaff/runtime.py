@@ -9212,6 +9212,9 @@ class Runtime:
             and (was not in ENDED or (task["status"] != was and task["status"] != "done"))
         ):
             self.decisions.drop_task(task)
+            # What its worker went on without asking the owner ends with it (or goes on with
+            # the task that replaced it).
+            self.asks.task_ended(task)
             if task["status"] in {"cancelled", "done"} and task["session_id"] in self.settings_held:
                 # (Cancelled, replaced, moved, set aside: E124.)
                 self.background(

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **A worker's question nobody answered in time stays under *Needs you*.** A worker that asked
+  on a question card waits an hour at most, then goes on without your answer; the card then
+  left *Needs you*, so a question you never saw was gone, and an answer could no longer reach
+  the worker. It now stays, with one line saying the worker went on without your answer, until
+  you answer or dismiss it, or its task ends (accepted, failed or cancelled; a task replaced
+  by another, or by one the Router started instead, passes it on to that task, and one closed
+  with its worker stays). Your answer reaches
+  the worker as a message on its task, saying which question it answers. A question still open
+  when Chief of Staff restarts stays the same way, and its worker hears why no answer came. A
+  code a notification gave for the card still answers it. The worker waits no longer than
+  before.
+
 ## 0.1.56 (2026-11-23)
 
 A busy worker's new task starts at once in a second worker with its context; a decision you

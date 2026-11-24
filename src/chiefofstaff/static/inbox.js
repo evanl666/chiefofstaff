@@ -535,7 +535,7 @@ export async function focusQuestion(questionId) {
 function questionItem(question) {
   return {
     key: `question:${question.id}:${question.at}`,
-    version: `${question.task_status}:${question.closed}:${JSON.stringify([question.why, question.options, question.next])}`,
+    version: `${question.task_status}:${question.closed}:${JSON.stringify([question.why, question.options, question.next, ...(question.went_on ? [true] : [])])}`,
     build: () => questionCard(question),
     refresh: (node) => {
       const meta = node.querySelector(".head .meta");

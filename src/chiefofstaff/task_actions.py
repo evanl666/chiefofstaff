@@ -3989,17 +3989,24 @@ class TaskActions:
         task = self.tasks.find(question["task_id"]) if question["task_id"] else None
         if not task:
             self.runtime.asks.dismiss(question["id"], "answered")  # That one: its others stay.
-            if self.runtime.asks.session_questions(session_id):
-                # It asked several: which one this answers rides along.
+            if question.get("went_on") or self.runtime.asks.session_questions(session_id):
+                # It asked several, or went on without this one: which one this answers rides
+                # along.
                 said = " ".join(question["text"].split())[:1500]
+                late = " (you went on without it: no answer came in time)"
+                late = late if question.get("went_on") else ""
                 self.delivery.hold(
                     session_id,
-                    wrap("system", "context", f"The owner's next message answers: {said}"),
+                    wrap("system", "context", f"The owner's next message answers{late}: {said}"),
                     kind="notice",
                     display=f"Answering: {said[:200]}",
                 )
             await self.runtime.owner_send(session_id, text, clear_questions=False)
             return {"session_id": session_id}
+        if question.get("went_on"):
+            # The worker went on without it: told which question this answers, on its task (or
+            # on the task that continues it).
+            return await self.follow_up(task["id"], text, resume=True, answers=question)
         return await self.follow_up(task["id"], text, resume=True)
 
     async def handed_over(self, session_id: str, replaced: list[dict], new: dict, label: str):
@@ -4124,12 +4131,18 @@ class TaskActions:
                 self.arm_go_on(task_id, int(value))
 
     async def follow_up(
-        self, task_id: str, text: str, resume: bool = False, changes: str = ""
+        self,
+        task_id: str,
+        text: str,
+        resume: bool = False,
+        changes: str = "",
+        answers: dict | None = None,
     ) -> dict:
         """The owner adds to a task: its worker continues it (a finished task reopens).
         `resume`: the owner answered its question after it was cancelled: it goes on.
         `changes`: who did not accept its result ("you": the owner) and asks for these
-        changes: its worker hears so plainly."""
+        changes: its worker hears so plainly. `answers`: the question (Asks.keep_unanswered)
+        this answers, which its worker went on without: it hears which."""
         task = self.tasks.get(task_id)
         # Go on (a stopped task's button, from two tabs say): sent once, while it is stopped.
         going_on = text.strip() == "Go on where you stopped."
@@ -4159,7 +4172,8 @@ class TaskActions:
             if gone_on(now := self.tasks.get(task_id)):
                 return now
         self.store.delete(f"news:{task_id}")  # Answering it, the owner has seen its news.
-        self.runtime.asks.answered(task["session_id"], task_id)
+        # (Go on is no answer to what its worker went on without.)
+        self.runtime.asks.answered(task["session_id"], task_id, went_on=not going_on)
         before = task["status"]
         # How it waits (stopped, by whom; asked after its result), for if this never reaches it.
         marks = {
@@ -4208,6 +4222,21 @@ class TaskActions:
             )
             shown = f"Changes requested: {text}"
         prompt = wrap("owner", "message", said, task=task_id, reply_in=spoken)
+        if answers:
+            asked = " ".join((answers.get("text") or "").split())[:1500]
+            moved = answers.get("moved_from") or {}
+            on = (
+                f"a question asked earlier on task {moved.get('task_id')} “{moved.get('title')}”, "
+                "which this task continues; its worker went on without it"
+                if moved
+                else "the question you asked earlier on this task and went on without"
+            )
+            prompt += "\n\n" + wrap(
+                "system",
+                "context",
+                f"This is the owner's answer to {on} (no answer came in time): “{asked}”. "
+                "Take it into account from here, and say in your next report what it changes.",
+            )
         if switched := self.runtime.switched_language(row["id"], spoken):
             # A conversation in one language pulls the answer back into it.
             prompt += "\n\n" + wrap("system", "context", switched)
@@ -5252,6 +5281,10 @@ class TaskActions:
                     "options": question.get("options") or [],
                     "next": question.get("next") or "",
                     "at": question.get("at") or "",
+                    # Asked on a card nobody answered in time: its worker went on without it.
+                    **{
+                        key: question[key] for key in ("went_on", "moved_from") if question.get(key)
+                    },
                 }
         return None
 
