@@ -89,14 +89,14 @@ for you* step reaches no GitHub, and the Router never asks a worker to merge or 
 is on by default since 0.1.18, as your own Copilot sessions usually run: if workers read content
 you do not trust (PR comments from strangers, say), turn it off in Settings.
 
-**Abilities you add** (Settings → Connections: skills, plugins, MCP servers) run as they would
+**Abilities you add** (Settings → Connections → Skills, plugins and MCP servers) run as they would
 in your own Copilot sessions: a plugin's hooks and an MCP server run as you, outside the
 sandbox. Add only what you would install for yourself.
 
 ## Workers on other coding agents
 
 Workers can also run on Codex or Claude Code (off until you allow one, on Home's card or in
-Settings → *Coding agents*). For such a worker:
+Settings → *Agents & models*). For such a worker:
 
 - **Sandbox.** A Claude worker runs in Claude's own sandbox, set from Chief of Staff's policy for
   a Copilot worker (writes only in its folders, protected paths read-only, your service secrets
@@ -141,7 +141,7 @@ Settings → *Coding agents*). For such a worker:
   of its own on 127.0.0.1, that each kind of action asks it first; a version that fails runs no
   worker that asks first (or none at all, when its edits do not ask).
 - **Workers that read Slack** run on Copilot: not on Codex, and not on Claude yet.
-- **The Router and the Watchdog** can run on Codex or Claude too (Settings → *Coding agents*),
+- **The Router and the Watchdog** can run on Codex or Claude too (Settings → *Agents & models*),
   with nothing but Chief of Staff's tools, as on Copilot: on Codex, its commands, image viewing
   and making, goals, its own questions, web search, hooks and plugins off, your MCP servers not
   started, ChatGPT's apps and subagents off, each of those features read back off before the
