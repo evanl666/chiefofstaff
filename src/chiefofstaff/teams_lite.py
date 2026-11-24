@@ -16,6 +16,7 @@ says where each stands from Home's own board (static/team.js), the one lifecycle
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -49,6 +50,9 @@ HISTORY_PAGE = 50
 # its request again at once).
 RELOAD_SECONDS = 24 * 3600
 CHUNK = 400
+# Requests read at a time while every request is read (in the background on a large data
+# folder: the first snapshot reads only the requests it shows).
+WARM_CHUNK = 250
 # Part colors by the order parts joined: neighbours apart, red last.
 PALETTE = ("c0", "c3", "c5", "c2", "c6", "c7", "c1", "c4")
 TEAM_ID = re.compile(r"^team-(\d+)-(t[0-9a-f]{7})$")
@@ -86,13 +90,17 @@ class TeamsLite:
         # Every request's teams by its id, read once and again only once a task of it changed.
         self.requests: dict[str, Request] = {}
         self.dirty: set[str] = set()
+        # When every request was last read (0: not yet; Past teams' count waits for it), and the
+        # background read under way.
         self.loaded = 0.0
+        self.warming: asyncio.Task | None = None
+        self.by_message: tuple[float, set[str]] | None = None
         # Kept as requests are read: how many teams there are, and the requests of the current
         # window (a task open, or changed in its last WINDOW_DAYS), looked over every 10 min.
         self.total = 0
         self.recent: set[str] = set()
         self.recent_at = 0.0
-        self.memo: tuple[tuple, tuple[list[dict], int]] | None = None
+        self.memo: tuple[tuple, tuple[list[dict], int | None]] | None = None
 
     # Stamps, as things happen (passive: never read back to change what is done).
 
@@ -434,21 +442,60 @@ class TeamsLite:
         }
 
     def load(self):
-        """Every request's teams: all of them now and then (once a day), else those whose
-        tasks changed since."""
+        """Every request's teams, read once (and again once a day): at once on a small data
+        folder or outside the event loop, else in the background a chunk at a time; then only
+        those whose tasks changed."""
         if not self.loaded or time.time() - self.loaded > RELOAD_SECONDS:
-            made = {key: loads(value, []) for key, value in self.store.items("reqtasks:").items()}
-            self.requests, self.total, self.recent, self.recent_at = {}, 0, set(), time.time()
-            self.put(self.read(made))
-            self.loaded, self.dirty = time.time(), set()
-            return
+            self.warm_up()
         if self.dirty:
             again, self.dirty = self.dirty, set()
-            made = {
-                key.split(":", 1)[1]: loads(value, [])
-                for key, value in self.kv([f"reqtasks:{r}" for r in again]).items()
-            }
-            self.put(self.read(made))
+            self.put(self.read(self.made(list(again))))
+
+    def made(self, requests: list[str]) -> dict[str, list[str]]:
+        return {
+            key.split(":", 1)[1]: loads(value, [])
+            for key, value in self.kv([f"reqtasks:{r}" for r in requests]).items()
+        }
+
+    def warm_up(self):
+        if self.warming:
+            return
+        requests = [key.split(":", 1)[1] for key in self.store.keys("reqtasks:")]
+        # Once a day every request again; the first time, those not read yet.
+        todo = requests if self.loaded else [r for r in requests if r not in self.requests]
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            running = False
+        else:
+            running = True
+        if not running or len(todo) <= WARM_CHUNK:
+            self.read_all(todo)
+            self.warmed()
+            return
+        self.warming = self.runtime.background(self.warm(todo))
+
+    async def warm(self, todo: list[str]):
+        try:
+            for start in range(0, len(todo), WARM_CHUNK):
+                self.read_all(todo[start : start + WARM_CHUNK])
+                await asyncio.sleep(0)
+            self.warmed()
+            self.runtime.publish_state()
+        finally:
+            self.warming = None
+
+    def read_all(self, requests: list[str]):
+        """Requests read as a chunk: those of one task are no team (and not read further)."""
+        made = self.made(requests)
+        self.put({r: Request(r, tasks) for r, tasks in made.items() if len(tasks) < 2})
+        self.put(self.read({r: tasks for r, tasks in made.items() if len(tasks) >= 2}))
+
+    def warmed(self):
+        self.loaded = time.time()
+        self.recent_at = 0.0
+        self.by_message = None
+        self.memo = None
 
     def put(self, found: dict[str, Request]):
         since = self.since()
@@ -466,20 +513,25 @@ class TeamsLite:
     def since() -> str:
         return (datetime.now(UTC) - timedelta(days=WINDOW_DAYS)).isoformat()
 
-    def current(self, listed: list[dict]) -> tuple[list[dict], int]:
+    def current(self, listed: list[dict]) -> tuple[list[dict], int | None]:
         """Candidate teams (§4.1): those of a request with a task open, listed on Home, or
-        changed in the last WINDOW_DAYS; and how many older ones there are (Past teams). Read
-        again once anything changed; the page says where each stands."""
-        key = (self.store.db.total_changes, tuple(task["id"] for task in listed), self.bucket())
+        changed in the last WINDOW_DAYS; and how many older ones there are (Past teams: None
+        until every request was read). Read again once anything changed; the page says where
+        each stands."""
+        key = (
+            self.store.db.total_changes,
+            tuple(task["id"] for task in listed),
+            self.bucket(),
+            self.loaded,
+        )
         if self.memo and self.memo[0] == key:
             return self.memo[1]
         self.load()
-        window = self.window(listed)
         # Read anew on every change: what a hook may have missed never stays.
-        self.put(self.read({r: self.requests[r].tasks for r in window}))
+        self.put(self.read(self.made(sorted(self.wanted(listed)))))
         window = self.window(listed)
         teams = [team for r in window for team in self.requests[r].teams]
-        past = self.total - len(teams)
+        past = self.total - len(teams) if self.loaded else None
         seen = self.kv([f"teamseen:{team['id']}" for team in teams])
         for team in teams:
             team["seen"] = seen_mark(seen.get(f"teamseen:{team['id']}"))
@@ -491,18 +543,51 @@ class TeamsLite:
     def bucket() -> int:
         return int(time.time() // 60)
 
-    def window(self, listed: list[dict]) -> set[str]:
-        if time.time() - self.recent_at > 600:
+    def wanted(self, listed: list[dict]) -> set[str]:
+        """The requests of the tasks Home lists, those of the last WINDOW_DAYS (by their
+        message, until every request was read), and those whose tasks changed since."""
+        if self.loaded and time.time() - self.recent_at > 600:
             since = self.since()
             self.recent = {r for r, e in self.requests.items() if e.open or e.latest >= since}
             self.recent_at = time.time()
         stamps = self.kv([f"req:{task['id']}" for task in listed])
-        found = {value for value in stamps.values() if value in self.requests} | self.recent
-        return {r for r in found if self.requests[r].teams or len(self.requests[r].tasks) >= 2}
+        found = set(stamps.values()) | self.recent
+        return found if self.loaded else found | self.recent_messages()
+
+    def recent_messages(self) -> set[str]:
+        """Requests whose message is of the last WINDOW_DAYS: message ids grow with time, so
+        found by halves over the requests' ids (a few reads by key)."""
+        if self.by_message and time.time() - self.by_message[0] < 600:
+            return self.by_message[1]
+        ids = sorted(
+            int(request)
+            for key in self.store.keys("reqtasks:")
+            if (request := key.split(":", 1)[1]).isdigit()
+        )
+        since, low, high = self.since(), 0, len(ids)
+        while low < high:
+            middle = (low + high) // 2
+            row = self.store.one("SELECT created_at FROM messages WHERE id=?", (ids[middle],))
+            if row and row["created_at"] >= since:
+                high = middle
+            else:
+                low = middle + 1
+        found = {str(request) for request in ids[low:]}
+        self.by_message = (time.time(), found)
+        return found
+
+    def window(self, listed: list[dict]) -> set[str]:
+        found = self.wanted(listed)
+        return {
+            r
+            for r in found
+            if r in self.requests and (self.requests[r].teams or len(self.requests[r].tasks) >= 2)
+        }
 
     def snapshot(self, listed: list[dict]) -> dict:
         """The state's `teams` (candidates, with the questions held between their parts) and
-        `past_teams`; `held_questions` while one holds its asker up half an hour."""
+        `past_teams` (null until every request was read: in the background on a large data
+        folder); `held_questions` while one holds its asker up half an hour."""
         teams, past = self.current(listed)
         waiting = self.waiting(teams)
         shown = [{**team, "waiting": waiting.get(team["id"], [])} for team in teams]
