@@ -554,6 +554,14 @@ FIXES: list[Allow] = [
         element='#sidebar #external .item[data-id="3c9a1e5f-2b7d-4f0a-8e6c-5a4b3d2c1e0f"]',
         views=r"^(home|sidebar)",
     ),
+    # 0.1.58 (owner report "我输了回车 没有反应 又输了一遍"): the answer to the owner's send says
+    # where its message stands (`delivery`), as its chat then shows it. (The page's own id for a
+    # send, client_id, comes from the page only: the script's sends have none.)
+    Allow(
+        "the answer to the owner's send says where its message stands",
+        data=r"^backend\.owner\[\d+\]\.answer$",
+        added=r',"delivery":"[a-z]*"',
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
