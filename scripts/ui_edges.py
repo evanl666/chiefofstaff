@@ -5685,8 +5685,9 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
             await page.locator("#home-tabs [data-tab=tasks]").click()
         await (await team_row(page, custom)).click()
         brief = page.locator("#timeline .tp-brief.done")
+        # (A decision of the owner's in force, from a round before, is kept by its parts too.)
         await expect(brief.locator(".say")).to_have_text(
-            "Done in 1 h 40 min: all 3 parts accepted."
+            re.compile(r"^Done in 1 h 40 min: (all 3 parts accepted|\d+ decisions? kept)\.$")
         )
         await expect(brief.locator(".acts button")).to_have_text(["Copy summary", "Dismiss"])
         await expect(page.locator("#timeline details.tp-talk.notes")).not_to_have_attribute(
@@ -6348,6 +6349,8 @@ async def round_team_v4(runtime, browser, failures: list[str]):
     shots = Path(os.environ.get("TEAM_V4_SHOTS", SHOTS / "team-v4"))
     shots.mkdir(parents=True, exist_ok=True)
     store = runtime.store
+    # A decision an earlier round left in force would be every new part's too: not this scene's.
+    store.execute("UPDATE decisions SET status='replaced' WHERE status='active'")
     found = await teams_scene.refund_team(runtime)
     team = found["team"]
     # A worker closed (the sidebar's Closed · N).
@@ -6464,6 +6467,8 @@ async def round_team_v4(runtime, browser, failures: list[str]):
         await expect(page.locator("#composer-input")).to_have_attribute(
             "placeholder", "Tell the team…"
         )
+        await page.mouse.move(0, 0)  # (No tooltip in the pictures.)
+        await page.wait_for_timeout(200)
         await page.locator("#main").screenshot(path=shots / f"team-live-{width}-{scheme}.png")
         await page.screenshot(path=shots / f"team-live-window-{width}-{scheme}.png")
         await to.locator(".change").click()
@@ -6635,6 +6640,8 @@ async def round_team_v4(runtime, browser, failures: list[str]):
             await expect(page.locator("#timeline .tp-plan-fold > summary")).to_contain_text(
                 "How it went"
             )
+        await page.mouse.move(0, 0)
+        await page.wait_for_timeout(200)
         await page.locator("#main").screenshot(path=shots / f"team-done-{width}-{scheme}.png")
         await page.locator("#back-home").click()
         await home_whole(page, width)
