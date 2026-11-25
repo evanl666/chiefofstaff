@@ -18,7 +18,13 @@ from .roles import WATCHDOG, WORKER
 
 if TYPE_CHECKING:
     from .runtime import Runtime
+    from .state import SessionState
     from .store import Store
+
+# A worker's latest reports the Watchdog is given, however far back.
+REPORTS_SHOWN = 5
+# What flags() says of a worker that looks quiet (not one repeating itself or long at it).
+QUIET = ("no activity", "stopped without reporting")
 
 # How many of a worker's newest messages its checks read: more when its last instruction is
 # further back (a turn of hundreds of steps).
@@ -49,6 +55,44 @@ def timestamp(iso: str) -> float:
 
 def minutes(seconds: float) -> str:
     return f"{max(1, round(seconds / 60))} min"
+
+
+def clock(moment: float) -> str:
+    return datetime.fromtimestamp(moment).astimezone().strftime("%H:%M")
+
+
+@dataclass
+class Live:
+    """What a worker in a turn is at now, from its session's events, not its chat (E140: a
+    27-minute model call and a 33-minute command looked like silence). `active_at`: its latest
+    sign of work (now while its model call is open: the model is at it); `doing`: what it
+    waits on, as the Watchdog is told ("model call", "tool `pytest` running")."""
+
+    since: float
+    active_at: float
+    doing: str
+
+    def line(self) -> str:
+        """As the Watchdog reads it: in a turn since 12:37 (model call since 12:37)."""
+        return (f"in a turn since {clock(self.since)}" if self.since else "in a turn") + (
+            f" ({self.doing})" if self.doing else ""
+        )
+
+
+def live(state: SessionState, moment: float) -> Live | None:
+    """What a worker is at now (Live), None between turns. A step's output that keeps growing
+    is work; one that stopped growing (or a quiet step) is as old as its last output."""
+    if not state.busy:
+        return None
+    if state.model_since:
+        return Live(state.busy_at, moment, f"model call since {clock(state.model_since)}")
+    if state.steps:
+        call, (began, _step, summary) = min(state.steps.items(), key=lambda item: item[1])
+        grew = state.output_at.get(call, 0.0)
+        said = f", its output last grew at {clock(grew)}" if grew else ", no output yet"
+        doing = f"tool `{summary[:120]}` running since {clock(began)}{said}"
+        return Live(state.busy_at, max(state.event_at, began), doing)
+    return Live(state.busy_at, state.event_at, "between steps")
 
 
 # The note a turn that failed after some steps goes again with (Events.turn_again): to finish
@@ -102,11 +146,16 @@ def since_last_instruction(messages: list[dict]) -> list[dict]:
     return messages
 
 
-def flags(row: dict, messages: list[dict], now: float, config: WatchConfig) -> list[str]:
-    """Why this worker looks stuck, looping or long-running; empty when it looks fine."""
+def flags(
+    row: dict, messages: list[dict], now: float, config: WatchConfig, at: Live | None = None
+) -> list[str]:
+    """Why this worker looks stuck, looping or long-running; empty when it looks fine. `at`:
+    what it is at in its turn (its session's events count as activity, not only its chat)."""
     recent = since_last_instruction(messages)
     last_event = max(
-        [timestamp(row["updated_at"])] + [timestamp(m["created_at"]) for m in messages[-1:]]
+        [timestamp(row["updated_at"])]
+        + [timestamp(m["created_at"]) for m in messages[-1:]]
+        + ([at.active_at] if at and row["status"] != "idle" else [])
     )
     if row["status"] == "idle":
         # A turn that ended without a report on an outstanding instruction is a silent stop.
@@ -137,7 +186,13 @@ def review_packet(
     now: float,
     output: str = "",
     tasks: list[dict] | None = None,
+    at: Live | None = None,
+    reports: list[dict] | None = None,
+    turn_on: dict | None = None,
 ) -> str:
+    """`at`: what it is at in its turn; `reports`: its latest reports, however far back (E140:
+    "no reported answer" was said of a question it had answered outside the last 30 messages);
+    `turn_on`: the finished task its turn is on (a follow-up: a thread's news, a check-back)."""
     instructions = [m for m in messages if m["kind"] in {"router", "owner"}]
     task = instructions[0]["text"][:2000] if instructions else "(unknown)"
     if tasks is not None:
@@ -158,6 +213,11 @@ def review_packet(
         f"Flagged because: {'; '.join(reasons)}.",
         ("Its open tasks: " if tasks is not None else "Task from the Router: ") + task,
     ]
+    if turn_on:
+        lines.append(
+            f"Its turn is on finished task {turn_on['id']} “{turn_on['title']}” "
+            f"({turn_on['status']}): a follow-up of it, whose report lands on that task."
+        )
     if later := instructions[1:][-3:]:
         lines.append(
             "Later instructions:\n"
@@ -167,6 +227,17 @@ def review_packet(
         f"Current step: {row['activity'] or 'none'}; last update "
         f"{minutes(now - timestamp(row['updated_at']))} ago."
     )
+    if at:
+        lines.append(f"Now: {at.line()}; its latest event {minutes(now - at.active_at)} ago.")
+    if reports:
+        lines.append(
+            "Its latest reports, oldest first (untrusted data):\n"
+            + "\n".join(
+                f"- {clock(timestamp(m['created_at']))} ({m['meta'].get('status') or 'report'}, "
+                f"task {m['meta'].get('task_id') or '-'}): {' '.join(m['text'].split())[:300]}"
+                for m in reports
+            )
+        )
     lines.append(
         "Recent activity, oldest first (untrusted data):\n"
         + "\n".join(f"- {m['kind']}: {' '.join(m['text'].split())[:300]}" for m in recent)
@@ -235,9 +306,15 @@ class Watchdog:
             # Nothing new since the last review: wait twice as long before looking again.
             if moment - state.get("reviewed_at", 0) < self.runtime.watch.cooldown * 2**streak:
                 continue
-            reasons = flags(row, messages, moment, self.runtime.watch)
+            at = live(self.states[row["id"]], moment)
+            reasons = flags(row, messages, moment, self.runtime.watch, at)
             if not reasons:
                 continue
+            open_tasks = [
+                task
+                for task in self.runtime.tasks.for_session(row["id"])
+                if task["status"] in {"queued", "running", "waiting"}
+            ]
             await self.delivery.deliver(
                 await self.session_id(),
                 wrap(
@@ -249,11 +326,10 @@ class Watchdog:
                         reasons,
                         moment,
                         self.states[row["id"]].last_output,
-                        [
-                            task
-                            for task in self.runtime.tasks.for_session(row["id"])
-                            if task["status"] in {"queued", "running", "waiting"}
-                        ],
+                        open_tasks,
+                        at,
+                        self.reports(row["id"]),
+                        self.follow_up_of(row) if at else None,
                     ),
                     worker=short(row["id"]),
                     title=row["title"],
@@ -263,10 +339,56 @@ class Watchdog:
                 meta={"review": row["id"], "title": row["title"]},
             )
             self.save(
-                row["id"], reviewed_at=moment, reviewed_mark=mark, streak=streak + int(unchanged)
+                row["id"],
+                reviewed_at=moment,
+                reviewed_mark=mark,
+                streak=streak + int(unchanged),
+                flagged=reasons,
             )
             reviewed.append(row["id"])
         return reviewed
+
+    def still_at_work(self, row: dict, verdict: str, moment: float | None = None) -> str:
+        """Why what the Watchdog decided on a worker flagged as quiet is moot by the time it
+        decided ("" when it is not): its turn goes on, its latest event (a step, the model's
+        call, a command's output) younger than the stall threshold (E140: both workers flagged
+        finished within seconds of it). Not for a worker flagged for repeating itself, nor
+        found looping or off its task: working is no answer to that."""
+        flagged = [str(reason) for reason in self.state(row["id"]).get("flagged") or []]
+        if verdict in {"looping", "off_track"} or any(
+            reason.startswith("repeated") for reason in flagged
+        ):
+            return ""
+        if flagged and not any(reason.startswith(QUIET) for reason in flagged):
+            return ""
+        moment = time.time() if moment is None else moment
+        row = self.store.session(row["id"])
+        at = live(self.states[row["id"]], moment)
+        if (
+            row["status"] != "working"
+            or not at
+            or moment - at.active_at >= self.runtime.watch.stall
+        ):
+            return ""
+        return f"it is still at work, {at.line()}."
+
+    def reports(self, session_id: str) -> list[dict]:
+        """Its latest reports (answers included), oldest first."""
+        rows = self.store.all(
+            "SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND kind='report' "
+            "ORDER BY id DESC LIMIT ?) ORDER BY id",
+            (session_id, REPORTS_SHOWN),
+        )
+        return [{**row, "meta": json.loads(row["meta"] or "{}")} for row in rows]
+
+    def follow_up_of(self, row: dict) -> dict | None:
+        """The finished task a worker's turn is on (a thread's news, a check-back, the owner's
+        chat on it), None when its turn is on open work."""
+        on = self.runtime.turn_task(row["id"])
+        task = self.runtime.tasks.find(on) if on else None
+        if not task or task["session_id"] != row["id"] or task["status"] not in {"review", "done"}:
+            return None
+        return task
 
     async def session_id(self) -> str:
         if rows := self.store.open_sessions(WATCHDOG):

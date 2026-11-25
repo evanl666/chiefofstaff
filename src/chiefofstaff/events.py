@@ -44,6 +44,38 @@ logger = logging.getLogger(__name__)
 
 # Copilot's own bookkeeping tools; they say nothing about the work.
 PLUMBING_TOOLS = {"tool_search_tool", "report_intent"}
+# A session at work shows it by its events, not only in its chat (E140: a 27-minute model call
+# and a 33-minute command looked like silence): a model call open from its start to its first
+# answer (or step), the model streaming, a command's output growing. Only kept as times on its
+# state (SessionState.event_at); nothing else is done with the ones that only say that.
+MODEL_STARTS = frozenset({"assistant.turn_start", "model.call_start"})
+MODEL_ENDS = frozenset(
+    {
+        "model.call_finished",
+        "assistant.usage",
+        "assistant.message",
+        "tool.execution_start",
+        "assistant.turn_end",
+        "session.idle",
+        "session.error",
+    }
+)
+STREAMING = frozenset(
+    {
+        "assistant.streaming_delta",
+        "assistant.message_delta",
+        "assistant.message_start",
+        "assistant.reasoning_delta",
+        "assistant.reasoning",
+        "assistant.tool_call_delta",
+        "assistant.intent",
+        "model.call_start",
+        "model.call_finished",
+    }
+)
+OUTPUT = frozenset(
+    {"tool.shell_output", "tool.execution_partial_result", "tool.execution_progress"}
+)
 
 
 def describe_tool(name: str, arguments: Any) -> str:
@@ -440,10 +472,33 @@ class Events:
             logger.exception("Failed to handle session event")
 
     def handle_event(self, session_id: str, event: Any):
-        handler = self.handlers.get(getattr(event.type, "value", str(event.type)))
+        kind = getattr(event.type, "value", str(event.type))
+        if self.at_work(session_id, kind, event):
+            return
+        handler = self.handlers.get(kind)
         row = self.store.find_session(session_id)
         if handler and row and not row["closed_at"]:
             handler(row, event)
+
+    def at_work(self, session_id: str, kind: str, event: Any) -> bool:
+        """Its session's event, as a sign of work (E140): when its model call began and ended,
+        when a step's output grew. True when that is all it says."""
+        state = self.states[session_id]
+        moment = time.time()
+        state.event_at = moment
+        data = getattr(event, "data", None)
+        own = not getattr(event, "agent_id", None) and not getattr(
+            data, "parent_tool_call_id", None
+        )
+        if own and kind in MODEL_STARTS:
+            state.model_since = moment
+        elif own and kind in MODEL_ENDS:
+            state.model_since = 0.0
+        if kind in OUTPUT:
+            if call := getattr(data, "tool_call_id", "") or "":
+                state.output_at[call] = moment
+            return True
+        return kind in STREAMING
 
     def stopped_work(self, row: dict) -> bool:
         """Whether what it was on was called off (stopped, cancelled) and nothing else of it is
@@ -655,6 +710,7 @@ class Events:
     def tool_complete(self, row: dict, event: Any):
         data = event.data
         sub = bool(getattr(data, "parent_tool_call_id", None))
+        self.states[row["id"]].output_at.pop(getattr(data, "tool_call_id", "") or "", None)
         if not sub and self.states[row["id"]].steps.pop(
             getattr(data, "tool_call_id", "") or "", None
         ):
@@ -861,6 +917,7 @@ class Events:
         # aborted (stopped, its task cancelled) owes no report.
         aborted, state.after_abort = state.after_abort, False
         state.steps.clear()
+        state.output_at.clear()
         state.retuned = False
         last = self.store.value("SELECT max(id) FROM messages WHERE session_id=?", (session_id,))
         self.store.set(f"idle:{session_id}", str(last or 0))
