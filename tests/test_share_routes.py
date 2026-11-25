@@ -211,6 +211,7 @@ async def test_revoke_deletes_the_gist_at_once(world):
     preview = await world.shares.preview(task["id"])
     made = await world.shares.create(task["id"], decide(preview), preview["digest"], 7, "jordan")
     assert world.shares.timer is not None, "a timer for its expiry while it is live"
+    assert world.shares.timer not in world.runtime.jobs, "no work in progress: nothing waits on it"
     revoked = await world.shares.revoke(made["share"]["id"])
     assert revoked["state"] == "revoked" and revoked["link"] == ""
     assert world.fake.gists == {}

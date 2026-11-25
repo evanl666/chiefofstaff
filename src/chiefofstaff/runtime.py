@@ -1106,6 +1106,7 @@ class Runtime:
     async def stop(self):
         self.stopping = True
         self.send.close()
+        self.shares.stop()
         if workspaces_module.GIT_GUARD and workspaces_module.GIT_GUARD() == self.git_guard:
             workspaces_module.GIT_GUARD = None
         remade = workspaces_module.CLONE_REMADE
