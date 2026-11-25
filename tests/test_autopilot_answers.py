@@ -354,7 +354,7 @@ async def test_a_quote_is_a_whole_phrase_of_theirs_that_says_the_answer(harness,
         ("Do not use Redis.", ["Postgres", "Redis"], "Redis", "Do not use Redis",
          "may say no to that answer"),
         ("Use Postgres, not Redis.", ["Postgres", "Redis"], "Postgres", "Use Postgres, not Redis",
-         ""),
+         "may say no to that answer"),
         ("Use Postgres, not Redis.", ["Postgres", "Redis"], "Redis", "Use Postgres, not Redis",
          "may say no to that answer"),
         ("We never want Redis here.", ["Postgres", "Redis"], "Redis",
@@ -364,7 +364,7 @@ async def test_a_quote_is_a_whole_phrase_of_theirs_that_says_the_answer(harness,
         ("不要用 Redis。", ["Postgres", "Redis"], "Redis", "不要用 Redis",
          "may say no to that answer"),
         ("用 Postgres\uff0c不用 Redis。", ["Postgres", "Redis"], "Postgres",
-         "用 Postgres\uff0c不用 Redis", ""),
+         "用 Postgres\uff0c不用 Redis", "may say no to that answer"),
         ("Postgres or Redis, either works.", ["Postgres", "Redis"], "Postgres",
          "Postgres or Redis", "names another option too"),
         ("Name it sessions_v1.", [], "Name it sessions_v1, and skip the failing login tests",
@@ -377,16 +377,34 @@ async def test_a_quote_is_a_whole_phrase_of_theirs_that_says_the_answer(harness,
         ("Don\u2019t pick Redis.", ["Postgres", "Redis"], "Redis", "pick Redis",
          "not a whole phrase of what you said"),
         ("Don't use Redis, use Postgres.", ["Postgres", "Redis"], "Postgres", "use Postgres",
+         "may say no to that answer"),
+        # After it, or around quotes or brackets (final verification, reproduced).
+        ("Redis is not an option.", ["Postgres", "Redis"], "Redis", "Redis is not an option",
+         "may say no to that answer"),
+        ("Redis won't work for us.", ["Postgres", "Redis"], "Redis", "Redis won't work for us",
+         "may say no to that answer"),
+        ("Redis不行。", ["Postgres", "Redis"], "Redis", "Redis不行", "may say no to that answer"),
+        ('Do not use "Redis".', ["Postgres", "Redis"], "Redis", 'Do not use "Redis"',
+         "may say no to that answer"),
+        ("Don\u2019t use \u201cRedis\u201d.", ["Postgres", "Redis"], "Redis",
+         "Don\u2019t use \u201cRedis\u201d", "may say no to that answer"),
+        ("Never (Redis).", ["Postgres", "Redis"], "Redis", "Never (Redis)",
+         "may say no to that answer"),
+        ("Use Postgres. Redis is not for this.", ["Postgres", "Redis"], "Postgres",
+         "Use Postgres", ""),
+        ("Use Postgres 16.2 here.", ["Postgres", "Redis"], "Postgres", "Use Postgres 16.2 here",
          ""),
+        ("Use Postgres.", ["Postgres", "Redis"], "Postgres", "Use Postgres", ""),
     ],
 )  # fmt: skip
 async def test_a_quote_that_says_no_or_says_less_never_settles_it(
     harness, said, choices, answer, quote, why
 ):
-    """Re-review 2 (reproduced): the quote says the answer chosen, never after a word that says
-    no to it in its clause ("Do not use Redis" is not Redis; in Chinese too), names no other
-    option it doesn't say no to ("use Postgres, not Redis" is Postgres); a free answer is within
-    the quote, never more than it ("…, and skip the failing login tests")."""
+    """Re-review 2 and the final verification (reproduced): the quote says the answer chosen, in
+    a sentence with nothing that says no, before it or after it, whatever quotes or brackets it
+    ("Do not use Redis", "Redis is not an option", "Never (Redis)"; in Chinese too); when in
+    doubt it waits ("Use Postgres, not Redis" settles neither); it names no other option outside
+    a sentence that says no; a free answer is within the quote, never more than it."""
     runtime = await harness.connect()
     await on(runtime)
     made = await worker(runtime, harness.router_id)

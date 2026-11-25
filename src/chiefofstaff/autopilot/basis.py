@@ -42,15 +42,16 @@ CLAUSE = set(".,;:!?()[]\"\u201c\u201d\u2018\u2019\u2014\u2013\u2026\n"
              "\u3002\uff0c\uff1b\uff1a\uff01\uff1f\u3001\uff08\uff09")  # fmt: skip
 LATIN = re.compile(r"[A-Za-z0-9_]+")
 CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
-# What says no to what follows it in its clause (when in doubt, it does): whole words, any
-# "n't", and Chinese ones anywhere (不 covers 不要, 不用, 不能, 而不是).
+# What says no (when in doubt, it does), anywhere in the sentence an answer is in, before it or
+# after it: whole words, any "n't", and Chinese ones anywhere (不 covers 不要, 不用, 不能, 而不是).
 NEGATORS = ("not", "never", "no", "none", "nor", "neither", "without", "avoid", "instead of",
             "rather than", "cannot", "dont", "except", "other than", "against")  # fmt: skip
 CONTRACTED = re.compile(r"[a-z]n't\b")
 NEGATORS_CJK = ("不", "别", "没", "勿", "避免", "禁止", "无需")
-# A clause break within a sentence ("No, use Redis"), and a curly apostrophe within a word (as
-# in "don't": never a closing quote that ends a clause).
-SOFT = set(",\u2014\u2013\uff0c\u3001")
+# Where a sentence ends (never a comma, a dash, a quotation mark or a bracket; a full stop only
+# before a space or the end, not in "16.2"); and a curly apostrophe within a word (as in
+# "don't": never a closing quote that ends a phrase).
+SENTENCE_ENDS = set("!?;\n\u3002\uff01\uff1f\uff1b")
 APOSTROPHE = re.compile(r"(?<=\w)[\u2019\u02bc](?=\w)")
 
 
@@ -114,31 +115,31 @@ def says_no(words: str) -> bool:
     return any(word in words for word in NEGATORS_CJK)
 
 
-def clause_start(text: str, at: int) -> int:
-    return max((i for i, ch in enumerate(text[:at]) if ch in CLAUSE), default=-1) + 1
+def sentence(text: str, start: int, end: int) -> str:
+    """The whole sentence (or sentences) text[start:end] is in."""
+
+    def ends(at: int) -> bool:
+        mark = text[at]
+        return mark in SENTENCE_ENDS or (mark == "." and text[at + 1 : at + 2] in {"", " "})
+
+    while start > 0 and not ends(start - 1):
+        start -= 1
+    while end < len(text) and not ends(end):
+        end += 1
+    return text[start:end]
 
 
-def negated(text: str, at: int) -> bool:
-    """Whether something that says no comes before text[at] in its clause, or in short clauses
-    just before it in its sentence ("No, use Redis"; "Don't, ever, use Redis")."""
-    start = clause_start(text, at)
-    if says_no(text[start:at]):
-        return True
-    while start and text[start - 1] in SOFT:
-        before = clause_start(text, start - 1)
-        if weight(text[before : start - 1]) > 2:
-            break
-        if says_no(text[before : start - 1]):
-            return True
-        start = before
-    return False
+def negated(text: str, at: int, size: int) -> bool:
+    """Whether anything in the sentence text[at:at + size] is in says no: before it or after it,
+    whatever quotes or brackets it ("Redis is not an option"; "Do not use "Redis"")."""
+    return says_no(sentence(text, at, at + size))
 
 
 def quote_refusal(item: Item, quote: str, answer: str, options: Sequence[str] = ()) -> str:
     """Why a quote does not hold for an answer ("" when it does): it must be a whole phrase of
-    the owner's that holds the answer (with options: the one chosen), never after a word that
-    says no to it in its clause; and with options, any other it names must be one it says no
-    to ("use Postgres, not Redis")."""
+    the owner's that holds the answer (with options: the one chosen) in a sentence with nothing
+    that says no (when in doubt, the question waits: "Use Postgres, not Redis" settles neither);
+    and with options, any other it names must be in a sentence that says no."""
     text, said = plain(item.text), plain(quote)
     places = bounded(text, said)
     if not said or not places:
@@ -151,14 +152,14 @@ def quote_refusal(item: Item, quote: str, answer: str, options: Sequence[str] = 
     if not spots:
         return f"what you said ({item.id}) doesn't say that answer"
     # Read where the quote is in what they said (each place it is: any that says no, holds).
-    if any(negated(text, place + at) for place in places for at in spots):
+    if any(negated(text, place + at, len(wanted)) for place in places for at in spots):
         return f"what you said ({item.id}) may say no to that answer"
     chosen = [(at, at + len(wanted)) for at in spots]
     for other in {plain(option) for option in options} - {wanted, ""}:
         for at in bounded(said, other):
             if any(start <= at and at + len(other) <= end for start, end in chosen):
                 continue  # A part of the option chosen ("Postgres" in "Postgres 16").
-            if not all(negated(text, place + at) for place in places):
+            if not all(negated(text, place + at, len(other)) for place in places):
                 return f"what you said ({item.id}) names another option too"
     return ""
 
