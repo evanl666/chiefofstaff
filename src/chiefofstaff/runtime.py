@@ -9503,10 +9503,11 @@ class Runtime:
                     if tell_router:
                         self.owner_told(row, text, client_id=client_id)
                     return message
+        answered: list[dict] = []
         if row["role"] in {WORKER, SLACK} and clear_questions:
             # The owner answers what it asked on that task (others' questions stay).
-            self.asks.answered(session_id, about["id"] if about else "")
-            self.asks.answered(session_id, "")
+            answered = self.asks.answered(session_id, about["id"] if about else "", text=text)
+            answered += self.asks.answered(session_id, "", text=text)
         # Waiting on its decision card: what the owner writes it is their answer to it (unless
         # they ask something back: then the card stays, and this is chat).
         decided = (
@@ -9523,6 +9524,10 @@ class Runtime:
         spoken = self.heard(text, home=row["role"] == ROUTER) if learn else language(text)
         prompt = wrap("owner", "message", text, reply_in=spoken)
         meta: dict[str, Any] = dict(sent_as)
+        if asked := [c["target"]["question"] for c in decided] + [q["text"] for q in answered]:
+            # Its answer to what the worker asked (Asks.held_ask reads it so).
+            answers = decided[0]["id"] if decided else answered[0]["id"]
+            meta |= {"answers": answers, "asked": asked[0][:300], "answer": text.strip()}
         switched = self.switched_language(session_id, spoken)
         notes = [switched]
         made = None

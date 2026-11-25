@@ -4080,7 +4080,7 @@ class TaskActions:
             # The worker went on without it: told which question this answers, on its task (or
             # on the task that continues it).
             return await self.follow_up(task["id"], text, resume=True, answers=question)
-        return await self.follow_up(task["id"], text, resume=True)
+        return await self.follow_up(task["id"], text, resume=True, question=question)
 
     async def handed_over(self, session_id: str, replaced: list[dict], new: dict, label: str):
         """A worker's work went on with a new one (Continue with…): the tasks it had open are
@@ -4210,12 +4210,14 @@ class TaskActions:
         resume: bool = False,
         changes: str = "",
         answers: dict | None = None,
+        question: dict | None = None,
     ) -> dict:
         """The owner adds to a task: its worker continues it (a finished task reopens).
         `resume`: the owner answered its question after it was cancelled: it goes on.
         `changes`: who did not accept its result ("you": the owner) and asks for these
         changes: its worker hears so plainly. `answers`: the question (Asks.keep_unanswered)
-        this answers, which its worker went on without: it hears which."""
+        this answers, which its worker went on without: it hears which. `question`: the one
+        under Needs you this answers (Asks.held_ask reads the message so)."""
         task = self.tasks.get(task_id)
         # Go on (a stopped task's button, from two tabs say): sent once, while it is stopped.
         going_on = text.strip() == "Go on where you stopped."
@@ -4246,7 +4248,9 @@ class TaskActions:
                 return now
         self.store.delete(f"news:{task_id}")  # Answering it, the owner has seen its news.
         # (Go on is no answer to what its worker went on without.)
-        self.runtime.asks.answered(task["session_id"], task_id, went_on=not going_on)
+        self.runtime.asks.answered(
+            task["session_id"], task_id, went_on=not going_on, text="" if going_on else text
+        )
         before = task["status"]
         # How it waits (stopped, by whom; asked after its result), for if this never reaches it.
         marks = {
@@ -4331,12 +4335,18 @@ class TaskActions:
                 "answer, and report.",
             )
         try:
+            asked = question or answers
             message = await self.delivery.deliver(
                 row["id"],
                 prompt,
                 kind="owner",
                 display=shown,
-                meta={"task_id": task_id},
+                meta={"task_id": task_id}
+                | (
+                    {"answers": asked["id"], "asked": asked["text"][:300], "answer": text}
+                    if asked and asked.get("id")
+                    else {}
+                ),
                 steer=True,
             )
         except Exception:

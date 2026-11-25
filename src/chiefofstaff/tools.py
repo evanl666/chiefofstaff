@@ -4381,6 +4381,15 @@ class Tools:
                 "step, the numbers, and the table if one was asked for. If this already is the "
                 "whole answer, call report again with it unchanged."
             )
+        if (
+            task
+            and row["role"] == WORKER
+            and params.status in {"question", "blocked"}
+            and (said := self.runtime.asks.held_ask(caller, task))
+        ):
+            # The owner's answer, or the Router's or their newer word on this task, is unread:
+            # no question built without it (E156).
+            raise ValueError(said)
         finished = bool(
             task
             and (
@@ -4814,6 +4823,13 @@ class Tools:
                 'Router or the owner, use report(status="answer").'
             )
         crossed = ""
+        if task and params.status in {"question", "blocked"} and unread:
+            # Asked again once it was held back for it (Asks.held_ask), still unread (E156).
+            crossed = (
+                f"This was asked before its worker read a newer message about task {task['id']} "
+                f"(“{list(unread.values())[-1][:200]}”), which may settle it: wait for its next "
+                "report before you ask the owner."
+            )
         if task and params.status == "done" and unread:
             # Through, a newer message about it still unread (bug E95: the Router took the
             # missing part for ignored, and gave it out as a new task).

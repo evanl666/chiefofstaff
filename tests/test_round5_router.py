@@ -118,8 +118,8 @@ async def test_the_router_hears_when_the_owner_answers_a_workers_question(harnes
         if 'type="question-closed"' in m["meta"].get("prompt", "")
     ]  # fmt: skip
     assert note["meta"]["deferred"], "with its next message, not a turn of its own"
-    assert "The owner answered “Pick a database”'s question" in note["meta"]["prompt"]
-    assert "Postgres or MySQL?" in note["meta"]["prompt"]
+    assert "The owner answered “Postgres or MySQL?” (Pick a database" in note["meta"]["prompt"]
+    assert "): Postgres." in note["meta"]["prompt"], "what they said (E151)"
     assert "no longer open" in note["meta"]["prompt"]
 
 

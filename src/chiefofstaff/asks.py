@@ -86,6 +86,14 @@ class AnswerSession(BaseModel):
     answer: str
 
 
+def clock(iso: str) -> str:
+    """A time of day on this computer ("10:02"), as a worker is told when the owner answered."""
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%H:%M")
+    except (TypeError, ValueError):
+        return "earlier"
+
+
 def http_url(url: str) -> str:
     if not url.startswith(("https://", "http://")):
         raise ValueError("Only http(s) links can be shown to the owner.")
@@ -219,6 +227,57 @@ class Asks:
         self.store.set(key, json.dumps(question))
         self.runtime.publish_state()
 
+    def held_ask(self, session_id: str, task: dict | None) -> str:
+        """A worker asks the owner about a task (a decision card, a question or blocked report,
+        its question card) while what the owner or the Router sent it about that task is still
+        unread: sent into its turn and not seen there yet, or not sent at all. Then no card: the
+        owner's own answer to what it asked is given to it instead (R1: a second card built on
+        what it found before reading the answer); any other instruction holds the ask back, for
+        it to read that first (E156). Once for each message: asked again, it asks as usual.
+        What it is told, or "" to ask."""
+        if not task or not self.states[session_id].busy:
+            return ""  # (Asked in no turn of its own: nothing came in it.)
+        unread = self.delivery.unread(session_id, task["id"])
+        key = f"heldask:{session_id}:{task['id']}"
+        held = set(json.loads(self.store.get(key) or "[]"))
+        fresh = [message for message in unread if message["id"] not in held]
+        if not fresh:
+            return ""
+        self.store.set(key, json.dumps(sorted(held | {m["id"] for m in fresh})))
+        if answers := [m for m in fresh if m["meta"].get("answers")]:
+            meta = answers[-1]["meta"]
+            asked = clip(" ".join(str(meta.get("asked") or "").split()), 300)
+            answer = clip(" ".join(str(meta.get("answer") or answers[-1]["text"]).split()), 500)
+            at = clock(answers[-1]["created_at"])
+            decision = meta.get("decision") or ""
+            row = self.store.session(session_id)
+            self.runtime.handled.record(
+                "held-ask",
+                f"“{self.runtime.display_title(row)}” asked again before reading your {at} "
+                f"answer (“{clip(answer, 80)}”): it got your answer, not a new card",
+                session_id=session_id,
+                ref=task["id"],
+            )
+            logger.info("Held %s's ask on %s: the owner's answer is unread", session_id, task["id"])
+            text = (
+                f"Not asked: the owner already answered{f' “{asked}”' if asked else ''} at "
+                f"{at}: {answer}{f' ({decision})' if decision else ''}. Their answer reaches "
+                "you as a message you have not read yet. Re-check your question against it, and "
+                "go on with it."
+            )
+            if decision:
+                text += (
+                    " If what you found since calls it into question, ask again with "
+                    f'replaces="{decision}" and say in why what their answer did not know.'
+                )
+            return text
+        newest = clip(" ".join(fresh[-1]["text"].split()), 200)
+        return (
+            f"Not asked yet: a newer message about task {task['id']} reached you while you "
+            f"worked (“{newest}”), and you have not read it. It comes next: read it, then ask "
+            "the owner only if you still need to."
+        )
+
     def owner_question(self, question_id: str) -> dict | None:
         """A question by its id; by "<session id>:-", that session's question without a task
         when it has one only (of several, which one is meant is not known); by a worker's id,
@@ -251,12 +310,13 @@ class Asks:
         task_id: str | None = None,
         by: str = "owner",
         went_on: bool = True,
-    ):
+        text: str = "",
+    ) -> list[dict]:
         """The owner answered (or someone did for them), or the worker moved on: the question
         of that task ("": those it asked with no task), or (no task named) all of the
-        worker's. `by`: "owner" (the Router hears it is no longer open), "router" or
-        "worker". `went_on`: also those it went on without (never when it is the worker that
-        moves on: it did so without their answer)."""
+        worker's. `by`: "owner" (the Router hears it is no longer open, and `text`, their
+        answer), "router" or "worker". `went_on`: also those it went on without (never when it
+        is the worker that moves on: it did so without their answer). The questions closed."""
         questions = [
             question
             for question in self.session_questions(session_id)
@@ -269,14 +329,15 @@ class Asks:
                 self.store.delete(f"ownerq:{question['id']}")
                 gone.append(question)
         if gone:
-            self.closed(session_id, gone, "answered" if by == "owner" else "")
+            self.closed(session_id, gone, "answered" if by == "owner" else "", text)
             self.runtime.publish_state()
+        return gone
 
-    def closed(self, session_id: str, questions: list[dict], how: str):
+    def closed(self, session_id: str, questions: list[dict], how: str, text: str = ""):
         """A session's questions are no longer under Needs you: the Router's notes about them
         go with them. `how` the owner settled them ("answered", "dismissed"; "" when the Router
-        or the worker did): the Router hears it with its next message (not a turn of its own),
-        so it never calls them open."""
+        or the worker did), with `text`, their answer: the Router hears it with its next message
+        (not a turn of its own), so it never calls them open, and knows what they said."""
         ids = {question["id"] for question in questions}
         router = self.store.get("router_id") or ""
         for message in self.store.all(
@@ -294,6 +355,11 @@ class Asks:
         whose = "the Slack session" if row["role"] == "slack" else f"\u201c{name}\u201d"
         for question in questions:
             task = self.runtime.tasks.find(question.get("task_id") or "")
+            if how == "answered" and text.strip():
+                # What they said, not only that they did (E151): it may settle a choice others
+                # rely on.
+                self.tell_router_answer(session_id, question["text"], text, task)
+                continue
             on = f" on task {task['id']} “{task['title']}”" if task else ""
             asked = " ".join(question["text"].split())[:300]
             self.delivery.hold(
@@ -310,6 +376,35 @@ class Asks:
                 display=f"You {how} {whose}'s question"[:300],
                 meta={"session_id": session_id, **({"task_id": task["id"]} if task else {})},
             )
+
+    def tell_router_answer(self, session_id: str, asked: str, text: str, task: dict | None):
+        """The owner answered a worker's question (under Needs you, on its question card, in its
+        chat): the Router hears what they said with its next message (E151, until answers are
+        kept as decisions by subject)."""
+        router = self.store.get("router_id") or ""
+        row = self.store.find_session(session_id)
+        if not router or not row:
+            return
+        name = self.runtime.display_title(row)
+        whose = "the Slack session" if row["role"] == "slack" else f"\u201c{name}\u201d"
+        on = f", task {task['id']}" if task else ""
+        asked = " ".join(asked.split())[:300]
+        said = " ".join(text.split())[:1000]
+        self.delivery.hold(
+            router,
+            wrap(
+                "system",
+                "question-closed",
+                f"The owner answered “{asked}” ({name}{on}): {said}. It is no longer open under "
+                "Needs you: do not ask it again or call it open. If this settles a choice others "
+                "rely on, record_decision.",
+                worker=short(session_id),
+                task=task["id"] if task else None,
+            ),
+            kind="notice",
+            display=f"You answered {whose}'s question: {said}"[:300],
+            meta={"session_id": session_id, **({"task_id": task["id"]} if task else {})},
+        )
 
     def go_on(self, task: dict, chat: bool = True, told: bool = False) -> dict:
         """The owner answered what a task waited for (its question, its decision): it goes on
@@ -681,6 +776,10 @@ class Asks:
                 choices = draft["target"].get("choices") or []
                 result = {"answer": text, "wasFreeform": text not in choices}
                 outcome = text[:500]
+                row = self.store.find_session(draft["session_id"])
+                if row and row["role"] == "worker":
+                    task = self.runtime.tasks.find(draft["target"].get("task_id") or "")
+                    self.tell_router_answer(row["id"], draft["text"], text, task)
             elif kind == "form":
                 content = form_values(draft["target"].get("schema") or {}, decision.content)
                 result = {"action": "accept", "content": content}
@@ -709,6 +808,8 @@ class Asks:
         if row and row["role"] == "worker":
             # The task it asks on: where its question stays if nobody answers in time.
             task = self.runtime.at_work(session_id)
+            if said := self.held_ask(session_id, task):
+                return {"answer": said, "wasFreeform": True}  # No card built without it.
             target["task_id"] = task["id"] if task else ""
             self.drop_went_on(session_id, target["task_id"], question[:2000])
         result = await self.ask_owner(

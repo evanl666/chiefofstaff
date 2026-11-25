@@ -416,6 +416,26 @@ class Delivery:
         self.publish_delivery(session_id, dropped)  # Not sent, nor waiting to be: nothing said.
         return received
 
+    def unread(self, session_id: str, task_id: str = "") -> list[dict]:
+        """What it was given that asks something of it (`instructs`) and that it has not read
+        yet, oldest first: sent into its turn and not shown in its conversation yet, or not sent
+        at all (waiting for its next message, a slot, its backend). `task_id`: about that task,
+        or about none."""
+        state = self.states[session_id]
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        spans = [
+            (first, entry[1] if (entry := state.echo_wait.get(key)) else mark)
+            for key, (_, _, first) in state.unread.items()
+        ]
+        after = min([first for first, _ in spans] + [mark + 1]) - 1
+        return [
+            message
+            for message in self.store.prompts(session_id, after=after)
+            if (message["id"] > mark or any(a <= message["id"] <= b for a, b in spans))
+            and instructs(message)
+            and (not task_id or (message["meta"].get("task_id") or "") in {task_id, ""})
+        ]
+
     def has_unsent(self, session_id: str) -> bool:
         """Whether it has messages to receive that are worth a turn (a deferred note, such as
         a cancellation, only rides along with the next one)."""

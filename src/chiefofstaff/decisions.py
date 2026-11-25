@@ -250,6 +250,10 @@ class Decisions:
         }
         cards = self.open_cards("decision")
         reconsidered = self.reconsidered(params, task)
+        if not reconsidered and (said := self.runtime.asks.held_ask(caller, task)):
+            # What the owner (or the Router) sent about this task is unread: no card built
+            # without it. Only a reconsideration of their answer is asked as such.
+            return said
         if not (params.same_as.strip() or reconsidered):
             # Asked again (owner report 0.1.53, item 1: a new card, the task waiting again).
             mine = [
@@ -452,10 +456,13 @@ class Decisions:
                     asked + "\n\n" + wrap("owner", "decision", text, decision=identifier or None),
                     kind="owner",
                     display=display,
-                    # The owner's answer to its card (Decisions.unread_answer reads it so).
+                    # The owner's answer to its card, their words (Asks.held_ask reads it so).
                     meta={
                         **({"task_id": task["id"]} if task else {}),
                         "answers": card["id"],
+                        "asked": target["question"],
+                        "answer": display,
+                        "owner_said": True,
                         **({"decision": identifier} if identifier else {}),
                     },
                     steer=True,

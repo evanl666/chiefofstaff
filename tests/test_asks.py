@@ -631,7 +631,7 @@ async def test_a_question_nobody_answers_in_time_stays_until_answered(harness, m
     assert runtime.snapshot()["questions"] == []
     assert runtime.tasks.get(task["id"])["status"] == "running"
     closed = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
-    assert closed[-1] == "You answered “Pick a port”'s question"
+    assert closed[-1] == "You answered “Pick a port”'s question: 9090", "what they said (E151)"
 
 
 async def test_a_question_gone_on_without_is_dismissed_or_asked_again(harness, monkeypatch):

@@ -264,7 +264,8 @@ async def test_a_decision_is_asked_for_the_task_at_work_not_the_one_given_last(h
 
 
 async def test_a_decision_names_its_task(harness):
-    runtime, worker, a, b, _session = await two_given(harness)
+    runtime, worker, a, b, session = await two_given(harness)
+    await turn(runtime, session)  # It read task B (unread, its ask would wait for that).
     await call_tool(runtime, "ask_decision", worker, question="Docs in English only?",
                     task_id=b["id"])  # fmt: skip
     card = next(d for d in harness.store.drafts() if d["kind"] == "decision")

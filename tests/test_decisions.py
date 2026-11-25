@@ -565,3 +565,145 @@ async def test_each_agent_takes_the_answer_into_the_turn_that_asked(
         assert answers == ["steering"], f"taken into its turn, once: {taken}"
     finally:
         await runtime.stop()
+
+
+async def asked_in_turn(runtime, harness, title, question):
+    """A worker at work (its conversation shows its task) that asks a decision card and goes
+    on in that turn."""
+    worker = await spawn(runtime, harness.router_id, title)
+    session = harness.session(worker["session_id"])
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    await call_tool(runtime, "ask_decision", worker["session_id"], question=question)
+    [card] = harness.store.drafts()
+    return worker, session, card
+
+
+async def test_a_worker_that_asks_again_before_reading_the_answer_gets_it_not_a_card(harness):
+    """R1's second card: asked from what it found before it read the owner's answer, it was a
+    card of its own, both answers in force. Asked while the answer is unread, it gets the answer
+    (once); the owner sees that in Handled."""
+    runtime = await harness.connect()
+    worker, session, card = await asked_in_turn(
+        runtime, harness, "Tie breaker", "Add rule A, rule B, or change nothing?"
+    )
+    sid = worker["session_id"]
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Rule A"))
+    await settle(runtime)
+    [decision] = runtime.decisions.active()
+    again = await call_tool(runtime, "ask_decision", sid, seen_precedents=True,
+                            question="A and B both fail in simulation: C+D, C only, or none?",
+                            why="The two options from the last question failed.")  # fmt: skip
+    said = again.text_result_for_llm
+    assert "already answered" in said and "Rule A" in said and decision["id"] in said, said
+    assert f'replaces="{decision["id"]}"' in said
+    assert not harness.store.drafts() and len(runtime.decisions.active()) == 1
+    [handled] = runtime.handled.view()
+    assert handled["kind"] == "held-ask" and "before reading your" in handled["text"]
+
+    session.emit("user.message", content=session.sent[-1])  # It reads the answer now.
+    await settle(runtime)
+    assert not runtime.delivery.unread(sid, worker["task_id"])
+    why = "Simulation: with rule A players still tie 61% of the time."
+    await call_tool(runtime, "ask_decision", sid, question="C+D, C only, or none?",
+                    replaces=decision["id"], why=why)  # fmt: skip
+    [card] = harness.store.drafts()
+    assert card["target"]["replaces"] == decision["id"], "asked as what it is: a reconsideration"
+
+
+async def test_e156_a_question_or_blocked_report_waits_for_what_it_has_not_read(harness):
+    """E156: a question (or blocked) report while the owner's answer to it, or the Router's newer
+    word on its task, was unread became a card all the same. The answer is given instead; any
+    other instruction holds it back once; news that asks nothing holds nothing."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Port picker")
+    sid, task = worker["session_id"], worker["task_id"]
+    session = harness.session(sid)
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    await call_tool(runtime, "report", sid, status="question", summary="Port 8080 or 9090?")
+    [question] = runtime.asks.session_questions(sid)
+    await runtime.task_actions.answer_question(question["id"], "9090")
+    await settle(runtime)
+    assert session.modes[-1] == "immediate", "into the turn that asked"
+    blocked = await call_tool(runtime, "report", sid, status="blocked",
+                              summary="Which port: 8080 or 9090?")  # fmt: skip
+    said = blocked.text_result_for_llm
+    assert blocked.result_type == "failure" and "already answered" in said and "9090" in said
+    assert not runtime.asks.session_questions(sid), "no card built without it"
+    assert runtime.tasks.get(task)["status"] == "running"
+
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    await call_tool(runtime, "message_session", harness.router_id, session_id=sid,
+                    task="note", text="Use the staging host.")  # fmt: skip
+    held = await call_tool(runtime, "report", sid, status="question", summary="Which host?")
+    assert held.result_type == "failure" and "Use the staging host." in held.text_result_for_llm
+    assert not runtime.asks.session_questions(sid)
+    await call_tool(runtime, "report", sid, status="question", summary="Which host?")
+    assert len(runtime.asks.session_questions(sid)) == 1, "held once, then asked"
+    told = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
+    assert "asked before its worker read a newer message" in told[-1]["meta"]["prompt"]
+
+
+async def test_a_question_card_asked_before_the_answer_was_read_gets_the_answer(harness):
+    """Copilot's ask_user (a question card) asked while the owner's answer to its decision card
+    is unread: the answer, no card."""
+    runtime = await harness.connect()
+    worker, _session, card = await asked_in_turn(runtime, harness, "Tie breaker", "Rule A or B?")
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Rule A"))
+    await settle(runtime)
+    answer = await asyncio.wait_for(
+        runtime.asks.on_user_input(
+            {"question": "Rule A or rule B?", "choices": ["A", "B"]},
+            {"sessionId": runtime.copilot_id(worker["session_id"])},
+        ),
+        5,
+    )
+    assert "already answered" in answer["answer"] and "Rule A" in answer["answer"]
+    assert not harness.store.drafts()
+
+
+async def test_e151_the_router_hears_what_the_owner_answered(harness):
+    """E151 (interim): the owner answered "which k" on one worker's question card and on another's
+    question under Needs you; the Router only heard that a question closed, and the decision in
+    force still said the old value. It hears what they said, and that it may record it."""
+    runtime = await harness.connect()
+    router = harness.router_id
+
+    def told() -> str:
+        notes = [
+            m["meta"]["prompt"]
+            for m in harness.store.messages(router)
+            if 'type="question-closed"' in m["meta"].get("prompt", "")
+        ]
+        return notes[-1]
+
+    serve = await spawn(runtime, router, "Serve the model")
+    await call_tool(runtime, "report", serve["session_id"], status="question",
+                    summary="Serve k=1.11 or k=1.12?")  # fmt: skip
+    [question] = runtime.asks.session_questions(serve["session_id"])
+    await runtime.task_actions.answer_question(question["id"], "k=1.11")
+    assert "The owner answered “Serve k=1.11 or k=1.12?” (Serve the model" in told()
+    assert ": k=1.11." in told() and "record_decision" in told()
+
+    tune = await spawn(runtime, router, "Tune the model", why_new="separate")
+    asking = asyncio.ensure_future(runtime.asks.on_user_input(
+        {"question": "Which k for the tuning run?", "choices": ["1.11", "1.12"]},
+        {"sessionId": runtime.copilot_id(tune["session_id"])},
+    ))  # fmt: skip
+    for _ in range(100):
+        if harness.store.drafts():
+            break
+        await asyncio.sleep(0.01)
+    [card] = harness.store.drafts()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="1.12"))
+    assert (await asking)["answer"] == "1.12"
+    assert "The owner answered “Which k for the tuning run?”" in told() and ": 1.12." in told()
+
+    chat = await spawn(runtime, router, "Report the k", why_new="separate")
+    await call_tool(runtime, "report", chat["session_id"], status="question",
+                    summary="Report with k=1.11?")  # fmt: skip
+    await runtime.owner_send(chat["session_id"], "Use 1.12 everywhere.")
+    assert "The owner answered “Report with k=1.11?”" in told()
+    assert "Use 1.12 everywhere." in told()
