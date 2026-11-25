@@ -234,7 +234,11 @@ class Drafts:
                 await self.learn_style(draft["text"], reason=decision.reason or "(no reason)")
             reason = f" Reason: {decision.reason}" if decision.reason else " No reason given."
             self.settle_question(draft)
-            if (task := self.task_of(draft)) and task["status"] in {"review", "done"}:
+            if (task := self.task_of(draft)) and decision.reason.strip():
+                # What the owner said no to, and why: new work for its worker given now may
+                # supersede that task (Tools.supersede_rejected, E148).
+                self.store.set(f"ownerrejected:{task['id']}", now())
+            if task and task["status"] in {"review", "done"}:
                 # Its result said the draft waits for the owner: it does not any more. Their
                 # reason (their own words, from away) as a sentence.
                 said = reason.rstrip()
@@ -249,6 +253,7 @@ class Drafts:
                 True,
                 display=f"Rejected: {self.shown(draft)}."
                 + (f" Reason: {decision.reason}" if decision.reason else ""),
+                reason=decision.reason or "",
             )
             self.tell_router(
                 draft,
@@ -1151,6 +1156,7 @@ class Drafts:
                 f"{reason}",
                 True,
                 display=f"You chose no folder for “{title}”: it does not start.{reason}",
+                reason=decision.reason or "",
             )
             return draft
         if decision.action != "choose":
@@ -2035,14 +2041,23 @@ class Drafts:
         return CARD_WORDS.get(draft["kind"], "card")
 
     async def tell_drafter(
-        self, draft: dict, text: str, wake: bool = False, said: str = "", display: str = ""
+        self,
+        draft: dict,
+        text: str,
+        wake: bool = False,
+        said: str = "",
+        display: str = "",
+        reason: str = "",
     ):
         """`said`: the owner's own words in it (what to change): answered in their language.
-        `display`: the line its chat shows the owner (else the text the session gets)."""
+        `display`: the line its chat shows the owner (else the text the session gets).
+        `reason`: the owner's reason for what they did with it. Either makes it an instruction
+        (E145: a report written before it reached the worker is told so)."""
         row = self.store.find_session(draft["session_id"])
         if not row or row["closed_at"]:
             return
         display = display or text
+        ordered = {"owner_said": True} if (said.strip() or reason.strip()) else None
         task = self.task_of(draft)
         if (
             not wake
@@ -2072,9 +2087,11 @@ class Drafts:
         if not wake:
             # Not worth a turn of its own, but it must know (or it asks about the draft again):
             # it reads this with its next message.
-            self.delivery.hold(row["id"], prompt, kind="notice", display=display)
+            self.delivery.hold(row["id"], prompt, kind="notice", display=display, meta=ordered)
             return
         try:
-            await self.delivery.deliver(row["id"], prompt, kind="notice", display=display)
+            await self.delivery.deliver(
+                row["id"], prompt, kind="notice", display=display, meta=ordered
+            )
         except Exception:
             logger.warning("Could not tell the drafting session about its draft.", exc_info=True)

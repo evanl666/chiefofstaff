@@ -168,7 +168,10 @@ replaced, so no *Retry* stays beside it.
 ## Events
 
 `Events.handle_event` (`events.py`) runs on the event loop for every session event and passes it
-to the handler for its type:
+to the handler for its type. Each event first marks the session at work (`SessionState.event_at`;
+an open model call, from `assistant.turn_start` or `model.call_start` to its answer or step, as
+`model_since`; a step's growing output, from `tool.shell_output`, as `output_at`): what the
+Watchdog reads as activity. The ones that only say that (streaming, output) stop there.
 
 | Event | Effect |
 | --- | --- |

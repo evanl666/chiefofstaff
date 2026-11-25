@@ -3842,14 +3842,17 @@ class TaskActions:
         self.publish(task)
         return task
 
-    def accept(self, task_id: str, as_is: bool = True) -> dict:
+    def accept(self, task_id: str, as_is: bool = True, by: str = "owner") -> dict:
         """The owner accepts its result. `as_is=False`: settled by sending a draft the owner
-        edited first (what they changed is learned from that draft, not as agreement)."""
+        edited first (what they changed is learned from that draft, not as agreement). `by`:
+        who accepted it, as the Router is told (finished_words): the owner, or "settled" for
+        them (a report they read)."""
         task = self.tasks.get(task_id)
         if task["status"] != "review":
             raise ValueError(f"Task {task_id} is {task['status']}, not ready for review.")
         self.store.delete(f"news:{task_id}")  # Seen with the result.
         self.store.delete(f"setaside:{task_id}")
+        self.store.set(f"acceptedby:{task_id}", by)
         task = self.tasks.move(task_id, "done")
         # Prepared for you: the head of each PR it keeps moving that the owner reviewed.
         self.runtime.shepherd.accepted(task)
@@ -3881,7 +3884,8 @@ class TaskActions:
                 continue
             if task["session_id"] in helpers or not self.informational(task):
                 continue  # (Chief of Staff's own helpers settle theirs.)
-            self.accept(task["id"], as_is=False)  # (Not the owner's word: nothing learned.)
+            # (Not the owner's word: nothing learned, nor said to be theirs.)
+            self.accept(task["id"], as_is=False, by="settled")
             self.tasks.update(task["id"], ended_at=ended)  # Finished when it finished, not now.
             self.publish(self.tasks.get(task["id"]))
             self.runtime.handled.record(
@@ -3908,10 +3912,26 @@ class TaskActions:
         if not task or task["status"] != "done" or self.store.get(f"setaside:{task['id']}"):
             raise ValueError("It moved on since: there's nothing to undo.")
         self.tasks.move(task["id"], "review")
+        self.store.delete(f"acceptedby:{task['id']}")
         task = self.tasks.get(task["id"])
         self.store.set(f"keepreview:{task['id']}", self.finished_at(task))
         self.publish(task)
         return f"“{task['title']}” waits for your Accept again."
+
+    def finished_words(self, task: dict) -> str:
+        """How a task ended, as the Router is told ("its task t1 “X” …"): accepted by the
+        owner only when they did (E141: said of tasks nobody reviewed)."""
+        if task["status"] == "cancelled":
+            return "was cancelled"
+        if task["status"] == "failed":
+            return "failed"
+        if task["status"] == "review":
+            return "is finished: its result waits for the owner's review"
+        if task["status"] != "done":
+            return f"is {task['status']}"
+        if self.store.get(f"acceptedby:{task['id']}") == "owner":
+            return "was accepted by the owner and is done"
+        return "is done"
 
     def finished_at(self, task: dict) -> str:
         """When its latest result came: its latest run's end (else its last change)."""

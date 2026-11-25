@@ -1033,6 +1033,11 @@ def risky(text: str) -> re.Match | None:
 
 # A new task for a worker given one this recently is asked about once (see recent_task).
 ADD_MINUTES = 30
+# A busy worker's task whose draft the owner rejected this recently is superseded by the new
+# task a second worker of it takes (supersede_rejected).
+SUPERSEDE_MINUTES = 10
+# A task over, as far as more of it goes: what a new task may only add to is not one of these.
+FINISHED = frozenset({"done", "review", "failed", "cancelled"})
 # Internal ids a worker may write in its report: a draft's ("d4d31ea2f"), a Slack message's
 # timestamp ("ts 1794157630.819867").
 DRAFT_ID = r"d[0-9a-f]{8}"
@@ -2325,13 +2330,22 @@ class Tools:
             # Not "Started" for work that waits: for the tasks it comes after, or for a slot.
             waits = [dep["title"] for dep in self.tasks.unmet(task)]
             limit = self.store.settings().max_workers
+            # A second worker: one line of its own in the owner's chat, never folded with the
+            # routing lines (E148: it went unseen), saying why that worker did not take it.
+            because = (
+                " (asked for in parallel)"
+                if fork and fork.why == "wanted in parallel"
+                else " (it was busy)"
+                if fork and fork.why
+                else ""
+            )
             if fork and self.runtime.workers.running() >= limit:
                 said = (
-                    f"Queued a second worker for “{title}” (context from “{origin}”) · waits "
+                    f"Queued a second worker from “{origin}”{because} for “{title}” · waits "
                     f"for a worker slot ({limit} busy)"
                 )
             elif fork:
-                said = f"Started a second worker for “{title}” (context from “{origin}”)"
+                said = f"Started a second worker from “{origin}”{because} for “{title}”"
             elif waits:
                 said = f"Queued “{title}”{instead} · after " + ", ".join(
                     f"“{t}”" for t in waits[:2]
@@ -2342,7 +2356,14 @@ class Tools:
                 said = f"Started “{title}”{instead}"
             notice = said + self.new_because(why_new)
             self.runtime.add_message(
-                caller, "notice", notice, {"session_id": session_id, "task_id": task["id"]}
+                caller,
+                "notice",
+                notice,
+                {
+                    "session_id": session_id,
+                    "task_id": task["id"],
+                    **({"fork": True} if fork else {}),
+                },
             )
             if fork:
                 self.runtime.add_message(
@@ -2616,10 +2637,12 @@ class Tools:
                 "worker's task when its work helps), why_new quoting the owner's words."
             )
         if task and params.task == "continue" and task["status"] == "done":
+            # Its one way on: a new task is never refused for it (recent_task, E141).
             raise ValueError(
-                f"Its task {task['id']} “{task['title']}” was accepted by the owner and is done. "
-                "More work, or another subject: task='new' with a title. Only telling it "
-                "something (an answer, an acknowledgement): task='note'."
+                f"Its task {task['id']} “{task['title']}” "
+                f"{self.runtime.task_actions.finished_words(task)}. More work, or another "
+                "subject: task='new' with a title. Only telling it something (an answer, an "
+                "acknowledgement): task='note'."
             )
         if (
             task
@@ -2681,14 +2704,18 @@ class Tools:
         if (
             params.task == "new"
             and target["role"] == WORKER
-            and self.runtime.forks.reason(target, params.earlier, same_worker, parallel)
+            and (why := self.runtime.forks.reason(target, params.earlier, same_worker, parallel))
         ):
             # Busy with other work: a second worker with its context takes it now (forks.py).
             title = deliverable_title(params.title)
             self.check_title_style(title, "Not sent")
             busy = bool(self.runtime.forks.busy(target))
-            forked = await self.fork_task(caller, target, params, title, why_new, request, busy)
+            forked = await self.fork_task(
+                caller, target, params, title, why_new, request, busy, why
+            )
             if forked is not None:
+                if stopped := await self.supersede_rejected(target, forked["task_id"], title):
+                    forked["superseded"] = stopped
                 return forked
             if parallel:
                 raise ValueError(self.not_in_parallel(target, "starting it failed"))
@@ -3060,16 +3087,17 @@ class Tools:
             return at
         recent = sorted(tasks, key=lambda t: t["updated_at"])[-5:]
         last = at or recent[-1]
-        was = {
-            "cancelled": "was cancelled",
-            "done": "was accepted by the owner and is done",
-        }.get(last["status"], f"is finished ({last['status']})")
+        was = (
+            self.runtime.task_actions.finished_words(last)
+            if last["status"] in {"cancelled", "done"}
+            else f"is finished ({last['status']})"
+        )
         listed = "; ".join(f"{t['id']} “{t['title']}” ({t['status']})" for t in reversed(recent))
         raise ValueError(
             f"That worker has no open task: its task {last['id']} “{last['title']}” {was}. More "
             f"of a task in review or failed (a correction, a missing piece): call again with its "
             f"task_id, e.g. task_id='{last['id']}' (its latest tasks: {listed}). More work on "
-            "accepted work, or another subject: task='new' with a title. Only telling it "
+            "a done task, or another subject: task='new' with a title. Only telling it "
             "something: task='note'."
         )
 
@@ -3099,11 +3127,13 @@ class Tools:
         why_new: str,
         request: str = "",
         busy: bool = False,
+        why: str = "",
     ) -> dict | None:
         """A new task for a busy worker, given to a second worker of it (forks.py: on its
         session's fork, or with a brief of its work), in a workspace made as for its own
         projects; None when that could not be done (nothing of it is left: the task then goes
-        to the busy worker, as before). `busy`: that is why (not work wanted in parallel)."""
+        to the busy worker, as before). `busy`: that is why (not work wanted in parallel);
+        `why`: Forks.reason's words for it."""
         spawn = SpawnWorker.model_construct(
             title=title,
             instructions=params.text,
@@ -3117,7 +3147,36 @@ class Tools:
             why_new=why_new,
             replaces=params.replaces,
         )
-        return await self.start_second(target, spawn, caller, title, request=request, busy=busy)
+        return await self.start_second(
+            target, spawn, caller, title, request=request, busy=busy, why=why
+        )
+
+    async def supersede_rejected(self, busy: dict, new_id: str, title: str) -> list[str]:
+        """A busy worker's task whose draft the owner just rejected, saying why, while its new
+        task went to a second worker (E148: the first went on with the rejected work): the new
+        task supersedes it, so it is cancelled and its worker stops it. What it says of each,
+        for the Router."""
+        since = (datetime.now(UTC) - timedelta(minutes=SUPERSEDE_MINUTES)).isoformat()
+        said = []
+        for task in self.tasks.for_session(busy["id"]):
+            rejected = self.store.get(f"ownerrejected:{task['id']}") or ""
+            if task["status"] not in {"running", "waiting"} or rejected < since:
+                continue
+            self.store.set(f"supersededby:{task['id']}", new_id)
+            try:
+                await self.runtime.task_actions.cancel(
+                    task["id"],
+                    f"Superseded by “{title}”, which a second worker does: you rejected its draft.",
+                    by="Chief of Staff",
+                )
+            except ValueError:
+                self.store.delete(f"supersededby:{task['id']}")
+                continue
+            said.append(
+                f"Task {task['id']} “{task['title']}”, whose draft the owner rejected, is "
+                f"cancelled as superseded by {new_id}: its worker stops it."
+            )
+        return said
 
     def second_workspace(self, source: dict) -> dict:
         """A second worker works on the projects the worker it comes from works on, as it does:
@@ -3140,15 +3199,18 @@ class Tools:
         refused: bool = False,
         request: str = "",
         busy: bool = False,
+        why: str = "",
     ) -> dict | None:
         """A second worker of `source` for this task (forks.py); None when none could be made
         (nothing of it is left). `refused`: what keeps it from being made is said (raised), as
-        spawn_worker says it. `busy`: it takes the task because `source` is busy."""
+        spawn_worker says it. `busy`: it takes the task because `source` is busy. `why`: why
+        not that worker (Forks.reason; "": the Router's fork_of)."""
         forks = self.runtime.forks
         second = await forks.second(source, title)
         if second is None:
             return None
         second.busy = busy
+        second.why = why
         try:
             # One that reads Slack holds Slack's words in its context: so does its fork.
             return await self.t_spawn_worker(
@@ -3756,9 +3818,10 @@ class Tools:
             ):
                 # Between turns, waiting for workers it works with (E139): their message wakes it.
                 entry["task"]["waiting_for"] = row["activity"].removeprefix("waiting for ")
-        if worker and (unread := self.states[row["id"]].unread):
+        if worker and (unread := self.states[row["id"]].unread_orders):
             # Sent within its turn and not read yet (bug E95): a report now predates them.
-            entry["unread"] = [text for text, _, _ in unread.values()]
+            # What asks something of it only (E145).
+            entry["unread"] = [text for text, _ in unread.values()]
         if row["report"]:
             entry["last_report"] = " ".join(row["report"].split())[:200]
             if since := self.drafts_since_report(row):
@@ -4370,10 +4433,12 @@ class Tools:
                     "holds from before, what changed, what is new). If the earlier result no "
                     "longer holds, call report again unchanged."
                 )
+        # What reached it while it finished that asks something of it (E145: not a thread's
+        # news, a peer's note or a check-back's wake), about this task or none.
         unread = (
             {
                 key: text
-                for key, (text, about, _) in self.states[caller].unread.items()
+                for key, (text, about) in self.states[caller].unread_orders.items()
                 if task["id"] in about or "" in about
             }
             if task
@@ -4394,7 +4459,8 @@ class Tools:
             # hold this one's report back.
             self.store.set(f"unread_report:{task['id']}", json.dumps(sorted(unread)))
             newest = list(unread.values())[-1]
-            first = min(entry[2] for entry in self.states[caller].unread.values())
+            batches = self.states[caller].unread
+            first = min(batches[key][2] for key in unread if key in batches)
             owner_chat = self.store.value(
                 "SELECT count(*) FROM messages WHERE session_id=? AND id>=? AND kind='owner' "
                 "AND json_extract(meta, '$.task_id')=?",
@@ -4827,15 +4893,17 @@ class Tools:
         return f"Cancelled task {task['id']}."
 
     def recent_task(self, session_id: str) -> dict | None:
-        """The worker's task given in the last half hour (not cancelled) that a new one may
-        only add to, when the Router was not asked about it yet. Not an adopted session's work
-        so far: no task was given there."""
+        """The worker's task given in the last half hour, still at work, that a new one may
+        only add to, when the Router was not asked about it yet. Not a finished one (done, in
+        review, failed or cancelled: E141, continue on it was refused too, each refusal
+        pointing at the other), nor an adopted session's work so far: no task was given
+        there."""
         since = (datetime.now(UTC) - timedelta(minutes=ADD_MINUTES)).isoformat()
         for task in reversed(self.tasks.for_session(session_id)):
             if task["created_at"] < since:
                 break
             if (
-                task["status"] != "cancelled"
+                task["status"] not in FINISHED
                 and task["result"] != ADOPTED
                 and not self.store.get(f"newasked:{task['id']}")
             ):

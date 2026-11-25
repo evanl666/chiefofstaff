@@ -100,7 +100,7 @@ async def test_a_busy_workers_new_task_goes_to_a_second_worker_with_its_context(
     assert harness.store.session(worker)["title"] == "Fix login" and row["title"] == "Export CSV"
     name = runtime.display_title(harness.store.session(worker))
     notices = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
-    line = f"Started a second worker for “Export CSV” (context from “{name}”)"
+    line = f"Started a second worker from “{name}” (it was busy) for “Export CSV”"
     assert notices[-1] == f"{line} · new because test", "why it is new, on hover"
     assert ("notice", "Its context went to a second worker for “Export CSV”") in harness.kinds(
         worker
@@ -170,7 +170,7 @@ async def test_a_worker_long_at_work_on_one_task_is_busy_too(harness):
     runtime = await harness.connect()
     worker = (await spawn(runtime, harness.router_id, "Run the migration"))["session_id"]
     await at_work(runtime, harness, worker)
-    runtime.states[worker].busy_since = time.monotonic() - 11 * 60
+    runtime.states[worker].busy_since = time.monotonic() - 21 * 60
     result = await new_task(runtime, harness, worker, "Check the docs", "Check the docs.")
     assert result["session_id"] != worker and harness.client.forks
 
@@ -271,7 +271,7 @@ async def test_a_busy_worker_whose_conversation_cannot_be_copied_hands_on_a_brie
     assert runtime.view(harness.store.session(second))["fork_of"]["id"] == worker
     notices = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
     assert notices[-1].startswith(
-        f"Started a second worker for “Export CSV” (context from “{name}”)"
+        f"Started a second worker from “{name}” (it was busy) for “Export CSV”"
     )
 
 
@@ -539,8 +539,8 @@ async def test_a_new_worker_the_owner_asks_for_starts_from_a_related_workers_con
     name = runtime.display_title(theirs)
     assert runtime.view(mine)["fork_of"] == {"id": source, "title": name}
     notices = [text for kind, text in harness.kinds(harness.router_id) if kind == "notice"]
-    assert notices[-1].startswith(f"Started a second worker for “Write the codename file” "
-                                  f"(context from “{name}”)")  # fmt: skip
+    assert notices[-1].startswith(f"Started a second worker from “{name}” for “Write the "
+                                  "codename file”")  # fmt: skip
     edges = [e for e in runtime.relations.graph().edges if e["kind"] == "fork"]
     assert [(e["from_session"], e["to_session"]) for e in edges] == [(source, second)]
 

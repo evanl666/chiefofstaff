@@ -177,8 +177,12 @@ uses, a schema or file format they share. The Router starts them together and sa
 together; each is told about the others. They pass what the other needs straight to it
 (`tell_session`, or `ask_session` for a question), in their exact words and at once, without a
 Router turn in between. A worker waiting for another one's message waits quietly (its card
-says *waiting for “…”*) and goes on when it arrives; when the other one finishes, its result
-reaches the ones still at work. What workers tell each other is information, never new work:
+says *waiting for “…”*, and so does the Router's list) and goes on when it arrives, whatever
+words it said it in, as long as it named that worker or its task said it waits for it; when the
+other one finishes, its result reaches the ones still at work. A worker's turn that ends without
+a report is never taken for a finished task: what it said is kept on the task's card as
+progress and it is asked once whether it is finished (or it goes to you for review when you
+asked to see that task); still silent, its words wait for your *Accept*, never accepted for you. What workers tell each other is information, never new work:
 when one should change course (scope, another approach, overlapping work), it asks the Router,
 which decides or asks you. Independent tasks started together are not linked.
 
@@ -244,13 +248,15 @@ When you ask for a new worker in so many words ("a new worker", "one worker for 
 
 The Router sees how loaded each worker is: whether it is at work and for how long, its open
 tasks and what it has not taken up yet. When the worker that knows the subject is **busy** (at
-work with two or more tasks open, or at work for ten minutes without a break) and a worker slot
+work with two or more tasks open, or at work for twenty minutes without a break) and a worker slot
 is free, its new task goes to a
 **second worker** that starts at once with that worker's conversation so far (Copilot's session
 fork, up to its last finished turn) and a note from Chief of Staff on what the first one is
 doing now and where. It works in a folder and branch of its own (from the project's base); the
-busy worker goes on undisturbed. The Router chat says *Started a second worker for “…” (context
-from “…”)*; in the sidebar the second worker has a small ⑂ after its name, and its task's row says
+busy worker goes on undisturbed, unless the new task is what you asked for when you rejected its
+draft: then the work you rejected is cancelled, superseded by the new task, and that worker stops
+it. The Router chat says *⑂ Started a second worker from “…” (it was busy) for “…”*, a line of its
+own; in the sidebar the second worker has a small ⑂ after its name, and its task's row says
 *Worker from “…”*; its *Notes* tab's lineage has it *⑂ forked from …*. With every slot taken, or
 when only that worker can do it (its branch or PR, or you asked for it), the task waits for it
 as before. Work you ask for in parallel (meanwhile, at the same time) with what a worker is
@@ -1430,8 +1436,13 @@ goes straight to it; the Router is not woken (its timeline shows one line).
 
 Every minute a cheap check (no model) looks at each working worker: no activity for 15 minutes,
 the same step repeated, the same instructions for 45 minutes, or a turn that ended without a
-report. A flagged worker is reviewed by the Watchdog session, which decides: on track, nudge
-(into the worker's current turn), interrupt a hung step and nudge, or escalate to the Router.
+report. Activity is what its session does, not only what its chat shows: a model call is work
+while it is open, a command while its output still grows, and a worker waiting for another
+worker it works with is not stopped. A flagged worker is reviewed by the Watchdog session, which
+is told what the worker is at (*in a turn since 12:37 (model call since 12:37)*) and its latest
+reports, and decides: on track, nudge (into the worker's current turn, also one at work on a
+follow-up of finished work), interrupt a hung step and nudge, or escalate to the Router. A
+worker flagged as quiet is looked at again just before that: still at work, nothing is sent.
 After two nudges without a new report the problem goes to the Router. It does not coach a worker
 that is making progress, however long it takes; a nudge says why it stepped in (*Watchdog ·
 looks stuck*, and the evidence). A worker waiting for your word on its folder's settings is left

@@ -58,7 +58,7 @@ LARK = "LARK-58"
 CODEX_MODEL = os.environ.get("LIVE_CODEX_MODEL", "")
 COPILOT_SCENARIOS = {"F1", "F2", "F3", "F4", "F5", "F6"}
 FINISHED = {"review", "done"}
-SECOND = "Started a second worker for"
+SECOND = "Started a second worker from"
 
 
 def stamp() -> str:

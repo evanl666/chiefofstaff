@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # A worker in a turn is busy with this many open tasks (running or queued: the owner's "many
 # tasks"), or once it has been at work this many minutes without a break.
 BUSY_TASKS = 2
-BUSY_MINUTES = float(os.environ.get("CHIEFOFSTAFF_FORK_BUSY_MINUTES", "10"))
+BUSY_MINUTES = float(os.environ.get("CHIEFOFSTAFF_FORK_BUSY_MINUTES", "20"))
 # What the brief says of each of the first worker's open tasks, at most.
 GOAL_CHARS = 400
 PROGRESS_CHARS = 300
@@ -62,6 +62,9 @@ class Second:
     session_id: str
     native: bool
     busy: bool = False
+    # Why the task went to it rather than to that worker (Forks.reason): "" when the Router
+    # asked for it (fork_of).
+    why: str = ""
 
 
 class Forks:

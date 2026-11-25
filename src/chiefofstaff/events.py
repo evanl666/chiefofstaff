@@ -553,7 +553,9 @@ class Events:
         seen = digest(getattr(event.data, "content", "") or "")
         if state.unread:
             # It sees a message now: that one (or, changed on the way, the oldest).
-            state.unread.pop(seen if seen in state.unread else next(iter(state.unread)))
+            shown = seen if seen in state.unread else next(iter(state.unread))
+            state.unread.pop(shown)
+            state.unread_orders.pop(shown, None)
         if state.unseen:
             state.unseen.pop(seen if seen in state.unseen else next(iter(state.unseen)))
         if not stopped:
