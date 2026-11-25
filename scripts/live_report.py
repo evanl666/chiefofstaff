@@ -410,9 +410,11 @@ async def r6_a_decision_is_not_asked_twice(app: App) -> list[tuple[str, bool, st
     await app.post(
         f"/api/sessions/{worker}/messages",
         {
+            # (0.1.58, E154: only a picked option decides; words naming none are a note.)
             "text": "New evidence: greet.txt is shown to Spanish speakers. Ask me to reconsider "
-            "that decision with ask_decision (replaces=its id, and why: what changed). Once I "
-            "decide, write that word into greet.txt and report done."
+            "that decision with ask_decision (replaces=its id, why: what changed, and the "
+            "options hola and hello). Once I decide, write that word into greet.txt and report "
+            "done."
         },
     )
     revisit = await wait_for(

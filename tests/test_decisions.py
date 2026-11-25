@@ -981,3 +981,23 @@ async def test_e157_blocked_on_another_worker_waits_under_monitoring_not_needs_y
     assert runtime.asks.session_questions(form["session_id"]), "the owner's, under Needs you"
     assert not runtime.task_actions.view(runtime.tasks.get(form["task_id"]))["waits_on"]
     assert api["task_id"]
+
+
+@pytest.mark.parametrize(
+    ("options", "said", "picked"),
+    [
+        (("Rule A", "Rule B"), "rule a, please", "Rule A"),
+        (("Rule A", "Rule B"), "Rule A, not rule B", ""),
+        (("C", "C only"), "C only", "C only"),
+        (("C and D", "C only"), "C", ""),
+        (("Spanish: hola", "English: hello"), "hola", "Spanish: hola"),
+        (("'hi'", "'hello'"), "hi", "'hi'"),
+        (("A", "B"), "Add a test first", ""),
+        (("留到下一晚", "清零"), "留到下一晚吧", "留到下一晚"),
+    ],
+)
+def test_e154_which_words_name_an_option(options, said, picked):
+    """E154: only a picked option, or words that clearly name one, decide."""
+    from chiefofstaff.decisions import Decisions
+
+    assert Decisions.named({"options": [{"choice": o} for o in options]}, said) == picked

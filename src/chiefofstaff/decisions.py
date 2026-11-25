@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 CLOSED = "Its worker was closed."
 # Changes of one decision this close together are one change card (E154).
 CHANGE_DEBOUNCE_HOURS = 2
+# Quotes and brackets around an option's words, as the owner may type them or not.
+QUOTES = re.compile("[\"'`\u2018\u2019\u201c\u201d\u300c\u300d\u300e\u300f()\\[\\]]")
 
 
 def same_words(one: str, other: str) -> bool:
@@ -572,25 +574,33 @@ class Decisions:
 
     @staticmethod
     def named(target: dict, text: str) -> str:
-        """The option an answer picks or clearly names ("" for none, or for more than one)."""
+        """The option an answer picks or clearly names ("" for none, or for more than one): its
+        words, words that hold one option's ("C and D, but log it"), or a part of one option
+        only ("hola" of "Spanish: hola")."""
 
         def plain(value: str) -> str:
-            return " ".join(value.casefold().split()).rstrip(".!?\u3002\uff01\uff1f")
+            value = QUOTES.sub(" ", value.casefold())
+            return " ".join(value.split()).rstrip(".!?\u3002\uff01\uff1f")
+
+        def within(part: str, whole: str) -> bool:
+            if part.isascii():
+                # A one-letter option ("A") is named only first ("A, please"), never by the "a"
+                # of "add a test".
+                start = "^" if len(part) == 1 else r"(?<!\w)"
+                return re.search(rf"{start}{re.escape(part)}(?!\w)", whole) is not None
+            return part in whole  # (No word boundaries in Chinese.)
 
         said = plain(text)
         choices = [o["choice"] for o in target.get("options") or [] if plain(o["choice"])]
+        if not said:
+            return ""
         if exact := [choice for choice in choices if plain(choice) == said]:
             return exact[0]
-
-        def names(choice: str) -> bool:
-            words = plain(choice)
-            if words.isascii():
-                return re.search(rf"(?<!\w){re.escape(words)}(?!\w)", said) is not None
-            return words in said
-
-        found = [choice for choice in choices if names(choice)]
-        # "C only" names "C" too: the longer one is meant.
-        found = [c for c in found if not any(c != o and plain(c) in plain(o) for o in found)]
+        found = [choice for choice in choices if within(plain(choice), said)]
+        # "C only" holds "C" too: the longer one is meant.
+        found = [c for c in found if not any(c != o and within(plain(c), plain(o)) for o in found)]
+        if not found:
+            found = [choice for choice in choices if within(said, plain(choice))]
         return found[0] if len(found) == 1 else ""
 
     async def tell_askers(
