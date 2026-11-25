@@ -2812,7 +2812,7 @@ async def e15_browser(ctx: Ctx):
             await expect(rows.first).to_be_visible(timeout=10000)
             await rows.first.click()
             team_page = page.locator("#timeline .team-page")
-            await expect(team_page.locator(".tv2-node").first).to_be_visible(timeout=10000)
+            await expect(team_page.locator(".tp-plan .tp-part").first).to_be_visible(timeout=10000)
             await page.screenshot(path=SCRIPTS.parent / "browser-shots" / "live-e-team.png")
             await page.locator("#back-home").click()
         told = next(

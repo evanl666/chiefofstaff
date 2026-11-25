@@ -7,7 +7,8 @@ a worker's Team or Notes tab) show them.
       that lands (2 of 2), each row's one relation its part; one Teams lite team of the two,
       each part with a name and an avatar of its own.
   R2  A task that needs another's result before it starts (`after`): while the other runs it
-      waits on it (Home's Teams row: "1 working · 1 up next"; the team's page: "Starts after …";
+      waits on it (Home's Teams row: "1 working · 1 up next", or its newest change; the team's
+      page: the plan's "Starts after …";
       its Team tab's lineage: "… waits on …"), the two workers one team though they never
       message, a chain (no fan of parts; neither told the other works at the same time); once
       the other is done the wait is cleared. Accepted, the team is Done (the calm Done row);
@@ -15,9 +16,9 @@ a worker's Team or Notes tab) show them.
   R3  Another worker does an open task instead (`replaces`), asked in a later message: an edge
       from the old task to the new; no Teams lite team (one part, the other request's work);
       the old task's Notes tab has the new one in its lineage.
-  R4  In the browser: R1's team page (its request as the goal, "Working · …" or "Done · …", a
-      node a part, the pair's labelled line, the map in words, what they handed each other
-      "A → B"), the part's Team tab with Open team.
+  R4  In the browser: R1's team page (team-page-v4: its request as the goal, "Working · …" or
+      "Done · …", the brief, a row a part on the plan, what they told each other in the notes
+      folded at the bottom "A → B"), the part's Team tab with Open team.
   R5  One request in three parts, one of them a reused worker's new task (message_session): one
       Teams lite team of three, names of their own; what the workers and the Router were given
       as in 0.1.56 (no Teams lite id anywhere; the Router's team digest in its own words).
@@ -211,11 +212,13 @@ async def r2_waits_on(ctx: Ctx):
         browser = await playwright.chromium.launch()
         page, errors = await page_of(ctx, browser)
         home = home_row(page, lite["id"])
-        await expect(home.locator(".status")).to_have_text("1 working · 1 up next", timeout=20000)
+        await expect(home.locator(".status")).to_have_text(
+            re.compile(r"^(?:1 working · 1 up next|.+ · (?:just now|.+ ago))$"), timeout=20000
+        )
         await expect(home.locator(".segs i")).to_have_count(2)
         await page.locator("#tasks-teams").screenshot(path=SHOTS / "r2-home.png")
         await home.click()
-        nodes = page.locator("#timeline .team-page .tv2-node")
+        nodes = page.locator("#timeline .team-page .tp-plan .tp-part")
         await expect(nodes).to_have_count(2)
         await expect(nodes.nth(1).locator(".status")).to_have_text(re.compile(r"^Starts after "))
         await page.screenshot(path=SHOTS / "r2-team-page.png")
@@ -332,11 +335,12 @@ async def r4_parts_in_the_page(ctx: Ctx):
             re.compile(r"^(Working|Waiting on you|Done)\b")
         )
         team_page = page.locator("#timeline .team-page")
-        await expect(team_page.locator(".tv2-node")).to_have_count(2)
-        await expect(team_page.locator(".tv2-label").first).to_contain_text("told")
-        await expect(team_page.locator(".tv2-words li").first).to_be_attached()
-        items = team_page.locator(".tv2-history .tv2-item")
-        await expect(items.first.locator(".who")).to_have_text(re.compile(r"^.+→.+$"))
+        await expect(team_page.locator(".tp-brief")).to_be_visible()
+        await expect(team_page.locator(".tp-plan .tp-part")).to_have_count(2)
+        notes = team_page.locator(".tp-talk.notes")
+        await expect(notes.locator("summary")).to_contain_text("What the parts told each other")
+        await notes.locator("summary").click()
+        await expect(notes.locator(".who").first).to_have_text(re.compile(r"^.+→.+$"))
         await page.screenshot(path=SHOTS / "r4-team-page.png")
         await worker_tab(page, writer, "Team")
         link = page.locator("#worker-tabs .team-link")
