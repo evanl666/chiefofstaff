@@ -217,8 +217,12 @@ function handleEvent({ type, data }) {
   } else if (type === "message") {
     noteUpdate(data);
     notePeer(data);
-    // Where a message sent to a worker stands: the row it was sent from says it too.
-    if (noteDelivery(data) && data.session_id !== viewedId()) scheduleHome();
+    // Where a message sent to a worker stands: the row it was sent from says it too (and a
+    // team's page, what its parts have read of what the owner told them).
+    if (noteDelivery(data) && data.session_id !== viewedId()) {
+      scheduleHome();
+      if (isTeamView()) scheduleTeam();
+    }
     if (data.amended) {
       // While its chat loads, kept for after it: a message held meanwhile is not on the page yet.
       if (state.loading?.id === data.session_id) state.loading.held.push(data);

@@ -14,6 +14,7 @@ import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
 import { avatar, labelOf, peerOf, peerLine, showTeam, TEAM, teamOfPeers, teamOfWorker, waitingWords, workerLineage } from "./team.js";
+import { leaveTeamPage } from "./teampage.js";
 // A chat loads a page of its messages at a time: its latest, then earlier ones when asked.
 export const PAGE = 400;
 // The chat shown: its first message loaded, and how many come before it (null: not known).
@@ -508,6 +509,7 @@ async function post(path, done = "", undo = null) {
 }
 // Home has the Router's conversation and a panel beside it; a session, its timeline alone.
 export function setLayout(home) {
+  leaveTeamPage();
   $("#main").classList.toggle("home", home);
   // A worker's tab is its own: any other view shows all it holds.
   delete $("#timeline").dataset.tab;

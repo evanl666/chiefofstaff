@@ -243,3 +243,142 @@ async def more_exchanges(runtime, found: dict, count: int = 6) -> None:
         await call_tool(runtime, "tell_session", rules, session_id=direct,
                         text=f"规则第 {number + 1} 条已写进 docs/autopilot/security.md。请按它分发。")  # fmt: skip
     runtime.publish_state()
+
+
+REFUND = (
+    "给 acme-shop 加上按单退款：后端出退款 API，订单页加退款按钮和确认弹窗，退款成功发邮件通知，"
+    "最后补端到端测试。只有 30 天内的订单能退，金额一律用分。"
+)
+
+
+def pull(number: int, title: str, **state) -> dict:
+    """A PR as GitHub has it, the worker's own (its run's evidence)."""
+    return {"label": f"acme/acme-shop#{number}", "url": f"https://github.com/acme/acme-shop/pull/{number}",
+            "title": title, "state": "OPEN", "checks": "passing", "failing": [], "review": "",
+            "own": True, "at": datetime.now(UTC).isoformat(), **state}  # fmt: skip
+
+
+def with_prs(runtime, task_id: str, prs: list[dict]):
+    store = runtime.store
+    run = store.one("SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC", (task_id,))
+    store.execute("UPDATE runs SET evidence=? WHERE id=?",
+                  (json.dumps({"checkouts": [], "prs": prs}), run["id"]))  # fmt: skip
+    runtime.task_actions.publish(runtime.tasks.get(task_id))
+
+
+async def refund_team(runtime, looked_minutes: int = 22) -> dict:
+    """The team page's scene (team-page-v4's prototype): one request of the owner's in four parts
+    on three workers. The API done and accepted, with its merged PR and its doc; 订单页 asking the
+    owner a decision (two options, one recommended), with a draft PR; 邮件通知 at work, having
+    answered 订单页's question; 端到端测试 up next, after both. The owner last looked at the
+    page `looked_minutes` ago (0: never)."""
+    store = runtime.store
+    router = store.get("router_id")
+    store.save_settings(store.settings().model_copy(update={"max_workers": 1000}))
+
+    async def start(title, **extra):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test", **extra)  # fmt: skip
+        await settle(runtime)
+        found = json.loads(result.text_result_for_llm)
+        return found["session_id"], found["task_id"]
+
+    async def tool(name, caller, **arguments):
+        return (await call_tool(runtime, name, caller, **arguments)).text_result_for_llm
+
+    def at_work(worker):
+        session = runtime.states.handle(worker)
+        session.emit("user.message", content=session.sent[-1])
+        session.emit("assistant.turn_start")
+
+    request = owner_request(runtime, REFUND, minutes_ago=72)
+    api, api_task = await start("退款 API：POST /v2/orders/{id}/refunds")
+    ui, ui_task = await start("订单页：退款按钮和确认弹窗", after=[api_task])
+    mail, mail_task = await start("邮件通知：退款成功后发邮件", after=[api_task])
+    e2e, e2e_task = await start("端到端测试：退款的全流程", after=[ui_task, mail_task])
+    now = datetime.now(UTC)
+
+    def at(minutes):
+        return (now - timedelta(minutes=minutes)).isoformat()
+
+    at_work(api)
+    await settle(runtime)
+    await tool("report", api, status="progress", summary="读完订单服务，开始写退款表。")
+    await tool("report", api, status="progress", summary="接口和迁移完成，测试 41 个通过。")
+    await tool("report", api, status="done",
+               summary="退款 API 已合并：POST /v2/orders/{id}/refunds，金额用分，超过 30 天返回 409。",
+               artifacts=[{"url": "https://docs.acme-shop.example/refunds/api", "name": "docs/refunds/api.md",
+                           "status": "published"}])  # fmt: skip
+    await settle(runtime)  # Its result's evidence read first: the PR comes on it.
+    with_prs(runtime, api_task, [pull(412, "退款 API：POST /v2/orders/{id}/refunds", state="MERGED",
+                                      review="APPROVED", at=at(12))])  # fmt: skip
+    runtime.task_actions.accept(api_task)
+    runtime.states.handle(api).emit("session.idle")
+    await settle(runtime)
+    for worker in (ui, mail):
+        at_work(worker)
+    await settle(runtime)
+    first = store.value("SELECT max(id) FROM messages")
+    await tool("tell_session", api, session_id=ui,
+               text="接口已在 staging：POST /v2/orders/{id}/refunds。超过 30 天返回 409 refund_window_closed。")  # fmt: skip
+    asked = await tool("ask_session", ui, session_id=api, question="退款接口的金额是分还是元？")
+    question = asked.split("(")[1].split(")")[0]
+    await tool(
+        "answer_session", api, question_id=question, answer="分，一律整数分，和下单接口一致。"
+    )
+    # Before the owner last looked: answered 2 min after it was asked, 40 minutes ago.
+    store.execute("UPDATE messages SET created_at=? WHERE id>?", (at(42), first))
+    store.execute("UPDATE questions SET asked=?, closed=? WHERE id=?",
+                  (time.time() - 42 * 60, time.time() - 40 * 60, question))  # fmt: skip
+    asked = await tool(
+        "ask_session", ui, session_id=mail, question="确认弹窗的标题要和邮件标题一致吗？"
+    )
+    question = asked.split("(")[1].split(")")[0]
+    await tool("answer_session", mail, question_id=question,
+               answer="一致，都用“退款已受理”；客服后台按这个标题搜索。")  # fmt: skip
+    store.execute("UPDATE questions SET asked=? WHERE id=?", (time.time() - 4 * 60, question))
+    await tool("report", mail, status="progress", summary="照订单邮件的样式写退款模板。")
+    await tool("report", mail, status="progress", summary="邮件模板已完成，正在接入发送队列。")
+    await tool("report", ui, status="progress", summary="确认弹窗接上 API，金额按分显示为元。")
+    with_prs(runtime, ui_task, [pull(415, "订单页退款按钮和确认弹窗", draft=True, at=at(19))])
+    await tool("ask_decision", ui, question="部分退款要支持吗？",
+               why="API 已支持按金额退款。只做全额，弹窗更简单，测试也少一半。",
+               options=[{"choice": "只允许全额退款", "effect": "弹窗只有确认按钮；今天就能交付"},
+                        {"choice": "支持部分退款", "effect": "弹窗加金额输入，上限为实付金额；多约 30 分钟"}],
+               recommendation="支持部分退款：客服最常见的诉求是只退运费。")  # fmt: skip
+    runtime.states.handle(ui).emit("session.idle")
+    await settle(runtime)
+    # As the minute it shows: the API took 38 min and finished 27 min ago; 订单页 asked 18 min
+    # ago; 邮件通知 has been at work 24 min.
+    store.execute("UPDATE runs SET started_at=? WHERE task_id=?", (at(65), api_task))
+    store.execute(
+        "UPDATE tasks SET ended_at=?, updated_at=? WHERE id=?", (at(27), at(27), api_task)
+    )
+    store.execute("UPDATE runs SET started_at=? WHERE task_id=?", (at(31), ui_task))
+    store.execute("UPDATE tasks SET updated_at=? WHERE id=?", (at(18), ui_task))
+    store.execute("UPDATE runs SET started_at=? WHERE task_id=?", (at(24), mail_task))
+    if looked_minutes:
+        team = next(t for t in runtime.snapshot()["teams"] if t["request"]["id"] == request)
+        store.set(f"teamlook:{team['id']}", at(looked_minutes))
+    runtime.states[router].turn_request = ""
+    runtime.teams_lite.memo = None
+    runtime.publish_state()
+    team = next(t for t in runtime.snapshot()["teams"] if t["request"]["id"] == request)
+    return {"team": team["id"], "api": api, "ui": ui, "mail": mail, "e2e": e2e,
+            "api_task": api_task, "ui_task": ui_task, "mail_task": mail_task,
+            "e2e_task": e2e_task}  # fmt: skip
+
+
+async def refund_reports(runtime, found: dict):
+    """邮件通知 reports its result (a PR with checks passed): ready for the owner's review."""
+    mail = found["mail"]
+    session = runtime.states.handle(mail)
+    session.emit("user.message", content=session.sent[-1])
+    session.emit("assistant.turn_start")
+    await settle(runtime)
+    await call_tool(runtime, "report", mail, status="done",
+                    summary="退款邮件已接入发送队列，失败会重试 3 次。模板与订单邮件一致，标题“退款已受理”；预览和 12 个测试在 PR 里。")  # fmt: skip
+    with_prs(runtime, found["mail_task"], [pull(416, "退款成功的邮件通知")])
+    session.emit("session.idle")
+    await settle(runtime)
+    runtime.publish_state()
