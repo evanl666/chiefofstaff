@@ -301,6 +301,7 @@ async def states(browser, base: str):
                 "the runbook",
                 "Copy",
                 "★ Star it on GitHub",
+                "Open in my Chief",
                 "Report this card",
             ]
             positions = [
@@ -308,7 +309,7 @@ async def states(browser, base: str):
             ]
             check(
                 all(p >= 0 for p in positions) and positions == sorted(positions),
-                f"keyboard order: the card's links, Copy, Star, Report ({order})",
+                f"keyboard order: the card's links, Copy, Star, Open in my Chief, Report ({order})",
             )
         elif name == "hostile":
             card = page.locator(".card.shared")
@@ -332,6 +333,7 @@ async def states(browser, base: str):
             )
             check(not alerts, f"nothing ran ({alerts})")
         else:
+            check(await page.locator("#open-in-chief").is_hidden(), f"{name}: no Open in my Chief")
             check(
                 await page.locator("#decrypted").is_hidden(),
                 f"{name}: no Decrypted in this browser",
@@ -506,6 +508,23 @@ async def screenshots(browser, base: str):
                     full_page=True,
                     animations="disabled",
                 )
+                if name == "valid" and width == 390:
+                    # Open in my Chief copies the whole link, and says where to paste it.
+                    await page.get_by_role("button", name="Open in my Chief").click()
+                    await page.locator("#open-help").wait_for()
+                    copied = await page.evaluate("navigator.clipboard.readText()")
+                    check(
+                        copied == page.url and "#1." in copied,
+                        f"Open in my Chief copies the link ({scheme})",
+                    )
+                    help_text = await page.locator("#open-help").inner_text()
+                    check("paste it into the message box on Home" in help_text, "and says where")
+                    await page.locator(".v-made").scroll_into_view_if_needed()
+                    await page.screenshot(
+                        path=str(SHOTS / f"viewer-open-in-chief-{width}-{scheme}.png"),
+                        full_page=True,
+                        animations="disabled",
+                    )
                 await page.close()
             await context.close()
     context = await browser.new_context(viewport={"width": 1440, "height": 900})

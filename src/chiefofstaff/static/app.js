@@ -12,6 +12,7 @@ import { bindSettings, openSettings, refreshUsageLink, showUsage } from "./setti
 import { bindSplitter } from "./splitter.js";
 import { bindStorage } from "./storage.js";
 import { watchFocus } from "./agentsetup.js";
+import { leaveOut, linkAlone, noteLink, openSharedLink, withCardBody } from "./share.js";
 // Whether Other Copilot sessions are unfolded (kept with the setting on).
 const FOLD = "cos.section.external";
 function bindUi() {
@@ -24,6 +25,7 @@ function bindUi() {
   input.addEventListener("input", () => {
     autosize();
     onComposerInput();
+    noteLink(state.selected === HOME);
   });
   // Closed once focus is elsewhere (a click on the list keeps it: mousedown is prevented there).
   input.addEventListener("blur", () => setTimeout(() => document.activeElement !== input && closeMentions(), 150));
@@ -40,6 +42,21 @@ function bindUi() {
     const sessionId = state.selected;
     const other = externalItem();
     if ((!text && !hasAttachments()) || (sessionId !== HOME && !current() && !other)) return;
+    if (sessionId === HOME && !hasAttachments() && linkAlone(text)) {
+      // A share link alone: Chief of Staff opens its card itself; it goes to no session.
+      input.value = "";
+      autosize();
+      noteLink(true);
+      try {
+        await openSharedLink(text, (message) => appendMessages([message]));
+      } catch (error) {
+        input.value = text;
+        autosize();
+        noteLink(true);
+        toast(error.message, "error");
+      }
+      return;
+    }
     if (sessionId === HOME && !routerId()) {
       toast("Your chief of staff starts once Copilot is ready.", "error");
       return;
@@ -91,9 +108,12 @@ function bindUi() {
       // it is for that line alone).
       const task = chatAnchor();
       const held = byId(viewedId())?.settings_hold?.digest;
-      const extra = { ...chosen, ...(task ? { task_id: task } : {}), ...(held ? { settings_digest: held } : {}) };
+      // On Home, a card someone shared goes along, quoted as information (Start a task from this).
+      const card = sessionId === HOME ? withCardBody() : {};
+      const extra = { ...chosen, ...card, ...(task ? { task_id: task } : {}), ...(held ? { settings_digest: held } : {}) };
       appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body(extra) })]);
       if (agent || compare.length) setAgent(null);
+      if (card.shared_card) leaveOut();
     } catch (error) {
       if (other) input.disabled = false;
       if (error.fresh) {

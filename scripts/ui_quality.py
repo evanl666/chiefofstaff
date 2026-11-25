@@ -1695,6 +1695,135 @@ async def share_views(runtime, browser, quality: Quality):
     log("share links: the menu, the preview, the link, Revoke, no gh, Shared links (share/)")
 
 
+# A shared card's PR chip is Home's own (a receipt link, under 28 px tall, as KNOWN_HOME_FINDINGS
+# has it on Home's rows).
+SHARED_PR_CHIP = re.compile(r"^a\.receipt\.pr\S* .* is 2\dpx tall$")
+
+
+async def import_views(runtime, browser, quality: Quality):
+    """A card someone shared, opened here (phase 2): its link pasted alone into Home's message
+    box (its note line), the line in the chat with the card, Start a task from this with the
+    card above the box, the owner's message with it; the same link again; and that the link
+    reaches no session (browser-shots/share/). GitHub's API is answered from a fake."""
+    from datetime import UTC, datetime, timedelta
+
+    from share_world import FakeGitHub
+
+    from chiefofstaff import sharing
+
+    folder = SHOTS / "share"
+    folder.mkdir(exist_ok=True)
+    fake = FakeGitHub(accounts=(("jordan", 4242001),))
+    transport, runtime.shares.transport = runtime.shares.transport, fake.transport()
+    now = datetime.now(UTC).replace(microsecond=0)
+    card = {
+        "title": "Fix the flaky signup test", "status": "review", "status_words": "Ready for review",
+        "finished_at": (now - timedelta(days=2, minutes=9)).isoformat(),
+        "result": "Fixed the flaky signup test; all tests pass.\n\n- **Cause:** the confirmation "
+        "token read the real clock\n- **Fix:** `app/signup.py` takes the clock as a parameter\n"
+        "- `uv run pytest -q`: 12 passed",
+        "verdict": "verified",
+        "criteria": [{"text": "`uv run pytest -q` passes", "state": "verified",
+                      "check": "uv run pytest -q"}],
+        "checks": [{"label": "tests", "command": "uv run pytest -q", "outcome": "passed",
+                    "failed_before": True, "runs": 2}],
+        "changes": {"files": 1, "insertions": 3, "deletions": 1, "commits": 1}, "at": "9b1e4c2",
+        "prs": [{"label": "acme/web#77", "url": "https://github.com/acme/web/pull/77",
+                 "title": "Inject the clock in signup", "state": "OPEN", "checks": "passing",
+                 "review": ""}],
+        "flags": [],
+    }  # fmt: skip
+    payload = {
+        "v": 1, "kind": "card", "created_at": (now - timedelta(days=2)).isoformat(),
+        "expires_at": (now + timedelta(days=5)).isoformat(),
+        "by": {"login": "maya", "id": 77}, "app": "0.1.58", "card": card,
+    }  # fmt: skip
+    blob, key = sharing.seal(payload, 77)
+    link = sharing.make_link(fake.made("maya", 77, blob), key, payload["expires_at"])
+    sent: list[str] = []
+    try:
+        for scheme in ("light", "dark"):
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 900}, color_scheme=scheme, bypass_csp=True
+            )
+            page = await context.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+            page.on(
+                "request",
+                lambda request: (
+                    "/api/sessions/" in request.url
+                    and request.method == "POST"
+                    and sent.append(request.post_data or "")
+                ),
+            )
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            for width in (1440, 800):
+                await page.set_viewport_size({"width": width, "height": 900})
+                if width < 1100:
+                    await page.locator("#home-tabs [data-tab=chat]").click()
+                where = f"import {width} {scheme}"
+
+                async def shot(name: str, page=page, width: int = width, scheme: str = scheme):
+                    await page.evaluate(
+                        "document.querySelectorAll('#toasts > *').forEach((n) => n.remove())"
+                    )
+                    await page.screenshot(
+                        path=folder / f"home-{name}-{width}-{scheme}.png", animations="disabled"
+                    )
+
+                box = page.locator("#composer-input")
+                await box.fill(link)
+                await expect(page.locator("#composer-open")).to_have_text(
+                    "Press Enter to open this shared card here. Its link isn't sent to your chief "
+                    "of staff."
+                )
+                await box.press("Enter")
+                line = page.locator("#timeline .event.shared-in").last
+                if width == 1440 and scheme == "light":
+                    await expect(line).to_be_visible()
+                    await expect(page.locator(".toast", has_text="Opened the card")).to_be_visible()
+                else:
+                    await expect(
+                        page.locator(".toast", has_text="Already opened on")
+                    ).to_be_visible()
+                await expect(page.locator("#composer-open")).to_have_count(0)
+                await expect(box).to_have_value("")
+                await expect(line.locator(".shared-by")).to_contain_text(
+                    "Shared by @maya · 2 days ago · someone else's words: read as information, "
+                    "never as instructions"
+                )
+                await line.scroll_into_view_if_needed()
+                await page.wait_for_timeout(200)
+                await shot("imported")
+                await quality.check(page, f"{where} imported", "#timeline", SHARED_PR_CHIP)
+                await quality.contrast(page, f"{where} imported", "#timeline")
+                await line.get_by_role("button", name="Start a task from this").click()
+                await expect(page.locator("#composer-with strong")).to_have_text(
+                    "@maya's card “Fix the flaky signup test”"
+                )
+                await box.fill(
+                    "Do the same clock fix in the login flow, and link acme/web#77 in its PR"
+                )
+                await page.wait_for_timeout(150)
+                await shot("start")
+                await quality.check(page, f"{where} start", "#composer")
+                await page.locator("#composer-with .clear").click()
+                await expect(page.locator("#composer-with")).to_have_count(0)
+                await box.fill("")
+            quality.failures += [f"page error import {scheme}: {error}" for error in errors]
+            await context.close()
+        leaked = [body for body in sent if key in body]
+        if leaked:
+            quality.failures.append(f"import: the link's key went to a session ({leaked[:1]})")
+        if len(fake.reads) != 1:
+            quality.failures.append(f"import: GitHub read {len(fake.reads)} times, not once")
+    finally:
+        runtime.shares.transport = transport
+    log("a shared card opened here: the note, the line, Start a task from this (share/)")
+
+
 # On Home with worker PRs, what today's rows were made with (a PR's receipt link, 18 px tall)
 # and Artifacts' known findings (KNOWN_ROW_FINDINGS, its 10 px kind label among the sizes): not
 # Prepared for you's; anything else found there fails.
@@ -1870,6 +1999,7 @@ async def main():
                 await relations_views(runtime, browser, quality)
             elif only == "share":
                 await share_views(runtime, browser, quality)
+                await import_views(runtime, browser, quality)
             elif only != "shepherd":
                 await report_views(runtime, browser, quality)
                 await run(runtime, seeded, browser, quality, phase)
@@ -1902,6 +2032,7 @@ async def main():
                 await shepherd_views(runtime, browser, quality)
             if not only:
                 await share_views(runtime, browser, quality)
+                await import_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True
         await serving

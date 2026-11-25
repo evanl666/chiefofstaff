@@ -2356,3 +2356,18 @@ ul.memory.shared-links li.confirming .confirm p { margin: 0; flex: 1 1 280px; li
 @media (prefers-reduced-motion: reduce) {
   mark.share-hit.flash { animation: none; }
 }
+/* A card someone shared, opened here from its link: in the chat, quoted, theirs (dashed). */
+.event.shared-in { display: block; }
+.event.shared-in .shared-wrap { margin: 6px 0 4px 24px; display: grid; gap: 6px; }
+.event.shared-in .shared-by { margin: 0; font-size: var(--small); color: var(--muted); line-height: 1.5; }
+.event.shared-in .shared-by strong { color: var(--soft); font-weight: 600; }
+.card.task.shared.imported { border-style: dashed; box-shadow: none; }
+.card.task.shared.imported .head .title { margin: 0; font-size: var(--body); white-space: normal; }
+.card.task.shared.imported .meta { max-width: none; }
+.event.shared-in .actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; position: relative; }
+.event.shared-in.flash .card { animation: hit-flash 0.9s var(--ease); }
+#composer-with { flex-basis: 100%; display: flex; align-items: center; gap: 4px; font-size: var(--body); color: var(--muted); }
+#composer-with strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 600; }
+#composer-with .apart { flex: none; }
+#composer #composer-with .clear { width: 28px; height: 28px; border-radius: var(--radius); background: none; color: var(--muted); font-size: var(--title); }
+#composer-open { flex-basis: 100%; color: var(--muted); font-size: var(--small); padding: 2px 0 0; }

@@ -121,6 +121,15 @@ function bind() {
   const install = $("#copy-install");
   install.dataset.label = install.textContent;
   install.addEventListener("click", () => copy("uvx chiefofstaff", install, "Copied"));
+  // Open in my Chief: the link copied, to paste into Home's message box (Chief of Staff opens
+  // it itself; no page reaches a local Chief of Staff, and its AI never gets the link).
+  const openIn = $("#open-in-chief");
+  openIn.dataset.label = openIn.textContent;
+  openIn.addEventListener("click", async () => {
+    const copied = await copy(location.href, openIn, "Link copied");
+    $("#open-help").hidden = false;
+    $("#open-help-manual").hidden = copied;
+  });
   window.addEventListener("hashchange", load);
 }
 
