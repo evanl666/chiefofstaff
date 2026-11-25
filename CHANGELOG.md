@@ -153,6 +153,9 @@ The sidebar is one list of workers, and an answer you asked for stands out on Ho
   12 min* within the hour, else *↻ 3:28 PM*; what it checks on hover), and one that waits on
   another worker says so (*waits on “…”*). Workers' colors (their avatars, a team's parts) are no
   longer blue, green, amber or red, so none reads as a state.
+- **The sidebar's *Other Copilot sessions* is *Other sessions*:** the same list of your other
+  Copilot CLI sessions on this computer (and, with Codex or Claude Code on, theirs), with *No other
+  sessions yet.* when there are none; in Settings → General, *Show where my other sessions stand*.
 - **An answer you asked for stands out on Home.** When the Router asks a worker something for
   you, or you ask one on Home with @, its answer was one muted line like every routine one,
   named by its task's title, cut short. Its line now starts with a small *Answer* label, then
