@@ -6,18 +6,22 @@ work it held goes on once, by itself, never twice and never what had already run
 import asyncio
 import json
 import os
+import re
 import shlex
+import sys
 import time
+from importlib import metadata
 from pathlib import Path
 
 import pytest
-from conftest import call_tool
+from conftest import Harness, call_tool
 from test_agent_picker import started, until
 from test_agents import ran, saved, spawn_on
 
-from chiefofstaff import agents, agentsetup, backend_claude, task_actions
+from chiefofstaff import agents, agentsetup, backend_claude, claude_setup, task_actions
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff.roles import WORKER
+from chiefofstaff.store import Store
 
 
 def approve(said: str = "ok", folder: Path | None = None):
@@ -938,3 +942,338 @@ async def test_a_claude_limit_without_a_reset_says_so_plainly_and_waits_for_the_
         assert view["attention"] == "stopped", "the owner's: Go on, or Continue with…"
     finally:
         await runtime.stop()
+
+
+# Claude's Agent SDK set up by Chief of Staff itself (claude_setup.py): the owner runs no command.
+
+
+class Installer:
+    """A stand-in for the install's command (never a real install in the tests): what it was
+    given, held until `gate` is set; it "installs" `installs` (sdk) where it succeeds, and into
+    its folder (`--target`) as a real one would."""
+
+    def __init__(self, sdk: dict, code: int = 0, output: str = "", installs: str = "0.2.189"):
+        self.sdk, self.code, self.output, self.installs = sdk, code, output, installs
+        self.calls: list[tuple[list[str], float]] = []
+        self.held = ""  # The constraints it was given (`--constraint`).
+        self.gate = asyncio.Event()
+        self.gate.set()
+
+    async def __call__(self, argv: list[str], seconds: float):
+        self.calls.append((argv, seconds))
+        if "--constraint" in argv:
+            held = Path(argv[argv.index("--constraint") + 1])
+            self.held = await asyncio.to_thread(held.read_text)
+        await self.gate.wait()
+        if self.code == 0:
+            if "--target" in argv:
+                target = Path(argv[argv.index("--target") + 1])
+                (target / "claude_agent_sdk").mkdir(parents=True)
+                (target / "claude_agent_sdk" / "__init__.py").write_text("")
+            self.sdk["version"] = self.installs
+        return self.code, self.output
+
+
+@pytest.fixture
+def sdk(monkeypatch):
+    """The Agent SDK as installed here, to change ("": missing), and how it is installed:
+    Chief of Staff's own environment, with uv."""
+    found = {"version": ""}
+    monkeypatch.setattr(backend_claude, "sdk_version", lambda: found["version"])
+    monkeypatch.setattr(claude_setup, "CHECK_SECONDS", 0.0)
+    monkeypatch.setattr(claude_setup, "own_environment", lambda: True)
+    monkeypatch.setattr(claude_setup, "find_uv", lambda: "/owner/.local/bin/uv")
+    monkeypatch.setattr(claude_setup, "has_pip", lambda: False)
+    return found
+
+
+def with_claude_on(directory: Path) -> Harness:
+    """Chief of Staff with Claude on for workers, as it starts."""
+    agents.configure(Store(directory), "claude", enabled=True)
+    return Harness(directory)
+
+
+async def test_claude_on_without_its_sdk_is_set_up_at_start_and_turns_ready_without_a_restart(
+    tmp_path, claude_on_path, sdk, quick
+):
+    harness = with_claude_on(tmp_path / "data")
+    runtime = harness.runtime
+    installer = runtime.claude_setup.runner = Installer(sdk)
+    installer.gate.clear()
+    await runtime.start()
+    try:
+        await until(lambda: installer.calls)
+        argv, seconds = installer.calls[0]
+        wanted = claude_setup.requirement()
+        assert argv == [
+            "/owner/.local/bin/uv",
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            wanted,
+        ]
+        assert re.fullmatch(r"claude-agent-sdk(?:[<>=,.0-9])+", wanted), "the extra's, nothing else"
+        assert seconds == claude_setup.SETUP_SECONDS
+        status = runtime.agent_status("claude")
+        assert (status["status"], status["said"]) == (agents.SETTING_UP, "Setting up Claude…")
+        assert "uv tool" not in json.dumps(runtime.snapshot()["agents_status"])
+        installer.gate.set()
+        await until(lambda: runtime.agent_status("claude")["status"] == agents.READY)
+        assert len(installer.calls) == 1
+    finally:
+        await runtime.stop()
+
+
+async def test_a_failed_setup_says_why_offers_retry_and_is_not_tried_again_by_itself(
+    tmp_path, claude_on_path, sdk, quick
+):
+    data = tmp_path / "data"
+    harness = with_claude_on(data)
+    failing = (
+        "error: Failed to fetch: `https://me:hunter2@pypi.acme.example/simple/claude-agent-sdk/`\n"
+        "  Caused by: dns error: failed to lookup address information"
+    )
+    installer = harness.runtime.claude_setup.runner = Installer(sdk, code=2, output=failing)
+    await harness.runtime.start()
+    try:
+        await until(lambda: harness.runtime.agent_status("claude").get("setup", {}).get("state")
+                    == "failed")  # fmt: skip
+        status = harness.runtime.agent_status("claude")
+        assert status["said"] == "Couldn't set up Claude: no network"
+        assert status["setup"]["command"] == claude_setup.manual_command()
+        assert "hunter2" not in json.dumps(status), "an index's password is never shown"
+        assert any("pypi.acme.example" in line for line in status["setup"]["output"])
+    finally:
+        await harness.runtime.stop()
+    again = Harness(data)
+    again.runtime.claude_setup.runner = installer
+    await again.runtime.start()
+    try:
+        await asyncio.sleep(0.3)
+        assert len(installer.calls) == 1, "not again by itself: once per version and reason"
+        status = again.runtime.agent_status("claude")
+        assert (status["said"], status["setup"]["state"]) == (
+            "Couldn't set up Claude: no network",
+            "failed",
+        )
+        # A worker for Claude meanwhile: why, in those words (the owner's Retry fixes it).
+        agent, why = await again.runtime.new_worker_agent("", False, picked="claude")
+        assert (agent, why) == (
+            "copilot",
+            "Started on Copilot: Claude could not start: Couldn't set up Claude: no network",
+        )
+        installer.code = 0
+        shown = await again.runtime.retry_claude_setup("claude")
+        assert [s["status"] for s in shown["agents_status"] if s["name"] == "claude"] == [
+            agents.SETTING_UP
+        ]
+        await until(lambda: again.runtime.agent_status("claude")["status"] == agents.READY)
+        assert len(installer.calls) == 2
+    finally:
+        await again.runtime.stop()
+
+
+async def test_an_untested_sdk_is_replaced_and_each_reason_or_reinstall_is_tried_once(
+    tmp_path, claude_on_path, sdk, quick, monkeypatch
+):
+    data = tmp_path / "data"
+    sdk["version"] = "1.0.99"
+    harness = with_claude_on(data)
+    installer = harness.runtime.claude_setup.runner = Installer(sdk)
+
+    async def restart(removed: bool = False) -> Harness:
+        if removed:
+            sdk["version"] = ""
+        again = Harness(data)
+        again.runtime.claude_setup.runner = installer
+        await again.runtime.start()
+        return again
+
+    await harness.runtime.start()
+    try:
+        await until(lambda: harness.runtime.agent_status("claude")["status"] == agents.READY)
+        ((argv, _),) = installer.calls
+        assert argv[-1] == claude_setup.requirement(), "the tested range, in its place"
+    finally:
+        await harness.runtime.stop()
+    # Removed since: another reason, tried again by itself.
+    again = await restart(removed=True)
+    try:
+        await until(lambda: again.runtime.agent_status("claude")["status"] == agents.READY)
+        assert len(installer.calls) == 2
+    finally:
+        await again.runtime.stop()
+    # Removed again, the same way: not by itself (Set up is the owner's), never in a loop.
+    again = await restart(removed=True)
+    try:
+        await asyncio.sleep(0.3)
+        assert len(installer.calls) == 2
+        status = again.runtime.agent_status("claude")
+        assert (status["said"], status["setup"]["state"]) == ("Claude isn't set up yet", "needed")
+    finally:
+        await again.runtime.stop()
+    # Chief of Staff installed again (`uv tool install --reinstall`, without the SDK): set up.
+    monkeypatch.setattr(claude_setup, "made", lambda: "installed again")
+    again = await restart(removed=True)
+    try:
+        await until(lambda: again.runtime.agent_status("claude")["status"] == agents.READY)
+        assert len(installer.calls) == 3
+    finally:
+        await again.runtime.stop()
+
+
+async def test_with_claude_off_nothing_is_installed_until_the_owner_turns_it_on(
+    tmp_path, claude_on_path, sdk, quick
+):
+    harness = Harness(tmp_path / "data")
+    installer = harness.runtime.claude_setup.runner = Installer(sdk)
+    await harness.runtime.start()
+    runtime = harness.runtime
+    try:
+        await asyncio.sleep(0.3)
+        assert installer.calls == []
+        status = runtime.agent_status("claude")
+        assert (status["status"], status["said"]) == (agents.NOT_SET_UP, "Not set up yet")
+        (claude,) = (await runtime.look_for_agents())["agents"]
+        assert (claude["problem"], claude["status"]) == ("", agents.NOT_SET_UP), "not a reason"
+        await saved(runtime, {"claude": {"enabled": True}})
+        await until(lambda: runtime.agent_status("claude")["status"] == agents.READY)
+        assert len(installer.calls) == 1
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_worker_waits_a_little_for_a_setup_under_way_else_says_so(
+    tmp_path, claude_on_path, sdk, quick, monkeypatch
+):
+    monkeypatch.setattr(claude_setup, "WAIT_SECONDS", 0.3)
+    harness = with_claude_on(tmp_path / "data")
+    runtime = harness.runtime
+    installer = runtime.claude_setup.runner = Installer(sdk)
+    installer.gate.clear()
+    await runtime.start()
+    try:
+        await until(lambda: installer.calls)
+        agent, why = await runtime.new_worker_agent("", False, picked="claude")
+        assert (agent, why) == (
+            "copilot",
+            "Started on Copilot: Claude could not start: Claude is being set up",
+        )
+        with pytest.raises(ValueError, match=r"^Claude could not start: Claude is being set up$"):
+            await runtime.new_worker_agent("claude", False)
+        waiting = asyncio.ensure_future(runtime.new_worker_agent("", False, picked="claude"))
+        await asyncio.sleep(0.05)
+        installer.gate.set()  # Set up within its wait: it runs on Claude.
+        assert await waiting == ("claude", "")
+    finally:
+        await runtime.stop()
+
+
+async def test_started_with_uvx_the_sdk_goes_to_chief_of_staffs_own_folder_never_uvs_cache(
+    tmp_path, claude_on_path, sdk, quick, monkeypatch
+):
+    """uvx's environment is in uv's cache (uv's alone to change): the SDK goes to a folder of
+    Chief of Staff's own, last on sys.path, its requirements held to Chief of Staff's own
+    packages; found there again at the next start."""
+    monkeypatch.setattr(claude_setup, "own_environment", lambda: False)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    data = tmp_path / "data"
+    harness = with_claude_on(data)
+    installer = harness.runtime.claude_setup.runner = Installer(sdk)
+    await harness.runtime.start()
+    side = claude_setup.side_folder(data)
+    try:
+        await until(lambda: harness.runtime.agent_status("claude")["status"] == agents.READY)
+        ((argv, _),) = installer.calls
+        staging = side.with_name(side.name + ".new")
+        constraints = side.with_name(side.name + ".constraints.txt")
+        assert argv == [
+            "/owner/.local/bin/uv", "pip", "install", "--python", sys.executable,
+            "--target", str(staging), "--constraint", str(constraints),
+            claude_setup.requirement(),
+        ]  # fmt: skip
+        held = installer.held.split()
+        assert "pydantic==" + metadata.version("pydantic") in held
+        assert not [line for line in held if line.startswith("claude-agent-sdk")]
+        assert (side / "claude_agent_sdk").is_dir()
+        assert not staging.exists() and not constraints.exists(), "nothing left beside it"
+        assert sys.path[-1] == str(side), "last: Chief of Staff's own packages come first"
+    finally:
+        await harness.runtime.stop()
+    sys.path.remove(str(side))
+    again = Harness(data)
+    again.runtime.claude_setup.runner = installer
+    await again.runtime.start()
+    try:
+        assert sys.path[-1] == str(side) and len(installer.calls) == 1
+    finally:
+        await again.runtime.stop()
+
+
+def test_what_is_installed_is_the_claude_extras_own_requirement_and_how():
+    sdk, extra = "claude-agent-sdk", "; extra == 'claude'"
+    listed = ["fastapi<1; python_version > '3'", f"{sdk}<0.3,>=0.2.182{extra}"]
+    assert claude_setup.requirement(listed) == f"{sdk}<0.3,>=0.2.182"
+    assert claude_setup.requirement([f'{sdk} (>=0.2.190, <0.3) ; extra == "claude"']) == (
+        f"{sdk}>=0.2.190,<0.3"
+    )
+    tested = f"{sdk}>=0.2.182,<0.3.0"
+    assert claude_setup.fallback() == tested
+    for odd in (
+        f"{sdk} @ https://acme.example/sdk.whl{extra}",  # Never an address.
+        f"evil-package>=1{extra}",
+        f"{sdk}>=0.2; os.system('x'){extra}",
+        f"{sdk}<0.3,>=0.2.182; extra == 'dev'",
+    ):
+        assert claude_setup.requirement([odd]) == tested, odd
+    side = Path("/data/extras/claude-sdk")
+    own_uv = claude_setup.plan(tested, side, own=True, uv="/u/uv", pip=True)
+    assert own_uv.argv == ("/u/uv", "pip", "install", "--python", sys.executable, tested)
+    own_pip = claude_setup.plan(tested, side, own=True, uv="", pip=True)
+    assert own_pip.argv == (
+        sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", tested,
+    )  # fmt: skip
+    assert claude_setup.plan(tested, side, own=True, uv="", pip=False).argv == ()
+    # uvx's environment (in uv's cache) and a Python that is not a venv's: its own folder.
+    assert not claude_setup.own_environment("/u/.cache/uv/archive-v0/Ab12/", "/py")
+    assert not claude_setup.own_environment("/usr/local", "/usr/local")
+    side_pip = claude_setup.plan(tested, side, own=False, uv="", pip=True)
+    assert side_pip.argv[-5:] == (
+        "--target", "/data/extras/claude-sdk.new",
+        "--constraint", "/data/extras/claude-sdk.constraints.txt", tested,
+    )  # fmt: skip
+    assert claude_setup.reason_of("error: No space left on device (os error 28)") == (
+        "the disk is full"
+    )
+    assert claude_setup.reason_of("error: Permission denied (os error 13)") == (
+        "its folder can't be written"
+    )
+    offline = (  # uv 0.9, its network off and nothing cached.
+        "  \u00d7 No solution found when resolving dependencies:\n  ╰─▶ Because claude-agent-sdk "
+        "was not found in the cache and you require claude-agent-sdk>=0.2.182,<0.3, we can "
+        "conclude that your requirements are unsatisfiable.\n      hint: Packages were unavailable "
+        "because the network was disabled."
+    )
+    assert claude_setup.reason_of(offline) == "no network"
+    assert claude_setup.reason_of("\u00d7 No solution found when resolving dependencies") == (
+        "no tested version can be installed here"
+    )
+    assert claude_setup.reason_of("weird\nboom") == "the installer failed (boom)"
+    # Here (a virtual environment, the SDK in it): what a `uv tool upgrade` must put back.
+    assert claude_setup.kept_through_upgrade() == claude_setup.requirement()
+    assert re.fullmatch(r"\d+-\d+", claude_setup.made()), "this install of it, told apart"
+
+
+def test_uv_is_found_where_its_installers_put_it(tmp_path):
+    home = tmp_path / "home"
+    uv = home / ".local" / "bin" / "uv"
+    uv.parent.mkdir(parents=True)
+    uv.write_text("#!/bin/sh\n")
+    uv.chmod(0o755)
+    assert claude_setup.find_uv({"PATH": str(tmp_path / "nowhere")}, home) in {
+        str(uv),
+        "/opt/homebrew/bin/uv",
+        "/usr/local/bin/uv",
+    }
+    assert claude_setup.find_uv({"PATH": "", "UV": str(uv)}, tmp_path) == str(uv)

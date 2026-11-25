@@ -91,7 +91,7 @@ export function fixLine(fix) {
 // at most every 15 seconds, every 5 while one is not ready (signed in meanwhile: Ready now).
 let asked = 0;
 export async function refreshStatuses(after) {
-  const unready = statuses().some((status) => status.status === "signin" || status.status === "missing");
+  const unready = statuses().some((status) => ["signin", "missing", "settingup"].includes(status.status));
   if (!statuses().length || Date.now() - asked < (unready ? 5000 : 15000)) return;
   asked = Date.now();
   try {
@@ -252,7 +252,7 @@ export function agentPopover(anchor, chosen, onPick, { title = "Runs on" } = {})
             el("small", { class: "status", text: can && !limited(status) ? "" : statusText(status) }),
           );
           // One not ready: Sign in (or Install) under it, else the command that makes it ready.
-          return el("div", { class: "agent-pop-row" }, button, can ? "" : setupLine(status) || fixLine(status.fix) || "");
+          return el("div", { class: "agent-pop-row" }, button, can ? "" : setupLine(status, draw) || fixLine(status.fix) || "");
         }),
     );
     if (focused) left.querySelector(`.agent-pop-agent[data-agent="${focused}"]`)?.focus();

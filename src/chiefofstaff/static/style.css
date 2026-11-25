@@ -1048,6 +1048,12 @@ label.hours input { width: 118px; }
 .agent-alerts[hidden] { display: none; }
 .agent-alert { margin: 0; color: var(--amber); font-size: var(--small); line-height: 1.5; }
 .agent-alert.bad { color: var(--red); }
+/* A setup Chief of Staff ran that failed: what it printed and the command, folded. */
+dialog details.setup-fold { display: grid; gap: 4px; color: var(--muted); font-size: var(--small); }
+dialog details.setup-fold summary { justify-self: start; margin: 0; color: var(--muted); font-size: var(--small); }
+.setup-fold pre { max-height: 160px; overflow: auto; margin: 0; padding: 6px 10px; border-radius: var(--radius); background: var(--bubble); color: var(--soft); font: var(--small)/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.setup-fold code { padding: 1px 5px; border-radius: 5px; background: var(--hover); color: var(--soft); font: var(--small) var(--mono); overflow-wrap: anywhere; }
+.setup-fold button.link { padding: 0; color: var(--accent); font-size: var(--small); }
 /* A plan's use: the most-used window in a small meter; each window and its reset on hover or
    focus, and for screen readers. */
 .plan-meter { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; padding: 0 4px; border-radius: var(--radius); color: var(--soft); font-size: var(--small); font-variant-numeric: tabular-nums; white-space: nowrap; cursor: default; }

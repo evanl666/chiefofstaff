@@ -374,6 +374,9 @@ LIMITED = "limited"
 # too, and goes on by itself once that check, tried again by itself, has run (Runtime.check_later).
 UNCHECKED = "unchecked"
 WAITS = HELD | {LIMITED, UNCHECKED}
+# Claude while Chief of Staff installs what its workers need (claude_setup.py), and while that
+# is missing with Claude off: it is set up once turned on.
+SETTING_UP, NOT_SET_UP = "settingup", "setup"
 STATUS_WORDS = {
     READY: "Ready",
     SIGN_IN: "Sign-in needed",

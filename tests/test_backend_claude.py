@@ -694,13 +694,21 @@ async def test_a_claude_that_cannot_run_says_why(tmp_path, monkeypatch, env, pro
         await backend_claude.look(command)
 
 
-async def test_without_its_extra_claude_says_what_to_install(tmp_path, monkeypatch):
+async def test_without_its_extra_claude_says_so_without_a_command_to_run(tmp_path, monkeypatch):
+    """Chief of Staff sets the extra up by itself (claude_setup.py): what is said where it is
+    missing, or not one tested, points there, never at a command for the owner to run."""
     command = fake_claude(tmp_path / "fake", monkeypatch)
     monkeypatch.setattr(backend_claude, "sdk_version", lambda: "")
-    with pytest.raises(RuntimeError, match=r"Needs Chief of Staff's Claude extra"):
+    missing = r"^Claude isn't set up here yet: Settings → Agents & models sets it up\.$"
+    with pytest.raises(RuntimeError, match=missing):
         await claude_backend(command, folder=tmp_path / "agent").start()
-    with pytest.raises(RuntimeError, match=r"Needs Chief of Staff's Claude extra"):
+    with pytest.raises(RuntimeError, match=missing):
         await backend_claude.look(command)
+    monkeypatch.setattr(backend_claude, "sdk_version", lambda: "1.0.99")
+    assert backend_claude.sdk_refused() == (
+        "Claude's Agent SDK here (1.0.99) is not one Chief of Staff was tested with: Settings → "
+        "Agents & models sets up the tested one."
+    )
 
 
 async def test_the_look_keeps_how_it_is_signed_in_and_never_who(tmp_path, monkeypatch):

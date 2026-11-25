@@ -630,6 +630,32 @@ async def test_an_update_that_failed_says_why_and_runs_as_before(harness, monkey
         await runtime.update_now()
 
 
+def test_a_restart_to_update_keeps_claudes_sdk_that_uv_tool_upgrade_removes(tmp_path, monkeypatch):
+    """`uv tool upgrade` keeps only what its tool's record names: Claude's Agent SDK, which Chief
+    of Staff installed into its own environment, is put back before the new version starts."""
+    from chiefofstaff import __main__ as main_module
+    from chiefofstaff import claude_setup
+    from chiefofstaff.updates import Launch
+
+    ran = []
+    monkeypatch.setattr(main_module.subprocess, "run", lambda command, **options: (
+        ran.append(command) or SimpleNamespace(returncode=0, stderr="", stdout="")))  # fmt: skip
+    monkeypatch.setattr(main_module.os, "execve", lambda *arguments: None)
+    monkeypatch.setattr(main_module.shutil, "which", lambda name: f"/owner/bin/{name}")
+    wanted = "claude-agent-sdk<0.3,>=0.2.182"
+    monkeypatch.setattr(claude_setup, "kept_through_upgrade", lambda: wanted)
+    tool = Launch("tool", "uv tool upgrade chiefofstaff", ("/t/bin/chiefofstaff", "--no-browser"))
+    main_module.restart_into(tool, "k" * 43, tmp_path)
+    assert ran == [
+        ["/owner/bin/uv", "tool", "upgrade", "chiefofstaff"],
+        ["/owner/bin/uv", "pip", "install", "--python", main_module.sys.executable, wanted],
+    ]
+    ran.clear()
+    monkeypatch.setattr(claude_setup, "kept_through_upgrade", lambda: "")  # (Not there.)
+    main_module.restart_into(tool, "k" * 43, tmp_path)
+    assert ran == [["/owner/bin/uv", "tool", "upgrade", "chiefofstaff"]]
+
+
 def test_a_restart_to_update_runs_the_new_version_in_its_place(tmp_path, monkeypatch):
     """`uv tool upgrade` first (a tool install), then the new version in this process's place,
     with the private link's token (the page it had goes on); when that can't start, this one

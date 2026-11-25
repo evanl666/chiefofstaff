@@ -1550,7 +1550,8 @@ anywhere.
 on Copilot); *Not now* leaves it off and is not asked again. Settings → *Agents & models* has a row
 per agent installed (with Copilot alone, only Copilot's; one not installed has none, but for one
 still on, *Not installed*, so you can turn it off): its status in a few words
-(*Ready*, *Sign in needed*, *Not installed*, *At its limit · resets …*, *Can't run here*), a small
+(*Ready*, *Sign in needed*, *Not installed*, *At its limit · resets …*, *Setting up Claude…*,
+*Can't run here*), a small
 meter of the most-used of its plan's limits (each limit and when it resets on hover or focus), its
 one action (*Sign in*: see **Signing in and installing from here** below) and *Use for
 workers*, which turns on only once it is ready (turning it off always works, whatever its status).
@@ -1592,6 +1593,23 @@ that key, and its status says so ("Uses your Anthropic API key (ANTHROPIC_API_KE
 `CODEX_ACCESS_TOKEN` set, Codex's workers use that token over your `codex login` ("Uses your access
 token (CODEX_ACCESS_TOKEN)"). `CODEX_API_KEY` and `OPENAI_API_KEY` don't change what Codex workers
 use (only `codex exec` reads the first), so nothing is said of them.
+
+**Setting up Claude.** Claude workers also need Anthropic's Agent SDK for Python (Chief of Staff's
+Claude extra). While Claude is on for workers (or the Router or the Watchdog runs on it) and the
+SDK is missing, or is a version this release was not tested with, Chief of Staff installs the
+tested one by itself: as it starts, as you turn Claude on, or when you click *Retry*. Claude's row
+says *Setting up Claude…* meanwhile (usually under a minute), then *Ready*, with no restart. With
+Claude off, its row says *Not set up yet*: turning on *Use for workers* sets it up. It installs only
+the version its Claude extra names, into its own environment (a `uv tool`, pipx or other virtual
+environment: with `uv pip install`, or that environment's `pip`). Started with `uvx`, whose
+environment lives in uv's cache, it installs into a folder of its own in its data folder instead,
+read after its own packages, so nothing it already has is replaced. It tries once by itself per
+Chief of Staff version (an update that dropped the SDK is set up again as the new version starts).
+Where it can't (no network, no space, no `uv` or `pip`), the row says why in a few words ("Couldn't
+set up Claude: no network") with *Retry*; *Details* has what the installer said and, as a last
+resort, the command to run yourself (`uv tool install 'chiefofstaff[claude]'`, or the one for how you
+installed Chief of Staff). A task for Claude meanwhile waits a little for the setup, then goes as when
+Claude can't run, saying *Claude is being set up*.
 
 **Choosing it for one task.** Type `@` in Home's message box: it lists every agent first, each with
 its status (*Ready*, *Sign-in needed*, *Not installed*; one not ready is dimmed: picking it signs in
@@ -1696,8 +1714,10 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   `codex login status`. Only once you open Settings → *Agents & models* does it start Codex to
   read its models and limits, without Codex's plugin sync (Codex still refreshes its own model
   cache then).
-- **Claude:** Claude Code 2.1.322 or later, signed in by running `claude` in a terminal, and
-  Chief of Staff's Claude extra (`uv tool install 'chiefofstaff[claude]'`). For Home's first-run
+- **Claude:** Claude Code 2.1.322 or later, signed in by running `claude` in a terminal. What
+  Claude workers need of Chief of Staff's own (Anthropic's Agent SDK for Python, its Claude
+  extra) it sets up by itself while Claude is on, nothing to run: see **Setting up Claude**
+  below. For Home's first-run
   card Chief of Staff runs only `claude --version`, and `claude auth status` where Claude was set
   up (its `.claude.json` is there). Claude workers use
   whatever your `claude` is signed in with: a Claude plan, an API key, Amazon Bedrock, Google

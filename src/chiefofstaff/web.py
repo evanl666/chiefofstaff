@@ -483,6 +483,12 @@ def create_app(
     async def agent_setup_cancel(name: str):
         return await runtime.setups.cancel(name)
 
+    @app.post("/api/agents/{name}/setup/retry")
+    async def agent_setup_retry(name: str):
+        """Claude's Retry (or Set up): Chief of Staff installs its Agent SDK again
+        (claude_setup.py); its status as the page shows it."""
+        return await runtime.retry_claude_setup(name)
+
     @app.post("/api/agents/{name}/offer")
     async def agent_offer(name: str, payload: AgentOffer):
         """The owner's answer on an agent's first-run card (Allow, or Not now)."""

@@ -9,7 +9,7 @@ import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
 import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, markOf, marksShown, modelLabel, modelOptions, ready, statuses, statusOf } from "./agentpick.js";
-import { setupAction } from "./agentsetup.js";
+import { setupAction, setupKind } from "./agentsetup.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
@@ -1268,9 +1268,12 @@ function refusalCard(text, meta, time) {
   }
   const wait = el("button", { type: "button", class: "text", text: "Wait" });
   wait.onclick = () => answer("wait");
-  // The command that makes it ready, the owner's to run (else a link to the guide).
-  const fix = meta.fix ? fixLine(meta.fix) : null;
-  node.append(el("div", { class: "actions" }, fix || el("a", { class: "link", href: SIGN_IN_HELP, target: "_blank", rel: "noreferrer", text: "Sign-in help" }), el("span", { class: "spacer" }), wait, copilot));
+  // The command that makes it ready, the owner's to run (else a link to the guide). What Chief of
+  // Staff sets up itself (Claude's Agent SDK) needs neither: Retry where its setup failed.
+  const status = statusOf(meta.agent);
+  const fix = (setupKind(status) === "retry" ? setupAction(status) : null) || (meta.fix ? fixLine(meta.fix) : null);
+  const help = status?.setup ? "" : el("a", { class: "link", href: SIGN_IN_HELP, target: "_blank", rel: "noreferrer", text: "Sign-in help" });
+  node.append(el("div", { class: "actions" }, fix || help, el("span", { class: "spacer" }), wait, copilot));
   return node;
 }
 // A role waiting for its agent (Settings: If unavailable, Ask me): Sign in (or Install), or Use

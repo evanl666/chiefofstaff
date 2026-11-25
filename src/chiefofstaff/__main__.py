@@ -19,6 +19,7 @@ from pathlib import Path
 import uvicorn
 from platformdirs import user_data_path
 
+from . import claude_setup
 from .updates import UPDATE_NOTE, Launch, own_args
 from .web import create_app
 
@@ -118,15 +119,26 @@ def restart_into(launch: Launch, token: str, directory: Path):
     note = directory / UPDATE_NOTE
     note.unlink(missing_ok=True)
     if launch.how == "tool":
+        uv = shutil.which("uv") or "uv"
+        # Claude's Agent SDK, which `uv tool upgrade` removes (its tool's record does not name
+        # it: Chief of Staff installed it), put back at once; else the new version's start sets
+        # it up (claude_setup.py).
+        keep = claude_setup.kept_through_upgrade()
         try:
             done = subprocess.run(  # noqa: S603  (uv, which installed it, and its package)
-                [shutil.which("uv") or "uv", "tool", "upgrade", "chiefofstaff"],
+                [uv, "tool", "upgrade", "chiefofstaff"],
                 capture_output=True, text=True, timeout=900, check=False,
                 stdin=subprocess.DEVNULL,
             )  # fmt: skip
             if done.returncode:
                 said = (done.stderr or done.stdout).strip()[-500:]
                 note.write_text(said or "uv tool upgrade failed")
+            elif keep:
+                subprocess.run(  # noqa: S603  (uv, and the Claude extra's own requirement)
+                    [uv, "pip", "install", "--python", sys.executable, keep],
+                    capture_output=True, text=True, timeout=claude_setup.SETUP_SECONDS,
+                    check=False, stdin=subprocess.DEVNULL,
+                )  # fmt: skip
         except (OSError, subprocess.SubprocessError) as exc:
             note.write_text(str(exc))
     sys.stderr.flush()

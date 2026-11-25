@@ -392,6 +392,46 @@ def test_an_agents_meter_shows_its_most_used_window_amber_from_80_red_at_100():
     assert meters[0]["label"] == "41% of your weekly limit used"
 
 
+def test_claudes_setup_by_chief_of_staff_is_said_calmly_with_retry_never_a_command():
+    """Claude's Agent SDK, which Chief of Staff installs itself (claude_setup.py): "Setting up
+    Claude…" (neutral) while it runs; failed, why in a few words and Retry, the command only
+    under Details; off, it can be turned on, which sets it up. Never "Can't run here"."""
+    said = run_ui(
+        """
+        const command = "uv tool install 'chiefofstaff[claude]'";
+        const row = (look, status) => {
+          const shown = a.agentStatus("claude", { look, status, on: Boolean(status?.on) });
+          const alerts = a.agentAlerts("claude", { look, status });
+          return { ...shown, alerts: alerts.map((alert) => `${alert.tone}: ${alert.text}`), details: alerts.map((alert) => alert.details?.command || "") };
+        };
+        return [
+          row(null, { status: "settingup", said: "Setting up Claude…", setup: { state: "running" }, on: true }),
+          row(null, { status: "problem", said: "Couldn't set up Claude: no network", setup: { state: "failed", reason: "no network", command, output: ["error: dns error"] }, on: true }),
+          row({ status: "problem", said: "Claude isn't set up yet", problem: "", setup: { state: "needed", command } }, null),
+          row({ status: "setup", said: "Not set up yet", problem: "", setup: { state: "off" } }, null),
+        ];
+        """
+    )
+    running, failed, needed, off = said
+    assert (running["text"], running["tone"], running["action"]) == (
+        "Setting up Claude…",
+        "off",
+        "",
+    )
+    assert running["alerts"] == []
+    assert (failed["text"], failed["tone"], failed["action"], failed["words"]) == (
+        "Not set up", "warn", "retry", "Retry"
+    )  # fmt: skip
+    assert failed["alerts"] == ["warn: Couldn't set up Claude: no network."]
+    assert failed["details"] == ["uv tool install 'chiefofstaff[claude]'"], "folded under Details"
+    assert (needed["text"], needed["action"], needed["words"], needed["alerts"]) == (
+        "Not set up", "retry", "Set up", []
+    )  # fmt: skip
+    assert (off["text"], off["tone"], off["turnsOn"], off["alerts"]) == (
+        "Not set up yet", "off", True, []
+    )  # fmt: skip
+
+
 def test_a_limit_or_a_sign_in_ending_is_said_under_an_agent_whatever_its_status_and_meter():
     """§3.3 (review finding 4): what costs money or stops work is never folded away: extra
     usage, a limit used up with no reset known, a rate limit, a close limit; a sign-in about to

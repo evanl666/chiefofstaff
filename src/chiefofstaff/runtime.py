@@ -43,7 +43,17 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-from . import agents, agentsetup, caches, compat, prompts, settings_guard, threads, updates
+from . import (
+    agents,
+    agentsetup,
+    caches,
+    claude_setup,
+    compat,
+    prompts,
+    settings_guard,
+    threads,
+    updates,
+)
 from . import workspaces as workspaces_module
 from .abilities import Abilities
 from .accounts import Accounts
@@ -771,6 +781,9 @@ class Runtime:
         self.roles_unwaited: set[str] = set()
         # Sign-ins and installs the owner started from the page (agentsetup.py).
         self.setups = agentsetup.Setups(self)
+        # Claude's Agent SDK, set up by Chief of Staff itself while Claude is in use.
+        self.claude_setup = claude_setup.ClaudeSetup(store, self.claude_in_use)
+        self.claude_setup.changed = self.claude_setup_changed
         # Every turn of another agent's worker begins only once admitted (admit_turn), one at a
         # time; what can make a worker ineligible bumps the generation under this lock first.
         self.admission = asyncio.Lock()
@@ -959,6 +972,10 @@ class Runtime:
         self.asks.expire_requests()
         self.accounts.restore()
         agentsetup.kept_paths(self.store)  # Agents installed from here, found as before.
+        if not getattr(self, "demo", False):
+            # Claude's Agent SDK: as set up before, else set up now while Claude is in use.
+            self.claude_setup.load()
+            self.claude_setup.at_start()
         for name in agents.NAMES:
             self.arm_limit(name)  # A limit used up: its reset waited for again.
             self.arm_check(name)  # A check that could not run: tried again by itself.
@@ -1140,6 +1157,7 @@ class Runtime:
             await source.stop()
         await self.habits.stop()
         await self.connector.stop()
+        await self.claude_setup.stop()
         for agent in self.agents:
             await self.disconnect_agent(agent)
         await self.disconnect()
@@ -1320,6 +1338,36 @@ class Runtime:
         """Chief of Staff's own folder for an agent (its processes start there)."""
         return self.store.directory / "agents" / name
 
+    def claude_in_use(self) -> bool:
+        """Whether Claude is in use: on for workers, or one of Chief of Staff's own sessions put
+        on it (what its Agent SDK is set up for: claude_setup.py)."""
+        if getattr(self, "demo", False):
+            return False
+        return agents.enabled(self.store, "claude") or "claude" in agents.roles(self.store).values()
+
+    def claude_setup_changed(self, done: bool | None):
+        """Claude's setup started (None) or ended: its status is said; set up, Claude is looked
+        at again at once, so its row turns Ready by itself and what waited on it goes on
+        (agent_up)."""
+        if done:
+            self.glanced.pop("claude", None)
+            self.glance_failures.pop("claude", None)
+            self.agent_failed.pop("claude", None)  # (Its start failed for its setup: past.)
+            if "claude" in self.agents_found():
+                self.glance_soon("claude")
+        self.publish_state()
+
+    async def retry_claude_setup(self, name: str) -> dict:
+        """The owner's Retry (or Set up) on Claude's row: its Agent SDK installed again, whatever
+        was tried before; every agent's status, as the page shows them."""
+        if name != "claude":
+            raise LookupError(f"Nothing of {agents.display(name)} is set up by Chief of Staff.")
+        if getattr(self, "demo", False):
+            raise ValueError("Not in the demo: it has no coding agents of its own.")
+        self.claude_setup.retry()
+        self.publish_state()
+        return {"agents_status": self.agents_status()}
+
     def private_folders(self) -> list[str]:
         """Chief of Staff's private folders for other agents' workers (a Claude worker's MCP
         configuration and prompt): no worker reads or changes them (policy.private_denial, and
@@ -1417,6 +1465,9 @@ class Runtime:
                 raise RuntimeError(self.not_on_windows(agent))
             if not entry.enabled():
                 raise RuntimeError(self.turned_off(agent))
+            if agent == "claude" and (why := await self.claude_setup.wait()):
+                # Its Agent SDK being set up (waited for a little), or its setup failed.
+                raise RuntimeError(why)
             self.end_commands(agent)
             # What its processes left when Chief of Staff last stopped abruptly (the supervisor
             # ends them unless it was killed too): only this data directory's, as for Copilot.
@@ -2601,6 +2652,8 @@ class Runtime:
         after = agents.configured(self.store)
         was_on = sorted(name for name, entry in before.items() if entry.get("enabled"))
         now = agents.turned_on(self.store)
+        if "claude" in now and "claude" not in was_on:
+            self.claude_setup.turned_on()  # Its Agent SDK set up now, where it is missing.
         for name in now:
             if name not in self.agents:
                 self.agents[name] = self.agent_connection(name)
@@ -5390,7 +5443,9 @@ class Runtime:
         """One agent's row (look_for_agents), with its status as the @ picker says it."""
         entry = await self.looked_at_agent(name)
         status = self.agent_status(name)
-        kept = ("status", "said", "pays", "fix", "ways", "install", "expires", "key_env")
+        kept = ("status", "said", "pays", "fix", "ways", "install", "expires", "key_env", "setup")
+        if "setup" in status:
+            entry["problem"] = ""  # Its Agent SDK: its status says where its setup stands.
         return entry | {key: status[key] for key in kept if key in status}
 
     async def looked_at_agent(self, name: str) -> dict:
@@ -5566,6 +5621,8 @@ class Runtime:
             return entry | {"status": agents.READY, "said": "Ready", "pays": agents.COPILOT_PAYS}
         if name not in self.agents_found():
             return entry | self.unready(name, "not installed")
+        if name == "claude" and (setup := self.claude_setup.status()):
+            return entry | setup  # Its Agent SDK, being set up or not yet.
         seen = self.glanced.get(name, (0.0, None))[1]
         facts = seen if isinstance(seen, dict) else {}
         backend, _ = self.connection(name)
@@ -5631,6 +5688,8 @@ class Runtime:
             at = self.glanced.get(name, (float("-inf"), None))[0]
             if time.monotonic() - at < self.look_every(name) or self.setups.running(name):
                 continue
+            if name == "claude" and self.claude_setup.running():
+                continue  # Looked at once set up (claude_setup_changed).
             looks.append(self.glance_soon(name))
         if looks:
             await asyncio.wait(looks, timeout=REFRESH_WAIT)

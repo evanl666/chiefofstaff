@@ -20,10 +20,25 @@ export function setupWords(name) {
 }
 
 // The button that makes an agent ready, where a control can be: Sign in (its sign-in needed),
-// Install (not installed); none for one that is ready or can't run for another reason.
-export function setupAction(status, { compact = false } = {}) {
+// Install (not installed), Retry (what Chief of Staff sets up itself failed: Claude's Agent SDK;
+// Set up when it is needed again); none for one that is ready or can't run for another reason.
+export function setupAction(status, { compact = false, after } = {}) {
   const kind = setupKind(status);
   if (!kind) return null;
+  if (kind === "retry") {
+    const words = status.setup.state === "failed" ? "Retry" : "Set up";
+    return el("button", {
+      type: "button",
+      class: `setup-action${compact ? " compact" : ""}`,
+      text: words,
+      "aria-label": `Set up ${title(status.name)}${words === "Retry" ? " again" : ""}`,
+      onmousedown: (event) => event.preventDefault(),
+      onclick: (event) => {
+        event.stopPropagation();
+        retrySetup(status.name, after);
+      },
+    });
+  }
   const busy = running(status.name);
   const words = busy ? setupWords(status.name) : kind === "install" ? "Install" : "Sign in";
   const label = busy ? `Show the ${kind === "install" ? "install" : "sign-in"} of ${title(status.name)}` : kind === "install" ? `Install ${title(status.name)}` : `Sign in to ${title(status.name)}`;
@@ -41,13 +56,26 @@ export function setupAction(status, { compact = false } = {}) {
 }
 export function setupKind(status) {
   if (!status || status.status === "ready") return "";
+  if (["failed", "needed"].includes(status.setup?.state)) return "retry";
   if (status.status === "signin" && status.ways?.length) return "signin";
   if (status.status === "missing" && status.install?.length) return "install";
   return "";
 }
+// Chief of Staff sets up again what it sets up itself (Claude's Agent SDK): the page then says
+// "Setting up Claude…" until it is done (its status, from the snapshot).
+export async function retrySetup(name, after) {
+  try {
+    const { agents_status: found } = await api(`/api/agents/${name}/setup/retry`, { method: "POST" });
+    state.snapshot = { ...state.snapshot, agents_status: found };
+    after?.();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 // Sign in (or Install), and the command to run it in a terminal instead, copied.
-export function setupLine(status) {
-  const action = setupAction(status, { compact: true });
+export function setupLine(status, after) {
+  const action = setupAction(status, { compact: true, after });
   if (!action) return null;
   const copy = status.fix?.command
     ? el("button", {

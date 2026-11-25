@@ -1,5 +1,6 @@
 """Claude workers: the owner's Claude Code CLI, driven through Anthropic's Agent SDK for Python
-(the optional extra `chiefofstaff[claude]`), shown to the runtime as Copilot shows itself
+(the optional extra `chiefofstaff[claude]`, which Chief of Staff installs by itself while
+Claude is on: claude_setup.py), shown to the runtime as Copilot shows itself
 (backend.AgentBackend and AgentSession), so the runtime cannot tell the difference.
 
 - Each worker has a CLI process of its own (one process holds one session), started under Chief
@@ -114,7 +115,8 @@ ASK_FIRST_BEFORE = "2.2.0"
 # The Agent SDK versions this release was tested with (the extra pins them too).
 SDK_OLDEST = (0, 2, 182)
 SDK_BEFORE = (0, 3, 0)
-EXTRA = "Needs Chief of Staff's Claude extra: `uv tool install 'chiefofstaff[claude]'`"
+# The Agent SDK missing: Chief of Staff sets it up by itself while Claude is on (claude_setup.py).
+EXTRA = "Claude isn't set up here yet: Settings → Agents & models sets it up."
 NOT_FOUND = "Not found on this computer: install Claude Code."
 NOT_SIGNED_IN = "Not signed in to Claude Code: sign in from Settings → Agents & models."
 # Claude never set up for the owner (no state file): `claude auth status` would make its files.
@@ -346,8 +348,8 @@ def sdk_refused() -> str:
     found = release(version)
     if found is None or not (SDK_OLDEST <= found[:3] < SDK_BEFORE):
         return (
-            f"Chief of Staff's Claude extra has an Agent SDK it was not tested with ({version}): "
-            "reinstall it: `uv tool install 'chiefofstaff[claude]'`"
+            f"Claude's Agent SDK here ({version}) is not one Chief of Staff was tested with: "
+            "Settings → Agents & models sets up the tested one."
         )
     return ""
 
@@ -1504,8 +1506,8 @@ class ClaudeWorker:
             process = getattr(transport, "_process", None)
             if self.query is None or process is None:
                 raise RuntimeError(
-                    f"The Agent SDK installed ({sdk_version()}) is not one Chief of Staff was "
-                    "tested with: reinstall its Claude extra."
+                    f"The Agent SDK installed ({sdk_version()}) does not work as the one Chief "
+                    "of Staff was tested with."
                 )
             self.pid = process.pid
             self.answer_forms(self.query)

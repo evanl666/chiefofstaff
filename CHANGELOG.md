@@ -63,6 +63,18 @@ longer takes long work for silence.
   most (past that, those sessions are named with your next message). Asking a worker about a
   finished task looks at its checkouts once instead of twice. What the Router and workers are
   given is the same.
+- **Claude sets itself up.** Claude workers need Anthropic's Agent SDK (Chief of Staff's Claude
+  extra). Installed or updated without it, Chief of Staff said *Can't run here* on Claude's row
+  and asked you to run `uv tool install 'chiefofstaff[claude]'`. It now installs the tested SDK by
+  itself while Claude is on (as it starts, as you turn Claude on, or on *Retry*): the row says
+  *Setting up Claude…*, then *Ready*, with no restart. With Claude off it says *Not set up yet*,
+  and turning it on sets it up. Where it can't, the row says why in a few words ("Couldn't set up
+  Claude: no network") with *Retry*; the command to run yourself is only under *Details*, as a
+  last resort. It tries once by itself per version, so an update that drops the SDK is set up
+  again as the new version starts, and *Update and restart* keeps it. Started with `uvx`, it goes
+  into a folder of Chief of Staff's own (uv's cache is never changed), read after its own
+  packages. A task for Claude meanwhile waits a little, then goes as when Claude can't run,
+  saying *Claude is being set up*.
 
 Your answer to a decision card reaches its worker at once, and a decided question stays decided.
 

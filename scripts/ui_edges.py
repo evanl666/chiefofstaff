@@ -9307,7 +9307,16 @@ PLAN_NOTE = (
     "terms."
 )
 HOOKS_NOTE = "Sandboxed Claude workers don't run hooks."
-NO_EXTRA = "Needs Chief of Staff's Claude extra: `uv tool install 'chiefofstaff[claude]'`"
+# Claude's Agent SDK, set up by Chief of Staff itself (claude_setup.py): under way, failed, off.
+EXTRA_COMMAND = "uv tool install 'chiefofstaff[claude]'"
+SETTING_UP = {"status": "settingup", "said": "Setting up Claude…", "setup": {"state": "running"}}
+SETUP_FAILED = {
+    "status": "problem", "said": "Couldn't set up Claude: no network",
+    "setup": {"state": "failed", "reason": "no network", "command": EXTRA_COMMAND,
+              "output": ["error: Failed to fetch: `https://pypi.org/simple/claude-agent-sdk/`",
+                         "  Caused by: dns error: failed to lookup address information"]},
+}  # fmt: skip
+NOT_SET_UP = {"status": "setup", "said": "Not set up yet", "setup": {"state": "off"}}
 LIMIT_LINE = "Claude's 5-hour limit is used up · resets 3:40 PM"
 
 
@@ -9640,6 +9649,75 @@ async def agents_none(runtime, browser):
     log("agents: with Copilot alone, Copilot's row and its own sessions; nothing of other agents")
 
 
+def with_status(entry: dict):
+    """/api/state with this agent's status (agents_status) as the page reads it."""
+
+    async def handle(route):
+        response = await route.fetch()
+        data = await response.json()
+        found = [item for item in data.get("agents_status") or [] if item["name"] != entry["name"]]
+        data["agents_status"] = [*found, entry]
+        await route.fulfill(response=response, json=data)
+
+    return handle
+
+
+async def claude_setup_row(page, tab, name: str, scheme: str):
+    """Claude's row while Chief of Staff sets up its Agent SDK (claude_setup.py): calm while it
+    runs; failed, why in a few words and Retry, the command only under Details (folded); off,
+    turning it on sets it up. Never "Can't run here", never a command to run in plain view."""
+    await expect(tab).to_have_attribute("data-looked", "done")
+    row = tab.locator("#agent-claude")
+    status = row.locator(".agent-line .status")
+    alerts = row.locator(".agent-alert")
+    box = row.locator("input[type=checkbox]")
+    action = row.locator(".action-slot button")
+    await expect(box).to_be_enabled()
+    if name == "claude-setting-up":
+        await expect(status).to_have_text("Setting up Claude…")
+        await expect(status).to_have_class(re.compile(r"\boff\b"))
+        await expect(alerts).to_have_count(0)
+        await expect(action).to_have_count(0)
+    elif name == "claude-not-set-up":
+        await expect(status).to_have_text("Not set up yet")
+        await expect(alerts).to_have_count(0)
+        await expect(box).not_to_be_checked()
+        await unfold_agent(tab, "claude")
+        await expect(row.locator(".setup-note")).to_have_text(
+            "Turning on Use for workers sets it up: Chief of Staff installs what Claude workers "
+            "need, in a minute or so."
+        )
+    else:
+        await expect(status).to_have_text("Not set up")
+        await expect(alerts).to_have_text(["Couldn't set up Claude: no network."])
+        await expect(action).to_have_text("Retry")
+        await expect(action).to_have_attribute("aria-label", "Set up Claude Code again")
+        fold = row.locator(".agent-alerts details.setup-fold")
+        await expect(fold.locator("summary")).to_have_text("Details")
+        assert "uv tool install" not in await row.inner_text(), "the command: under Details only"
+        await fold.locator("summary").click()
+        await expect(fold.locator("code")).to_have_text(EXTRA_COMMAND)
+        await expect(fold.locator("pre")).to_contain_text("dns error")
+        await shoot(page, "group-claude-setup-failed-details", scheme, 1024, focus=row)
+        retried: list[str] = []
+
+        async def retry(route):
+            retried.append(route.request.method)
+            await route.fulfill(json={"agents_status": [
+                {"name": "copilot", "status": "ready", "said": "Ready", "on": True},
+                {"name": "claude", "label": "Claude", "on": True} | SETTING_UP,
+            ]})  # fmt: skip
+
+        await page.route("**/api/agents/claude/setup/retry", retry)
+        await page.unroute("**/api/state")
+        await page.route("**/api/state", with_status({"name": "claude", "on": True} | SETTING_UP))
+        await action.click()
+        await expect(status).to_have_text("Setting up Claude…")
+        await expect(alerts).to_have_count(0)
+        assert retried == ["POST"], retried
+    assert "Can't run here" not in await row.inner_text()
+
+
 def agents_answer(answer, gate: asyncio.Event):
     """What /api/agents answers in a state: nothing until let go (checking), an error, or
     this."""
@@ -9659,9 +9737,11 @@ def agents_answer(answer, gate: asyncio.Event):
 async def agents_states(browser, scheme: str):
     """The page's other states, as /api/agents answers them (settings-v2.md §3.3): the look
     under way, an error, none found, signed out, one that cannot run here, the sandbox on,
-    stopped by itself, most of a plan used, a plan's limit, Claude without its extra. A row's
-    status is a few words; why, and what costs money, is an alert line under it; one that is on
-    can always be turned off; one off is turned on only once it can work."""
+    stopped by itself, most of a plan used, a plan's limit; Claude's Agent SDK being set up by
+    Chief of Staff, its setup failed (Retry; the command only under Details), not set up while
+    off (turning it on sets it up). A row's status is a few words; why, and what costs money, is
+    an alert line under it; one that is on can always be turned off; one off is turned on only
+    once it can work (or once turning it on sets it up)."""
     found = {
         "name": "codex", "label": "Codex", "enabled": False, "model": "", "effort": "",
         "limit": 0, "found": True, "state": "", "problem": "", "models": [], "status": "ready",
@@ -9718,13 +9798,27 @@ async def agents_states(browser, scheme: str):
                                  "note": PLAN_NOTE, "limit_line": LIMIT_LINE}],
             "new_workers": "copilot", "sandboxed": False,
         },
-        "claude-no-extra": {
-            "agents": [claude | {"problem": NO_EXTRA, "note": PLAN_NOTE}],
+        "claude-setting-up": {
+            "agents": [claude | {"enabled": True} | SETTING_UP],
+            "new_workers": "copilot", "sandboxed": False,
+        },
+        "claude-setup-failed": {
+            "agents": [claude | {"enabled": True} | SETUP_FAILED],
+            "new_workers": "copilot", "sandboxed": False,
+        },
+        "claude-not-set-up": {
+            "agents": [claude | NOT_SET_UP],
             "new_workers": "copilot", "sandboxed": False,
         },
     }  # fmt: skip
     for name, answer in [("checking", None), ("error", "error"), *states.items()]:
         context, page, errors, requests = await agents_page(browser, scheme)
+        if name.startswith("claude-set"):
+            # What the page knows of Claude's setup between looks (the snapshot) says the same.
+            claude_now = {"name": "claude", "label": "Claude", "on": True} | answer["agents"][0]
+            await page.route("**/api/state", with_status(claude_now))
+            await page.reload()
+            await expect(page.locator("#application")).to_be_visible()
         gate = asyncio.Event()
         answered = agents_answer(answer, gate)
         await page.route("**/api/agents", answered)
@@ -9749,6 +9843,8 @@ async def agents_states(browser, scheme: str):
                 "No supported coding agent found. Supported: the Codex CLI or Claude Code \u2014 "
                 "install one, then open this again."
             )
+        elif name.startswith("claude-") and "set" in name:
+            await claude_setup_row(page, tab, name, scheme)
         else:
             await expect(tab).to_have_attribute("data-looked", "done")
             shown = answer["agents"][0]
@@ -9777,7 +9873,7 @@ async def agents_states(browser, scheme: str):
             assert "`" not in await row.inner_text(), "no code marks shown as they are"
             label = row.locator("label.check")
             await expect(label).to_have_text("Use for workers")
-            if name in ("signed-out", "too-old", "sandboxed", "claude-widened", "claude-no-extra"):
+            if name in ("signed-out", "too-old", "sandboxed", "claude-widened"):
                 await expect(box).to_be_disabled()
                 await expect(label).to_have_class(re.compile(r"\blocked\b"))
                 assert await box.evaluate("b => getComputedStyle(b).opacity") == "0.4"
@@ -9811,7 +9907,8 @@ async def agents_states(browser, scheme: str):
     log(
         f"agents ({scheme}): looking, error, none found, signed out, too old, sandboxed, "
         "Claude's settings widening its sandbox, Claude sandboxed (no hooks), offline, most of a "
-        "plan used (its tip in the page area), Claude's plan limit, Claude without its extra"
+        "plan used (its tip in the page area), Claude's plan limit, Claude being set up, its "
+        "setup failed (Retry, Details), Claude not set up while off"
     )
 
 

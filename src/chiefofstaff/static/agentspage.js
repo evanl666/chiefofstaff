@@ -12,7 +12,7 @@
 import { $, api, el, toast } from "./dom.js";
 import { state } from "./state.js";
 import { copyFix, endsLine, modelText, statusOf } from "./agentpick.js";
-import { openSetup, setupOf, setupWords } from "./agentsetup.js";
+import { openSetup, retrySetup, setupOf, setupWords } from "./agentsetup.js";
 import { resetTime } from "./board.js";
 import { codeHtml } from "./text.js";
 
@@ -88,12 +88,18 @@ export function agentAlerts(name, { look = null, status = null, sandboxed = fals
   if (ends) alerts.push({ tone: "warn", text: ends });
   const why = cannotRun(look, status, sandboxed);
   if (why) alerts.push({ tone: "bad", text: why });
+  // Its setup by Chief of Staff failed: why in a few words; what it printed and the command to
+  // run instead folded under Details.
+  const now = { ...(status || {}), ...(look || {}) };
+  if (now.setup?.state === "failed") alerts.push({ tone: "warn", text: `${now.said}.`, details: now.setup });
   if (sandboxed && look?.sandbox_note && !why) alerts.push({ tone: "warn", text: look.sandbox_note });
   return alerts;
 }
 // Why it can't run here, said in full ("" when it can, or when Sign in or Install is what it
 // needs).
 function cannotRun(look, status, sandboxed) {
+  // (What Chief of Staff sets up itself is said by its status, not as a reason it can't run.)
+  if (look?.setup || status?.setup) return "";
   const kind = (look || status)?.status;
   if (["signin", "missing"].includes(kind) || look?.found === false) return "";
   if (look && sandboxed && look.sandbox) return look.sandbox;
@@ -106,6 +112,11 @@ function cannotRun(look, status, sandboxed) {
 export function agentStatus(name, { look = null, status = null, sandboxed = false, on = false, running = "" } = {}) {
   const now = { ...(status || {}), ...(look || {}) };
   if (running) return { text: running, tone: "warn", action: "show" };
+  // Its Agent SDK, which Chief of Staff sets up itself (Claude): calm while it runs; Retry when
+  // it failed (Set up when it is needed again); turning it on sets it up.
+  if (now.status === "settingup") return { text: now.said || "Setting up…", tone: "off", action: "" };
+  if (["failed", "needed"].includes(now.setup?.state)) return { text: "Not set up", tone: "warn", action: "retry", words: now.setup.state === "failed" ? "Retry" : "Set up" };
+  if (now.status === "setup") return { text: now.said || "Not set up yet", tone: "off", action: "", turnsOn: true };
   if (now.status === "signin") return { text: "Sign in needed", tone: "warn", action: now.ways?.length ? "signin" : "" };
   // (Listed only while on, to be turned off: Settings offers no install; the @ list does.)
   if (now.status === "missing" || look?.found === false) return { text: "Not installed", tone: "off", action: "" };
@@ -136,8 +147,11 @@ const savedOn = (name) => (looked ? Boolean(lookOf(name)?.enabled) : Boolean(sta
 const onNow = (name) => Boolean(field(`agent_${name}_enabled`)?.checked);
 const sandboxed = () => Boolean(looked?.sandboxed);
 function nowOf(name) {
-  const look = lookOf(name);
+  let look = lookOf(name);
   const status = statusOf(name) || null;
+  // Where the setup of its Agent SDK stands changes as it runs: the snapshot's, once it began or
+  // ended since the look (agentsStateChanged then looks again).
+  if (look && status && (status.setup || look.setup?.state === "running")) look = { ...look, status: status.status, said: status.said, setup: status.setup };
   const running = setupOf(name)?.state === "running" ? setupWords(name) : "";
   return { look, status, sandboxed: sandboxed(), on: onNow(name), running };
 }
@@ -470,7 +484,7 @@ function drawRow(name) {
   // Turning it on waits until it can work; turning it off never waits.
   const box = field(`agent_${name}_enabled`);
   const on = savedOn(name);
-  box.disabled = !on && !box.checked && !status.works;
+  box.disabled = !on && !box.checked && !status.works && !status.turnsOn;
   box.closest("label").classList.toggle("locked", box.disabled);
   // The meter: where the agent said how much of its plan is used.
   const meter = usageMeter(now.look?.usage);
@@ -492,9 +506,10 @@ function drawRow(name) {
   }
   // Its one action.
   const action = row.querySelector(".action-slot");
-  const said = { signin: "Sign in", install: "Install", show: "Show" }[status.action];
-  const named = { signin: `Sign in to ${label(name)}`, install: `Install ${label(name)}`, show: `Show the ${setupOf(name)?.kind === "install" ? "install" : "sign-in"} of ${label(name)}` }[status.action];
-  action.replaceChildren(...(said ? [el("button", { type: "button", class: "setup-action compact", text: said, "aria-label": named, "data-setup": name })] : []));
+  const said = { signin: "Sign in", install: "Install", show: "Show", retry: status.words }[status.action];
+  const named = { signin: `Sign in to ${label(name)}`, install: `Install ${label(name)}`, show: `Show the ${setupOf(name)?.kind === "install" ? "install" : "sign-in"} of ${label(name)}`, retry: `Set up ${label(name)}${status.words === "Retry" ? " again" : ""}` }[status.action];
+  const target = status.action === "retry" ? { "data-retry": name } : { "data-setup": name };
+  action.replaceChildren(...(said ? [el("button", { type: "button", class: "setup-action compact", text: said, "aria-label": named, ...target })] : []));
   alertsInto(name, agentAlerts(name, { look: now.look, status: now.status, sandboxed: now.sandboxed, failure: failed }));
   // What it unfolds: how to make it ready, that its work waits, its fields, its details.
   const fix = (now.look || now.status)?.fix;
@@ -502,8 +517,9 @@ function drawRow(name) {
   const setupDetails = row.querySelector(".setup-details");
   const kind = (now.look || now.status)?.status;
   const unready = Boolean(now.running) || kind === "signin" || status.text === "Not installed";
-  setupNote.hidden = !unready;
+  setupNote.hidden = !unready && !status.turnsOn;
   setupDetails.hidden = !(unready && fix?.command);
+  if (status.turnsOn) setupNote.textContent = "Turning on Use for workers sets it up: Chief of Staff installs what Claude workers need, in a minute or so.";
   if (unready) {
     setupNote.textContent = setupOf(name)?.kind === "install"
       ? "Install runs the official installer in your account and shows its output; then Sign in."
@@ -543,9 +559,33 @@ function drawRow(name) {
 function alertsInto(name, alerts) {
   const box = $(`#agent-${name}-alerts`);
   if (!box) return;
-  // (A command in one shows as code, not with its marks.)
-  box.replaceChildren(...alerts.map((alert) => el("p", { class: `agent-alert ${alert.tone}`, html: codeHtml(alert.text) })));
+  // (A command in one shows as code, not with its marks.) Details stay folded as they were.
+  const open = box.querySelector("details")?.open;
+  box.replaceChildren(...alerts.flatMap((alert) => [el("p", { class: `agent-alert ${alert.tone}`, html: codeHtml(alert.text) }), ...(alert.details ? [setupDetailsFold(name, alert.details, open)] : [])]));
   box.hidden = !alerts.length;
+}
+// What a setup that failed printed last, and the command to run instead: a last resort.
+function setupDetailsFold(name, setup, open) {
+  const fold = el(
+    "details",
+    { class: "setup-fold" },
+    el("summary", { text: "Details" }),
+    ...(setup.output?.length ? [el("pre", { text: setup.output.join("\n") })] : []),
+    ...(setup.command
+      ? [
+          el(
+            "span",
+            { class: "cmd" },
+            "Or install it yourself in a terminal: ",
+            el("code", { text: setup.command }),
+            " ",
+            el("button", { type: "button", class: "link", text: "Copy command", "aria-label": `Copy ${setup.command}`, "data-copy-setup": name }),
+          ),
+        ]
+      : []),
+  );
+  fold.open = Boolean(open);
+  return fold;
 }
 // A setup run's news (agentsetup.js): its row says it at once.
 export function setupChanged() {
@@ -556,6 +596,8 @@ export function setupChanged() {
 // The snapshot changed (an agent's status, Copilot's): the rows say so, fields untouched.
 export function agentsStateChanged() {
   if (!$("#settings-dialog")?.open || !$("#agent-rows")) return;
+  // Set up meanwhile (its Agent SDK): looked at again, for its version, sign-in and models.
+  if (looked && !looking && others.some((name) => lookOf(name)?.setup && !statusOf(name)?.setup)) lookAtAgents();
   for (const name of others) drawRow(name);
   drawCopilot();
   syncNewWork();
@@ -724,6 +766,14 @@ function clicked(event) {
   if (setup) return openSetup(setup.dataset.setup);
   const again = event.target.closest("[data-again]");
   if (again) return openSetup(again.dataset.again, { again: true });
+  const retry = event.target.closest("[data-retry]");
+  if (retry) return retrySetup(retry.dataset.retry, agentsStateChanged);
+  const copySetup = event.target.closest("[data-copy-setup]");
+  if (copySetup) {
+    const setup = statusOf(copySetup.dataset.copySetup)?.setup || lookOf(copySetup.dataset.copySetup)?.setup;
+    if (setup?.command) copyFix({ command: setup.command });
+    return;
+  }
   const copy = event.target.closest("[data-copy]");
   if (copy) {
     const name = copy.dataset.copy;
