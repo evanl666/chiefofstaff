@@ -106,7 +106,8 @@ async def test_a_busy_workers_new_task_goes_to_a_second_worker_with_its_context(
         worker
     )
     assert harness.kinds(second)[0] == ("notice", f"Started with the context of “{name}”")
-    assert runtime.view(row)["fork_of"] == {"id": worker, "title": name}
+    # Why, for the sidebar's ⑂: "…, because <it> was busy".
+    assert runtime.view(row)["fork_of"] == {"id": worker, "title": name, "busy": True}
     assert "fork_of" not in runtime.view(harness.store.session(worker))
 
 
@@ -471,6 +472,7 @@ async def test_work_wanted_in_parallel_with_a_worker_at_work_goes_to_a_second_wo
         assert tasks_of(harness, second) == ["Count the lines"]
         assert tasks_of(harness, worker) == ["Run the tests"]
         assert harness.session(worker).sent == before, "the worker at work is not disturbed"
+        assert "busy" not in runtime.forks.origin(second), "wanted in parallel, not busy"
     elif case == "between turns":
         assert result.startswith("Delivered"), result
         assert tasks_of(harness, worker) == ["Run the tests", "Count the lines"]

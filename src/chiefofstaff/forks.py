@@ -54,12 +54,14 @@ EVERY_WORKER_WAITS = frozenset({NO_SLOT, SHORT})
 @dataclass
 class Second:
     """A second worker about to be made: the worker it comes from, its session's id (the fork
-    of that worker's session, or a new one), and whether it has that conversation (`native`)
-    or a brief of its work only."""
+    of that worker's session, or a new one), whether it has that conversation (`native`) or a
+    brief of its work only, and whether it takes a new task of that worker's because that one
+    was busy (`busy`; the sidebar's ⑂ says so)."""
 
     source: dict
     session_id: str
     native: bool
+    busy: bool = False
 
 
 class Forks:
@@ -225,6 +227,8 @@ class Forks:
         origin: dict[str, Any] = {"id": source["id"], "title": self.runtime.display_title(source)}
         if not second.native:
             origin["brief"] = True
+        if second.busy:
+            origin["busy"] = True
         self.store.set(f"forkof:{session_id}", json.dumps(origin, ensure_ascii=False))
         if not second.native:
             return
