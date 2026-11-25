@@ -64,6 +64,52 @@ longer takes long work for silence.
   finished task looks at its checkouts once instead of twice. What the Router and workers are
   given is the same.
 
+Your answer to a decision card reaches its worker at once, and a decided question stays decided.
+
+- **Your answer to a decision card reaches the worker at once.** A worker that asked and kept at
+  other parts of its task (a simulation, say) read your answer only when that turn ended, 43
+  minutes later in one case; meanwhile it asked you again, from what it found before your
+  answer, as a new card, and both answers stayed in force. Your answer, and what you write a
+  worker waiting on you, now reaches it in the turn it is in, on Copilot, Codex and Claude Code
+  (Claude Code takes it in while one of its tools runs, else when that turn ends); a worker
+  whose turn is over gets it as its next turn, once.
+- **A worker that asks again before reading your answer gets your answer, not a new card.**
+  Whether it asks with a decision card, a question or blocked report, or Copilot's question
+  card: no card is made while your answer to it is on its way; it gets that answer, with when
+  you gave it, and *Handled for you* says so. Asked while a newer message of yours or the
+  Router's about its task is unread, it reads that first (once), and the Router hears that a
+  question asked anyway was asked before it.
+- **A decided question comes back as decided.** On a task you decided for, a worker that asks
+  again, in any words, gets your decision back. Only a reconsideration that says why (or a
+  decision it says is another one, once it was shown yours) makes a card.
+- **A reconsideration says when you answered.** Its card reads *You answered this at 10:02
+  (“…”). Asked again because: …*, and its one main action is **Keep**: your answer stays in
+  force and the worker goes on with it. Picking one of its options changes it. *Not now* on a
+  reconsideration told the worker to go on with its recommendation, which there is the change:
+  it now keeps your answer, for now.
+- **Words that pick no option are a note, not a decision.** "Try more variants with a lower
+  weight first" on a reconsideration replaced the decision in force, reopened six finished
+  tasks and sent "Decision changed" six times. Only a picked option, or words that clearly name
+  one, decide; other words reach the workers that asked as your note, and the card says *Kept
+  your decision; sent your note*.
+- **A changed decision tells each worker once.** One message for each worker, however many of
+  its tasks rely on the decision; a finished task reopens only when the answer itself changed
+  (not for the same answer in other words); changes of one decision within two hours are one
+  *Decision changed* card. What workers confirm stays on that card after *Got it*.
+- **A decision the Router records reaches the workers relying on it.** Recorded for tasks
+  already given, it reached none of their workers (one asked you for it again, blocked). Each
+  hears it once, at once when it waits on you, and a question it asked you about it is settled.
+- **Your question stays while its worker works on.** A progress report took the worker's open
+  question off *Needs you* (and it came back with its next one). It stays until you answer it,
+  its task ends, or the worker asks again: then it is the same question, saying *Updated 10:42*;
+  a worker's decision card asked again in other words is updated the same way.
+- **Blocked on another worker is not blocked on you.** A blocked report waiting on a worker it
+  works with (named, or one its task waits on) shows under *Monitoring*, "Waits on “…”", not
+  under *Needs you*.
+- **The Router hears what you answered.** When you answer a worker's question (under *Needs
+  you*, on its question card or in its chat), the Router gets your words, not only that it was
+  answered, and may record them as a decision.
+
 A finished card can be shared as a link, and opened in your own Chief of Staff.
 
 - **Share a finished card as a link.** *Share…* in a finished card's ⋯ menu (right after *Copy

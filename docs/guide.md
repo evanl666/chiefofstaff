@@ -763,14 +763,23 @@ notification:
 
 - **Decisions**: a choice that is yours (scope, a trade-off, a risky change such as a migration).
   The card says why it comes up, the options and what each means, and what the worker
-  recommends; pick one or write your own. Workers that hit the same question wait on the same
-  card, and one answer reaches all of them. Answering in the worker's chat answers its card
+  recommends; pick one, or write your own decision (on a card with options, words that name
+  none of them are a note to the worker: it goes on with them as your instruction, and
+  nothing is decided). Workers that hit the same question wait on the same card, and one
+  answer reaches all of them, at once: a worker that asked and kept at other parts of its
+  task reads it in that same turn. A worker that asks again in other words while its card
+  waits updates that card (it says *updated 10:42*) instead of making another. Answering in the worker's chat answers its card
   too (a question back, "what does B change?", does not: the worker answers it and the card
   stays); a card whose task ends (done, failed, cancelled) leaves, and its worker is told. A
   card is about the task its worker is at (not one given since); closed, the worker leaves
   its card, and reopened, it waits on it again. See [Decisions](#decisions).
-- **Questions**: a worker uses Copilot's `ask_user` for quick facts. Pick a choice or type an
-  answer. It waits at most an hour; then it goes on without your answer, and the question
+- **Questions**: a worker reports one when it needs you (its progress reports meanwhile keep it
+  under *Needs you*, and asked again, it is the same question, updated), or uses Copilot's
+  `ask_user` for quick facts: pick a choice or type an answer. What you answer reaches the
+  worker at once, and the Router hears it too (it may record it as a decision). A worker
+  blocked on another worker it works with waits on it under *Monitoring* ("Waits on “…”"), not
+  under *Needs you*. An `ask_user` question waits at most an hour; then it goes on without your
+  answer, and the question
   stays under *Needs you*, saying so, until you answer or dismiss it, or its task ends
   (accepted, failed or cancelled; a task replaced by another, or by one the Router started
   instead, passes it on to that one). Your answer
@@ -878,12 +887,23 @@ all"). It records the new decision in place of the old one, and Chief of Staff:
 Work that does not rely on the decision carries on untouched.
 
 When a worker is about to ask something you decided before, it is told first: it follows your
-earlier decision, or asks anyway and the card shows *You decided before: …*. A question you
-answered for its task, asked again, gets your answer, not a new card. When what it found since
-calls one of your decisions into question, its card says *Reconsiders what you decided: …* and
-why; your answer replaces that decision (one decision stays in force), and every other task that
-relied on it is told, as above. Decided another way meanwhile (told the Router, say), the card
-leaves and its task goes on under your new decision.
+earlier decision, or asks anyway and the card shows *You decided before: …*. On a task you
+already decided for, a worker asking again (in any words) gets your decision back, not a new
+card: it asks again only to have you reconsider, saying why, or for another decision it says is
+one. A worker that asks before it has read your answer (it reached the worker while it worked)
+gets that answer instead of a card, and *Handled for you* says so; so does a question it asks
+before reading a newer message of yours or the Router's about its task: it reads that first.
+
+When what it found since calls one of your decisions into question, its card says *You answered
+this at 10:02 (“…”). Asked again because: …*. **Keep** leaves your answer in force (the worker
+goes on with it), and so does *Not now*, for now; picking one of its options replaces that
+decision (one decision stays in force), and every other task that relied on it is told, as
+above: each worker once, however many of its tasks rely on it; a finished task reopens only when
+the answer itself changed, and changes of one decision within two hours are one *Decision
+changed* card. Decided another way meanwhile (told the Router, say), the card leaves and its task
+goes on under your new decision. A decision the Router records for tasks already given reaches
+their workers too, and settles a question one of them asked you about it. What workers confirm
+about a change stays on its card after *Got it*.
 
 ## How you work: learned, and kept up to date
 
