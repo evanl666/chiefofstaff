@@ -70,12 +70,6 @@ KEEP_OPEN = re.compile(
     r"|\bdo(?:n't| not) report (?:it |this )?(?:as )?(?:done|finished)\b",
     re.IGNORECASE,
 )
-# How an acknowledgement starts ("Understood. This task stays open until…").
-ACKNOWLEDGES = re.compile(
-    r"^\W*(?:understood|got it|ok(?:ay)?|noted|will do|sure|acknowledged|right|roger|agreed"
-    r"|thanks|thank you)\b",
-    re.IGNORECASE,
-)
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -644,12 +638,9 @@ class Workers:
             return False
         from .tools import acknowledgement
 
-        return (
-            not answer
-            or acknowledgement(answer)
-            or bool(ACKNOWLEDGES.search(answer))
-            or bool(KEEP_OPEN.search(answer))
-        )
+        # (Not one that says what it did since: that is filed, and it is asked whether it is
+        # finished.)
+        return not answer or acknowledgement(answer) or bool(KEEP_OPEN.search(answer))
 
     async def report_chat_change(self, session_id: str):
         """Asked in chat for a change to finished work, it changed its files and ended without
