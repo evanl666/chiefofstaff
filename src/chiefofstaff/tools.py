@@ -3744,6 +3744,14 @@ class Tools:
                 "title": task["title"],
                 "status": task["status"],
             }
+            if (
+                worker
+                and task["status"] == "running"
+                and row["status"] == "idle"
+                and (row["activity"] or "").startswith("waiting for “")
+            ):
+                # Between turns, waiting for workers it works with (E139): their message wakes it.
+                entry["task"]["waiting_for"] = row["activity"].removeprefix("waiting for ")
         if worker and (unread := self.states[row["id"]].unread):
             # Sent within its turn and not read yet (bug E95): a report now predates them.
             entry["unread"] = [text for text, _, _ in unread.values()]
@@ -4579,6 +4587,11 @@ class Tools:
                 # Read in the background (below): its receipts say so until then, not that it
                 # changed nothing.
                 self.runtime.task_actions.result_due(task["id"])
+                if self.states[caller].filing:
+                    # Its words, filed by Chief of Staff: the owner's to accept (E139).
+                    self.store.set(f"filedwords:{task['id']}", "1")
+                else:
+                    self.store.delete(f"filedwords:{task['id']}")
                 task = self.tasks.move(task["id"], "review", result=clip_report(shown))
                 # The workers it works with that are still at it get its result.
                 self.runtime.background(self.runtime.peers.finished(caller, task, params.summary))
@@ -4731,6 +4744,12 @@ class Tools:
                 f"task_id='{task['id']}'. Never move that work into another task."
             )
         told_status = "answer" if answer else params.status
+        if task and params.status == "done" and self.states[caller].filing:
+            filed = (
+                "Filed from its worker's own words: it ended its turn without report(). Its "
+                "result waits for the owner's review; it is done only once they accept it."
+            )
+            crossed = f"{crossed} {filed}".strip()
         await self.runtime.tell_router(row, told_status, params.summary, task, crossed)
         # On Home now (a line in the Router's chat, a card): an answer to the owner's @ there
         # is not shown again.

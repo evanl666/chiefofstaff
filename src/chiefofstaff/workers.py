@@ -38,17 +38,42 @@ SETTINGS_WAIT = "waiting for you: its folder's settings changed"
 # Who stopped a task its worker was at when they changed ("Stopped by …"): the owner's "Use
 # these settings" goes on with it.
 SETTINGS_STOP = "Chief of Staff, for its folder's settings"
-# A final answer at least this long, left in a worker's chat without report(), is its report.
+# A final answer at least this long, left in a worker's chat without report(), is filed: as
+# progress on its task (never as its result: only the worker says it is done, E139), or for
+# the owner's review when the task needs their acceptance.
 FILED_ANSWER_CHARS = 80
 # An answer in its chat this long, and twice its "done" report or more, completes that report.
 FULLER_ANSWER_CHARS = 200
+# What another worker or a run does that a waiting worker waits for (E139: "once <id> sends",
+# "as soon as the release arrives", "after the data worker's check passes", "until …").
+ARRIVES = (
+    r"(?:sends?|sent|arrives?|passe?s|pass|lands?|finish(?:es)?|completes?|is (?:done|ready|in"
+    r"|merged|out)|are (?:done|ready|in|out)|comes? (?:in|back|through)|reports?|repl(?:y|ies)"
+    r"|answers?|delivers?|posts?|shares?|publish(?:es)?|merges?)"
+)
 # Words of a worker that stopped to wait, not to deliver. In Chinese too, which has no word
 # boundaries (live E3: "我在等 Column Maker 告诉我列名" was not waiting, and asked for a report):
 # 在等, 等待, 等着, 等候, and 等 before a name.
 WAITS = re.compile(
     r"\b(waiting|wait for|once (it|they|the|that|this|ci)\b"
     r"|when (it|they|ci) (finish|answer|complete)|will (continue|resume|go on|pick (it|this) up))"
+    rf"|\bonce\s+\S+(?:\s+\S+){{0,3}}?\s+(?:{ARRIVES}|is|are|has|have)\b"
+    rf"|\b(?:as soon as|after|until|till)\s+(?:\S+\s+){{0,6}}?{ARRIVES}\b"
     r"|在等|等待|等着|等候|等\s*[A-Za-z“\"「(\uff08]",
+    re.IGNORECASE,
+)
+# The Router telling a worker its task is not finished: what the worker answers to that is an
+# acknowledgement (E139: "Understood. This task stays open…" was filed as the task's result).
+KEEP_OPEN = re.compile(
+    r"\bkeep (?:it|this|the task|this task|that task) open\b|\b(?:stays?|remains?) open\b"
+    r"|\b(?:isn't|is not|not|aren't|are not) (?:yet )?(?:done|finished|complete)\b"
+    r"|\bdo(?:n't| not) report (?:it |this )?(?:as )?(?:done|finished)\b",
+    re.IGNORECASE,
+)
+# How an acknowledgement starts ("Understood. This task stays open until…").
+ACKNOWLEDGES = re.compile(
+    r"^\W*(?:understood|got it|ok(?:ay)?|noted|will do|sure|acknowledged|right|roger|agreed"
+    r"|thanks|thank you)\b",
     re.IGNORECASE,
 )
 
@@ -472,6 +497,15 @@ class Workers:
             return  # Working again, or being closed or reattached (asked once it is: reopened).
         answers = [m for m in recent if m["kind"] == "assistant" and not m["meta"].get("narration")]
         answer = answers[-1]["text"].strip() if answers else ""
+        if peers := self.peer_waits(session_id, task, asked, answer):
+            # Waiting for a worker it works with (its answer names it, or its task says it
+            # waits for it: E139, before any wording): that worker's message starts its next
+            # turn. Home and the Router see whom it waits for.
+            names = ", ".join(f"“{self.runtime.display_title(peer)}”" for peer in peers)
+            self.runtime.update_session(session_id, activity=f"waiting for {names}")
+            return
+        if self.acknowledges_open(asked, answer):
+            return  # The Router said its task is not done: it said it understood (E139).
         # Waiting for something (an answer it asked for, a card, a thread or PR it follows):
         # its last words say what it waits for, not its result. Then it reports itself.
         waiting = bool(
@@ -480,35 +514,17 @@ class Workers:
             or self.store.follows(session_id)
             or any(d["session_id"] == session_id for d in self.store.drafts("pending"))
         )
-        if WAITS.search(answer) and (peers := self.runtime.peers.waiting_on(session_id, answer)):
-            # Waiting for a worker it works with: that worker's message starts its next turn.
-            names = ", ".join(f"“{peer['title']}”" for peer in peers)
-            self.runtime.update_session(session_id, activity=f"waiting for {names}")
-            return
         if nudged:
             if waiting:
                 return  # It says what it waits for; the Watchdog follows it up.
-            # Asked once already and it still did not report: its last words are its report,
-            # so the task leaves Running (the owner reviews what it said).
-            from .tools import Report
-
+            # Asked once already and it still did not report: its last words go to the owner,
+            # who reviews them, so the task leaves Running. Never done by that (E139): only
+            # the owner's acceptance makes it so.
             summary = answer or "It stopped without a report and said nothing more."
-            # report() turns some reports back once each (a short answer, failing tests): the
-            # owner judges it now, so it is filed all the same.
-            for _ in range(4):
-                try:
-                    await self.runtime.toolset.t_report(
-                        Report(status="done", summary=summary, task_id=task["id"]), session_id
-                    )
-                except ValueError:
-                    continue
-                except Exception:
-                    logger.warning("Could not file %s's last words.", session_id, exc_info=True)
-                    return
+            if await self.file_words(session_id, task, "done", summary, retries=4):
                 self.runtime.add_message(
                     session_id, "notice", "It stopped again without a report: filed as one."
                 )
-                return
             return
         text = (
             "Your turn ended without report(). The owner sees only reports: call report now "
@@ -516,16 +532,23 @@ class Workers:
             "from the owner; if you wait for something outside (a run, a deploy, a reply), call "
             "check_back with when to look again. Do not redo the work."
         )
+        display = "It stopped without a report: asked for one."
         if not waiting and len(answer) >= FILED_ANSWER_CHARS:
-            from .tools import Report
-
-            status = "question" if answer.endswith("?") else "done"
+            # Filed as it is (nothing is lost in a retelling), yet never as its result: a turn
+            # that ended without report() may have stopped short (E139: "Nothing is launched
+            # yet" became a done task). Progress on its task, and it is asked once whether it
+            # is finished; for the owner's review when the task needs their acceptance.
+            status = (
+                "question"
+                if answer.endswith("?")
+                else "done"
+                if self.store.get(f"reviewreq:{task['id']}")
+                else "progress"
+            )
             try:
                 # The task it is asked to report on (bug E96: not a finished task its last
                 # instruction named, whose result it replaced).
-                await self.runtime.toolset.t_report(
-                    Report(status=status, summary=answer, task_id=task["id"]), session_id
-                )
+                await self.file_words(session_id, task, status, answer)
             except ValueError as exc:
                 # Not taken as it is (a check fails, an asked-for table is missing): the worker
                 # hears why, as it would have from report.
@@ -533,18 +556,99 @@ class Workers:
             except Exception:
                 logger.warning("Could not file %s's answer as its report.", session_id)
             else:
-                self.runtime.add_message(
-                    session_id, "notice", "It ended without a report: its answer is filed as one."
+                if status != "progress":
+                    self.runtime.add_message(
+                        session_id,
+                        "notice",
+                        "It ended without a report: its answer is filed as one.",
+                    )
+                    return
+                text = (
+                    "Your turn ended without report(). Your last answer is on the task's card as "
+                    "progress, not as its result: if the task is finished, call report now "
+                    "(status done) with your full result (that answer, if it is all of it); if "
+                    "you need something from the owner, report question or blocked; if you wait "
+                    "for a worker you work with, say whom (its worker id) and end your turn; if "
+                    "you wait for something outside (a run, a deploy, a reply), call check_back "
+                    "with when to look again. Do not redo the work."
                 )
-                return
+                display = (
+                    "It ended without a report: its answer is filed as progress; asked whether "
+                    "it is finished."
+                )
         with suppress(Exception):
             await self.delivery.deliver(
                 session_id,
                 wrap("system", "report-missing", text, task=task["id"]),
                 kind="notice",
-                display="It stopped without a report: asked for one.",
+                display=display,
                 meta={"report_nudge": True},
             )
+
+    async def file_words(
+        self, session_id: str, task: dict, status: str, summary: str, retries: int = 0
+    ) -> bool:
+        """A worker's own words, filed on its task as a report it did not make (Report's
+        status). Filed as done, they wait for the owner's review as such: never accepted for
+        them (TaskActions.informational), and the Router hears where they come from.
+        `retries`: report() turns some reports back once each (a short answer, failing tests):
+        the owner judges it now, so it is filed all the same (False when it could not be);
+        without, what it turns back is raised."""
+        from .tools import Report
+
+        state = self.states[session_id]
+        for _ in range(retries + 1):
+            state.filing = True
+            try:
+                await self.runtime.toolset.t_report(
+                    Report(status=status, summary=summary, task_id=task["id"]), session_id
+                )
+            except ValueError:
+                if not retries:
+                    raise
+                continue
+            except Exception:
+                if not retries:
+                    raise
+                logger.warning("Could not file %s's last words.", session_id, exc_info=True)
+                return False
+            finally:
+                state.filing = False
+            return True
+        return False
+
+    def peer_waits(self, session_id: str, task: dict, asked: dict, answer: str) -> list[dict]:
+        """The workers at work that a turn which ended without report() waits for (E139): those
+        its answer names (by worker id or title), whatever its words; else those its task's
+        instructions (the Router's) name as what it waits for. Never one it does not name."""
+        peers = self.runtime.peers
+        if answer and (named := peers.waiting_on(session_id, answer)):
+            return named
+        given = [task["goal"] or ""]
+        if asked["kind"] == "router" and asked["meta"].get("task_id") in {task["id"], None}:
+            given.append(asked["text"] or "")
+        for text in given:
+            if WAITS.search(text) and (named := peers.waiting_on(session_id, text)):
+                return named
+        return []
+
+    @staticmethod
+    def acknowledges_open(asked: dict, answer: str) -> bool:
+        """Whether a turn's answer only acknowledges the Router's message that its task is not
+        done ("This task isn't done… keep it open"; E139: "Understood. This task stays open
+        until…" was filed as its result). Never filed, nor asked to be."""
+        if asked["kind"] != "router" or not (router_message(asked) or router_note(asked)):
+            return False
+        if not KEEP_OPEN.search(asked["text"] or ""):
+            return False
+        from .tools import acknowledgement
+
+        return (
+            not answer
+            or acknowledgement(answer)
+            or bool(ACKNOWLEDGES.search(answer))
+            or bool(KEEP_OPEN.search(answer))
+        )
 
     async def report_chat_change(self, session_id: str):
         """Asked in chat for a change to finished work, it changed its files and ended without
