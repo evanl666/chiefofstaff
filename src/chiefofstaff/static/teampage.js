@@ -547,7 +547,7 @@ function line(model, { key, who, main, sub, chip, tone, at, kind, url }) {
     "div",
     { class: `tp-line${model.unseen(at) ? " unseen" : ""}`, "data-line": key },
     whoMark(model, who),
-    el("span", { class: "what" }, el("span", { class: "main", title: main }, kind ? el("span", { class: "kind", text: kind }) : null, name), sub ? el("span", { class: "sub", text: sub }) : null),
+    el("span", { class: "what" }, el("span", { class: "main", title: main }, kind ? el("span", { class: "kind", "data-kind": kind }) : null, name), sub ? el("span", { class: "sub", text: sub }) : null),
     el("span", { class: "end" }, chip ? el("span", { class: `chip ${TONE_CHIP[tone] || ""}`.trim(), text: chip }) : null),
   );
 }
@@ -635,7 +635,7 @@ function partRow(model, view, part) {
   const avatar = partAvatar({ ...part, cls: cls + (part.state === "needs" || (part.state === "blocked" && part.held?.minutes >= ts.BLOCKING_MINUTES) ? " is-review" : "") }, { large: true });
   const kind = ts.needKind(part.marker);
   let primary = null;
-  if (part.state === "needs" && kind === "review" && !st.done) primary = el("button", { type: "button", text: "Review", "aria-expanded": String(view.review === part.id), onclick: (event) => { event.stopPropagation(); openReview(part.id); } });
+  if (part.state === "needs" && kind === "review" && !st.done) primary = el("button", { type: "button", class: view.review === part.id ? "secondary" : "", text: "Review", "aria-expanded": String(view.review === part.id), onclick: (event) => { event.stopPropagation(); openReview(part.id); } });
   else if (part.state === "needs" && ask && brief.part?.id !== part.id) primary = el("button", { type: "button", text: "Answer", "aria-expanded": String(view.answering === part.id), onclick: (event) => { event.stopPropagation(); view.answering = view.answering === part.id ? "" : part.id; view.opening = view.answering; renderTeam(); } });
   else if (part.state === "needs" && brief.part?.id !== part.id) [primary] = stuckActions(part);
   else if (part.state === "blocked" && part.held?.minutes >= ts.BLOCKING_MINUTES && brief.part?.id !== part.id) primary = nudgeButton(part.held, st.parts.find((one) => one.id === part.held.to)?.name || "");
@@ -643,14 +643,18 @@ function partRow(model, view, part) {
   const mark = markOf(workerOf(part.moved_out?.session || part.session));
   const row = el(
     "div",
-    { class: `tp-part ${part.color} ${cls}${view.open === part.id ? " open" : ""}`, "data-part": part.id, role: "listitem" },
+    { class: `tp-part ${part.color} ${cls}${view.open === part.id ? " open" : ""}`, "data-part": part.id },
     el("span", { class: "av" }, avatar),
     el(
       "div",
-      { class: "main", role: "button", tabindex: "0", "aria-expanded": String(view.open === part.id), "aria-label": `${part.name}: ${words}`, onclick: () => toggleOpen(part.id), onkeydown: (event) => (event.key === "Enter" || event.key === " ") && (event.preventDefault(), toggleOpen(part.id)) },
-      el("div", { class: "name" }, el("span", { text: part.name }), mark || null),
-      el("div", { class: "status", text: words, title: words }),
-      outs.length ? el("div", { class: "outs" }, ...outs.map((item) => (item.url ? el("a", { class: `chip ${TONE_CHIP[item.tone] || ""}`.trim(), href: item.url, target: "_blank", rel: "noopener", text: item.kind === "PR" ? `${item.short}${item.status ? ` ${item.status}` : ""}` : item.name, onclick: (event) => event.stopPropagation() }) : el("span", { class: "chip", text: item.name })))) : null,
+      { class: "main" },
+      el(
+        "div",
+        { class: "tp-head", role: "button", tabindex: "0", "aria-expanded": String(view.open === part.id), "aria-label": `${part.name}: ${words}`, onclick: () => toggleOpen(part.id), onkeydown: (event) => (event.key === "Enter" || event.key === " ") && (event.preventDefault(), toggleOpen(part.id)) },
+        el("div", { class: "name" }, el("span", { text: part.name }), mark || null),
+        el("div", { class: "status", text: words, title: words }),
+      ),
+      outs.length ? el("div", { class: "outs" }, ...outs.map((item) => (item.url ? el("a", { class: `chip ${TONE_CHIP[item.tone] || ""}`.trim(), href: item.url, target: "_blank", rel: "noopener", text: item.kind === "PR" ? `${item.short}${item.status ? ` ${item.status}` : ""}` : item.name }) : el("span", { class: "chip", text: item.name })))) : null,
     ),
     el("span", { class: "time", text: ts.partTime(part) }),
     el("span", { class: "act" }, primary, rowMenu(model, part)),
@@ -661,7 +665,8 @@ function partRow(model, view, part) {
   else if (view.open === part.id) after.push(detail(model, part));
   // Opened just now: it rises in (not at every redraw while open).
   if (view.opening === part.id && moving()) after.forEach((node) => node.classList.add("rise"));
-  return [row, ...after];
+  // A part and what it opens, one item of the list.
+  return [el("div", { class: "tp-item", role: "listitem" }, row, ...after)];
 }
 function toggleOpen(id) {
   page.open = page.open === id ? "" : id;

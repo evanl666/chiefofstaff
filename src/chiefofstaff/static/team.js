@@ -449,7 +449,8 @@ export function teamOfPeers(peers) {
 // a "!" when it needs the owner.
 const SVG_NS = "http://www.w3.org/2000/svg";
 export function partAvatar(part, { large = false, mark = part.cls } = {}) {
-  const node = el("span", { class: `pa ${part.color}${large ? " lg" : ""}`, "aria-hidden": "true" }, part.avatar, el("span", { class: "ring" }));
+  // Its letter drawn from data-av: a mark, never text read or sized as text.
+  const node = el("span", { class: `pa ${part.color}${large ? " lg" : ""}`, "aria-hidden": "true", "data-av": part.avatar }, el("span", { class: "ring" }));
   if (/\bis-done\b/.test(mark || "") && !/\bis-ended\b/.test(mark || "")) {
     const tick = document.createElementNS(SVG_NS, "svg");
     tick.setAttribute("viewBox", "0 0 10 10");
