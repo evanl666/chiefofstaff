@@ -1152,6 +1152,16 @@ async def teams_views(runtime, browser, quality: Quality):
     # The prototype's scene: live (the brief asking), Tell the team (the message written, who
     # gets it chosen), Review in place (邮件通知 reported), then delivered.
     refund = await teams_scene.refund_team(runtime)
+    # A decision from before the request that 订单页 relies on: Decided's "Also applies" fold.
+    runtime.store.execute(
+        "INSERT INTO decisions(id, text, status, replaces, source, created_at) "
+        "VALUES ('d0ea1b2c4', '退款一律原路退回，不退到余额', 'active', '[]', 'owner', "  # noqa: RUF001
+        "'2026-01-01T00:00:00+00:00')"
+    )
+    runtime.store.execute(
+        "INSERT INTO task_decisions(task_id, decision_id) VALUES (?, 'd0ea1b2c4')",
+        (refund["ui_task"],),
+    )
     for state in ("team-live", "team-tell", "team-review", "team-delivered"):
         if state == "team-review":
             await teams_scene.refund_reports(runtime, refund)
@@ -1167,6 +1177,9 @@ async def teams_views(runtime, browser, quality: Quality):
             await page.goto(f"{BASE}/#token={TOKEN}")
             await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
             await show(page, refund["team"])
+            if state == "team-live":
+                await page.locator("#panel .tp-also > summary").click()
+                await expect(page.locator("#panel .tp-also .tp-line")).to_be_visible()
             if state == "team-tell":
                 await page.locator("#composer-input").fill(
                     "退款弹窗和邮件里都加一句：部分退款会在 3 个工作日内原路退回。"  # noqa: RUF001

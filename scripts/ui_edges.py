@@ -5539,6 +5539,9 @@ RUNNING = """() => document.getAnimations().filter((a) => a.playState === "runni
   .map((a) => `${a.animationName || a.constructor.name} on ${a.effect?.target?.className}`)"""
 
 
+# A decision of the owner's made days before the refund request (changed once since).
+EARLIER = "退款一律原路退回，不退到余额"  # noqa: RUF001
+
 # The most dots on a team's rail at once, as each is drawn (again with the page, where it was).
 TRAVELS = """() => {
   window.travels = 0;
@@ -6833,6 +6836,17 @@ async def round_team_v4(runtime, browser, failures: list[str]):
     store.execute("UPDATE decisions SET status='replaced' WHERE status='active'")
     found = await teams_scene.refund_team(runtime)
     team = found["team"]
+    # A decision of the owner's from days before the request that 订单页 relies on (the Router
+    # named it): it only "also applies", behind a fold in Decided, never in Watch out.
+    store.execute(
+        "INSERT INTO decisions(id, text, status, replaces, source, created_at) "
+        "VALUES ('d0ea1b2c3', ?, 'active', '[\"d0ea1b2c2\"]', 'owner', ?)",
+        (EARLIER, (datetime.now(UTC) - timedelta(days=3)).isoformat()),
+    )
+    store.execute(
+        "INSERT INTO task_decisions(task_id, decision_id) VALUES (?, 'd0ea1b2c3')",
+        (found["ui_task"],),
+    )
     # A worker closed (the sidebar's Closed · N).
     router = store.get("router_id")
     made = await call_tool(runtime, "spawn_worker", router, title="旧的导出脚本", instructions="x",
@@ -6923,7 +6937,14 @@ async def round_team_v4(runtime, browser, failures: list[str]):
             panel = page.locator("#panel.tp-panel")
             await expect(panel.locator(".tp-panel-head h2")).to_have_text("So far")
             await expect(panel.locator(".tp-sofar-made .tp-line")).to_have_count(3)
-            await expect(panel.locator(".tp-sofar-decided .tp-line")).to_have_count(2)
+            decided = panel.locator(".tp-sofar-decided")
+            await expect(decided.locator(".items > .tp-line")).to_have_count(2)
+            await expect(decided.locator("summary .count")).to_have_text("2")
+            also = decided.locator(".tp-also")
+            await expect(also.locator("summary")).to_have_text("Also applies · 1")
+            await expect(also).not_to_have_attribute("open", "")
+            await expect(also.locator(".tp-line")).to_contain_text(EARLIER)
+            await expect(page.locator("#panel")).not_to_contain_text("hasn't confirmed")
             for part in HOME_PARTS:
                 await expect(page.locator(part)).to_be_attached()
                 await expect(page.locator(part)).to_be_hidden()
@@ -7023,8 +7044,9 @@ async def round_team_v4(runtime, browser, failures: list[str]):
     await page.locator("#tp-brief .option", has_text="支持部分退款").click()
     decided = page.locator("#panel .tp-sofar-decided .tp-line", has_text="支持部分退款")
     await expect(decided).to_have_count(1, timeout=10000)
-    assert [d["text"] for d in runtime.decisions.active()] == [
-        "部分退款要支持吗？ → 支持部分退款"  # noqa: RUF001
+    assert sorted(d["text"] for d in runtime.decisions.active()) == [
+        EARLIER,
+        "部分退款要支持吗？ → 支持部分退款",  # noqa: RUF001
     ]
     await page.wait_for_timeout(2500)
     # Its result handed on: a dot travels down the rail to the part waiting on it (a second

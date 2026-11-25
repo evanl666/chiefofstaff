@@ -429,6 +429,9 @@ export function sinceOf(team, st, { looked = "", decided = [], made = [], brief 
       const status = row.status || part.status;
       const text = part.accepted ? `${part.name} is done` : status === "failed" ? `${part.name} failed` : status === "cancelled" ? `${part.name} was cancelled` : `${part.name} ended`;
       if (after(at)) found.push({ key: `e:${part.id}`, at, text, target: `part:${part.id}` });
+    } else if (part.state === "blocked" && part.held && after(part.held.asked)) {
+      // A question between parts, once it holds its asker up (a note never is news here).
+      found.push({ key: `q:${part.held.id}`, at: part.held.asked, text: `${part.name} waits on ${name(part.held.to)}'s answer`, target: brief?.part?.id === part.id ? "brief" : `part:${part.id}` });
     }
   }
   for (const item of made) if (item.status === "merged" && after(item.at)) found.push({ key: `m:${item.key}`, at: item.at, text: `${name(item.part)}'s ${item.short} merged`, target: `line:${item.key}` });

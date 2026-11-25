@@ -415,6 +415,22 @@ def test_since_you_looked_is_what_changed_after_the_look_only():
     assert found["never"] == 0, "never looked: nothing to say since when"
 
 
+def test_since_you_looked_has_a_question_once_it_holds_a_part_up():
+    """A question between parts is news once it holds its asker up (after the look); one that
+    holds nothing up, like a note, is not."""
+    found = v4(
+        "const looked = at(30);\n"
+        "const t = team([member('a'), member('b'), member('c'), member('d')], { waiting: ["
+        "{ id: 'q1', from: 'b', to: 'a', blocks: true, minutes: 12, asked: at(12) }, "
+        "{ id: 'q2', from: 'c', to: 'a', blocks: false, minutes: 5, asked: at(5) }, "
+        "{ id: 'q3', from: 'd', to: 'a', blocks: true, minutes: 50, asked: at(50) }] });\n"
+        "const st = ts.teamState(t, ctx({ a: run, b: run, c: run, d: run }));\n"
+        "return ts.sinceOf(t, st, { looked, brief: ts.briefOf(t, st) })"
+        ".map((i) => [i.key, i.text, i.target]);"
+    )
+    assert found == [["q:q1", "Pb waits on Pa's answer", "part:b"]]
+
+
 def test_watch_out_is_what_could_go_wrong_across_the_parts():
     found = v4(
         "const out = member('x', { moved_out: { task: 'y', title: 'Sales export', session: 'sy' }"
