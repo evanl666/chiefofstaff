@@ -372,9 +372,13 @@ default). Nothing is shared until you click *Create link*:
 - **What:** the card as its preview shows it, by an allow-list (title, result, its checks and
   criteria, change counts, the commit it is about, its PRs and warnings), never the worker's
   conversation, the changes themselves, cost, branches or paths on your computer (shortened to
-  the file's name). Tokens, keys, private and internal addresses, Slack links and email addresses
-  are marked in red, and *Create link* waits until you remove or keep each one; the server scans
-  again and refuses if the card changed since the preview.
+  the file's name). Tokens, keys and passwords, private and internal addresses, Slack links and
+  email addresses are marked in red, and *Create link* waits until you remove or keep each one;
+  the server scans again and refuses if the card changed since the preview. Each is marked whole,
+  so *Remove* takes it out whole: a private key from its `BEGIN` line to its `END` (or to the end
+  of its body), an AWS key id with the secret beside it, a link's `user:password@` whatever its
+  scheme (`postgres://`, `redis://`…), and a value given by a name that says it is one
+  (`DB_PASSWORD=`, `JWT_SECRET=`, `"password": "…"`, `client_secret:`).
 - **Where:** a secret gist of your own GitHub account, made with that account's own token from
   `gh` (its identity checked, never another account), holding only ciphertext: AES-256-GCM with
   a fresh key per link, bound to your GitHub user id, at most 64 KiB, with the expiry inside. The

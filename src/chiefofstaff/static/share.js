@@ -67,6 +67,26 @@ export async function openShare(task) {
   else preview(task, data);
 }
 
+// The card as it will be shared (sharing.apply): each removed value replaced wherever it shows,
+// longest first, so a removed key block or AWS pair reads as the one [removed] it will be, however
+// many lines it had. Where the preview marks hits, a stand-in for each, drawn as its [removed].
+function asShared(card, hits, decisions) {
+  const removed = hits.filter((hit) => decisions[hit.id] === "remove" && hit.value).sort((a, b) => b.value.length - a.value.length);
+  const stands = removed.map((hit, n) => ({ ...hit, value: `\uE000${n}\uE001`, was: hit.value }));
+  const marks = (text) => removed.reduce((out, hit, n) => out.split(hit.value).join(stands[n].value), String(text ?? ""));
+  const plain = (text) => removed.reduce((out, hit) => out.split(hit.value).join("[removed]"), String(text ?? ""));
+  const shown = {
+    ...card,
+    title: marks(card.title),
+    result: marks(card.result),
+    criteria: (card.criteria || []).map((item) => ({ ...item, text: marks(item.text), check: plain(item.check) })),
+    checks: (card.checks || []).map((item) => ({ ...item, command: plain(item.command) })),
+    flags: (card.flags || []).map(marks),
+    prs: (card.prs || []).map((pr) => ({ ...pr, title: plain(pr.title) })),
+  };
+  return { card: shown, hits: [...hits.filter((hit) => !removed.includes(hit)), ...stands] };
+}
+
 // The card exactly as it will be seen, what looks private in red, then Create link.
 function preview(task, data, decisions = {}, choice = {}) {
   const { card, hits } = data;
@@ -94,7 +114,8 @@ function preview(task, data, decisions = {}, choice = {}) {
         ))),
       )
     : null;
-  const holder = el("div", { class: "share-preview", role: "region", "aria-label": "What people with the link will see" }, renderCard(card, { when: card.finished_at ? `finished ${ago(card.finished_at)}` : "", hits, decisions }));
+  const shared = asShared(card, hits, decisions);
+  const holder = el("div", { class: "share-preview", role: "region", tabindex: "0", "aria-label": "What people with the link will see" }, renderCard(shared.card, { when: card.finished_at ? `finished ${ago(card.finished_at)}` : "", hits: shared.hits, decisions }));
   function flash(hit) {
     const mark = holder.querySelector(`mark[data-hit="${hit.id}"]`);
     if (!mark) return;

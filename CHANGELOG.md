@@ -3,17 +3,17 @@
 ## Unreleased
 
 - **Share a finished card as a link.** *Share…* in a finished card's ⋯ menu (right after *Copy
-  report*) shows the card exactly as people with the link will see it; tokens, keys, private or
-  internal addresses, Slack links and email addresses are in red, to remove or keep, and *Create
-  link* waits until each is decided (paths on your computer are shortened by themselves; the
+  report*) shows the card exactly as people with the link will see it; tokens, keys, passwords,
+  private or internal addresses, Slack links and email addresses are in red, to remove or keep (each
+  whole: a private key's whole block, an AWS key with its secret, the password in a link), and
+  *Create link* waits until each is decided (paths on your computer are shortened by themselves; the
   conversation, the changes themselves and cost are never shared). The link works for 1, 7 or 30
-  days (7 by default): the card is encrypted (AES-256-GCM) in a secret gist of your GitHub
-  account, made with `gh`, and the key is only in the link, so GitHub can't read it. Anyone
-  holding it opens it in a browser at `evanl666.github.io/chiefofstaff/s/`, with nothing to
-  install or sign in to. *Revoke* (on the card, or Settings → You → *Shared links*, shown only
-  while you have one) deletes the gist and the link stops working at once; it also ends by itself,
-  and Chief of Staff deletes the gist then. Without `gh`, *Download HTML file* saves the card as
-  one file.
+  days (7 by default): the card is encrypted (AES-256-GCM) in a secret gist of your GitHub account,
+  made with `gh`, and the key is only in the link, so GitHub can't read it. Anyone holding it opens
+  it in a browser at `evanl666.github.io/chiefofstaff/s/`, with nothing to install or sign in to.
+  *Revoke* (on the card, or Settings → You → *Shared links*, shown only while you have one) deletes
+  the gist and the link stops working at once; it also ends by itself, and Chief of Staff deletes
+  the gist then. Without `gh`, *Download HTML file* saves the card as one file.
 - **Open a card someone shared, in your own Chief of Staff.** Paste their link alone into Home's
   message box and press Enter (the page's *Open in my Chief* copies it): Chief of Staff opens the
   card itself, as a line in the chat (*Shared by @them · someone else's words*); the link and its

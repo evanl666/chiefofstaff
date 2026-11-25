@@ -718,10 +718,12 @@ you give it (merging does not accept it).
 
 *Share…* in a finished card's ⋯ menu (right after *Copy report*) makes a link to the card that
 anyone holding it can open in a browser, with nothing to install or sign in to. The dialog shows
-the card exactly as they will see it. What looks private (tokens and keys, private or internal
-addresses, Slack links, email addresses) is in red: *Remove* or *Keep* each one; *Create link*
-waits until every one is decided. Paths on your computer are shortened by themselves. Never
-shared: the worker's conversation, the changes themselves, cost and Slack threads.
+the card exactly as they will see it. What looks private (tokens, keys and passwords, private or
+internal addresses, Slack links, email addresses) is in red: *Remove* or *Keep* each one; *Remove*
+takes out the whole secret (a private key's whole block, an AWS key with its secret, the password
+in a link), and *Create link* waits until every one is decided. Paths on your computer are
+shortened by themselves. Never shared: the worker's conversation, the changes themselves, cost and
+Slack threads.
 
 Choose how long it works (1, 7 or 30 days) and *Create link*: the card is encrypted and kept in a
 secret gist of your GitHub account (the one signed in to `gh`; with several, you pick), and the
