@@ -1,0 +1,86 @@
+name: Pages
+# The share links viewer (site/; SECURITY.md, "Share links") on GitHub Pages, at
+# https://evanl666.github.io/chiefofstaff/s/. Built and checked in a browser (every state, its
+# Content-Security-Policy, the format against Chief's own Python) before each deploy. Safe while
+# Pages is off: the deploy runs only once the repository's Pages site publishes from GitHub
+# Actions (read first); until then the viewer is built and checked, and nothing is published.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "src/chiefofstaff/static/sharecard.js"
+      - "src/chiefofstaff/static/style.css"
+      - "src/chiefofstaff/static/mascot.css"
+      - "src/chiefofstaff/static/mascot.js"
+      - "src/chiefofstaff/static/favicon.svg"
+      - "src/chiefofstaff/sharing.py"
+      - "scripts/build_site.py"
+      - "scripts/viewer_check.py"
+      - "tests/share_vector.json"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and check the viewer
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: read
+    outputs:
+      publish: ${{ steps.pages.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - run: uv sync --locked --extra dev
+      - run: uv run --with playwright python -m playwright install --with-deps chromium
+      - name: Build the site
+        run: uv run --locked python scripts/build_site.py _site
+      - name: Check the viewer as built
+        run: uv run --locked --extra dev --with playwright python scripts/viewer_check.py --site _site
+      - name: Pages on, from GitHub Actions?
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ "$(gh api "repos/$REPOSITORY/pages" --jq .build_type 2>/dev/null)" = workflow ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub Pages is not on with GitHub Actions as its source: the viewer was built and checked, and nothing was deployed."
+          fi
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: steps.pages.outputs.publish == 'true'
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}s/
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

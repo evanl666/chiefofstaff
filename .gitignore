@@ -15,3 +15,4 @@ browser-shots/
 .coverage.*
 htmlcov/
 coverage.xml
+_site/

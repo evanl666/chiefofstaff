@@ -22,6 +22,8 @@ TOP = {
     "eslint.config.mjs",
     "pyproject.toml",
     "scripts",
+    # The share links viewer, published on GitHub Pages (.github/workflows/pages.yml).
+    "site",
     "slack-manifest.json",
     "src",
     "tests",

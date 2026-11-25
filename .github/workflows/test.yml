@@ -39,7 +39,7 @@ jobs:
         with:
           node-version: "22"
       - name: ESLint (web UI)
-        run: npx --yes eslint@10.14.0 --max-warnings 0 src/chiefofstaff/static
+        run: npx --yes eslint@10.14.0 --max-warnings 0 src/chiefofstaff/static site
       - name: Workflow files
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
 
@@ -152,6 +152,8 @@ jobs:
       - run: uv sync --locked --extra dev
       - run: uv run --with playwright python -m playwright install --with-deps chromium
       - run: uv run --with playwright python scripts/demo_smoke.py
+      - name: The share links viewer (site/), as Pages would serve it
+        run: uv run --extra dev --with playwright python scripts/viewer_check.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
