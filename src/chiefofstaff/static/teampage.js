@@ -198,12 +198,14 @@ function modelOf(view) {
   const st = ts.teamState(team, ctx);
   const brief = ts.briefOf(team, st, ctx.now);
   const made = madeOf(st, ctx);
-  const decided = data.decided || [];
+  // This request's decisions; one made before it that a part relies on only "also applies".
+  const decided = (data.decided || []).filter((entry) => entry.kind !== "also");
+  const also = (data.decided || []).filter((entry) => entry.kind === "also");
   const watch = st.done ? [] : ts.watchOf(team, st, decided);
   const since = st.done ? [] : ts.sinceOf(team, st, { looked: view.since, decided, made, brief });
   // New since the owner last looked (never once it is done: Delivered is all of it).
   const unseen = (at) => !st.done && Boolean(view.since) && Boolean(at) && at > view.since;
-  return { team, st, ctx, items, brief, made, decided, watch, since, unseen, stages: ts.stagesOf(team, st) };
+  return { team, st, ctx, items, brief, made, decided, also, watch, since, unseen, stages: ts.stagesOf(team, st) };
 }
 // What the parts made (PRs, docs, flows), each once, in the plan's order: Home's own list.
 function madeOf(st, ctx) {
@@ -561,15 +563,28 @@ function soFarGroups(model) {
     const sub = entry.kind === "yours" ? `You decided${entry.parts.length ? ` for ${ts.listed(entry.parts.map(name))}` : ""} at ${clock(entry.at)}` : `${name(entry.from)} answered ${name(entry.to)}'s question`;
     return line(model, { key: entry.key, who, main: entry.text, sub, at: entry.at });
   });
+  if (model.also.length) {
+    const fold = el(
+      "details",
+      { class: "tp-also", open: page?.alsoOpen || undefined },
+      el("summary", {}, `Also applies · ${model.also.length}`),
+      ...model.also.map((entry) => line(model, { key: entry.key, who: "you", main: entry.text, sub: `Decided before this request${entry.parts.length ? ` · ${ts.listed(entry.parts.map(name))} relies on it` : ""}` })),
+    );
+    fold.addEventListener("toggle", () => {
+      if (page) page.alsoOpen = fold.open;
+    });
+    decided.push(fold);
+  }
   const watch = model.watch.map((item) => {
     const node = line(model, { key: item.key, who: item.parts.length > 1 ? item.parts.slice(0, 2) : item.parts[0], main: item.text, sub: item.sub });
     if (item.question) node.querySelector(".end").append(nudgeButton(item.question, name(item.question.to)));
     return node;
   });
+  // [id, title, items, how many]: Decided counts this request's decisions only.
   return [
-    ["made", "Made", made],
-    ["decided", "Decided", decided],
-    ["watch", "Watch out", watch],
+    ["made", "Made", made, made.length],
+    ["decided", "Decided", decided, model.decided.length],
+    ["watch", "Watch out", watch, watch.length],
   ].filter(([, , items]) => items.length);
 }
 function soFarCard(model) {
@@ -596,8 +611,8 @@ function panel(model) {
   const groups = soFarGroups(model);
   const box = el("div", { class: "tp-sofar-panel" }, head);
   if (!groups.length) box.append(el("p", { class: "tp-empty", text: "Nothing made or decided yet: it comes here as parts report." }));
-  for (const [id, words, items] of groups) {
-    const section = el("details", { class: `panel-section area tp-sofar-${id}`, open: true }, el("summary", {}, el("h2", { class: "title", text: words }), el("span", { class: "count", text: String(items.length) })), el("div", { class: "items" }, ...items));
+  for (const [id, words, items, count] of groups) {
+    const section = el("details", { class: `panel-section area tp-sofar-${id}`, open: true }, el("summary", {}, el("h2", { class: "title", text: words }), count ? el("span", { class: "count", text: String(count) }) : null), el("div", { class: "items" }, ...items));
     box.append(section);
   }
   const old = node.querySelector(":scope > .tp-sofar-panel");

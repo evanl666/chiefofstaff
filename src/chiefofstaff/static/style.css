@@ -1423,6 +1423,12 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tp-group { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 6px; }
 .tp-group > h3 { margin: 4px 6px 2px; font-size: var(--small); font-weight: 600; color: var(--soft); }
 .tp-group.watch > h3 { color: var(--amber); }
+/* Decided's fold: a decision made before the request that a part relies on, once. */
+.tp-also > summary { display: flex; align-items: center; gap: 6px; min-height: 28px; width: fit-content; padding: 0 6px; list-style: none; font-size: var(--small); color: var(--muted); cursor: pointer; }
+.tp-also > summary::-webkit-details-marker { display: none; }
+.tp-also > summary::before { content: "▸"; width: 8px; }
+.tp-also[open] > summary::before { content: "▾"; }
+.tp-also > summary:hover { color: var(--text); }
 .tp-line { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 10px; align-items: center; min-height: 34px; padding: 5px 6px; border-radius: var(--radius); }
 .tp-line:hover { background: var(--hover); }
 .tp-line .pa { width: 20px; height: 20px; font-size: 11px; }

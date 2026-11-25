@@ -291,6 +291,39 @@ async def test_decided_holds_decisions_and_answers_never_a_note(harness):
     )
 
 
+async def test_decided_is_this_requests_an_earlier_decision_only_also_applies(harness):
+    """Decided and Watch out are the decisions recorded for this request's tasks; one the
+    owner made before the request, that a part relies on, is "also applies" (once, never
+    waiting for a confirmation), not one of this team's."""
+    runtime = await harness.connect()
+    router = harness.router_id
+
+    async def record(**arguments) -> str:
+        said = await call_tool(runtime, "record_decision", router, **arguments)
+        return said.text_result_for_llm.split()[1].rstrip(",.")
+
+    await owner_turn(harness, runtime, "Prices are in cents. No: in cents, with their currency.")
+    cents = await record(decision="Prices in cents")
+    changed = await record(decision="Prices in cents, with their currency", replaces=[cents])
+    await owner_turn(harness, runtime, "Export the prices, then import them.")
+    export = await spawn(runtime, router, "Export the prices")
+    load = await spawn(
+        runtime, router, "Import the prices", after=[export["task_id"]], decisions=[changed]
+    )
+    await record(decision="Import overwrites what is there", tasks=[load["task_id"]])
+    await settle(runtime)
+    [team] = teams_of(runtime)
+    decided = runtime.teams_lite.page(team["id"])["decided"]
+    assert [(e["kind"], e["text"]) for e in decided] == [
+        ("also", "Prices in cents, with their currency"),
+        ("yours", "Import overwrites what is there"),
+    ]
+    also, yours = decided
+    assert also["parts"] == [load["task_id"]] and also["unconfirmed"] == []
+    # Decided in the request's turn: the parts it gave out in it rely on it.
+    assert yours["parts"] == [export["task_id"], load["task_id"]]
+
+
 async def test_the_page_gives_views_of_the_parts_home_does_not_list(harness):
     runtime = await harness.connect()
     found = await refund_team(harness, runtime)

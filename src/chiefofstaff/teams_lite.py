@@ -997,10 +997,13 @@ class TeamsLite:
 
     def decided(self, team: dict, items: list[dict]) -> list[dict]:
         """What is settled for a team (team-page-v4 §7, Decided), oldest first: the owner's
-        decisions in force on its parts (which parts rely on each; of a changed one, those
-        that have not confirmed they work to it yet), and the answers its parts gave each
-        other's questions. Never a note: whether one settles anything is a judgement."""
+        decisions in force on its parts that were made since its request (in it, by its parts,
+        about them: which parts rely on each; of a changed one, those that have not confirmed
+        they work to it yet), and the answers its parts gave each other's questions. One made
+        before the request that a part relies on "also applies" (kind "also"): once, waiting
+        for no confirmation. Never a note: whether one settles anything is a judgement."""
         part_of = {task: member["id"] for member in team["members"] for task in member["tasks"]}
+        asked = stored_time(team["request"]["at"])
         found: dict[str, dict] = {}
         for row in self.rows(
             "SELECT l.task_id, l.ack, d.id, d.text, d.status, d.replaces, d.created_at "
@@ -1011,11 +1014,13 @@ class TeamsLite:
             if row["status"] != "active":
                 continue
             question, _, answer = row["text"].partition(" \u2192 ")
+            made = stored_time(row["created_at"])
+            before = bool(asked and made and made < asked)
             entry = found.setdefault(
                 row["id"],
                 {
                     "key": f"d:{row['id']}",
-                    "kind": "yours",
+                    "kind": "also" if before else "yours",
                     "text": answer or question,
                     "question": question if answer else "",
                     "parts": [],
@@ -1027,7 +1032,12 @@ class TeamsLite:
             part = part_of[row["task_id"]]
             if part not in entry["parts"]:
                 entry["parts"].append(part)
-            if entry["changed"] and not row["ack"] and part not in entry["unconfirmed"]:
+            if (
+                entry["kind"] == "yours"
+                and entry["changed"]
+                and not row["ack"]
+                and part not in entry["unconfirmed"]
+            ):
                 entry["unconfirmed"].append(part)
         between = [
             {
@@ -1312,6 +1322,15 @@ def dep_state(status: str, needs: str) -> str:
     if status in {"failed", "cancelled"}:
         return "failed"
     return "pending"
+
+
+def stored_time(text: str | None) -> datetime | None:
+    """A stored time ("…+00:00", "…Z", or naive: UTC), to compare; None for none."""
+    try:
+        found = datetime.fromisoformat(text or "")
+    except ValueError:
+        return None
+    return found if found.tzinfo else found.replace(tzinfo=UTC)
 
 
 def seen_mark(raw: str | None) -> dict | None:
