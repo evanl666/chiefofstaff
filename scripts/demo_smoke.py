@@ -283,7 +283,7 @@ async def run(scheme: str):
             line = page.locator("#settings-form label.check").filter(
                 has=page.locator("input[name=other_sessions]")
             )
-            await expect(line).to_have_text("Show where my other Copilot sessions stand")
+            await expect(line).to_have_text("Show where my other sessions stand")
             assert await switch.is_checked() is OTHERS
             await page.locator("#settings-dialog").screenshot(
                 path=SHOTS / f"demo-{scheme}-5-settings-general{OFF}.png"

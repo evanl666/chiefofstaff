@@ -512,6 +512,18 @@ FIXES: list[Allow] = [
         "a second worker for a busy one's new task, marked so",
         data=r"(/api/state\.sessions\[\d+\]\.fork_of\.busy|\.db\.kv\.forkof:.*)$",
     ),
+    # 0.1.57 (the owner's word): the sidebar's Other Copilot sessions is Other sessions: its
+    # heading (and its name for a screen reader), its empty line, the setting's line.
+    Allow(
+        "Other sessions (was Other Copilot sessions): the sidebar's heading and its empty line",
+        element="#external > summary, #external-list .empty-note",
+        views=r"^(home|sidebar)",
+    ),
+    Allow(
+        "Settings → General: Show where my other sessions stand (was …other Copilot sessions…)",
+        element="#settings-dialog label:has(> input[name=other_sessions])",
+        views=r"^settings-general-",
+    ),
     # 0.1.57 (QA E149): workers' colors (their avatars, a team's parts) are no status's hue.
     Allow(
         "workers' colors, none a status's hue (avatars, a team's parts)",
@@ -552,7 +564,7 @@ FEATURES["other_sessions"] = Feature(
             views=r"^settings-general-",
         ),
         Allow(
-            "the group Other Copilot sessions: unfolded on the first load, its rows at rest and"
+            "the group Other sessions: unfolded on the first load, its rows at rest and"
             " N more, their dots, small words, tooltips, names and order",
             element="#sidebar #external",
             views=r"^(home|sidebar)",

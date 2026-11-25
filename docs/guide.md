@@ -102,8 +102,9 @@ model, its permission checks, its folder and *Close worker*. On a narrow window 
 *Chat*, *Needs you* and *Tasks* one at a time, and narrower still (a phone) the sidebar folds
 away behind **☰** at the top left (with what needs you counted on it; Esc or a pick closes it).
 The sidebar has Home (its count is what needs
-you, the only count anywhere), your workers, running first, then *Closed* and *Other Copilot
-sessions*; Settings and Usage are the icons at the bottom.
+you, the only count anywhere), your workers, running first, then *Closed* and *Other sessions*
+(your other Copilot CLI sessions on this computer, the ones Chief of Staff does not manage);
+Settings and Usage are the icons at the bottom.
 
 A file path in a report or message opens the file when it is in a worker's folders (a
 walkthrough, results, a log): Markdown shows formatted. Other paths are copied.
@@ -291,9 +292,9 @@ What weighs is what workers run: test suites, builds, browsers. So:
 How many workers to run at once depends on what they run: four builds of a large project need
 more than four searches.
 
-### Your other Copilot sessions
+### Your other sessions
 
-*Other Copilot sessions* in the sidebar lists the sessions Chief of Staff does not manage, the
+*Other sessions* in the sidebar lists the sessions Chief of Staff does not manage, the
 ones you started in a terminal. Those open in a terminal right now come first, marked *open*.
 Opening one shows its latest conversation, and keeps it current while it works. Sessions a
 program made through Copilot's SDK (a script's, one per item of a batch, say) are not yours to
@@ -339,8 +340,8 @@ pulsing ring while it works, dashed when it has made no progress for 15 minutes,
 idle, green once it finished; for a wait, how long replaces *open*. Hover a row for the question
 or its last answer; the first line of its view says it too. At most five rows show at once,
 those waiting for you first, the rest under *N more*. A row whose status cannot be told for
-sure looks as before, and its tooltip says why. Turn it off with *Show where my other Copilot
-sessions stand* in Settings → General.
+sure looks as before, and its tooltip says why. Turn it off with *Show where my other sessions
+stand* in Settings → General.
 
 **Send it a message to continue it here.** It becomes a worker, with its conversation so far in
 its timeline, and keeps working in its own folder, inside your code folder or not: nothing is
@@ -873,7 +874,7 @@ previous one. Turn *Learn from my Slack messages, PR reviews, commits and Copilo
 to stop reading them. Of your Copilot sessions, only those you talked in are read (two messages
 of yours or more): not a one-shot one, such as a `copilot -p` you ran or one question you asked
 and left, which is written for a script or a single answer; nor sessions a program, a worker or a
-script made (see [Your other Copilot sessions](#your-other-copilot-sessions)). What was read from
+script made (see [Your other sessions](#your-other-sessions)). What was read from
 those and not learned from yet is dropped before learning; `chiefofstaff tidy-sessions` names
 what was learned from a worker's or a script's sessions before that.
 
@@ -1745,7 +1746,7 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   scheduled is not handed over until they are deleted in Claude: they would go on in your
   terminal. Nor, with the worker sandbox on, is one whose folder's settings of its agent changed
   (they would load there): its timeline then has the line with **Use these settings**.
-- **Your own sessions:** *Other Copilot sessions* lists your own Codex and Claude sessions too.
+- **Your own sessions:** *Other sessions* lists your own Codex and Claude sessions too.
   Adopting a Claude session goes on in that session (not while it is open elsewhere); a Codex
   thread goes on in a new thread of Chief of Staff's with its conversation, and yours stays as it
   was. A worker on another agent has no search of your past Copilot sessions.

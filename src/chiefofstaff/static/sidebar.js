@@ -424,12 +424,8 @@ function headingCount(total, open) {
   if (count.textContent !== shown) count.textContent = shown;
   const words = total ? [plural(total, "session"), open ? `${open} open` : ""].filter(Boolean).join(", ") : "";
   const summary = $("#external > summary");
-  // Named for Copilot while only Copilot's are listed; for none once another agent's are too.
-  const name = state.external.some((item) => item.agent) ? "Other sessions" : "Other Copilot sessions";
-  const label = summary.querySelector(".group-name");
-  if (label && label.textContent !== name) label.textContent = name;
   put(summary, "title", words);
-  put(summary, "aria-label", words && `${name}, ${words}`);
+  put(summary, "aria-label", words && `Other sessions, ${words}`);
 }
 export async function loadExternal(refresh = false) {
   // Read while Copilot was not connected, the list is empty for no reason of its own: read again
@@ -458,7 +454,7 @@ function noOthers(count) {
   }
   const why = !connected
     ? "Shown once Copilot is connected."
-    : state.externalError || (othersOn() && state.othersWhy) || "No other Copilot sessions yet.";
+    : state.externalError || (othersOn() && state.othersWhy) || "No other sessions yet.";
   return el("div", { class: "empty-note", text: why });
 }
 // A Copilot session Chief of Staff does not manage: its latest conversation, read from its log.
@@ -694,7 +690,7 @@ function renderGroup() {
   let fold = list.querySelector(":scope > details.idle-workers");
   if (more.length) {
     if (!fold) {
-      fold = el("details", { class: "idle-workers", open: Boolean(state.othersMore) }, el("summary", { title: "Your other Copilot sessions: open ones first, then the latest" }));
+      fold = el("details", { class: "idle-workers", open: Boolean(state.othersMore) }, el("summary", { title: "Your other sessions: open ones first, then the latest" }));
       fold.addEventListener("toggle", () => {
         state.othersMore = fold.open;
       });

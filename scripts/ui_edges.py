@@ -8268,8 +8268,9 @@ async def others_heading(runtime, browser):
             summary = page.locator("#external > summary")
             await expect(page.locator("#external-count")).to_have_text("12 open")
             await expect(summary).to_have_attribute("title", "40 sessions, 12 open")
+            await expect(summary.locator(".group-name")).to_have_text("Other sessions")
             await expect(summary).to_have_attribute(
-                "aria-label", "Other Copilot sessions, 40 sessions, 12 open"
+                "aria-label", "Other sessions, 40 sessions, 12 open"
             )
             found = await page.evaluate(HEADING)
             where = f"{'on' if on else 'off'} {scheme}"
@@ -8277,9 +8278,10 @@ async def others_heading(runtime, browser):
             assert found["height"] <= 28.5, (where, found)  # Its 28 px target, one line.
             assert not found["wordsCut"] and not found["countCut"], (where, found)
             assert abs(found["right"]) <= 1, ("in line with the rows' small words", where, found)
+            # (190 px cut "Other Copilot sessions"; "Other sessions" fits there.)
             await page.evaluate(
                 "() => { document.querySelector('#application').style.gridTemplateColumns ="
-                " '190px 1fr'; }"
+                " '150px 1fr'; }"
             )
             found = await page.evaluate(HEADING)
             assert found["lines"] == 1 and found["height"] <= 28.5, (where, found)
@@ -8464,9 +8466,31 @@ def terminal_write(client, session_id: str, events: list):
             file.write(json.dumps(event, separators=(",", ":")) + "\n")
 
 
+async def others_none(runtime, browser):
+    """None of the owner's: the group says so in one line, by its name (Other sessions, the
+    owner's word for it in 0.1.57: not "Other Copilot sessions")."""
+    client = runtime.backend
+    client.metas.clear()
+    client.in_use.clear()
+    await others_setting(runtime, False)
+    await runtime.workers.refresh_elsewhere()
+    context, page = await others_page(browser)
+    summary = page.locator("#external > summary")
+    await expect(summary.locator(".group-name")).to_have_text("Other sessions")
+    async with page.expect_request("**/api/external?refresh=true"):
+        await summary.click()
+    await expect(page.locator("#external-list .empty-note")).to_have_text("No other sessions yet.")
+    await page.locator("#settings-button").click()
+    await expect(
+        page.locator("#settings-dialog label:has(> input[name=other_sessions])")
+    ).to_have_text("Show where my other sessions stand")
+    assert not page.errors, page.errors  # type: ignore[attr-defined]
+    await context.close()
+
+
 async def round_others(runtime, browser, failures: list[str]):
-    """The sidebar's Other Copilot sessions (docs/design/adopt-sessions.md): with the setting
-    off, exactly as before it existed; on, where each stands."""
+    """The sidebar's Other sessions (docs/design/adopt-sessions.md): with the setting off,
+    exactly as before it existed; on, where each stands; none, said so by its name."""
     client = runtime.backend
     client.home = runtime.store.directory / "copilot-home"
     ask, done = asking(client), finished(client)
@@ -8485,6 +8509,7 @@ async def round_others(runtime, browser, failures: list[str]):
         await others_leases(runtime, browser, ask)
         await others_heading(runtime, browser)
         await others_focus(runtime, browser)
+        await others_none(runtime, browser)
     finally:
         client.metas.clear()
         client.in_use.clear()

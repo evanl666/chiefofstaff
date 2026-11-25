@@ -13,6 +13,9 @@
   12 min* within the hour, else *↻ 3:28 PM*; what it checks on hover), and one that waits on
   another worker says so (*waits on “…”*). Workers' colors (their avatars, a team's parts) are no
   longer blue, green, amber or red, so none reads as a state.
+- **The sidebar's *Other Copilot sessions* is *Other sessions*:** the same list of your other
+  Copilot CLI sessions on this computer (and, with Codex or Claude Code on, theirs), with *No other
+  sessions yet.* when there are none; in Settings → General, *Show where my other sessions stand*.
 - **A worker's question nobody answered in time stays under *Needs you*.** A worker that asked
   on a question card waits an hour at most, then goes on without your answer; the card then
   left *Needs you*, so a question you never saw was gone, and an answer could no longer reach
