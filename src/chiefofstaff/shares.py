@@ -590,9 +590,10 @@ class Shares:
             raise LookupError("That shared card is no longer here: it was removed.")
         return found
 
-    async def read_gist(self, gist_id: str) -> httpx.Response:
+    async def read_gist(self, gist_id: str) -> tuple[int, httpx.Headers, bytes]:
         """The gist from GitHub's API without signing in (GitHub doesn't learn which account
-        opened which gist), past its 60-second cache, no redirects, at most MOST_READ read."""
+        opened which gist), past its 60-second cache, no redirects, at most MOST_READ read
+        (decoded once, as it arrives): (status, headers, body)."""
         async with httpx.AsyncClient(
             timeout=10, follow_redirects=False, transport=self.transport
         ) as client:
@@ -614,7 +615,7 @@ class Shares:
                         raise ValueError(DAMAGED)
             finally:
                 await answer.aclose()
-            return httpx.Response(answer.status_code, headers=answer.headers, content=body)
+            return answer.status_code, answer.headers, body
 
     async def opened(self, link: str) -> dict:
         """The checked payload of a pasted link, with its gist's owner (GitHub's word):
@@ -625,10 +626,10 @@ class Shares:
         if parsed.get("newer"):
             raise ValueError(NEWER)
         try:
-            answer = await self.read_gist(parsed["gist_id"])
+            status, headers, body = await self.read_gist(parsed["gist_id"])
         except httpx.HTTPError as exc:
             raise ValueError(UNREACHABLE) from exc
-        if answer.status_code == 404:
+        if status == 404:
             hint = parsed["expires_hint"]
             if hint and when(hint) <= self.clock():
                 raise ValueError(
@@ -636,8 +637,8 @@ class Shares:
                     "has been deleted. Ask whoever sent it for a new link if you still need it."
                 )
             raise ValueError(REVOKED)
-        if answer.status_code in {403, 429} and answer.headers.get("x-ratelimit-remaining") == "0":
-            reset = answer.headers.get("x-ratelimit-reset", "")
+        if status in {403, 429} and headers.get("x-ratelimit-remaining") == "0":
+            reset = headers.get("x-ratelimit-reset", "")
             at = (
                 datetime.fromtimestamp(int(reset), UTC).astimezone().strftime("%H:%M")
                 if reset.isdigit()
@@ -647,10 +648,10 @@ class Shares:
                 "GitHub needs a short break: it lets one network open about 60 of these an hour "
                 f"without signing in, and this one has. Try again{f' at {at}' if at else ' later'}."
             )
-        if answer.status_code != 200:
-            raise ValueError(f"GitHub answered {answer.status_code}. Try again in a moment.")
+        if status != 200:
+            raise ValueError(f"GitHub answered {status}. Try again in a moment.")
         try:
-            gist = answer.json()
+            gist = json.loads(body)
             files = gist.get("files") or {}
             file = files.get("share.txt") or {}
             owner = gist.get("owner") or {}

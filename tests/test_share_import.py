@@ -112,6 +112,27 @@ async def test_the_same_link_again_is_the_first_copy(world):
     assert len(world.fake.reads) == 1, "not read again"
 
 
+async def test_githubs_compressed_answer_is_read_once(world):
+    """GitHub's API answers gzip (live: the answer read, then decoded again, was taken for no
+    network)."""
+    import gzip
+
+    link = shared_link(world.fake)
+    plain = world.fake.transport()
+
+    def compressed(request: httpx.Request) -> httpx.Response:
+        answer = plain.handle_request(request)
+        return httpx.Response(
+            answer.status_code,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+            content=gzip.compress(answer.read()),
+        )
+
+    world.shares.transport = httpx.MockTransport(compressed)
+    opened = await world.shares.open_link(link)
+    assert opened["message"]["meta"]["shared"]["card"]["title"] == CARD["title"]
+
+
 async def test_the_copy_stays_after_the_link_ends_and_remove_deletes_it(world):
     link = shared_link(world.fake)
     opened = await world.shares.open_link(link)
