@@ -539,6 +539,15 @@ FIXES: list[Allow] = [
         'from"], [title^="Answer from"]))',
         views=r"^home",
     ),
+    # 0.1.57, Copilot CLI 1.0.115: the owner's session open in 1.0.115's terminal (others()'s
+    # `newer`) says it asks them, where 0.1.56 showed it with no status ("Copilot did not say
+    # which app started it"). Seen wherever Other Copilot sessions is on against the baseline as
+    # it is by default (--copilot-alone); its row only (the group is other_sessions' allow_on).
+    Allow(
+        "a session open in Copilot 1.0.115's terminal says it asks you, not no status (its row)",
+        element='#sidebar #external .item[data-id="3c9a1e5f-2b7d-4f0a-8e6c-5a4b3d2c1e0f"]',
+        views=r"^(home|sidebar)",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
