@@ -121,23 +121,40 @@ A team is one of your requests, followed on Home, the sidebar and its own page.
   workers, with a thread of every message. Now a team is the parts the Router made for one of
   your requests and linked on purpose (one works with or waits on another, or does another's
   instead), named for that request; workers that only talk, or work on different requests, are
-  no team. *Teams*, above *Running*, has a row per team: a bar with a segment per part, one calm
-  line (*1 working · 1 waiting on a teammate · 1 up next*, *Waiting on you · review UI*) and
-  *1/3* parts done, worked out from Home's own rows; the sidebar has the same line over its
-  workers. A team's page has its request, where it stands (*Working · 1 of 4 parts done ·
-  started 9:12*), the one thing that needs you, a map with a node per part (a short name and an
-  avatar of its own, what it is doing) and one labelled line per pair, the map in words for a
-  screen reader, *All N parts* beyond eight, and what the parts handed each other (*A → B*,
-  newest first, titled by its first sentence; filters from eight entries on). A part continued
-  by a task for another request says *Continued in “…” outside this team*, and one that waits on
-  it *Waiting on “…” (outside this team)*, on its row and its page alike. A done team's row is
+  no team. *Teams*, above *Running*, has a row per team: a bar with a segment per part (the
+  working ones gently alive), what needs you if anything does (*Waiting on you · answer UI*),
+  else the newest change and when (*Email answered Order page · 3 min ago*, stronger until you
+  look), and once done the outcome (*Done · 3 PRs merged · 1 h 13 min*); the sidebar has the
+  same line over its workers. A team's page is where you run it. *The brief* says where your
+  request stands and the one thing that moves it, done right there: a part's question with its
+  options and your own answer, *Review* with *Accept* in place, *Retry* for a part that failed,
+  *Nudge* for one held up by another's answer. *Since you looked* lists what changed across the
+  parts since you last had the page in sight, on any tab. *The plan* has the parts in the order
+  work moves, on a rail, each with its state, how long, what it made (its PR, its documents), one
+  action and **⋯** (tell it something, open its chat, stop, follow up, cancel). *So far* keeps
+  what the team made, what was decided and what to watch out for, in Home's side panel from
+  1100 px wide (Home's own panel comes back when you go Home) and under the plan below that.
+  *Tell the team*, the composer on its page, sends your word to the parts you choose, always
+  named on its *To* line: a part at work reads it now, one not started gets it when it starts, a
+  done part only when you tick it (it reopens as a follow-up), and the Router keeps one passive
+  copy, never a turn of its own. Done, *Delivered* says what it came to, with *Copy summary*.
+  Things move only when something happens (a result travels down the rail to the part waiting on
+  it, a new line brightens for a moment), and nothing moves when your system asks for less
+  motion. What the parts told each other is folded at the bottom (*A → B*, titled by its first
+  sentence). A part continued by a task for another request says *Continued in “…” outside this
+  team*, and one that waits on it *Waiting on “…” (outside this team)*. A part the Router
+  replaces when it re-plans stays in its team, and one it starts after a worker reports, waiting
+  on or working with a request's parts, joins that request's team. A team's name is your own
+  words for the request (*Nightly export*, *给 Chief of Staff 做用户自定义 UI*), its parts' names
+  short and whole (*Login page*, not *Page*), never cut inside a word. A done team's row is
   quiet and stays until you've seen it, then leaves ten minutes later (or at once with its ×);
   *Past teams · N* lists the earlier ones. A question that holds a worker up for half an hour is
   a card of its own under *Needs you*, in a team or not, and *Nudge* reaches the one asked. A
   worker's tab is *Team* (with *Open team*) for a part of a team, *Notes* otherwise, with its
-  task's lineage. Only what you see changes: how workers are linked and told, what the Router is
-  given (its team digest, `read_team_thread`) and the data folder's tables are as before (an
-  earlier version opens it as it was).
+  task's lineage. How workers are linked, what the Router is given (its team digest,
+  `read_team_thread`, its prompts and tools) and the data folder's tables are as before; what
+  you tell a team reaches its workers as your messages do (an earlier version opens the folder
+  as it was, and a note kept for a part not started yet is simply not given there).
 
 ## 0.1.56 (2026-11-23)
 
