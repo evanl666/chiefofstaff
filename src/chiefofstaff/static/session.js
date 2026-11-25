@@ -750,6 +750,10 @@ export function scrollToBottom(force = false) {
 // an image shows once near the screen and opens full size; another file downloads on a click.
 function attachmentLink(file) {
   const image = file.type?.startsWith("image/");
+  // On its way from this page (sendingNode): shown from the page's own copy, until it is stored.
+  if (image && file.url?.startsWith("data:")) {
+    return el("a", { href: "#", title: file.name, onclick: (event) => event.preventDefault() }, el("img", { alt: file.name, src: file.url, onload: imageLoaded }));
+  }
   const link = el(
     "a",
     { href: "#", target: "_blank", rel: "noreferrer", title: file.name, download: image ? undefined : file.name },
@@ -1570,8 +1574,108 @@ export function replaceMessage(message) {
   if (message.kind === "owner") {
     if (DELIVERY_WORDS[message.delivery]) node.dataset.delivery = message.delivery;
     else delete node.dataset.delivery;
+    keepPictures(old, node);
   }
   old.replaceWith(node);
+  showDeliveries();
+}
+
+// What the owner just sent, shown at once (Sending…) until it is stored: by the id the page
+// gave that send (client_id), in the chat it went to. Until its message comes (its event, or
+// the answer to the send) it stays last there, in the order sent; then that message takes its
+// place, once. "Sending…" says so only once it takes a moment: a quick one shows nothing between.
+const sending = new Map();  // client id -> { session, key, node, said, id, answered }
+const SENDING_SAYS = 400;
+const sendingFor = (message) => {
+  const found = message.kind === "owner" && sending.get(message.meta?.client_id || "");
+  return found && found.session === message.session_id ? found : null;
+};
+export function showSending(message, key) {
+  const id = message.meta.client_id;
+  const entry = { session: message.session_id, key, node: null, said: false, id: 0, answered: false };
+  entry.node = sendingNode(message, entry);
+  sending.set(id, entry);
+  setTimeout(() => {
+    entry.said = true;
+    const shown = entry.id ? $("#timeline").querySelector(`.msg.owner[data-id="${entry.id}"]`) : entry.node;
+    shown?.querySelector(":scope > .delivery.later")?.classList.remove("later");
+  }, SENDING_SAYS);
+  appendMessages([]);
+  scrollToBottom(true);
+}
+function sendingNode(message, entry) {
+  const node = renderMessage(message);
+  node.dataset.client = message.meta.client_id;
+  node.dataset.kind = "owner";
+  if (!entry.said) node.querySelector(":scope > .delivery")?.classList.add("later");
+  return node;
+}
+// The same words to the same chat (and worker, agent, images) while that send is on its way:
+// not sent again; its message stands out a moment instead. Whether there was one.
+export function repeatSending(key) {
+  const entry = [...sending.values()].find((item) => item.key === key && !item.answered);
+  if (!entry) return false;
+  const node = entry.id ? $("#timeline").querySelector(`.msg.owner[data-id="${entry.id}"]`) : entry.node;
+  if (node?.isConnected) {
+    node.classList.remove("flash");
+    void node.offsetWidth;  // Restarts the highlight.
+    node.classList.add("flash");
+    node.scrollIntoView({ block: "nearest" });
+  }
+  return true;
+}
+// Its message, stored: in the place of what was shown for it. Until the send is answered, one
+// stored with no word yet of where it stands still says it is on its way.
+function placeSent(container, entry, message, shown) {
+  const as = message.delivery || entry.answered ? message : { ...message, delivery: "sending" };
+  entry.id = message.id;
+  if (entry.answered) sending.delete(message.meta.client_id);
+  state.lastId = Math.max(state.lastId, message.id);
+  place(container, as, null, shown);
+  const node = container.lastElementChild;
+  if (!node?.dataset) return;
+  if (as.delivery === "sending") {
+    node.dataset.client = message.meta.client_id;
+    if (!entry.said) node.querySelector(":scope > .delivery")?.classList.add("later");
+  }
+  keepPictures(entry.node, node);
+}
+// The images it showed from this page's own copy, kept as they were: no flicker while the
+// stored ones load.
+function keepPictures(old, node) {
+  const before = [...(old?.querySelectorAll(".attachments img") || [])];
+  node.querySelectorAll(".attachments img").forEach((picture, index) => {
+    if (!picture.getAttribute("src") && before[index]?.src) picture.src = before[index].src;
+  });
+}
+// The send answered (`message`: what it stored, in this chat; null when the chat shows another
+// copy of it, or none): its message in place of what was shown for it, if its event did not
+// bring it first, else where it stands now if that is still "Sending…".
+export function answerSending(clientId, message) {
+  const entry = sending.get(clientId);
+  if (!entry) return;
+  entry.answered = true;
+  if (!message) return;  // Its event brings it (or it is not in this chat).
+  if (viewedId() === entry.session && !entry.id) {
+    appendMessages([{ ...message, meta: { ...message.meta, client_id: clientId } }]);
+  } else if (viewedId() === entry.session) {
+    const shown = $("#timeline").querySelector(`.msg.owner[data-id="${entry.id}"]`);
+    if (shown?.dataset.delivery === "sending" && message.id === entry.id) replaceMessage(message);
+  }
+  sending.delete(clientId);
+}
+// The send failed: what was shown for it goes (unless it was stored, as its event said: then it
+// stays, no longer "Sending…").
+export function dropSending(clientId) {
+  const entry = sending.get(clientId);
+  if (!entry) return;
+  sending.delete(clientId);
+  entry.node.remove();
+  const shown = entry.id ? $("#timeline").querySelector(`.msg.owner[data-id="${entry.id}"]`) : null;
+  if (shown?.dataset.delivery === "sending") {
+    shown.querySelector(":scope > .delivery")?.remove();
+    delete shown.dataset.delivery;
+  }
   showDeliveries();
 }
 
@@ -1582,11 +1686,20 @@ export function appendMessages(messages) {
   timeline.querySelector(":scope > .tab-empty")?.remove();
   const shown = state.selected === HOME ? byId(routerId()) : current();
   const viewed = viewedId();
+  // What is on its way from here stays last: out while what came is added before it.
+  const waiting = [...sending.values()].filter((entry) => !entry.id);
+  for (const entry of waiting) entry.node.remove();
   messages.forEach((message, index) => {
+    const mine = message.session_id === viewed && sendingFor(message);
+    if (mine && !mine.id) {
+      placeSent(timeline, mine, message, shown);
+      return;
+    }
     if (message.id <= state.lastId || message.session_id !== viewed) return;
     state.lastId = message.id;
     place(timeline, message, messages[index + 1], shown);
   });
+  for (const entry of waiting) if (!entry.id && entry.session === viewed) timeline.append(entry.node);
   // Nothing said yet: what to ask for (unless Copilot must be set up first).
   if (!timeline.children.length && state.selected === HOME && state.snapshot?.runtime.state !== "error") timeline.append(welcomeCard());
   updateWorkingLine();

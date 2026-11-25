@@ -46,6 +46,16 @@ longer takes long work for silence.
   with its checks, on *Artifacts* and on its card. One merged keeps its state without being read
   again; news on one (merged, say) has it read at once. A PR its report only mentions is still
   read once, not followed.
+- **What you send shows at once.** Pressing Enter on Home or in a worker's chat showed nothing
+  until Chief of Staff had stored your message, which on a busy computer took seconds: the box
+  was empty and nothing said the message was on its way, so you sent it again and the Router
+  got it twice. Your message now shows in the chat as you press Enter (with *→ worker*, the
+  agent you chose and your images, as it will stay), and *Sending…* under it when that takes a
+  moment; it then becomes the message as stored, in the same place, without a flicker. The
+  same words sent to the same chat again while it is on its way are not sent twice: its
+  message stands out a moment instead. Sent again on purpose once it went, it is a message of
+  its own. If it cannot be sent, it goes from the chat, and your words and images are back in
+  the box, with why. A send your browser happens to make twice is stored and sent once.
 - **Your message to the Router waits less on a busy computer.** Before it was stored, the
   sessions you opened in a terminal since the Router last looked were listed twice (again for
   one of Chief of Staff's own opened beside them), and that listing is slow when the computer

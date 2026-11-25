@@ -520,9 +520,13 @@ async def home(runtime, browser, failures: list[str]):
     assert names == ["shot.png", "dropped.png"], names
     assert all(item["type"] == "image/png" and item["data"] == png
                for item in sent["attachments"]), sent  # fmt: skip
+    # The stored one (in place of the bubble shown while it was on its way).
+    await expect(bubble).to_have_attribute("data-id", re.compile(r"^\d+$"))
     image = await bubble.locator(".attachments img").first.element_handle()
     # Served back by the server: it loads.
-    await page.wait_for_function("img => img.complete && img.naturalWidth === 1", arg=image)
+    await page.wait_for_function(
+        "img => img.complete && img.naturalWidth === 1 && img.src.startsWith('blob:')", arg=image
+    )
     log("images: picked, pasted and dropped, one removed; sent along; shown in the bubble")
     # No address in the page carries the launch key (a link would put it in the history or a
     # copied link): the image is fetched with the key in a header and shown from a blob: address.
@@ -6253,7 +6257,8 @@ async def main():
                           round_usage, round_relations, round_shepherd,
                           round_stacked_merge, round_fork, round_needs_dots,
                           round_settings, round_teams_v2,
-                          round_answer_label, round_sidebar_flat):  # fmt: skip
+                          round_answer_label, round_sidebar_flat,
+                          round_composer):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -6262,6 +6267,203 @@ async def main():
         if failures:
             raise AssertionError(f"browser errors: {failures}")
     print("UI EDGE CASES PASSED")
+
+
+# The owner's bubbles with this text, as the timeline holds them at each change: never none once
+# shown, never two (no flicker, no copy).
+WATCH_BUBBLES = """(text) => {
+  const count = () => [...document.querySelectorAll('#timeline .msg.owner')]
+    .filter((node) => node.querySelector('.text')?.textContent === text).length;
+  window.bubbleCounts = [count()];
+  window.bubbleWatch?.disconnect();
+  window.bubbleWatch = new MutationObserver(() => window.bubbleCounts.push(count()));
+  window.bubbleWatch.observe(document.querySelector('#timeline'),
+    { childList: true, subtree: true });
+}"""
+
+
+def bubbles_held(counts: list[int]) -> bool:
+    """Once shown, one bubble at every change after."""
+    shown = counts[counts.index(1) :] if 1 in counts else []
+    return bool(shown) and all(count == 1 for count in shown)
+
+
+class Held:
+    """A chat's sends, held (each answered once its gate is set), or failed with `fail`."""
+
+    def __init__(self):
+        self.posts: list[dict] = []
+        self.gate = asyncio.Event()
+        self.fail = ""
+
+    async def __call__(self, route):
+        if route.request.method != "POST":
+            await route.continue_()
+            return
+        self.posts.append(route.request.post_data_json)
+        await self.gate.wait()
+        if self.fail:
+            await route.fulfill(status=400, json={"detail": self.fail})
+        else:
+            await route.continue_()
+
+
+async def round_composer(runtime, browser, failures: list[str]):
+    """0.1.58 (owner report "我输了回车 没有反应 又输了一遍"): Enter shows the owner's message at
+    once, "Sending…" under it once that takes a moment, until it is stored; then the stored one
+    takes its place, once (no flicker, no copy, nothing moved). The same words again while it is
+    on its way are not sent twice: its bubble stands out. Failed, it goes and the words and
+    images are back in the composer. On Home, to one worker (@), with an agent chosen, and in a
+    worker's chat."""
+    store = runtime.store
+    router = store.get("router_id")
+    made = await call_tool(runtime, "spawn_worker", router, title="Tidy the exports",
+                           instructions="Tidy acme/exports", why_new="test")  # fmt: skip
+    worker = json.loads(made.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    box = page.locator("#composer-input")
+    timeline = page.locator("#timeline")
+    home = Held()
+    await page.route(f"**/api/sessions/{router}/messages", home)
+
+    def bubble(text: str):
+        return timeline.locator(".msg.owner").filter(
+            has=page.locator(".text", has_text=re.compile(f"^{re.escape(text)}$"))
+        )
+
+    # Home: shown at once, before the Router has it; the same words again are not sent twice.
+    words = "你去研究一下股票 开一个新的worker"
+    await page.evaluate(WATCH_BUBBLES, words)
+    await box.fill(words)
+    await box.press("Enter")
+    await expect(bubble(words)).to_have_count(1)
+    await expect(box).to_have_value("")
+    line = bubble(words).locator(".delivery")
+    await expect(line).to_have_text("Sending…")
+    # Said only once it takes a moment (its place kept meanwhile).
+    await expect(line).not_to_have_class(re.compile(r"\blater\b"), timeout=3000)
+    assert await bubble(words).get_attribute("data-id") is None
+    await box.press("Enter")  # Again, with nothing in the box: nothing.
+    await box.fill(words)
+    await box.press("Enter")
+    await expect(bubble(words)).to_have_class(re.compile(r"\bflash\b"))
+    await expect(box).to_have_value("")
+    await page.wait_for_timeout(300)
+    assert len(home.posts) == 1, home.posts
+    assert re.fullmatch(r"[0-9a-f]{32}", home.posts[0]["client_id"]), home.posts[0]
+    # What comes meanwhile goes before it: it stays last until it is stored.
+    runtime.add_message(router, "assistant", "Meanwhile: the nightly build passed.")
+    meanwhile = timeline.locator(".msg.agent", has_text="Meanwhile: the nightly build passed.")
+    await expect(meanwhile).to_have_count(1)
+    assert await meanwhile.evaluate(
+        "(node, text) => !!(node.compareDocumentPosition([...document.querySelectorAll("
+        "'#timeline .msg.owner')].find((n) => n.querySelector('.text')?.textContent === text))"
+        " & Node.DOCUMENT_POSITION_FOLLOWING)",
+        words,
+    ), "the reply that came meanwhile is above the message on its way"
+    home.gate.set()
+    await expect(bubble(words)).to_have_attribute("data-id", re.compile(r"^\d+$"))
+    await expect(bubble(words).locator(".delivery", has_text="Sending…")).to_have_count(0)
+    await page.wait_for_timeout(500)
+    counts = await page.evaluate("window.bubbleCounts")
+    assert bubbles_held(counts), counts
+    stored = [m for m in store.messages(router) if m["kind"] == "owner" and m["text"] == words]
+    assert len(stored) == 1 and stored[0]["meta"]["client_id"] == home.posts[0]["client_id"]
+    assert str(stored[0]["id"]) == await bubble(words).get_attribute("data-id")
+    # Sent again on purpose once the first was taken: a message of its own.
+    await box.fill(words)
+    await box.press("Enter")
+    await expect(bubble(words)).to_have_count(2)
+    await expect(bubble(words).last).to_have_attribute("data-id", re.compile(r"^\d+$"))
+    assert len(home.posts) == 2 and home.posts[1]["client_id"] != home.posts[0]["client_id"]
+    log("Home: the message at once, Sending… under it; the same again not sent twice; "
+        "replaced once by the stored one, after what came meanwhile")  # fmt: skip
+
+    # Failed: it goes, and the words and the image are back, with why.
+    home.gate, home.fail = asyncio.Event(), "Could not deliver the message: Copilot went away."
+    await page.locator("#attach-input").set_input_files(
+        files=[{"name": "shot.png", "mimeType": "image/png", "buffer": PNG}]
+    )
+    await expect(page.locator("#attachments .thumb")).to_have_count(1)
+    failing = "Look at this screenshot"
+    await box.fill(failing)
+    await box.press("Enter")
+    await expect(bubble(failing).locator(".attachments img")).to_have_count(1)
+    await expect(page.locator("#attachments .thumb")).to_have_count(0)
+    home.gate.set()
+    await expect(page.locator(".toast", has_text="Copilot went away")).to_be_visible()
+    await expect(bubble(failing)).to_have_count(0)
+    await expect(box).to_have_value(failing)
+    await expect(page.locator("#attachments .thumb")).to_have_count(1)
+    home.fail = ""
+    await box.fill("")
+    await page.locator("#attachments .thumb button").click()
+    log("failed: the bubble goes; the words and the image are back, with the error")
+
+    # To one worker from Home (@), and with an agent chosen: as the stored one shows them.
+    home.gate = asyncio.Event()
+    await box.press_sequentially("@Tidy the ex")
+    await box.press("Enter")
+    await expect(page.locator("#composer-to")).to_contain_text("To Tidy the exports")
+    told = "Keep the CSV header as it is"
+    await box.fill(told)
+    await box.press("Enter")
+    await expect(bubble(told)).to_have_count(1)
+    await expect(bubble(told).locator(".to")).to_have_text("→ Tidy the exports")
+    await expect(bubble(told).locator(".delivery")).to_have_text("Sending…")
+    await page.evaluate(WATCH_BUBBLES, told)
+    home.gate.set()
+    await expect(bubble(told)).to_have_attribute("data-id", re.compile(r"^\d+$"))
+    await expect(bubble(told).locator(".to")).to_have_text("→ Tidy the exports")
+    await expect(page.locator(".toast", has_text="Sent to “Tidy the exports”")).to_be_visible()
+    await page.wait_for_timeout(300)
+    assert bubbles_held(await page.evaluate("window.bubbleCounts"))
+    assert home.posts[-1]["to"] == worker, home.posts[-1]
+    home.gate = asyncio.Event()
+    await page.evaluate(
+        """async () => { const { mention } = await import('/static/mention.js');
+          mention.agent = { name: 'copilot', model: 'smart-model', effort: '' }; }"""
+    )
+    chosen = "Compare the two exporters"
+    await box.fill(chosen)
+    await box.press("Enter")
+    await expect(bubble(chosen).locator(".to")).to_have_count(1)
+    on = await bubble(chosen).locator(".to").text_content()
+    assert on.startswith("On Copilot"), on
+    home.gate.set()
+    await expect(bubble(chosen)).to_have_attribute("data-id", re.compile(r"^\d+$"))
+    await expect(bubble(chosen).locator(".to")).to_have_text(on)
+    assert home.posts[-1]["agent"] == "copilot" and home.posts[-1]["agent_model"] == "smart-model"
+    log("to one worker and with an agent chosen: the bubble says so at once, as the stored one")
+
+    # In a worker's chat.
+    chat = Held()
+    await page.route(f"**/api/sessions/{worker}/messages", chat)
+    await page.locator("#session-list .item", has_text="Tidy the exports").click()
+    await expect(page.locator("#back-home")).to_be_visible()
+    asked = "Use the stdlib csv module"
+    await page.evaluate(WATCH_BUBBLES, asked)
+    await box.fill(asked)
+    await box.press("Enter")
+    await expect(bubble(asked)).to_have_count(1)
+    await expect(bubble(asked).locator(".delivery")).to_have_text("Sending…")
+    await box.fill(asked)
+    await box.press("Enter")
+    await page.wait_for_timeout(300)
+    assert len(chat.posts) == 1, chat.posts
+    chat.gate.set()
+    await expect(bubble(asked)).to_have_attribute("data-id", re.compile(r"^\d+$"))
+    await page.wait_for_timeout(300)
+    assert bubbles_held(await page.evaluate("window.bubbleCounts"))
+    assert errors == [], errors
+    await context.close()
+    log("a worker's chat: at once, once, the same again not sent twice")
 
 
 async def round_needs_dots(runtime, browser, failures: list[str]):

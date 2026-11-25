@@ -66,7 +66,12 @@ work") and it does the same (*Stopped by the Router*, with *Go on*): it cancels 
 say cancel. Cancelling a stopped task lets the worker go on with its other tasks at once (also
 after a restart); its replies and reviews still waiting for you go with it. Cancelling a task
 that had finished already (its result reported) stops nothing: it is done with its result, and
-the Router says it had finished. Under your latest messages to a session its chat says where
+the Router says it had finished. What you send shows in the chat at once, as you press Enter;
+when it takes a moment to reach Chief of Staff (a busy computer), *Sending…* under it. Sending
+the same words to the same chat again while it is on its way sends nothing more: its message
+stands out a moment instead (sent again once it went, it is a message of its own). If it cannot
+be sent, it goes from the chat and your words and images are back in the box, with why. Under
+your latest messages to a session its chat says where
 they stand: *Waiting to be sent*, *Sent*, *Received* (its conversation shows it), *Handled* (the
 turn it was in ended); one its conversation does not show within 20 seconds, and that Copilot
 does not hold for it either, is sent again (*Not received yet — sending again*), and after two

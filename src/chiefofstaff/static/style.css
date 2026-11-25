@@ -2155,7 +2155,9 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .delivery.wait, .delivery.warn { color: var(--amber); }
 .delivery.bad { color: var(--red); font-weight: 600; }
 .delivery.good { color: var(--green); }
-.msg.owner > .delivery { margin-top: 2px; text-align: right; opacity: 0.85; }
+.msg.owner > .delivery { margin-top: 2px; text-align: right; opacity: 0.85; transition: opacity 0.2s ease; }
+/* On its way from this page: "Sending…" only once it takes a moment (its line holds its place). */
+.msg.owner > .delivery.later { opacity: 0; }
 /* Why it waits, and Send now when it can go at once: one short line, cut with "…" if need be. */
 .msg.owner > .delivery:has(.why) { display: flex; justify-content: flex-end; align-items: baseline; }
 .delivery > .why { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

@@ -3,7 +3,7 @@
 import { $, api, closeMenus, closeOnBackdrop, FRESH_START, rememberKey, startFresh, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, othersOn, routerId, state, viewedId } from "./state.js";
 import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
-import { agentModels, appendMessages, chatAnchor, followAnchor, renderHeader, scrolledByOwner, scrollToBottom, select } from "./session.js";
+import { agentModels, answerSending, appendMessages, chatAnchor, dropSending, followAnchor, renderHeader, repeatSending, scrolledByOwner, scrollToBottom, select, showSending } from "./session.js";
 import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setAgent, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
@@ -80,14 +80,22 @@ function bindUi() {
       : compare.length
         ? { agents: compare }
         : {};
+    // Shown at once, until it is stored (not to another session continued here: its composer
+    // says so). The same again while it is on its way is not sent twice: it stands out instead.
+    const chat = other ? "" : viewedId();
+    const key = JSON.stringify([chat, to?.id || "", text, chosen, files.map((file) => [file.name, file.url.length])]);
+    if (chat && repeatSending(key)) return;
+    const clientId = chat ? newClientId() : "";
+    if (chat) showSending(sendingMessage({ clientId, chat, text, to, chosen, files }), key);
     // Images go along only when there are any: a server without them takes the message as before.
-    const body = (extra = {}) => ({ text, ...extra, ...(files.length ? { attachments: attachmentBody(files) } : {}) });
+    const body = (extra = {}) => ({ text, ...extra, ...(files.length ? { attachments: attachmentBody(files) } : {}), ...(clientId ? { client_id: clientId } : {}) });
     try {
       if (to) {
         // Straight to one worker; the Router hears of it with its next message.
         const sent = await api(`/api/sessions/${routerId()}/messages`, { method: "POST", body: body({ to: to.id }) });
         setRecipient(null);
-        appendMessages([sent]);
+        // Home shows its copy ("→ worker").
+        answerSending(clientId, sent.copy || null);
         // A worker deep in a step reads it only when the step ends: said here, where the owner is.
         toast(sent.note ? `Sent to “${to.title}”. ${sent.note.split("; said")[0]}` : `Sent to “${to.title}”`);
         return;
@@ -111,11 +119,12 @@ function bindUi() {
       // On Home, a card someone shared goes along, quoted as information (Start a task from this).
       const card = sessionId === HOME ? withCardBody() : {};
       const extra = { ...chosen, ...card, ...(task ? { task_id: task } : {}), ...(held ? { settings_digest: held } : {}) };
-      appendMessages([await api(`/api/sessions/${viewedId()}/messages`, { method: "POST", body: body(extra) })]);
+      answerSending(clientId, await api(`/api/sessions/${chat}/messages`, { method: "POST", body: body(extra) }));
       if (agent || compare.length) setAgent(null);
       if (card.shared_card) leaveOut();
     } catch (error) {
       if (other) input.disabled = false;
+      dropSending(clientId);
       if (error.fresh) {
         // Kept for its worker (its Copilot session can't be reopened): not to be sent twice.
         toast(error.message, "error", null, { text: FRESH_START, onclick: () => startFresh(error.fresh) });
@@ -194,6 +203,20 @@ function bindUi() {
   }, 60000);
   // Running cards say how long a step has taken: refreshed while Home is shown.
   setInterval(scheduleHome, 30000);
+}
+// The page's own id for one send (the server knows it by it: never sent twice).
+function newClientId() {
+  return [...window.crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+// What a send looks like in its chat until it is stored, as the stored one will.
+function sendingMessage({ clientId, chat, text, to, chosen, files }) {
+  const meta = {
+    client_id: clientId,
+    ...(to ? { to: to.id, to_title: to.title } : {}),
+    ...chosen,
+    ...(files.length ? { attachments: files.map(({ name, type, url }) => ({ name, type, url })) } : {}),
+  };
+  return { id: 0, session_id: chat, kind: "owner", text, meta, delivery: "sending", created_at: new Date().toISOString() };
 }
 // The "⋯" menus (dom.js moreMenu) from the keyboard: opened with Enter, Space or an arrow key,
 // the focus is on an item; arrow keys, Home and End move among them; Escape closes it with the

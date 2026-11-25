@@ -94,10 +94,12 @@ export function forkOrigin(session) {
   return workerTitle(origin) || from.title || "";
 }
 // Where a message sent to a session stands (`delivery`: the owner's, the Router's, a notice),
-// in words for the chat and for the row the owner sent it from: queued, held for its next
-// message (it was stopped), sent, its conversation shows it (received), the turn it was in
-// ended (handled), sent again for want of a sign it got there, or given up on.
+// in words for the chat and for the row the owner sent it from: on its way from this page (not
+// stored yet), queued, held for its next message (it was stopped), sent, its conversation shows
+// it (received), the turn it was in ended (handled), sent again for want of a sign it got
+// there, or given up on.
 export const DELIVERY_WORDS = {
+  sending: ["Sending…", ""],
   queued: ["Waiting to be sent", "wait"],
   held: ["Not sent yet", "wait"],
   sent: ["Sent", ""],
