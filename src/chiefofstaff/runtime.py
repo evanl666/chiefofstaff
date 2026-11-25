@@ -9391,6 +9391,7 @@ class Runtime:
         agent_effort: str = "",
         typed: bool = False,
         settings_digest: str = "",
+        shared_card: str = "",
     ) -> dict:
         """`learn`: the owner typed it (not a message the app sends for them). A message to a
         worker is also noted for the Router (`tell_router`), which must know what the owner
@@ -9400,8 +9401,14 @@ class Runtime:
         `compare`: several agents chosen (@codex @claude): the task runs on each. `task_id`:
         the task of the worker's they look at in its chat (see chat_task). `typed`: written
         in that worker's own chat, which showed `settings_digest` as the line on its folder's
-        settings that waits for them (settings_typed)."""
+        settings that waits for them (settings_typed). `shared_card`: on Home, a card someone
+        shared that the owner opened here, quoted after their words as untrusted data."""
         row = self.store.session(session_id)
+        # Someone else's card: after the owner's words, never instructions (shares.quoted); one
+        # removed meanwhile is said before anything is done.
+        quoted, shared = (
+            self.shares.quoted(shared_card) if shared_card and row["role"] == ROUTER else ("", {})
+        )
         if (
             typed
             and row["role"] == WORKER
@@ -9491,6 +9498,8 @@ class Runtime:
                     else ""
                 )
             )
+        if quoted:
+            meta["shared_card"] = shared
         if row["role"] == ROUTER:
             # The Router hands this message on as {owner:<ref>} instead of copying it.
             meta["ref"] = "o" + uuid4().hex[:6]
@@ -9532,7 +9541,7 @@ class Runtime:
                 "question, report your answer (status done)."
             )
         context = [wrap("system", "context", note) for note in notes if note]
-        prompt = "\n\n".join([prompt, *context])
+        prompt = "\n\n".join([prompt, *([quoted] if quoted else []), *context])
         task = about
         if made:
             meta |= {
