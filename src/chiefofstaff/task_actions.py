@@ -130,6 +130,9 @@ PR_HOURS = 72
 JUST_OPENED = (1.0, 2.0)
 # Those closed (not merged) this many times less often: one may be reopened.
 CLOSED_PR_PACE = 5
+# A task's PRs read from GitHub in one pass, at most (see TaskActions.read_prs): one with forty
+# has them read a few a pass.
+PR_READS = 5
 # The rules a task's PRs' roles were read by (classify_prs): raised when they change, so that
 # receipts read before are read again once (merged and closed PRs too), this many tasks a round.
 ROLE_RULES = 2
@@ -1817,25 +1820,50 @@ class TaskActions:
         checkouts: list[dict] | None = None,
         again: bool = False,
         reported: bool = False,
+        first: str = "",
     ) -> list[dict]:
         """The task's PRs as GitHub has them now: open or merged, checks, review, and what each
         is to the task (`role`, see pr_roles). `checkouts`: its changes as just found (whose
         commits are on which branch), else as its receipts last had them. `again`: a periodic
         refresh, which reads only what the task made, changed or reviewed: a PR it only
         mentions keeps how it stood when its result was read, and so does one that cannot be
-        read now. A PR GitHub said several times does not exist (an example in a report, a
-        typo) is not asked for again. `reported`: its result was just reported (a PR it opened
-        a moment ago is read again after a pause, JUST_OPENED)."""
-        prs = []
+        read now. One known merged keeps how it was read: merged is final. A PR GitHub said
+        several times does not exist (an example in a report, a typo) is not asked for again.
+        At most PR_READS are read a pass (a task may have dozens): those never read first, then
+        open ones, then closed ones (one may be reopened), each the least lately read and then
+        the newest first; one not read now keeps how it stood. `first` ("owner/repo#n"): one
+        something just happened on, read before any. `reported`: its result was just reported
+        (a PR it opened a moment ago is read again after a pause, JUST_OPENED)."""
         earlier = {pr["label"].lower(): pr for pr in self.previous_prs(task["id"])}
         opened = self.opened_prs(task["id"])
-        for repo, number in threads.PR_URL.findall(" ".join(self.pr_urls(task)))[:5]:
-            label = f"{repo}#{number}".lower()
+        named: dict[str, tuple[str, str]] = {}
+        for repo, number in threads.PR_URL.findall(" ".join(self.pr_urls(task))):
+            named.setdefault(f"{repo}#{number}".lower(), (repo, number))
+        # Not read now: as it was last read (what it is to the task, how it stood), not dropped
+        # from its receipts until it is read again.
+        kept: dict[str, dict] = {}
+        due: list[tuple[bool, int, float, int, str]] = []
+        for index, label in enumerate(named):
             if int(self.store.get(f"prmissing:{label}") or 0) >= MISSING_TRIES:
                 continue
             known = earlier.get(label)
-            if again and known and not followed_up(known) and label not in opened:
-                prs.append({key: value for key, value in known.items() if key != "role"})
+            if known:
+                kept[label] = {key: value for key, value in known.items() if key != "role"}
+            if known and (
+                (again and not followed_up(known) and label not in opened)
+                # (One read before PRs' authors were kept lacks what its role is read from.)
+                or (known.get("state") == "MERGED" and "author" in known)
+            ):
+                continue
+            rank = 0 if not known else 2 if known.get("state") == "CLOSED" else 1
+            at = stamp(known.get("at")) if known else 0.0
+            due.append((label != first.lower(), rank, at, -index, label))
+        reading = {item[-1] for item in sorted(due)[:PR_READS]}
+        prs = []
+        for label, (repo, number) in named.items():
+            if label not in reading:
+                if label in kept:
+                    prs.append(kept[label])
                 continue
             # One it opened a moment ago: GitHub's answer can lag a new PR (live H-X SX2: its
             # result's receipts had none of it), read again after a pause before going without.
@@ -1847,10 +1875,8 @@ class TaskActions:
                 if NOT_FOUND.search(str(exc)):
                     missing = int(self.store.get(f"prmissing:{label}") or 0) + 1
                     self.store.set(f"prmissing:{label}", str(missing))
-                if known:
-                    # Not read now: it stays as it was last read (what it is to the task, how
-                    # it stood), not dropped from its receipts until GitHub answers again.
-                    prs.append({key: value for key, value in known.items() if key != "role"})
+                if label in kept:  # Until GitHub answers again.
+                    prs.append(kept[label])
                 continue
             self.store.delete(f"prmissing:{label}")
             # Read: a follow that could not read the PR itself can again.
@@ -2127,12 +2153,16 @@ class TaskActions:
         return self.view(self.tasks.get(task_id))
 
     async def learn_pr_titles(self, text: str):
-        """The titles of the PRs a text names, read from GitHub once (a few at a time)."""
+        """The titles of the PRs a text names, read from GitHub once (a few at a time: those not
+        known yet)."""
         learned = False
-        for key in threads.pull_requests(text)[:5]:
+        unknown = [
+            key
+            for key in threads.pull_requests(text)
+            if not self.store.get(f"prtitle:{key.removeprefix('github:')}")
+        ]
+        for key in unknown[:5]:
             label = key.removeprefix("github:")
-            if self.store.get(f"prtitle:{label}"):
-                continue
             repo, number = label.rsplit("#", 1)
             try:
                 pull = await self.runtime.github.pull(repo, int(number))
@@ -2501,9 +2531,10 @@ class TaskActions:
                     needs_action=True, title="Ready to merge",
                 )  # fmt: skip
 
-    async def refresh_prs(self, task_id: str) -> bool:
+    async def refresh_prs(self, task_id: str, first: str = "") -> bool:
         """The PR chips of a task show what is true now, not what was when it reported: a PR
-        whose failing checks pass on a later run turns green. True when anything changed."""
+        whose failing checks pass on a later run turns green. True when anything changed.
+        `first`: the PR ("owner/repo#n") something just happened on, read before its others."""
         run = self.store.one(
             """SELECT id, evidence FROM runs WHERE task_id=? AND evidence!=''
             ORDER BY started_at DESC LIMIT 1""",
@@ -2515,7 +2546,7 @@ class TaskActions:
         if not evidence.get("prs"):
             return False
         read = now()
-        prs = await self.read_prs(self.tasks.get(task_id), again=True)
+        prs = await self.read_prs(self.tasks.get(task_id), again=True, first=first)
         if not prs:
             return False
         task = self.tasks.get(task_id)
@@ -2539,8 +2570,10 @@ class TaskActions:
 
     async def refresh_open_prs(self, pull: str = "", every: float = PR_REFRESH):
         """Every few minutes (and at once for `pull`, "owner/repo#n", when something happened
-        on it): the PRs of recent tasks that are not merged yet. Those all closed (not merged)
-        less often, and at once when something happened on one: it may have been reopened."""
+        on it): the PRs of recent tasks that are not merged yet, and those not read yet (more
+        than a pass reads, see read_prs), however its others stand. Those all closed (not
+        merged) less often, and at once when something happened on one: it may have been
+        reopened."""
         for task in self.tasks.listed(include_ended_since=hours_ago(PR_HOURS)):
             run = self.store.one(
                 """SELECT evidence FROM runs WHERE task_id=? AND evidence!=''
@@ -2551,17 +2584,32 @@ class TaskActions:
             # What it made, changed or reviewed, or is about (the PR its checks are on): a PR it
             # only mentions (an example, for context) is not followed up.
             prs = [pr for pr in evidence.get("prs") or [] if followed_up(pr)]
+            unread = self.unread_prs(task, evidence["prs"]) if evidence.get("prs") else set()
             states = {pr.get("state") for pr in prs}
-            if not prs or states == {"MERGED"}:
+            if not unread and (not prs or states == {"MERGED"}):
                 continue
-            named = pull and any(pr.get("label", "").lower() == pull.lower() for pr in prs)
-            pace = every * CLOSED_PR_PACE if states <= {"MERGED", "CLOSED"} else every
+            labels = {pr.get("label", "").lower() for pr in prs} | unread
+            named = bool(pull) and pull.lower() in labels
+            pace = (
+                every * CLOSED_PR_PACE if not unread and states <= {"MERGED", "CLOSED"} else every
+            )
             if not named and time.time() - evidence.get("prs_at", 0) < pace:
                 continue
             try:
-                await self.refresh_prs(task["id"])
+                await self.refresh_prs(task["id"], pull if named else "")
             except Exception:
                 logger.info("Could not refresh the PRs of %s.", task["id"], exc_info=True)
+
+    def unread_prs(self, task: dict, prs: list[dict]) -> set[str]:
+        """The task's PRs ("owner/repo#n", lowercase) its receipts (`prs`) do not have yet, but
+        for one GitHub said several times does not exist."""
+        known = {pr["label"].lower() for pr in prs}
+        return {
+            label
+            for repo, number in threads.PR_URL.findall(" ".join(self.pr_urls(task)))
+            if (label := f"{repo}#{number}".lower()) not in known
+            and int(self.store.get(f"prmissing:{label}") or 0) < MISSING_TRIES
+        }
 
     async def reread_roles(self, most: int = ROLE_REREADS):
         """What each PR is to its task (created, modified, reviewed, referenced) as receipts read

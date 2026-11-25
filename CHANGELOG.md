@@ -38,6 +38,14 @@ longer takes long work for silence.
   new request and to stop the old work unless told otherwise; its task stays as it is until the
   Router or you cancel it. Busy is twenty minutes in a turn now, not ten (or two open tasks, as
   before).
+- **Every PR a task opened shows where it stands, however many it opened.** A task that opened
+  a PR a round (eleven of them) listed its newer ones under *Artifacts* as *Created* with no
+  state, a day after they were merged: only its first five PRs were ever read from GitHub, and
+  once those five were merged none was read again. Each PR a task created, changed or reviewed
+  is now read, a few at a time (the newest it has not read yet first): merged, closed, or open
+  with its checks, on *Artifacts* and on its card. One merged keeps its state without being read
+  again; news on one (merged, say) has it read at once. A PR its report only mentions is still
+  read once, not followed.
 
 A finished card can be shared as a link, and opened in your own Chief of Staff.
 

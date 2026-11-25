@@ -263,6 +263,126 @@ async def test_a_refresh_leaves_mentioned_prs_and_ones_github_does_not_have(harn
     assert len([call for call in harness.gh_calls if gone in call[0]]) == 3
 
 
+def app_pr(number: int) -> str:
+    return f"https://github.com/acme/app/pull/{number}"
+
+
+def rounds(harness, numbers, open_from=21):
+    """PRs a task opened a round each, as GitHub has them: merged, the latest still open."""
+    harness.gh_replies["auth status --json hosts"] = json.dumps(
+        {"hosts": {"github.com": [{"login": "me", "state": "success", "active": True}]}}
+    )
+    for number in numbers:
+        harness.gh_replies[f"pr view {app_pr(number)}"] = pr_view(
+            number=number, url=app_pr(number), title=f"Round {number}",
+            state="OPEN" if number >= open_from else "MERGED", headRefName=f"round-{number}",
+        )  # fmt: skip
+
+
+def pr_reads(harness) -> list[int]:
+    """The PRs read from GitHub since the last clear, by number."""
+    return sorted(
+        int(call[2].rsplit("/", 1)[1]) for call, _ in harness.gh_calls if call[:2] == ("pr", "view")
+    )
+
+
+def pr_statuses(runtime, task_id) -> dict[str, str]:
+    return {
+        item["title"].split(" · ")[0]: item["status"]
+        for item in view(runtime, task_id)["deliverables"]
+        if item["kind"] == "pr"
+    }
+
+
+async def test_a_task_with_many_prs_has_each_read_a_few_a_pass_the_newest_first(harness):
+    """The owner's valley-life task opened a PR a round, eleven of them: only its first five
+    were ever read from GitHub, so the newer ones (those that matter) showed no state. Each is
+    read now, a few a pass, those never read first and the newest of them first; one known
+    merged keeps its state and is not read again, nor dropped from its receipts."""
+    runtime = await harness.connect()
+    numbers = range(12, 23)
+    rounds(harness, numbers)
+    worker, task = await spawn(runtime, harness.router_id, "Retest the game")
+    runtime.task_actions.record_opened(task["id"], [app_pr(n) for n in numbers])
+    harness.gh_calls.clear()
+    summary = "Opened " + ", ".join(app_pr(n) for n in numbers)
+    await call_tool(runtime, "report", worker, status="done", summary=summary)
+    await settle(runtime)
+    assert pr_reads(harness) == [18, 19, 20, 21, 22], "a few at once, the newest first"
+    # News on one (as on_thread and a Merge card bring): read at once, first, though just read.
+    harness.gh_calls.clear()
+    await runtime.task_actions.refresh_open_prs("acme/app#12", every=3600)
+    assert pr_reads(harness) == [12, 14, 15, 16, 17], "then those never read before open ones"
+    harness.gh_calls.clear()
+    await runtime.task_actions.refresh_open_prs(every=0)
+    assert pr_reads(harness) == [13, 21, 22]
+    harness.gh_calls.clear()
+    await runtime.task_actions.refresh_open_prs(every=0)
+    assert pr_reads(harness) == [21, 22], "merged: not read again"
+    prs = runtime.task_actions.previous_prs(task["id"])
+    assert [pr["label"] for pr in prs] == [f"acme/app#{n}" for n in numbers]
+    assert pr_statuses(runtime, task["id"]) == {
+        f"app#{n}": "merged" if n < 21 else "awaiting approval" for n in numbers
+    }
+
+
+async def test_prs_a_task_opened_after_its_read_ones_were_all_merged_are_read(harness):
+    """The owner's report: valley-life#17 to #22, opened by a task still at work, said only
+    "Created" a day after #17 to #20 were merged: the five read before were all merged, and a
+    task whose PRs read were all merged was never read again. Those it opened since are read,
+    one with news (merged) at once; one it only mentions is read once and not followed."""
+    runtime = await harness.connect()
+    actions = runtime.task_actions
+    rounds(harness, range(12, 23))
+    mentioned = app_pr(5)
+    harness.gh_replies[f"pr view {mentioned}"] = pr_view(
+        number=5, url=mentioned, author={"login": "bob"}, createdAt="2020-01-01T00:00:00Z",
+        headRefName="bob-fix",
+    )  # fmt: skip
+    worker, task = await spawn(runtime, harness.router_id, "Retest the game")
+    actions.record_opened(task["id"], [app_pr(n) for n in range(12, 17)])
+    summary = "Opened " + ", ".join(app_pr(n) for n in range(12, 17))
+    await call_tool(runtime, "report", worker, status="done", summary=summary)
+    await settle(runtime)
+    assert {pr["state"] for pr in actions.previous_prs(task["id"])} == {"MERGED"}
+    runtime.tasks.move(task["id"], "running", progress="Round 23")
+    actions.remember_prs(task["id"], f"Bob's {mentioned} fixes the same crash.")
+    for number in range(17, 23):
+        actions.record_opened(task["id"], [app_pr(number)])
+        actions.remember_prs(task["id"], f"Round {number}: opened {app_pr(number)}")
+    assert pr_statuses(runtime, task["id"])["app#17"] == "", "not read yet"
+
+    harness.gh_calls.clear()
+    await actions.refresh_open_prs(every=0)
+    assert pr_reads(harness) == [5, 19, 20, 21, 22], "those not read yet, the newest first"
+    # Merged (news on it): read at once, though the task's PRs were just read.
+    harness.gh_calls.clear()
+    await actions.refresh_open_prs("acme/app#17", every=3600)
+    assert pr_reads(harness) == [17, 18, 21, 22]
+    assert pr_statuses(runtime, task["id"])["app#17"] == "merged"
+    harness.gh_calls.clear()
+    await actions.refresh_open_prs(every=0)
+    assert pr_reads(harness) == [21, 22], "only mentioned, or merged: not read again"
+    assert pr_statuses(runtime, task["id"]) == {
+        f"app#{n}": "merged" if n < 21 else "awaiting approval" for n in range(12, 23)
+    }, "not one it only mentions"
+
+
+async def test_the_titles_of_the_newer_prs_a_report_names_are_learned(harness):
+    """Only the first five PRs a report named had their titles read: those known already."""
+    runtime = await harness.connect()
+    for number in range(12, 23):
+        harness.own_pull("acme/app", number, title=f"Round {number}")
+    for number in range(12, 17):
+        runtime.remember_pr_title(f"acme/app#{number}", f"Round {number}")
+    text = "Opened " + ", ".join(app_pr(n) for n in range(12, 23))
+    await runtime.task_actions.learn_pr_titles(text)
+    await runtime.task_actions.learn_pr_titles(text)
+    assert [harness.store.get(f"prtitle:acme/app#{n}") for n in range(12, 23)] == [
+        f"Round {n}" for n in range(12, 23)
+    ]
+
+
 def files_in(folder: Path) -> tuple[str, str]:
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "mock.png").write_bytes(b"png")
