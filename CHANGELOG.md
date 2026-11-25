@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- **A worker waiting for another worker stays at work.** A worker told to wait for another
+  one's message ended its turn with "I'll launch once <worker> sends the release", and its task
+  was filed as done with "Nothing is launched yet" as its result. A wait is now read from the
+  worker it names (or its task says it waits for), whatever the words, and from more ways of
+  saying it ("once … sends", "as soon as …", "after … passes", "until …"); its card and the
+  Router's list say *waiting for “…”*, and that worker's message wakes it. A turn that ends
+  without a report is never taken for a finished task: what the worker said is kept on the
+  task's card and it is asked once whether it is finished (at once to you for review when you
+  asked to see that task); still silent, its words wait for your *Accept*, never accepted for
+  you. Its "Understood, it stays open" to the Router is never filed.
+- **The Watchdog no longer takes long work for silence.** It read a worker's activity from its
+  chat only, so a 27-minute model call and a 33-minute command were "no activity", and the
+  Router made a duplicate task. A model call now counts while it is open and a command while
+  its output grows; the Watchdog looks again just before it acts and lets a worker still at work
+  be; it is told what the worker is at (*in a turn since 12:37 (model call since 12:37)*) and
+  its latest reports, however far back. A nudge reaches a worker at work on a follow-up of
+  finished work (a PR thread's news), and an escalation of one tells the Router its report lands
+  on that task.
+- **One more thing on a task just finished takes one call.** The Router's *continue* on a
+  finished task said to use *new*, and *new* said to use *continue*. A new task is now asked
+  about only beside one still at work, and the Router hears "accepted by the owner" only of
+  what you accepted.
+- **"Written before a newer message" only for an instruction.** A bot's PR comment, a peer's
+  note or a check-back made a worker's done report wait, and a "nothing new" report followed.
+  Only the Router's or your message (and your reason when you reject a draft) holds a report
+  back now.
+- **A second worker for a busy one says so in your chat.** *⑂ Started a second worker from “…”
+  (it was busy) for “…”* is a line of its own, never folded into the routing updates. When its
+  task is what you asked for on rejecting the busy worker's draft, the work you rejected is
+  cancelled (superseded by the new task) and that worker stops it. Busy is twenty minutes in a
+  turn now, not ten (or two open tasks, as before).
 - **A worker's question nobody answered in time stays under *Needs you*.** A worker that asked
   on a question card waits an hour at most, then goes on without your answer; the card then
   left *Needs you*, so a question you never saw was gone, and an answer could no longer reach
