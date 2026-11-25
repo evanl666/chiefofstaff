@@ -328,6 +328,8 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
   if (working(worker) && active === task.id) return at("running", "", "");
   // Its turn is over, and a command it left running for this task (a dev server) goes on.
   if (worker.background && active === task.id) return at("running", "background", "Waiting for background process");
+  // Blocked on workers it works with, not on the owner (E157): their result or message wakes it.
+  if (task.waits_on) return at("monitoring", "watching", `Waits on ${task.waits_on}`);
   // Waiting on something registered for this task: whatever its worker does meanwhile.
   if (checkBack) return at("monitoring", "check-back", "");
   // Its worker is on another task: this one waits its turn when it was not taken up yet, or when

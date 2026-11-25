@@ -203,6 +203,9 @@ class Asks:
         "blocked": it cannot go on without them): kept with it until it is answered."""
         text = text.strip()[:6000]
         key = f"ownerq:{session_id}:{task_id}"
+        # Asked again on its task: the same question (its id, when it was first asked), as it
+        # stands now, stamped updated (E155).
+        before = json.loads(self.store.get(key) or "null") if task_id else None
         if not task_id:
             # Not the one it asked before (that one stays), unless it asks the same again.
             same = [
@@ -224,6 +227,11 @@ class Asks:
         }
         if about_draft:
             question["about_draft"] = True
+        if before and not before.get("went_on"):
+            changed = any(question[k] != before.get(k) for k in ("text", "why", "options", "next"))
+            question["at"] = before.get("at") or question["at"]
+            if changed or before.get("updated_at"):
+                question["updated_at"] = now() if changed else before["updated_at"]
         self.store.set(key, json.dumps(question))
         self.runtime.publish_state()
 

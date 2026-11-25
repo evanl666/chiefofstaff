@@ -4771,6 +4771,10 @@ class TaskActions:
             "deliverables": self.deliverables(task, prs, given, unknown),
             # Its question to the owner while it is open: why it asks, the choices, what next.
             "question": self.open_question(task),
+            # Blocked on workers it works with, not on the owner (E157): who, while it runs.
+            "waits_on": (self.store.get(f"peerwait:{task['id']}") or "")
+            if task["status"] == "running"
+            else "",
             # As its card shows it: what it said of its PR before it was opened or merged
             # left out once that is past (the stored result stays as reported).
             "result": self.shown_result(task),
@@ -5364,6 +5368,10 @@ class TaskActions:
                     "options": question.get("options") or [],
                     "next": question.get("next") or "",
                     "at": question.get("at") or "",
+                    # Asked again since, in other words (E155): when.
+                    **(
+                        {"updated_at": question["updated_at"]} if question.get("updated_at") else {}
+                    ),
                     # Asked on a card nobody answered in time: its worker went on without it.
                     **{
                         key: question[key] for key in ("went_on", "moved_from") if question.get(key)

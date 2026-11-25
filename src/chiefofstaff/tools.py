@@ -4381,6 +4381,14 @@ class Tools:
                 "step, the numbers, and the table if one was asked for. If this already is the "
                 "whole answer, call report again with it unchanged."
             )
+        # Blocked on another worker it works with, not on the owner (E157): under Monitoring.
+        peers = (
+            self.blocked_on_peers(caller, task, params.summary)
+            if params.status == "blocked"
+            else []
+        )
+        if task:
+            self.store.delete(f"peerwait:{task['id']}")
         if (
             task
             and row["role"] == WORKER
@@ -4702,6 +4710,12 @@ class Tools:
                         needs_action=False,
                         title="Finished",
                     )
+            elif peers:
+                names = ", ".join(f"“{self.runtime.display_title(peer)}”" for peer in peers)
+                self.store.set(f"peerwait:{task['id']}", names)
+                task = self.tasks.update(task["id"], progress=params.summary[:6000])
+                if task["status"] == "waiting" and not self.waits_for_owner(caller, task):
+                    task = self.tasks.move(task["id"], "running", progress=params.summary[:6000])
             elif params.status in {"question", "blocked"}:
                 if task["status"] in {"review", "done"} and not asked:
                     self.store.set(f"askedafter:{task['id']}", task["status"])
@@ -4739,6 +4753,14 @@ class Tools:
                     needs_action=True,
                     title="Failed",
                 )
+            elif (
+                params.status == "progress"
+                and task["status"] == "waiting"
+                and self.waits_for_owner(caller, task)
+            ):
+                # Progress while its question waits for the owner (E155: the card went, and came
+                # back with its next question): it still waits for them.
+                task = self.tasks.update(task["id"], progress=params.summary[:6000])
             elif task["status"] != "running":
                 task = self.tasks.move(task["id"], "running", progress=params.summary[:6000])
             else:
@@ -4746,7 +4768,7 @@ class Tools:
         if not answer:
             # An answer changes nothing: asked about its work, it returns to where it was.
             self.states[caller].resting = ""
-        if params.status in {"question", "blocked"}:
+        if params.status in {"question", "blocked"} and not peers:
             # Under Needs you until answered, whatever becomes of the task (the Slack
             # session's too: it has no task).
             self.runtime.asks.record_question(
@@ -4759,8 +4781,9 @@ class Tools:
                 next_step=params.next,
                 kind=params.status,
             )
-        elif not answer:
-            # It went on with this task: its question is behind it (another task's stays).
+        elif not answer and params.status != "progress":
+            # It finished this task (done, failed): its question is behind it (another task's
+            # stays). Progress keeps it: answered, withdrawn or asked again, it ends (E155).
             self.runtime.asks.answered(caller, task["id"] if task else "", by="worker")
         if row["role"] == WORKER and params.status in {"progress", "done"}:
             # A PR it delivers is its PR: reviews, comments and CI come back to it. Not every
@@ -4796,7 +4819,7 @@ class Tools:
         if settled and task:
             return f"Task {task['id']} was cancelled: this report stays in your session only."
         values: dict[str, Any] = {"report": params.summary[:4000]}
-        if row["role"] == WORKER and params.status in REPORT_STATUS:
+        if row["role"] == WORKER and params.status in REPORT_STATUS and not peers:
             values["status"] = REPORT_STATUS[params.status]
             if params.status == "failed" and task and task["status"] != "failed":
                 values["status"] = "done"  # Its finished work stands.
@@ -4839,6 +4862,12 @@ class Tools:
                 "reports this task again: wait for that report, or send your message again with "
                 f"task_id='{task['id']}'. Never move that work into another task."
             )
+        if peers:
+            names = ", ".join(f"“{self.runtime.display_title(peer)}”" for peer in peers)
+            crossed = (
+                f"{crossed} It waits on {names} (a worker it works with), not on the owner: that "
+                "worker's result or message wakes it. Nothing for the owner."
+            ).strip()
         told_status = "answer" if answer else params.status
         if task and params.status == "done" and self.states[caller].filing:
             filed = (
@@ -4872,6 +4901,29 @@ class Tools:
                 "is only an answer or a message to pass on." + self.run_note(row, task, "done")
             )
         return "Reported to the Router." + split_note + self.run_note(row, task, params.status)
+
+    def blocked_on_peers(self, caller: str, task: dict | None, summary: str) -> list[dict]:
+        """The workers a blocked report waits on (E157): those it names that are still at their
+        task, else those whose open tasks its task waits on (after)."""
+        row = self.store.session(caller)
+        if not task or row["role"] != WORKER:
+            return []
+        if named := self.runtime.peers.waiting_on(caller, summary):
+            return named
+        found: dict[str, dict] = {}
+        for dependency in self.tasks.deps(task["id"]):
+            other = self.store.find_session(dependency["session_id"])
+            if dependency["status"] in OPEN and other and not other["closed_at"]:
+                found.setdefault(other["id"], other)
+        return [other for key, other in found.items() if key != caller]
+
+    def waits_for_owner(self, caller: str, task: dict) -> bool:
+        """Whether a task waits on what its worker asked the owner: its question under Needs
+        you, or its decision card. Not one stopped (that waits for their Go on)."""
+        return not self.store.get(f"stopped:{task['id']}") and (
+            any(q.get("task_id") == task["id"] for q in self.runtime.asks.session_questions(caller))
+            or self.runtime.decisions.waits_on(task["id"])
+        )
 
     def run_note(self, row: dict, task: dict | None, status: str) -> str:
         """Reported done with a run it says still goes on that nothing will look at again (not

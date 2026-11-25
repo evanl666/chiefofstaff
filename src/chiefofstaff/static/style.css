@@ -1879,6 +1879,11 @@ button.receipt.changes .not-counted { color: var(--muted); }
 .receipt.verdict { font-weight: 600; }
 .card.decision .question, .card.change .question, .card.check .question { font-weight: 600; margin: 0 0 4px; }
 .card.decision .why, .card.change .why { color: var(--soft); font-size: var(--small); }
+/* A reconsideration: what the owner answered and why it is asked again, before the question. */
+.card.decision .answered { color: var(--soft); font-size: var(--small); margin: 0 0 6px; overflow-wrap: anywhere; }
+/* Asked again by its worker in other words: the same card, saying when. */
+.card.draft > .head .updated, .card .asked .q-updated { color: var(--muted); font-size: var(--small); font-weight: 400; }
+.card.draft > .head .updated { margin-left: auto; }
 .card.change .before { color: var(--muted); font-size: var(--small); text-decoration: line-through; }
 /* Options read as a list to pick from: what it is, what it means; the recommended one marked. */
 .card.decision .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 4px; margin: 12px 0 0; }
@@ -1893,7 +1898,7 @@ button.receipt.changes .not-counted { color: var(--muted); }
 .card.decision .option .tag { grid-column: 2; grid-row: 1; font-size: var(--small); color: var(--accent); font-weight: 600; }
 .card.decision .option small { grid-column: 1 / -1; color: var(--muted); font-size: var(--small); }
 .card.decision .recommendation, .card.decision .precedents { font-size: var(--small); color: var(--soft); margin-top: 8px; }
-.card.draft :is(.question, .why, .before, .recommendation, .precedents, .option, .lesson small) code { font: 0.92em var(--mono); background: var(--bubble); padding: 0 4px; border-radius: 4px; overflow-wrap: anywhere; }
+.card.draft :is(.question, .why, .answered, .before, .recommendation, .precedents, .option, .lesson small) code { font: 0.92em var(--mono); background: var(--bubble); padding: 0 4px; border-radius: 4px; overflow-wrap: anywhere; }
 .card.lessons .lesson-list { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 8px; }
 .card.lessons li { display: flex; gap: 10px; align-items: flex-start; }
 .card.lessons li input[type="checkbox"] { margin-top: 8px; }

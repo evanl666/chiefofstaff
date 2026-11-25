@@ -84,7 +84,9 @@ function decider(draft, node, error, failed = null) {
         node.classList.remove("leaving");
       }
       applyDraft(result?.id === draft.id && result.status ? result : { ...draft, status: "answered" });
-      if (done) toast(done);
+      // What it came to, as the server says (a note, not a decision), when `done` asks.
+      const said = typeof done === "function" ? done(result) : done;
+      if (said) toast(said);
       return true;
     } catch (failure) {
       state.leaving.delete(key);
@@ -292,7 +294,7 @@ function connectionCard(draft) {
   return node;
 }
 // Cards change as workers join a decision or confirm a changed one.
-export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? draft.target.askers.length : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : draft.kind === "lessons" ? draft.target.lessons.map((lesson) => lesson.id).join(",") : draft.kind === "connection" ? `${draft.target.affected_sessions}:${draft.target.last_failed_at}:${draft.target.retrying}:${draft.target.still_failing}:${draft.target.source}:${draft.target.url}` : ""}:${draft.outcome || ""}`;
+export const draftKey = (draft) => `draft:${draft.id}:${draft.kind === "decision" ? `${draft.target.askers.length}:${draft.target.updated_at || ""}` : draft.kind === "change" ? draft.target.tasks.map((task) => (task.ack ? 1 : 0)).join("") : draft.kind === "lessons" ? draft.target.lessons.map((lesson) => lesson.id).join(",") : draft.kind === "connection" ? `${draft.target.affected_sessions}:${draft.target.last_failed_at}:${draft.target.retrying}:${draft.target.still_failing}:${draft.target.source}:${draft.target.url}` : ""}:${draft.outcome || ""}`;
 // What the owner typed on a card, by card and field: a card drawn again (another worker joins
 // a decision, a lesson is added) keeps it.
 const typed = new Map();
@@ -309,16 +311,25 @@ function decisionCard(draft) {
   const error = el("span", { class: "error" });
   // Which task asks, in its label; several tasks that wait on it are listed below it.
   const askers = target.askers || [];
+  // A reconsideration: what the owner answered, when, and why it is asked again, first.
+  const kept = target.replaces ? (target.previous || "").split(" → ").slice(1).join(" → ") || target.previous || "" : "";
+  const answered = target.replaces ? el("div", { class: "answered", html: inlineHtml(`You answered this ${target.previous_at ? `at ${clock(target.previous_at)}` : "before"} (“${kept}”).${target.why ? ` Asked again because: ${target.why}` : ""}`) }) : null;
   const node = card(
     draft,
     "decision",
     askers.length === 1 ? ["Decision for ", taskLink(askers[0])] : "Decision",
     askers.length > 1 ? el("div", { class: "affects" }, el("span", { text: `For ${askers.length} tasks:` }), ...askers.map(taskLink)) : null,
+    answered,
     el("div", { class: "question", html: inlineHtml(target.question) }),
-    target.why ? el("div", { class: "why", html: inlineHtml(target.why) }) : null,
+    target.why && !answered ? el("div", { class: "why", html: inlineHtml(target.why) }) : null,
   );
+  // Asked again by its worker with what it found since: the same card, saying when.
+  if (target.updated_at) node.querySelector(":scope > .head").append(el("span", { class: "updated", text: `updated ${clock(target.updated_at)}` }));
   const decide = decider(draft, node, error);
-  const answer = (text) => text.trim() && decide({ action: "answer", text }, "Decided.");
+  // Words that name none of its options are a note to the worker, not a decision (the server
+  // says which it was).
+  const outcome = (result) => (/sent your note/i.test(result?.outcome || "") ? `${result.outcome}.` : "Decided.");
+  const answer = (text) => text.trim() && decide({ action: "answer", text }, outcome);
   const lowered = (target.recommendation || "").toLowerCase();
   const best = (target.options || []).find((option) => lowered.includes(option.choice.toLowerCase()));
   if (target.options?.length) {
@@ -343,17 +354,21 @@ function decisionCard(draft) {
     const reason = best && lowered.startsWith(best.choice.toLowerCase()) ? target.recommendation.slice(best.choice.length).replace(/^[\s:,.;—–-]+/, "") : "";
     node.append(el("div", { class: "recommendation", html: inlineHtml(reason ? `Why ${best.choice.toLowerCase()}: ${reason}` : `Recommended: ${target.recommendation}`) }));
   }
-  // A reconsideration says which decision its answer replaces (its why: what changed since).
-  if (target.previous) node.append(el("div", { class: "precedents", html: inlineHtml(`Reconsiders what you decided: ${target.previous}`) }));
-  else if (target.precedents?.length) node.append(el("div", { class: "precedents", html: inlineHtml(`You decided before: ${target.precedents.join(" · ")}`) }));
+  if (!answered && target.precedents?.length) node.append(el("div", { class: "precedents", html: inlineHtml(`You decided before: ${target.precedents.join(" · ")}`) }));
+  const options = Boolean(target.options?.length);
   const field = () => {
-    const input = keepTyped(el("input", { placeholder: "Your decision", autocomplete: "off", "aria-label": "Your decision" }), `${draft.id}:decision`);
+    const label = options ? "Your decision, or a note" : "Your decision";
+    const input = keepTyped(el("input", { placeholder: label, autocomplete: "off", "aria-label": label }), `${draft.id}:decision`);
     input.addEventListener("keydown", (event) => submits(event) && answer(input.value));
-    return [input, el("button", { type: "button", class: "secondary", text: "Decide", onclick: () => answer(input.value) })];
+    return [input, el("button", { type: "button", class: answered ? "text" : "secondary", text: options ? "Send" : "Decide", onclick: () => answer(input.value) })];
   };
   // Typed into before it was drawn again: the field is open with it.
-  const open = target.options?.length && !typed.get(`${draft.id}:decision`) ? later("Something else…", field) : field();
-  node.append(actionRow(error, null, [{ text: "Not now", onclick: () => decide({ action: "reject" }, "Left for later.") }], ...[open].flat()));
+  const open = options && !typed.get(`${draft.id}:decision`) ? later("Something else…", field) : field();
+  // A reconsideration's one main action keeps the answer in force; Not now keeps it too, for
+  // now (never the change it recommends).
+  const keep = answered ? el("button", { type: "button", text: "Keep", "data-tip": `Keep your answer (“${kept}”): the worker goes on with it`, onclick: () => decide({ action: "choose", choice: "keep" }, "Kept your answer.") }) : null;
+  const notNow = { text: "Not now", onclick: () => decide({ action: "reject" }, answered ? "Kept your answer for now." : "Left for later.") };
+  node.append(actionRow(error, keep, [notNow], ...[open].flat()));
   return node;
 }
 // The owner changed a decision: which tasks it affects, and which workers confirmed.

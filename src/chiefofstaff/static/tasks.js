@@ -2,7 +2,7 @@
 
 import { api, el, foldable, FRESH_START, freshButton, moreMenu, once, startFresh, submits, toast } from "./dom.js";
 import { monitorParts, obligationsOf, PLAN_STOP, PR_TO_FIX, resetTime, SECTION_DOT, SECTIONS, statusWord, taskPhase, workerContext } from "./board.js";
-import { ago, changesText, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel, uncheckedText } from "./text.js";
+import { ago, changesText, clock, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel, uncheckedText } from "./text.js";
 import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, toneOf } from "./artifacts.js";
 import { openFile } from "./files.js";
 import { byId, closedWorkers, DELIVERY_WORDS, forkOrigin, latestDelivery, loadState, ownerQuestions, pendingDrafts, sessions, state, tasks } from "./state.js";
@@ -372,13 +372,15 @@ function deliveryNote(task) {
 const questionOf = (task) => (task.stopped ? null : ownerQuestions().find((question) => question.task_id === task.id) || task.question || null);
 const askedOf = (task) => {
   const question = questionOf(task);
-  return question ? [question.id, question.text, question.why, question.options, question.next, ...(question.went_on ? [true] : [])] : null;
+  return question ? [question.id, question.text, question.why, question.options, question.next, ...(question.went_on ? [true] : []), ...(question.updated_at ? [question.updated_at] : [])] : null;
 };
 export function questionParts(question, answer) {
   const options = (Array.isArray(question.options) ? question.options : []).map((option) => String(option?.choice ?? option?.text ?? option ?? "").trim()).filter(Boolean);
   // Asked on a card nobody answered in time: its worker went on, and an answer still reaches it.
   const movedFrom = question.moved_from?.title ? ` (asked on “${question.moved_from.title}”)` : "";
   return [
+    // Asked again on its task: the same question, as it stands now (E155).
+    question.updated_at ? el("div", { class: "q-updated", text: `Updated ${clock(question.updated_at)}` }) : "",
     question.went_on ? el("div", { class: "q-went-on", text: `It went on without your answer; a reply still reaches it${movedFrom}.` }) : "",
     question.why ? el("div", { class: "q-why" }, el("span", { class: "muted", text: "Why: " }), question.why) : "",
     options.length ? el("div", { class: "q-options", role: "group", "aria-label": "Answers it offers" }, ...options.map((option) => el("button", { type: "button", class: "secondary q-option", text: option, "data-tip": `Answer “${option}”`, onclick: () => answer(option) }))) : "",

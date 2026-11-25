@@ -4,6 +4,8 @@ import sys
 
 import pytest
 from conftest import Harness, call_tool, env, settle
+from test_round13_ui import BOARD
+from test_ui_text import run_js
 
 from chiefofstaff.models import DraftDecision
 from chiefofstaff.scripted import CallTool, Say, ScriptedBackend, Shell
@@ -320,7 +322,11 @@ async def test_a_decision_asked_again_on_its_task_gets_its_answer_not_a_card(har
     assert not harness.store.drafts() and runtime.tasks.get(task)["status"] == "running"
 
     lighthouse = "Light the lighthouse at dusk?"
-    await call_tool(runtime, "ask_decision", sid, question=lighthouse, seen_precedents=True)
+    shown = await call_tool(runtime, "ask_decision", sid, question=lighthouse,
+                            seen_precedents=True)  # fmt: skip
+    assert "decided for your task already" in shown.text_result_for_llm
+    assert not harness.store.drafts(), "a decided task: its decision first, not a card (R1)"
+    await call_tool(runtime, "ask_decision", sid, question=lighthouse, distinct=True)
     await runtime.owner_send(sid, "Yes, at dusk.")
     again = await call_tool(runtime, "ask_decision", sid, question=lighthouse,
                             seen_precedents=True)  # fmt: skip
@@ -344,7 +350,7 @@ async def test_new_evidence_reconsiders_a_decision_and_one_stays_in_force(harnes
     [old] = runtime.decisions.active()
     revised = "Carry only half of the gold over to the next night?"
     listed = await call_tool(runtime, "ask_decision", sid, question=revised)
-    assert listed.result_type == "failure" and old["id"] in listed.text_result_for_llm
+    assert listed.result_type == "success" and old["id"] in listed.text_result_for_llm
     assert "replaces=" in listed.text_result_for_llm and not harness.store.drafts()
     unsaid = await call_tool(runtime, "ask_decision", sid, question=revised, replaces=old["id"])
     assert unsaid.result_type == "failure" and not harness.store.drafts(), "it says why"
@@ -707,3 +713,270 @@ async def test_e151_the_router_hears_what_the_owner_answered(harness):
     await runtime.owner_send(chat["session_id"], "Use 1.12 everywhere.")
     assert "The owner answered “Report with k=1.11?”" in told()
     assert "Use 1.12 everywhere." in told()
+
+
+async def decided(runtime, harness, title, question, choice, options=("Rule A", "Rule B")):
+    """A worker whose card the owner answered: its task relies on that decision."""
+    worker = await spawn(runtime, harness.router_id, title)
+    await call_tool(runtime, "ask_decision", worker["session_id"], question=question,
+                    options=[{"choice": option} for option in options])  # fmt: skip
+    [card] = harness.store.drafts()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text=choice))
+    await settle(runtime)
+    [decision] = runtime.decisions.active()
+    return worker, decision
+
+
+async def test_a_reask_on_a_decided_task_is_its_decision_unless_it_reconsiders(harness):
+    """R1: a reworded re-ask on a decided task went through with seen_precedents=true and left
+    two decisions in force. On a decided task a new card is a reconsideration saying why, or a
+    decision it says is another one once it has seen the one in force."""
+    runtime = await harness.connect()
+    worker, decision = await decided(runtime, harness, "Tie breaker", "Rule A or rule B?",
+                                     "Rule A")  # fmt: skip
+    sid = worker["session_id"]
+    for flags in ({"distinct": True}, {"seen_precedents": True}):
+        again = await call_tool(runtime, "ask_decision", sid, question="Which tie rule, then?",
+                                **flags)  # fmt: skip
+        said = again.text_result_for_llm
+        assert decision["id"] in said and "→ Rule A" in said and "replaces=" in said, said
+        assert not harness.store.drafts(), f"no card with {flags}"
+    other = await call_tool(runtime, "ask_decision", sid, question="Log every tie?", distinct=True)
+    assert "Asked the owner" in other.text_result_for_llm, "another decision, shown the first"
+    [card] = harness.store.drafts()
+    assert card["target"]["precedents"] == [decision["text"]], "the card shows the one in force"
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="reject"))
+
+    why = "Simulated 2,000 games: with rule A players still tie 61% of the time."
+    await call_tool(runtime, "ask_decision", sid, question="C and D, or C only?",
+                    options=[{"choice": "C and D"}, {"choice": "C only"}],
+                    replaces=decision["id"], why=why)  # fmt: skip
+    [card] = harness.store.drafts()
+    target = card["target"]
+    assert (target["replaces"], target["previous_at"]) == (decision["id"], decision["created_at"])
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="C and D"))
+    [now] = runtime.decisions.active()
+    assert now["text"] == "C and D, or C only? → C and D", "one decision in force"
+
+
+async def test_e155_its_own_card_asked_again_is_that_card_updated(harness):
+    """E155 (and R1 before the answer): a worker asked again in other words while its card was
+    open: a second card of its own. It is told the card waits; with what it found since
+    (same_as), that card is updated: the same id, saying when."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Tie breaker")
+    sid = worker["session_id"]
+    await call_tool(runtime, "ask_decision", sid, question="Rule A or rule B?",
+                    options=[{"choice": "Rule A"}, {"choice": "Rule B"}])  # fmt: skip
+    [card] = harness.store.drafts()
+    again = await call_tool(runtime, "ask_decision", sid, question="Which rule against ties?")
+    assert f'same_as="{card["id"]}"' in again.text_result_for_llm
+    assert len(harness.store.drafts()) == 1
+    three = [{"choice": "Rule A"}, {"choice": "Rule B"}, {"choice": "Rule C"}]
+    await call_tool(runtime, "ask_decision", sid, question="Rule A, B or C?", same_as=card["id"],
+                    why="C came out best in a first run.", options=three)  # fmt: skip
+    [updated] = harness.store.drafts()
+    assert updated["id"] == card["id"] and updated["target"]["updated_at"]
+    assert updated["target"]["question"] == "Rule A, B or C?"
+    assert [o["choice"] for o in updated["target"]["options"]] == ["Rule A", "Rule B", "Rule C"]
+    await call_tool(runtime, "ask_decision", sid, question="Database?", distinct=True)
+    assert len(harness.store.drafts()) == 2, "another decision is a card of its own"
+
+
+async def test_keep_and_not_now_on_a_reconsideration_leave_the_decision_in_force(harness):
+    """Item 4: Keep answers a reconsideration with the decision in force. Item 5: Not now on one
+    told the worker to go on with its recommendation, which there is the change: it keeps the
+    decision for now."""
+    runtime = await harness.connect()
+    worker, decision = await decided(runtime, harness, "Tie breaker", "Rule A or rule B?",
+                                     "Rule A")  # fmt: skip
+    sid = worker["session_id"]
+    session = harness.session(sid)
+    for how, said in (
+        (DraftDecision(action="choose", choice="keep"), "The owner keeps their decision:"),
+        (DraftDecision(action="reject"), "The owner keeps their decision for now:"),
+    ):
+        await call_tool(runtime, "ask_decision", sid, question="Switch to rule C?",
+                        replaces=decision["id"], why="Rule A still ties 61%.",
+                        recommendation="Rule C", options=[{"choice": "Rule C"}])  # fmt: skip
+        [card] = harness.store.drafts()
+        assert runtime.tasks.get(worker["task_id"])["status"] == "waiting"
+        card = await runtime.drafts.resolve(card["id"], how)
+        await settle(runtime)
+        assert card["outcome"].startswith("Kept") and card["outcome"].endswith(": Rule A")
+        assert not harness.store.drafts()
+        assert said in session.sent[-1] and "Rule C" not in session.sent[-1].split(said)[1]
+        assert "recommendation" not in session.sent[-1]
+        assert [d["id"] for d in runtime.decisions.active()] == [decision["id"]]
+        assert runtime.tasks.get(worker["task_id"])["status"] == "running"
+
+
+async def test_e154_words_that_pick_no_option_are_a_note_and_the_decision_stays(harness):
+    """E154: "try more variants with a lower weight first" on a reconsideration card replaced the
+    decision in force, and every task relying on it reopened. Only a picked option (or words
+    that name one) is a decision; other words reach the workers that asked, as the owner's."""
+    runtime = await harness.connect()
+    worker, decision = await decided(runtime, harness, "Weights", "Weight 1.0 or 0.5?", "1.0",
+                                     options=("1.0", "0.5"))  # fmt: skip
+    sid = worker["session_id"]
+    await call_tool(runtime, "ask_decision", sid, question="Weight 0.5 after all, or 0.25?",
+                    replaces=decision["id"], why="1.0 overfits.",
+                    options=[{"choice": "0.5"}, {"choice": "0.25"}])  # fmt: skip
+    [card] = harness.store.drafts()
+    note = "Try more variants with a lower weight first."
+    card = await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text=note))
+    await settle(runtime)
+    assert card["outcome"] == "Kept your decision; sent your note"
+    assert [d["id"] for d in runtime.decisions.active()] == [decision["id"]]
+    assert note in harness.session(sid).sent[-1]
+    assert not [d for d in harness.store.drafts() if d["kind"] == "change"]
+
+    await call_tool(runtime, "ask_decision", sid, question="0.5 or 0.25, then?",
+                    replaces=decision["id"], why="Variants: 0.25 overfits least.",
+                    options=[{"choice": "0.5"}, {"choice": "0.25"}])  # fmt: skip
+    [card] = harness.store.drafts()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="0.25, please"))
+    [now] = runtime.decisions.active()
+    assert now["text"] == "0.5 or 0.25, then? → 0.25, please", "words that name one decide"
+
+    plain = await spawn(runtime, harness.router_id, "Docs", why_new="separate")
+    await call_tool(runtime, "ask_decision", plain["session_id"], question="Docs in English?",
+                    options=[{"choice": "English"}, {"choice": "Both"}], distinct=True)  # fmt: skip
+    [card] = harness.store.drafts()
+    card = await runtime.drafts.resolve(card["id"], DraftDecision(action="answer",
+                                                                  text="Ask the PM."))  # fmt: skip
+    assert card["outcome"] == "Sent your note" and len(runtime.decisions.active()) == 1
+
+
+async def test_e154_a_change_tells_each_worker_once_and_reopens_only_on_a_new_value(harness):
+    """E154: a change reached four workers six times (once per task), reopened six finished
+    tasks, and an hour later a second change made a second card. One message per worker; the
+    same answer in other words reopens nothing; changes within two hours are one card."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    worker = await spawn(runtime, router, "Serve the model")
+    sid = worker["session_id"]
+    await call_tool(runtime, "message_session", router, session_id=sid, task="new",
+                    why_new="test", earlier="keep", title="Tune the model",
+                    text="Tune it.")  # fmt: skip
+    tasks = [task["id"] for task in runtime.tasks.for_session(sid)]
+    recorded = await call_tool(runtime, "record_decision", router, decision="Which k? → 1.11",
+                               tasks=tasks)  # fmt: skip
+    first = recorded.text_result_for_llm.split()[1].rstrip(",.")
+    await call_tool(runtime, "report", sid, status="done", summary="Served with 1.11.",
+                    task_id=tasks[0])  # fmt: skip
+    before = len(harness.session(sid).sent)
+    same = await call_tool(runtime, "record_decision", router, decision="Which k to serve? → 1.11",
+                           replaces=[first])  # fmt: skip
+    assert "nothing changed" in same.text_result_for_llm
+    assert runtime.tasks.get(tasks[0])["status"] == "review", "the same value: nothing reopens"
+    assert len(harness.session(sid).sent) == before
+    second = runtime.decisions.active()[0]["id"]
+
+    await call_tool(runtime, "record_decision", router, decision="Which k? → 1.12",
+                    replaces=[second])  # fmt: skip
+    told = [s for s in harness.session(sid).sent[before:] if 'type="decision-changed"' in s]
+    assert len(told) == 1 and all(task in told[0] for task in tasks), "one message, both tasks"
+    assert runtime.tasks.get(tasks[0])["status"] == "running", "a new value: it reopens"
+    third = runtime.decisions.active()[0]["id"]
+    await call_tool(runtime, "record_decision", router, decision="Which k? → 1.13",
+                    replaces=[third])  # fmt: skip
+    [card] = [d for d in harness.store.drafts() if d["kind"] == "change"]
+    assert card["target"]["decision"]["text"] == "Which k? → 1.13"
+    assert card["target"]["before"] == ["Which k to serve? → 1.11"], "from what it was first"
+
+
+async def test_e153_a_new_decision_reaches_the_workers_whose_tasks_rely_on_it(harness):
+    """E153: the Router recorded a decision linked to a worker's task, without replaces: nobody
+    told it, and 75 s later it reported blocked, waiting for that decision. Each worker hears it
+    once; one that waits on the owner for it hears it at once, its question settled."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    waiting = await spawn(runtime, router, "Serve the model")
+    busy = await spawn(runtime, router, "Tune the model", why_new="separate")
+    await call_tool(runtime, "report", waiting["session_id"], status="blocked",
+                    summary="Which k should I serve?")  # fmt: skip
+    assert runtime.asks.session_questions(waiting["session_id"])
+    said = await call_tool(runtime, "record_decision", router, decision="Serve and tune k=1.12",
+                           tasks=[waiting["task_id"], busy["task_id"]])  # fmt: skip
+    assert "2 of their worker(s) were told" in said.text_result_for_llm
+    [decision] = runtime.decisions.active()
+    for worker, mode in ((waiting, "immediate"), (busy, "enqueue")):
+        session = harness.session(worker["session_id"])
+        [note] = [s for s in session.sent if 'type="decision"' in s]
+        assert decision["id"] in note and "Serve and tune k=1.12" in note
+        assert session.modes[-1] == mode
+    assert not runtime.asks.session_questions(waiting["session_id"]), "its question settled"
+    assert runtime.tasks.get(waiting["task_id"])["status"] == "running"
+
+
+async def test_e160_confirmations_are_kept_once_the_owner_saw_the_change(harness):
+    """E160: Got it on a change card, then a worker's confirmation: lost."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    worker = await spawn(runtime, router, "Login API")
+    recorded = await call_tool(runtime, "record_decision", router, decision="Email only",
+                               tasks=[worker["task_id"]])  # fmt: skip
+    first = recorded.text_result_for_llm.split()[1].rstrip(",.")
+    await call_tool(runtime, "record_decision", router, decision="Email and SMS", replaces=[first])
+    [card] = [d for d in harness.store.drafts() if d["kind"] == "change"]
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer"))
+    [new] = runtime.decisions.active()
+    await call_tool(runtime, "ack_decision", worker["session_id"], decision=new["id"],
+                    plan="Add the SMS form")  # fmt: skip
+    card = harness.store.draft(card["id"])
+    assert card["status"] == "answered" and card["target"]["tasks"][0]["ack"] == "Add the SMS form"
+    assert runtime.decisions.for_task(worker["task_id"])[-1]["ack"] == "Add the SMS form"
+
+
+async def test_e155_a_progress_report_keeps_the_open_question_and_a_reask_updates_it(harness):
+    """E155: a progress report withdrew the worker's open question (and its task left Needs
+    you), and its next question came back as new. It stays until answered, asked again (the
+    same question, updated) or the task ends."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Port picker")
+    sid, task = worker["session_id"], worker["task_id"]
+    await call_tool(runtime, "report", sid, status="question", summary="Port 8080 or 9090?",
+                    options=["8080", "9090"])  # fmt: skip
+    [question] = runtime.asks.session_questions(sid)
+    await call_tool(runtime, "report", sid, status="progress", summary="Load-testing both.")
+    assert [q["id"] for q in runtime.asks.session_questions(sid)] == [question["id"]]
+    assert runtime.tasks.get(task)["status"] == "waiting", "it still waits for the owner"
+    await call_tool(runtime, "report", sid, status="question", options=["8080", "9090"],
+                    summary="Port 8080 or 9090? 9090 held 20% more load.")  # fmt: skip
+    [again] = runtime.asks.session_questions(sid)
+    assert again["id"] == question["id"] and again["at"] == question["at"]
+    assert again["updated_at"] and "20% more" in again["text"]
+    view = runtime.task_actions.view(runtime.tasks.get(task))
+    assert view["question"]["updated_at"] == again["updated_at"]
+    await call_tool(runtime, "report", sid, status="done", summary="Went with 9090.")
+    assert not runtime.asks.session_questions(sid), "its task finished without it"
+
+
+async def test_e157_blocked_on_another_worker_waits_under_monitoring_not_needs_you(harness):
+    """E157: a blocked report that waited on another worker went under Needs you, and the
+    owner's acknowledgement raised it again. It waits on that worker, under Monitoring."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    api = await spawn(runtime, router, "Build the schema API")
+    form = await spawn(runtime, router, "Build the signup form", why_new="parallel")
+    waits = "Waiting for “Build the schema API” to publish the field names."
+    await call_tool(runtime, "report", form["session_id"], status="blocked", summary=waits)
+    assert not runtime.asks.session_questions(form["session_id"]), "nothing for the owner"
+    view = runtime.task_actions.view(runtime.tasks.get(form["task_id"]))
+    assert view["status"] == "running" and view["waits_on"] == "“Build the schema API”"
+    assert harness.store.session(form["session_id"])["status"] != "waiting"
+    told = [m for m in harness.store.messages(router) if m["kind"] == "inbound"][-1]
+    assert "not on the owner" in told["meta"]["prompt"]
+    found = run_js(
+        BOARD + f"const task = {json.dumps(view)};\n"
+        "const worker = { status: 'idle' };\n"
+        "const phase = b.taskPhase(task, worker, b.workerContext(worker, [task]));\n"
+        "return [phase.section, phase.why];"
+    )
+    assert found == ["monitoring", "Waits on “Build the schema API”"]
+    await call_tool(runtime, "report", form["session_id"], status="blocked",
+                    summary="I need the owner's Stripe key.")  # fmt: skip
+    assert runtime.asks.session_questions(form["session_id"]), "the owner's, under Needs you"
+    assert not runtime.task_actions.view(runtime.tasks.get(form["task_id"]))["waits_on"]
+    assert api["task_id"]
