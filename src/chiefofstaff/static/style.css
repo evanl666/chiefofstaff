@@ -1389,6 +1389,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 /* A part's avatar: its name's first character in its color; its state's ring; a tick when done. */
 .pa { position: relative; display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--color, var(--muted)); color: #fff; font-size: var(--small); font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
 .pa.lg { width: 30px; height: 30px; font-size: var(--body); }
+.pa::before { content: attr(data-av); }
 .pa .ring { position: absolute; inset: -4px; border-radius: 50%; pointer-events: none; }
 .pa .tick { position: absolute; right: -4px; bottom: -3px; width: 14px; height: 14px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 2px var(--card); display: grid; place-items: center; }
 .pa .tick svg { width: 9px; height: 9px; fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
@@ -1458,7 +1459,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tp-since { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; margin: -2px 0 -4px; font-size: var(--small); color: var(--muted); }
 .tp-since .lead { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; color: var(--soft); font-weight: 600; }
 .tp-since .lead::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
-.tp-since button.link { min-height: 24px; padding: 0 4px; font-size: var(--small); color: var(--soft); border-radius: 6px; }
+.tp-since button.link { min-height: 28px; padding: 0 4px; font-size: var(--small); color: var(--soft); border-radius: 6px; }
 .tp-since button.link:hover { color: var(--text); background: var(--hover); }
 .tp-since .sep { color: var(--muted); }
 .tp-since .fresh-in { animation: rise-in 0.45s var(--ease) both; }
@@ -1481,13 +1482,14 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tp-line .you { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--bubble); color: var(--soft); font-size: 10px; font-weight: 600; }
 .tp-line .what { min-width: 0; }
 .tp-line .what .main { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.tp-line .what .main a { color: var(--text); font-weight: 500; text-decoration: none; }
+.tp-line .what .main a { padding-block: 6px; color: var(--text); font-weight: 500; text-decoration: none; }
 .tp-line .what .main a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .tp-line .what .sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--small); color: var(--muted); }
 .tp-line .kind { margin-right: 6px; font: 600 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+.tp-line .kind::before { content: attr(data-kind); }
 .tp-line .end { display: flex; align-items: center; gap: 6px; }
 .tp-line .end .chip { white-space: nowrap; }
-.tp-line .end button { min-height: 26px; padding: 0 10px; font-size: var(--small); }
+.tp-line .end button { min-height: 28px; padding: 0 10px; font-size: var(--small); }
 /* New since you looked: a small accent dot at the line's start. */
 .tp-line.unseen::before { content: ""; position: absolute; left: -2px; top: 50%; width: 5px; height: 5px; margin-top: -2.5px; border-radius: 50%; background: var(--accent); }
 /* Just arrived: it rises in and holds a soft accent a moment, then lets go. */
@@ -1525,9 +1527,15 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tp-part { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto auto; column-gap: 10px; align-items: center; min-height: 58px; padding: 6px 6px 6px 8px; border-radius: var(--radius); }
 .tp-part:hover { background: color-mix(in srgb, var(--hover) 70%, transparent); }
 .tp-part.open { background: color-mix(in srgb, var(--hover) 55%, transparent); }
-.tp-part > .av { position: relative; z-index: 3; display: grid; place-items: center; width: 40px; height: 40px; }
-.tp-part .main { min-width: 0; cursor: pointer; border-radius: 6px; }
-.tp-part .main:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The avatar's ring, tick and "!" are its box's (40 px), kept inside it: nothing to scroll. */
+.tp-part > .av { position: relative; z-index: 3; display: grid; place-items: center; width: 40px; height: 40px; overflow: clip; overflow-clip-margin: 12px; }
+.tp-part > .av > .pa { position: static; }
+.tp-part > .av .ring { inset: 1px; }
+.tp-part > .av .tick { right: 1px; bottom: 2px; }
+.tp-part > .av .bang { right: 0; bottom: 1px; }
+.tp-part .main { min-width: 0; }
+.tp-part .main > .tp-head { cursor: pointer; border-radius: 6px; }
+.tp-part .main > .tp-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tp-part .name { display: flex; align-items: center; gap: 4px; min-width: 0; font-weight: 600; line-height: 20px; }
 .tp-part .name > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tp-part .name .agent-mark { margin-left: 4px; }
@@ -1537,7 +1545,12 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tp-part .status.swap { animation: fade 0.5s var(--ease); }
 .tp-part .outs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; min-width: 0; }
 .tp-part .outs .chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; padding: 0 7px; }
-.tp-part .outs a.chip { text-decoration: none; }
+/* A chip as the prototype draws it (18 px), hit over 28 px. */
+.tp-part .outs a.chip { position: relative; isolation: isolate; padding-block: 5px; margin-block: -5px; background: none; text-decoration: none; }
+.tp-part .outs a.chip::before { content: ""; position: absolute; inset: 5px 0; z-index: -1; border-radius: 10px; background: var(--hover); }
+.tp-part .outs a.chip.done::before { background: var(--green-soft); }
+.tp-part .outs a.chip.failed::before { background: var(--red-soft); }
+.tp-part .outs a.chip.waiting::before { background: var(--amber-soft); }
 .tp-part .outs a.chip:hover { color: var(--text); }
 .tp-part .time { font-size: var(--small); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 .tp-part .act { display: flex; align-items: center; gap: 2px; }
@@ -1599,7 +1612,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 #composer.tp-composer #composer-to .rcpt { display: inline-flex; align-items: center; gap: 4px; color: var(--text); font-weight: 500; }
 #composer.tp-composer #composer-to .rcpt .pa { width: 16px; height: 16px; font-size: 9px; }
 #composer.tp-composer #composer-to .later { color: var(--muted); font-weight: 400; }
-#composer.tp-composer #composer-to .change { width: auto; height: 24px; min-height: 24px; padding: 0 6px; border-radius: 6px; background: none; color: var(--accent); font-size: var(--small); font-weight: 500; }
+#composer.tp-composer #composer-to .change { width: auto; height: 28px; min-height: 28px; padding: 0 6px; border-radius: 6px; background: none; color: var(--accent); font-size: var(--small); font-weight: 500; }
 #composer.tp-composer #composer-to .change:hover { background: var(--hover); opacity: 1; }
 .tp-to-menu { position: absolute; left: 8px; right: auto; bottom: calc(100% + 6px); top: auto; width: min(380px, calc(100% - 16px)); padding: 8px; gap: 2px; transform-origin: bottom left; }
 .tp-to-menu label { display: grid; grid-template-columns: 18px 20px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 34px; padding: 2px 6px; border-radius: 6px; color: var(--text); font-size: var(--body); cursor: pointer; }
