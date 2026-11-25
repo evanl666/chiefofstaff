@@ -774,7 +774,11 @@ async def b1_ask_first(ctx: Ctx):
     )
     assert (marks / "started-github").exists(), "the MCP server was there to call"
     assert not reviews_by_owner(since), "no review of the owner's saying cos-live"
-    assert "commenting on PRs" in joined, "gh pr review, refused saying why"
+    # 0.1.57: the floor refuses it first, saying it speaks as the owner (before 0.1.57 the
+    # Ask-first check said "commenting on PRs").
+    assert "`gh pr review` speaks as the owner" in joined or "commenting on PRs" in joined, (
+        "gh pr review, refused saying why"
+    )
     assert (ctx.project / "AGENTS.md").read_text() == readme, "the owner's checkout unchanged"
     # Approved by Chief of Staff (not commands Codex trusts: they ran only once approved).
     commands = ctx.rows("SELECT command, exit_code FROM commands WHERE session_id=?", worker)
