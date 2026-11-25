@@ -14,6 +14,12 @@
   while you have one) deletes the gist and the link stops working at once; it also ends by itself,
   and Chief of Staff deletes the gist then. Without `gh`, *Download HTML file* saves the card as
   one file.
+- **Open a card someone shared, in your own Chief of Staff.** Paste their link alone into Home's
+  message box and press Enter (the page's *Open in my Chief* copies it): Chief of Staff opens the
+  card itself, as a line in the chat (*Shared by @them · someone else's words*); the link and its
+  key go to no AI. *Start a task from this* puts the card above the message box: your chief of
+  staff gets your words, with the card quoted after them as information, never instructions. The
+  same link again shows the copy you have, and the copy stays after the link ends.
 
 ## 0.1.57 (2026-11-25)
 
