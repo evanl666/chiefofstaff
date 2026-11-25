@@ -47,6 +47,7 @@ export async function showTeam(teamId) {
   const actions = $("#session-actions");
   delete actions.dataset.key;
   actions.replaceChildren();
+  watchRails();
   page = { id: teamId, data: null, items: [], next: "", loadingMore: false, open: "", review: "", answering: "", changes: false, to: null, toOpen: false, prev: null, since: null, sendKey: newKey(), sending: false, asked: false };
   const composer = $("#composer");
   composer.hidden = false;
@@ -197,7 +198,8 @@ function modelOf(view) {
   const decided = data.decided || [];
   const watch = st.done ? [] : ts.watchOf(team, st, decided);
   const since = st.done ? [] : ts.sinceOf(team, st, { looked: view.since, decided, made, brief });
-  const unseen = (at) => Boolean(view.since) && Boolean(at) && at > view.since;
+  // New since the owner last looked (never once it is done: Delivered is all of it).
+  const unseen = (at) => !st.done && Boolean(view.since) && Boolean(at) && at > view.since;
   return { team, st, ctx, items, brief, made, decided, watch, since, unseen, stages: ts.stagesOf(team, st) };
 }
 // What the parts made (PRs, docs, flows), each once, in the plan's order: Home's own list.
@@ -796,7 +798,13 @@ function drawRails() {
     rails.append(path);
   }
 }
-new window.ResizeObserver(() => drawRails()).observe(document.documentElement);
+// Drawn again as the column's width changes (the window, the panel's width).
+let railsWatch = null;
+function watchRails() {
+  if (railsWatch || !window.ResizeObserver) return;
+  railsWatch = new window.ResizeObserver(() => drawRails());
+  railsWatch.observe($("#scroller"));
+}
 
 // 5 · What the parts told each other: folded; So far holds what it settled.
 function talkFold(model, view) {

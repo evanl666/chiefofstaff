@@ -378,7 +378,59 @@ async def refund_reports(runtime, found: dict):
     await settle(runtime)
     await call_tool(runtime, "report", mail, status="done",
                     summary="退款邮件已接入发送队列，失败会重试 3 次。模板与订单邮件一致，标题“退款已受理”；预览和 12 个测试在 PR 里。")  # fmt: skip
+    await settle(runtime)  # Its result's evidence read first: the PR comes on it.
     with_prs(runtime, found["mail_task"], [pull(416, "退款成功的邮件通知")])
     session.emit("session.idle")
     await settle(runtime)
+    runtime.publish_state()
+
+
+async def refund_done(runtime, found: dict):
+    """The refund team to its end: the owner decides 订单页's question, every part reports with
+    its PR merged and is accepted (端到端测试 starts after both, and reports last)."""
+    from chiefofstaff.models import DraftDecision
+
+    store = runtime.store
+
+    async def finish(worker, task, summary, number, title):
+        status = runtime.tasks.get(task)["status"]
+        if status == "done":
+            return
+        if status == "review":
+            runtime.task_actions.accept(task)
+            await settle(runtime)
+            return
+        session = runtime.states.handle(worker)
+        for _ in range(4):
+            # What came for it meanwhile (an answer, the owner's word) is read first.
+            session.emit("user.message", content=session.sent[-1])
+            session.emit("assistant.turn_start")
+            await settle(runtime)
+            said = await call_tool(
+                runtime, "report", worker, status="done", summary=summary, task_id=task
+            )
+            await settle(runtime)
+            if not said.text_result_for_llm.startswith("Error: Not reported yet"):
+                break
+            session.emit("session.idle")
+            await settle(runtime)
+        with_prs(runtime, task, [pull(number, title, state="MERGED", review="APPROVED")])
+        if runtime.tasks.get(task)["status"] != "review":
+            raise AssertionError((said.text_result_for_llm, runtime.tasks.get(task)))
+        runtime.task_actions.accept(task)
+        session.emit("session.idle")
+        await settle(runtime)
+
+    for draft in store.drafts():
+        if draft["kind"] == "decision" and draft["status"] == "pending":
+            await runtime.drafts.resolve(
+                draft["id"], DraftDecision(action="answer", text="支持部分退款")
+            )
+    await settle(runtime)
+    await finish(found["mail"], found["mail_task"],
+                 "退款邮件已接入发送队列，失败会重试 3 次。模板与订单邮件一致。", 416, "退款成功的邮件通知")  # fmt: skip
+    await finish(found["ui"], found["ui_task"],
+                 "订单页的退款按钮和确认弹窗已合并，含部分退款，上限为实付金额。", 415, "订单页退款按钮和确认弹窗（含部分退款）")  # fmt: skip
+    await finish(found["e2e"], found["e2e_task"],
+                 "退款的端到端测试：9 个流程在 staging 全部通过。", 417, "退款端到端测试")  # fmt: skip
     runtime.publish_state()

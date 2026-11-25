@@ -339,7 +339,9 @@ export function partTime(part, now = Date.now()) {
   if (part.moved) return "";
   if (part.finished) {
     const ended = row.ended_at || part.ended_at;
-    return started && ended && ended > started ? duration(minutesSince(started, Date.parse(ended))) : "";
+    if (!started || !ended || ended <= started) return "";
+    const took = minutesSince(started, Date.parse(ended));
+    return took ? duration(took) : "<1 min";
   }
   if (part.state === "needs") {
     const minutes = minutesSince(needSince(part), now);
