@@ -5555,12 +5555,16 @@ class Tools:
 
     def moved_on_since_review(self, row: dict) -> str:
         """Why a nudge decided on the review is moot now ("" if it is not): the worker reported,
-        or has nothing open to go on with."""
+        or has nothing open to go on with and is idle. One in a turn (a follow-up of finished
+        work: a thread's news, a check-back) is nudged within it (E142: "Not sent: it has no
+        running task now", and the escalation that followed made a duplicate task)."""
         mark = self.runtime.watchdog.state(row["id"]).get("reviewed_mark", 0)
         later = self.store.messages(row["id"], after=mark) if mark else []
         if any(m["kind"] == "report" for m in later):
             return "it reported after it was flagged."
-        if not any(t["status"] == "running" for t in self.tasks.for_session(row["id"])):
+        if not any(t["status"] == "running" for t in self.tasks.for_session(row["id"])) and not (
+            self.states[row["id"]].busy and self.store.session(row["id"])["status"] == "working"
+        ):
             return "it has no running task now."
         return ""
 
@@ -5586,8 +5590,14 @@ class Tools:
             f"“{row['title']}”: {params.verdict.replace('_', ' ')}: {decided}. {params.reason}",
             {"session_id": row["id"]},
         )
-        if action in {"nudge", "interrupt"} and (moved := self.moved_on_since_review(row)):
-            # Out of date by the time it came: what it was flagged for is behind it.
+        moved = (self.moved_on_since_review(row) if action in {"nudge", "interrupt"} else "") or (
+            self.runtime.watchdog.still_at_work(row, params.verdict)
+            if action in {"nudge", "interrupt", "escalate"}
+            else ""
+        )
+        if moved:
+            # Out of date by the time it came: what it was flagged for is behind it, or it is
+            # at work again (read again now, E140).
             self.runtime.add_message(
                 caller, "notice", f"Not sent: {moved}", {"session_id": row["id"]}
             )
@@ -5615,12 +5625,23 @@ class Tools:
         elif action == "escalate":
             last = self.store.messages(row["id"])
             self.runtime.watchdog.save(row["id"], escalated_mark=last[-1]["id"] if last else 0)
+            said = f"The worker looks {params.verdict.replace('_', ' ')}: {params.reason}"
+            if not any(t["status"] in OPEN for t in self.tasks.for_session(row["id"])) and (
+                followed := self.runtime.watchdog.follow_up_of(row)
+            ):
+                # Its turn is a follow-up of finished work (E142: told only that it never
+                # reported, the Router gave it a new task, and cancelled it as a duplicate).
+                said += (
+                    f" It is working on a follow-up of task {followed['id']} “{followed['title']}” "
+                    f"({followed['status']}); its report lands on that task. No new task is "
+                    "needed for it."
+                )
             await self.delivery.deliver(
                 self.runtime.router_id(),
                 wrap(
                     "watchdog",
                     "escalation",
-                    f"The worker looks {params.verdict.replace('_', ' ')}: {params.reason}",
+                    said,
                     worker=short(row["id"]),
                     title=row["title"],
                 ),

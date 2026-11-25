@@ -30,6 +30,15 @@ class SessionState:
     # (time.monotonic) it has been, without a break: 0 while not.
     _busy: bool = field(default=False, repr=False)
     busy_since: float = 0.0
+    # The same, as a time of day (time.time()): what the Watchdog says of it.
+    busy_at: float = 0.0
+    # What shows it at work in its turn besides its chat (E140: a long model call or command
+    # says nothing there), as times of day: its session's latest event (a step, the model's,
+    # a command's output, a sub-agent's), when the model call it waits for began (0: none
+    # open), and when each open step's output last grew (by call id).
+    event_at: float = 0.0
+    model_since: float = 0.0
+    output_at: dict[str, float] = field(default_factory=dict)
     # A delayed flush of held messages is scheduled.
     flush_scheduled: bool = False
     # The model changed during this turn: messages wait for the next turn, which uses it.
@@ -146,8 +155,11 @@ class SessionState:
     def busy(self, value: bool):
         if value and not self._busy:
             self.busy_since = time.monotonic()
+            self.busy_at = time.time()
         elif not value:
-            self.busy_since = 0.0
+            self.busy_since = self.busy_at = 0.0
+            self.model_since = 0.0
+            self.output_at.clear()
         self._busy = value
 
     def step(self) -> tuple[float, str]:
@@ -212,3 +224,5 @@ class SessionStates:
             state.held = False
             state.echo_wait.clear()
             state.steps.clear()
+            state.output_at.clear()
+            state.model_since = 0.0

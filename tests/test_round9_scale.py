@@ -116,7 +116,9 @@ async def test_an_answer_after_hundreds_of_steps_is_filed_as_its_report(harness)
     await settle(runtime)
     reports = [text for kind, text in harness.kinds(worker) if kind == "report"]
     assert reports == [answer]
-    assert runtime.tasks.current(worker)["status"] in {"review", "done"}
+    # Filed on its task as progress, never as its result (E139): it is asked once.
+    assert runtime.tasks.current(worker)["progress"] == answer
+    assert "report-missing" in session.sent[-1]
 
 
 async def test_the_watchdog_sees_a_stop_after_hundreds_of_steps(harness):

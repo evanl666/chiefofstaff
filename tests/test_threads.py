@@ -140,6 +140,8 @@ async def test_watchdog_reviews_and_intervenes(tmp_path):
         result=SimpleNamespace(content="ERROR: connection refused (attempt 9), retrying"),
     )
     await settle(runtime)
+    # Its session's last event was long ago (E140: the Watchdog reads it again before acting).
+    runtime.states[worker_id].event_at = now - 1000
     assert await runtime.watchdog.check(now) == [], "a fresh worker is fine"
     assert await runtime.watchdog.check(now + 1000) == [worker_id]
     assert await runtime.watchdog.check(now + 1100) == [], "one review per cooldown"
