@@ -1277,3 +1277,8 @@ def test_uv_is_found_where_its_installers_put_it(tmp_path):
         "/usr/local/bin/uv",
     }
     assert claude_setup.find_uv({"PATH": "", "UV": str(uv)}, tmp_path) == str(uv)
+
+
+async def test_no_real_install_runs_while_the_tests_run():
+    with pytest.raises(RuntimeError, match=r"^not while Chief of Staff's own tests run$"):
+        await claude_setup.run_command(["/bin/echo", "never"], 5)
