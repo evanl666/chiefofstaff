@@ -4853,6 +4853,12 @@ class Tools:
                 f"(“{list(unread.values())[-1][:200]}”), which may settle it: wait for its next "
                 "report before you ask the owner."
             )
+        if peers:
+            names = ", ".join(f"“{self.runtime.display_title(peer)}”" for peer in peers)
+            crossed = (
+                f"{crossed} It waits on {names} (a worker it works with), not on the owner: that "
+                "worker's result or message wakes it. Nothing for the owner."
+            ).strip()
         if task and params.status == "done" and unread:
             # Through, a newer message about it still unread (bug E95: the Router took the
             # missing part for ignored, and gave it out as a new task).
@@ -4862,12 +4868,6 @@ class Tools:
                 "reports this task again: wait for that report, or send your message again with "
                 f"task_id='{task['id']}'. Never move that work into another task."
             )
-        if peers:
-            names = ", ".join(f"“{self.runtime.display_title(peer)}”" for peer in peers)
-            crossed = (
-                f"{crossed} It waits on {names} (a worker it works with), not on the owner: that "
-                "worker's result or message wakes it. Nothing for the owner."
-            ).strip()
         told_status = "answer" if answer else params.status
         if task and params.status == "done" and self.states[caller].filing:
             filed = (
