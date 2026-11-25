@@ -173,7 +173,11 @@ class Delivery:
         claimed = not self.states[session_id].busy
         if row["role"] == WORKER and not await self.runtime.workers.claim_slot(session_id):
             return message
-        working = row["status"] == "working" and self.states.is_live(session_id)
+        # A worker that asked the owner (waiting) while its turn goes on is at work in that turn
+        # as much as one working: steered, the owner's answer reaches it there (R1: queued
+        # behind its turn, it was read 43 minutes later, after a card built without it).
+        asked = row["role"] == WORKER and row["status"] == "waiting" and not claimed
+        working = (row["status"] == "working" or asked) and self.states.is_live(session_id)
         mode = (
             "immediate" if steer and working and not self.states[session_id].retuned else "enqueue"
         )
@@ -472,7 +476,11 @@ class Delivery:
             # Its turn is over, but a command it left running holds what Copilot queues for
             # it: sent at once, this starts a turn.
             mode = "immediate"
-        mid_turn = row["role"] == WORKER and row["status"] == "working" and state.echoes
+        mid_turn = (
+            row["role"] == WORKER
+            and (row["status"] == "working" or (busy and row["status"] == "waiting"))
+            and state.echoes
+        )
         attachments = [
             {"type": "file", "path": item["path"], "displayName": item["name"]}
             for message in pending
@@ -822,7 +830,9 @@ class Delivery:
                 or self.states.handle(session_id) is not session
             ):
                 return
-            working = row["role"] == WORKER and row["status"] == "working"
+            working = row["role"] == WORKER and (
+                row["status"] == "working" or (row["status"] == "waiting" and state.busy)
+            )
             mode: SendMode = "immediate" if state.held or working else "enqueue"
             try:
                 if attachments:

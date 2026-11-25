@@ -400,7 +400,7 @@ class Decisions:
                 + " Go on with your recommendation only if it is safe and easy to undo; "
                 "otherwise report(status=\"blocked\")."
             )  # fmt: skip
-            await self.tell_askers(target, text, "Not decided", "", "Not decided by you")
+            await self.tell_askers(card, text, "Not decided", "", "Not decided by you")
             return card
         if decision.action != "answer":
             raise ValueError("Decide, or say Not now.")
@@ -425,14 +425,18 @@ class Decisions:
         text = f"The owner decided: {choice}"
         short = choice if len(choice) <= 80 else choice[:79].rstrip() + "…"
         await self.tell_askers(
-            target, text, f"Decision: {choice}", recorded["decision"]["id"], f"Decided: {short}"
+            card, text, f"Decision: {choice}", recorded["decision"]["id"], f"Decided: {short}"
         )
         return card
 
     async def tell_askers(
-        self, target: dict, text: str, display: str, identifier: str, progress: str = ""
+        self, card: dict, text: str, display: str, identifier: str, progress: str = ""
     ):
-        """`progress`: what its task shows at work now (not "Needs your decision" any more)."""
+        """Every worker that waits on a card hears the owner's answer at once: steered into the
+        turn it is in when it asked and went on (else it starts its next one), so nothing it
+        does after the answer is done without it. `progress`: what its task shows at work now
+        (not "Needs your decision" any more)."""
+        target = card["target"]
         for asker in target["askers"]:
             row = self.store.find_session(asker["session_id"])
             if not row or row["closed_at"]:
@@ -448,7 +452,13 @@ class Decisions:
                     asked + "\n\n" + wrap("owner", "decision", text, decision=identifier or None),
                     kind="owner",
                     display=display,
-                    meta={"task_id": task["id"]} if task else None,
+                    # The owner's answer to its card (Decisions.unread_answer reads it so).
+                    meta={
+                        **({"task_id": task["id"]} if task else {}),
+                        "answers": card["id"],
+                        **({"decision": identifier} if identifier else {}),
+                    },
+                    steer=True,
                 )
             except Exception:
                 logger.warning("Could not tell %s the decision.", row["id"], exc_info=True)

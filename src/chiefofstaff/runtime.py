@@ -9293,7 +9293,9 @@ class Runtime:
         if task["status"] != "waiting" and self.waits_for_nothing(task["session_id"]):
             # Its question settled some other way (the draft it asked about sent, say): its
             # worker no longer waits for the owner (bug bash 9: its box kept "waits for you").
-            self.update_session(task["session_id"], status="idle")
+            # One whose turn goes on (it asked and kept at it) is at work in it.
+            busy = self.states[task["session_id"]].busy
+            self.update_session(task["session_id"], status="working" if busy else "idle")
 
     def waits_for_nothing(self, session_id: str) -> bool:
         """A session shown as waiting for the owner that waits for nothing of theirs now: no

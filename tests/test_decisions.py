@@ -1,9 +1,12 @@
 import asyncio
 import json
+import sys
 
-from conftest import call_tool, env, settle
+import pytest
+from conftest import Harness, call_tool, env, settle
 
 from chiefofstaff.models import DraftDecision
+from chiefofstaff.scripted import CallTool, Say, ScriptedBackend, Shell
 
 
 async def spawn(runtime, router, title, **extra):
@@ -407,3 +410,158 @@ async def test_two_reconsiderations_of_a_decision_are_one_card_and_one_answer(ha
     assert new["text"] == "Carry half? → Half, then." and new["replaces"] == f'["{old["id"]}"]'
     assert runtime.tasks.get(town["task_id"])["status"] == "running"
     assert "Now: Carry half? → Half, then." in harness.session(town["session_id"]).sent[-1]
+
+
+async def test_the_owners_answer_reaches_a_worker_still_in_the_turn_that_asked(harness):
+    """Owner report (0.1.57, R1): a worker asked, went on in the same turn (its simulations
+    ran), and the owner's answer waited behind that turn: 43 minutes later it read it, after a
+    second card built without it. Steered, it reaches that turn; a worker whose turn is over
+    gets it as its next turn, once."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Tie breaker")
+    sid = worker["session_id"]
+    session = harness.session(sid)
+    await call_tool(runtime, "ask_decision", sid, question="Add rule A or rule B?",
+                    options=[{"choice": "Rule A"}, {"choice": "Rule B"}])  # fmt: skip
+    [card] = harness.store.drafts()
+    assert harness.store.session(sid)["status"] == "waiting" and runtime.states[sid].busy
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Rule A"))
+    await settle(runtime)
+    [decision] = runtime.decisions.active()
+    assert session.modes[-1] == "immediate", "into the turn it asked in"
+    assert "The owner decided: Rule A" in session.sent[-1]
+    told = [m for m in harness.store.messages(sid) if m["kind"] == "owner"][-1]
+    assert told["meta"]["answers"] == card["id"] and told["meta"]["decision"] == decision["id"]
+    session.emit("session.idle")
+    await settle(runtime)
+    assert sum("The owner decided: Rule A" in s for s in session.sent) == 1, "not sent again"
+
+    other = await spawn(runtime, harness.router_id, "Tie log", why_new="separate")
+    waiting = harness.session(other["session_id"])
+    await call_tool(runtime, "ask_decision", other["session_id"], question="Log the ties?")
+    [card] = harness.store.drafts()
+    waiting.emit("session.idle")  # It ended its turn to wait.
+    await settle(runtime)
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Yes"))
+    await settle(runtime)
+    assert waiting.modes[-1] == "enqueue", "its turn was over: the answer starts the next"
+    assert sum("The owner decided: Yes" in s for s in waiting.sent) == 1
+
+
+def r1_brain(gate: asyncio.Event):
+    """The owner's case R1, in made-up words: a worker asks rule A or B and keeps at it in the
+    same turn (a simulation it started before the answer); what that simulation found, it asks
+    again unless the owner's answer reached it first."""
+
+    async def brain(session, prompt):
+        if 'type="task"' not in prompt or "Tie breaker" not in prompt:
+            yield Say("Noted.")
+            return
+        yield CallTool("ask_decision", {
+            "question": "Players always tie. Add rule A, rule B, or change nothing?",
+            "options": [{"choice": "Rule A"}, {"choice": "Rule B"}, {"choice": "No change"}],
+            "recommendation": "Rule A: fewer ties"})  # fmt: skip
+        await asyncio.wait_for(gate.wait(), 10)  # The owner answers while it simulates.
+        yield Shell("python simulate.py --rules A,B", output="A and B: ties 61%", seconds=0.05)
+        heard = [text for who, text in session.history if who == "user" and "Rule A" in text]
+        if not heard:
+            options = [{"choice": "C+D"}, {"choice": "C only"}, {"choice": "None"}]
+            yield CallTool("ask_decision", {
+                "question": "(Update) A and B both fail in simulation: C+D, C only, or none?",
+                "why": "The two options from the last question failed.", "seen_precedents": True,
+                "options": options})  # fmt: skip
+            return
+        yield CallTool("report", {"status": "done", "summary": "Rule A in; ties at 12%."})
+
+    return brain
+
+
+async def test_r1_the_answer_given_while_the_asker_simulates_reaches_it_and_no_card_follows(
+    tmp_path,
+):
+    gate = asyncio.Event()
+    harness = Harness(tmp_path / "data", client=ScriptedBackend(r1_brain(gate)))
+    runtime = await harness.connect()
+    try:
+        worker = await spawn(runtime, harness.router_id, "Tie breaker")
+        sid = worker["session_id"]
+        for _ in range(500):
+            if harness.store.drafts():
+                break
+            await asyncio.sleep(0.01)
+        [card] = harness.store.drafts()
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Rule A"))
+        gate.set()
+        for _ in range(500):
+            if runtime.tasks.get(worker["task_id"])["status"] in {"review", "done"}:
+                break
+            await asyncio.sleep(0.01)
+        cards = harness.store.all("SELECT id FROM drafts WHERE kind='decision'")
+        assert len(cards) == 1, "no second card built on what it found before the answer"
+        [decision] = runtime.decisions.active()
+        assert decision["text"].endswith("→ Rule A")
+        assert runtime.tasks.get(worker["task_id"])["result"] == "Rule A in; ties at 12%."
+        received = [m for m in harness.store.messages(sid) if m["kind"] == "owner"]
+        assert len(received) == 1 and received[0]["meta"]["answers"] == card["id"]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-ins run their commands in sh")
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+async def test_each_agent_takes_the_answer_into_the_turn_that_asked(
+    tmp_path, monkeypatch, request, agent
+):
+    """Steering parity: Codex's (turn/steer) and Claude's (a message while a tool runs) take
+    the owner's answer within the turn that asked, as Copilot's does, once."""
+    from test_agents import saved, spawn_on
+
+    from chiefofstaff import backend_claude
+
+    if agent == "codex":
+        request.getfixturevalue("codex_installed")
+    else:
+        request.getfixturevalue("claude_on_path")
+        passed = {"ran": True, "acting": "", "ask_first": "", "steering": True, "usage": True}
+
+        async def check(self, folder):
+            return dict(passed)
+
+        monkeypatch.setattr(backend_claude.ClaudeAgent, "check", check)
+        monkeypatch.setattr(backend_claude, "LISTED", {})
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    taken: list[tuple[str, str]] = []
+    took = runtime.events.user_message
+
+    def spy(row, event):
+        content = getattr(event.data, "content", "") or ""
+        delivery = getattr(getattr(event.data, "delivery", None), "value", "")
+        taken.append((content, delivery))
+        took(row, event)
+
+    monkeypatch.setitem(runtime.events.handlers, "user.message", spy)
+    try:
+        await saved(runtime, {agent: {"enabled": True}})
+        asked = json.dumps({"question": "Rule A or rule B?"})
+        made = await spawn_on(
+            harness, runtime, title="Tie breaker", agent=agent,
+            instructions=f"Call the ask_decision tool with arguments {asked}\n"
+            "Run the shell command `sleep 4`. Then reply with just: simulated",
+        )  # fmt: skip
+        sid = made["session_id"]
+        for _ in range(600):
+            if harness.store.drafts() and runtime.states[sid].steps:
+                break
+            await asyncio.sleep(0.05)
+        [card] = harness.store.drafts()
+        assert runtime.states[sid].busy, "its turn goes on (the command runs)"
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Rule A"))
+        for _ in range(600):
+            if not runtime.states[sid].busy:
+                break
+            await asyncio.sleep(0.05)
+        answers = [d for text, d in taken if "The owner decided: Rule A" in text]
+        assert answers == ["steering"], f"taken into its turn, once: {taken}"
+    finally:
+        await runtime.stop()
