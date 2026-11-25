@@ -516,7 +516,7 @@ async def test_a_part_continued_outside_its_request_has_moved_out(harness, monke
         inside["task_id"],
         [one["task_id"], inside["task_id"]],
     )
-    assert first["name"] == "Report" and first["moved_out"] is None
+    assert first["name"] == "Export the report" and first["moved_out"] is None
     other = await owner_turn(harness, runtime, "Unrelated: docs.")
     runtime.update_session(two["session_id"], status="idle")
     outside = await runtime.continue_on(

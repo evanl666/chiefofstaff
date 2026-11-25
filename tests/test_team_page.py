@@ -104,8 +104,8 @@ async def test_tell_the_team_reaches_each_part_as_it_stands_and_the_router_once(
         (e2e["task_id"], "start"),
     ]
     line = (
-        f"To the parts of \u201c{team['goal']}\u201d (you are Order page; also sent to Email, "
-        "End-to-end tests (when it starts)):"
+        f"To the parts of \u201c{team['goal']}\u201d (you are Order page; also sent to "
+        "Refund email, End-to-end tests (when it starts)):"
     )
     for part in ("page", "mail"):
         session = harness.session(found[part]["session_id"])
@@ -116,7 +116,7 @@ async def test_tell_the_team_reaches_each_part_as_it_stands_and_the_router_once(
         ]
         assert mine["meta"]["team"] == team["id"] and mine["meta"]["to_parts"] == [
             "Order page",
-            "Email",
+            "Refund email",
             "End-to-end tests",
         ]
     assert line in harness.session(page["session_id"]).sent[-1]
@@ -134,7 +134,7 @@ async def test_tell_the_team_reaches_each_part_as_it_stands_and_the_router_once(
     assert copy["text"] == text and copy["meta"]["to"] == f"team:{team['id']}"
     assert copy["meta"]["deferred"] and copy["meta"]["to_parts"] == [
         "Order page",
-        "Email",
+        "Refund email",
         "End-to-end tests",
     ]
     assert 'type="to-worker"' in copy["meta"]["prompt"]
