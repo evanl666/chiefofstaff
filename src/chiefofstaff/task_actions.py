@@ -1333,11 +1333,14 @@ class TaskActions:
             ],
         )
 
-    async def record_restart(self, task: dict, resumed: bool = False):
+    async def record_restart(
+        self, task: dict, resumed: bool = False, taken: dict[str, dict] | None = None
+    ):
         """A finished task taken up again (a follow-up, the owner's chat): when other work
         changed its checkouts since its result, that gap is kept (see Scope.gaps). `resumed`:
         its worker came back to it from other work: where its checkouts are now is where what
-        it changes for it from here starts (see changed_since_result)."""
+        it changes for it from here starts (see changed_since_result). `taken`: its checkouts
+        as they are now, by path, when the caller just took them (not taken again)."""
         ended = json.loads(self.store.get(f"taskend:{task['id']}") or "{}")
         row = self.store.find_session(task["session_id"])
         if not ended or not row or (not resumed and self.own_change_pending(task)):
@@ -1352,7 +1355,11 @@ class TaskActions:
         now_trees, now_commits = {}, {}
         for checkout in self.workspaces.checkouts(row):
             with suppress(Exception):
-                if (found := await snapshot(checkout)) and found["tree"]:
+                if taken is not None:
+                    found = taken.get(checkout["path"])
+                else:
+                    found = await snapshot(checkout)
+                if found and found["tree"]:
                     now_trees[checkout["path"]] = found["tree"]
                     now_commits[checkout["path"]] = found["commit"]
         if resumed:
@@ -1452,7 +1459,7 @@ class TaskActions:
                 if (found := await snapshot(checkout)) and found["tree"]:
                     trees[checkout["path"]] = found
         self.store.set(f"chatbase:{task['id']}", json.dumps({"at": now(), "trees": trees}))
-        await self.record_restart(task)
+        await self.record_restart(task, taken=trees)  # (Its checkouts as just taken.)
 
     async def changed_since_result(self, task: dict) -> bool:
         """Whether this task changed its checkouts since the owner asked about it in chat or

@@ -92,6 +92,75 @@ def test_owner_talks_to_the_router(app_client):
     assert app_client.get(f"/api/sessions/{router}").json()["role"] == "router"
 
 
+def test_a_send_tried_again_is_stored_and_delivered_once(app_client):
+    """Owner report "我输了回车 没有反应 又输了一遍": the page gives each send an id of its own
+    (client_id). The same send again (a retry, a second Enter that got through while the first
+    was on its way) gets what the first stored: one message, given the Router once. Another send,
+    the same words or not, is a message of its own. Home's copy of one to a worker (@) comes
+    with the answer, by that id: the chat shows it where it showed the send."""
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+    url = f"/api/sessions/{router}/messages"
+    send = {"text": "Research the stock market", "client_id": "a1" * 16}
+    first = app_client.post(url, json=send, headers=ORIGIN).json()
+    again = app_client.post(url, json=send, headers=ORIGIN).json()
+    assert again["id"] == first["id"] and first["meta"]["client_id"] == "a1" * 16
+    assert "delivery" in first and "prompt" not in first["meta"]
+    shown = app_client.get(url).json()
+    assert [m["id"] for m in shown if m["kind"] == "owner"] == [first["id"]]
+    assert app_client.fake.sessions[router].sent == [said("Research the stock market")]
+    other = app_client.post(url, json={**send, "client_id": "b2" * 16}, headers=ORIGIN).json()
+    assert other["id"] != first["id"] and len(app_client.fake.sessions[router].sent) == 2
+    wrong = app_client.post(url, json={**send, "client_id": "not-an-id"}, headers=ORIGIN)
+    assert wrong.status_code == 422
+
+    result = app_client.portal.call(
+        lambda: call_tool(runtime, "spawn_worker", router, title="Docs", instructions="Write docs")
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    told = {"text": "Keep it short", "to": worker, "client_id": "c3" * 16}
+    sent = app_client.post(url, json=told, headers=ORIGIN).json()
+    assert sent["session_id"] == worker and sent["meta"]["client_id"] == "c3" * 16
+    copy = sent["copy"]
+    assert copy["session_id"] == router and copy["meta"]["to"] == worker
+    assert copy["meta"]["client_id"] == "c3" * 16 and "prompt" not in copy["meta"]
+    assert "delivery" in copy
+    assert app_client.post(url, json=told, headers=ORIGIN).json()["copy"]["id"] == copy["id"]
+    assert app_client.fake.sessions[worker].sent[-1].count("Keep it short") == 1
+    copies = [m for m in app_client.get(url).json() if m["meta"].get("to") == worker]
+    assert [m["id"] for m in copies] == [copy["id"]]
+
+
+async def test_the_same_send_twice_at_once_is_sent_once(harness):
+    """Two of the same send at once (a browser that sent it again before the first answered):
+    the second waits for the first and gets what it stored; a send that failed may be tried
+    again."""
+    runtime = await harness.connect()
+    router = harness.router_id
+
+    def send(text: str):
+        return lambda: runtime.owner_send(router, text, typed=True, client_id="d4" * 16)
+
+    first, second = await asyncio.gather(
+        runtime.owner_send_once(router, "d4" * 16, send("One message")),
+        runtime.owner_send_once(router, "d4" * 16, send("One message")),
+    )
+    assert first["id"] == second["id"]
+    assert [m["text"] for m in harness.store.messages(router) if m["kind"] == "owner"] == [
+        "One message"
+    ]
+    assert harness.session(router).sent == [said("One message")]
+
+    async def failing():
+        raise ValueError("Codex is turned off")
+
+    with pytest.raises(ValueError, match="turned off"):
+        await runtime.owner_send_once(router, "e5" * 16, failing)
+    retried = await runtime.owner_send_once(router, "e5" * 16, send("Tried again"))
+    assert retried["text"] == "Tried again"
+
+
 def test_settings_are_validated(app_client, tmp_path):
     sign_in(app_client)
     project = tmp_path / "project"

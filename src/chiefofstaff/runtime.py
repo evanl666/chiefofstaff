@@ -343,6 +343,12 @@ RECONNECT_MOST = 300.0
 # note and capture again within SENT_AGAIN_SECONDS is the command run twice.
 SENT_RATES = ((60, 10, "a minute"), (86400, 300, "a day"))
 SENT_AGAIN_SECONDS = 600
+# How long the owner's message to the Router waits for the listing of their sessions that names
+# the ones opened in a terminal since (seconds; terminals_note).
+TERMINALS_WAIT = 3.0
+# How long the owner's sends from the page are known by the id the page gave each (seconds):
+# one sent again with it in that time is answered with what the first stored (owner_send_once).
+CLIENT_SEND_SECONDS = 300.0
 
 
 # How long a turn of another agent waits for what the last one spent (seconds).
@@ -855,6 +861,9 @@ class Runtime:
         self.elsewhere_on: dict[str, dict[str, int]] = {}
         # Those of them the Router was last given (terminals_note); None before its first look.
         self.terminals_given: set[str] | None = None
+        # The owner's latest sends from the page, by session and the page's id for each:
+        # when it came, and what it stored (owner_send_once).
+        self.client_sends: dict[tuple[str, str], tuple[float, asyncio.Future]] = {}
         # What workers open in a terminal are doing, read from their logs (Workers.mirror).
         self.terminal: dict[str, dict] = {}
         self.mirror_job: asyncio.Task | None = None
@@ -7081,7 +7090,7 @@ class Runtime:
             self.delivery.publish_delivery(session_id, [self.store.message(message["id"])])
 
     async def settings_typed(
-        self, row: dict, text: str, shown: str, task_id: str = ""
+        self, row: dict, text: str, shown: str, task_id: str = "", client_id: str = ""
     ) -> dict | None:
         """The owner, in the chat of a worker held for its folder's settings (never Home, Slack,
         Send to Chief or a worker's words), saying to use them in so many words (SAID_USE; a
@@ -7103,7 +7112,11 @@ class Runtime:
             )
         ):
             return None
-        meta = {"settings_typed": shown, **({"task_id": task_id} if task_id else {})}
+        meta = {
+            "settings_typed": shown,
+            **({"task_id": task_id} if task_id else {}),
+            **({"client_id": client_id} if client_id else {}),
+        }
         message = self.add_message(session_id, "owner", text, meta)
         try:
             await self.accept_settings(session_id, shown, typed=True)
@@ -9375,6 +9388,37 @@ class Runtime:
                 found.append({"name": name, "path": str(path), "url": f"/api/attachments/{name}"})
         return found
 
+    async def owner_send_once(
+        self, session_id: str, client_id: str, send: Callable[[], Awaitable[dict]]
+    ) -> dict:
+        """The owner's send from the page, once for the id the page gave it (`client_id`): the
+        same again within CLIENT_SEND_SECONDS (a retry, a second Enter that got through while
+        the first was on its way) gets what the first stored, and nothing is sent twice. One
+        that failed may be tried again."""
+        if not client_id:
+            return await send()
+        now = time.monotonic()
+        for key, (at, _) in list(self.client_sends.items()):
+            if now - at > CLIENT_SEND_SECONDS:
+                del self.client_sends[key]
+        key = (session_id, client_id)
+        if key in self.client_sends:
+            return await asyncio.shield(self.client_sends[key][1])
+        sent: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.client_sends[key] = (now, sent)
+        try:
+            message = await send()
+        except BaseException as exc:
+            self.client_sends.pop(key, None)
+            if isinstance(exc, Exception):
+                sent.set_exception(exc)
+                sent.exception()  # (Retrieved: one waiting for it hears of it, or none does.)
+            else:
+                sent.cancel()
+            raise
+        sent.set_result(message)
+        return message
+
     async def owner_send(
         self,
         session_id: str,
@@ -9393,6 +9437,7 @@ class Runtime:
         typed: bool = False,
         settings_digest: str = "",
         shared_card: str = "",
+        client_id: str = "",
     ) -> dict:
         """`learn`: the owner typed it (not a message the app sends for them). A message to a
         worker is also noted for the Router (`tell_router`), which must know what the owner
@@ -9403,8 +9448,11 @@ class Runtime:
         the task of the worker's they look at in its chat (see chat_task). `typed`: written
         in that worker's own chat, which showed `settings_digest` as the line on its folder's
         settings that waits for them (settings_typed). `shared_card`: on Home, a card someone
-        shared that the owner opened here, quoted after their words as untrusted data."""
+        shared that the owner opened here, quoted after their words as untrusted data.
+        `client_id`: their page's id for this send, kept with what it stores (its chat shows it
+        there at once, Home's copy too)."""
         row = self.store.session(session_id)
+        sent_as = {"client_id": client_id} if client_id else {}
         # Someone else's card: after the owner's words, never instructions (shares.quoted); one
         # removed meanwhile is said before anything is done.
         quoted, shared = (
@@ -9415,7 +9463,11 @@ class Runtime:
             and row["role"] == WORKER
             and not attachments
             and not row["closed_at"]
-            and (said := await self.settings_typed(row, text, settings_digest, task_id))
+            and (
+                said := await self.settings_typed(
+                    row, text, settings_digest, task_id, client_id=client_id
+                )
+            )
         ):
             return said
         for chosen in (agent, *compare) if row["role"] == ROUTER else ():
@@ -9437,13 +9489,17 @@ class Runtime:
             # be read once the card times out).
             with suppress(ValueError):
                 if card := self.asks.answer_in_chat(session_id, text.strip()):
-                    meta = {"answered": card["id"], **({"home": True} if from_home else {})}
+                    meta = {
+                        "answered": card["id"],
+                        **({"home": True} if from_home else {}),
+                        **sent_as,
+                    }
                     if about:
                         meta["task_id"] = about["id"]
                     message = self.add_message(session_id, "owner", text, meta)
                     self.forget_go_on_at(session_id)  # Their answer, not going on by itself.
                     if tell_router:
-                        self.owner_told(row, text)
+                        self.owner_told(row, text, client_id=client_id)
                     return message
         if row["role"] in {WORKER, SLACK} and clear_questions:
             # The owner answers what it asked on that task (others' questions stay).
@@ -9464,7 +9520,7 @@ class Runtime:
         # Answers come in the language of this message, whatever the conversation used before.
         spoken = self.heard(text, home=row["role"] == ROUTER) if learn else language(text)
         prompt = wrap("owner", "message", text, reply_in=spoken)
-        meta: dict[str, Any] = {}
+        meta: dict[str, Any] = dict(sent_as)
         switched = self.switched_language(session_id, spoken)
         notes = [switched]
         made = None
@@ -9596,7 +9652,7 @@ class Runtime:
             # It goes on as the owner says now (taken), not by itself at its limit's reset.
             self.forget_go_on_at(session_id)
         if row["role"] == WORKER and tell_router:
-            self.owner_told(row, text, message)
+            self.owner_told(row, text, message, client_id=client_id)
         if about and about["status"] == "waiting" and clear_questions and not asked_back:
             # It has the owner's answer now: it goes on (not "waits for your answer" until its
             # next report).
@@ -9669,18 +9725,37 @@ class Runtime:
         return f"It reads this now; the step it is in goes on in the background. {line}"
 
     async def owner_send_to(
-        self, router_id: str, worker_id: str, text: str, attachments: Sequence[Attachment] = ()
+        self,
+        router_id: str,
+        worker_id: str,
+        text: str,
+        attachments: Sequence[Attachment] = (),
+        client_id: str = "",
     ) -> dict:
-        """From the Router chat, straight to one worker; the Router hears of it later."""
+        """From the Router chat, straight to one worker; the Router hears of it later. With
+        Home's copy of it (`copy`, "→ worker"), what the chat there shows, by the page's
+        `client_id` for this send."""
         row = self.store.session(worker_id)
         if row["role"] != WORKER:
             raise ValueError("Address a worker.")
-        message = await self.owner_send(row["id"], text, attachments=attachments, from_home=True)
+        message = await self.owner_send(
+            row["id"], text, attachments=attachments, from_home=True, client_id=client_id
+        )
         # Not when it answered the question card the worker was waiting on.
         note = "" if message["meta"].get("answered") else self.busy_note(row["id"])
         if note:  # Where the owner is: Chat or the inbox.
             self.add_message(router_id, "notice", note, {"session_id": row["id"]})
-        return {**message, "note": note}
+        found = client_id and self.store.one(
+            "SELECT id FROM messages WHERE session_id=? AND kind='owner' "
+            "AND id>? AND json_extract(meta, '$.client_id')=? ORDER BY id DESC LIMIT 1",
+            (router_id, message["id"], client_id),
+        )
+        if not found:
+            return {**message, "note": note}
+        copy = self.store.message(found["id"])
+        delivery = self.delivery.delivery_for(router_id, [copy])[0]
+        meta = {key: value for key, value in copy["meta"].items() if key != "prompt"}
+        return {**message, "note": note, "copy": {**copy, "meta": meta, "delivery": delivery}}
 
     async def send_now(self, session_id: str) -> dict:
         """What waits to be sent to a worker goes now, as the owner asks where it says it waits:
@@ -9710,11 +9785,11 @@ class Runtime:
                     self.states[session_id].now = False
         return self.view(self.store.session(session_id))
 
-    def owner_told(self, row: dict, text: str, sent: dict | None = None):
+    def owner_told(self, row: dict, text: str, sent: dict | None = None, client_id: str = ""):
         """What the owner told a worker directly (in its timeline, @ in Chat, on a task card):
         the Router hears of it with its next message, so it never takes the result for drift.
         `sent`: the worker's own message, as it was given it: Home's copy stands where that one
-        does (Delivery.delivery_for)."""
+        does (Delivery.delivery_for). `client_id`: their page's for that send (owner_send)."""
         given = sent and "prompt" in (sent.get("meta") or {})
         with suppress(RuntimeError):
             copy = self.add_message(
@@ -9725,6 +9800,7 @@ class Runtime:
                     "to": row["id"],
                     "to_title": self.display_title(row),
                     **({"sent_as": sent["id"]} if sent and given else {}),
+                    **({"client_id": client_id} if client_id else {}),
                     # Not a turn of its own: it goes with the Router's next message.
                     "prompt": wrap(
                         "system",
@@ -9859,17 +9935,22 @@ class Runtime:
     async def terminals_note(self) -> str:
         """The owner's sessions opened in a terminal since the Router last looked at them, named
         in the owner's next message (live e2e r81r: asked about one opened a minute after its
-        last list_sessions, the Router answered from that list and found it nowhere)."""
+        last list_sessions, the Router answered from that list and found it nowhere). Their
+        message waits for the listing (the CLI's, slow under load) TERMINALS_WAIT at most:
+        longer, those are named with their next message instead (the listing goes on, and is
+        there by then)."""
         now = set(self.open_terminals())
         given, self.terminals_given = self.terminals_given, now
         opened = now - given if given is not None else set()
         if not opened:
             return ""  # The Router's first look at them is through list_sessions.
-        try:
-            items = await self.workers.external(agents_too=True)
-            if not opened <= {item["id"] for item in items}:
-                items = await self.workers.external(refresh=True, agents_too=True)
-        except Exception:
+        listing = self.background(self.terminals_listing(opened))
+        done, _ = await asyncio.wait({listing}, timeout=TERMINALS_WAIT)
+        if not done:
+            self.terminals_given = (self.terminals_given or set()) - opened
+            return ""
+        items = listing.result()
+        if items is None:
             return ""
         named = [
             f"\u201c{item['summary']}\u201d (session {item['id']}"
@@ -9884,6 +9965,25 @@ class Runtime:
             f"Opened in the owner's terminal since you last looked: {'; '.join(named[:5])}. "
             "list_sessions().terminal_sessions has every session open there now."
         )
+
+    async def terminals_listing(self, opened: set[str]) -> list[dict] | None:
+        """The owner's sessions as listed, with those `opened` in a terminal: listed again only
+        when one is in neither the listing nor what it left out as never the owner's, and that
+        listing was not taken just now (another one now would say the same). None when they
+        can't be listed."""
+        started = time.monotonic()
+        try:
+            items = await self.workers.external(agents_too=True)
+            known = {item["id"] for item in items} | self.workers.never_owners
+            if opened <= known | self.workers.agents_never_owners:
+                return items
+            if self.workers.external_cache[0] >= started and (
+                not self.agents_on() or self.workers.agent_cache[0] >= started
+            ):
+                return items
+            return await self.workers.external(refresh=True, agents_too=True)
+        except Exception:
+            return None
 
     def report_on_home(self, row: dict, task: dict, status: str, summary: str):
         """What a worker reported to the owner who wrote to it in its chat about finished work

@@ -728,6 +728,9 @@ class OwnerMessage(StrictModel):
     # On Home: a card someone shared that the owner opened here goes with it, quoted as
     # untrusted data (Start a task from this).
     shared_card: str = Field(default="", max_length=32)
+    # The page's own id for this send, made once: sent again with it, it is not sent twice
+    # (Runtime.owner_send_once); the chat knows its message by it before the answer comes.
+    client_id: str = Field(default="", pattern=r"^([0-9a-f]{32})?$")
 
     @model_validator(mode="after")
     def something(self) -> "OwnerMessage":

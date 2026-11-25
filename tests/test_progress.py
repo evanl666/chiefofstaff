@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import FakeSession, Harness, begins, call_tool, env, settle, task_of
 
+from chiefofstaff import runtime as runtime_module
 from chiefofstaff.models import DraftDecision, Settings
 
 
@@ -195,24 +196,29 @@ async def test_the_router_knows_sessions_open_in_a_terminal(harness, tmp_path):
     assert "Rerun the old eval" in harness.session("old-1").sent[-1]
 
 
+def terminal_meta(identifier, summary, day, client="github/cli", folder: Path | None = None):
+    """A session as Copilot's listing has it (`client`: the app that made it)."""
+    context = SimpleNamespace(working_directory=str(folder or ""), repository="", branch="")
+    found = SimpleNamespace(
+        session_id=identifier,
+        summary=summary,
+        is_remote=False,
+        modified_time=datetime(2026, 11, day, tzinfo=UTC),
+        context=context,
+    )
+    vars(found).update(client_name=client, last_client_name="", clients_listed=True)
+    return found
+
+
 async def test_a_session_opened_in_a_terminal_since_the_router_looked_is_named(harness, tmp_path):
     """Live e2e r81r: the Router had listed the owner's terminal sessions a minute before; the
     owner opened another (a codeword in it) and asked about it, and the Router answered from its
     earlier list: none was about a codeword. The owner's next message names the one opened since,
     once; Chief of Staff's own sessions open elsewhere are not named."""
     runtime = await harness.connect()
-    context = SimpleNamespace(working_directory=str(tmp_path), repository="", branch="")
 
     def meta(identifier, summary, day, client="github/cli"):
-        found = SimpleNamespace(
-            session_id=identifier,
-            summary=summary,
-            is_remote=False,
-            modified_time=datetime(2026, 11, day, tzinfo=UTC),
-            context=context,
-        )
-        vars(found).update(client_name=client, last_client_name="", clients_listed=True)
-        return found
+        return terminal_meta(identifier, summary, day, client, tmp_path)
 
     harness.client.metas = [meta("term-1", "Design the game", 3)]
     harness.client.in_use = {"term-1": 4242}
@@ -232,6 +238,65 @@ async def test_a_session_opened_in_a_terminal_since_the_router_looked_is_named(h
     assert "Design the game" not in told and "ours-1" not in told
     await runtime.owner_send(harness.router_id, "And what else is open there?")
     assert "since you last looked" not in router.sent[-1], "named once"
+
+
+def count_listings(harness, delay: float = 0.0) -> list[float]:
+    """When each listing of Copilot's sessions began (each taking `delay` seconds)."""
+    began: list[float] = []
+    listed = harness.client.list_sessions
+
+    async def listing():
+        began.append(time.monotonic())
+        await asyncio.sleep(delay)
+        return await listed()
+
+    harness.client.list_sessions = listing
+    return began
+
+
+async def test_the_owners_message_waits_for_one_listing_of_their_sessions_at_most(
+    harness, tmp_path, monkeypatch
+):
+    """Owner report "我输了回车 没有反应 又输了一遍": their message to the Router waited seconds
+    before it was stored (the machine busy). The sessions opened in a terminal since its last
+    look were listed twice: again for one of Chief of Staff's own opened beside (never named).
+    Once now; and the listing a message waits for is bounded: past TERMINALS_WAIT it goes
+    without them, and its next message names them (the listing went on meanwhile)."""
+    runtime = await harness.connect()
+    harness.client.metas = [terminal_meta("term-1", "Design the game", 3, folder=tmp_path)]
+    harness.client.in_use = {"term-1": 4242}
+    await runtime.workers.refresh_elsewhere()
+    await runtime.owner_send(harness.router_id, "Hello")  # Its first look.
+    router = harness.session(harness.router_id)
+    harness.client.metas += [
+        terminal_meta("term-2", "Remember the codeword PELICAN", 4, folder=tmp_path),
+        terminal_meta(
+            "ours-1", "A worker of another Chief of Staff", 4, "copilot-cli/chiefofstaff"
+        ),
+    ]
+    harness.client.in_use |= {"term-2": 4343, "ours-1": 4444}
+    await runtime.workers.refresh_elsewhere()
+    runtime.workers.external_cache = (float("-inf"), [])  # Listed longer ago than its 15 s.
+    began = count_listings(harness)
+    await runtime.owner_send(harness.router_id, "Which codeword does my terminal session hold?")
+    assert len(began) == 1, "listed once: Chief of Staff's own is left out whatever it says"
+    assert "Remember the codeword PELICAN" in router.sent[-1] and "ours-1" not in router.sent[-1]
+
+    monkeypatch.setattr(runtime_module, "TERMINALS_WAIT", 0.2)
+    harness.client.metas.append(terminal_meta("term-3", "Plan the launch", 5, folder=tmp_path))
+    harness.client.in_use |= {"term-3": 4545}
+    await runtime.workers.refresh_elsewhere()
+    runtime.workers.external_cache = (float("-inf"), [])
+    began = count_listings(harness, delay=2.0)
+    started = time.monotonic()
+    await runtime.owner_send(harness.router_id, "What is open now?")
+    assert time.monotonic() - started < 1.5, "stored and sent without the slow listing"
+    assert "Plan the launch" not in router.sent[-1]
+    await settle(runtime)  # The listing ends meanwhile.
+    await runtime.owner_send(harness.router_id, "And now?")
+    assert "Opened in the owner's terminal since you last looked" in router.sent[-1]
+    assert "Plan the launch" in router.sent[-1], "named with the next message"
+    assert len(began) == 1, "the next message took that listing"
 
 
 async def test_a_plugin_hook_that_fails_does_not_fail_the_worker(harness):

@@ -24,6 +24,7 @@ from chiefofstaff import events as events_module
 from chiefofstaff import policy as policy_module
 from chiefofstaff import privategit, settings_guard
 from chiefofstaff import runtime as runtime_module
+from chiefofstaff import task_actions as task_actions_module
 from chiefofstaff import tasks as tasks_module
 from chiefofstaff import workers as workers_module
 from chiefofstaff import workspaces as workspaces_module
@@ -5246,7 +5247,6 @@ def slow_reads(monkeypatch) -> dict[str, str]:
     """Reading a worker's worktree (git's snapshot, its changes) takes a while, and lsof sees
     the git doing it run in it. The worktree read now -> by which."""
     from chiefofstaff import machine
-    from chiefofstaff import task_actions as task_actions_module
 
     reading: dict[str, str] = {}
 
@@ -5955,6 +5955,40 @@ async def test_a_question_in_chat_is_news_though_others_changed_the_folder(tmp_p
     await call_tool(runtime, "report", session_id, status="done", summary="3 lines.")
     shown = runtime.tasks.get(task)
     assert shown["result"] == "Cents added.", "an answer: news, not a new result"
+
+
+async def test_a_question_about_finished_work_takes_its_checkouts_once(tmp_path, monkeypatch):
+    """Owner report "我输了回车 没有反应 又输了一遍": their message waits for what its worker's
+    checkouts hold as it comes (git, slow on a busy machine). Asked about a finished task, they
+    were taken twice in a row: as where its next result starts, then again to see whether other
+    work changed them since its result. Once now, for both."""
+    _, app = published(tmp_path, "app")
+    harness = Harness(tmp_path / "data", Settings(projects=[str(app)]))
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, title="Notes", instructions="x",
+                         project=str(app), isolate=True)  # fmt: skip
+    tree, session_id, task = Path(worker["cwd"]), worker["session_id"], worker["task_id"]
+    (tree / "NOTES.md").write_text("notes\n")
+    await call_tool(runtime, "report", session_id, status="done", summary="NOTES.md written.")
+    await receipts_of(runtime, task)
+    for _ in range(50):
+        if runtime.store.get(f"taskend:{task}"):
+            break
+        await asyncio.sleep(0.05)
+    (tree / "OTHER.md").write_text("another task's\n")  # Changed since its result.
+    taken: list[str] = []
+    snapshot = task_actions_module.snapshot
+
+    async def counted(checkout):
+        taken.append(checkout["path"])
+        return await snapshot(checkout)
+
+    monkeypatch.setattr(task_actions_module, "snapshot", counted)
+    await runtime.owner_send(session_id, "Why does NOTES.md say notes?")
+    assert taken == [str(tree)], taken
+    base = json.loads(runtime.store.get(f"chatbase:{task}"))
+    [gap] = json.loads(runtime.store.get(f"taskgaps:{task}"))
+    assert gap["start"][str(tree)] == base["trees"][str(tree)]["tree"], "the same look, for both"
 
 
 async def test_a_change_in_chat_without_a_report_is_asked_to_be_reported(tmp_path):

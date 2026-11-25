@@ -100,6 +100,8 @@ ANOTHER = "another"  # last run by a Chief of Staff
 OWNER = "owner"
 # Not listed at all, neither in the sidebar nor to the Router.
 LEFT_OUT = frozenset({OURS, REMOTE, PROGRAM, MADE_BY_WORKER, BATCH})
+# Of those, the ones left out whether open or not, whatever its log says (whose' first rules).
+NEVER_OWNERS = frozenset({OURS, REMOTE, PROGRAM})
 # Not the owner's words: what was read from them and not learned from yet is dropped.
 NOT_THEIRS = frozenset({PROGRAM, MADE_BY_WORKER, BATCH})
 # A few one-shot sessions alike, tied to no worker: the owner's, listed (tidy-sessions names

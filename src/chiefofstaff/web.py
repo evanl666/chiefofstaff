@@ -370,21 +370,25 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/messages")
     async def send(session_id: str, payload: OwnerMessage):
-        if (
-            session_id == runtime.router_id()
-            and link_alone(payload.text)
-            and not payload.attachments
-        ):
-            # A share link alone on Home is opened by Chief itself: never sent to a session.
-            return shown((await runtime.shares.open_link(payload.text))["message"])
-        if payload.to:
-            return shown(
-                await runtime.owner_send_to(
-                    session_id, payload.to, payload.text, payload.attachments
+        async def sending() -> dict:
+            if (
+                session_id == runtime.router_id()
+                and link_alone(payload.text)
+                and not payload.attachments
+            ):
+                # A share link alone on Home is opened by Chief itself: never sent to a session.
+                return shown((await runtime.shares.open_link(payload.text))["message"])
+            if payload.to:
+                return shown(
+                    await runtime.owner_send_to(
+                        session_id,
+                        payload.to,
+                        payload.text,
+                        payload.attachments,
+                        client_id=payload.client_id,
+                    )
                 )
-            )
-        return shown(
-            await runtime.owner_send(
+            sent = await runtime.owner_send(
                 session_id,
                 payload.text,
                 attachments=payload.attachments,
@@ -396,8 +400,15 @@ def create_app(
                 typed=True,
                 settings_digest=payload.settings_digest,
                 shared_card=payload.shared_card,
+                client_id=payload.client_id,
             )
-        )
+            # Where it stands now (sent, waiting to be sent…), as its chat says it.
+            if "delivery" not in sent:
+                found = runtime.delivery.delivery_for(sent["session_id"], [sent])
+                sent = {**sent, "delivery": found[0]}
+            return shown(sent)
+
+        return await runtime.owner_send_once(session_id, payload.client_id, sending)
 
     @app.get("/api/attachments/{name}")
     async def attachment(name: str):

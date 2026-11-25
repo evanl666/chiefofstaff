@@ -46,6 +46,13 @@ longer takes long work for silence.
   with its checks, on *Artifacts* and on its card. One merged keeps its state without being read
   again; news on one (merged, say) has it read at once. A PR its report only mentions is still
   read once, not followed.
+- **Your message to the Router waits less on a busy computer.** Before it was stored, the
+  sessions you opened in a terminal since the Router last looked were listed twice (again for
+  one of Chief of Staff's own opened beside them), and that listing is slow when the computer
+  is busy: once now, while it reads which are open, and your message waits for it 3 seconds at
+  most (past that, those sessions are named with your next message). Asking a worker about a
+  finished task looks at its checkouts once instead of twice. What the Router and workers are
+  given is the same.
 
 A finished card can be shared as a link, and opened in your own Chief of Staff.
 

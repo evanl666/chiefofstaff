@@ -21,7 +21,7 @@ from . import agents, caches, catalog, machine
 from .backend import COPILOT_AGENT, stop_background
 from .envelope import clean_title, owner_text, sendable, sender, short, wrap
 from .events import PLUMBING_TOOLS, describe_tool
-from .provenance import LEFT_OUT, managed, whose
+from .provenance import LEFT_OUT, NEVER_OWNERS, managed, whose
 from .roles import ROUTER, WORKER
 from .settings_guard import SettingsChangedError
 from .sources.slack import describe
@@ -222,6 +222,10 @@ class Workers:
         # agent each listed one is of.
         self.agent_cache: tuple[float, list[dict]] = (float("-inf"), [])
         self.listed_agent: dict[str, str] = {}
+        # Of the sessions those listings had, the ones never the owner's, open or not (Chief of
+        # Staff's own, remote, a program's): no listing again would list them as the owner's.
+        self.never_owners: set[str] = set()
+        self.agents_never_owners: set[str] = set()
         # Reading logs of sessions open in a terminal; held while their timelines catch up.
         self.mirror_lock = asyncio.Lock()
         # Other sessions' logs as last read: session id -> (offset, entries, turn open).
@@ -1475,16 +1479,22 @@ class Workers:
         if not refresh and time.monotonic() - cached_at < AGENT_LISTING_SECONDS:
             return items
         held = managed(self.store)
-        items, listed = [], {}
-        for name in self.runtime.agents_on():
+        items, listed, never = [], {}, set()
+
+        async def listing(name: str) -> list:
             try:
                 backend = await self.runtime.connect_agent(name)
-                found = await asyncio.wait_for(backend.list_sessions(), LISTING_TIMEOUT)
+                return await asyncio.wait_for(backend.list_sessions(), LISTING_TIMEOUT)
             except Exception as exc:
                 logger.info("Could not list %s's sessions: %s", name, describe(exc))
-                continue
+                return []
+
+        # Each agent's at once: one slow to answer (under load) does not add to the others'.
+        names = self.runtime.agents_on()
+        for name, found in zip(names, await asyncio.gather(*map(listing, names)), strict=True):
             for meta in found:
                 if meta.session_id in held:
+                    never.add(meta.session_id)
                     continue
                 context = meta.context
                 cwd = (context.working_directory if context else "") or ""
@@ -1504,6 +1514,7 @@ class Workers:
                     }
                 )
         self.agent_cache, self.listed_agent = (time.monotonic(), items), listed
+        self.agents_never_owners = never
         return items
 
     async def listed_as(self, session_id: str) -> str:
@@ -1521,10 +1532,16 @@ class Workers:
         cached_at, items = self.external_cache
         if not refresh and time.monotonic() - cached_at < 15:
             return items
-        items = []
+        items, never = [], set()
         backend = self.runtime.require_ready()
-        listed = await backend.list_sessions()
-        await self.refresh_elsewhere()
+        # Which are open in a terminal is read meanwhile (the process table, under load).
+        listed, looked = await asyncio.gather(
+            backend.list_sessions(), self.refresh_elsewhere(), return_exceptions=True
+        )
+        if isinstance(listed, BaseException):
+            raise listed
+        if isinstance(looked, BaseException):
+            raise looked
         elsewhere = self.runtime.elsewhere
         # Chief of Staff's own (here, or from another data directory: a test run's, an older
         # install's), remote, or made by a program through Copilot's SDK, by a worker's
@@ -1537,7 +1554,9 @@ class Workers:
             listed, key=lambda m: (m.session_id in elsewhere, m.modified_time), reverse=True
         ):
             is_open = meta.session_id in elsewhere
-            if whose(meta, held, made, is_open) in LEFT_OUT:
+            if (found := whose(meta, held, made, is_open)) in LEFT_OUT:
+                if found in NEVER_OWNERS:
+                    never.add(meta.session_id)
                 continue
             context = meta.context
             items.append(
@@ -1554,6 +1573,7 @@ class Workers:
             if len(items) >= 40:
                 break
         self.external_cache = (time.monotonic(), items)
+        self.never_owners = never
         return items
 
     async def adopt(self, session_id: str) -> dict:
