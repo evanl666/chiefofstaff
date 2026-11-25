@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Your other Copilot sessions say where they stand again on Copilot CLI 1.0.115.** That
+  version no longer records which app started a session you run in its terminal, and logs the
+  tools a session's first model call is given: every such session showed no status (*Copilot
+  did not say which app started it*), and a question asked in a session's first reply did not
+  show as one. A session that names no app that started it, but names the one that last ran
+  it, is now taken for a terminal's, as before; and that new line changes nothing a status
+  depends on. Earlier CLIs' sessions read as before.
 - **A worker's question nobody answered in time stays under *Needs you*.** A worker that asked
   on a question card waits an hour at most, then goes on without your answer; the card then
   left *Needs you*, so a question you never saw was gone, and an answer could no longer reach

@@ -477,6 +477,10 @@ OWN_CLIENTS = frozenset({CLIENT_NAME, "chiefofstaff", "work-buddy"})
 # What the CLI records as the maker of a session a program made through Copilot's SDK without
 # naming itself: a script's (a batch job, an eval), often one of many.
 SDK_CLIENT = "sdk"
+# The CLI's own name, for a session run in its terminal. Copilot 1.0.115 no longer records it as
+# the maker of a session run interactively there, only as the client that last ran a turn in it
+# (`copilot -p` and the SDK's sessions still name their maker): see provenance.whose.
+TERMINAL_CLIENT = "github/cli"
 
 
 def made_by_us(item: dict) -> bool:
