@@ -1480,6 +1480,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 /* A state's ring is the plan's: the small avatars of a line, the To line and notes have none. */
 :is(.tp-line, .tp-talk, #composer-to, .tp-to-menu) .pa .ring { display: none; }
 .tp-line .you { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--bubble); color: var(--soft); font-size: 10px; font-weight: 600; }
+.tp-line .you::before { content: attr(data-av); }
 .tp-line .what { min-width: 0; }
 .tp-line .what .main { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .tp-line .what .main a { padding-block: 6px; color: var(--text); font-weight: 500; text-decoration: none; }
