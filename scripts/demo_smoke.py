@@ -124,7 +124,10 @@ async def run(scheme: str):
             await research.locator("textarea").press_sequentially("Include pricing")
             state = "n => n.className + (n.querySelector('.activity')?.textContent || '')"
             before = await research.evaluate(state)
-            for _ in range(60):
+            # The Watchdog steps in once the worker has been quiet for its 12 s from its step's
+            # end (since 0.1.58, E140: its session's events count, not only its chat), a few
+            # seconds later than from the step's start: up to 30 s.
+            for _ in range(120):
                 if await research.evaluate(state) != before:
                     break
                 await asyncio.sleep(0.25)
