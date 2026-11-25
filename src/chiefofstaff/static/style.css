@@ -1383,8 +1383,9 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .lineage .peek .link { margin-left: auto; flex: none; min-height: 28px; }
 /* A worker's Team tab: its task's lineage first. */
 #timeline > .team-lineage > .lineage { margin: 0 0 4px; }
-/* Teams lite (teams-v2.md): a team is one request of the owner's that several workers do. Every
-   color is a variable above; nothing moves (Phase 1 is static). */
+/* Teams (teams-v2.md, team-page-v4.md): a team is one request of the owner's that several workers
+   do. Every color is a variable above; things move only for events (and nothing with reduced
+   motion: the rule at the end). */
 /* A part's avatar: its name's first character in its color; its state's ring; a tick when done. */
 .pa { position: relative; display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--color, var(--muted)); color: #fff; font-size: var(--small); font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
 .pa.lg { width: 30px; height: 30px; font-size: var(--body); }
@@ -1394,124 +1395,235 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .pa .bang { position: absolute; right: -6px; bottom: -4px; width: 13px; height: 13px; border-radius: 50%; background: var(--badge); box-shadow: 0 0 0 2px var(--card); display: grid; place-items: center; }
 .pa .bang::after { content: "!"; color: #fff; font-size: 10px; font-weight: 700; line-height: 1; }
 
-/* A team's page: its request, the one thing that needs you, its map, what they handed each other. */
+/* A team's page (team-page-v4.md): the brief, Since you looked, the plan, So far (Home's side
+   panel when wide), Tell the team, the parts' notes folded. One column, as a chat is. */
 #session-meta > .dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; vertical-align: 0; }
-.team-page { display: grid; gap: 20px; width: 100%; max-width: 920px; margin: 0 auto; min-width: 0; }
+#session-meta .tp-meta { display: inline-flex; align-items: center; white-space: pre; font-variant-numeric: tabular-nums; }
+#session-meta .tp-meta .dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; }
+.team-page { display: grid; gap: 14px; width: 100%; max-width: 920px; margin: 0 auto; min-width: 0; padding-top: 4px; }
 .tv2-why { display: flex; align-items: center; gap: 8px; min-width: 0; margin: -8px 0 -4px; font-size: var(--small); color: var(--muted); }
 .tv2-why .why-label { flex: none; }
 .tv2-why .quote { min-width: 0; min-height: 28px; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; color: var(--soft); font-weight: 400; text-align: left; }
 .tv2-why .quote:hover { opacity: 1; color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
-.tv2-callout { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--line)); border-radius: var(--radius-lg); background: var(--amber-soft); }
-.tv2-callout .what { flex: 1; min-width: 0; }
-.tv2-callout .what strong { display: block; font-weight: 600; }
-.tv2-callout .what span { font-size: var(--small); color: var(--soft); }
-.tv2-callout > button { flex: none; }
-/* Done: one calm row; it leaves Teams by itself. */
-.tv2-done { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 2px 0; }
-.tv2-done .done-mark { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--green-soft); }
-.tv2-done .done-mark svg { width: 16px; height: 16px; fill: none; stroke: var(--green); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.tv2-done .what { flex: 1; min-width: 0; }
-.tv2-done .what strong { display: block; font-weight: 600; color: var(--text); }
-.tv2-done .what span { display: block; font-size: var(--small); color: var(--muted); }
-.tv2-done > button.link { flex: none; min-height: 28px; font-size: var(--small); }
+.team-page h2.tp-h { display: flex; align-items: center; gap: 8px; min-height: 24px; margin: 0; font-size: var(--small); font-weight: 600; color: var(--muted); }
+.team-page h2.tp-h .count { font-weight: 500; font-variant-numeric: tabular-nums; }
+.team-page .tp-empty { margin: 4px 6px; font-size: var(--small); color: var(--muted); }
+/* Loops follow the clock (--sync), so a redraw carries on where the last one was. */
+.team-page .ring, .tp-bar i::before { animation-delay: var(--sync, 0s); }
 
-/* The flow map: parts left to right as work moves; every line says what it carries. */
-.tv2-map { position: relative; min-width: 0; padding: 18px 16px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); box-shadow: var(--shadow); }
-.tv2-map .grid { position: relative; z-index: 1; display: grid; column-gap: 92px; row-gap: 72px; justify-content: center; align-items: center; }
-.tv2-map svg.edges { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-.tv2-map .labels { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
-.tv2-node { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 10px; row-gap: 1px; width: 100%; min-width: 0; min-height: 58px; padding: 9px 12px 9px 10px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); color: var(--text); font-weight: 400; text-align: left; }
-.tv2-node:not(:disabled):hover { opacity: 1; border-color: color-mix(in srgb, var(--color, var(--muted)) 45%, var(--line)); box-shadow: var(--shadow); }
-.tv2-node .pa { grid-row: span 2; }
-.tv2-node .name { display: flex; align-items: center; gap: 4px; min-width: 0; font-weight: 600; line-height: 18px; }
-.tv2-node .name > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tv2-node .name .agent-mark { margin: 0 0 0 3px; }
-.tv2-node .status { min-width: 0; font-size: var(--small); line-height: 16px; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
-.tv2-node.is-working .status { color: var(--soft); }
-.tv2-node.is-waiting .status, .tv2-node.is-review .status { color: var(--amber); }
-.tv2-node.is-done { background: color-mix(in srgb, var(--card) 70%, var(--bg)); }
-.tv2-node.is-done .pa { filter: saturate(0.55); }
-.tv2-node.is-done .name { color: var(--soft); }
-.tv2-node.is-ended .pa { filter: saturate(0.2); opacity: 0.8; }
-.tv2-node.lit { border-color: var(--text); }
-/* Working: an accent arc around its avatar (still). Waiting: an amber ring. Up next: dashed. */
-.tv2-node.is-working .ring { background: conic-gradient(from 0deg, transparent 0 62%, var(--accent) 88%, transparent 100%); -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px)); mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px)); }
-.tv2-node.is-waiting .ring, .tv2-node.is-review .ring { border: 2px solid var(--amber); }
-.tv2-node.is-watching .ring { border: 1.5px solid color-mix(in srgb, var(--accent) 70%, transparent); }
-.tv2-node.is-queued .ring { border: 1.5px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
-.tv2-node.is-queued .pa { background: color-mix(in srgb, var(--color, var(--muted)) 60%, var(--muted)); }
-.tv2-more { display: grid; place-items: center; grid-template-columns: 1fr; color: var(--soft); font-size: var(--small); font-weight: 500; }
-/* Lines: one ink; amber while a question holds a part up or your OK is waited for; dashed while
-   what it carries is still to come. */
-.tv2-map .e { fill: none; stroke: var(--muted); stroke-opacity: 0.55; stroke-width: 1.5; stroke-linecap: round; }
-.tv2-map .e.done { stroke-opacity: 0.4; }
-.tv2-map .e.pending { stroke-dasharray: 3 5; }
-.tv2-map .e.msg { stroke: var(--soft); stroke-opacity: 0.5; }
-.tv2-map .e.owner { stroke: var(--amber); stroke-opacity: 0.75; stroke-dasharray: 3 5; }
-.tv2-map .e.failed { stroke: var(--red); stroke-opacity: 0.7; stroke-dasharray: 3 5; }
-.tv2-map .e.open { stroke: var(--amber); stroke-opacity: 1; stroke-dasharray: 5 4; }
-.tv2-map .e.lit { stroke: var(--text); stroke-opacity: 0.9; }
-.tv2-map .head-muted { fill: var(--muted); fill-opacity: 0.7; }
-.tv2-map .head-amber { fill: var(--amber); }
-.tv2-map .head-red { fill: var(--red); }
-.tv2-map .head-soft { fill: var(--soft); fill-opacity: 0.7; }
-.tv2-label { position: absolute; padding: 1px 5px; border-radius: 9px; background: var(--card); color: var(--muted); font-size: var(--small); line-height: 16px; text-align: center; white-space: nowrap; pointer-events: auto; cursor: default; }
-.tv2-label.start { text-align: left; }
-.tv2-label .piece { display: inline-block; border-radius: 6px; }
-.tv2-label .piece.amber { padding: 0 4px; color: var(--amber); background: var(--amber-soft); }
-.tv2-label .piece.red { color: var(--red); }
-.tv2-label .sep { color: var(--muted); }
-.tv2-label:hover, .tv2-label.lit { color: var(--text); }
-/* Narrow: top to bottom when three columns would not fit. */
-.tv2-map.vertical .grid { column-gap: 116px; row-gap: 56px; justify-content: stretch; }
-.tv2-map.tight:not(.vertical) .grid { row-gap: 24px; }
-.tv2-map.tight.vertical .grid { column-gap: 24px; }
-.tv2-map.vertical .tv2-node.spans { justify-self: center; width: calc(50% - 58px); }
-/* All N parts, beyond 8: a table under the map. */
-.tv2-all > summary { width: fit-content; min-height: 28px; font-size: var(--small); color: var(--accent); cursor: pointer; }
-.tv2-all table { width: 100%; margin-top: 6px; border-collapse: collapse; font-size: var(--small); }
-.tv2-all :is(th, td) { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; font-weight: 400; color: var(--soft); }
-.tv2-all thead th { color: var(--muted); font-weight: 600; }
-.tv2-all tbody th { color: var(--text); font-weight: 600; }
+/* 1 · The brief: where it stands, the one thing that moves it, answered right there. */
+.tp-brief { display: grid; grid-template-columns: 52px minmax(0, 1fr); column-gap: 14px; align-items: start; padding: 16px 18px 14px; }
+.tp-brief > :not(.captain, .tp-bar, .tp-bar-words) { grid-column: 2; }
+.tp-brief.attention { border-color: color-mix(in srgb, var(--amber) 30%, var(--line)); }
+.tp-brief .captain { grid-column: 1; grid-row: 1 / span 3; display: grid; place-items: center; width: 52px; height: 56px; margin-top: -4px; border-radius: 14px; }
+.tp-brief .captain .duck { width: 46px; }
+.tp-brief.done .captain { background: var(--green-soft); }
+.tp-brief.needs .captain { background: var(--amber-soft); }
+.tp-brief.working .captain { background: var(--accent-soft); }
+.tp-brief .say { margin: 0; font-size: var(--title); font-weight: 600; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
+.tp-brief .say .who { white-space: nowrap; }
+.tp-brief .then { margin: 2px 0 0; font-size: var(--small); color: var(--soft); }
+.tp-brief .then b { font-weight: 600; color: var(--text); }
+.tp-brief .acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.tp-brief .acts .link { font-size: var(--small); }
+.tp-brief .acts a.button { display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border-radius: var(--radius); background: var(--hover); color: var(--text); font-weight: 500; text-decoration: none; }
+.tp-brief .acts a.button:hover { background: var(--active); }
+.tp-brief.tp-lit { animation: flash 1.6s ease-out; }
+/* The worker's question, as Home's decision card puts it: its options, the recommended one marked. */
+.tp-answer .why { margin: 4px 0 0; font-size: var(--small); color: var(--soft); }
+.tp-answer .options { margin-top: 12px; }
+.tp-answer .recommendation { font-size: var(--small); color: var(--soft); margin-top: 8px; }
+.tp-answer .own-row { display: flex; gap: 8px; margin-top: 10px; }
+.tp-answer .own-row[hidden] { display: none; }
+.tp-answer button.link.other { min-height: 24px; margin-top: 6px; padding: 0; font-size: var(--small); }
+.tp-answer .own { flex: 1; min-width: 0; min-height: 32px; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); color: var(--text); font: inherit; }
+.tp-answer .error:empty { display: none; }
+/* A bar with a segment per part: the same as Home's row, larger; segments fill as parts finish. */
+.tp-bar { grid-column: 1 / -1; display: flex; gap: 4px; height: 4px; margin-top: 14px; }
+.tp-bar i { position: relative; flex: 1; overflow: hidden; border-radius: 2px; background: var(--line); }
+.tp-bar i::after { content: ""; position: absolute; inset: 0; border-radius: 2px; transform-origin: left; transition: transform 0.6s var(--ease), background-color 0.4s var(--ease); transform: scaleX(0); }
+.tp-bar i.done::after { transform: none; background: color-mix(in srgb, var(--green) 75%, var(--line)); }
+.tp-bar i.ended::after { transform: none; background: color-mix(in srgb, var(--muted) 45%, var(--line)); }
+.tp-bar i.working::after { transform: none; background: var(--accent); opacity: 0.85; }
+.tp-bar i.waiting::after { transform: none; background: var(--amber); }
+.tp-bar i.watching::after { transform: none; background: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent); }
+.tp-bar i.next::after { transform: none; background: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--muted) 45%, transparent); }
+.tp-bar i.done:is(.was-working, .was-waiting, .was-next, .was-watching)::after { transform: scaleX(0); transition: none; }
+/* At work: a slow light across its segment (the only moving thing on a calm bar). */
+.tp-bar i.working::before { content: ""; position: absolute; z-index: 1; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--card) 55%, transparent), transparent); transform: translateX(-100%); animation: tp-sheen 2.4s var(--ease) infinite; }
+@keyframes tp-sheen { 60%, 100% { transform: translateX(100%); } }
+.tp-bar-words { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; font-size: var(--small); color: var(--muted); font-variant-numeric: tabular-nums; }
 
-/* What they handed each other: newest first, a question with its answer, a note by its lead. */
-.tv2-history { display: grid; gap: 8px; min-width: 0; }
-.tv2-history > h2, .tv2-history > summary { display: flex; align-items: center; gap: 8px; min-height: 28px; margin: 0; font-size: var(--small); font-weight: 600; color: var(--muted); }
-.tv2-history > summary { list-style: none; cursor: pointer; }
-.tv2-history > summary::-webkit-details-marker { display: none; }
-.tv2-history > summary::before { content: "▸"; width: 8px; }
-.tv2-history[open] > summary::before { content: "▾"; }
-.tv2-history .count { font-weight: 500; font-variant-numeric: tabular-nums; }
-.tv2-history .filters { display: flex; gap: 2px; margin-left: auto; }
-.tv2-history .filters button { min-height: 28px; padding: 0 10px; border-radius: 14px; background: none; color: var(--muted); font-size: var(--small); font-weight: 400; }
-.tv2-history .filters button:hover { opacity: 1; color: var(--text); background: var(--hover); }
-.tv2-history .filters button[aria-pressed="true"] { color: var(--text); background: var(--active); font-weight: 600; }
-.tv2-history .filters .n { margin-left: 4px; color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
-.tv2-history .list { display: grid; gap: 8px; min-width: 0; }
-.tv2-history > .show-more { justify-self: start; }
-.tv2-item { min-width: 0; padding: 10px 14px 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); }
-.tv2-item.waiting { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); }
-.tv2-item .top { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--small); color: var(--muted); }
-.tv2-item .who { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--soft); font-weight: 600; }
-.tv2-item .who .arrow { color: var(--muted); font-weight: 400; }
-.tv2-item .kind { flex: none; }
-.tv2-item .pill { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.tv2-item time { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
-.tv2-item .about { margin: 4px 0 0 30px; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
-.tv2-item .text { margin: 2px 0 0 30px; color: var(--soft); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: pre-line; }
-.tv2-item .text.whole { display: block; }
-.tv2-item .more { min-height: 28px; margin: 0 0 -4px 24px; padding: 0 6px; background: none; color: var(--accent); font-size: var(--small); font-weight: 500; }
-.tv2-item .more:hover { opacity: 1; text-decoration: underline; }
-.tv2-item .answer { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; margin: 8px 0 0 30px; padding: 6px 0 0 10px; border-left: 2px solid var(--line); }
-.tv2-item .answer .pa { grid-row: span 2; width: 20px; height: 20px; margin-top: 1px; }
-.tv2-item .answer .a-top { font-size: var(--small); color: var(--muted); }
-.tv2-item .answer .a-top strong { color: var(--soft); font-weight: 600; }
-.tv2-item .answer .a-text { color: var(--text); overflow-wrap: anywhere; white-space: pre-line; }
-.tv2-event { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 0 4px 0 6px; font-size: var(--small); color: var(--muted); }
-.tv2-event .mark { flex: none; width: 16px; text-align: center; color: var(--muted); }
-.tv2-event.done .mark { color: var(--green); }
-.tv2-event .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soft); }
-.tv2-event time { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+/* 2 · Since you looked: one line, only when something changed; each item jumps to it. */
+.tp-since { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; margin: -2px 0 -4px; font-size: var(--small); color: var(--muted); }
+.tp-since .lead { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; color: var(--soft); font-weight: 600; }
+.tp-since .lead::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.tp-since button.link { min-height: 24px; padding: 0 4px; font-size: var(--small); color: var(--soft); border-radius: 6px; }
+.tp-since button.link:hover { color: var(--text); background: var(--hover); }
+.tp-since .sep { color: var(--muted); }
+.tp-since .fresh-in { animation: rise-in 0.45s var(--ease) both; }
+
+/* 3 · So far: what the team made and decided, and what to watch. Kept up to date in place. */
+.tp-sofar { padding: 12px 10px 8px; }
+.tp-sofar > h2.tp-h { padding: 0 6px; }
+.tp-group { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 6px; }
+.tp-group > h3 { margin: 4px 6px 2px; font-size: var(--small); font-weight: 600; color: var(--soft); }
+.tp-group.watch > h3 { color: var(--amber); }
+.tp-line { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 10px; align-items: center; min-height: 34px; padding: 5px 6px; border-radius: var(--radius); }
+.tp-line:hover { background: var(--hover); }
+.tp-line .pa { width: 20px; height: 20px; font-size: 11px; }
+.tp-line .pair { position: relative; width: 22px; height: 22px; }
+.tp-line .pair .pa { position: absolute; width: 16px; height: 16px; font-size: 9px; box-shadow: 0 0 0 1.5px var(--card); }
+.tp-line .pair .pa:first-child { left: 0; top: 0; }
+.tp-line .pair .pa:last-child { right: 0; bottom: 0; }
+.tp-line .you { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--bubble); color: var(--soft); font-size: 10px; font-weight: 600; }
+.tp-line .what { min-width: 0; }
+.tp-line .what .main { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.tp-line .what .main a { color: var(--text); font-weight: 500; text-decoration: none; }
+.tp-line .what .main a:hover { text-decoration: underline; text-underline-offset: 2px; }
+.tp-line .what .sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--small); color: var(--muted); }
+.tp-line .kind { margin-right: 6px; font: 600 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.02em; }
+.tp-line .end { display: flex; align-items: center; gap: 6px; }
+.tp-line .end .chip { white-space: nowrap; }
+.tp-line .end button { min-height: 26px; padding: 0 10px; font-size: var(--small); }
+/* New since you looked: a small accent dot at the line's start. */
+.tp-line.unseen::before { content: ""; position: absolute; left: -2px; top: 50%; width: 5px; height: 5px; margin-top: -2.5px; border-radius: 50%; background: var(--accent); }
+/* Just arrived: it rises in and holds a soft accent a moment, then lets go. */
+.tp-line.fresh { animation: rise-in 0.45s var(--ease) both, tp-fresh 3.2s var(--ease) both; }
+@keyframes tp-fresh { 0%, 55% { background: var(--accent-soft); } 100% { background: transparent; } }
+.tp-line.jump { animation: flash 1.6s ease-out; }
+/* So far, wide: Home's side panel and its sections; a line may wrap to two. Home's own parts
+   stay where they are, out of sight. */
+#panel.tp-panel > :not(.tp-sofar-panel) { display: none; }
+.tp-sofar-panel { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.tp-panel-head { display: grid; padding: 0 2px; }
+.tp-panel-head h2 { margin: 0; font-size: var(--title); font-weight: 600; }
+.tp-panel-head span { font-size: var(--small); color: var(--muted); }
+.tp-sofar-panel .items { gap: 0; }
+.tp-sofar-panel .tp-line { margin: 0 -6px; align-items: start; }
+.tp-sofar-panel .tp-line > :is(.pa, .pair, .you) { margin-top: 2px; }
+.tp-sofar-panel .tp-line .what .main { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.tp-sofar-panel .tp-line .what .sub { white-space: normal; }
+.tp-sofar-panel .tp-line .end { padding-top: 1px; }
+.tp-sofar-panel .tp-sofar-watch > summary h2 { color: var(--amber); }
+
+/* 4 · The plan: the parts in the order work moves, as a live list on a rail. */
+.tp-plan { position: relative; padding: 12px 10px 8px; }
+.tp-plan > h2.tp-h { padding: 0 6px; }
+.tp-plan .rails { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.tp-plan .rails path { fill: none; stroke-width: 2; stroke-linecap: round; }
+.tp-plan .rails .met { stroke: color-mix(in srgb, var(--green) 55%, var(--line)); }
+.tp-plan .rails .pending { stroke: color-mix(in srgb, var(--muted) 55%, transparent); stroke-dasharray: 2 5; }
+.tp-plan .rails .owner { stroke: var(--amber); stroke-dasharray: 2 5; }
+.tp-plan .rails .failed { stroke: var(--red); stroke-dasharray: 2 5; }
+.tp-plan .rails .together { stroke: var(--line); stroke-width: 1.5; }
+.tp-plan .travel { position: absolute; z-index: 4; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--color); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color) 22%, transparent); pointer-events: none; }
+.tp-stage { position: relative; }
+.tp-stage-label { display: flex; align-items: center; gap: 6px; margin: 2px 0 0 56px; min-height: 20px; font-size: var(--small); color: var(--muted); }
+.tp-part { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto auto; column-gap: 10px; align-items: center; min-height: 58px; padding: 6px 6px 6px 8px; border-radius: var(--radius); }
+.tp-part:hover { background: color-mix(in srgb, var(--hover) 70%, transparent); }
+.tp-part.open { background: color-mix(in srgb, var(--hover) 55%, transparent); }
+.tp-part > .av { position: relative; z-index: 3; display: grid; place-items: center; width: 40px; height: 40px; }
+.tp-part .main { min-width: 0; cursor: pointer; border-radius: 6px; }
+.tp-part .main:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tp-part .name { display: flex; align-items: center; gap: 4px; min-width: 0; font-weight: 600; line-height: 20px; }
+.tp-part .name > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-part .name .agent-mark { margin-left: 4px; }
+.tp-part .status { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-size: var(--small); line-height: 17px; color: var(--muted); overflow-wrap: anywhere; }
+.tp-part.is-working .status { color: var(--soft); }
+.tp-part.is-needs .status { color: var(--amber); }
+.tp-part .status.swap { animation: fade 0.5s var(--ease); }
+.tp-part .outs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; min-width: 0; }
+.tp-part .outs .chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; padding: 0 7px; }
+.tp-part .outs a.chip { text-decoration: none; }
+.tp-part .outs a.chip:hover { color: var(--text); }
+.tp-part .time { font-size: var(--small); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+.tp-part .act { display: flex; align-items: center; gap: 2px; }
+.tp-part .act .menu-wrap { position: relative; }
+.tp-part.is-done .name { color: var(--soft); }
+.tp-part.is-done .pa { filter: saturate(0.6); }
+.tp-part.is-ended .pa { filter: saturate(0.2); opacity: 0.8; }
+.tp-part.is-next .pa { background: color-mix(in srgb, var(--color, var(--muted)) 55%, var(--muted)); }
+/* Rings on the avatar: at work a slow arc; needing you amber, breathing; watching a quiet
+   ring; up next dashed; done a tick (it draws itself, and one ripple, when just accepted). */
+.tp-part .pa.lg { width: 30px; height: 30px; }
+.tp-part.is-working .ring { background: conic-gradient(from 0deg, transparent 0 62%, var(--accent) 88%, transparent 100%); -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px)); mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px)); animation: spin 2.4s linear infinite; }
+.tp-part.is-needs .ring { border: 2px solid var(--amber); animation: breathe 2.4s ease-in-out infinite; }
+.tp-part.is-watching .ring { border: 1.5px solid color-mix(in srgb, var(--accent) 70%, transparent); }
+.tp-part.is-next .ring { border: 1.5px dashed color-mix(in srgb, var(--muted) 70%, transparent); }
+.tp-part.just .pa .tick { animation: rise-in 0.45s var(--ease) both; }
+.tp-part.is-done.just .ring { border: 2px solid var(--green); animation: tp-ripple 0.9s var(--ease) both; }
+@keyframes tp-ripple { from { opacity: 0.9; transform: scale(0.9); } to { opacity: 0; transform: scale(1.5); } }
+/* Under a part when opened: its latest updates, its links. */
+.tp-detail { position: relative; z-index: 3; margin: -2px 0 6px 58px; padding: 8px 12px 10px; border-left: 2px solid var(--line); font-size: var(--small); color: var(--soft); }
+.tp-detail p { margin: 0; }
+.tp-detail ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.tp-detail li { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; }
+.tp-detail li time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.tp-detail .links { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.tp-detail .links button.link { font-size: var(--small); padding: 0 6px 0 0; color: var(--accent); }
+/* Review, in place: what it says it did, its PR, Accept or ask for changes. */
+.tp-review { position: relative; z-index: 3; margin: -2px 0 8px 58px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); box-shadow: var(--shadow); }
+.tp-review .lead { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.tp-review .rest { margin: 2px 0 0; color: var(--soft); font-size: var(--small); overflow-wrap: anywhere; }
+.tp-review .tp-line { margin: 8px -6px 0; }
+.tp-review .acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.tp-review textarea { display: block; width: 100%; min-height: 56px; margin-top: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
+.tp-review .error:empty { display: none; }
+:is(.tp-detail, .tp-review).rise { animation: rise-in 0.3s var(--ease); }
+
+/* 5 · What the parts told each other: folded; So far holds what it settled. */
+.tp-talk > summary { display: flex; align-items: center; gap: 8px; min-height: 28px; width: fit-content; list-style: none; cursor: pointer; font-size: var(--small); font-weight: 600; color: var(--muted); }
+.tp-talk > summary::-webkit-details-marker { display: none; }
+.tp-talk > summary::before { content: "▸"; width: 8px; }
+.tp-talk[open] > summary::before { content: "▾"; }
+.tp-talk > summary:hover { color: var(--text); }
+.tp-talk .count { font-weight: 500; }
+.tp-talk .items { display: grid; gap: 2px; margin-top: 4px; }
+.tp-talk .t-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 10px; padding: 6px; border-radius: var(--radius); font-size: var(--small); }
+.tp-talk .t-item .pa { width: 20px; height: 20px; font-size: 11px; }
+.tp-talk .t-item .who { color: var(--muted); }
+.tp-talk .t-item .about { color: var(--text); font-weight: 500; font-size: var(--body); overflow-wrap: anywhere; }
+.tp-talk .t-item .rest { color: var(--soft); overflow-wrap: anywhere; }
+.tp-talk .t-item .answer { margin-top: 4px; padding-left: 10px; border-left: 2px solid var(--line); color: var(--soft); overflow-wrap: anywhere; }
+.tp-talk .t-item .pill { display: inline-block; margin-top: 4px; }
+.tp-talk .t-item time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.tp-talk > .show-more { margin-left: 22px; }
+.tp-plan-fold > .tp-plan { margin-top: 6px; }
+
+/* 6 · Tell the team: the product's composer, addressed. Who gets it is always in sight. */
+#composer.tp-composer #composer-to { flex-wrap: wrap; gap: 2px 4px; padding: 0 0 2px; font-size: var(--small); }
+#composer.tp-composer #composer-to .to-word { color: var(--muted); }
+#composer.tp-composer #composer-to .rcpt { display: inline-flex; align-items: center; gap: 4px; color: var(--text); font-weight: 500; }
+#composer.tp-composer #composer-to .rcpt .pa { width: 16px; height: 16px; font-size: 9px; }
+#composer.tp-composer #composer-to .later { color: var(--muted); font-weight: 400; }
+#composer.tp-composer #composer-to .change { width: auto; height: 24px; min-height: 24px; padding: 0 6px; border-radius: 6px; background: none; color: var(--accent); font-size: var(--small); font-weight: 500; }
+#composer.tp-composer #composer-to .change:hover { background: var(--hover); opacity: 1; }
+.tp-to-menu { position: absolute; left: 8px; right: auto; bottom: calc(100% + 6px); top: auto; width: min(380px, calc(100% - 16px)); padding: 8px; gap: 2px; transform-origin: bottom left; }
+.tp-to-menu label { display: grid; grid-template-columns: 18px 20px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 34px; padding: 2px 6px; border-radius: 6px; color: var(--text); font-size: var(--body); cursor: pointer; }
+.tp-to-menu label:hover { background: var(--hover); }
+.tp-to-menu label.off { color: var(--muted); cursor: default; }
+.tp-to-menu label .pa { width: 20px; height: 20px; font-size: 11px; }
+.tp-to-menu label .how { display: block; font-size: var(--small); color: var(--muted); }
+.tp-to-menu .note { margin: 0; padding: 0 6px; font-size: var(--small); color: var(--muted); }
+.tp-sent { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: var(--small); color: var(--muted); }
+.tp-sent .got { color: var(--green); }
+.tp-sent .bad { color: var(--red); }
+dialog.tp-confirm { width: min(440px, calc(100vw - 32px)); }
+dialog.tp-confirm p { margin: 0; font-size: var(--small); }
+dialog.tp-confirm .row { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Narrow: the plan's time goes under the name; nothing else changes. */
+@media (max-width: 1099px) {
+  .tp-part { grid-template-columns: 40px minmax(0, 1fr) auto; }
+  .tp-part .time { grid-column: 2; grid-row: 2; text-align: left; margin-top: 2px; }
+  .tp-part .act { grid-column: 3; grid-row: 1 / span 2; }
+  .tp-detail { margin-left: 50px; }
+  .tp-review { margin-left: 8px; }
+  .tp-brief { grid-template-columns: 44px minmax(0, 1fr); padding: 14px 14px 12px; }
+  .tp-brief .captain { width: 44px; height: 48px; }
+  .tp-brief .captain .duck { width: 40px; }
+}
 
 /* Home: Teams, above Running. A row per team: its goal, a calm status line, a segment a part. */
 #tasks-teams .items { gap: 2px; }
@@ -1532,6 +1644,13 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .team2-row .segs i.working { background: var(--accent); }
 .team2-row .segs i.waiting { background: var(--amber); }
 .team2-row .segs i.watching { background: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent); }
+.team2-row .segs i.next { background: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--muted) 40%, transparent); }
+.team2-row .status.fresh-news { color: var(--soft); }
+/* Live: a slow sheen on a working part's segment; a segment fills when its part finishes. */
+.team2-row .segs i.working { position: relative; overflow: hidden; }
+.team2-row .segs i.working::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--card) 55%, transparent), transparent); transform: translateX(-100%); animation: tp-sheen 2.4s var(--ease) infinite; animation-delay: var(--sync, 0s); }
+.team2-row .segs i.done.filled { background: linear-gradient(color-mix(in srgb, var(--green) 75%, var(--line)), color-mix(in srgb, var(--green) 75%, var(--line))) left / 100% 100% no-repeat, var(--line); animation: tp-fill 0.6s var(--ease) both; }
+@keyframes tp-fill { from { background-size: 0 100%, auto; } }
 .team2-row .check { width: 14px; height: 14px; fill: none; stroke: var(--green); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .team2-wrap { position: relative; }
 .team2-wrap .dismiss { position: absolute; right: 4px; top: 5px; display: grid; place-items: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: var(--radius); background: none; color: var(--muted); font-weight: 400; }

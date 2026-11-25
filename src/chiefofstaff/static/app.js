@@ -13,6 +13,8 @@ import { bindSplitter } from "./splitter.js";
 import { bindStorage } from "./storage.js";
 import { watchFocus } from "./agentsetup.js";
 import { leaveOut, linkAlone, noteLink, openSharedLink, withCardBody } from "./share.js";
+import { isTeamView } from "./team.js";
+import { tellTeam } from "./teampage.js";
 // Whether Other Copilot sessions are unfolded (kept with the setting on).
 const FOLD = "cos.section.external";
 function bindUi() {
@@ -40,6 +42,19 @@ function bindUi() {
     event.preventDefault();
     const text = input.value.trim();
     const sessionId = state.selected;
+    if (isTeamView()) {
+      // Tell the team (teampage.js): to the parts in its To line, only on this Send.
+      if (!text) return;
+      const over = tooLong(text);
+      if (over) return toast(over, "error");
+      input.value = "";
+      autosize();
+      if (!(await tellTeam(text))) {
+        input.value = text;
+        autosize();
+      }
+      return;
+    }
     const other = externalItem();
     if ((!text && !hasAttachments()) || (sessionId !== HOME && !current() && !other)) return;
     if (sessionId === HOME && !hasAttachments() && linkAlone(text)) {
