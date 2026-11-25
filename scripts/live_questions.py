@@ -128,7 +128,8 @@ async def q1_the_question_stays_and_its_answer_reaches_the_worker(run: Run):
         return worker if written(worker, "port.txt") == "9090" else None
 
     worker = await wait_for("the answer used", answered, 600, app)
-    messages = await app.get(f"/api/sessions/{worker_id}/messages")
+    # The prompt a message was sent as comes only with ?prompts=1.
+    messages = await app.get(f"/api/sessions/{worker_id}/messages?prompts=1")
     told = [
         m for m in messages if m["kind"] == "owner" and "earlier" in m["meta"].get("prompt", "")
     ]
