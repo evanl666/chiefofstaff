@@ -6349,6 +6349,8 @@ async def round_composer(runtime, browser, failures: list[str]):
     # Said only once it takes a moment (its place kept meanwhile).
     await expect(line).not_to_have_class(re.compile(r"\blater\b"), timeout=3000)
     assert await bubble(words).get_attribute("data-id") is None
+    await page.wait_for_timeout(300)  # (Its line faded in.)
+    await page.locator("#conversation").screenshot(path=SHOTS / "ui-edges-composer-sending.png")
     await box.press("Enter")  # Again, with nothing in the box: nothing.
     await box.fill(words)
     await box.press("Enter")
@@ -10668,7 +10670,10 @@ async def picker_composer(runtime, browser):
         await box.press("Enter")
         await expect(chip).to_be_hidden()
         await until(lambda sent=sent: sent)
+        # (With the page's own id for that send: see round_composer.)
+        ids = [body.pop("client_id", "") for body in sent]
         assert sent == [{"text": "Port the parser to Rust", "agent": "codex"}], sent
+        assert all(re.fullmatch(r"[0-9a-f]{32}", found) for found in ids), ids
         await expect(mine).to_have_count(1)
         await expect(mine.locator("span.to")).to_have_text("On Codex")
         await picker_shoot(page, "composer-sent", scheme, focus=mine)
