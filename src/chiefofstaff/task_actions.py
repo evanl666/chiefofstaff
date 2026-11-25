@@ -4139,12 +4139,16 @@ class TaskActions:
         resume: bool = False,
         changes: str = "",
         answers: dict | None = None,
+        tell_router: bool = True,
+        extra_meta: dict | None = None,
     ) -> dict:
         """The owner adds to a task: its worker continues it (a finished task reopens).
         `resume`: the owner answered its question after it was cancelled: it goes on.
         `changes`: who did not accept its result ("you": the owner) and asks for these
         changes: its worker hears so plainly. `answers`: the question (Asks.keep_unanswered)
-        this answers, which its worker went on without: it hears which."""
+        this answers, which its worker went on without: it hears which. `tell_router`: the
+        Router hears of it (not for Tell the team: one copy for the send); `extra_meta`, kept
+        on the message."""
         task = self.tasks.get(task_id)
         # Go on (a stopped task's button, from two tabs say): sent once, while it is stopped.
         going_on = text.strip() == "Go on where you stopped."
@@ -4265,7 +4269,7 @@ class TaskActions:
                 prompt,
                 kind="owner",
                 display=shown,
-                meta={"task_id": task_id},
+                meta={"task_id": task_id, **(extra_meta or {})},
                 steer=True,
             )
         except Exception:
@@ -4276,7 +4280,8 @@ class TaskActions:
                     self.store.set(key, value)  # Still waiting as it was (Go on, by whom).
                 self.publish(self.tasks.get(task_id))
             raise
-        self.runtime.owner_told(row, shown, message)
+        if tell_router:
+            self.runtime.owner_told(row, shown, message)
         return task
 
     def continued(self, session_id: str, prompt: str):

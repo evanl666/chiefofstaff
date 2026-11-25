@@ -12,6 +12,12 @@ done team). A team is computed from them on
 every read: the tasks of one request joined by a link the Router made on purpose (works_with by
 name, after, a replacement), on two or more workers. The server returns candidates; the page
 says where each stands from Home's own board (static/team.js), the one lifecycle authority.
+
+The team page (team-page-v4): `teamlook:<team>` is when the owner last had a team's page in
+sight (Since you looked, the same on every tab); Tell the team is the owner's one way to speak
+to its parts from it (`tell`): each part as its task stands now, one passive copy for the
+Router, `teamnote:<task>` for a part not started (given with its start) and `teamtells:<team>`
+(what was told, to whom, by the page's key).
 """
 
 from __future__ import annotations
@@ -20,10 +26,13 @@ import asyncio
 import json
 import re
 import time
+from collections import defaultdict
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from .envelope import language, short, wrap
 from .peers import same as same_words
 from .tasks import OPEN
 from .team_names import avatars, goal_name, message_title, part_names
@@ -58,6 +67,21 @@ PALETTE = ("c0", "c3", "c5", "c2", "c6", "c7", "c1", "c4")
 TEAM_ID = re.compile(r"^team-(\d+)-(t[0-9a-f]{7})$")
 SEEN_KEY = re.compile(r"^[0-9a-z]{1,32}$")
 LINK_KEYS = ("with:", "replacedby:", "supersededby:", "contextfrom:", "setaside:")
+# Tell the team: how a part takes the owner's word, by its task's status now. At work, waiting
+# on the owner or its result ready: now, in its own chat's way; not started: with its start
+# (`teamnote:`); finished: as a follow-up that reopens it (only when the owner ticked it).
+TELL_HOW = {
+    "running": "now",
+    "waiting": "now",
+    "review": "now",
+    "queued": "start",
+    "done": "reopen",
+    "failed": "reopen",
+}
+NOTES_KEPT = 10
+TELLS_KEPT = 20
+# The latest exchanges of each part's task looked at for a team's newest one (Home's row).
+NEWS_TAIL = 8
 
 
 def loads(text: str | None, default: Any) -> Any:
@@ -101,6 +125,10 @@ class TeamsLite:
         self.recent: set[str] = set()
         self.recent_at = 0.0
         self.memo: tuple[tuple, tuple[list[dict], int | None]] | None = None
+        # Tell the team: one send at a time per team (a second click waits, then finds it
+        # sent by its key); each part task's latest exchanges, by its `xchg:` list as read.
+        self.telling: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.tails: dict[str, tuple[str, list[int]]] = {}
 
     # Stamps, as things happen (passive: never read back to change what is done).
 
@@ -222,12 +250,15 @@ class TeamsLite:
             known = loads(self.store.get(f"xchg:{task}"), [])
             self.store.set(f"xchg:{task}", json.dumps([*known, message_id][-EXCHANGES_KEPT:]))
 
-    def task_changed(self, task: dict):
+    def task_changed(self, task: dict, was: str | None = None):
         """A task was made or changed: its request's teams are read again (and a name an earlier
-        task of it gave, waiting for a task so named, is looked at)."""
+        task of it gave, waiting for a task so named, is looked at). A part that starts now
+        (`was` queued) is given what the owner told it from its team's page meanwhile."""
         if request := self.store.get(f"req:{task['id']}"):
             self.dirty.add(request)
             self.resolve_pending(task, request)
+        if was == "queued" and task["status"] in {"running", "waiting"}:
+            self.give_notes(task)
 
     # Reading, by key or by an index only.
 
@@ -532,9 +563,14 @@ class TeamsLite:
         window = self.window(listed)
         teams = [team for r in window for team in self.requests[r].teams]
         past = self.total - len(teams) if self.loaded else None
-        seen = self.kv([f"teamseen:{team['id']}" for team in teams])
+        marks = self.kv(
+            [f"{prefix}{team['id']}" for team in teams for prefix in ("teamseen:", "teamlook:")]
+        )
+        news = self.news(teams)
         for team in teams:
-            team["seen"] = seen_mark(seen.get(f"teamseen:{team['id']}"))
+            team["seen"] = seen_mark(marks.get(f"teamseen:{team['id']}"))
+            team["looked"] = marks.get(f"teamlook:{team['id']}") or ""
+            team["news"] = news.get(team["id"])
         teams.sort(key=lambda team: int(team["request"]["id"]), reverse=True)
         self.memo = (key, (teams, past))
         return teams, past
@@ -597,6 +633,63 @@ class TeamsLite:
             "past_teams": past,
             **({"held_questions": held} if held else {}),
         }
+
+    def news(self, teams: list[dict]) -> dict[str, dict]:
+        """Each team's newest exchange between two of its parts (Home's row says it when
+        nothing needs the owner): a note, a question, or a question's answer, with when. From
+        the latest few of each part's task's exchanges (`xchg:`, by key; a list read once per
+        change of it)."""
+        part_of = {
+            task: (team["id"], member["id"])
+            for team in teams
+            for member in team["members"]
+            for task in member["tasks"]
+        }
+        if not part_of:
+            return {}
+        lists = self.kv([f"xchg:{task}" for task in part_of])
+        ids: set[int] = set()
+        for key, value in lists.items():
+            known = self.tails.get(key)
+            if not known or known[0] != value:
+                known = (value, loads(value, [])[-NEWS_TAIL:])
+                self.tails[key] = known
+            ids.update(known[1])
+        if not ids:
+            return {}
+        found: dict[str, dict] = {}
+
+        def offer(team: str, item: dict):
+            if item["at"] and item["at"] > found.get(team, {}).get("at", ""):
+                found[team] = item
+
+        asks = []
+        for row in self.rows(
+            "SELECT id, kind, meta, created_at FROM messages WHERE id IN ({})", sorted(ids)
+        ):
+            meta = loads(row["meta"], {})
+            one = part_of.get(meta.get("from_task", ""))
+            other = part_of.get(meta.get("to_task", ""))
+            if not one or not other or one[0] != other[0] or one[1] == other[1]:
+                continue
+            kind = "told" if row["kind"] == "tell" else "asked"
+            offer(one[0], {"kind": kind, "from": one[1], "to": other[1], "at": row["created_at"]})
+            if kind == "asked" and meta.get("question_id"):
+                asks.append((meta["question_id"], one, other))
+        if asks:
+            questions = {
+                row["id"]: row
+                for row in self.rows(
+                    "SELECT id, status, closed FROM questions WHERE id IN ({})",
+                    [question for question, _, _ in asks],
+                )
+            }
+            for question, one, other in asks:
+                row = questions.get(question)
+                if row and row["status"] == "answered" and row["closed"]:
+                    answered = {"kind": "answered", "from": other[1], "to": one[1]}
+                    offer(one[0], {**answered, "at": iso(row["closed"])})
+        return found
 
     # Questions between workers, by the tasks they went between.
 
@@ -697,27 +790,52 @@ class TeamsLite:
         )
         if team is None:
             raise LookupError("No such team.")
-        seen = self.store.get(f"teamseen:{team['id']}")
-        return {**team, "seen": seen_mark(seen)}
+        marks = self.kv([f"teamseen:{team['id']}", f"teamlook:{team['id']}"])
+        return {
+            **team,
+            "seen": seen_mark(marks.get(f"teamseen:{team['id']}")),
+            "looked": marks.get(f"teamlook:{team['id']}") or "",
+        }
 
-    def page(self, team_id: str, before: str = "") -> dict:
-        """A team with its members' task rows, the questions held between its parts, what
-        they handed each other (newest first, a page at a time) and what each pair exchanged."""
+    def page(self, team_id: str, before: str = "", need: list[str] | tuple = ()) -> dict:
+        """A team with its members' task rows (each result's lead sentence, when it started),
+        the questions held between its parts, what they handed each other (newest first, a
+        page at a time), what was decided for it (the owner's decisions on its parts, and the
+        answers parts gave each other), what the owner told it from here, and the full views
+        of the parts' tasks the page asks for (`need`: those Home does not list)."""
         team = self.find(team_id)
         waiting = self.waiting([team]).get(team["id"], [])
         tasks = [task for member in team["members"] for task in member["tasks"]]
         rows = self.rows(
-            "SELECT id, session_id, title, status, progress, created_at, updated_at, ended_at "
-            "FROM tasks WHERE id IN ({})",
+            "SELECT id, session_id, title, status, progress, result, created_at, updated_at, "
+            "ended_at FROM tasks WHERE id IN ({})",
             tasks,
         )
         # As they stand, for a part Home does not list (its own rows, the page's, are Home's).
         aside = self.kv([f"setaside:{row['id']}" for row in rows])
-        views = [
-            {**row, "set_aside": row["status"] == "done" and f"setaside:{row['id']}" in aside}
-            for row in rows
-        ]
-        items, pairs = self.history(team)
+        started = {
+            row["task_id"]: row["at"]
+            for row in self.rows(
+                "SELECT task_id, min(started_at) AS at FROM runs WHERE task_id IN ({}) "
+                "GROUP BY task_id",
+                tasks,
+            )
+        }
+        views = []
+        for row in rows:
+            result = row.pop("result")
+            lead, rest = message_title(result) if result else ("", "")
+            views.append(
+                {
+                    **row,
+                    "set_aside": row["status"] == "done" and f"setaside:{row['id']}" in aside,
+                    "started_at": started.get(row["id"], ""),
+                    "lead": lead,
+                    "rest": rest[:600],
+                }
+            )
+        items = self.history(team)
+        decided = self.decided(team, items)
         items += self.moments(team, {row["id"]: row for row in rows})
         items.sort(key=lambda item: (item["at"], item["key"]), reverse=True)
         if before:
@@ -725,18 +843,32 @@ class TeamsLite:
             items = [item for item in items if (item["at"], item["key"]) < (at, key)]
         page = items[:HISTORY_PAGE]
         more = len(items) > HISTORY_PAGE
+        current = {member["task"] for member in team["members"]}
+        wanted = [task for task in dict.fromkeys(need) if task in current]
         return {
             "team": {**team, "waiting": waiting},
             "tasks": views,
-            "pairs": pairs,
             "items": page,
             "total": len(items) if not before else None,
             "next": f"{page[-1]['at']}|{page[-1]['key']}" if more and page else "",
+            **(
+                {}
+                if before
+                else {
+                    "decided": decided,
+                    "tells": [self.tell_view(entry) for entry in self.tells(team["id"])[-3:]],
+                    "views": [
+                        self.runtime.task_actions.view(task)
+                        for task_id in wanted
+                        if (task := self.tasks.find(task_id))
+                    ],
+                }
+            ),
         }
 
-    def history(self, team: dict) -> tuple[list[dict], list[dict]]:
+    def history(self, team: dict) -> list[dict]:
         """Its parts' exchanges (from their tasks' `xchg:` lists, by key), kept when both
-        stamped tasks are its parts'; and each pair's counts for the map."""
+        stamped tasks are its parts'."""
         part_of = {task: member["id"] for member in team["members"] for task in member["tasks"]}
         lists = self.kv([f"xchg:{task}" for task in part_of])
         ids = sorted({i for value in lists.values() for i in loads(value, [])})
@@ -758,13 +890,9 @@ class TeamsLite:
                 [meta["question_id"] for _, meta in messages if meta.get("question_id")],
             )
         }
-        items, pairs = [], {}
+        items = []
         for row, meta in messages:
             one, other = part_of[meta["from_task"]], part_of[meta["to_task"]]
-            pair = pairs.setdefault(
-                tuple(sorted((one, other))),
-                {"parts": sorted((one, other)), "told": [], "asked": [], "answered": 0, "open": []},
-            )
             item = {
                 "key": f"m{row['id']:012d}",
                 "id": str(row["id"]),
@@ -776,7 +904,6 @@ class TeamsLite:
             if row["kind"] == "tell":
                 title, rest = message_title(row["text"])
                 items.append({**item, "kind": "tell", "title": title, "rest": rest})
-                pair["told"].append(one)
                 continue
             question = questions.get(meta.get("question_id", ""))
             if not question:
@@ -807,22 +934,7 @@ class TeamsLite:
                     ),
                 }
             )
-            pair["asked"].append(one)
-            if question["status"] == "answered":
-                pair["answered"] += 1
-            if question["status"] == "open":
-                pair["open"].append({"from": one, "to": other, "minutes": waited})
-        return items, [
-            {
-                "parts": pair["parts"],
-                "told": [{"from": part, "n": pair["told"].count(part)} for part in pair["parts"]],
-                "asked": len(pair["asked"]),
-                "answered": pair["answered"],
-                "open": pair["open"],
-                "from": sorted(set(pair["told"]) | set(pair["asked"])),
-            }
-            for pair in pairs.values()
-        ]
+        return items
 
     def moments(self, team: dict, rows: dict[str, dict]) -> list[dict]:
         """Quiet lines for what moved without words: the request in parts, a result accepted
@@ -850,6 +962,257 @@ class TeamsLite:
                 found.append({"key": f"e{member['id']}", "kind": row["status"],
                               "part": member["id"], "at": at})  # fmt: skip
         return found
+
+    def decided(self, team: dict, items: list[dict]) -> list[dict]:
+        """What is settled for a team (team-page-v4 §7, Decided), oldest first: the owner's
+        decisions in force on its parts (which parts rely on each; of a changed one, those
+        that have not confirmed they work to it yet), and the answers its parts gave each
+        other's questions. Never a note: whether one settles anything is a judgement."""
+        part_of = {task: member["id"] for member in team["members"] for task in member["tasks"]}
+        found: dict[str, dict] = {}
+        for row in self.rows(
+            "SELECT l.task_id, l.ack, d.id, d.text, d.status, d.replaces, d.created_at "
+            "FROM task_decisions l JOIN decisions d ON d.id=l.decision_id "
+            "WHERE l.task_id IN ({})",
+            list(part_of),
+        ):
+            if row["status"] != "active":
+                continue
+            question, _, answer = row["text"].partition(" \u2192 ")
+            entry = found.setdefault(
+                row["id"],
+                {
+                    "key": f"d:{row['id']}",
+                    "kind": "yours",
+                    "text": answer or question,
+                    "question": question if answer else "",
+                    "parts": [],
+                    "unconfirmed": [],
+                    "at": row["created_at"],
+                    "changed": bool(loads(row["replaces"], [])),
+                },
+            )
+            part = part_of[row["task_id"]]
+            if part not in entry["parts"]:
+                entry["parts"].append(part)
+            if entry["changed"] and not row["ack"] and part not in entry["unconfirmed"]:
+                entry["unconfirmed"].append(part)
+        between = [
+            {
+                "key": f"a:{item['question']}",
+                "kind": "between",
+                "text": message_title(item["answer"])[0] or item["answer"][:200],
+                "question": item["title"],
+                "from": item["to"],
+                "to": item["from"],
+                "at": item["answered_at"],
+            }
+            for item in items
+            if item["kind"] == "ask" and item["status"] == "answered" and item["answer"].strip()
+        ]
+        return sorted([*found.values(), *between], key=lambda entry: (entry["at"], entry["key"]))
+
+    def look(self, team_id: str) -> dict:
+        """The owner had a team's page in sight (2 s, visible and focused): when, on the
+        server, so Since you looked is the same on every tab and device."""
+        if not TEAM_ID.match(team_id or ""):
+            raise ValueError("No such team.")
+        at = datetime.now(UTC).isoformat()
+        self.store.set(f"teamlook:{team_id}", at)
+        return {"looked": at}
+
+    # Tell the team (team-page-v4 §6): the owner's word to some of a team's parts, from its page.
+
+    def tells(self, team_id: str) -> list[dict]:
+        return loads(self.store.get(f"teamtells:{team_id}"), [])
+
+    async def tell(self, team_id: str, text: str, to: list[str], key: str) -> dict:
+        """The owner tells parts of a team something (only on their Send, through the app's
+        authenticated API). Every part named must be one of the team's now; each takes it as
+        its task stands now (TELL_HOW), in the owner's envelope, after a line saying who else
+        got it. The Router gets one passive copy (with its next message, never a turn of its
+        own), not one per part. `key`: the page's for this send: sent again, it is this one."""
+        text = text.strip()
+        if not text:
+            raise ValueError("Write what to tell them.")
+        if not SEEN_KEY.match(key or ""):
+            raise ValueError("No such send.")
+        async with self.telling[team_id]:
+            if known := next((e for e in self.tells(team_id) if e["key"] == key), None):
+                return self.tell_view(known)
+            team = self.find(team_id)
+            return self.tell_view(await self.send_tell(team, text, to, key))
+
+    def tell_plan(self, team: dict, to: list[str]) -> list[tuple[dict, dict, str]]:
+        """Each part named with its task as it stands now and how it takes the word; refused
+        as a whole when one is not a part of the team now, or can't take it."""
+        members = {member["id"]: member for member in team["members"]}
+        wanted = list(dict.fromkeys(to))
+        if not wanted:
+            raise ValueError("Choose who gets it.")
+        if strangers := [part for part in wanted if part not in members]:
+            raise ValueError(f"Not a part of this team now: {', '.join(strangers)}.")
+        plan = []
+        for part in wanted:
+            member = members[part]
+            if member["moved_out"]:
+                raise ValueError(
+                    f"{member['name']} went on outside this team: tell it in its own chat."
+                )
+            task = self.tasks.get(member["task"])
+            how = TELL_HOW.get(task["status"])
+            if not how:
+                raise ValueError(f"{member['name']} was cancelled: retry it first.")
+            plan.append((member, task, how))
+        return plan
+
+    async def send_tell(self, team: dict, text: str, to: list[str], key: str) -> dict:
+        plan = self.tell_plan(team, to)
+        names = [member["name"] for member, _, _ in plan]
+        at = datetime.now(UTC).isoformat()
+        sent = []
+        for member, task, how in plan:
+            others = [
+                other["name"] + (" (when it starts)" if way == "start" else "")
+                for other, _, way in plan
+                if other is not member
+            ]
+            line = f"To the parts of \u201c{team['goal']}\u201d (you are {member['name']}" + (
+                f"; also sent to {', '.join(others)}):" if others else "):"
+            )
+            said = f"{line}\n\n{text}"
+            meta = {"team": team["id"], "to_parts": names}
+            entry = {"part": member["id"], "task": task["id"], "session": member["session"]}
+            try:
+                if how == "now":
+                    message = await self.runtime.owner_send(
+                        member["session"],
+                        said,
+                        learn=False,
+                        tell_router=False,
+                        clear_questions=False,
+                        task_id=task["id"],
+                        answers_card=False,
+                        extra_meta=meta,
+                    )
+                    entry["message"] = message["id"]
+                elif how == "reopen":
+                    await self.runtime.task_actions.follow_up(
+                        task["id"], said, tell_router=False, extra_meta=meta
+                    )
+                    entry["message"] = self.store.value(
+                        "SELECT max(id) FROM messages WHERE session_id=? AND kind='owner'",
+                        (member["session"],),
+                    )
+                else:
+                    notes = loads(self.store.get(f"teamnote:{task['id']}"), [])
+                    note = {"text": said, "at": at, "team": team["id"], "key": key}
+                    notes = [*notes, {**note, "to_parts": names}][-NOTES_KEPT:]
+                    self.store.set(f"teamnote:{task['id']}", json.dumps(notes))
+                sent.append({**entry, "how": how})
+            except Exception as exc:  # One part not reached: said, the others still get it.
+                sent.append({**entry, "how": "failed", "error": str(exc)[:300]})
+        self.router_copy(team, plan, sent, text)
+        entry = {"key": key, "at": at, "text": text[:2000], "to": sent}
+        self.store.set(
+            f"teamtells:{team['id']}", json.dumps([*self.tells(team["id"]), entry][-TELLS_KEPT:])
+        )
+        return entry
+
+    def router_copy(self, team: dict, plan: list, sent: list[dict], text: str):
+        """One passive copy for the Router of what the owner told the team (as a message to
+        one worker gives it one): with its next message, not a turn of its own; Home's chat
+        shows it, "→" the team."""
+        how = {item["part"]: item["how"] for item in sent}
+        words = {"now": "", "start": ", when its task starts", "reopen": ", reopening its task"}
+        reached = [
+            f"{member['name']} (worker {short(member['session'])}{words[how[member['id']]]})"
+            for member, _, _ in plan
+            if how[member["id"]] in words
+        ]
+        if not reached:
+            return
+        names = [member["name"] for member, _, _ in plan if how[member["id"]] in words]
+        with suppress(RuntimeError):
+            self.runtime.add_message(
+                self.runtime.router_id(),
+                "owner",
+                text,
+                {
+                    "to": f"team:{team['id']}",
+                    "to_title": f"{team['goal']} \u00b7 {', '.join(names)}",
+                    "team": team["id"],
+                    "to_parts": names,
+                    "prompt": wrap(
+                        "system",
+                        "to-worker",
+                        f"The owner told these workers directly, the parts of their request "
+                        f"\u201c{team['goal']}\u201d: {'; '.join(reached)}. They said: {text}",
+                        title=team["goal"],
+                    ),
+                    "deferred": True,
+                },
+            )
+
+    def give_notes(self, task: dict):
+        """A part starts: what the owner told it from its team's page before then comes in its
+        first prompt, each under the line it was told with (nothing was spent before)."""
+        notes = loads(self.store.get(f"teamnote:{task['id']}"), [])
+        if not notes:
+            return
+        self.store.delete(f"teamnote:{task['id']}")
+        for note in notes:
+            message = self.runtime.add_message(
+                task["session_id"],
+                "owner",
+                note["text"],
+                {
+                    "prompt": wrap(
+                        "owner",
+                        "message",
+                        note["text"],
+                        task=task["id"],
+                        reply_in=language(note["text"]),
+                    ),
+                    "task_id": task["id"],
+                    "team": note.get("team", ""),
+                    "to_parts": note.get("to_parts", []),
+                },
+            )
+            tells = self.tells(note.get("team", ""))
+            for entry in tells:
+                if entry["key"] != note.get("key"):
+                    continue
+                for item in entry["to"]:
+                    if item["task"] == task["id"] and item["how"] == "start":
+                        item["message"] = message["id"]
+            if tells:
+                self.store.set(f"teamtells:{note['team']}", json.dumps(tells))
+
+    def tell_view(self, entry: dict) -> dict:
+        """What was told and where each part has it now: its message's delivery (read once its
+        conversation shows it), "start" while it waits for its part to start, "dropped" for a
+        part that never started, "failed" for one it could not be sent to."""
+        found = []
+        for item in entry["to"]:
+            state = "failed" if item["how"] == "failed" else ""
+            if not state and item.get("message"):
+                try:
+                    message = self.store.message(int(item["message"]))
+                except (LookupError, TypeError, ValueError):
+                    message = None
+                if message:
+                    marks = self.runtime.delivery.delivery_for(message["session_id"], [message])
+                    state = marks[0] or "sent"
+            if not state and item["how"] == "start":
+                task = self.tasks.find(item["task"])
+                waiting = any(
+                    note.get("key") == entry["key"]
+                    for note in loads(self.store.get(f"teamnote:{item['task']}"), [])
+                )
+                state = "start" if waiting and task and task["status"] == "queued" else "dropped"
+            found.append({**item, "delivery": state or "sent"})
+        return {**entry, "to": found}
 
     def past(self, before: str = "", limit: int = PAST_PAGE) -> dict:
         """Teams of older requests, newest first, a page at a time by a cursor over the

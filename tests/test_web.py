@@ -8,7 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 import uvicorn
-from conftest import FakeClient, FakeSession, FakeSlackMcp, FakeTokens, call_tool, env, said
+from conftest import (
+    FakeClient,
+    FakeSession,
+    FakeSlackMcp,
+    FakeTokens,
+    call_tool,
+    env,
+    said,
+    settle,
+)
 from fastapi.testclient import TestClient
 
 from chiefofstaff.__main__ import LAUNCH_FILE, Server, running_instance
@@ -786,6 +795,49 @@ async def test_no_event_can_end_the_tabs_live_updates():
     payload.encode("utf-8")  # As the stream sends it.
     sent = {"type": "message", "data": {**data, "text": "Done ?"}}
     assert payload == json.dumps(sent, ensure_ascii=False), "the rest exactly as before"
+
+
+def test_tell_the_team_and_since_you_looked_through_the_owners_api_only(app_client):
+    """The team page's input (team-page-v4 §6): only through the app's authenticated API, to
+    parts of the team only; the owner's look kept for every tab."""
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+
+    async def request():
+        await runtime.owner_send(router, "Rotate the API token, then use it in the client.")
+        session = app_client.fake.sessions[runtime.store.get(f"copilot:{router}") or router]
+        session.emit("user.message", content=session.raw_sent[-1])
+        await settle(runtime)
+
+    def spawn(title, **extra):
+        result = app_client.portal.call(
+            lambda: call_tool(
+                runtime, "spawn_worker", router, title=title, instructions=title, why_new="t",
+                **extra,
+            )
+        )  # fmt: skip
+        return json.loads(result.text_result_for_llm)
+
+    app_client.portal.call(request)
+    scout = spawn("Rotate the API token")
+    client = spawn("Use the new token in the client", works_with=[scout["task_id"]])
+    [team] = app_client.get("/api/state").json()["teams"]
+    url = f"/api/teams/{team['id']}/tell"
+    body = {"text": "Use the staging vault.", "to": [scout["task_id"]], "key": "k1"}
+    stranger = app_client.post(url, json=body, headers={**ORIGIN, "X-Chief-Key": "nope"})
+    assert stranger.status_code == 401
+    assert (
+        app_client.post(url, json={**body, "to": ["t0000000"]}, headers=ORIGIN).status_code == 400
+    )
+    told = app_client.post(url, json=body, headers=ORIGIN)
+    assert told.status_code == 200 and [i["how"] for i in told.json()["to"]] == ["now"]
+    again = app_client.post(url, json={**body, "to": [client["task_id"]]}, headers=ORIGIN)
+    assert again.json()["to"] == told.json()["to"], "the same key: the same send"
+    looked = app_client.post(f"/api/teams/{team['id']}/looked", headers=ORIGIN).json()["looked"]
+    page = app_client.get(f"/api/teams/{team['id']}?need={scout['task_id']}").json()
+    assert page["team"]["looked"] == looked and page["tells"][-1]["key"] == "k1"
+    assert [view["id"] for view in page["views"]] == [scout["task_id"]]
 
 
 def test_a_teams_thread_a_workers_short_name_and_a_nudge_from_the_page(app_client):

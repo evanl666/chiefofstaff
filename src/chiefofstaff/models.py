@@ -815,6 +815,15 @@ class TeamSeen(StrictModel):
     key: str = Field(max_length=32)
 
 
+class TeamTell(StrictModel):
+    """The owner's word to parts of a team from its page (static/teampage.js): the parts by
+    their ids, and the page's key for this send (a second click is the same send)."""
+
+    text: str = Field(max_length=20000)
+    to: list[str] = Field(max_length=40)
+    key: str = Field(max_length=32)
+
+
 class Unfollow(StrictModel):
     text: str = Field(max_length=500)  # The thread: slack:… or github:owner/repo#n.
     task_id: str = Field(default="", max_length=20)  # For this task only (else for all).

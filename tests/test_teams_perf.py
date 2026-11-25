@@ -206,6 +206,13 @@ def test_every_read_is_by_a_key_or_an_index(harness):
         "SELECT created_at FROM messages WHERE id=?",
         "SELECT key FROM kv WHERE key >= ? AND key < ?",
         "SELECT status FROM tasks WHERE id IN (?,?)",
+        # The team page (team-page-v4): when parts started, what was decided, the newest
+        # exchange of a team.
+        "SELECT task_id, min(started_at) AS at FROM runs WHERE task_id IN (?,?) GROUP BY task_id",
+        "SELECT l.task_id, l.ack, d.id, d.text, d.status, d.replaces, d.created_at "
+        "FROM task_decisions l JOIN decisions d ON d.id=l.decision_id WHERE l.task_id IN (?,?)",
+        "SELECT id, kind, meta, created_at FROM messages WHERE id IN (?,?)",
+        "SELECT id, status, closed FROM questions WHERE id IN (?,?)",
     ]
     for sql in reads:
         plan = " | ".join(
