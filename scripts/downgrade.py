@@ -1,7 +1,8 @@
 """Downgrade test (docs/design/more-agents.md, section 8): an earlier Chief of Staff, which runs
 every worker on Copilot, opening a data directory where workers ran on Codex. With
-`--case teams` (teams-v2.md, Teams lite): a team this tree made, 0.1.56 working in its folder,
-then this tree again.
+`--case teams` (teams-v2.md, Teams lite; team-page-v4): a team this tree made, told something
+from its page (a part not started yet keeping it for its start) and looked at, 0.1.56 working
+in its folder, then this tree again.
 
     uv run python scripts/downgrade.py [--baseline v0.1.42]
     uv run python scripts/downgrade.py --case teams --baseline v0.1.56
@@ -179,7 +180,9 @@ async def old_side(run: Path, rows: dict):
 
 
 # Teams lite (--case teams): this tree makes a team for one of the owner's requests (its
-# passive stamps: req:, reqtasks:, with:, xchg:, from_task/to_task); 0.1.56 opens the folder and
+# passive stamps: req:, reqtasks:, with:, xchg:, from_task/to_task), the owner tells it something
+# from its page and looks (teamtells:, teamnote: for the part not started, teamlook:, the
+# messages' team and to_parts); 0.1.56 opens the folder and
 # works in it (reopens and accepts a part, continues one, tells, splits and merges back, a failed
 # part done instead by a task of its own); this tree again: no error, the team as its tasks are now.
 
@@ -229,6 +232,9 @@ async def teams_new(run: Path):
                text="Totals are in cents.")  # fmt: skip
     [team] = runtime.snapshot()["teams"]
     runtime.teams_lite.seen(team["id"], "k0156")
+    parts = [member["id"] for member in team["members"]]
+    await runtime.teams_lite.tell(team["id"], "Keep totals in cents.", parts, "kv4tell")
+    runtime.teams_lite.look(team["id"])
     found = {
         "team": team["id"],
         "parts": [member["name"] for member in team["members"]],
@@ -302,6 +308,14 @@ async def teams_again(run: Path):
     pages = [runtime.teams_lite.page(team["id"]) for team in teams]
     found = {
         "seen": [store.get(f"teamseen:{team['id']}") for team in teams],
+        "looked": [bool(store.get(f"teamlook:{team['id']}")) for team in teams],
+        "tells": [
+            [
+                (entry["text"], [(item["how"], item["delivery"]) for item in entry["to"]])
+                for entry in page["tells"]
+            ]
+            for page in pages
+        ],
         "teams": [
             {
                 "id": team["id"],
@@ -331,7 +345,8 @@ async def teams_downgrade(baseline: str) -> int:
         new, found = await side(ROOT, env, "--side", "teams-new", "--run", str(run))
         await new.wait()
         checks.check(found["parts"] == ["API", "UI", "Tests"], "a team of three", found)
-        stamps = {"req", "reqtasks", "teamseen", "with", "xchg"}
+        stamps = {"req", "reqtasks", "teamseen", "with", "xchg", "teamtells", "teamnote"}
+        stamps |= {"teamlook"}
         checks.check(stamps <= set(found["keys"]), "its stamps, in kv", found["keys"])
         rows = found["rows"]
         print(f"The baseline ({baseline}) works in that data directory", flush=True)
@@ -378,6 +393,24 @@ async def teams_downgrade(baseline: str) -> int:
             [(mark or "").split("|")[0] for mark in back["seen"]] == ["k0156"],
             "the owner's look, kept",
             back["seen"],
+        )
+        checks.check(
+            back["looked"] == [True],
+            "Since you looked: the owner's last look at its page, kept",
+            back["looked"],
+        )
+        tells = back["tells"][0] if back["tells"] else []
+        checks.check(
+            len(tells) == 1
+            and tells[0][0] == "Keep totals in cents."
+            and tells[0][1][2] == ["start", "dropped"]
+            and all(
+                state == "dropped" if how == "start" else state not in {"failed", "dropped"}
+                for how, state in tells[0][1]
+            ),
+            "what the owner told it: given to the parts at work; the note for a part not started "
+            "then (0.1.56 started it: it knows no notes) never given",
+            tells,
         )
         checks.check(
             back["told"] == [["Totals are in cents"]],
