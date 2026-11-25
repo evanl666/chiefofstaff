@@ -5463,29 +5463,32 @@ async def round_relations(runtime, browser, failures: list[str]):
     log("Relations: less motion asked, nothing moves; a request's parts in words")
 
 
-# Teams lite (teams-v2.md v3.1): what a map's labels may never cover, and the words no node says.
-LABEL_CLASHES = """map => {
-  const boxes = (selector) => [...map.querySelectorAll(selector)]
-    .map((node) => node.getBoundingClientRect());
-  const over = (a, b) => a.left < b.right - 1 && b.left < a.right - 1
-    && a.top < b.bottom - 1 && b.top < a.bottom - 1;
-  const labels = boxes(".tv2-label");
-  const nodes = boxes(".tv2-node");
-  const found = [];
-  labels.forEach((label, index) => {
-    if (nodes.some((node) => over(label, node))) found.push(`label ${index} over a node`);
-    labels.slice(index + 1).forEach((other, at) => over(label, other)
-      && found.push(`labels ${index} and ${index + at + 1}`));
-  });
-  return found;
-}"""
+# Teams lite (teams-v2.md v3.1): the words no part says.
 INTERNAL = re.compile(r"\b(handed|forked|worker:|Copilot|Codex|Claude|t[0-9a-f]{7})\b")
-# As OVERFLOWS, but for an avatar's ring and tick (drawn around it on purpose) and the map in
-# words (read by a screen reader, not shown).
+# As OVERFLOWS, but for an avatar's ring and tick (drawn around it on purpose), the plan's rail
+# and what is read by a screen reader only.
 TEAM_OVERFLOWS = OVERFLOWS.replace(
     'if (!box.width || node.closest("pre")) return false;',
-    'if (!box.width || node.closest("pre, .pa, .visually-hidden")) return false;',
+    'if (!box.width || node.closest("pre, .pa, .av, .pair, .visually-hidden, .rails, .travel"))'
+    " return false;",
 )
+# At most one primary action on a row of the plan (its menu aside).
+PRIMARIES = """root => [...root.querySelectorAll(".tp-part")]
+  .filter((row) => row.querySelectorAll(".act > button:not(.more-button)").length > 1)
+  .map((row) => row.dataset.part)"""
+# What moves on the page now.
+RUNNING = """() => document.getAnimations().filter((a) => a.playState === "running")
+  .map((a) => `${a.animationName || a.constructor.name} on ${a.effect?.target?.className}`)"""
+
+
+# The most dots on a team's rail at once, as each is drawn (again with the page, where it was).
+TRAVELS = """() => {
+  window.travels = 0;
+  new MutationObserver(() => {
+    const now = document.querySelectorAll("#timeline .tp-plan .travel").length;
+    window.travels = Math.max(window.travels, now);
+  }).observe(document.querySelector("#timeline"), { childList: true, subtree: true });
+}"""
 
 
 async def team_row(page, team: str):
@@ -5536,9 +5539,10 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         await expect(row.locator(".segs i").nth(1)).to_have_class("waiting")
         row = await team_row(page, autopilot)
         await expect(row.locator(".goal")).to_have_text("设计 Chief of Staff 的 Autopilot 模式")
-        await expect(row.locator(".status")).to_have_text(
-            "1 working · 1 waiting on a teammate · 1 up next"
-        )
+        # Nothing needs the owner: its newest change (a note between its parts), in stronger
+        # ink until the owner looks at its page.
+        await expect(row.locator(".status")).to_have_text("安全规则 told 点对点直连 · just now")
+        await expect(row.locator(".status")).to_have_class(re.compile(r"\bfresh-news\b"))
         await expect(row.locator(".frac")).to_have_text("1/4")
         row = await team_row(page, custom)
         await expect(row.locator(".status")).to_have_text(
@@ -5580,7 +5584,7 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         await expect(card.get_by_role("button", name="Open", exact=True)).to_be_visible()
         await expect(card.locator(".in-team")).to_have_count(0)
         await page.locator("#needs").screenshot(path=shots / f"needs-{width}-{scheme}.png")
-        # A team's page: the one at work.
+        # A team's page: the one at work (team-page-v4): calm, its plan in stages, nothing cut.
         if width < 1100:
             await page.locator("#home-tabs [data-tab=tasks]").click()
         await (await team_row(page, autopilot)).click()
@@ -5588,121 +5592,104 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
             "设计 Chief of Staff 的 Autopilot 模式"
         )
         await expect(page.locator("#session-meta")).to_have_text(
-            re.compile(r"^Working · 1 of 4 parts done · started ")
+            re.compile(r"^Working · 1 of 4 done · 1 h \d+ min$")
         )
         team_page = page.locator("#timeline .team-page")
         await expect(team_page.locator(".tv2-why")).to_contain_text("先出方案")
-        await expect(team_page.locator(".tv2-callout")).to_have_count(0)
-        map_ = team_page.locator(".tv2-map")
-        nodes = map_.locator(".tv2-node")
-        await expect(nodes.locator(".name > span:first-child")).to_have_text(
+        brief = team_page.locator(".tp-brief")
+        await expect(brief.locator(".say")).to_have_text(
+            "Nothing needs you. 安全规则 is at work; 点对点直连 waits on 安全规则's answer."
+        )
+        await expect(brief.locator(".then")).to_have_text(
+            "Next: 可点击原型 starts after 安全规则 and 点对点直连."
+        )
+        rows = team_page.locator(".tp-plan .tp-part")
+        await expect(rows.locator(".name > span:first-child")).to_have_text(
             ["方案设计", "安全规则", "点对点直连", "可点击原型"]
         )
-        await expect(nodes.nth(2).locator(".status")).to_have_text(
+        await expect(team_page.locator(".tp-stage-label")).to_have_text(
+            ["Then, side by side", "Then"]
+        )
+        await expect(rows.nth(2).locator(".status")).to_have_text(
             re.compile(r"^Waits on 安全规则's answer · 1\d min$")
         )
-        await expect(nodes.nth(3).locator(".status")).to_have_text(
+        await expect(rows.nth(3).locator(".status")).to_have_text(
             "Starts after 安全规则 and 点对点直连"
         )
-        await expect(nodes.nth(0).locator(".status")).to_have_text(
+        await expect(rows.nth(0).locator(".status")).to_have_text(
             re.compile(r"^Done · you accepted it at ")
         )
-        # One line per pair, each with one label; none over a node or another label.
-        await expect(map_.locator("path.e")).to_have_count(5)
-        await expect(map_.locator(".tv2-label")).to_have_count(4)
         await page.wait_for_timeout(200)
-        clashes = await map_.evaluate(LABEL_CLASHES)
-        assert not clashes, (width, scheme, clashes)
-        cut = await map_.evaluate(TRUNCATED, ".tv2-node .name > span:first-child")
+        await expect(team_page.locator(".tp-plan svg.rails path")).to_have_count(3)
+        cut = await team_page.evaluate(TRUNCATED, ".tp-part .name > span:first-child")
         assert not cut, (width, scheme, cut)
-        statuses = await nodes.locator(".status").all_text_contents()
+        statuses = await rows.locator(".status").all_text_contents()
         assert not [s for s in statuses if INTERNAL.search(s)], statuses
-        pair = map_.locator(".tv2-label", has_text="asked")
-        await expect(pair).to_have_text(re.compile(r"^asked · 1\d min · told$"))
-        await expect(pair).to_have_attribute(
-            "title",
-            re.compile(
-                r"^点对点直连 asked 安全规则, waiting 1\d min; 安全规则 told 点对点直连 1 thing$"
-            ),
-        )
-        words = map_.locator(".tv2-words li")
-        await expect(words).to_have_count(4 + 5)
-        await expect(words.first).to_have_text(
-            re.compile(r"^方案设计: Done · you accepted it at .+\.$")
-        )
-        # What they handed each other: newest first, A → B, titled by the lead sentence; no
-        # filters under 8 entries.
-        history = team_page.locator(".tv2-history")
-        items = history.locator(".tv2-item")
+        assert not await team_page.evaluate(PRIMARIES), "one primary action a row"
+        # What they told each other: folded, newest first, A → B.
+        notes = team_page.locator(".tp-talk.notes")
+        await expect(notes).not_to_have_attribute("open", "")
+        await notes.locator("summary").click()
+        items = notes.locator(".t-item")
         await expect(items).to_have_count(3)
-        await expect(items.first.locator(".who")).to_have_text("点对点直连→安全规则")
-        await expect(items.first.locator(".about")).to_have_text(
-            "对端实例发来的内容\uff0c能直接当作请求执行吗\uff1f"
-        )
+        await expect(items.first.locator(".who")).to_have_text("点对点直连 → 安全规则 · question")
         await expect(items.first.locator(".pill.waiting")).to_have_text(
             re.compile(r"^waiting 1\d min · holds 点对点直连$")
         )
-        await expect(items.nth(1).locator(".about")).to_have_text(
-            "Autopilot 方案把来自对端的内容当请求处理\uff0c这会绕过主人"
-        )
-        await expect(history.locator(".filters")).to_have_count(0)
-        await expect(history.locator(".tv2-event").last).to_have_text(
-            re.compile(r"^·Your request, in 4 parts: 方案设计, 安全规则, 点对点直连 and 可点击原型")
-        )
+        await notes.locator("summary").click()
         found_overflow = await page.locator("#timeline").evaluate(TEAM_OVERFLOWS)
         assert not found_overflow, (width, found_overflow)
         await page.locator("#main").screenshot(path=shots / f"team-active-{width}-{scheme}.png")
-        # The one waiting on the owner: one callout, one button.
+        # The one waiting on the owner: the brief, with Review in place.
         await page.locator("#back-home").click()
         if width < 1100:
             await page.locator("#home-tabs [data-tab=tasks]").click()
         await (await team_row(page, checkout)).click()
-        callout = page.locator("#timeline .tv2-callout")
-        await expect(callout.locator("strong")).to_have_text("UI's result is ready for you.")
-        await expect(callout).to_contain_text("Tests starts once you accept it.")
-        await expect(callout.locator("button")).to_have_text(["Review UI"])
+        brief = page.locator("#timeline .tp-brief")
+        await expect(brief.locator(".say")).to_have_text(
+            re.compile(r"^UI's result is ready: The v2 cart and payment pages")
+        )
+        await expect(brief.locator(".then")).to_have_text("Tests starts once you accept it.")
+        await expect(brief.locator(".acts button")).to_have_text(["Review UI"])
         await expect(page.locator("#session-meta")).to_have_text(
-            re.compile(r"^Waiting on you · 1 of 3 parts done · since ")
+            re.compile(r"^Waiting on you · 1 of 3 done · ")
         )
-        await expect(page.locator("#timeline .tv2-label", has_text="after your OK")).to_have_count(
-            1
-        )
-        answered = page.locator("#timeline .tv2-item", has_text="cents or in dollars")
-        await expect(answered.locator(".pill.answered")).to_have_count(1)
-        await expect(answered.locator(".answer .a-text")).to_have_text(
-            "Cents, always; the mock's dollars are a leftover."
+        await expect(page.locator("#timeline .tp-part").nth(2).locator(".status")).to_have_text(
+            "Has API's result ✓ · starts after your OK on UI"
         )
         await page.wait_for_timeout(200)
-        clashes = await page.locator("#timeline .tv2-map").evaluate(LABEL_CLASHES)
-        assert not clashes, (width, scheme, clashes)
+        await expect(page.locator("#timeline .tp-plan svg.rails path.owner")).to_have_count(1)
+        decided = page.locator(
+            "#panel .tp-sofar-decided" if width >= 1100 else "#timeline .tp-sofar"
+        )
+        await expect(decided).to_contain_text("Cents, always")
         await page.locator("#main").screenshot(path=shots / f"team-idle-{width}-{scheme}.png")
-        # A part that went on outside: its node and its line say where, in words.
+        # A part that went on outside: its row and Watch out say where, in words.
         await page.locator("#back-home").click()
         if width < 1100:
             await page.locator("#home-tabs [data-tab=tasks]").click()
         await (await team_row(page, warehouse)).click()
-        first = page.locator("#timeline .tv2-node").first
+        first = page.locator("#timeline .tp-part").first
         await expect(first.locator(".status")).to_have_text(
             "Continued in “Sales report export” outside this team"
         )
-        await expect(page.locator("#timeline .tv2-node").nth(1).locator(".status")).to_have_text(
+        await expect(page.locator("#timeline .tp-part").nth(1).locator(".status")).to_have_text(
             "Waiting on “Sales report export” (outside this team)"
         )
-        await expect(
-            page.locator("#timeline .tv2-event", has_text="outside this team")
-        ).to_have_count(1)
+        watch = page.locator("#panel .tp-sofar-watch" if width >= 1100 else "#timeline .tp-sofar")
+        await expect(watch).to_contain_text("waits on “Sales report export”")
         await page.locator("#main").screenshot(path=shots / f"team-moved-{width}-{scheme}.png")
-        # The done one: a calm row, its history folded.
+        # The done one: Delivered, its notes folded; Dismiss in the brief.
         await page.locator("#back-home").click()
         if width < 1100:
             await page.locator("#home-tabs [data-tab=tasks]").click()
         await (await team_row(page, custom)).click()
-        done = page.locator("#timeline .tv2-done")
-        await expect(done.locator("strong")).to_have_text(
-            re.compile(r"^Done · 3 parts · 1 h 4\d min$")
+        brief = page.locator("#timeline .tp-brief.done")
+        await expect(brief.locator(".say")).to_have_text(
+            "Done in 1 h 40 min: all 3 parts accepted."
         )
-        await expect(done).to_contain_text("Leaves Teams 10 min after you\u2019ve seen it")
-        await expect(page.locator("#timeline details.tv2-history")).not_to_have_attribute(
+        await expect(brief.locator(".acts button")).to_have_text(["Copy summary", "Dismiss"])
+        await expect(page.locator("#timeline details.tp-talk.notes")).not_to_have_attribute(
             "open", ""
         )
         await expect(page.locator("#session-meta")).to_have_text(
@@ -5716,7 +5703,8 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         "a held question of no team"
     )
 
-    # Every team in the same words on Home's row, the sidebar's line and its page's header.
+    # Every team in the same words on the sidebar's line and its page's header; Home's row says
+    # what needs the owner the same way, and otherwise its newest change.
     context = await browser.new_context(viewport={"width": 1280, "height": 1000})
     page = await context.new_page()
     page.on("pageerror", lambda error: failures.append(str(error)))
@@ -5727,8 +5715,9 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         status = await row.locator(".status").text_content()
         goal = await row.locator(".goal").text_content()
         line = page.locator("#session-list .team-line", has_text=goal)
-        if await line.count():
-            assert await line.get_attribute("title") == f"{goal}: {status}", (goal, status)
+        words = (await line.get_attribute("title")).split(": ", 1)[1] if await line.count() else ""
+        newest = re.search(r" · (just now|\d+ (min|h|d)( \d+ min)? ago)$", status)
+        assert newest or not words or words == status, (goal, status, words)
         await row.click()
         await expect(page.locator("#session-title")).to_have_text(goal)
         header = await page.locator("#session-meta").text_content()
@@ -5736,10 +5725,10 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         if lead.startswith("Done"):
             assert status.startswith("Done"), (goal, status, header)
         else:
-            assert lead.casefold() in status.casefold(), (goal, status, header)
+            assert lead.casefold() in (words or status).casefold(), (goal, words, header)
         await page.locator("#back-home").click()
     await context.close()
-    log("Teams lite: each team's words the same on its row, the sidebar and its page")
+    log("Teams lite: each team's words the same on the sidebar and its page; Home's row too")
 
     # Nudge on a question of no team; Open is its asker's chat.
     context = await browser.new_context(viewport={"width": 1280, "height": 1000})
@@ -5766,7 +5755,7 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
     await context.close()
     log("Teams lite: Nudge on a question of no team; Open; a row by the keyboard")
 
-    # Filters only from 8 entries, never a zero; All N parts beyond 8.
+    # Many notes and many parts: the notes stay folded (no filters), every part is on the plan.
     await teams_scene.more_exchanges(runtime, found)
     big = await teams_scene.big_team(runtime)
     context = await browser.new_context(viewport={"width": 1280, "height": 1000})
@@ -5774,22 +5763,16 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
     page.on("pageerror", lambda error: failures.append(str(error)))
     await page.goto(f"{BASE}/#token={TOKEN}")
     await (await team_row(page, autopilot)).click()
-    filters = page.locator("#timeline .tv2-history .filters button")
-    await expect(filters).to_have_text(
-        [re.compile(r"^All\d+$"), "Waiting1", "Questions1", "Notes8"]
-    )
-    await filters.filter(has_text="Questions").click()
-    await expect(page.locator("#timeline .tv2-item")).to_have_count(1)
+    notes = page.locator("#timeline .tp-talk.notes")
+    await expect(notes.locator("summary .count")).to_have_text(" · 9")
     await page.locator("#back-home").click()
     await (await team_row(page, big)).click()
-    await expect(page.locator("#timeline .tv2-node:not(.tv2-more)")).to_have_count(7)
-    await expect(page.locator("#timeline .tv2-more")).to_have_text("+4 more")
-    await page.locator("#timeline .tv2-all > summary").click()
-    await expect(page.locator("#timeline .tv2-all tbody tr")).to_have_count(11)
-    await expect(page.locator("#timeline .tv2-words li").first).to_be_attached()
+    await expect(page.locator("#timeline .tp-part")).to_have_count(11)
+    cut = await page.locator("#timeline").evaluate(TRUNCATED, ".tp-part .name > span:first-child")
+    assert not cut, cut
     await page.locator("#main").screenshot(path=shots / "team-all-parts-1280-light.png")
     await context.close()
-    log("Teams lite: filters from 8 entries without a zero; All 11 parts")
+    log("Teams: many notes folded, all 11 parts on the plan")
 
     # Done → stays unseen → seen (2 s in sight, focused) → gone 10 min later by the timer, to
     # Past teams; Past teams · N alone, a page at a time.
@@ -6207,7 +6190,7 @@ async def main():
                           round_qa8_approvals, round_e125, round_teams,
                           round_usage, round_relations, round_shepherd,
                           round_stacked_merge, round_fork, round_needs_dots,
-                          round_settings, round_teams_v2,
+                          round_settings, round_teams_v2, round_team_v4,
                           round_answer_label):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
@@ -6329,6 +6312,335 @@ INVOICE_ANSWER = (
     "Found 12 invoices this week; 2 don't match the bank statement (Mar 3 and Mar 9), both from "
     "the same vendor, and I drafted a note asking them for corrected copies."
 )
+
+
+HOME_PARTS = ("#needs", "#tasks-teams", "#tasks-running", "#tasks-monitoring", "#tasks-recent",
+              "#tasks-artifacts")  # fmt: skip
+
+
+async def home_whole(page, width: int):
+    """Home keeps every part it has (Needs you, Teams, Running, Monitoring, Recently finished,
+    Artifacts) and the sidebar its Closed and Other Copilot sessions groups."""
+    await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+    await expect(page.locator("#panel > .tp-sofar-panel")).to_have_count(0)
+    await expect(page.locator("#panel")).not_to_have_class(re.compile(r"\btp-panel\b"))
+    for tab, parts in (("needs", HOME_PARTS[:1]), ("tasks", HOME_PARTS[1:])):
+        if width < 1100:
+            await page.locator(f"#home-tabs [data-tab={tab}]").click()
+        for part in parts:
+            await expect(page.locator(part)).to_be_visible()
+    await expect(page.locator("#closed > summary")).to_have_text(re.compile(r"^Closed · \d+"))
+    await expect(page.locator("#closed")).to_be_visible()
+    await expect(page.locator("#external > summary")).to_contain_text("Other Copilot sessions")
+    await expect(page.locator("#external")).to_be_visible()
+
+
+async def round_team_v4(runtime, browser, failures: list[str]):
+    """The team page, v4 (team-page-v4.md, phase 1): the brief with the answer and Review in
+    place, Since you looked, the plan on its rail, So far in Home's side panel from 1100 px and
+    under the plan below, Tell the team (who gets it always in sight; each part as it stands,
+    one Router copy), Delivered; motion only for events and none with reduced motion; Home's
+    Teams row; Home keeps every part (and the sidebar its Closed and Other Copilot sessions)
+    while a team is open and after; 800, 1024 and 1440 px, light and dark
+    (browser-shots/team-v4/, TEAM_V4_SHOTS; a recording with TEAM_V4_VIDEO)."""
+    import teams_scene
+
+    shots = Path(os.environ.get("TEAM_V4_SHOTS", SHOTS / "team-v4"))
+    shots.mkdir(parents=True, exist_ok=True)
+    store = runtime.store
+    found = await teams_scene.refund_team(runtime)
+    team = found["team"]
+    # A worker closed (the sidebar's Closed · N).
+    router = store.get("router_id")
+    made = await call_tool(runtime, "spawn_worker", router, title="旧的导出脚本", instructions="x",
+                           why_new="test")  # fmt: skip
+    gone = json.loads(made.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    await runtime.workers.close(gone)
+    runtime.publish_state()
+
+    async def open_page(width, scheme, height=1000, **extra):
+        context = await browser.new_context(
+            viewport={"width": width, "height": height}, color_scheme=scheme, **extra
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        return context, page, errors
+
+    async def open_team(page, width):
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        await (await team_row(page, team)).click()
+        # (Done on a narrow window, the plan is folded under How it went.)
+        await expect(page.locator("#timeline .tp-brief")).to_be_visible(timeout=15000)
+        await expect(page.locator("#timeline .tp-plan")).to_be_attached()
+        await page.wait_for_timeout(300)
+
+    for width, scheme in itertools.product((1440, 1024, 800), ("light", "dark")):
+        context, page, errors = await open_page(width, scheme, height=1800)
+        await home_whole(page, width)
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        await page.screenshot(path=shots / f"home-{width}-{scheme}.png")
+        row = await team_row(page, team)
+        await expect(row.locator(".status")).to_have_text("Waiting on you · answer 订单页")
+        await expect(row.locator(".segs i")).to_have_class(["done", "waiting", "working", "next"])
+        await page.locator("#tasks-teams").screenshot(
+            path=shots / f"home-teams-{width}-{scheme}.png"
+        )
+        await page.set_viewport_size({"width": width, "height": 1000})
+        await open_team(page, width)
+        # The header ticks; the brief: the one need, answered here, what it unblocks.
+        await expect(page.locator("#session-meta")).to_have_text(
+            re.compile(r"^Waiting on you · 1 of 4 done · 1 h 1\d min$")
+        )
+        brief = page.locator("#timeline .tp-brief")
+        await expect(brief.locator(".say")).to_have_text("订单页 asks you: 部分退款要支持吗？")  # noqa: RUF001
+        await expect(brief.locator(".then")).to_have_text(
+            "It has waited 18 min. 端到端测试 can't start until 订单页 is done."
+        )
+        await expect(brief.locator(".option")).to_have_count(2)
+        await expect(brief.locator(".option.recommended .choice")).to_have_text("支持部分退款")
+        await expect(brief.locator(".recommendation")).to_have_text(
+            "Why 支持部分退款: 客服最常见的诉求是只退运费。"
+        )
+        await expect(brief.locator(".tp-bar i")).to_have_count(4)
+        # Since you looked: what changed since the look, each a jump.
+        since = page.locator("#timeline .tp-since")
+        await expect(since.locator("button")).to_have_text(
+            ["订单页 asked you", "API's PR #412 merged", "邮件通知 answered 订单页"]
+        )
+        # The plan: the parts in stages on a rail, one action a row, nothing cut.
+        plan = page.locator("#timeline .tp-plan")
+        await expect(plan.locator(".tp-part .name > span:first-child")).to_have_text(
+            ["API", "订单页", "邮件通知", "端到端测试"]
+        )
+        await expect(plan.locator(".tp-part").nth(0).locator(".outs .chip")).to_have_text(
+            ["PR #412 merged", "docs/refunds/api.md"]
+        )
+        await expect(plan.locator(".tp-part").nth(0).locator(".time")).to_have_text("38 min")
+        await expect(plan.locator(".tp-part").nth(1).locator(".time")).to_have_text(
+            "waiting 18 min"
+        )
+        await expect(plan.locator("svg.rails path")).to_have_count(3)
+        await expect(plan.locator("svg.rails path.met")).to_have_count(1)
+        assert not await plan.evaluate(PRIMARIES), "one primary action a row"
+        cut = await page.locator("#timeline").evaluate(
+            TRUNCATED, ".tp-part .name > span:first-child, .tp-brief .say, .tp-bar-words span"
+        )
+        assert not cut, (width, scheme, cut)
+        found_overflow = await page.locator("#timeline").evaluate(TEAM_OVERFLOWS)
+        assert not found_overflow, (width, scheme, found_overflow)
+        # So far: Home's side panel from 1100 px (Home's own parts out of sight, kept), else
+        # under the plan.
+        if width >= 1100:
+            panel = page.locator("#panel.tp-panel")
+            await expect(panel.locator(".tp-panel-head h2")).to_have_text("So far")
+            await expect(panel.locator(".tp-sofar-made .tp-line")).to_have_count(3)
+            await expect(panel.locator(".tp-sofar-decided .tp-line")).to_have_count(2)
+            for part in HOME_PARTS:
+                await expect(page.locator(part)).to_be_attached()
+                await expect(page.locator(part)).to_be_hidden()
+            found_overflow = await panel.evaluate(TEAM_OVERFLOWS)
+            assert not found_overflow, (width, scheme, found_overflow)
+        else:
+            await expect(page.locator("#panel")).to_be_hidden()
+            sofar = page.locator("#timeline .tp-sofar")
+            await expect(sofar.locator(".tp-group.made .tp-line")).to_have_count(3)
+            order = await page.evaluate(
+                "[...document.querySelectorAll('#timeline .team-page > *')].map((n) => n.className)"
+            )
+            assert order.index("card tp-sofar") > order.index("card tp-plan"), order
+        # The sidebar keeps its groups while a team is open.
+        await expect(page.locator("#closed")).to_be_visible()
+        await expect(page.locator("#external")).to_be_visible()
+        # Tell the team: the To line names every part it goes to, as it stands.
+        to = page.locator("#composer-to")
+        await expect(to.locator(".rcpt .name")).to_have_text(["订单页", "邮件通知", "端到端测试"])
+        await expect(to.locator(".rcpt .later")).to_have_text(["(when it starts)"])
+        await expect(page.locator("#composer-input")).to_have_attribute(
+            "placeholder", "Tell the team…"
+        )
+        await page.locator("#main").screenshot(path=shots / f"team-live-{width}-{scheme}.png")
+        await page.screenshot(path=shots / f"team-live-window-{width}-{scheme}.png")
+        await to.locator(".change").click()
+        menu = page.locator("#composer .tp-to-menu")
+        await expect(menu.locator("label")).to_have_count(4)
+        await expect(menu.locator("input:checked")).to_have_count(3)
+        await expect(menu.locator("label").first).to_contain_text(
+            "Done: this reopens it as a follow-up"
+        )
+        await page.locator("#composer-input").fill(
+            "退款弹窗和邮件里都加一句：部分退款会在 3 个工作日内原路退回。"  # noqa: RUF001
+        )
+        await page.screenshot(path=shots / f"team-tell-{width}-{scheme}.png")
+        await page.keyboard.press("Escape")
+        await page.locator("#composer-input").fill("")
+        # Home again: every part of it as it was, the sidebar's groups too.
+        await page.locator("#back-home").click()
+        await home_whole(page, width)
+        assert not errors, errors
+        await context.close()
+    log("Team page v4: the brief, since, plan, So far, To line; Home whole before and after")
+
+    # Since you looked, kept on the server: another tab after a look says nothing changed.
+    context, page, errors = await open_page(1440, "light")
+    await open_team(page, 1440)
+    await page.bring_to_front()
+    looked = store.get(f"teamlook:{team}")
+    for _ in range(60):
+        if store.get(f"teamlook:{team}") != looked:
+            break
+        await page.wait_for_timeout(100)
+    assert store.get(f"teamlook:{team}") != looked, "the look is kept after 2 s in sight"
+    # This visit's look stays what it was when it opened.
+    await expect(page.locator("#timeline .tp-since button")).to_have_count(3)
+    other, second, _ = await open_page(1440, "light")
+    await open_team(second, 1440)
+    await expect(second.locator("#timeline .tp-since")).to_have_count(0)
+    await other.close()
+    await context.close()
+    log("Team page v4: Since you looked is the server's, the same on every tab")
+
+    # Tell the team, answer in the brief, review in place and accept: what each part gets, and
+    # the motion each event has (recorded with TEAM_V4_VIDEO).
+    video = os.environ.get("TEAM_V4_VIDEO")
+    context, page, errors = await open_page(
+        1440,
+        "light",
+        **(
+            {"record_video_dir": video, "record_video_size": {"width": 1440, "height": 1000}}
+            if video
+            else {}
+        ),
+    )
+    await open_team(page, 1440)
+    await page.wait_for_timeout(1500)
+    router_copies = lambda: [  # noqa: E731
+        m for m in store.messages(router) if m["kind"] == "owner" and m["meta"].get("team")
+    ]
+    told = "退款弹窗和邮件里都加一句：部分退款会在 3 个工作日内原路退回。"  # noqa: RUF001
+    await page.locator("#composer-input").fill(told)
+    await page.wait_for_timeout(600)
+    await page.locator("#composer-input").press("Enter")
+    sent = page.locator("#timeline .tp-sent")
+    await expect(sent).to_contain_text("You told the team at", timeout=10000)
+    await expect(sent).to_contain_text("端到端测试: when it starts")
+    for worker in (found["ui"], found["mail"]):
+        got = [m for m in store.messages(worker) if m["kind"] == "owner" and told in m["text"]]
+        assert len(got) == 1 and got[0]["meta"]["team"] == team, got
+    assert json.loads(store.get(f"teamnote:{found['e2e_task']}"))[0]["text"].endswith(told)
+    assert len(router_copies()) == 1, router_copies()
+    await page.wait_for_timeout(1500)
+    await page.locator("#tp-brief .option", has_text="支持部分退款").click()
+    decided = page.locator("#panel .tp-sofar-decided .tp-line", has_text="支持部分退款")
+    await expect(decided).to_have_count(1, timeout=10000)
+    assert [d["text"] for d in runtime.decisions.active()] == [
+        "部分退款要支持吗？ → 支持部分退款"  # noqa: RUF001
+    ]
+    await page.wait_for_timeout(2500)
+    # Its result handed on: a dot travels down the rail to the part waiting on it (a second
+    # long: seen as it is added).
+    await page.evaluate(TRAVELS)
+    await teams_scene.refund_reports(runtime, found)
+    for _ in range(50):
+        if await page.evaluate("() => window.travels"):
+            break
+        await page.wait_for_timeout(100)
+    assert await page.evaluate("() => window.travels") == 1, "one dot down the rail, at once"
+    review = page.locator(
+        f'.tp-part[data-part="{found["mail_task"]}"] .act button', has_text="Review"
+    )
+    await expect(review).to_be_visible(timeout=10000)
+    await page.wait_for_timeout(1500)
+    for width, scheme in itertools.product((1440, 1024, 800), ("light", "dark")):
+        shot, viewer, _ = await open_page(width, scheme)
+        await open_team(viewer, width)
+        await viewer.locator(f'.tp-part[data-part="{found["mail_task"]}"] .act button',
+                             has_text="Review").click()  # fmt: skip
+        drawer = viewer.locator("#timeline .tp-review")
+        await expect(drawer.locator(".lead")).to_have_text(
+            "退款邮件已接入发送队列，失败会重试 3 次"  # noqa: RUF001
+        )
+        await expect(drawer.locator("button")).to_have_text(
+            ["Accept", "Request changes", "Open its chat"]
+        )
+        await drawer.scroll_into_view_if_needed()
+        await viewer.screenshot(path=shots / f"team-review-{width}-{scheme}.png")
+        await shot.close()
+    await review.click()
+    await page.wait_for_timeout(800)
+    await page.locator("#timeline .tp-review button", has_text="Accept").click()
+    await expect(page.locator(f'.tp-part[data-part="{found["mail_task"]}"]')).to_have_class(
+        re.compile(r"\bis-done\b")
+    )
+    assert runtime.tasks.get(found["mail_task"])["status"] == "done"
+    await page.wait_for_timeout(2500)
+    assert not errors, errors
+    await context.close()
+    log(
+        "Team page v4: Tell the team (each part as it stands, one Router copy), "
+        "answered and accepted in place"
+    )
+
+    # Less motion asked: nothing moves, no dot, whatever happens.
+    context, page, errors = await open_page(1440, "light", reduced_motion="reduce")
+    await open_team(page, 1440)
+    assert not await page.evaluate(RUNNING), await page.evaluate(RUNNING)
+    await call_tool(
+        runtime, "report", found["ui"], status="progress", summary="部分退款的金额输入已完成。"
+    )
+    await expect(
+        page.locator("#timeline .tp-part", has_text="部分退款的金额输入已完成")
+    ).to_have_count(1, timeout=10000)
+    assert not await page.evaluate(RUNNING), await page.evaluate(RUNNING)
+    await expect(
+        page.locator("#timeline .travel, #timeline .fresh, #timeline .fresh-in")
+    ).to_have_count(0)
+    await page.screenshot(path=shots / "team-live-reduced-motion-1440-light.png")
+    assert not errors, errors
+    await context.close()
+    log("Team page v4: with less motion asked, nothing moves")
+
+    # Done: Delivered, Copy summary; the plan folded under it on a narrow window.
+    await teams_scene.refund_done(runtime, found)
+    for width, scheme in itertools.product((1440, 1024, 800), ("light", "dark")):
+        context, page, errors = await open_page(width, scheme, height=1400)
+        row = await team_row(page, team)
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=tasks]").click()
+        await expect(row.locator(".status")).to_have_text(
+            re.compile(r"^Done · 3 PRs merged · 1 h \d+ min$")
+        )
+        await page.locator("#tasks-teams").screenshot(
+            path=shots / f"home-teams-done-{width}-{scheme}.png"
+        )
+        await page.set_viewport_size({"width": width, "height": 1000})
+        await open_team(page, width)
+        brief = page.locator("#timeline .tp-brief.done")
+        await expect(brief.locator(".say")).to_have_text(
+            re.compile(r"^Done in 1 h \d+ min: 3 PRs merged and 3 decisions kept\.$")
+        )
+        await expect(brief.locator(".acts button").first).to_have_text("Copy summary")
+        if width >= 1100:
+            await expect(page.locator("#panel .tp-panel-head h2")).to_have_text("Delivered")
+        else:
+            first = await page.evaluate(
+                "document.querySelector('#timeline .team-page > .card:not(.tp-brief)').className"
+            )
+            assert "tp-sofar" in first, first
+            await expect(page.locator("#timeline .tp-plan-fold > summary")).to_contain_text(
+                "How it went"
+            )
+        await page.locator("#main").screenshot(path=shots / f"team-done-{width}-{scheme}.png")
+        await page.locator("#back-home").click()
+        await home_whole(page, width)
+        assert not errors, errors
+        await context.close()
+    log("Team page v4: Delivered and Copy summary; Home whole after")
 
 
 async def round_answer_label(runtime, browser, failures: list[str]):

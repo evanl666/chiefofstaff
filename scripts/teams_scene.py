@@ -373,12 +373,20 @@ async def refund_reports(runtime, found: dict):
     """邮件通知 reports its result (a PR with checks passed): ready for the owner's review."""
     mail = found["mail"]
     session = runtime.states.handle(mail)
-    session.emit("user.message", content=session.sent[-1])
-    session.emit("assistant.turn_start")
-    await settle(runtime)
-    await call_tool(runtime, "report", mail, status="done",
-                    summary="退款邮件已接入发送队列，失败会重试 3 次。模板与订单邮件一致，标题“退款已受理”；预览和 12 个测试在 PR 里。")  # fmt: skip
-    await settle(runtime)  # Its result's evidence read first: the PR comes on it.
+    for _ in range(4):
+        # What came for it meanwhile (the owner's word to the team, a decision) is read first.
+        session.emit("user.message", content=session.sent[-1])
+        session.emit("assistant.turn_start")
+        await settle(runtime)
+        said = await call_tool(runtime, "report", mail, status="done",
+                               summary="退款邮件已接入发送队列，失败会重试 3 次。模板与订单邮件一致，标题“退款已受理”；预览和 12 个测试在 PR 里。")  # fmt: skip
+        await settle(runtime)  # Its result's evidence read first: the PR comes on it.
+        if not said.text_result_for_llm.startswith("Error: Not reported yet"):
+            break
+        session.emit("session.idle")
+        await settle(runtime)
+    if runtime.tasks.get(found["mail_task"])["status"] != "review":
+        raise AssertionError((said.text_result_for_llm, runtime.tasks.get(found["mail_task"])))
     with_prs(runtime, found["mail_task"], [pull(416, "退款成功的邮件通知")])
     session.emit("session.idle")
     await settle(runtime)
