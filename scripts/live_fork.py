@@ -2,18 +2,20 @@
 (docs/design/worker-fork.md), against real Copilot: the Router routes, Chief of Staff forks.
 
 F1  a busy worker (at work, two tasks open) gets a related task: a second worker starts at once
-    with its context (one line in the Router chat, linked to it), and does the task; the busy
-    worker's own tasks finish undisturbed, in its own folder; a fork for new work makes no team
-    (Teams lite: the owner's Teams has none of these tasks)
+    with its context (one line in the Router chat, linked to it, marked as started because that
+    worker was busy: the sidebar's ⑂ says so), and does the task; the busy worker's own tasks
+    finish undisturbed, in its own folder; a fork for new work makes no team (Teams lite: the
+    owner's Teams has none of these tasks)
 F2  the same kind of task once that worker is free: it takes the task itself (no second worker)
 F3  every worker slot taken: the task waits for the busy worker, as before (no second worker)
 F4  the second worker answers what only the busy worker's conversation held (a codename it read
     from a file deleted since, and never told anyone)
 F5  a worker at work on its only task (not busy): related work the owner wants done in parallel
-    goes to a second worker with its context at once, not behind that turn
+    goes to a second worker with its context at once, not behind that turn (not marked busy)
 F6  the owner asks for a new worker for work only a related worker's conversation can do (a
     codename it read from a file deleted since): the Router starts it from that worker
-    (spawn_worker fork_of), and it knows the codename; that worker, between turns, untouched
+    (spawn_worker fork_of), and it knows the codename (not marked busy); that worker, between
+    turns, untouched
 F7  on Codex, whose conversations are not forked: a busy Codex worker's related task goes to a
     second worker on Codex at once, with a brief of its work; it answers from the brief (a
     codename only the busy worker's earlier result held: not in the Router's words to it)
@@ -186,6 +188,9 @@ async def f1_f4_a_busy_worker_hands_a_related_task_to_a_second_worker(run: Run) 
         return worker
     row = await run.session(second)
     run.check("F1 linked to the busy worker", (row.get("fork_of") or {}).get("id") == worker)
+    origin = row.get("fork_of") or {}
+    run.check("F1 marked: started because that worker was busy", origin.get("busy") is True,
+              origin)  # fmt: skip
     task = await run.finished(line["meta"]["task_id"])
     written = Path(row["cwd"]) / "codename.txt"
     said = written.read_text().strip() if written.exists() else ""
@@ -233,6 +238,8 @@ async def f5_work_wanted_in_parallel_goes_to_a_second_worker(run: Run):
             await run.finished(task_id, 1200)
         return
     row = await run.session(second)
+    run.check("F5 not marked busy (wanted in parallel)",
+              "busy" not in (row.get("fork_of") or {}), row.get("fork_of"))  # fmt: skip
     task = await run.finished(line["meta"]["task_id"])
     written = Path(row["cwd"]) / "codename.txt"
     said = written.read_text().strip() if written.exists() else ""
@@ -258,6 +265,8 @@ async def f6_a_new_worker_the_owner_asks_for_starts_from_a_related_one(run: Run)
         return
     row = await run.session(new)
     run.check("F6 linked to the Vault Keeper", (row.get("fork_of") or {}).get("id") == keeper)
+    run.check("F6 not marked busy (the owner asked for it)",
+              "busy" not in (row.get("fork_of") or {}), row.get("fork_of"))  # fmt: skip
     task = await run.finished(line["meta"]["task_id"])
     written = Path(row["cwd"]) / "vault.txt"
     said = written.read_text().strip() if written.exists() else ""
