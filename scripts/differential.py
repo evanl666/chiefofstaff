@@ -1053,6 +1053,28 @@ FEATURES["worker_fork"] = Feature(
     ],
 )
 
+# Share links (shares.py, docs/design/share-links.md): no setting (Share… is the way in), so never
+# used it is the baseline but for these, by name: Share… in a finished card's ⋯ menu (seen only
+# with the menu open; its item, right after Copy report, is in the DOM of the hidden menu), and
+# Settings → You → Shared links, drawn only while there is a link (never here): the page reads
+# /api/shares as Settings opens. No table, timer, GitHub call or prompt text until a link exists.
+FEATURES["share_links"] = Feature(
+    off={},
+    on={},
+    allow_off=[
+        Allow(
+            "Share… in a finished card's ⋯ menu, right after Copy report",
+            element=".menu > button[data-item=share]",
+            views=r"^home",
+        ),
+        Allow(
+            "Settings → You → Shared links, drawn only with a link: read as Settings opens",
+            data=r"^page\.requests\[\d+\]$",
+            value="GET /api/shares",
+        ),
+    ],
+)
+
 # What another coding agent would leave if it were used while off: its CLI run, its modules.
 AGENT_MODULES = (
     "chiefofstaff.backend_codex",

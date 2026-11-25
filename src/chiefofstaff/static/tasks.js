@@ -12,6 +12,7 @@ import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
 import { agentName, agentsOn, markOf, ready, statusOf } from "./agentpick.js";
 import { showChanges } from "./diff.js";
 import { keptButton, keptLine, keptMenu } from "./prepared.js";
+import { openShare } from "./share.js";
 // Chief of Staff's own helpers (learning how the owner works, checks, the profile): their
 // results come as cards to approve; the work itself is not the owner's.
 const HELPER_TITLES = new Set(["Learn how you work", "Learn checks from mistakes", "Distill owner profile"]);
@@ -678,6 +679,8 @@ function taskCard(task, phase = phaseOf(task)) {
     const cancel = { text: "Cancel task…", onclick: confirmCancel, danger: true };
     const note = { text: "Add a note…", onclick: () => reply("Tell the worker now (it reads it within its current turn)", "Sent to the worker.", false) };
     const copy = { text: "Copy report", onclick: () => copyReport(task) };
+    // A finished card, as a link anyone holding it can open (share.js); right after Copy report.
+    const share = ["review", "done"].includes(task.status) ? { text: "Share…", key: "share", onclick: () => openShare(task) } : null;
     const pr = createsPr(task) ? { text: "Create PR", onclick: () => act(`/api/tasks/${task.id}/pr`, {}, "PR opened.", false) } : null;
     const named = { text: "Rename…", onclick: rename };
     const splitOff = task.splittable ? { text: "Move the latest result to a new task…", onclick: split } : null;
@@ -708,27 +711,27 @@ function taskCard(task, phase = phaseOf(task)) {
       const how = (value, said) => () => act(`/api/tasks/${task.id}/check-back`, { how: value }, said);
       main = el("button", { type: "button", text: "Retry check-back", onclick: how("retry", "Checking back now.") });
       shown = [quiet("Stop following up", how("stop", "No longer followed up."), "Drop the check-back and stop tracking the runs it was on")];
-      more = [task.status === "review" ? { text: "Accept", onclick: accept } : null, followUp, copy, named, worker];
+      more = [task.status === "review" ? { text: "Accept", onclick: accept } : null, followUp, copy, share, named, worker];
     } else if (task.status === "done" && PR_TO_FIX.includes(phase.marker)) {
       // Its PR has failing CI, merge conflicts or changes asked for: tell its worker what to do
       // about it (a result not accepted yet can be, as it is).
       const about = { "pr-failing": "the failing checks", "pr-conflicts": "the merge conflicts", "pr-changes": "the changes asked for" }[phase.marker];
       main = el("button", { type: "button", text: "Ask it to fix…", onclick: () => reply(`What should it do about ${about}?`, "Sent to the worker.") });
-      more = [followUp, copy, named, worker];
+      more = [followUp, copy, share, named, worker];
     } else if (task.status === "done" && phase.marker === "runs-unknown") {
       // Runs its worker said go on that nothing told of for a day, and nothing else to wait
       // on: the owner says what became of them, here; of several, which (bug E78).
       const [ended, untracked] = runActions();
       main = el("button", { type: "button", text: ended.text, "data-tip": ended.tip, onclick: ended.onclick });
       shown = [quiet(untracked.text, untracked.onclick, untracked.tip)];
-      more = [followUp, copy, pr, named, splitOff, worker];
+      more = [followUp, copy, share, pr, named, splitOff, worker];
     } else if (task.status === "review") {
       // Every result waits for the owner's Accept, a report that only informs too. On the card
       // of what its worker drafted for it, that card's own action accepts it (bug QA6-2: two
       // decisions on one card, and either click left the other behind).
       main = phase.inDraft ? null : el("button", { type: "button", text: "Accept", onclick: accept });
       shown = [viewing, following, changes];
-      more = [copy, pr, named, splitOff, worker];
+      more = [copy, share, pr, named, splitOff, worker];
     } else if (task.status === "waiting" && task.stopped && task.spend_stop && !task.go_on) {
       // Its token limit used: nothing goes on until it is raised (Settings → Agents & models).
       more = [named, worker, cancel];
@@ -770,9 +773,9 @@ function taskCard(task, phase = phaseOf(task)) {
       // News about finished work: seen, it goes back where it was (on a draft's card, with
       // that draft: its own action).
       main = phase.inDraft ? null : el("button", { type: "button", text: "Got it", onclick: () => act(`/api/tasks/${task.id}/news-seen`, {}, "") });
-      more = [{ text: "Follow up…", onclick: () => reply("What should it do about it?", "Sent to the worker.") }, copy, pr, named, worker];
+      more = [{ text: "Follow up…", onclick: () => reply("What should it do about it?", "Sent to the worker.") }, copy, share, pr, named, worker];
     } else if (task.status === "done") {
-      more = [followUp, copy, pr, named, splitOff, worker];
+      more = [followUp, copy, share, pr, named, splitOff, worker];
     } else {
       more = [named, worker];
     }

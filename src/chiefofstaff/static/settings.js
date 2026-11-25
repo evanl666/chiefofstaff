@@ -6,6 +6,7 @@ import { closedWorkers, followOthers, HOME, loadState, sessions, state } from ".
 import { renderSidebar } from "./sidebar.js";
 import { renderHeader, select } from "./session.js";
 import { agentsBody, agentsSaved, agentsShown, agentsStateChanged, modelsArrived, renderAgentsPage, setupChanged } from "./agentspage.js";
+import { renderSharedLinks } from "./share.js";
 
 // Settings' pages (docs/design/settings-v2.md): what each name opens, old names included, so a
 // link, a toast, a timeline line's `meta.settings` and the last page kept in localStorage open
@@ -93,6 +94,8 @@ export function openSettings(where = "") {
   }
   tabsOrientation();
   showSettingsTab(where || localStorage.getItem(TAB) || "general", { focus: true });
+  // The owner's share links, at the end of You: nothing is drawn without one.
+  renderSharedLinks();
   // Feedback, the owner's words and checks come in all the time; what was learned is read fresh.
   api("/api/state")
     .then((data) => {

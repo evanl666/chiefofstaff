@@ -2272,3 +2272,87 @@ ul.repo-list .repo-row .name { flex-basis: 100%; font-weight: 500; overflow: hid
 ul.repo-list .repo-row label.inline { display: flex; flex-direction: row; gap: 10px; align-items: center; }
 ul.repo-list .repo-row label.inline > span { white-space: nowrap; font-weight: 400; font-size: var(--body); color: var(--text); }
 ul.repo-list .repo-row label.inline > select { width: auto; }
+
+/* Share links (share.js, sharecard.js): one dialog, its preview, the hits to decide on, then the
+   link; a shared card wherever it is drawn (the viewer page copies this file). */
+dialog.share-dialog { width: min(680px, calc(100vw - 32px)); }
+.share-dialog form { gap: 14px; display: flex; flex-direction: column; max-height: min(88vh, 860px); overflow: hidden; }
+.share-dialog form > * { flex: none; }
+.share-dialog .hint { color: var(--muted); font-size: var(--small); margin: 0; line-height: 1.5; }
+.share-dialog h2 { margin: 0; overflow-wrap: anywhere; }
+.share-dialog header { display: grid; gap: 4px; }
+.share-flags { border: 1px solid var(--red); border-radius: var(--radius-lg); background: var(--red-soft); padding: 12px 14px; display: grid; gap: 8px; }
+.share-flags h3 { margin: 0; color: var(--red); font-size: var(--body); font-weight: 600; }
+.share-flags ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 220px; overflow-y: auto; }
+.share-flags li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; align-items: center; padding: 6px 0 0; border-top: 1px solid color-mix(in srgb, var(--red) 22%, transparent); cursor: pointer; }
+.share-flags li:first-child { border-top: 0; padding-top: 0; }
+.share-flags .what { font-size: var(--small); color: var(--soft); }
+.share-flags .what strong { color: var(--text); font-weight: 600; }
+.share-flags .value { grid-column: 1; font: var(--small) var(--mono); color: var(--red); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-flags li.removed .value { text-decoration: line-through; color: var(--muted); }
+.share-flags li.kept .value { color: var(--soft); }
+.share-flags .share-choice { grid-column: 2; grid-row: 1 / span 2; }
+.share-choice { display: inline-flex; padding: 2px; gap: 2px; border-radius: var(--radius); background: var(--card); border: 1px solid var(--line); }
+.share-choice button { background: none; color: var(--soft); font-weight: 400; padding: 0 12px; border-radius: 6px; min-height: 28px; font-size: var(--small); }
+.share-choice button:not(:disabled):hover { color: var(--text); background: var(--hover); opacity: 1; }
+.share-choice button[aria-pressed="true"] { background: var(--text); color: var(--bg); font-weight: 500; }
+.share-flags.settled { border-color: var(--line); background: var(--bg); }
+.share-flags.settled h3 { color: var(--text); }
+.share-dialog form > .share-preview { flex: 1 1 auto; min-height: 120px; }
+.share-preview { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--bg); padding: 12px; overflow: auto; }
+.share-preview .card.shared { box-shadow: none; }
+mark.share-hit { background: var(--red-soft); color: var(--red); border-radius: 4px; padding: 0 2px; box-shadow: inset 0 0 0 1px var(--red); }
+mark.share-hit.kept { background: none; color: inherit; box-shadow: inset 0 -1px 0 var(--muted); }
+mark.share-hit.removed { background: none; color: var(--muted); box-shadow: none; padding: 0; }
+mark.share-hit.removed s { display: none; }
+mark.share-hit.flash { animation: hit-flash 0.9s var(--ease); }
+@keyframes hit-flash { 30% { box-shadow: inset 0 0 0 2px var(--red), 0 0 0 4px var(--red-soft); } }
+.share-left-out { margin: 0; color: var(--muted); font-size: var(--small); line-height: 1.5; }
+.share-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: var(--small); color: var(--soft); }
+dialog .share-options label { display: inline-flex; align-items: center; gap: 8px; font-size: var(--small); }
+dialog .share-options label > span { font-weight: 400; }
+dialog .share-options select { width: auto; min-height: 30px; padding: 0 8px; }
+.share-options .as { color: var(--muted); }
+.share-options .as strong { color: var(--soft); font-weight: 600; }
+.share-dialog footer { align-items: center; margin-top: 0; }
+.share-dialog footer .spacer { flex: 1; }
+.share-dialog footer .why { color: var(--muted); font-size: var(--small); }
+.share-dialog footer button.text { padding: 0 6px; }
+.share-dialog .share-error a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.share-blocked { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 12px 14px; display: grid; gap: 6px; font-size: var(--small); color: var(--soft); }
+.share-blocked strong { color: var(--text); }
+.share-blocked code { font: var(--small) var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 4px; }
+.share-link { display: flex; gap: 8px; align-items: center; }
+dialog .share-link input { flex: 1; min-width: 0; font: var(--small) var(--mono); color: var(--soft); }
+.share-facts { margin: 0; padding-left: 18px; display: grid; gap: 4px; color: var(--soft); font-size: var(--small); line-height: 1.5; }
+.share-facts li::marker { color: var(--muted); }
+.share-done { display: flex; align-items: center; gap: 10px; }
+.share-done .duck { width: 40px; flex: none; }
+.share-live { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 12px 14px; display: grid; gap: 8px; }
+.share-live .when { font-size: var(--small); color: var(--soft); }
+.share-live .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: var(--small); color: var(--soft); }
+.share-live .confirm p { margin: 0; flex: 1 1 260px; line-height: 1.5; }
+button.text.danger-text, button.link.danger-text { color: var(--red); }
+button.text.danger-text:not(:disabled):hover, button.link.danger-text:not(:disabled):hover { color: var(--red); background: var(--red-soft); }
+.card.task.shared .link-host { color: var(--muted); font-size: var(--small); }
+.shared-links-section { display: grid; gap: 8px; }
+.shared-links-section h3 { margin-bottom: 0; }
+.shared-links-section .hint { margin: 0; }
+ul.memory.shared-links li { align-items: center; }
+ul.memory.shared-links li.off { opacity: 1; }
+ul.memory.shared-links li.off .clamped { color: var(--muted); }
+/* Revoke link, filled red: its words in the page's own background, legible light and dark. */
+.share-live .confirm button.danger, ul.memory.shared-links .confirm button.danger { color: var(--bg); }
+ul.memory.shared-links li small.error { color: var(--red); }
+ul.memory.shared-links a.link { flex: none; font-size: var(--small); padding: 0 4px; }
+ul.memory.shared-links li.confirming { flex-wrap: wrap; background: var(--red-soft); border-radius: var(--radius); padding: 8px 10px; border-bottom: 0; margin: 2px 0; }
+ul.memory.shared-links li.confirming .confirm { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: var(--small); color: var(--soft); }
+ul.memory.shared-links li.confirming .confirm p { margin: 0; flex: 1 1 280px; line-height: 1.5; }
+@media (max-width: 560px) {
+  .share-flags li { grid-template-columns: minmax(0, 1fr); }
+  .share-flags .share-choice { grid-column: 1; grid-row: auto; justify-self: start; }
+  .share-dialog footer { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  mark.share-hit.flash { animation: none; }
+}
