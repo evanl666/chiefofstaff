@@ -2210,7 +2210,14 @@ async def photograph(
                     await camera.shoot(page, f"sidebar-{width}", scheme, "#sidebar")
                     external = page.locator("#external > summary")
                     if await external.is_visible():
-                        await external.click()
+                        # Unfolding reads the list again (/api/external?refresh=true): shot once
+                        # it is read, or a slow read (Codex's sessions too) leaves it empty. (With
+                        # Other sessions on, it may start unfolded: the click folds it, no read.)
+                        if await page.locator("#external[open]").count():
+                            await external.click()
+                        else:
+                            async with page.expect_response(lambda r: "/api/external" in r.url):
+                                await external.click()
                         await quiet(page)
                         await camera.shoot(page, f"sidebar-external-{width}", scheme, "#sidebar")
                         await external.click()
