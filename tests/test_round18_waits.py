@@ -164,3 +164,22 @@ async def test_a_task_that_needs_the_owners_acceptance_files_the_answer_for_revi
     shown = runtime.tasks.get(task["id"])
     assert (shown["status"], shown["result"]) == ("review", DONE_LIKE)
     assert not nudged(session)
+
+
+async def test_more_work_done_after_not_done_yet_is_still_filed(harness):
+    """Only an acknowledgement is let be: an answer saying what it did since is filed, and the
+    worker asked whether it is finished."""
+    runtime = await harness.connect()
+    worker, task = await spawn(runtime, harness.router_id, "Train lower-weight twins")
+    session = harness.session(worker)
+    await turn(runtime, session)
+    await call_tool(runtime, "report", worker, status="progress", summary="Six configs ready.")
+    await idle(runtime, session, "Six configs ready.")
+    more = "It isn't done: add a seventh twin for the EU market."
+    await call_tool(runtime, "message_session", harness.router_id, session_id=worker,
+                    task="continue", task_id=task["id"], text=more)  # fmt: skip
+    await turn(runtime, session)
+    added = "Added the seventh twin (EU) and trained it: model id m-107, within 1% of baseline."
+    await idle(runtime, session, added)
+    assert runtime.tasks.get(task["id"])["progress"] == added
+    assert "report-missing" in session.sent[-1]
