@@ -725,6 +725,9 @@ class OwnerMessage(StrictModel):
     task_id: str = Field(default="", max_length=64)
     # In a worker's chat: the line on its folder's settings it showed (Runtime.settings_typed).
     settings_digest: str = Field(default="", max_length=64)
+    # On Home: a card someone shared that the owner opened here goes with it, quoted as
+    # untrusted data (Start a task from this).
+    shared_card: str = Field(default="", max_length=32)
 
     @model_validator(mode="after")
     def something(self) -> "OwnerMessage":
@@ -980,3 +983,9 @@ class ShareCreate(ShareFile):
 
     days: int = 7
     login: str = Field(default="", max_length=100)
+
+
+class SharedLink(StrictModel):
+    """A share link pasted alone into Home's message box, to open here."""
+
+    link: str = Field(max_length=400)

@@ -46,6 +46,7 @@ from .models import (
     Settings,
     SetupNotes,
     ShareCreate,
+    SharedLink,
     ShareFile,
     SkillUpload,
     SlackToken,
@@ -57,6 +58,7 @@ from .models import (
 )
 from .runtime import Runtime
 from .shares import ChangedError
+from .sharing import link_alone
 from .storage import StorageDelete, StorageKeep, StorageSession
 from .store import Store
 from .updates import installed
@@ -368,6 +370,13 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/messages")
     async def send(session_id: str, payload: OwnerMessage):
+        if (
+            session_id == runtime.router_id()
+            and link_alone(payload.text)
+            and not payload.attachments
+        ):
+            # A share link alone on Home is opened by Chief itself: never sent to a session.
+            return shown((await runtime.shares.open_link(payload.text))["message"])
         if payload.to:
             return shown(
                 await runtime.owner_send_to(
@@ -386,6 +395,7 @@ def create_app(
                 agent_effort=payload.agent_effort,
                 typed=True,
                 settings_digest=payload.settings_digest,
+                shared_card=payload.shared_card,
             )
         )
 
@@ -642,6 +652,16 @@ def create_app(
     @app.post("/api/shares/{share_id}/revoke")
     async def share_revoke(share_id: str):
         return await runtime.shares.revoke(share_id)
+
+    # A card someone shared, opened here from its link pasted alone into Home's message box.
+    @app.post("/api/shared/open")
+    async def shared_open(payload: SharedLink):
+        opened = await runtime.shares.open_link(payload.link)
+        return {**opened, "message": shown(opened["message"])}
+
+    @app.delete("/api/shared/{card_id}")
+    async def shared_remove(card_id: str):
+        return runtime.shares.remove_copy(card_id)
 
     @app.get("/api/tasks/{task_id}/diff")
     async def task_diff(task_id: str):
