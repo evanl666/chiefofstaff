@@ -7,7 +7,7 @@ security review of the diff, 2026-11-25.
 
 | # | Severity | File | Lines | Finding | Confidence | Status |
 |---|----------|------|-------|---------|------------|--------|
-| 1 | Medium | `src/chiefofstaff/sharing.py` | 503–517, 589–600 | The private-data scan's *Remove* can leave a secret in the shared card, and common credential formats aren't flagged | 8/10 | Open: to be fixed before share links ship |
+| 1 | Medium | `src/chiefofstaff/sharing.py` | 503–517, 589–600 | The private-data scan's *Remove* can leave a secret in the shared card, and common credential formats aren't flagged | 8/10 | Fixed in `6128604` |
 
 Nothing else was found at this confidence. These held up:
 
@@ -46,3 +46,27 @@ after Revoke.
 - Replace the leading `\b` with `(?<![A-Za-z0-9])`, and allow an optional quote around the key name
   and around the value.
 - Add tests that check what remains after Remove, not only that something was detected.
+
+**Fixed** in `6128604` ("Share links: Remove takes a secret out whole"), before share links ship:
+- Each hit is now the whole secret. A private key runs from its `BEGIN` line to the matching
+  `END`, including in a JSON string with escaped line breaks; when `END` is missing, it runs to
+  the end of the body. An AWS key id is taken together with the secret within 200 characters of
+  it, in either order. A link's `user:password@`, or just `:password@`, is found for any scheme.
+- No rule starts with `\b`. Rules start with `(?<![A-Za-z0-9])`, and the credential rule allows a
+  quote around the name and around the value. `DB_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`,
+  `SECRET_KEY=`, `JWT_SECRET=`, `password = "…"`, `"password": "…"`, `client_secret:` and
+  `x-api-key:` all match. Words about credentials don't: `secrets: inherit`, `max_tokens=…`,
+  `tokenizer:`.
+- `tests/test_share_remove.py` checks what is left after *Remove* for each case and for this
+  review's own examples:
+  - private keys: RSA, PKCS#8, EC, OpenSSH, encrypted, PGP, with headers, cut off, and in JSON;
+  - AWS credentials in ini, env, prose and JSON;
+  - nine links with a password, over eight schemes;
+  - twelve credential-line forms.
+
+  These tests failed before the fix: 35 of 45.
+- `tests/test_share_routes.py` checks that the HTML file, the sealed card in the gist and a copy
+  opened from the link all leave out the same secrets.
+- Share…'s preview now draws the card as it will be shared, with each removed value replaced,
+  and marks a secret that spans several lines on each of its lines. `scripts/ui_quality.py`
+  checks this (`share/home-secrets-*`).
