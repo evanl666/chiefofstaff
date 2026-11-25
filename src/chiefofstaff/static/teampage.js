@@ -531,14 +531,15 @@ function jump(target) {
 // 3 · So far: made, decided, watch out. The new line rises in, lit a moment, then lets go.
 function whoMark(model, who) {
   const part = (id) => model.st.parts.find((one) => one.id === id);
-  if (who === "you") return el("span", { class: "you", text: "you", title: "You" });
+  // A mark as the avatars are (drawn, its line says who: "You decided…").
+  if (who === "you") return el("span", { class: "you", "data-av": "you", "aria-hidden": "true" });
   if (Array.isArray(who)) {
     const [a, b] = who.map(part).filter(Boolean);
     if (a && b) return el("span", { class: "pair", "aria-hidden": "true" }, partAvatar(a), partAvatar(b));
     who = a?.id;
   }
   const found = part(who);
-  return found ? partAvatar(found) : el("span", { class: "you", text: "·" });
+  return found ? partAvatar(found) : el("span", { class: "you", "data-av": "·", "aria-hidden": "true" });
 }
 const TONE_CHIP = { good: "done", bad: "failed", wait: "waiting" };
 function line(model, { key, who, main, sub, chip, tone, at, kind, url }) {
