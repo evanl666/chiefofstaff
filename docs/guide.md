@@ -110,10 +110,14 @@ walkthrough, results, a log): Markdown shows formatted. Other paths are copied.
 
 The dot next to each worker says where it stands, in the same terms as Home (hover it for the
 words, or click *?* beside *Workers*): amber, one of its tasks needs you; pulsing blue, at work
-on one now; a blue ring, its tasks wait on something (a marker in words beside it: *queued*,
-*up next*, *checks back*, *overdue*…); grey, nothing open: those fold away under *Nothing
-open*. A worker is listed by its work (the task it is on, else its newest), its first title in
-the tooltip, also in its header and under *Closed*.
+on one now; a blue ring, its tasks wait on something (a few words beside it: when it checks
+back, *↻ in 12 min* within the hour, else *↻ 3:28 PM*, what it checks on hover; *waits on “…”*
+for the worker it waits on; else *queued*, *up next*, *overdue*…); grey, nothing open: those
+fold away under *Nothing open*. The sidebar lists workers only, in one list by where they stand
+(no groups: teams are on Home); a worker started from another one's conversation has a small
+⑂ after its name (*Started from “…” with its conversation, because … was busy* on hover). A
+worker is listed by its work (the task it is on, else its newest), its first title in the
+tooltip, also in its header and under *Closed*.
 
 Until you set your code folder (see [Where workers work](#where-workers-work)), Home asks for
 it; *Not now* hides that card, and Settings still has it.
@@ -184,8 +188,8 @@ the tasks made for that one message and linked on purpose (one works with or wai
 or does another's instead) make one: workers that only talk, work on another of your requests or
 were started on their own never do. *Teams*, above *Running*, has a row per team: its request, a
 bar with a segment per part, where it stands in a calm line (*1 working · 1 waiting on a teammate
-· 1 up next*, *Waiting on you · review UI*) and how many parts are done (*1/3*); the sidebar puts
-its workers under one line with the same count. A team's page says what it's for (*For your
+· 1 up next*, *Waiting on you · review UI*) and how many parts are done (*1/3*); in the sidebar
+its workers are rows like any other. A team's page says what it's for (*For your
 request at 9:12: …*), where it stands (*Working · 1 of 4 parts done · started 9:12*), the one
 thing that needs you if there is one, and a map: a node per part, by a short name from its task
 (each its own in the team, with an avatar of its own) and what it is doing, and one labelled
@@ -196,7 +200,7 @@ first (*API → UI · note*, by the parts' short names, titled by its first sent
 of your requests says *Continued in “…” outside this team* (a link) and counts as finished; one
 that waits on it says *Waiting on “…” (outside this team)*. A team's state is what Home's own
 rows say (a part waiting on your review or your answer has the team waiting on you), in the
-same words on its row, the sidebar and its page. Once every part is done its row says so,
+same words on its row and its page. Once every part is done its row says so,
 quietly (*Done · 3 parts · 1 h 40 min*), and stays until you've seen it; it leaves ten minutes
 later (at once with its ×), and *Past teams · N* lists the earlier ones. Teams change only what you see: how workers are linked,
 what they are told and what the Router gets are as before.
@@ -245,7 +249,7 @@ is free, its new task goes to a
 fork, up to its last finished turn) and a note from Chief of Staff on what the first one is
 doing now and where. It works in a folder and branch of its own (from the project's base); the
 busy worker goes on undisturbed. The Router chat says *Started a second worker for “…” (context
-from “…”)*; in the sidebar the second worker sits under the first, and its task's row says
+from “…”)*; in the sidebar the second worker has a small ⑂ after its name, and its task's row says
 *Worker from “…”*; its *Notes* tab's lineage has it *⑂ forked from …*. With every slot taken, or
 when only that worker can do it (its branch or PR, or you asked for it), the task waits for it
 as before. Work you ask for in parallel (meanwhile, at the same time) with what a worker is
@@ -1534,7 +1538,8 @@ sidebar row, its tasks and its header, and on the line that says it started in y
 
 **Comparing two agents.** Pick two agents (`@codex`, then `@claude`: "Compare on Codex and
 Claude"), or say "do this with Codex and Claude": the same task runs on each, a worker each in a
-worktree of its own, grouped in the sidebar under one row ("Compare: … (2)"); the Router gives
+worktree of its own, each a row of its own in the sidebar with a small ⇄ (the other side on
+hover); the Router gives
 you both results side by side once both have reported.
 
 **Starting over on another agent.** Until a worker has done anything (no step yet), its line in

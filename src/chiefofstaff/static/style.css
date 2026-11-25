@@ -18,15 +18,16 @@
   --accent-soft: #eaf0fd;
   --red: #b42f27;
   --red-soft: #fbeaea;
-  /* Workers' colors (avatars, a team's graph), from their ids. */
-  --c0: #2f68c9;
-  --c1: #1d7a50;
-  --c2: #a5581a;
-  --c3: #8344a3;
-  --c4: #b23a30;
-  --c5: #13757e;
-  --c6: #9c3f86;
-  --c7: #586776;
+  /* Workers' colors (avatars, a team's parts), from their ids: never a status's hue (blue
+     running, amber needs you, green done, red failed), so a color never reads as a state. */
+  --c0: #6a4fc0;
+  --c1: #625d84;
+  --c2: #5a6676;
+  --c3: #157780;
+  --c4: #4b4f58;
+  --c5: #9a3f86;
+  --c6: #8344a3;
+  --c7: #72675e;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
   /* Three sizes: small (meta, labels), body, and titles. */
   --small: 12px;
@@ -181,9 +182,14 @@ summary { min-height: 28px; }
 .item .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item.done .label { color: var(--soft); }
 .item .sub { font-size: var(--small); color: var(--muted); flex-shrink: 0; }
-/* A second worker, right under the worker it was started from: on a thin line from that one's dot. */
-.item.forked { position: relative; padding-left: 28px; }
-.item.forked::after { content: ""; position: absolute; left: 16px; top: -10px; height: calc(50% + 10px); width: 7px; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); border-bottom-left-radius: 4px; pointer-events: none; }
+/* Where a worker stands, in a few words ("waits on “…”" cut short, whole on hover). */
+#session-list .item .sub { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* After a worker's name: ⑂ when it started from another worker's conversation, ⇄ on a side of
+   a Compare; quiet, the name first. */
+#session-list .item .name { flex: 1; min-width: 0; display: flex; align-items: center; gap: 5px; }
+#session-list .item .name .label { flex: 0 1 auto; }
+.item :is(.fork-mark, .compare-mark) { flex: none; display: inline-flex; color: var(--muted); }
+.item :is(.fork-mark, .compare-mark) .glyph { width: 12px; height: 12px; }
 
 .badge {
   min-width: 20px;
@@ -716,9 +722,6 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 .agent-mark[data-agent="claude"] { background: var(--agent-claude); }
 .item .agent-mark { margin-left: 2px; }
 /* A Compare's workers, under one row. */
-.compare-group { display: flex; align-items: center; min-height: 28px; padding: 0 10px; font-size: var(--small); font-weight: 600; color: var(--soft); }
-.compare-group .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.item.nested { padding-left: 26px; }
 /* The agent chosen, as a chip: its popover picks the agent, its model and effort. */
 .agent-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--text); font: inherit; font-size: var(--small); cursor: pointer; }
 .agent-chip:hover { background: var(--hover); }
@@ -1502,17 +1505,6 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .past-row:hover { opacity: 1; color: var(--text); background: var(--hover); }
 .past-row .goal { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .past-row .when { flex: none; margin-left: auto; font-size: var(--small); color: var(--muted); }
-
-/* The sidebar: a team's line names its goal, its state and how far it is; its workers under it,
-   each with a rail in its part's color. */
-#session-list .team-line { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 28px; margin-top: 4px; padding: 0 12px 0 14px; background: none; color: var(--soft); font-size: var(--small); font-weight: 600; text-align: left; }
-#session-list .team-line:hover { opacity: 1; color: var(--text); }
-#session-list .team-line .dot { flex: none; width: 7px; height: 7px; }
-#session-list .team-line .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#session-list .team-line .frac { flex: none; margin-left: auto; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
-#session-list .team-line.selected { color: var(--text); background: var(--active); }
-#session-list .item.in-team { position: relative; }
-#session-list .item.in-team::before { content: ""; position: absolute; left: 2px; top: 7px; bottom: 7px; width: 2px; border-radius: 1px; background: var(--color); }
 
 /* Needs you: a question that holds a worker up, in plain words, with one action. */
 .card.team-wait .head { display: flex; align-items: center; gap: 8px; min-width: 0; }

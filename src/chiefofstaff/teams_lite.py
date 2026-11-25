@@ -53,7 +53,7 @@ CHUNK = 400
 # Requests read at a time while every request is read (in the background on a large data
 # folder: the first snapshot reads only the requests it shows).
 WARM_CHUNK = 250
-# Part colors by the order parts joined: neighbours apart, red last.
+# Part colors by the order parts joined: neighbours apart, the plainest last (none a status's hue).
 PALETTE = ("c0", "c3", "c5", "c2", "c6", "c7", "c1", "c4")
 TEAM_ID = re.compile(r"^team-(\d+)-(t[0-9a-f]{7})$")
 SEEN_KEY = re.compile(r"^[0-9a-z]{1,32}$")

@@ -2,7 +2,7 @@
 
 import { $, api, el, toast, withoutBidi } from "./dom.js";
 import { ago, clock, plural, shortPath, since, span } from "./text.js";
-import { closedWorkers, DOT_HELP, forkOrigin, HOME, loadState, otherItem, othersOn, otherStatus, routerId, sessions, state, workerTitle } from "./state.js";
+import { byId, closedWorkers, DOT_HELP, forkOrigin, HOME, loadState, otherItem, othersOn, otherStatus, routerId, sessions, state, workerTitle } from "./state.js";
 import { IN_TERMINAL, readOnlyTimeline, scrollToBottom, select, setComposer, setLayout, showDraft } from "./session.js";
 import { homeItem, needsCount, WORKER_STATES, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
@@ -10,7 +10,8 @@ import { openSettings, watchGaps } from "./settings.js";
 import { ownTasks } from "./tasks.js";
 import { duck, setMood } from "./mascot.js";
 import { agentName, markOf } from "./agentpick.js";
-import { sidebarTeams, teamLine } from "./team.js";
+import { labelOf } from "./team.js";
+import { glyph } from "./relations.js";
 // The captain beside the name says how Home stands, as the dots do: it salutes when something
 // needs the owner, steers while the Router or a worker is at work, keeps watch while tasks wait
 // on something, and is quiet otherwise; it cheers a moment when a task is done (and nothing
@@ -40,86 +41,125 @@ function captain(needs, where) {
   node.title = words;
 }
 // One count in the whole sidebar, on Home: what needs the owner. Workers show only their dot,
-// which says where each stands as Home does (Needs you, Running, Monitoring).
-function sessionItem(session, label, where, nested = false, forked = false) {
+// which says where each stands as Home does (Needs you, Running, Monitoring). One flat list of
+// workers: no groups (teams are on Home and their pages). After its name, ⑂ on one started from
+// another worker's conversation and ⇄ on a side of a Compare (what each is, on hover); at its
+// end, a few words of where it stands (a marker, when it checks back, the worker it waits on).
+function sessionItem(session, where, now = Date.now()) {
   const dot = where?.dot || "idle";
-  const named = label !== session.title ? `\nStarted as “${session.title}”` : "";
-  const origin = forkOrigin(session);
-  const second = origin ? `\nA second worker of “${origin}”, started with its context` : "";
-  // Its turn over, a command it left running (a dev server) goes on: not at work, not idle.
-  const background = session.background && session.status !== "working";
+  const { label, fork, compare, note, title } = rowParts(session, where, now);
+  const name = el("span", { class: "label", text: label });
   return el(
     "button",
     {
       type: "button",
-      class: `item ${dot.split(" ")[0]}${forked ? " forked" : ""}${state.selected === session.id ? " selected" : ""}${nested ? " nested" : ""}`,
-      title: [where?.text, background ? "Waiting for background process" : session.activity].filter(Boolean).join(" · ") + named + second,
+      class: `item ${dot.split(" ")[0]}${state.selected === session.id ? " selected" : ""}`,
+      title,
       "data-id": session.id,
       onclick: () => select(session.id),
     },
     el("span", { class: `dot ${dot}`, title: where?.text || "" }),
-    el("span", { class: "label", text: label }),
+    fork || compare
+      ? el(
+          "span",
+          { class: "name" },
+          name,
+          fork ? el("span", { class: "fork-mark", title: fork }, glyph("branched")) : null,
+          compare ? el("span", { class: "compare-mark", title: compare }, glyph("vs")) : null,
+        )
+      : name,
     // While more than one agent is on: its agent's mark (its model on hover).
     markOf(session),
     // A marker in words (queued, overdue…), not a color of its own.
-    where?.sub || background ? el("span", { class: "sub", text: where?.sub || "background" }) : null,
+    note ? el("span", { class: `sub${note.kind ? ` ${note.kind}` : ""}`, text: note.text, title: note.tip || null }) : null,
   );
 }
-// Each worker, with the second workers started from it right under it, one level only: a second
-// worker of a second worker sits under the first of them listed with it (a worker followed back
-// through those it came from, listed or not). [worker, nested].
-export function withSecondWorkers(list, known = [...sessions(), ...closedWorkers()]) {
-  const listed = new Set(list.map((worker) => worker.id));
-  const byId = new Map(known.map((worker) => [worker.id, worker]));
-  for (const worker of list) byId.set(worker.id, worker);
-  const first = (worker) => {
-    let top = null;
-    const seen = new Set([worker.id]);
-    for (let from = worker.fork_of?.id; from && !seen.has(from); from = byId.get(from)?.fork_of?.id) {
-      seen.add(from);
-      if (listed.has(from)) top = from;
-    }
-    return top;
-  };
-  const under = new Map();
-  const tops = [];
-  for (const worker of list) {
-    const top = first(worker);
-    if (top) under.set(top, [...(under.get(top) || []), worker]);
-    else tops.push(worker);
-  }
-  return tops.flatMap((worker) => [[worker, false], ...(under.get(worker.id) || []).map((second) => [second, true])]);
+// Where a second worker came from: "Started from “X” with its conversation, because X was busy"
+// (a brief of its work where its conversation could not be copied; why, when it was busy).
+export function forkWords(session) {
+  const from = session?.fork_of;
+  if (!from) return "";
+  const origin = forkOrigin(session);
+  return `Started from “${origin}” with ${from.brief ? "a brief of its work" : "its conversation"}${from.busy ? `, because ${origin} was busy` : ""}`;
 }
-// Workers as rows, the workers of one Compare under one row ("Compare: <title> (2)"), each
-// named by its agent, and second workers right under the worker they came from.
-function workerRows(list, where) {
-  const shown = new Set();
-  return withSecondWorkers(list).flatMap(([worker, forked]) => {
-    const group = worker.compare;
-    if (!group) return [sessionItem(worker, workerTitle(worker), where.get(worker.id), false, forked)];
-    if (shown.has(group.id)) return [];
-    shown.add(group.id);
-    // In the order the agents were chosen.
-    const order = (other) => (group.agents || []).indexOf(other.agent || "copilot");
-    const members = list.filter((other) => other.compare?.id === group.id).sort((a, b) => order(a) - order(b));
-    return [
-      el("div", { class: "compare-group", title: `The same task on ${members.map((other) => agentName(other.agent || "copilot")).join(" and ")}` }, el("span", { class: "label", text: `Compare: ${group.title} (${members.length})` })),
-      ...members.map((other) => sessionItem(other, agentName(other.agent || "copilot"), where.get(other.id), true)),
-    ];
-  });
+// A side of a Compare: "Compared with Codex: the same task on each".
+export function compareWords(session, known = sessions()) {
+  const group = session?.compare;
+  if (!group) return "";
+  const own = session.agent || "copilot";
+  const sides = known.filter((other) => other.id !== session.id && other.compare?.id === group.id).map((other) => other.agent || "copilot");
+  const others = sides.length ? sides : (group.agents || []).filter((agent) => agent !== own);
+  return others.length ? `Compared with ${[...new Set(others)].map(agentName).join(" and ")}: the same task on each` : "Compare: the same task on several agents";
+}
+// When a check-back wakes it: "↻ in 12 min" within the hour, else its time ("↻ 3:28 PM"); what
+// it checks, on hover. `next`: when its words change.
+export function checkBackNote(back, now = Date.now()) {
+  const at = Date.parse(back.at);
+  const minutes = Math.ceil((at - now) / 60000);
+  const text = minutes <= 0 ? "↻ now" : minutes < 60 ? `↻ in ${minutes} min` : `↻ ${clock(back.at)}`;
+  const next = minutes <= 0 ? null : at - (Math.min(minutes, 60) - 1) * 60000;
+  return { text, tip: `Checks back at ${clock(back.at)}${back.what ? `: ${back.what}` : ""}`, next, kind: "back" };
+}
+// What its row says of a monitored worker: the worker it waits on, else when it checks back,
+// else its marker (queued, up next…); "background" for a command left running.
+export function rowNote(session, where, now = Date.now()) {
+  if (where?.dot === "watching" && where.waitsOn) {
+    const other = workerTitle(byId(where.waitsOn)) || labelOf(where.waitsOn);
+    return { text: `waits on “${other}”`, tip: `Waits on “${other}”`, kind: "waits" };
+  }
+  if (where?.dot === "watching" && where.back?.at) return checkBackNote(where.back, now);
+  if (where?.sub) return { text: where.sub, tip: "" };
+  // Its turn over, a command it left running (a dev server) goes on: not at work, not idle.
+  if (session.background && session.status !== "working") return { text: "background", tip: "" };
+  return null;
+}
+// A worker's row as words: its name (its work), its fork's and its Compare's tooltips, its note
+// and its tooltip.
+export function rowParts(session, where, now = Date.now()) {
+  const label = workerTitle(session);
+  const named = label !== session.title ? `\nStarted as “${session.title}”` : "";
+  const fork = forkWords(session);
+  const compare = compareWords(session);
+  const note = rowNote(session, where, now);
+  const background = session.background && session.status !== "working";
+  const head = [where?.text, background ? "Waiting for background process" : session.activity].filter(Boolean).join(" · ");
+  const title = [head + named, fork, compare, note?.tip].filter(Boolean).join("\n");
+  return { label, fork, compare, note, title };
+}
+// The workers in the sidebar's order, one flat list: Needs you, Running, Monitoring, the newest
+// first; those with nothing open (but the one shown) folded under Nothing open.
+export function sidebarOrder(workers, where, selected = state.selected) {
+  const rank = (session) => ORDER[(where.get(session.id)?.dot || "idle").split(" ")[0]] ?? 9;
+  const sorted = [...workers].sort((a, b) => rank(a) - rank(b) || b.created_at.localeCompare(a.created_at));
+  const resting = (worker) => (where.get(worker.id)?.dot || "idle") === "idle" && selected !== worker.id;
+  return { open: sorted.filter((worker) => !resting(worker)), resting: sorted.filter(resting) };
 }
 const ORDER = Object.fromEntries([...WORKER_STATES.map(([dot]) => dot), "open"].map((dot, index) => [dot, index]));
 // What the dots mean, under "Workers" when asked.
 function legend() {
   return el("div", { class: "legend" }, ...WORKER_STATES.map(([dot, text]) => el("div", { class: "legend-row" }, el("span", { class: `dot ${dot}` }), el("span", { text }))), el("div", { class: "legend-row" }, el("span", { class: "dot open" }), el("span", { text: DOT_HELP.open })));
 }
+// The workers' rows, one flat list: those that need you, work or wait first; those with
+// nothing open folded away under Nothing open.
+export function workerNodes(workers, where, now = Date.now()) {
+  const rows = (list) => list.map((worker) => sessionItem(worker, where.get(worker.id), now));
+  const { open, resting } = sidebarOrder(workers, where);
+  if (!resting.length) return rows(open);
+  const fold = el("details", { class: "idle-workers", open: Boolean(state.idleOpen) }, el("summary", { text: `Nothing open · ${resting.length}`, title: "Workers whose tasks are all finished" }), ...rows(resting));
+  fold.addEventListener("toggle", () => {
+    state.idleOpen = fold.open;
+  });
+  return [...rows(open), fold];
+}
+// A check-back said "in 12 min" is said again as the minutes go.
+let ticking = 0;
 export function renderSidebar() {
   const list = $("#session-list");
   const all = sessions();
   const where = workerStates();
-  const rank = (session) => ORDER[(where.get(session.id)?.dot || "idle").split(" ")[0]] ?? 9;
+  const now = Date.now();
   // Chief of Staff's own helpers (learning, checks, the profile) are not the owner's workers.
-  const workers = all.filter((session) => session.role === "worker" && !session.helper).sort((a, b) => rank(a) - rank(b) || b.created_at.localeCompare(a.created_at));
+  const workers = all.filter((session) => session.role === "worker" && !session.helper);
   const nodes = [homeItem()];
   if (workers.length) {
     const toggle = el("button", { type: "button", class: "link legend-toggle", text: "?", title: "What the dots mean", "aria-expanded": String(Boolean(state.legend)), onclick: () => {
@@ -128,22 +168,12 @@ export function renderSidebar() {
     } });
     nodes.push(el("div", { class: "group" }, el("span", { text: "Workers" }), toggle));
     if (state.legend) nodes.push(legend());
-    // Workers with nothing open fold away: the ones that need you, work or wait come first.
-    const alone = (worker) => (where.get(worker.id)?.dot || "idle") === "idle" && state.selected !== worker.id;
-    // (A Compare's workers stay together: up here while any of them is.)
-    const idle = (worker) => (worker.compare ? workers.filter((other) => other.compare?.id === worker.compare.id) : [worker]).every(alone);
-    const busy = workers.filter((worker) => !idle(worker));
-    const resting = workers.filter(idle);
-    nodes.push(...grouped(busy, where));
-    if (resting.length) {
-      const fold = el("details", { class: "idle-workers", open: Boolean(state.idleOpen) }, el("summary", { text: `Nothing open · ${resting.length}`, title: "Workers whose tasks are all finished" }), ...workerRows(resting, where));
-      fold.addEventListener("toggle", () => {
-        state.idleOpen = fold.open;
-      });
-      nodes.push(fold);
-    }
+    nodes.push(...workerNodes(workers, where, now));
   }
   list.replaceChildren(...nodes);
+  clearTimeout(ticking);
+  const next = Math.min(...workers.map((worker) => rowNote(worker, where.get(worker.id), now)?.next || Infinity));
+  if (next < Infinity) ticking = setTimeout(renderSidebar, Math.max(1000, next - Date.now() + 250));
   const count = needsCount();
   captain(count, where);
   document.title = count ? `(${count}) Chief of Staff` : "Chief of Staff";
@@ -156,49 +186,6 @@ export function renderSidebar() {
   renderClosed();
   renderExternal();
   renderStatusLine();
-}
-// Workers of a team (Teams lite) together, under its line (it opens the team), while it is not
-// done; each with a rail in its part's color. The others as they come.
-function grouped(workers, where) {
-  const nodes = [];
-  const placed = new Set();
-  const teams = sidebarTeams();
-  const partOf = (found, id) => found.team.members.find((member) => member.session === id && !member.moved_out);
-  // A worker with its second workers (forks.py), wherever each would rank: nested under it.
-  const byId = new Map(workers.map((worker) => [worker.id, worker]));
-  const rootOf = (worker) => {
-    let top = worker;
-    const seen = new Set([worker.id]);
-    for (let from = worker.fork_of?.id; from && !seen.has(from); from = byId.get(from)?.fork_of?.id) {
-      seen.add(from);
-      if (byId.has(from)) top = byId.get(from);
-    }
-    return top;
-  };
-  const family = (list) => {
-    const tops = new Set(list.map((worker) => worker.id));
-    return workers.filter((other) => !placed.has(other.id) && (tops.has(other.id) || tops.has(rootOf(other).id)));
-  };
-  for (const worker of workers.map(rootOf)) {
-    if (placed.has(worker.id)) continue;
-    const found = teams.find((item) => partOf(item, worker.id));
-    const together = found ? family(workers.filter((other) => partOf(found, other.id))) : [];
-    if (!together.length) {
-      // A Compare's workers stay together (workerRows), a team or not.
-      const group = family(worker.compare ? workers.filter((other) => other.compare?.id === worker.compare.id) : [worker]);
-      for (const other of group) placed.add(other.id);
-      nodes.push(...workerRows(group, where));
-      continue;
-    }
-    for (const member of together) placed.add(member.id);
-    nodes.push(teamLine(found));
-    for (const node of workerRows(together, where)) {
-      const part = node.classList.contains("item") && partOf(found, node.dataset.id);
-      if (part) node.classList.add("in-team", part.color);
-      nodes.push(node);
-    }
-  }
-  return nodes;
 }
 // On a narrow window the sidebar folds away behind a button at the start of the header: it
 // opens over the page, and closes once one of its items is picked, on Escape (the focus back on
