@@ -357,7 +357,8 @@ async def test_a_fixed_mistake_becomes_a_check_that_proves_itself_then_runs(tmp_
     assert runtime.checks.view()["checks"][0]["status"] == "active"
 
     # Another worker makes the same mistake and ends its turn with its answer: the answer is
-    # not filed, and the worker hears why. Its next report goes through, flagged.
+    # its progress, never its result (E139), and it is asked whether it is finished. Its done
+    # report is turned back once by the check (it hears why); the next goes through, flagged.
     other = await spawn(runtime, harness.router_id, "Add a poller", project=str(project))
     (project / "src" / "poll.py").write_text(BAD)
     session = harness.session(other["session_id"])
@@ -365,7 +366,11 @@ async def test_a_fixed_mistake_becomes_a_check_that_proves_itself_then_runs(tmp_
     session.emit("assistant.message", content="Added the poller in src/poll.py. " * 8)
     session.emit("session.idle")
     await settle(runtime)
-    assert "No time.sleep in async code" in session.sent[-1]
+    assert "report-missing" in session.sent[-1]
+    assert runtime.tasks.get(other["task_id"])["status"] == "running"
+    refused = await call_tool(runtime, "report", other["session_id"], status="done",
+                              summary="Added the poller in src/poll.py.")  # fmt: skip
+    assert "No time.sleep in async code" in refused.text_result_for_llm
     assert runtime.tasks.get(other["task_id"])["status"] == "running"
     await call_tool(runtime, "report", other["session_id"], status="done", summary="It is fine.")
     task = runtime.tasks.get(other["task_id"])

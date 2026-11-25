@@ -3919,16 +3919,10 @@ class TaskActions:
         return f"“{task['title']}” waits for your Accept again."
 
     def finished_words(self, task: dict) -> str:
-        """How a task ended, as the Router is told ("its task t1 “X” …"): accepted by the
-        owner only when they did (E141: said of tasks nobody reviewed)."""
+        """How a cancelled or done task ended, as the Router is told ("its task t1 “X” …"):
+        accepted by the owner only when they did (E141: said of tasks nobody reviewed)."""
         if task["status"] == "cancelled":
             return "was cancelled"
-        if task["status"] == "failed":
-            return "failed"
-        if task["status"] == "review":
-            return "is finished: its result waits for the owner's review"
-        if task["status"] != "done":
-            return f"is {task['status']}"
         if self.store.get(f"acceptedby:{task['id']}") == "owner":
             return "was accepted by the owner and is done"
         return "is done"
