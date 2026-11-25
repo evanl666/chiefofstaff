@@ -1039,6 +1039,10 @@ class TeamsLite:
                 and part not in entry["unconfirmed"]
             ):
                 entry["unconfirmed"].append(part)
+        order = {member["id"]: index for index, member in enumerate(team["members"])}
+        for entry in found.values():
+            entry["parts"].sort(key=order.__getitem__)  # As the plan has them.
+            entry["unconfirmed"].sort(key=order.__getitem__)
         between = [
             {
                 "key": f"a:{item['question']}",
