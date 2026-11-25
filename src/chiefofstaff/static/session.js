@@ -13,6 +13,7 @@ import { setupAction } from "./agentsetup.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
+import { sharedEntry } from "./share.js";
 import { avatar, labelOf, peerOf, peerLine, showTeam, TEAM, teamOfPeers, teamOfWorker, waitingWords, workerLineage } from "./team.js";
 // A chat loads a page of its messages at a time: its latest, then earlier ones when asked.
 export const PAGE = 400;
@@ -40,6 +41,9 @@ function sessionMenu(session, items = []) {
 }
 const menuButton = (text, onclick, className = "") => el("button", { type: "button", class: className, text, onclick });
 export function renderHeader() {
+  // A shared card to start a task from goes with a message on Home only.
+  const withCard = $("#composer-with");
+  if (withCard) withCard.hidden = state.selected !== HOME;
   if (state.selected === HOME) {
     backHome(false);
     $("#worker-tabs").hidden = true;
@@ -929,6 +933,9 @@ function homeEntry(message) {
       node.dataset.label = meta.label || "Draft";
       return node;
     }
+    case "shared":
+      // A card someone shared, opened here from its link (share.js): never the Router's.
+      return sharedEntry(message, time);
     case "notice": {
       if (meta.settings) return eventLine({ mark: "✦", text, time, view: () => openSettings(meta.settings), viewText: "Open Settings" });
       if (meta.away_reply) return eventLine({ mark: "↩", text, time });
@@ -1375,6 +1382,8 @@ function ownerMessage(text, meta = {}, time = "", delivery = "", messageId = 0) 
   // The agent chosen for it with @ (its work runs there).
   if (meta.agents?.length) node.append(el("span", { class: "to", text: `Compare on ${meta.agents.map(agentName).join(" and ")}` }));
   else if (meta.agent) node.append(el("span", { class: "to", text: `On ${[agentName(meta.agent), modelLabel(meta.agent, meta.agent_model)].filter(Boolean).join(" · ")}` }));
+  // With a card someone shared, quoted as information.
+  if (meta.shared_card?.title) node.append(el("span", { class: "to", text: `With @${meta.shared_card.login}'s card “${meta.shared_card.title}”` }));
   const files = meta.attachments || [];
   if (files.length) {
     node.append(

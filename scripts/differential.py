@@ -1070,6 +1070,8 @@ FEATURES["worker_fork"] = Feature(
 # with the menu open; its item, right after Copy report, is in the DOM of the hidden menu), and
 # Settings → You → Shared links, drawn only while there is a link (never here): the page reads
 # /api/shares as Settings opens. No table, timer, GitHub call or prompt text until a link exists.
+# Opening a card someone shared (a link pasted alone into Home's message box) draws its note,
+# its line and the Start a task chip only then: declared, never seen here.
 FEATURES["share_links"] = Feature(
     off={},
     on={},
@@ -1083,6 +1085,22 @@ FEATURES["share_links"] = Feature(
             "Settings → You → Shared links, drawn only with a link: read as Settings opens",
             data=r"^page\.requests\[\d+\]$",
             value="GET /api/shares",
+        ),
+        # Phase 2: none without a share link in Home's message box (never here).
+        Allow(
+            "Home's message box opens a share link pasted alone: its note line",
+            element="#composer-open",
+            views=r"^home",
+        ),
+        Allow(
+            "a card someone shared, opened here: its line in Home's chat",
+            element="#timeline .event.shared-in",
+            views=r"^home",
+        ),
+        Allow(
+            "Start a task from this: the shared card above the message box",
+            element="#composer-with",
+            views=r"^home",
         ),
     ],
 )

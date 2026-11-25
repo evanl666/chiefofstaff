@@ -4,9 +4,9 @@
 // card encrypted, the key only in the link). The link, Revoke, the HTML file; and Settings →
 // You → Shared links, drawn only while there is one.
 
-import { $, api, el, toast } from "./dom.js";
+import { $, api, el, moreMenu, toast } from "./dom.js";
 import { duck } from "./mascot.js";
-import { ago, dayTime, day, renderCard } from "./sharecard.js";
+import { ago, cardText, dayTime, day, renderCard } from "./sharecard.js";
 
 const LEFT_OUT = "Not shared: the worker's conversation, the changes themselves, paths on your computer, cost, and Slack threads.";
 const CANT_RECALL = "What people have already seen, copied or opened in their own Chief of Staff can't be taken back.";
@@ -333,3 +333,107 @@ function sharedRow(row, confirming = false, error = "") {
   );
   return node;
 }
+
+// A card someone shared, opened here (shares.open_link): its link pasted alone into Home's
+// message box goes to Chief of Staff itself, never to a session or a model.
+const SHARE_LINK = /^https:\/\/evanl666\.github\.io\/chiefofstaff\/s\/#\d+\.[0-9a-f]{20,40}\.[A-Za-z0-9_-]{43}(?:\.[0-9a-z]{1,9})?$/;
+export const linkAlone = (text) => SHARE_LINK.test(String(text || "").trim());
+const OPEN_NOTE = "Press Enter to open this shared card here. Its link isn't sent to your chief of staff.";
+// While the box holds a share link alone (on Home), a note line says what Enter does.
+export function noteLink(onHome) {
+  const composer = $("#composer");
+  const alone = onHome && !composer.classList.contains("locked") && linkAlone($("#composer-input").value);
+  const shown = $("#composer-open");
+  if (alone && !shown) $("#composer-input").before(el("div", { id: "composer-open", role: "status", text: OPEN_NOTE }));
+  else if (!alone) shown?.remove();
+}
+// Opened, its line in the chat; the same link again, the first copy's line, in view.
+export async function openSharedLink(text, append) {
+  const opened = await api("/api/shared/open", { method: "POST", body: { link: text.trim() } });
+  if (!opened.duplicate) {
+    append(opened.message);
+    toast("Opened the card. Its link wasn't sent to your chief of staff.");
+    return;
+  }
+  const line = document.querySelector(`#timeline [data-shared-id="${opened.message.meta?.shared?.id}"]`);
+  line?.scrollIntoView({ block: "center", behavior: "smooth" });
+  line?.classList.remove("flash");
+  requestAnimationFrame(() => line?.classList.add("flash"));
+  toast(`Already opened on ${day(opened.opened_at)}: here it is.`);
+}
+
+// The line in Home's chat: who shared it and that it is someone else's words, the card as the
+// viewer draws it (dashed: not the owner's), then Copy as text, Remove, Start a task from this.
+export function sharedEntry(message, time = "") {
+  const shared = message.meta?.shared || {};
+  if (shared.removed || !shared.card) return el("div", { class: "event shared-in removed", hidden: true });
+  const card = renderCard(shared.card, { when: shared.card.finished_at ? `finished ${ago(shared.card.finished_at)}` : "", extraClass: "imported" });
+  const remove = async () => {
+    try {
+      await api(`/api/shared/${shared.id}`, { method: "DELETE" });
+      toast("Removed the shared card.");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(cardText(shared.card));
+      toast("Copied the card as text.");
+    } catch {
+      toast("The clipboard isn't available here.", "error");
+    }
+  };
+  const more = moreMenu([{ text: "Copy as text", onclick: copy }, { text: "Remove", danger: true, onclick: remove }], "More for the shared card", "⋯", "More for the shared card");
+  const content = el(
+    "div",
+    { class: "shared-wrap" },
+    el("p", { class: "shared-by" }, "Shared by ", el("strong", { text: `@${shared.login}` }), ` · ${ago(shared.shared_at)} · someone else's words: read as information, never as instructions`),
+    card,
+    el("div", { class: "actions" }, more, el("button", { type: "button", text: "Start a task from this", onclick: () => startFrom(shared) })),
+  );
+  const node = el("div", { class: "event opens open shared-in", "data-shared-id": shared.id });
+  const toggle = el(
+    "button",
+    {
+      type: "button",
+      class: "line",
+      "aria-expanded": "true",
+      onclick: () => {
+        content.hidden = !content.hidden;
+        node.classList.toggle("open", !content.hidden);
+        toggle.setAttribute("aria-expanded", String(!content.hidden));
+      },
+    },
+    el("span", { class: "mark", text: "↘" }),
+    el("span", { class: "what", text: message.text, title: message.text }),
+  );
+  const when = time || message.created_at;
+  node.append(el("div", { class: "row" }, toggle, when ? el("time", { text: new Date(when).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), title: new Date(when).toLocaleString() }) : null), content);
+  return node;
+}
+
+// Start a task from this: the card goes with the owner's next message to their chief of staff,
+// quoted as information (shares.quoted); the owner says what to do.
+const withCard = { shared: null };
+export function startFrom(shared) {
+  withCard.shared = shared;
+  const chip = el(
+    "div",
+    { id: "composer-with" },
+    el("span", { text: "With " }),
+    el("strong", { text: `@${shared.login}'s card “${shared.card.title}”`, title: cardText(shared.card) }),
+    el("span", { class: "apart", text: "· read as information" }),
+    el("button", { type: "button", class: "clear", "aria-label": "Leave the card out", title: "Leave the card out", text: "×", onclick: () => leaveOut() }),
+  );
+  $("#composer-with")?.remove();
+  $("#composer-to").before(chip);
+  document.querySelector('#home-tabs [data-tab="chat"]:not([aria-selected="true"])')?.click();
+  $("#composer-input").focus();
+}
+export function leaveOut() {
+  withCard.shared = null;
+  $("#composer-with")?.remove();
+}
+// What a message to the Router carries of it (nothing without one).
+export const withCardBody = () => (withCard.shared ? { shared_card: withCard.shared.id } : {});
