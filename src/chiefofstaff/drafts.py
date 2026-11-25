@@ -235,8 +235,8 @@ class Drafts:
             reason = f" Reason: {decision.reason}" if decision.reason else " No reason given."
             self.settle_question(draft)
             if (task := self.task_of(draft)) and decision.reason.strip():
-                # What the owner said no to, and why: new work for its worker given now may
-                # supersede that task (Tools.supersede_rejected, E148).
+                # What the owner said no to, and why: a second worker taking the new request
+                # tells its worker to stop that work (Tools.tell_rejected, E148).
                 self.store.set(f"ownerrejected:{task['id']}", now())
             if task and task["status"] in {"review", "done"}:
                 # Its result said the draft waits for the owner: it does not any more. Their

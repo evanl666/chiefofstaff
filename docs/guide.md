@@ -248,9 +248,9 @@ is free, its new task goes to a
 **second worker** that starts at once with that worker's conversation so far (Copilot's session
 fork, up to its last finished turn) and a note from Chief of Staff on what the first one is
 doing now and where. It works in a folder and branch of its own (from the project's base); the
-busy worker goes on undisturbed, unless the new task is what you asked for when you rejected its
-draft: then the work you rejected is cancelled, superseded by the new task, and that worker stops
-it. The Router chat says *⑂ Started a second worker from “…” (it was busy) for “…”*, a line of its
+busy worker goes on undisturbed; when you had just rejected its draft, it is told once that a
+second worker is doing the new request and to stop the old work unless told otherwise. Its task
+stays as it is until the Router or you cancel it. The Router chat says *⑂ Started a second worker from “…” (it was busy) for “…”*, a line of its
 own; in the sidebar the second worker sits under the first, and its task's row says
 *Worker from “…”*; its *Notes* tab's lineage has it *⑂ forked from …*. With every slot taken, or
 when only that worker can do it (its branch or PR, or you asked for it), the task waits for it
