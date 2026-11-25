@@ -959,6 +959,7 @@ async def test_e157_blocked_on_another_worker_waits_under_monitoring_not_needs_y
     runtime = await harness.connect()
     router = harness.router_id
     api = await spawn(runtime, router, "Build the schema API")
+    await spawn(runtime, router, "Build the schema", why_new="parallel")  # (Named by the other.)
     form = await spawn(runtime, router, "Build the signup form", why_new="parallel")
     waits = "Waiting for “Build the schema API” to publish the field names."
     await call_tool(runtime, "report", form["session_id"], status="blocked", summary=waits)

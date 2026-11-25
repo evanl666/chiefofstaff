@@ -4909,7 +4909,15 @@ class Tools:
         if not task or row["role"] != WORKER:
             return []
         if named := self.runtime.peers.waiting_on(caller, summary):
-            return named
+            # "QA schema API" names "QA schema" too: the longer one is meant.
+            return [
+                peer
+                for peer in named
+                if not any(
+                    other is not peer and peer["title"].casefold() in other["title"].casefold()
+                    for other in named
+                )
+            ]
         found: dict[str, dict] = {}
         for dependency in self.tasks.deps(task["id"]):
             other = self.store.find_session(dependency["session_id"])

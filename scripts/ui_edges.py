@@ -37,6 +37,7 @@ from conftest import (  # noqa: E402
     settle,
 )
 
+from chiefofstaff.models import DraftDecision  # noqa: E402
 from chiefofstaff.runtime import Runtime  # noqa: E402
 from chiefofstaff.sources.slack import SlackSource  # noqa: E402
 from chiefofstaff.web import create_app  # noqa: E402
@@ -3218,10 +3219,12 @@ async def round_ten(runtime, browser, failures: list[str]):
         assert "`" not in await asked.locator(part).inner_text(), part
     log("U7: a decision card shows `code` as code")
     again = page.locator(f'#needs .card.draft[data-id="{revisit["id"]}"]')
-    await expect(again.locator(".precedents")).to_have_text(
-        "Reconsiders what you decided: words(): keep split()? → Keep split()"
+    # (One made before 0.1.58 says no time: "before".)
+    await expect(again.locator(".answered")).to_have_text(
+        "You answered this before (“Keep split()”). Asked again because: Profiling: half the "
+        "input is CSV."
     )
-    await expect(again.locator(".why")).to_have_text("Profiling: half the input is CSV.")
+    await expect(again.locator(".why")).to_have_count(0)
     log("Item 1: a reconsideration names the decision it revisits, and why")
 
     # U10: names a screen reader says.
@@ -6258,7 +6261,7 @@ async def main():
                           round_stacked_merge, round_fork, round_needs_dots,
                           round_settings, round_teams_v2,
                           round_answer_label, round_sidebar_flat,
-                          round_composer):  # fmt: skip
+                          round_composer, round_decision_steer):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -6466,6 +6469,130 @@ async def round_composer(runtime, browser, failures: list[str]):
     assert errors == [], errors
     await context.close()
     log("a worker's chat: at once, once, the same again not sent twice")
+
+
+async def round_decision_steer(runtime, browser, failures: list[str]):
+    """0.1.58 (owner report R1, QA E153-E157): a reconsideration card says when the owner
+    answered and why it is asked again; Keep is its one main action, Not now keeps the answer for
+    now, words that name no option are a note; the worker's own card or question asked again is
+    the same one, saying when it was updated; a worker blocked on another waits under
+    Monitoring."""
+    store = runtime.store
+    router = store.get("router_id")
+    shots = Path(os.environ.get("DECISION_STEER_SHOTS", SHOTS / "decision-steer"))
+    shots.mkdir(parents=True, exist_ok=True)
+    old = store.settings()
+    new = old.model_copy(update={"max_workers": 1000})  # (Other rounds' workers hold slots.)
+    store.save_settings(new)
+    await runtime.settings_changed(old, new)
+
+    async def start(title):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        await settle(runtime)
+        found = json.loads(result.text_result_for_llm)
+        return found["session_id"], found["task_id"]
+
+    def card_of(worker):
+        mine = [d for d in store.drafts() if d["kind"] == "decision" and d["session_id"] == worker]
+        return mine[-1]
+
+    worker, _ = await start("QA10 tie breaker")
+    # (Other rounds' cards wait too: these are other decisions.)
+    await call_tool(runtime, "ask_decision", worker, question="QA10: rule A or rule B?",
+                    options=[{"choice": "Rule A"}, {"choice": "Rule B"}],
+                    distinct=True)  # fmt: skip
+    answer = DraftDecision(action="answer", text="Rule A")
+    await runtime.drafts.resolve(card_of(worker)["id"], answer)
+    await settle(runtime)
+    decision = next(d for d in runtime.decisions.active() if d["text"].startswith("QA10"))
+
+    async def reconsider():
+        await call_tool(runtime, "ask_decision", worker, question="QA10: rule C or rule D?",
+                        replaces=decision["id"], why="Rule A still ties 61% of games.",
+                        options=[{"choice": "Rule C"}, {"choice": "Rule D"}],
+                        recommendation="Rule C: fewest ties")  # fmt: skip
+        await settle(runtime)
+        runtime.publish_state()
+        return card_of(worker)["id"]
+
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    asked = page.locator(f'#needs .card.draft[data-id="{await reconsider()}"]')
+    await expect(asked).to_be_visible(timeout=15000)
+    await expect(asked.locator(".answered")).to_have_text(re.compile(
+        r"^You answered this at .+ \(“Rule A”\)\. Asked again because: Rule A still ties 61% of "
+        r"games\.$"
+    ))  # fmt: skip
+    await expect(asked.locator(".why")).to_have_count(0)
+    keep = asked.locator(".actions > button").last
+    await expect(keep).to_have_text("Keep")
+    await expect(asked.locator(".option")).to_have_count(2)
+    await asked.screenshot(path=shots / "reconsideration-1280.png")
+    await keep.click()
+    await expect(asked).to_have_count(0)
+    await expect(page.locator(".toast", has_text="Kept your answer.")).to_be_visible()
+    assert decision["id"] in [d["id"] for d in runtime.decisions.active()]
+    log("Item 4: a reconsideration says when you answered and why it is asked again; Keep")
+
+    asked = page.locator(f'#needs .card.draft[data-id="{await reconsider()}"]')
+    await asked.locator(".actions .more-button").click()
+    await page.get_by_role("menuitem", name="Not now").click()
+    await expect(asked).to_have_count(0)
+    await expect(page.locator(".toast", has_text="Kept your answer for now.")).to_be_visible()
+    assert decision["id"] in [d["id"] for d in runtime.decisions.active()]
+    log("Item 5: Not now on a reconsideration keeps the answer for now")
+
+    asked = page.locator(f'#needs .card.draft[data-id="{await reconsider()}"]')
+    await asked.get_by_role("button", name="Something else…").click()
+    await asked.get_by_label("Your decision, or a note").fill("Try a quieter variant of A first")
+    await asked.get_by_role("button", name="Send").click()
+    await expect(asked).to_have_count(0)
+    await expect(
+        page.locator(".toast", has_text="Kept your decision; sent your note.")
+    ).to_be_visible()
+    assert decision["id"] in [d["id"] for d in runtime.decisions.active()]
+    log("E154: words that name no option are a note; the decision stays")
+
+    # E155: its own card asked again with what it found since: the same card, saying when.
+    other, _ = await start("QA10 schema")
+    await call_tool(runtime, "ask_decision", other, question="QA10: one table or two?",
+                    distinct=True)  # fmt: skip
+    own = card_of(other)["id"]
+    await call_tool(runtime, "ask_decision", other, question="QA10: one table, two, or three?",
+                    same_as=own, why="A third keeps the audit log apart.")  # fmt: skip
+    await settle(runtime)
+    runtime.publish_state()
+    updated = page.locator(f'#needs .card.draft[data-id="{own}"]')
+    await expect(updated.locator(".head .updated")).to_have_text(re.compile(r"^updated "))
+    await expect(updated.locator(".question")).to_have_text("QA10: one table, two, or three?")
+    log("E155: its own card asked again is that card, updated")
+
+    asker, asker_task = await start("QA10 port picker")
+    await call_tool(runtime, "report", asker, status="question", summary="QA10: 8080 or 9090?")
+    await call_tool(runtime, "report", asker, status="progress", summary="Load-testing both.")
+    await call_tool(runtime, "report", asker, status="question",
+                    summary="QA10: 8080 or 9090? 9090 held more load.")  # fmt: skip
+    runtime.task_actions.publish(runtime.tasks.get(asker_task))
+    row = page.locator(f'#needs .card.task[data-task="{asker_task}"]')
+    await expect(row.locator(".asked .q-updated")).to_have_text(re.compile(r"^Updated "))
+    log("E155: a question kept through progress, asked again: the same, updated")
+
+    # E157: blocked on another worker: under Monitoring, saying on whom.
+    await start("QA10 schema API")
+    blocked, blocked_task = await start("QA10 signup form")
+    waits = "Waiting for “QA10 schema API” to publish the field names."
+    await call_tool(runtime, "report", blocked, status="blocked", summary=waits)
+    runtime.update_session(blocked, status="idle")
+    runtime.task_actions.publish(runtime.tasks.get(blocked_task))
+    row = page.locator(f'#tasks-monitoring .card.task[data-task="{blocked_task}"]')
+    await expect(row).to_contain_text("Waits on “QA10 schema API”")
+    await expect(page.locator(f'#needs .card.task[data-task="{blocked_task}"]')).to_have_count(0)
+    log("E157: blocked on another worker, it waits under Monitoring")
+    await context.close()
 
 
 async def round_needs_dots(runtime, browser, failures: list[str]):
