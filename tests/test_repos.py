@@ -253,12 +253,12 @@ async def test_the_floor_holds_for_every_worker_yolo_or_not(tmp_path, yolo):
         "git push --force origin feature",
     ):
         reason = await shell(command)
-        assert reason and policy_module.FLOOR_ASK in reason, command
+        assert reason and policy_module.FLOOR_WHY in reason, command
         assert ("notice", reason) in harness.kinds(worker)
     reason = await refused(
         kind="mcp", server_name="github-mcp-server", tool_name="merge_pull_request", read_only=False
     )
-    assert reason and policy_module.FLOOR_ASK in reason
+    assert reason and policy_module.FLOOR_ROUTE in reason
     for command in ("gh pr create --fill", "gh pr view 4", f"git push -u origin {branch}"):
         assert await shell(command) is None, command
     forced = await shell(f"git push --force-with-lease origin {branch}")

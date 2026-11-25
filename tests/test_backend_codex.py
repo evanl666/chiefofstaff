@@ -3178,7 +3178,8 @@ async def test_a_codex_worker_acting_on_its_own_is_held_to_the_floor(tmp_path, m
         notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
         ask = policy.FLOOR_ASK
         assert any("`gh pr comment`" in text and ask in text for text in notices), notices
-        assert any("merge_pull_request" in text and ask in text for text in notices)
+        route = policy.FLOOR_ROUTE
+        assert any("merge_pull_request" in text and route in text for text in notices)
         assert "get_pull_request" in str(harness.kinds(worker)), "its reads run"
         assert ran.read_text() == "pr view 4\n", "only the read ran"
         assert "Stopped" not in str(harness.kinds(worker))

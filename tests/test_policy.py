@@ -3010,14 +3010,47 @@ def floor(command: str, cwd, own=("wb/x",)) -> str | None:
 def test_the_floor_refuses_speaking_on_github_and_pushing_elsewhere(command, feature):
     """Yolo or not, no worker comments, reviews, merges or closes as the owner, changes issues,
     writes through gh api, force-pushes a branch not its own or pushes to main: the worker is
-    told to ask the owner, or hand them a draft."""
+    told to ask the owner, or hand them a draft (and, for a write it can make another way, how)."""
     reason = floor(command, feature)
-    assert reason and reason.startswith("Denied: ") and policy.FLOOR_ASK in reason, command
+    assert reason and reason.startswith("Denied: ") and policy.FLOOR_WHY in reason, command
 
 
 @pytest.mark.parametrize("command", FLOOR_ALLOWED)
 def test_the_floor_lets_through_its_own_branches_new_prs_and_reads(command, feature):
     assert floor(command, feature) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh api -X POST repos/o/r/pulls -f title=Fix -f head=fix-login -f base=main",
+        "gh api -X PUT repos/o/r/contents/app.py -f message=Fix -f content=eA== -f branch=fix",
+        "gh api repos/o/r/git/refs -f ref=refs/heads/fix -f sha=5182335",
+        "git push origin main",
+    ],
+)
+def test_a_refused_api_write_or_push_to_main_says_how_to_open_the_pr_itself(command, feature):
+    """Live, 0.1.57: refused `gh api` POSTs that would make a branch, a file and a PR, a yolo
+    worker was told only to ask the owner, and gave up. A change and its PR are its own to make:
+    the refusal says how (a branch of its own, pushed, then gh pr create)."""
+    reason = floor(command, feature)
+    assert reason and reason.startswith("Denied: "), command
+    assert "branch of your own" in reason and "`git push -u origin <branch>`" in reason, reason
+    assert "`gh pr create`" in reason and "Only comments, reviews, merges" in reason, reason
+
+
+def test_a_refused_github_mcp_write_says_how_to_open_the_pr_itself(feature):
+    row = {"role": "worker", "slack": 0, "cwd": str(feature)}
+    request = SimpleNamespace(
+        kind="mcp", server_name="github-mcp-server", tool_name="create_pull_request"
+    )
+    reason = policy.floor_denial(row, request)
+    assert reason and "create_pull_request" in reason and "`gh pr create`" in reason, reason
+
+
+def test_what_only_the_owner_may_do_is_asked_of_them_without_a_route(feature):
+    reason = floor("gh pr comment 12 --body 'Looks good'", feature)
+    assert reason and "Ask the owner" in reason and "gh pr create" not in reason, reason
 
 
 def test_the_floor_refuses_github_mcp_writes_and_only_for_workers(feature):

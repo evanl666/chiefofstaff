@@ -5475,11 +5475,26 @@ def shell_denial(command: str, cwd: str, reads_slack: bool, request: Any) -> str
 # closed, no issue opened, changed, commented on or closed, no write through gh api or GitHub's
 # MCP server, no force push to a branch that is not the worker's own, no push to the default
 # branch. Its own branches it pushes to as it likes; it opens PRs and reads anything.
+FLOOR_WHY = "Chief of Staff never does that as the owner unasked, whatever the worker's mode."
 FLOOR_ASK = (
-    "Chief of Staff never does that as the owner unasked, whatever the worker's mode. Ask the "
-    'owner with report(status="question"), or hand them the text as a draft to approve '
-    "(draft_github_review: a review, a reply or a comment)."
+    f'{FLOOR_WHY} Ask the owner with report(status="question"), or hand them the text as a '
+    "draft to approve (draft_github_review: a review, a reply or a comment)."
 )
+# Refused a write through GitHub's API or MCP server, or a push to the default branch, a
+# worker is told what it may do itself: open a PR from a branch of its own (live, 0.1.57: told
+# only to ask, a worker refused the API gave up on a PR it could have opened).
+FLOOR_ROUTE = (
+    f"{FLOOR_WHY} To change code and open a PR, do it yourself: in your checkout (or a clone "
+    "of the repository in your own folder), commit on a new branch of your own, push it "
+    "(`git push -u origin <branch>`), then open the PR with `gh pr create`. Only comments, "
+    'reviews, merges and issue changes need the owner: ask them with report(status="question"), '
+    "or hand them the text as a draft to approve (draft_github_review: a review, a reply or a "
+    "comment)."
+)
+GH_API_WRITE = (
+    "writing to GitHub through gh api (with -f/-F fields gh sends a POST: to read, add -X GET)"
+)
+DEFAULT_PUSH = "a push to the default branch"
 GH_PR_SPEAKS = re.compile(r"\bgh\s+pr\s+(merge|review|comment|close)\b")
 GH_ISSUE_CHANGES = re.compile(r"\bgh\s+issue\s+(create|new|edit|comment|close)\b")
 # Only a line that names git or gh is read further: the rest costs one search.
@@ -5513,7 +5528,7 @@ def floor_denial(
             request, "read_only", False
         ):
             tool = getattr(request, "tool_name", "") or "a tool"
-            return f"Denied: writing to GitHub as the owner ({tool}). {FLOOR_ASK}"
+            return f"Denied: writing to GitHub as the owner ({tool}). {FLOOR_ROUTE}"
         return None
     if kind != "shell":
         return None
@@ -5524,7 +5539,10 @@ def floor_denial(
         reason = floor_shell(command, row["cwd"] or "", frozenset(own), request)
     except Exception as exc:  # Any failure to check refuses, saying so.
         reason = f"{NOT_CHECKED} ({type(exc).__name__})"
-    return f"Denied: {reason}. {FLOOR_ASK}" if reason else None
+    if not reason:
+        return None
+    tail = FLOOR_ROUTE if reason in {GH_API_WRITE, DEFAULT_PUSH} else FLOOR_ASK
+    return f"Denied: {reason}. {tail}"
 
 
 def floor_needs_git(request: Any) -> bool:
@@ -5546,10 +5564,7 @@ def floor_shell(command: str, cwd: str, own: frozenset[str], request: Any) -> st
         if found := GH_ISSUE_CHANGES.search(command):
             return f"`gh issue {found.group(1)}` speaks as the owner on GitHub"
         if gh_api_writes(command):
-            return (
-                "writing to GitHub through gh api (with -f/-F fields gh sends a POST: to read, "
-                "add -X GET)"
-            )
+            return GH_API_WRITE
     if not re.search(r"\bgit\b", command):
         return None
     answers, settings, checked = ANSWERS.set({}), SETTINGS.set({}), CHECKED.set({})
@@ -5560,7 +5575,7 @@ def floor_shell(command: str, cwd: str, own: frozenset[str], request: Any) -> st
         if fed_script(command, cwd):
             return FED_SCRIPT
         if pushes_default(command, cwd):
-            return "a push to the default branch"
+            return DEFAULT_PUSH
         if forced_elsewhere(command, cwd, own):
             return "a force push to a branch that is not one of yours"
         if pushes_unknown(command, cwd):
