@@ -680,6 +680,48 @@ async def test_stop_while_a_decision_waits_for_a_slot_gives_its_card_back(harnes
     assert not [m for m in harness.store.messages(session) if (m["meta"] or {}).get("outbox")]
 
 
+async def test_stop_while_the_owner_changes_a_decision_leaves_their_one_card(harness, monkeypatch):
+    """Final verification (reproduced): decided, its delivery waiting for a slot; the owner
+    presses Change, then Stop. Their Change card is the one card (the first is not reopened);
+    answering it gives the worker one decision, theirs, recorded as the owner's."""
+    from chiefofstaff.models import DraftDecision
+
+    runtime = await harness.connect()
+    await on(runtime)
+    made = await worker(runtime, harness.router_id)
+    await worker(runtime, harness.router_id, title="Cache store")
+    session = made["session_id"]
+    owner = await said_in_page(runtime, session, "Postgres for v1.")
+    await call_tool(runtime, "ask_decision", session, question="Which store for sessions?",
+                    options=[{"choice": "Postgres", "effect": "a"},
+                             {"choice": "Redis", "effect": "b"}])  # fmt: skip
+    slot_wanted(runtime, monkeypatch)
+    await judge_proposes(harness, answer="Postgres", basis=[cite(owner, "Postgres for v1")])
+    await until(lambda: entries(runtime, "decided"))
+    await settle(runtime)
+    [decided] = entries(runtime, "decided")
+    change = runtime.autopilot.change(decided["id"])
+    await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    await settle(runtime)
+    pending = [d for d in harness.store.drafts() if d["kind"] == "decision"]
+    assert [d["id"] for d in pending] == [change["id"]], "one card: their Change"
+    [withdrawn] = runtime.autopilot.book.decisions(task_id=made["task_id"])
+    assert withdrawn["status"] == "withdrawn"
+    with pytest.raises(ValueError, match="withdrawn"):
+        runtime.autopilot.change(decided["id"])
+    monkeypatch.undo()
+    with ingress.through(ingress.PAGE):
+        await runtime.drafts.resolve(change["id"], DraftDecision(action="answer", text="Redis"))
+    await settle(runtime)
+    await runtime.autopilot.dispatch()
+    await settle(runtime)
+    told = [text for text in harness.session(session).sent if "decided" in text.lower()]
+    assert len(told) == 1 and "The owner decided: Redis" in told[0], told
+    [mine] = runtime.decisions.active()
+    assert mine["text"] == "Which store for sessions? → Redis"
+    assert not [d for d in harness.store.drafts() if d["kind"] == "decision"]
+
+
 async def test_a_delivery_stopped_while_its_worker_is_made_ready_changes_nothing(harness):
     """Re-review 3: Stop while its worker is made ready (an await, after the first check): what
     the first check does is nothing; its task is not set going nor does the worker carry its

@@ -577,8 +577,9 @@ class Logbook:
         """What a withdrawn answer was for is the owner's again, as if Autopilot never decided
         it (in the withdrawal's transaction): a question stays under Needs you (it is taken
         from there only as the answer is stored for its worker), set aside with why; a decision
-        no worker was told of is withdrawn and its card pending again. Returns the card's id
-        ("" for none)."""
+        no worker was told of is withdrawn and its card pending again, unless the owner is
+        changing it already (their Change card is the one card). Returns the card's id ("" for
+        none)."""
         payload = row.get("payload") or {}
         if row.get("kind") != "worker":
             return ""
@@ -600,6 +601,11 @@ class Logbook:
             "AND status=?",
             (WITHDRAWN, "stop", now(), decision["id"], ACTIVE),
         )
+        if any(
+            card["kind"] == "decision" and card["target"].get("changes") == decision["id"]
+            for card in self.store.drafts()
+        ):
+            return ""  # The owner is changing it (its Change card): theirs stands, alone.
         card = self.store.draft(decision["card_id"])
         if not card or card["status"] != "answered":
             return ""

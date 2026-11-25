@@ -551,7 +551,9 @@ class Answers:
         if not entry or entry["kind"] != "decided" or not decided:
             raise ValueError("Only a decision Autopilot made can be changed here.")
         decision = decided[-1]
-        if decision["status"] != "active":
+        if decision["status"] == WITHDRAWN:
+            raise ValueError("It was withdrawn before it went out: the card is yours to answer.")
+        if decision["status"] != ACTIVE:
             raise ValueError("You changed it already.")
         card = self.store.draft(decision["card_id"])
         askers = [a for a in decision["askers"] if self.store.find_session(a["session_id"])]
@@ -566,7 +568,9 @@ class Answers:
         return fresh
 
     def decision_changed(self: Autopilot, decision_id: str, choice: str):  # type: ignore[misc]
-        """The owner answered its *Change* card: theirs now, Autopilot's no longer in force."""
+        """The owner answered its *Change* card: theirs now (Decisions.answer records it as the
+        owner's own and tells every asker), Autopilot's no longer in force. One withdrawn by
+        Stop meanwhile was never in force: it stays withdrawn."""
         decision = self.book.decision(decision_id)
         if not decision or not self.book.change_decision(decision_id, "owner"):
             return
