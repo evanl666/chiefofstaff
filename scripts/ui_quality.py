@@ -1468,7 +1468,7 @@ async def fork_views(runtime, browser, quality: Quality):
 SHARED_TITLE = "Fix the flaky logout test"
 
 
-async def shared_card(runtime, title: str = SHARED_TITLE) -> str:
+async def shared_card(runtime, title: str = SHARED_TITLE, result: str = "") -> str:
     """A finished card to share: its result with a staging address, a token and an email."""
     from share_world import RESULT
 
@@ -1500,7 +1500,7 @@ async def shared_card(runtime, title: str = SHARED_TITLE) -> str:
     await settle(runtime)
     await call_tool(
         runtime, "report", worker["session_id"], status="done", task_id=worker["task_id"],
-        summary=RESULT.replace("login", "logout"),
+        summary=result or RESULT.replace("login", "logout"),
         criteria=[{"criterion": "`uv run pytest -q` passes", "result": "met",
                    "evidence": "`uv run pytest -q`: 8 passed"}],
     )  # fmt: skip
@@ -1698,6 +1698,102 @@ async def share_views(runtime, browser, quality: Quality):
 # A shared card's PR chip is Home's own (a receipt link, under 28 px tall, as KNOWN_HOME_FINDINGS
 # has it on Home's rows).
 SHARED_PR_CHIP = re.compile(r"^a\.receipt\.pr\S* .* is 2\dpx tall$")
+
+
+SECRETS_TITLE = "Rotate the deploy credentials"
+
+
+async def secret_views(runtime, browser, quality: Quality):
+    """Share…'s preview of secrets over several lines (SECURITY-REVIEW.md, 1): a key block in a
+    paragraph and an AWS pair over a list item's lines, marked line by line; each removed, the
+    preview shows the [removed]s the link will have, and none of them; so does the HTML file.
+    1440 and 800 px, light and dark (browser-shots/share/home-secrets-*)."""
+    from share_world import FakeGitHub
+    from test_share_remove import KEY_ID, KEY_SECRET, block
+
+    folder = SHOTS / "share"
+    key = block("RSA ", 5)
+    result = (
+        "Rotated the deploy credentials and checked the new ones work.\n\n"
+        f"The old deploy key, as the log printed it:\n{key}\n\n"
+        f"- The staging profile: aws_access_key_id = {KEY_ID}\n"
+        f"  aws_secret_access_key = {KEY_SECRET}\n"
+        "- DATABASE_URL=postgres://app:S3cretPass@db.example.com/app\n"
+        "- `DB_PASSWORD=hunter2hunter2` in .env"
+    )
+    secrets = [*key.splitlines()[1:], KEY_ID, KEY_SECRET, "S3cretPass", "hunter2"]
+    fake = FakeGitHub()
+    raw, runtime.github.raw = runtime.github.raw, fake
+    stood_in = runtime.github.__dict__.pop("signed_in", None)
+    task_id = await shared_card(runtime, SECRETS_TITLE, result)
+    try:
+        preview = await runtime.shares.preview(task_id)
+        everything = {hit["id"]: "remove" for hit in preview["hits"]}
+        shared = runtime.shares.file(task_id, everything, preview["digest"])["card"]["result"]
+        for scheme in ("light", "dark"):
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 900}, color_scheme=scheme, bypass_csp=True,
+                accept_downloads=True,
+            )  # fmt: skip
+            page = await context.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            for width in (1440, 800):
+                where = f"share secrets {width} {scheme}"
+                await page.set_viewport_size({"width": width, "height": 900})
+                await page.wait_for_timeout(200)
+                menu = await open_share(page, SECRETS_TITLE, width)
+                await menu.get_by_role("menuitem", name="Share…").click()
+                dialog = page.locator("dialog.share-dialog")
+                rows = dialog.locator(".share-flags li")
+                await expect(rows).to_have_count(len(preview["hits"]))
+                body = dialog.locator(".share-preview .report")
+                for hit in preview["hits"]:
+                    lines = [line for line in hit["value"].splitlines() if line.strip()]
+                    marks = body.locator(f'mark[data-hit="{hit["id"]}"]')
+                    if await marks.count() != len(lines):
+                        quality.failures.append(
+                            f"{where}: {hit['label']} is marked {await marks.count()} times, "
+                            f"not on each of its {len(lines)} lines"
+                        )
+                await body.locator("p", has_text="The old deploy key").scroll_into_view_if_needed()
+                await page.screenshot(
+                    path=folder / f"home-secrets-{width}-{scheme}.png", animations="disabled"
+                )
+                await quality.check(page, f"{where} marked", "dialog.share-dialog")
+                for row in range(len(preview["hits"])):
+                    await rows.nth(row).get_by_role("button", name="Remove").click()
+                await expect(dialog.get_by_role("button", name="Create link")).to_be_enabled()
+                seen = await body.inner_text()
+                if left := [secret for secret in secrets if secret in seen]:
+                    quality.failures.append(f"{where}: removed, yet the preview shows {left}")
+                if seen.count("[removed]") != shared.count("[removed]"):
+                    quality.failures.append(
+                        f"{where}: the preview shows {seen.count('[removed]')} [removed], "
+                        f"the link would have {shared.count('[removed]')}"
+                    )
+                await page.screenshot(
+                    path=folder / f"home-secrets-removed-{width}-{scheme}.png",
+                    animations="disabled",
+                )
+                await quality.check(page, f"{where} removed", "dialog.share-dialog")
+                await quality.contrast(page, f"{where} removed", "dialog.share-dialog")
+                async with page.expect_download() as downloading:
+                    await dialog.get_by_role("button", name="Download HTML file").click()
+                saved = folder / f"export-secrets-{scheme}.html"
+                await (await downloading.value).save_as(saved)
+                if left := [secret for secret in secrets if secret in saved.read_text()]:
+                    quality.failures.append(f"{where}: the HTML file still has {left}")
+                await dialog.get_by_role("button", name="Cancel").click()
+            quality.failures += [f"page error share secrets {scheme}: {error}" for error in errors]
+            await context.close()
+    finally:
+        runtime.github.raw = raw
+        if stood_in:
+            runtime.github.signed_in = stood_in
+    log("share links: secrets over several lines, marked and removed whole (share/home-secrets-*)")
 
 
 async def import_views(runtime, browser, quality: Quality):
@@ -1999,6 +2095,7 @@ async def main():
                 await relations_views(runtime, browser, quality)
             elif only == "share":
                 await share_views(runtime, browser, quality)
+                await secret_views(runtime, browser, quality)
                 await import_views(runtime, browser, quality)
             elif only != "shepherd":
                 await report_views(runtime, browser, quality)
@@ -2032,6 +2129,7 @@ async def main():
                 await shepherd_views(runtime, browser, quality)
             if not only:
                 await share_views(runtime, browser, quality)
+                await secret_views(runtime, browser, quality)
                 await import_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True

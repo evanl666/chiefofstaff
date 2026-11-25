@@ -39,9 +39,15 @@ const CRITERION = {
 const DOT = { review: "done", done: "done" };
 
 // Text with the hits the owner is deciding on marked (Share…'s preview only): a removed one
-// shows [removed], which is what will be shared.
+// shows [removed], which is what will be shared. A hit over several lines (a key's block, an AWS
+// pair) is marked line by line where the text it's in comes in pieces (a paragraph, a list).
 function marked(text, hits = [], decisions = {}) {
-  const live = hits.filter((hit) => hit.value && text.includes(hit.value));
+  const live = hits.flatMap((hit) => {
+    if (!hit.value) return [];
+    if (text.includes(hit.value)) return [hit];
+    if (!hit.value.includes("\n")) return [];
+    return hit.value.split("\n").map((line) => line.trim()).filter((line) => line.length > 3 && text.includes(line)).map((line) => ({ ...hit, value: line }));
+  });
   if (!live.length) return [text];
   const out = [];
   let rest = text;
@@ -59,7 +65,7 @@ function marked(text, hits = [], decisions = {}) {
     const decided = decisions[first.hit.id];
     out.push(
       decided === "remove"
-        ? el("mark", { class: "share-hit removed", "data-hit": first.hit.id, title: `Removed: ${first.hit.label}` }, el("s", { text: first.hit.value }), el("span", { class: "instead", text: "[removed]" }))
+        ? el("mark", { class: "share-hit removed", "data-hit": first.hit.id, title: `Removed: ${first.hit.label}` }, el("s", { text: first.hit.was ?? first.hit.value }), el("span", { class: "instead", text: "[removed]" }))
         : el("mark", { class: `share-hit${decided === "keep" ? " kept" : ""}`, "data-hit": first.hit.id, title: decided === "keep" ? `Kept: ${first.hit.label}` : `Looks like ${first.hit.label}`, text: first.hit.value }),
     );
     rest = rest.slice(first.at + first.hit.value.length);

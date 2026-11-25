@@ -23,8 +23,6 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from . import integrity
-
 VERSION = 1
 VIEWER = "https://evanl666.github.io/chiefofstaff/s/"
 MAX_PLAIN = 64 * 1024
@@ -487,7 +485,10 @@ def shorten(card: dict, roots: list[str]) -> tuple[dict, list[dict]]:
 
 
 # What looks private: each rule names what it found; the first rule to match a stretch of text
-# names it (secrets before addresses). The owner removes or keeps each hit before a link exists.
+# names it (secrets before addresses). A hit is the whole secret, never just a marker beside it
+# (a private key's whole block, an AWS key id with its secret, a link's password whatever its
+# scheme, a credential's value however its name is spelled): Remove replaces exactly the hit, so
+# what a hit leaves out stays in the link. The owner removes or keeps each hit before a link exists.
 URL_TAIL = r"[^\s<>()\[\]{}\"'`]*"
 PRIVATE_V4 = (
     r"(?:10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|192\.168|127\.\d{1,3}|169\.254)\.\d{1,3}\.\d{1,3}"
@@ -495,29 +496,67 @@ PRIVATE_V4 = (
 INTERNAL_SUFFIX = r"(?:internal|corp|local|lan|intranet|home\.arpa|localhost|svc|cluster\.local)"
 INTERNAL_HOST = rf"(?:[a-z0-9-]+\.)+{INTERNAL_SUFFIX}"
 PRIVATE_V6 = r"\[?(?:f[cd][0-9a-f]{2}|fe80):[0-9a-f:]+\]?"
-_SECRETS = dict(integrity.SECRETS)
-# As drafts.SECRET has it.
-_JWT = re.compile(r"\beyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,}")
+# Not after a letter or digit (`\b` fails after `_`: DB_PASSWORD=, AWS_SECRET_ACCESS_KEY=).
+START = r"(?<![A-Za-z0-9])"
+STOP = r"(?![A-Za-z0-9])"
+# A line break, or one escaped in a JSON string ("private_key": "-----BEGIN …\n…").
+BREAK = r"(?:\r?\n|\\r?\\n)"
+KEY_BEGIN = r"-----BEGIN (?P<kind>[A-Z0-9 ]*?)PRIVATE KEY(?P<block>(?: BLOCK)?)-----"
+KEY_END = r"-----END (?P=kind)PRIVATE KEY(?P=block)-----"
+# A line of a key's body (base64) or of its headers (Proc-Type: …), when the END line is missing.
+KEY_LINE = (
+    rf"(?:{BREAK}[ \t]*)+(?:[A-Za-z0-9+/=]{{4,}}|[A-Za-z][A-Za-z-]*:[^\n\\]*)"
+    r"(?=[ \t]*(?:\r?\n|\\[rn]|\"|$))"
+)
+AWS_ID = rf"{START}(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{{16}}{STOP}"
+# A secret access key: 40 of base64, not a commit's 40 of hex.
+AWS_KEY_BODY = (
+    r"(?<![A-Za-z0-9/+=])(?![0-9A-Fa-f]{40}(?![A-Za-z0-9/+=]))[A-Za-z0-9/+=]{40}"
+    r"(?![A-Za-z0-9/+=])"
+)
+# A name that says its value is a credential: DB_PASSWORD, "password", client_secret, x-api-key,
+# SecretAccessKey, apiToken; not tokens, tokenizer, secrets (camelCase may follow the word).
+CREDENTIAL_NAME = (
+    r"[A-Za-z0-9_.-]{0,40}?(?:password|passwd|passphrase|pwd|secret|api[_ -]?key|access[_ -]?key"
+    r"|private[_ -]?key|token|credentials?)(?:(?:[_.-]|(?-i:[A-Z]))[A-Za-z0-9_.-]{0,40})?"
+)
+CREDENTIAL_VALUE = r"(?:\"[^\"\n]+\"|'[^'\n]+'|[^\s\"'`]{6,})"
 RULES: tuple[tuple[str, re.Pattern], ...] = (
-    ("a GitHub token", _SECRETS["a GitHub token"]),
-    ("an AWS access key", _SECRETS["an AWS access key"]),
-    ("a Google API key", _SECRETS["a Google API key"]),
-    ("a private key", _SECRETS["a private key"]),
-    ("a Slack token", re.compile(r"\bxox[abposre]-[0-9A-Za-z-]{10,}")),
-    ("a Stripe key", _SECRETS["a Stripe key"]),
-    ("an npm token", _SECRETS["an npm token"]),
-    ("an Anthropic key", _SECRETS["an Anthropic key"]),
-    ("an OpenAI key", _SECRETS["an OpenAI key"]),
-    ("a JSON web token", _JWT),
-    ("a bearer token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*")),
     (
-        "a password or key",
+        "a private key",
+        re.compile(rf"{KEY_BEGIN}(?:[\s\S]{{0,20000}}?{KEY_END}|(?:{KEY_LINE})*)"),
+    ),
+    (
+        "an AWS key and its secret",
         re.compile(
-            r"(?i)\b(?:password|passwd|pwd|secret|api[_ -]?key|access[_ -]?key|token)\b"
-            r"\s*[:=]\s*[^\s\"'`]{6,}"
+            rf"{AWS_ID}[\s\S]{{0,200}}?{AWS_KEY_BODY}|{AWS_KEY_BODY}[\s\S]{{0,200}}?{AWS_ID}"
         ),
     ),
-    ("a link with a password", re.compile(rf"\bhttps?://[^\s/:@]+:[^\s/@]+@{URL_TAIL}")),
+    (
+        "a link with a password",
+        re.compile(rf"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:[^\s/@]+@{URL_TAIL}"),
+    ),
+    (
+        "a GitHub token",
+        re.compile(rf"{START}(?:gh[pousr]_[A-Za-z0-9]{{36,255}}|github_pat_\w{{22,255}})"),
+    ),
+    ("an AWS access key", re.compile(AWS_ID)),
+    ("a Google API key", re.compile(rf"{START}AIza[0-9A-Za-z_-]{{35}}(?![0-9A-Za-z_-])")),
+    ("a Slack token", re.compile(rf"{START}xox[abposre]-[0-9A-Za-z-]{{10,}}")),
+    ("a Stripe key", re.compile(rf"{START}(?:sk|rk)_live_[0-9A-Za-z]{{16,}}")),
+    ("an npm token", re.compile(rf"{START}npm_[A-Za-z0-9]{{36}}{STOP}")),
+    ("an Anthropic key", re.compile(rf"{START}sk-ant-[A-Za-z0-9_-]{{32,}}")),
+    ("an OpenAI key", re.compile(rf"{START}sk-(?:proj-)?[A-Za-z0-9_-]{{32,}}")),
+    # As drafts.SECRET has it.
+    (
+        "a JSON web token",
+        re.compile(rf"{START}eyJ[\w-]{{10,}}\.eyJ[\w-]{{10,}}\.[\w-]{{10,}}"),
+    ),
+    ("a bearer token", re.compile(rf"{START}Bearer\s+[A-Za-z0-9._~+/-]{{20,}}=*")),
+    (
+        "a password or key",
+        re.compile(rf"(?i){START}[\"']?{CREDENTIAL_NAME}[\"']?[ \t]*[:=][ \t]*{CREDENTIAL_VALUE}"),
+    ),
     (
         "a signed link",
         re.compile(

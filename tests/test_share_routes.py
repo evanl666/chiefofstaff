@@ -9,6 +9,7 @@ import pytest
 from conftest import FakeClient, FakeSlackMcp, FakeTokens, Harness
 from fastapi.testclient import TestClient
 from share_world import NO_SCOPE, SLOW, TIMED_OUT, FakeGitHub, finished_task
+from test_share_remove import KEY_ID, KEY_SECRET, block
 
 from chiefofstaff import sharing
 from chiefofstaff.runtime import Runtime
@@ -105,6 +106,35 @@ async def test_create_link_waits_for_every_decision_and_the_card_as_it_was_shown
     with pytest.raises(ValueError, match="1, 7 or 30"):
         await world.shares.create(task["id"], decide(fresh), fresh["digest"], 365, "jordan")
     assert world.fake.gists == {}
+
+
+async def test_what_remove_takes_out_is_out_of_the_file_the_link_and_a_copy_opened(world):
+    # SECURITY-REVIEW.md, 1: each secret goes whole, in the HTML file, the sealed card and a copy.
+    key = block("RSA ", 3)
+    result = (
+        f"Rotated the deploy credentials.\n\n{key}\n\n"
+        f"aws_access_key_id = {KEY_ID}\naws_secret_access_key = {KEY_SECRET}\n"
+        "DATABASE_URL=postgres://app:S3cretPass@db.example.com/app\n"
+        'DB_PASSWORD=hunter2hunter2\n{"password": "json-secret-1"}'
+    )
+    task = await finished_task(world, result=result)
+    preview = await world.shares.preview(task["id"])
+    decisions = decide(preview)
+    filed = world.shares.file(task["id"], decisions, preview["digest"])["card"]
+    made = await world.shares.create(task["id"], decisions, preview["digest"], 7, "jordan")
+    [gist] = world.fake.gists.values()
+    blob, link = gist["files"]["share.txt"]["content"], sharing.parse_link(made["link"])
+    sealed = sharing.open_payload(blob, link["key"], 4242001)["card"]
+    world.shares.transport = world.fake.transport()
+    opened = (await world.shares.open_link(made["link"]))["message"]["meta"]["shared"]["card"]
+    secrets = [*key.splitlines()[1:], KEY_ID, KEY_SECRET, "S3cretPass", "hunter2", "json-secret"]
+    for card in (filed, sealed, opened):
+        assert card["result"] == (
+            "Rotated the deploy credentials.\n\n[removed]\n\naws_access_key_id = [removed]\n"
+            "DATABASE_URL=[removed]\n[removed]\n{[removed]}"
+        )
+        every = "\n".join(text for _, text, _ in sharing.strings(card))
+        assert not [secret for secret in secrets if secret in every]
 
 
 async def test_only_a_finished_card_can_be_shared(world):
