@@ -600,9 +600,10 @@ class Workers:
         for _ in range(retries + 1):
             state.filing = True
             try:
-                await self.runtime.toolset.t_report(
-                    Report(status=status, summary=summary, task_id=task["id"]), session_id
+                report = Report.model_validate(
+                    {"status": status, "summary": summary, "task_id": task["id"]}
                 )
+                await self.runtime.toolset.t_report(report, session_id)
             except ValueError:
                 if not retries:
                     raise
