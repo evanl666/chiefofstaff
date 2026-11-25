@@ -1036,6 +1036,8 @@ ADD_MINUTES = 30
 # Internal ids a worker may write in its report: a draft's ("d4d31ea2f"), a Slack message's
 # timestamp ("ts 1794157630.819867").
 DRAFT_ID = r"d[0-9a-f]{8}"
+# A task's id, as works_with may name one (else a title).
+T_ID = re.compile(r"^(?:worker:)?(?:t[0-9a-f]{7}|[0-9a-f]{8}-[0-9a-f-]{27})$")
 # "(d4d31ea2f)", "(d4d31ea2f, d939522b7)": ids alone in brackets; "(d4d31ea2f, sent)"; one of
 # a list after a comma; "the draft d4d31ea2f" (the id after "draft").
 IDS_IN_BRACKETS = re.compile(rf"\s*\(\s*({DRAFT_ID}(?:\s*,\s*{DRAFT_ID})*)\s*\)")
@@ -1864,6 +1866,22 @@ class Tools:
         had none), else this Router tool call's; never the turn that happens to run."""
         return TURN_REQUEST.get() if request is None else request
 
+    def request_followed(self, params) -> str:
+        """A task made in a turn on no message of the owner's (an event: a worker's report)
+        that waits on tasks of one of their requests (`after`), or works with them by id: a
+        later part of that request (Teams lite's `req:`, passive). Only when every task it names
+        so is of that one request; else none, as before."""
+        names = [*(getattr(params, "after", None) or [])]
+        names += [name for name in getattr(params, "works_with", None) or [] if T_ID.match(name)]
+        found = set()
+        for name in names:
+            try:
+                task = self.runtime.task_actions.task_for(name.strip().removeprefix("worker:"))
+            except ValueError:
+                return ""
+            found.add(self.store.get(f"req:{task['id']}") or "")
+        return found.pop() if len(found) == 1 and "" not in found else ""
+
     def caller(self, session_id: str, *roles: str) -> dict:
         row = self.store.session(session_id)
         if row["role"] not in roles:
@@ -1984,7 +2002,10 @@ class Tools:
         `request`: the owner request a replay was asked in (its record's; "" for none), never
         the turn running now; left out, this Router tool call's own (TURN_REQUEST)."""
         self.caller(caller, ROUTER)
+        replay = request is not None
         request = "" if special else self.request_of(request)
+        if not request and not special and not replay:
+            request = self.request_followed(params)
         if (fork_of := getattr(params, "fork_of", "")) and not special and not fork:
             return await self.spawn_fork_of(params, caller, fork_of, request)
         if not special and not agent and not fork and (compared := self.compared(params, caller)):

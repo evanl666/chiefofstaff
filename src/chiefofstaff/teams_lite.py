@@ -305,19 +305,29 @@ class TeamsLite:
             "SELECT task_id, depends_on, needs FROM task_deps WHERE task_id IN ({})", linked
         )
         # Where a part went on outside its request: the task it continued in.
+        request_of = {task: request for request, entry in found.items() for task in entry.tasks}
         targets = [
             target
             for task in linked
             if (target := links.get(f"replacedby:{task}") or links.get(f"supersededby:{task}"))
-            and target not in tasks
+            and request_of.get(target) != request_of[task]
         ]
+        later: dict[str, str] = {}
         if targets:
             for row in self.rows(
                 "SELECT id, session_id, title, status, created_at, updated_at, ended_at "
                 "FROM tasks WHERE id IN ({})",
-                targets,
+                [target for target in targets if target not in tasks],
             ):
                 tasks[row["id"]] = row
+            # The owner's later request each was made for, and what else that request made.
+            stamps = self.kv([f"req:{target}" for target in targets])
+            made_for = self.made(list(dict.fromkeys(stamps.values())))
+            later = {
+                target: ",".join(made_for.get(stamps.get(f"req:{target}", ""), []))
+                for target in targets
+                if stamps.get(f"req:{target}")
+            }
         messages = {
             str(row["id"]): row
             for row in self.rows(
@@ -330,7 +340,9 @@ class TeamsLite:
             by_task.setdefault(dep["task_id"], []).append(dep)
         for entry in found.values():
             if len(entry.tasks) >= 2:
-                entry.teams = self.teams_of(entry, tasks, links, by_task, messages.get(entry.id))
+                entry.teams = self.teams_of(
+                    entry, tasks, links, by_task, messages.get(entry.id), later
+                )
         return found
 
     def teams_of(
@@ -340,9 +352,26 @@ class TeamsLite:
         links: dict[str, str],
         deps: dict[str, list[dict]],
         message: dict | None,
+        later: dict[str, str] | None = None,
     ) -> list[dict]:
-        inside = set(entry.tasks)
-        parent = {task: task for task in entry.tasks}
+        # A re-plan: the Router replaced a part with a task made for a later request of the
+        # owner's that made nothing else (each of its tasks replaces one of this request's):
+        # the part goes on in it, inside its team. Anything else that continued a part
+        # elsewhere (Continue with… carrying other work too) has moved out, as before.
+        replaced = {
+            new: task
+            for task in entry.tasks
+            if (new := links.get(f"replacedby:{task}") or links.get(f"supersededby:{task}"))
+            and new not in entry.tasks
+        }
+        replanned = {
+            new
+            for new in replaced
+            if (later or {}).get(new)
+            and set((later or {})[new].split(",")) <= set(replaced)
+        }
+        inside = set(entry.tasks) | replanned
+        parent = {task: task for task in inside}
 
         def root(task: str) -> str:
             while parent[task] != task:
@@ -374,7 +403,7 @@ class TeamsLite:
                 if (source := moved.get(dep["depends_on"], dep["depends_on"])) in inside:
                     join(task, source)
         groups: dict[str, list[str]] = {}
-        for task in entry.tasks:
+        for task in [*entry.tasks, *sorted(replanned)]:
             groups.setdefault(root(task), []).append(task)
         teams = []
         for group in groups.values():
