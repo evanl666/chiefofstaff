@@ -486,8 +486,9 @@ def test_neutral_events_change_nothing(home, clocks, kind):
 def test_a_recorded_terminal_log_says_where_it_stands_as_it_goes(home, clocks, version):
     """A terminal session's log as the CLI writes it (copilot_logs: recorded on a real CLI, the
     words, paths and ids made up): its first model call asks the owner through ask_user, it is
-    answered, writes a file, answers and exits. 1.0.115 logs the tools that first call was
-    given (session.tool_baseline) after it starts: its question showed as nothing."""
+    answered, writes a file (here, for longer than the no-progress threshold), answers, is left
+    for an hour and exits. 1.0.115 logs the tools that first call was given
+    (session.tool_baseline) after it starts: its question showed as nothing."""
     lines = (LOGS / f"{version}-ask.jsonl").read_text(encoding="utf-8").splitlines(keepends=True)
     kinds = [json.loads(line)["type"] for line in lines]
     path = home / "session-state" / "s" / "events.jsonl"
@@ -506,8 +507,14 @@ def test_a_recorded_terminal_log_says_where_it_stands_as_it_goes(home, clocks, v
         with path.open("a", encoding="utf-8", newline="") as log:
             log.writelines(lines[written:stop])
         written = stop
-        clocks.tick(1)
-        reader.step()
+        return later(1, is_open)
+
+    def later(seconds: float, is_open: bool = True):
+        """Where it stands `seconds` on, its log not grown, read pass after pass."""
+        while seconds > 0:
+            clocks.tick(min(60, seconds))
+            seconds -= 60
+            reader.step()
         shown = reader.shown(term, is_open)
         return shown if isinstance(shown, str) else (shown["key"], shown["words"])
 
@@ -515,7 +522,9 @@ def test_a_recorded_terminal_log_says_where_it_stands_as_it_goes(home, clocks, v
     assert upto("assistant.message") == ("working", "")
     assert upto("tool.execution_start") == ("asks", "Which branch should the fix go to?")
     assert upto("tool.execution_start", 2) == ("working", "create /work/app/branch.txt")
+    assert later(others.STALLED) == ("no_progress", "create /work/app/branch.txt")
     assert upto("assistant.turn_end", 3) == ("your_turn", "main")
+    assert later(others.IDLE) == ("idle", "main")
     assert upto("session.shutdown", is_open=False) == ("finished", "main")
 
 
