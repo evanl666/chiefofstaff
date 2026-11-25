@@ -123,6 +123,7 @@ from .sendsocket import parts as sent_parts
 from .sendsocket import prompt as sent_prompt
 from .sendsocket import shown as sent_shown
 from .settings_guard import SettingsChangedError, checkout_top, outermost_top, read_regular
+from .shares import Shares
 from .shepherd import Shepherd
 from .sources import Source
 from .sources.github import GitHubSource
@@ -910,6 +911,8 @@ class Runtime:
         # Send to Chief's socket, while the setting is on, and its command in the owner's shell.
         self.send = SendSocket(self)
         self.send_command = shell_command()
+        # Share links (shares.py): nothing of them before the owner's first link.
+        self.shares = Shares(self)
         # Chief of Staff's own code, read-only for sandboxed workers (see own_code).
         self.own_code_paths: list[str] | None = None
         # Sandboxed workers' caches (caches.py): their tier, their init scripts, what was found
@@ -971,6 +974,9 @@ class Runtime:
             self.seed_caches_soon()
         if self.store.drafts("uncertain"):
             self.background(self.drafts.check_uncertain())
+        if self.shares.exists():
+            # Links that expired while it was off are deleted; the timer set for the next.
+            self.background(self.shares.resume())
 
     def alive(self):
         """This run is running now: kept with Chief of Staff's runs (kv "uptime", at most

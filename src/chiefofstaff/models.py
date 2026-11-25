@@ -963,3 +963,20 @@ class OpenPr(StrictModel):
 
 class ProfileText(StrictModel):
     text: str = Field(default="", max_length=20000)
+
+
+class ShareFile(StrictModel):
+    """What Share…'s preview showed (its digest) and the owner's word on each thing that looked
+    private (its hit id: remove or keep)."""
+
+    decisions: dict[Annotated[str, Field(max_length=16)], Literal["remove", "keep"]] = Field(
+        default_factory=dict, max_length=500
+    )
+    digest: str = Field(default="", max_length=64)
+
+
+class ShareCreate(ShareFile):
+    """Create link: as ShareFile, with how long it works and the GitHub account it is made as."""
+
+    days: int = 7
+    login: str = Field(default="", max_length=100)
