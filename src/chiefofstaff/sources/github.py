@@ -2100,6 +2100,25 @@ class GitHubSource:
             gate()
         return await self.raw(*arguments, payload=payload, token=token)
 
+    async def bound_user(self, login: str) -> tuple[str, int]:
+        """As `bound`'s check: the account's token asked of gh afresh and its identity checked
+        with GitHub (never another account, nor the shared routing), with its numeric id, which
+        a share link binds its card to (logins can be renamed). (token, id)."""
+        if not login:
+            raise RuntimeError("No account is bound to this write.")
+        try:
+            token = (
+                await self.raw("auth", "token", "--hostname", "github.com", "--user", login)
+            ).strip()
+        except RuntimeError as exc:
+            raise RuntimeError(f"{login} is not signed in to gh on this computer.") from exc
+        me = json.loads(
+            await self.raw("api", "user", "--jq", "{login: .login, id: .id}", token=token)
+        )
+        if (me.get("login") or "").lower() != login.lower() or not isinstance(me.get("id"), int):
+            raise RuntimeError(f"gh's token for {login} is another account's.")
+        return token, me["id"]
+
     async def bound_token(self, login: str) -> str:
         """The bound account's token, its identity checked (for git's push)."""
         token = (

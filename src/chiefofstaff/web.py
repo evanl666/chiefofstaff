@@ -45,6 +45,8 @@ from .models import (
     SessionYolo,
     Settings,
     SetupNotes,
+    ShareCreate,
+    ShareFile,
     SkillUpload,
     SlackToken,
     TaskNote,
@@ -54,6 +56,7 @@ from .models import (
     UpdateRequest,
 )
 from .runtime import Runtime
+from .shares import ChangedError
 from .storage import StorageDelete, StorageKeep, StorageSession
 from .store import Store
 from .updates import installed
@@ -610,6 +613,35 @@ def create_app(
     @app.get("/api/tasks/{task_id}/report")
     async def task_report(task_id: str):
         return {"markdown": runtime.task_actions.report_markdown(task_id)}
+
+    # Share links (shares.py): a finished card's preview, its link, the HTML file; the links.
+    @app.get("/api/tasks/{task_id}/share")
+    async def share_preview(task_id: str):
+        return await runtime.shares.preview(task_id)
+
+    @app.post("/api/tasks/{task_id}/share")
+    async def share_create(task_id: str, payload: ShareCreate):
+        try:
+            return await runtime.shares.create(
+                task_id, payload.decisions, payload.digest, payload.days, payload.login
+            )
+        except ChangedError as exc:
+            return JSONResponse({"detail": str(exc), "changed": True}, status_code=409)
+
+    @app.post("/api/tasks/{task_id}/share-snapshot")
+    async def share_file(task_id: str, payload: ShareFile):
+        try:
+            return runtime.shares.file(task_id, payload.decisions, payload.digest)
+        except ChangedError as exc:
+            return JSONResponse({"detail": str(exc), "changed": True}, status_code=409)
+
+    @app.get("/api/shares")
+    async def shares():
+        return runtime.shares.listed()
+
+    @app.post("/api/shares/{share_id}/revoke")
+    async def share_revoke(share_id: str):
+        return await runtime.shares.revoke(share_id)
 
     @app.get("/api/tasks/{task_id}/diff")
     async def task_diff(task_id: str):
