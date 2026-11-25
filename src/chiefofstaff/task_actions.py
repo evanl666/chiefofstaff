@@ -3927,12 +3927,14 @@ class TaskActions:
     def informational(self, task: dict, found: dict | None = None) -> bool:
         """A result that is a report only (E123): its checkouts read, it changed no code there
         (no files, uncommitted changes or commits), opened or updated no PR, nothing it checked
-        or claimed fails (no flag, criteria not failed), no one asked to see it, no card of its
-        worker's waits (a reply or review it drafted is settled there), its worker is not at it
-        again, and the owner did not undo its acceptance. `found`: its receipts, read already."""
+        or claimed fails (no flag, criteria not failed), no one asked to see it, its worker
+        reported it (not its words filed without report(): E139), no card of its worker's
+        waits (a reply or review it drafted is settled there), its worker is not at it again,
+        and the owner did not undo its acceptance. `found`: its receipts, read already."""
         if (
             task["status"] != "review"
             or self.store.get(f"reviewreq:{task['id']}")
+            or self.store.get(f"filedwords:{task['id']}")
             or self.store.get(f"followup:{task['id']}")
             or task["id"] in self.receipts_due
         ):

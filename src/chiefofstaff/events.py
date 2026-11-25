@@ -563,6 +563,9 @@ class Events:
         self.states[row["id"]].turn_mark += 1
         if row["role"] == WORKER:
             self.states[row["id"]].busy = True
+        if row["role"] == WORKER and (row["activity"] or "").startswith("waiting for “"):
+            # Woken (the worker it waited for told it, or finished): it waits no more.
+            self.runtime.update_session(row["id"], activity="")
         if row["status"] == "idle":
             self.runtime.update_session(row["id"], status="working")
         elif getattr(event.data, "woken", False) and row["status"] in {"done", "waiting"}:

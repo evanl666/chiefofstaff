@@ -117,6 +117,9 @@ class SessionState:
     thread_nudged: bool = False
     # The tail of the latest tool output, for the Watchdog.
     last_output: str = ""
+    # Chief of Staff files its words as a report it did not make (Workers.file_words): the
+    # report() call in progress is that.
+    filing: bool = False
     # The steps (tool calls) it is in now, by call id: when each started, what it is for and
     # what it runs.
     steps: dict[str, tuple[float, str, str]] = field(default_factory=dict)

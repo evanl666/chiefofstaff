@@ -219,6 +219,8 @@ class Watchdog:
             )
             if row["status"] == "idle" and not running:
                 continue  # Between turns with nothing it owes: finished, waiting or cancelled.
+            if row["status"] == "idle" and (row["activity"] or "").startswith("waiting for “"):
+                continue  # It waits for workers it works with: their message wakes it (E139).
             messages = recent_messages(self.store, row["id"])
             if row["status"] == "idle" and self.runtime.workers.checking_finished(
                 since_last_instruction(messages)

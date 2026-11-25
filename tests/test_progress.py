@@ -1737,7 +1737,9 @@ async def test_a_pr_no_signed_in_account_can_see_says_how_to_fix_it(harness):
 
 
 async def test_a_worker_whose_answer_is_only_in_its_chat_reports_it(harness):
-    """The owner sees reports: its final answer becomes one, as written, without a turn."""
+    """The owner sees reports: its final answer is filed as written, on its task's card, as
+    progress (never as its result: only the worker says it is done, E139); it is asked once
+    whether it is finished."""
     runtime = await harness.connect()
     worker = await spawn(runtime, harness.router_id, "Analyze sales")
     session = harness.session(worker)
@@ -1748,12 +1750,11 @@ async def test_a_worker_whose_answer_is_only_in_its_chat_reports_it(harness):
     sent = len(session.sent)
     session.emit("session.idle")
     await settle(runtime)
-    assert len(session.sent) == sent, "no extra turn"
+    assert len(session.sent) == sent + 1 and "report-missing" in session.sent[-1]
     reports = [text for kind, text in harness.kinds(worker) if kind == "report"]
     assert reports == [answer]
-    assert harness.store.one("SELECT status FROM tasks WHERE session_id=?", (worker,))[
-        "status"
-    ] in {"review", "done"}
+    task = harness.store.one("SELECT status, progress FROM tasks WHERE session_id=?", (worker,))
+    assert (task["status"], task["progress"]) == ("running", answer)
 
 
 async def test_a_worker_refreshed_during_its_turn_is_still_asked_for_its_report(harness):
@@ -2610,6 +2611,13 @@ async def test_a_new_task_answered_without_a_report_is_filed_not_left_running(ha
     await settle(runtime)
     task = runtime.tasks.current(worker)
     assert task["title"] == "Monthly growth"
+    # Its progress, and it is asked once (E139); silent again, its words go to the owner.
+    assert task["status"] == "running" and "| Feb | +4% |" in task["progress"], task["status"]
+    session.emit("user.message", content=session.sent[-1])
+    session.emit("assistant.message", content=answer)
+    session.emit("session.idle")
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
     assert task["status"] == "review" and "| Feb | +4% |" in task["result"], task["status"]
 
     # Asked about finished work (no new task), it goes back to done after answering. Asked in
@@ -2640,6 +2648,14 @@ async def test_a_task_reopened_after_its_message_is_still_reported(harness):
         steer=True,
     )
     runtime.tasks.move(task["id"], "running", reason="decision changed")
+    session.emit("assistant.message", content="Switched the limit to per account. " * 6)
+    session.emit("session.idle")
+    await settle(runtime)
+    # Its answer is its progress, and it is asked once whether it is finished (E139): never
+    # left running unasked.
+    assert runtime.tasks.get(task["id"])["status"] == "running"
+    assert "report-missing" in session.sent[-1]
+    session.emit("user.message", content=session.sent[-1])
     session.emit("assistant.message", content="Switched the limit to per account. " * 6)
     session.emit("session.idle")
     await settle(runtime)
