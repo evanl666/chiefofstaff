@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **The Workers sidebar lists workers only, in one list.** A team's line over its workers with a
+  rail in each one's color, a second worker indented under the one it came from and a Compare's
+  caption over its two sides were three kinds of grouping in one list, each looking like a
+  worker. The sidebar is now one list of workers by where they stand (*Needs you*, *Running*,
+  *Monitoring*, the newest first; *Nothing open* folded as before); teams are under *Teams* on
+  Home and on their pages. A second worker has a small ⑂ after its name (hover: *Started from
+  “…” with its conversation, because … was busy*), and each side of a Compare is a row named by
+  its work with a small ⇄ (the other side on hover). A worker that checks back says when (*↻ in
+  12 min* within the hour, else *↻ 3:28 PM*; what it checks on hover), and one that waits on
+  another worker says so (*waits on “…”*). Workers' colors (their avatars, a team's parts) are no
+  longer blue, green, amber or red, so none reads as a state.
 - **A worker's question nobody answered in time stays under *Needs you*.** A worker that asked
   on a question card waits an hour at most, then goes on without your answer; the card then
   left *Needs you*, so a question you never saw was gone, and an answer could no longer reach
@@ -114,7 +125,7 @@ Settings has one page for agents and models, and Connections reads as a list.
   kept clear of its list of pages.
 - Messages that named *Settings → Coding agents* or *Models* name *Settings → Agents & models*.
 
-A team is one of your requests, followed on Home, the sidebar and its own page.
+A team is one of your requests, followed on Home and its own page.
 
 - **Teams are your requests' parts, and say plainly where they stand.** Before, any workers that
   messaged each other, or whose tasks were related in any way, were a team, named for its
@@ -123,8 +134,7 @@ A team is one of your requests, followed on Home, the sidebar and its own page.
   instead), named for that request; workers that only talk, or work on different requests, are
   no team. *Teams*, above *Running*, has a row per team: a bar with a segment per part, one calm
   line (*1 working · 1 waiting on a teammate · 1 up next*, *Waiting on you · review UI*) and
-  *1/3* parts done, worked out from Home's own rows; the sidebar has the same line over its
-  workers. A team's page has its request, where it stands (*Working · 1 of 4 parts done ·
+  *1/3* parts done, worked out from Home's own rows. A team's page has its request, where it stands (*Working · 1 of 4 parts done ·
   started 9:12*), the one thing that needs you, a map with a node per part (a short name and an
   avatar of its own, what it is doing) and one labelled line per pair, the map in words for a
   screen reader, *All N parts* beyond eight, and what the parts handed each other (*A → B*,

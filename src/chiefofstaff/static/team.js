@@ -1,9 +1,9 @@
 // Teams lite (teams-v2.md v3.1): the work several workers do for one of the owner's requests, as
 // the owner sees it. The server says which tasks are a team's parts (state.snapshot.teams);
 // where each stands is Home's own board (teamstate.js). Home's Teams rows, a team's page (its
-// request, the one thing that needs you, its flow map, what its parts handed each other),
-// the sidebar's team line and Needs you's card per held question. Workers' own lines and
-// colors in chats (labelOf, avatar) are as before.
+// request, the one thing that needs you, its flow map, what its parts handed each other) and
+// Needs you's card per held question; never the sidebar, which lists workers only. Workers'
+// own lines and colors in chats (labelOf, avatar) are as before.
 
 import { $, api, el, moreMenu, reconcile, toast } from "./dom.js";
 import { clock, firstLine } from "./text.js";
@@ -332,16 +332,6 @@ export function heldItem(question) {
       );
     },
   };
-}
-
-// The sidebar: a team's line (its goal, its state, how many parts done) over its workers, each
-// with a rail in its part's color, while one of them is in the open list.
-export function sidebarTeams(placed = placedTeams().shown) {
-  return placed.filter(({ st }) => !st.done);
-}
-export function teamLine({ team, st }) {
-  const frac = `${st.finished}/${st.total}`;
-  return el("button", { type: "button", class: `team-line${state.selected === TEAM + team.id ? " selected" : ""}`, title: `${team.goal}: ${st.words}`, onclick: () => showTeam(team.id) }, el("span", { class: `dot ${stateDot(st)}` }), el("span", { class: "name", text: team.goal }), el("span", { class: "frac", text: frac }));
 }
 
 // A team's page (#team): its request, the one thing that needs you (or its calm Done row), its

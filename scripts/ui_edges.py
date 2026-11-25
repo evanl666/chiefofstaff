@@ -5494,7 +5494,7 @@ async def team_row(page, team: str):
 
 async def round_teams_v2(runtime, browser, failures: list[str]):
     """Teams lite: Home's Teams rows (a calm line, a segment a part, the Done row, Past teams),
-    the sidebar's team line, a team's page (its request, the one thing that needs you, the flow
+    none in the sidebar, a team's page (its request, the one thing that needs you, the flow
     map with one labelled line per pair and the map in words, All N parts beyond 8, what its
     parts handed each other newest first, filters only from 8), a held question's card for a
     question in no team (Nudge, Open), a part continued outside its team, a done team leaving 10
@@ -5560,14 +5560,14 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         assert not found_overflow, (width, found_overflow)
         await section.screenshot(path=shots / f"home-teams-{width}-{scheme}.png")
         if width >= 1100:
-            # The sidebar: the team's line over its workers, each with its part's rail.
-            line = page.locator(
-                "#session-list .team-line", has_text="设计 Chief of Staff 的 Autopilot 模式"
+            # The sidebar lists workers only: a team's workers are rows like any other, with no
+            # line over them and no rail (teams are here on Home and on their pages).
+            await expect(page.locator("#session-list .item")).not_to_have_count(0)
+            grouping = ".team-line, .in-team, .compare-group, .forked"
+            await expect(page.locator("#session-list").locator(grouping)).to_have_count(0)
+            await expect(page.locator("#session-list")).not_to_contain_text(
+                "设计 Chief of Staff 的 Autopilot 模式"
             )
-            await expect(line.locator(".frac")).to_have_text("1/4")
-            await expect(
-                page.locator("#session-list .team-line", has_text="给 Chief of Staff")
-            ).to_have_count(0)
             await page.locator("#sidebar").screenshot(path=shots / f"sidebar-{width}-{scheme}.png")
         if width < 1100:
             await page.locator("#home-tabs [data-tab=needs]").click()
@@ -5712,11 +5712,11 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         assert not errors, errors
         await context.close()
     log(
-        "Teams lite: rows, the sidebar, the page at work, on you, moved out and done; "
+        "Teams lite: rows, no team in the sidebar, the page at work, on you, moved out and done; "
         "a held question of no team"
     )
 
-    # Every team in the same words on Home's row, the sidebar's line and its page's header.
+    # Every team in the same words on Home's row and its page's header.
     context = await browser.new_context(viewport={"width": 1280, "height": 1000})
     page = await context.new_page()
     page.on("pageerror", lambda error: failures.append(str(error)))
@@ -5726,9 +5726,6 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         row = await team_row(page, team)
         status = await row.locator(".status").text_content()
         goal = await row.locator(".goal").text_content()
-        line = page.locator("#session-list .team-line", has_text=goal)
-        if await line.count():
-            assert await line.get_attribute("title") == f"{goal}: {status}", (goal, status)
         await row.click()
         await expect(page.locator("#session-title")).to_have_text(goal)
         header = await page.locator("#session-meta").text_content()
@@ -5739,7 +5736,7 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
             assert lead.casefold() in status.casefold(), (goal, status, header)
         await page.locator("#back-home").click()
     await context.close()
-    log("Teams lite: each team's words the same on its row, the sidebar and its page")
+    log("Teams lite: each team's words the same on its row and its page")
 
     # Nudge on a question of no team; Open is its asker's chat.
     context = await browser.new_context(viewport={"width": 1280, "height": 1000})
@@ -6208,7 +6205,7 @@ async def main():
                           round_usage, round_relations, round_shepherd,
                           round_stacked_merge, round_fork, round_needs_dots,
                           round_settings, round_teams_v2,
-                          round_answer_label):  # fmt: skip
+                          round_answer_label, round_sidebar_flat):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -6546,6 +6543,155 @@ def usage_seeded(runtime) -> dict:
     store.record_usage(router, "router", "smart-model", 0.3, 1.0, 20_000, 300, initiator="")
     runtime.bus.publish("state")
     return {"worker": "wuse", "tasks": [task[2] for task in tasks[:3]]}
+
+
+# A color of a worker's or a team's part (style.css --c0…--c7) and the status colors' hues:
+# [[hue, saturation] of each part color, [hue of each status color]].
+PALETTE_HUES = """() => {
+  const style = getComputedStyle(document.documentElement);
+  const hsl = (name) => {
+    const hex = style.getPropertyValue(name).trim().replace('#', '');
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+    const l = (max + min) / 2, s = d ? d / (1 - Math.abs(2 * l - 1)) : 0;
+    const h = !d ? 0 : max === r ? 60 * (((g - b) / d) % 6)
+      : max === g ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4);
+    return [(h + 360) % 360, s];
+  };
+  return [[0, 1, 2, 3, 4, 5, 6, 7].map((i) => hsl(`--c${i}`)),
+          ['--accent', '--amber', '--green', '--red'].map((name) => hsl(name)[0])];
+}"""
+
+
+async def round_sidebar_flat(runtime, browser, failures: list[str]):
+    """The owner's choice for the Workers sidebar (QA E143, E146, E147, E149, E150): workers
+    only, in one flat list by status (Needs you, Running, Monitoring, the newest first; Nothing
+    open folded); a second worker a row like any other with a small ⑂ after its name (where it
+    came from and why on hover); a check-back's time ("↻ in 12 min" within the hour, else its
+    time; what it checks on hover); "waits on “…”" for one that waits on a peer; no team line,
+    rail or grouping (a team of three is three rows; its team on Home); each side of a Compare
+    a row, with a small ⇄; part colors that are no status's hue. Screenshots at 800, 1024
+    and 1440 px, light and dark (browser-shots/sidebar-flat/, or SIDEBAR_FLAT_SHOTS), taken
+    before anything is checked."""
+    import sidebar_scene
+
+    shots = Path(os.environ.get("SIDEBAR_FLAT_SHOTS") or SHOTS / "sidebar-flat")
+    shots.mkdir(parents=True, exist_ok=True)
+    folder, _ = codex_on_path()
+    try:
+        runtime.found_cache = (float("-inf"), [])
+        await agents_saved(runtime, {"codex": {"enabled": True}})
+        await runtime.refresh_agent_status()
+        scene = await sidebar_scene.busy_sidebar(runtime)
+        store = runtime.store
+        title = lambda worker: runtime.display_title(store.session(worker))  # noqa: E731
+        pages = []
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme, 1440)
+            await page.set_viewport_size({"width": 1440, "height": 1000})
+            await expect(page.locator(f'#session-list .item[data-id="{scene["fork"]}"]'))\
+                .to_be_visible(timeout=15000)  # fmt: skip
+            for width in (1440, 1024, 800):
+                await page.set_viewport_size({"width": width, "height": 1000})
+                await page.mouse.move(1, 1)
+                await quiet_for(page, 300)
+                await page.locator("#sidebar").screenshot(
+                    path=shots / f"sidebar-{width}-{scheme}.png"
+                )
+            pages.append((scheme, context, page, errors))
+        for scheme, context, page, errors in pages:
+            listed = page.locator("#session-list")
+            # No groups: no team line, rail, caption, nesting or indentation.
+            grouping = ".team-line, .in-team, .compare-group, .forked, .nested"
+            await expect(listed.locator(grouping)).to_have_count(0)
+            await expect(listed).not_to_contain_text("Run the reach experiment")
+            for width in (1440, 1024, 800):
+                await page.set_viewport_size({"width": width, "height": 1000})
+                lefts = await listed.locator(".item > .dot").evaluate_all(
+                    "nodes => nodes.filter((n) => n.offsetParent)"
+                    ".map((n) => Math.round(n.getBoundingClientRect().left))"
+                )
+                assert len(set(lefts)) == 1, ("one column of dots", width, lefts)
+                found = await listed.evaluate(SCROLLED_OVERFLOWS)
+                assert not found, (width, found)
+            await page.set_viewport_size({"width": 1440, "height": 1000})
+            # By status: Needs you, Running, Monitoring; the rest folded.
+            ranks = {"waiting": 0, "working": 1, "watching": 2}
+            dots = await listed.locator(":scope > .item:not(.home-item)").evaluate_all(
+                "nodes => nodes.map((n) => [n.dataset.id, n.classList[1]])"
+            )
+            shown = [worker for worker, _ in dots]
+            assert [ranks[dot] for _, dot in dots] == sorted(ranks[dot] for _, dot in dots), dots
+            for worker in scene["idle"]:
+                assert worker not in shown
+                await expect(listed.locator(f'.idle-workers .item[data-id="{worker}"]'))\
+                    .to_have_count(1)  # fmt: skip
+            row = lambda worker, page=page: page.locator(  # noqa: E731
+                f'#session-list .item[data-id="{worker}"]'
+            )
+            await expect(row(scene["thresholds"])).to_have_class(re.compile(r"\bwaiting\b"))
+            # The team of three: three rows like any other, where each stands.
+            await expect(row(scene["build"])).to_have_class(re.compile(r"\bworking\b"))
+            await expect(row(scene["train"]).locator(".sub.waits")).to_have_text(
+                f"waits on “{title(scene['build'])}”"
+            )
+            await expect(row(scene["train"]).locator(".sub.waits")).to_have_attribute(
+                "title", f"Waits on “{title(scene['build'])}”"
+            )
+            # Check-backs: within the hour, in how long; later, its time; what, on hover.
+            back = row(scene["nightly"]).locator(".sub.back")
+            await expect(back).to_have_text(re.compile(r"^↻ in (1[0-2]|[1-9]) min$"))
+            await expect(back).to_have_attribute(
+                "title", re.compile(r"^Checks back at .+: whether the nightly export finished$")
+            )
+            later = row(scene["reach"]).locator(".sub.back")
+            await expect(later).to_have_text(
+                re.compile(r"^↻ ([A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2}\s?[AP]M$")
+            )
+            await expect(later).to_have_attribute(
+                "title", re.compile(r"^Checks back at .+: whether the reach backfill finished$")
+            )
+            # A second worker: ⑂ after its name, where it came from and why.
+            origin = title(scene["busy"])
+            mark = row(scene["fork"]).locator(".name > .fork-mark")
+            await expect(mark).to_have_attribute(
+                "title", f"Started from “{origin}” with its conversation, because {origin} was busy"
+            )
+            label = row(scene["fork"]).locator(".label")
+            gap = await label.evaluate(
+                "n => n.nextElementSibling.getBoundingClientRect().left"
+                " - n.getBoundingClientRect().right"
+            )
+            assert gap < 10, ("right after its name", gap)
+            await expect(row(scene["busy"]).locator(".fork-mark")).to_have_count(0)
+            # A Compare: each side a row named by its work, a small ⇄ naming the other.
+            for side, other in zip(scene["pair"], ("Codex", "Copilot"), strict=True):
+                await expect(row(side).locator(".label")).to_have_text("Speed up the importer")
+                await expect(row(side).locator(".compare-mark")).to_have_attribute(
+                    "title", f"Compared with {other}: the same task on each"
+                )
+            # Its team is on Home (Teams), never in the sidebar.
+            team = page.locator("#tasks-teams .team2-row", has_text="Run the reach experiment")
+            await expect(team).to_have_count(1)
+            # A worker's or a part's color is never a status's hue (E149): far from blue,
+            # amber, green and red, or a neutral tint.
+            colors, statuses = await page.evaluate(PALETTE_HUES)
+            for hue, saturation in colors:
+                apart = min(min(abs(hue - s), 360 - abs(hue - s)) for s in statuses)
+                assert apart >= 25 or saturation < 0.25, (scheme, hue, saturation, statuses)
+            # Keyboard: Tab reaches each row in its order; Enter opens it.
+            await row(scene["thresholds"]).focus()
+            await page.keyboard.press("Tab")
+            following = await page.evaluate("document.activeElement.dataset.id")
+            assert following == shown[shown.index(scene["thresholds"]) + 1], (following, shown)
+            await page.keyboard.press("Enter")
+            await expect(row(following)).to_have_class(re.compile(r"\bselected\b"))
+            assert not errors, errors
+            await context.close()
+    finally:
+        await agents_saved(runtime, {"codex": {"enabled": False}})
+        codex_off_path(folder)
+    log("the sidebar: workers only, flat by status; ⑂, ↻ times, waits on, ⇄; 800-1440 px")
 
 
 async def round_usage(runtime, browser, failures: list[str]):
@@ -6983,8 +7129,9 @@ async def fork_switch(runtime, on: bool):
 async def round_fork(runtime, browser, failures: list[str]):
     """A busy worker's new task goes to a second worker with its context
     (docs/design/worker-fork.md): one line in the Router chat; in the sidebar the second worker
-    right under the one it came from, on a thin line; its task's row says where it came from;
-    the first line of each one's chat opens the other; one switch in Settings → General."""
+    a row like any other, with ⑂ after its name (where it came from and why on hover); its
+    task's row says where it came from; the first line of each one's chat opens the other; one
+    switch in Settings → General."""
     store = runtime.store
     router = store.get("router_id")
     await fork_switch(runtime, True)
@@ -7009,7 +7156,7 @@ async def round_fork(runtime, browser, failures: list[str]):
     )  # fmt: skip
     second = json.loads(told.text_result_for_llm)["session_id"]
     await settle(runtime)
-    # The second worker busy too: a third, from its conversation, sits under the first as well.
+    # The second worker busy too: a third, from its conversation.
     session = runtime.states.handle(second)
     session.emit("user.message", content=session.sent[-1])
     session.emit("assistant.turn_start")
@@ -7044,28 +7191,22 @@ async def round_fork(runtime, browser, failures: list[str]):
             await expect(line.locator(".what")).to_have_text(
                 f"Started a second worker for “Export to Parquet” (context from “{origin}”)"
             )
-            # The sidebar: right under the busy worker, nested on a thin line.
-            items = page.locator("#session-list .item")
-            listed = await items.evaluate_all(
-                "nodes => nodes.map((n) => [n.dataset.id, n.classList.contains('forked')])"
-            )
-            at = listed.index([worker, False])
-            after = listed[at + 1 : at + 3]  # In the list's order: the newest first.
-            assert sorted(after) == sorted([[second, True], [third, True]]), listed
+            # The sidebar: a row like any other, by status (never indented under the busy
+            # worker), a small ⑂ after its name saying where it came from and why.
             nested = page.locator(f'#session-list .item[data-id="{second}"]')
             lefts = [
                 await page.locator(f'#session-list .item[data-id="{id_}"] .dot').evaluate(
                     "n => n.getBoundingClientRect().left"
                 )
-                for id_ in (second, third)
+                for id_ in (worker, second, third)
             ]
-            assert lefts[0] == lefts[1], ("one level only", lefts)
-            await expect(nested).to_have_attribute(
-                "title", re.compile(f"A second worker of “{re.escape(origin)}”")
-            )
-            left = await nested.locator(".dot").evaluate("n => n.getBoundingClientRect().left")
-            first = page.locator(f'#session-list .item[data-id="{worker}"] .dot')
-            assert left > await first.evaluate("n => n.getBoundingClientRect().left") + 8
+            assert len(set(lefts)) == 1, ("no indentation", lefts)
+            busy = f"Started from “{origin}” with its conversation, because {origin} was busy"
+            await expect(nested.locator(".fork-mark")).to_have_attribute("title", busy)
+            await expect(nested).to_have_attribute("title", re.compile(re.escape(busy)))
+            await expect(
+                page.locator(f'#session-list .item[data-id="{worker}"] .fork-mark')
+            ).to_have_count(0)
             found = await page.locator("#session-list").evaluate(OVERFLOWS)
             assert not found, (width, found)
             # Its task's row: where it came from, at its foot.
@@ -7096,7 +7237,7 @@ async def round_fork(runtime, browser, failures: list[str]):
             await gone.click()
             await expect(nested).to_have_class(re.compile(r"\bselected\b"))
             await context.close()
-    log("a second worker: one line, nested under its worker, its row and chats linked")
+    log("a second worker: one line, a row with ⑂ in the sidebar, its row and chats linked")
     # Joined to the worker it came from (the Router's view of teams, as before); its own tab
     # starts with its task's lineage: with whose context it started (⑂). No team of the owner's.
     team = runtime.teams.team_of(worker)
@@ -10526,9 +10667,9 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
     """The agent picker as the owner's research asked (2026-11-19): @ lists every agent with its
     status (Ready, Sign-in needed, Not installed; one not ready dimmed, with the command and
     Copy); the chip's popover (agent, its models and effort, whose plan it uses); two agents
-    picked to compare, their workers under one row; each worker's agent mark on its row, task
-    and header; the start line's chip (Restart on… before its first step); Settings' status
-    lines, Use for workers off until ready, Last used, its own sessions."""
+    picked to compare, each worker a row of its own (⇄); each worker's agent mark on its
+    row, task and header; the start line's chip (Restart on… before its first step); Settings'
+    status lines, Use for workers off until ready, Last used, its own sessions."""
     from copilot.tools import ToolInvocation
 
     from chiefofstaff import agents
@@ -10665,10 +10806,15 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
         for scheme in ("light", "dark"):
             context, page, errors, _ = await agents_page(browser, scheme)
             await at_home(page)
-            group = page.locator("#session-list .compare-group")
-            await expect(group).to_have_text("Compare: Speed up the importer (2)")
-            nested = page.locator("#session-list .item.nested .label")
-            await expect(nested).to_have_text(["Copilot", "Codex"])
+            # Each side a row like any other, named by its work, its agent's mark, and a
+            # small ⇄ saying the other side on hover; no caption, no nesting.
+            await expect(page.locator("#session-list .compare-group")).to_have_count(0)
+            for side, other in zip(pair, ("Codex", "Copilot"), strict=True):
+                row = page.locator(f'#session-list .item[data-id="{side}"]')
+                await expect(row.locator(".label")).to_have_text("Speed up the importer")
+                await expect(row.locator(".compare-mark")).to_have_attribute(
+                    "title", f"Compared with {other}: the same task on each"
+                )
             row = page.locator("#session-list .item", has_text="Draft the release notes")
             await expect(row.locator(".agent-mark")).to_have_attribute(
                 "aria-label", re.compile(r"^Copilot")

@@ -11,7 +11,7 @@ import { expandTask, followUpItem, inTerminal, ownTasks, questionParts, syncTask
 import { artifactItems } from "./artifacts.js";
 import { preparedItems } from "./prepared.js";
 import { duck } from "./mascot.js";
-import { heldItem, heldQuestions, teamsSection } from "./team.js";
+import { heldItem, heldQuestions, peerWaiting, teamsSection } from "./team.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
 // Needs you (waiting for an answer, failed, a result to accept, news, no progress); a
 // worker's question whose task does not show it (cancelled, finished, or none); the Router's
@@ -51,8 +51,10 @@ export function workerStates() {
   // Every worker a decision card waits for, not only the first that asked.
   const askers = needs.drafts.flatMap((draft) => (draft.kind === "decision" ? (draft.target.askers || []).map((asker) => asker.session_id) : []));
   const asking = new Set([...needs.drafts.map((draft) => draft.session_id), ...needs.ok.map((draft) => draft.session_id), ...needs.uncertain.map((draft) => draft.session_id), ...askers, ...needs.questions.map((question) => question.session_id), ...needs.tasks.map((task) => task.session_id)]);
+  const all = ownTasks();
   const mine = new Map();
-  for (const task of ownTasks()) mine.set(task.session_id, [...(mine.get(task.session_id) || []), task]);
+  for (const task of all) mine.set(task.session_id, [...(mine.get(task.session_id) || []), task]);
+  const waits = waitsOn(all, peerWaiting());
   const found = new Map();
   for (const session of sessions()) {
     const list = mine.get(session.id) || [];
@@ -64,7 +66,23 @@ export function workerStates() {
     else if (section === "monitoring") dot = "watching";
     // A marker in words, not a color of its own: queued, overdue, checks back…
     const markers = [...new Set(list.map((task) => MARKED[phases.get(task.id)?.marker]).filter(Boolean))];
-    found.set(session.id, { dot, sub: dot === "watching" ? markers[0] || "" : "", text: session.elsewhere ? DOT_HELP.open : Object.fromEntries(WORKER_STATES)[dot] });
+    // Its soonest check-back, and the worker it waits on (the sidebar says them).
+    const back = list.filter((task) => phases.get(task.id)?.marker === "check-back" && task.check_back?.at).map((task) => task.check_back).sort((a, b) => Date.parse(a.at) - Date.parse(b.at))[0] || null;
+    found.set(session.id, { dot, sub: dot === "watching" ? markers[0] || "" : "", text: session.elsewhere ? DOT_HELP.open : Object.fromEntries(WORKER_STATES)[dot], back, waitsOn: waits.get(session.id) || "" });
+  }
+  return found;
+}
+// The worker each one waits on: one it asked and has no answer from yet, else one whose open
+// task a task of its own waits for, not started (after).
+const OPEN = new Set(["queued", "running", "waiting"]);
+export function waitsOn(tasks, questions) {
+  const found = new Map();
+  for (const question of questions) if (!found.has(question.asker) && question.target !== question.asker) found.set(question.asker, question.target);
+  const byTask = new Map(tasks.map((task) => [task.id, task]));
+  for (const task of tasks) {
+    if (task.status !== "queued" || found.has(task.session_id)) continue;
+    const other = (task.after || []).map((id) => byTask.get(id)).find((dep) => dep && OPEN.has(dep.status) && dep.session_id !== task.session_id);
+    if (other) found.set(task.session_id, other.session_id);
   }
   return found;
 }

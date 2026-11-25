@@ -1406,14 +1406,152 @@ def test_five_other_sessions_at_rest_those_waiting_first():
     ]
 
 
-def test_second_workers_sit_one_level_under_the_first_they_came_from():
-    """A second worker sits right under the worker it came from; one of a second worker under
-    the first of them listed with it (followed back through one not listed): one level only."""
+# Just enough of the DOM for the sidebar's rows (dom.js el, relations.js glyph): elements with
+# their class, text, attributes and children.
+DOM = """
+class Element {
+  constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.attributes = {};
+    this.className = ""; this.own = ""; }
+  set textContent(value) { this.own = String(value); this.children = []; }
+  get textContent() { return this.own + this.children.map((child) => child.textContent).join(""); }
+  setAttribute(key, value) { this.attributes[key] = String(value); }
+  getAttribute(key) { return this.attributes[key] ?? null; }
+  append(...nodes) { for (const node of nodes) this.children.push(typeof node === "string"
+    ? { textContent: node, children: [] } : node); }
+  addEventListener() {}
+  get classes() { return this.className.split(" ").filter(Boolean); }
+  find(name) { for (const child of this.children) { if (child.classes?.includes(name)) return child;
+    const found = child.find?.(name); if (found) return found; } return null; }
+}
+document.createElement = (tag) => new Element(tag);
+document.createElementNS = (space, tag) => new Element(tag);
+"""
+
+
+def sidebar_rows(workers: list, where: dict, now: str, others: list | None = None) -> list:
+    """The sidebar's worker rows (sidebar.js workerNodes) as words: each row's classes, name,
+    ⑂'s and Compare's tooltips, its note and its tooltip; the fold's rows under it."""
+    return run_js(
+        DOM + f"const b = await import({json.dumps((STATIC / 'sidebar.js').as_uri())});\n"
+        f"s.state.snapshot = {{ sessions: {json.dumps(workers + (others or []))}, closed: [] }};\n"
+        f"const where = new Map(Object.entries({json.dumps(where)}));\n"
+        f"const now = Date.parse({json.dumps(now)});\n"
+        f"const nodes = b.workerNodes({json.dumps(workers)}, where, now);\n"
+        "const row = (node) => ({ id: node.attributes['data-id'], classes: node.classes,"
+        " label: node.find('label')?.textContent, fork: node.find('fork-mark')?.attributes.title"
+        " || '', compare: node.find('compare-mark')?.attributes.title || '',"
+        " sub: node.find('sub')?.textContent"
+        " || '', subTip: node.find('sub')?.attributes.title || '', title: node.attributes.title,"
+        " kids: node.children.map((child) => child.classes?.join('.') || '') });\n"
+        "return nodes.map((node) => node.tagName === 'DETAILS' ? { fold: node.children[0]"
+        ".textContent, rows: node.children.slice(1).map(row) } : row(node));"
+    )
+
+
+def worker(id_: str, title: str, at: str, **extra) -> dict:
+    return {"id": id_, "role": "worker", "title": title, "display_title": title,
+            "created_at": f"2026-11-24T{at}:00Z", "status": "idle", **extra}  # fmt: skip
+
+
+def test_the_sidebar_lists_workers_only_in_one_flat_list_by_status():
+    """The owner's choice (QA E143, E146, E147): workers only, no groups. Needs you, Running,
+    Monitoring, the newest first, the rest folded under Nothing open; a second worker is a row
+    like any other (⑂ after its name, never indented under the one it came from), and so is
+    each side of a Compare (named by its work, a small ⇄ saying the other side)."""
+    group = {"id": "g1", "title": "Speed up the importer", "agents": ["copilot", "codex"]}
+    busy = {"id": "a", "title": "Old name", "busy": True}
+    brief = {"id": "b", "title": "Build model releases", "brief": True}
+    workers = [
+        worker("a", "Raise unique reach vs baseline", "09:00"),
+        worker("b", "Build model releases", "09:05"),
+        worker("c", "Count companies using source X", "09:10", fork_of=busy),
+        worker("d", "Speed up the importer", "09:20", compare=group),
+        worker("e", "Speed up the importer", "09:21", agent="codex", compare=group),
+        worker("f", "Answer a teammate", "09:30"),
+        worker("g", "Old export", "08:00", fork_of={"id": "f", "title": "Answer a teammate"}),
+        worker("h", "Summarise the logs", "08:30", fork_of=brief),
+    ]
+    where = {
+        "a": {"dot": "watching", "sub": "checks back", "text": "Monitoring",
+              "back": {"at": "2026-11-24T15:28:00Z", "what": "the training runs"}},
+        "b": {"dot": "working", "sub": "", "text": "Running"},
+        "c": {"dot": "watching", "sub": "nothing to wait on", "text": "Monitoring",
+              "waitsOn": "b"},
+        "d": {"dot": "working", "sub": "", "text": "Running"},
+        "e": {"dot": "waiting", "sub": "", "text": "Needs you"},
+        "f": {"dot": "watching", "sub": "checks back", "text": "Monitoring",
+              "back": {"at": "2026-11-24T12:12:00Z", "what": "CI on #42"}},
+        "g": {"dot": "idle", "sub": "", "text": "Nothing open"},
+        "h": {"dot": "idle", "sub": "", "text": "Nothing open"},
+    }  # fmt: skip
+    rows = sidebar_rows(workers, where, "2026-11-24T12:00:00Z")
+    assert [row.get("id") for row in rows[:-1]] == ["e", "d", "b", "f", "c", "a"]
+    assert rows[-1]["fold"] == "Nothing open · 2"
+    assert [row["id"] for row in rows[-1]["rows"]] == ["h", "g"]
+    shown = {row["id"]: row for row in [*rows[:-1], *rows[-1]["rows"]]}
+    for row in shown.values():
+        assert row["classes"][0] == "item" and not {"forked", "nested", "in-team"} & set(
+            row["classes"]
+        ), row
+    # A second worker: ⑂ after its name, where it came from and why on hover.
+    origin = "Raise unique reach vs baseline"
+    fork = f"Started from “{origin}” with its conversation, because {origin} was busy"
+    assert shown["c"]["fork"] == fork and fork in shown["c"]["title"].splitlines()
+    assert shown["c"]["kids"][:2] == ["dot.watching", "name"]
+    assert shown["g"]["fork"] == "Started from “Answer a teammate” with its conversation"
+    assert shown["h"]["fork"] == "Started from “Build model releases” with a brief of its work"
+    assert all(not shown[id_]["fork"] for id_ in "abdef")
+    # A Compare: each side a row named by its work; Compare says the other side.
+    assert shown["d"]["label"] == shown["e"]["label"] == "Speed up the importer"
+    assert shown["d"]["compare"] == "Compared with Codex: the same task on each"
+    assert shown["e"]["compare"] == "Compared with Copilot: the same task on each"
+    # A check-back: its time (within the hour, in how long), what it checks on hover.
+    assert shown["f"]["sub"] == "↻ in 12 min"
+    later = run_js("return t.clock('2026-11-24T15:28:00Z');")
+    assert shown["a"]["sub"] == f"↻ {later}"
+    assert shown["a"]["subTip"] == f"Checks back at {later}: the training runs"
+    assert shown["f"]["subTip"].startswith("Checks back at ") and shown["f"]["subTip"].endswith(
+        ": CI on #42"
+    )
+    # Waiting on a peer: by that worker's name.
+    assert shown["c"]["sub"] == "waits on “Build model releases”"
+    assert shown["b"]["sub"] == "" and shown["b"]["label"] == "Build model releases"
+    assert shown["b"]["kids"][:2] == ["dot.working", "label"], "a row as before"
+
+
+def test_a_check_back_says_its_time_relative_within_the_hour():
     found = run_js(
         f"const b = await import({json.dumps((STATIC / 'sidebar.js').as_uri())});\n"
-        "const w = (id, from) => ({ id, ...(from ? { fork_of: { id: from } } : {}) });\n"
-        "const list = [w('e'), w('c', 'b'), w('a'), w('d', 'x'), w('b', 'a'), w('f', 'z')];\n"
-        "const shown = b.withSecondWorkers(list, [w('x', 'a')]);\n"
-        "return shown.map(([worker, nested]) => worker.id + (nested ? '>' : '')).join(' ');"
+        "const now = Date.parse('2026-11-24T12:00:00Z');\n"
+        "const at = (minutes) => new Date(now + minutes * 60000).toISOString();\n"
+        "return [0.2, 1, 12, 59.5, 61, -3].map((m) => b.checkBackNote({ at: at(m), what: 'x' },"
+        " now)).map((note) => [note.text, note.next && (note.next - now) / 60000]);"
     )
-    assert found == "e a c> d> b> f"
+    clock = run_js(
+        "return [59.5, 61].map((m) => t.clock(new Date(Date.parse('2026-11-24T12:00:00Z')"
+        " + m * 60000).toISOString()));"
+    )
+    assert found == [
+        ["↻ in 1 min", 0.2],
+        ["↻ in 1 min", 1],
+        ["↻ in 12 min", 1],
+        [f"↻ {clock[0]}", 0.5],
+        [f"↻ {clock[1]}", 2],
+        ["↻ now", None],
+    ]
+
+
+def test_a_worker_waits_on_the_one_it_asked_or_whose_task_its_own_waits_for():
+    found = run_js(
+        f"const i = await import({json.dumps((STATIC / 'inbox.js').as_uri())});\n"
+        "const task = (id, session, status, after = []) => ({ id, session_id: session, status,"
+        " after });\n"
+        "const tasks = [task('t1', 'a', 'running'), task('t2', 'b', 'queued', ['t1']),"
+        " task('t3', 'c', 'queued', ['t4']), task('t4', 'd', 'done'),"
+        " task('t5', 'e', 'queued', ['t6']), task('t6', 'e', 'running'),"
+        " task('t7', 'f', 'running')];\n"
+        "const questions = [{ asker: 'f', target: 'a' }, { asker: 'f', target: 'd' }];\n"
+        "return Object.fromEntries(i.waitsOn(tasks, questions));"
+    )
+    # b's task waits for a's, still open; c's for one done (it starts); e's for its own.
+    assert found == {"b": "a", "f": "a"}

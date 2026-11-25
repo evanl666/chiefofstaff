@@ -493,8 +493,29 @@ FIXES: list[Allow] = [
         without=r"\d+ workers? waiting on another one's answer",
     ),
     Allow(
-        "Teams lite: Home's Teams rows, the sidebar's team line, a held question's card",
-        element="#tasks-teams, #session-list .team-line, #needs .card.team-wait",
+        "Teams lite: Home's Teams rows, a held question's card",
+        element="#tasks-teams, #needs .card.team-wait",
+        views=r"^(home|sidebar)",
+    ),
+    # 0.1.57 (the owner's choice, QA E143, E146, E147, E150): the Workers sidebar lists workers
+    # only, in one list by status: no team line, rail, Compare caption or indentation (as
+    # v0.1.56 had them); a small ⑂ after a second worker's name, ⇄ on a side of a Compare, when a
+    # check-back wakes its worker (↻ in 12 min, ↻ 3:28 PM) and the worker one waits on. A second
+    # worker started for a busy one's new task is marked so in the state (fork_of's busy).
+    Allow(
+        "the Workers sidebar: workers only, flat by status (⑂, ⇄, ↻ times, waits on)",
+        element="#session-list :is(.team-line, .compare-group, .item.forked, .item.nested, "
+        ".item.in-team, .item:has(.fork-mark, .compare-mark, > .sub.back, > .sub.waits))",
+        views=r"^(home|sidebar)",
+    ),
+    Allow(
+        "a second worker for a busy one's new task, marked so",
+        data=r"(/api/state\.sessions\[\d+\]\.fork_of\.busy|\.db\.kv\.forkof:.*)$",
+    ),
+    # 0.1.57 (QA E149): workers' colors (their avatars, a team's parts) are no status's hue.
+    Allow(
+        "workers' colors, none a status's hue (avatars, a team's parts)",
+        element=".avatar[class*=' c'], .pa[class*=' c'], .tv2-node[class*=' c']",
         views=r"^(home|sidebar)",
     ),
     # 0.1.57 (owner report): an answer the owner asked for (the Router asked a worker for them,
