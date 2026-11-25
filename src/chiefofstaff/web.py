@@ -54,6 +54,7 @@ from .models import (
     TaskNote,
     TeamNudge,
     TeamSeen,
+    TeamTell,
     Unfollow,
     UpdateRequest,
 )
@@ -879,10 +880,22 @@ def create_app(
         return runtime.teams_lite.past(before, max(1, min(limit, 50)))
 
     @app.get("/api/teams/{team_id}")
-    async def team_page(team_id: str, before: str = ""):
-        """A team (Teams lite): its parts' task rows, the map's pairs and what they handed each
-        other, newest first, a page at a time."""
-        return runtime.teams_lite.page(team_id, before)
+    async def team_page(team_id: str, before: str = "", need: str = ""):
+        """A team's page: its parts' task rows, what they handed each other (newest first, a
+        page at a time), what was decided for it, what the owner told it, and the views of the
+        parts' tasks Home does not list (`need`, their ids)."""
+        wanted = [task for task in need.split(",") if task][:40]
+        return runtime.teams_lite.page(team_id, before, wanted)
+
+    @app.post("/api/teams/{team_id}/looked")
+    async def team_looked(team_id: str):
+        """The owner had a team's page in sight: Since you looked starts here, on every tab."""
+        return runtime.teams_lite.look(team_id)
+
+    @app.post("/api/teams/{team_id}/tell")
+    async def team_tell(team_id: str, payload: TeamTell):
+        """Tell the team: the owner's word to the parts they chose, each as its task stands."""
+        return await runtime.teams_lite.tell(team_id, payload.text, payload.to, payload.key)
 
     @app.post("/api/teams/{team_id}/seen")
     async def team_seen(team_id: str, payload: TeamSeen):

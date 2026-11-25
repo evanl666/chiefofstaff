@@ -9496,7 +9496,7 @@ class Runtime:
         decision card it waited on no longer waits for it. Not at every change of a task that
         ended before (bug E100: finished work's own card closed at its next progress report).
         `was`: its status before, when this change set it."""
-        self.teams_lite.task_changed(task)
+        self.teams_lite.task_changed(task, was)
         self.task_actions.publish(task)
         if (
             task["status"] in ENDED
@@ -9692,10 +9692,14 @@ class Runtime:
         settings_digest: str = "",
         shared_card: str = "",
         client_id: str = "",
+        answers_card: bool = True,
+        extra_meta: dict | None = None,
     ) -> dict:
         """`learn`: the owner typed it (not a message the app sends for them). A message to a
         worker is also noted for the Router (`tell_router`), which must know what the owner
         asked for. `from_home`: written on Home (@ a worker), where its answer is shown too.
+        `answers_card`: to a worker waiting on its question card, it is the answer (not a word
+        to several parts of a team: Tell the team); `extra_meta`, kept on the message.
         `agent`: the coding agent the owner chose for it in the composer (@codex: the Router's
         new workers for it run there; `agent_model` and `agent_effort`, chosen with it).
         `compare`: several agents chosen (@codex @claude): the task runs on each. `task_id`:
@@ -9738,7 +9742,7 @@ class Runtime:
         # The task this is about: the one whose question it answers, the one the owner looks
         # at, the one it is on… (see chat_task).
         about = self.chat_task(session_id, task_id) if row["role"] == WORKER else None
-        if row["role"] == WORKER and not attachments and text.strip():
+        if row["role"] == WORKER and not attachments and text.strip() and answers_card:
             # Waiting on its question card: this is the answer (sent as a message, it would only
             # be read once the card times out).
             with suppress(ValueError):
@@ -9869,6 +9873,7 @@ class Runtime:
             meta |= {"task_id": task["id"], "chat": True}
         if from_home:
             meta["home"] = True  # Asked on Home: its answer is shown there too.
+        meta |= extra_meta or {}
         if task and task["status"] in {"review", "done", "failed", "cancelled"}:
             # A question about finished work changes nothing: what it reports is news on it.
             self.store.set(f"followup:{task['id']}", "chat")

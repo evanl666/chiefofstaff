@@ -654,6 +654,4 @@ async def test_a_teams_history_is_only_what_its_parts_handed_each_other(harness)
     ]
     assert talk[0]["question"] == question and talk[0]["status"] == "open"
     assert [i["kind"] for i in page["items"]][-1] == "request", "the request, oldest"
-    [pair] = page["pairs"]
-    assert pair["asked"] == 1 and pair["open"] and sum(t["n"] for t in pair["told"]) == 1
     assert {view["id"] for view in page["tasks"]} == {scout["task_id"], writer["task_id"]}
