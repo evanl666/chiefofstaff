@@ -3,10 +3,11 @@ test_share_crypto), and Chief deletes the gist at expiry, at its next start afte
 while it was off, and again an hour later when a delete failed. With no live link there is no
 timer and nothing reads the table or GitHub."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import Harness, settle
+from conftest import Harness
 from share_world import FakeGitHub, finished_task
 
 from chiefofstaff.shares import Shares
@@ -42,7 +43,7 @@ async def test_the_timer_deletes_the_gist_at_expiry(world):
     assert world.shares.timer is not None and len(world.fake.gists) == 1
     later(world, days=1, seconds=1)
     world.shares.arm()
-    await settle(world.runtime)
+    await asyncio.wait_for(world.shares.timer, 5)
     row = world.shares.row(made["id"])
     assert (
         row["state"] == "expired" and row["error"] == "" and row["ended_at"] == made["expires_at"]
@@ -54,7 +55,8 @@ async def test_the_timer_deletes_the_gist_at_expiry(world):
 
 async def test_one_that_expired_while_chief_was_off_is_deleted_at_start(world):
     made = await share(world, days=1)
-    world.shares.timer.cancel()
+    await world.runtime.stop()  # Chief of Staff stops: its timer with it.
+    assert world.shares.timer is None
     later(world, days=2)
     await world.shares.resume()
     assert world.shares.row(made["id"])["state"] == "expired" and world.fake.gists == {}

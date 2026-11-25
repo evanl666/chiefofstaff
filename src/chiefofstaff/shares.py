@@ -509,13 +509,22 @@ class Shares:
         if wake is None:
             return
         delay = max(0.0, min((wake - self.clock()).total_seconds(), LONGEST_WAIT))
-        self.timer = self.runtime.background(self.wait(delay))
+        # Its own task, not the runtime's jobs: a timer is no work in progress (stop cancels it).
+        self.timer = asyncio.get_running_loop().create_task(self.wait(delay))
 
     async def wait(self, delay: float):
         await asyncio.sleep(delay)
         self.timer = None
-        await self.sweep()
+        try:
+            await self.sweep()
+        except Exception:
+            logger.warning("Could not end the share links that expired.", exc_info=True)
         self.arm()
+
+    def stop(self):
+        if self.timer:
+            self.timer.cancel()
+            self.timer = None
 
 
 def environment() -> list[str]:
