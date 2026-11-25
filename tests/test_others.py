@@ -2,7 +2,8 @@
 
 The logs here are made up in the shape the Copilot CLI writes them (1.0.91 to 1.0.109): each
 line one event, its type first; a session.start line first; the agent's own events without an
-agentId, its sub-agents' with one. The words are invented."""
+agentId, its sub-agents' with one. The words are invented. Those in copilot_logs were recorded
+on real CLIs (1.0.114, 1.0.115), their words, paths and ids made up."""
 
 import asyncio
 import itertools
@@ -32,6 +33,7 @@ from chiefofstaff.web import create_app
 
 START = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
 READ_CHUNK = others.read_chunk
+LOGS = Path(__file__).parent / "copilot_logs"
 
 
 def iso(seconds: float) -> str:
@@ -478,6 +480,43 @@ def test_neutral_events_change_nothing(home, clocks, kind):
     term.answer()
     reader.step()
     assert reader.status(term) == "your_turn"
+
+
+@pytest.mark.parametrize("version", ["1.0.114", "1.0.115"])
+def test_a_recorded_terminal_log_says_where_it_stands_as_it_goes(home, clocks, version):
+    """A terminal session's log as the CLI writes it (copilot_logs: recorded on a real CLI, the
+    words, paths and ids made up): its first model call asks the owner through ask_user, it is
+    answered, writes a file, answers and exits. 1.0.115 logs the tools that first call was
+    given (session.tool_baseline) after it starts: its question showed as nothing."""
+    lines = (LOGS / f"{version}-ask.jsonl").read_text(encoding="utf-8").splitlines(keepends=True)
+    kinds = [json.loads(line)["type"] for line in lines]
+    path = home / "session-state" / "s" / "events.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(lines[:1]), encoding="utf-8")
+    reader = Follow()
+    reader.logs["s"] = Log("s", path)
+    reader.step(startup=True)
+    term = SimpleNamespace(id="s")
+    written = 1
+
+    def upto(kind: str, nth: int = 1, is_open: bool = True):
+        """The log written on to its nth line of this type, read: where it stands then."""
+        nonlocal written
+        stop = [n for n, each in enumerate(kinds) if each == kind][nth - 1] + 1
+        with path.open("a", encoding="utf-8", newline="") as log:
+            log.writelines(lines[written:stop])
+        written = stop
+        clocks.tick(1)
+        reader.step()
+        shown = reader.shown(term, is_open)
+        return shown if isinstance(shown, str) else (shown["key"], shown["words"])
+
+    assert ("session.tool_baseline" in kinds) == (version == "1.0.115")
+    assert upto("assistant.message") == ("working", "")
+    assert upto("tool.execution_start") == ("asks", "Which branch should the fix go to?")
+    assert upto("tool.execution_start", 2) == ("working", "create /work/app/branch.txt")
+    assert upto("assistant.turn_end", 3) == ("your_turn", "main")
+    assert upto("session.shutdown", is_open=False) == ("finished", "main")
 
 
 @pytest.mark.parametrize(
@@ -984,7 +1023,13 @@ def listed(
         ("chiefofstaff", "chiefofstaff", "ours"),  # Made by one under another data directory.
         ("chiefofstaff", "", "ours"),
         ("work-buddy", "chiefofstaff", "ours"),
-        ("", "github/cli", "unknown"),
+        # Copilot 1.0.115 names no maker for a session run in its terminal, only the client
+        # that last ran it.
+        ("", "github/cli", "owner"),
+        ("", "copilot-cli/chiefofstaff", "another"),
+        ("", "chiefofstaff", "another"),
+        ("", "sdk", "owner"),
+        ("", "", "unknown"),
         ("sdk", "", "program"),  # A script's, through Copilot's SDK (a batch job's).
         ("sdk", "sdk", "program"),
         ("sdk", "github/cli", "owner"),  # Continued in a terminal.
@@ -1037,6 +1082,10 @@ async def test_the_cli_says_who_made_and_last_ran_each_session():
         {"sessionId": "a", **times, "isRemote": False, "clientName": "github/cli",
          "lastClientName": "chiefofstaff"},
         {"sessionId": "b", **times, "isRemote": False},
+        # As Copilot 1.0.115 lists a session run in its terminal: no clientName.
+        {"sessionId": "c", **times, "isRemote": False, "isDetached": False,
+         "summary": "Fix the login test", "lastClientName": "github/cli",
+         "context": {"cwd": "/work/app"}},
     ]}  # fmt: skip
 
     class Rpc:
@@ -1050,8 +1099,9 @@ async def test_the_cli_says_who_made_and_last_ran_each_session():
     assert [(m.client_name, m.last_client_name, m.clients_listed) for m in listed] == [
         ("github/cli", "chiefofstaff", True),
         ("", "", True),
+        ("", "github/cli", True),
     ]
-    assert [whose(m, set()) for m in listed] == ["another", "unknown"]
+    assert [whose(m, set()) for m in listed] == ["another", "unknown", "owner"]
     assert CopilotBackend(Client()).session_log("not-an-id") is None  # type: ignore[arg-type]
 
 

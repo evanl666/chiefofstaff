@@ -3,7 +3,8 @@
 owner writes (habits.py) and `chiefofstaff tidy-sessions` (tidy.py) all ask here.
 
 Copilot keeps with each session the app that made it and the one that last ran a turn in it (see
-backend.made_by_us and backend.made_by_a_program). Its CLI calls itself github/cli whether the
+backend.made_by_us and backend.made_by_a_program; 1.0.115 keeps only the latter for a session run
+in its terminal: see whose). Its CLI calls itself github/cli whether the
 owner typed in it or a script ran `copilot -p` in a loop, and nothing in a session's files tells
 the two apart for sure (CLI 1.0.110 to 1.0.112: the same events and fields; what differs, a
 title the CLI makes up, its memories, how its model was settled, comes and goes with the
@@ -80,7 +81,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .backend import OWN_CLIENTS, made_by_a_program, made_by_us
+from .backend import OWN_CLIENTS, TERMINAL_CLIENT, made_by_a_program, made_by_us
 
 if TYPE_CHECKING:
     from .store import Store
@@ -94,7 +95,7 @@ PROGRAM = "program"  # a program's, through Copilot's SDK, naming no app
 MADE_BY_WORKER = "worker"  # a Chief of Staff worker's `copilot -p`
 BATCH = "batch"  # one of a script's many one-shot sessions
 UNLISTED = "unlisted"  # the listing does not say which app made it
-UNKNOWN = "unknown"  # no app named
+UNKNOWN = "unknown"  # no client named at all
 ANOTHER = "another"  # last run by a Chief of Staff
 OWNER = "owner"
 # Not listed at all, neither in the sidebar nor to the Router.
@@ -168,10 +169,12 @@ def whose(
 ) -> str:
     """Section 4.2: whose a listed session is, the first rule that matches. ours, remote, program,
     worker and batch are left out (LEFT_OUT); unlisted (the raw answer was not read), unknown (no
-    maker named) and another (made by another client and last run by a Chief of Staff) are listed
-    without a status; owner: the owner's own, with one. `made`: what Provenance.made found of
-    the sessions that would otherwise be the owner's, closed. Open now (`is_open`), one may be
-    anything until it ends: only its name says it is a batch's (see named)."""
+    client named at all) and another (made by another client and last run by a Chief of Staff)
+    are listed without a status; owner: the owner's own, with one. A session that names the
+    client that last ran it but no maker was made in the CLI's terminal (TERMINAL_CLIENT): Copilot
+    1.0.115 records no maker for a session run interactively there. `made`: what Provenance.made
+    found of the sessions that would otherwise be the owner's, closed. Open now (`is_open`), one
+    may be anything until it ends: only its name says it is a batch's (see named)."""
     if meta.session_id in held or getattr(meta, "made_by_us", False):
         return OURS
     if getattr(meta, "is_remote", False):
@@ -180,8 +183,8 @@ def whose(
         return PROGRAM
     if not getattr(meta, "clients_listed", False):
         return UNLISTED
-    maker = getattr(meta, "client_name", "") or ""
     last = getattr(meta, "last_client_name", "") or ""
+    maker = getattr(meta, "client_name", "") or (TERMINAL_CLIENT if last else "")
     if not maker:
         return UNKNOWN
     if made_by_us({"clientName": maker, "lastClientName": last}):

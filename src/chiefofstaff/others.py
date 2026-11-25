@@ -186,6 +186,12 @@ NEUTRAL = frozenset(
         "session.warning",
         "session.model_change",
         "session.permissions_changed",
+        # Copilot 1.0.115's, kept for a resume: the tools a model call was given (tool_baseline,
+        # in a session's first one and when they change; tool_update) and answers to approvals
+        # that hold for the rest of the session.
+        "session.permission_grants_recorded",
+        "session.tool_baseline",
+        "session.tool_update",
         "session.truncation",
         "system.message",
         "system.notification",
