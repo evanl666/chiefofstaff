@@ -218,15 +218,17 @@ sidebar its workers are rows like any other. A team's page is where you run it:
   and *Request changes* in place, *Retry* for a part that failed, *Nudge* for one held up by
   another's answer. Its bar has a segment per part and how long it has taken.
 - *Since you looked*: what changed across the parts since you last had the page in sight (a
-  question, a part done, a PR merged, an answer between parts), on any tab; each jumps to its part.
+  question for you, a part done, a PR merged, a question between parts once it holds a part up,
+  an answer between parts; never a note), on any tab; each jumps to its part.
 - *The plan*: the parts in the order work moves (*Then, side by side*), on a rail, each by a short
   name and an avatar of its own, with its state in plain words, how long, what it made (its PR,
   its documents), one action and **⋯** (*Tell it…*, *Open its chat*, *Stop*, *Follow up…*,
   *Cancel this part…*). A part continued by a task for another of your requests says *Continued
   in “…” outside this team*; one that waits on it *Waiting on “…” (outside this team)*.
-- *So far*: what the team made (PRs, documents), what was decided (your decisions, answers
-  between parts) and what to watch out for (a question holding a part up, a result that won't
-  come). From 1100 px wide it takes Home's side panel while the page is open (Home's own panel,
+- *So far*: what the team made (PRs, documents), what was decided for this request (your
+  decisions made since you asked, answers between parts; one of yours from before that a part
+  relies on is under *Also applies*, folded, once) and what to watch out for (a question holding
+  a part up, a result that won't come, a change of yours a part hasn't confirmed). From 1100 px wide it takes Home's side panel while the page is open (Home's own panel,
   with *Needs you*, *Teams*, *Running*, *Monitoring*, *Recently finished* and *Artifacts*, comes
   back when you go Home); narrower, it is under the plan.
 - *Tell the team*: the composer on its page sends your word to the parts on its *To* line

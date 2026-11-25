@@ -7,18 +7,21 @@
   now says where your request stands and the one thing that moves it, done right there: a part's
   question with its options and your own answer, *Review* with *Accept* in place, *Retry* for a
   part that failed, *Nudge* for one held up by another's answer. *Since you looked* lists what
-  changed across the parts since you last had the page in sight, on any tab. *The plan* has the
-  parts in the order work moves, on a rail, each with its state, how long, what it made (its PR,
-  its documents), one action and **⋯** (tell it something, open its chat, stop, follow up,
-  cancel). *So far* keeps what the team made, what was decided and what to watch out for, in
-  Home's side panel from 1100 px wide (Home's own panel comes back when you go Home) and under
-  the plan below that. *Tell the team*, the composer on its page, sends your word to the parts
-  you choose, always named on its *To* line: a part at work reads it now, one not started gets it
-  when it starts, a done part only when you tick it (it reopens as a follow-up), and the Router
-  keeps one passive copy, never a turn of its own. Done, *Delivered* says what it came to, with
-  *Copy summary*. Things move only when something happens (a result travels down the rail to the
-  part waiting on it, a new line brightens for a moment), and nothing moves when your system asks
-  for less motion. What the parts told each other is folded at the bottom. The flow map is gone.
+  changed across the parts since you last had the page in sight, on any tab (a question between
+  parts once it holds a part up, never a note). *The plan* has the parts in the order work moves,
+  on a rail, each with its state, how long, what it made (its PR, its documents), one action and
+  **⋯** (tell it something, open its chat, stop, follow up, cancel). *So far* keeps what the team
+  made, what was decided for this request (a decision of yours from before it that a part relies
+  on only under *Also applies*, folded, and never waiting for a part to confirm it) and what to
+  watch out for, in Home's side panel from 1100 px wide (Home's own panel comes back when you go
+  Home) and under the plan below that. *Tell the team*, the composer on its page, sends your word
+  to the parts you choose, always named on its *To* line: a part at work reads it now, one not
+  started gets it when it starts, a done part only when you tick it (it reopens as a follow-up),
+  and the Router keeps one passive copy, never a turn of its own. Done, *Delivered* says what it
+  came to, with *Copy summary*. Things move only when something happens (a result travels down the
+  rail to the part waiting on it, a new line brightens for a moment), and nothing moves when your
+  system asks for less motion. What the parts told each other is folded at the bottom. The flow
+  map is gone.
 - **Home's Teams row says what changed.** What needs you, as before; otherwise the newest change
   and when (*Email answered Order page · 3 min ago*, stronger until you look), and once done the
   outcome (*Done · 3 PRs merged · 1 h 13 min*); the working parts' segments are gently alive.
