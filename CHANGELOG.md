@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+- **A team's page is where you run it.** It had the request, the one thing that needs you, a flow
+  map and what the parts handed each other: a pile to read, with nothing to do there. *The brief*
+  now says where your request stands and the one thing that moves it, done right there: a part's
+  question with its options and your own answer, *Review* with *Accept* in place, *Retry* for a
+  part that failed, *Nudge* for one held up by another's answer. *Since you looked* lists what
+  changed across the parts since you last had the page in sight, on any tab. *The plan* has the
+  parts in the order work moves, on a rail, each with its state, how long, what it made (its PR,
+  its documents), one action and **⋯** (tell it something, open its chat, stop, follow up,
+  cancel). *So far* keeps what the team made, what was decided and what to watch out for, in
+  Home's side panel from 1100 px wide (Home's own panel comes back when you go Home) and under
+  the plan below that. *Tell the team*, the composer on its page, sends your word to the parts
+  you choose, always named on its *To* line: a part at work reads it now, one not started gets it
+  when it starts, a done part only when you tick it (it reopens as a follow-up), and the Router
+  keeps one passive copy, never a turn of its own. Done, *Delivered* says what it came to, with
+  *Copy summary*. Things move only when something happens (a result travels down the rail to the
+  part waiting on it, a new line brightens for a moment), and nothing moves when your system asks
+  for less motion. What the parts told each other is folded at the bottom. The flow map is gone.
+- **Home's Teams row says what changed.** What needs you, as before; otherwise the newest change
+  and when (*Email answered Order page · 3 min ago*, stronger until you look), and once done the
+  outcome (*Done · 3 PRs merged · 1 h 13 min*); the working parts' segments are gently alive.
+- **Teams form as you would expect, with names you would write.** A part the Router replaces when
+  it re-plans stays in its team (it said "moved out"), and one it starts after a worker reports,
+  waiting on or working with a request's parts, joins that request's team (it was in none). A
+  team's name is your own words for the request (*Nightly export*, *给 Chief of Staff 做用户自定义
+  UI*), its parts' names short and whole (*Login page*, not *Page*), never cut inside a word or a
+  character, without "please", "帮我" or a pasted log.
+- How workers are linked, what the Router is given (its prompts and tools) and the data folder's
+  tables are as before; what you tell a team reaches its workers as your messages do. An earlier
+  version opens the folder as it was (a note kept for a part not started yet is simply not given
+  there).
+
 ## 0.1.59 (2026-11-26)
 
 Chief of Staff starts, and stops, however large a worker's Copilot session has grown.

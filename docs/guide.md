@@ -202,24 +202,51 @@ sides of one change, a value one finds that another uses, a part that starts onc
 done), those parts are a team, named for your request (*Ship checkout v2 for acme-shop*). Only
 the tasks made for that one message and linked on purpose (one works with or waits on another,
 or does another's instead) make one: workers that only talk, work on another of your requests or
-were started on their own never do. *Teams*, above *Running*, has a row per team: its request, a
-bar with a segment per part, where it stands in a calm line (*1 working · 1 waiting on a teammate
-· 1 up next*, *Waiting on you · review UI*) and how many parts are done (*1/3*); in the sidebar
-its workers are rows like any other. A team's page says what it's for (*For your
-request at 9:12: …*), where it stands (*Working · 1 of 4 parts done · started 9:12*), the one
-thing that needs you if there is one, and a map: a node per part, by a short name from its task
-(each its own in the team, with an avatar of its own) and what it is doing, and one labelled
-line per pair (*result ✓ · told*, *asked · 12 min*); the map in words too, for a screen reader,
-and *All N parts* as a table beyond eight. Below it, *What they handed each other*, newest
-first (*API → UI · note*, by the parts' short names, titled by its first sentence), with *All*,
-*Waiting*, *Questions* and *Notes* from eight entries on. A part continued by a task for another
-of your requests says *Continued in “…” outside this team* (a link) and counts as finished; one
-that waits on it says *Waiting on “…” (outside this team)*. A team's state is what Home's own
-rows say (a part waiting on your review or your answer has the team waiting on you), in the
-same words on its row and its page. Once every part is done its row says so,
-quietly (*Done · 3 parts · 1 h 40 min*), and stays until you've seen it; it leaves ten minutes
-later (at once with its ×), and *Past teams · N* lists the earlier ones. Teams change only what you see: how workers are linked,
-what they are told and what the Router gets are as before.
+were started on their own never do. A part the Router replaces when it re-plans stays in its
+team; one it starts after a worker reports, waiting on or working with a request's parts, joins
+that request's team. A team's name is your own words for the request (*Nightly export*), its
+parts' names short and whole (*Login page*, *Token writer*), never cut inside a word.
+
+*Teams*, above *Running*, has a row per team: its request, a bar with a segment per part (the
+working ones gently alive), what needs you if anything does (*Waiting on you · answer UI*), else
+the newest change and when (*Email answered Order page · 3 min ago*, in stronger ink until you
+look) and, once every part is done, the outcome (*Done · 3 PRs merged · 1 h 13 min*); in the
+sidebar its workers are rows like any other. A team's page is where you run it:
+
+- *The brief*: where your request stands in a sentence and the one thing that moves it, done
+  right there: a part's question with its options (and your own answer), *Review* with *Accept*
+  and *Request changes* in place, *Retry* for a part that failed, *Nudge* for one held up by
+  another's answer. Its bar has a segment per part and how long it has taken.
+- *Since you looked*: what changed across the parts since you last had the page in sight (a
+  question, a part done, a PR merged, an answer between parts), on any tab; each jumps to its part.
+- *The plan*: the parts in the order work moves (*Then, side by side*), on a rail, each by a short
+  name and an avatar of its own, with its state in plain words, how long, what it made (its PR,
+  its documents), one action and **⋯** (*Tell it…*, *Open its chat*, *Stop*, *Follow up…*,
+  *Cancel this part…*). A part continued by a task for another of your requests says *Continued
+  in “…” outside this team*; one that waits on it *Waiting on “…” (outside this team)*.
+- *So far*: what the team made (PRs, documents), what was decided (your decisions, answers
+  between parts) and what to watch out for (a question holding a part up, a result that won't
+  come). From 1100 px wide it takes Home's side panel while the page is open (Home's own panel,
+  with *Needs you*, *Teams*, *Running*, *Monitoring*, *Recently finished* and *Artifacts*, comes
+  back when you go Home); narrower, it is under the plan.
+- *Tell the team*: the composer on its page sends your word to the parts on its *To* line
+  (*Change ▾* chooses): a part at work reads it now, one not started gets it when it starts, a
+  done part only when you tick it (it reopens as a follow-up). Each is told who else got it; the
+  Router keeps one copy for its next turn, never a turn of its own. The line under the plan says
+  where each has it (*✓ read*, *when it starts*).
+- Done, the brief is *Delivered*: what it came to in a line (*Done in 1 h 13 min: 3 PRs merged
+  and 2 decisions kept.*) with *Copy summary* (Markdown: what it made, what was decided, a line
+  per part), and *So far* becomes *Delivered*.
+- What the parts told each other is folded at the bottom (*API → UI · note*, by the parts' short
+  names, titled by its first sentence).
+
+Things move only when something happens: a result travels down the rail to the part waiting on
+it, a changed line brightens for a moment; nothing moves when your system asks for less motion.
+A team's state is what Home's own rows say (a part waiting on your review or your answer has the
+team waiting on you), in the same words on its row and its page. A done team's row
+stays until you've seen it; it leaves ten minutes later (at once with its ×), and *Past teams ·
+N* lists the earlier ones. How workers are linked and what the Router is given are as before;
+what you tell a team reaches its workers as your own messages do.
 
 Workers are named in the Router's lines and in each other's chats by a short name (from their
 first task, *Token Scout*; yours in its **⋯** → *Short name*). In a worker's chat, *Work* shows
