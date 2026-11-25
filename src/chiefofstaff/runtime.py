@@ -6271,6 +6271,7 @@ class Runtime:
         state.steps.clear()  # A disconnected session is in no step.
         state.mcp_calls.clear()
         state.unread.clear()  # What it was sent is resent or replayed, not waiting in a turn.
+        state.unread_orders.clear()
         state.unseen.clear()
         state.echo_wait.clear()
         state.held = False  # Its next connection holds nothing.

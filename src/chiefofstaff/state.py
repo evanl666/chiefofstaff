@@ -87,6 +87,11 @@ class SessionState:
     # they are about ("" for a message about none) and the first message's id (to send them
     # again if its turn is stopped before it saw them).
     unread: dict[str, tuple[str, tuple[str, ...], int]] = field(default_factory=dict)
+    # Of those, the ones that ask something of it (delivery.instructs: the Router's, the
+    # owner's, the owner's reason for what they did with its draft), by the same digest: the
+    # newest such message's text and the tasks they are about. Only these hold its report
+    # back (E145).
+    unread_orders: dict[str, tuple[str, tuple[str, ...]]] = field(default_factory=dict)
     # Its connection has shown a message it received (so unread ones can be told apart).
     echoes: bool = False
     # Every message sent to it that its conversation has not shown yet, even one that starts a

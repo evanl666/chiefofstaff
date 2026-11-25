@@ -935,8 +935,9 @@ function homeEntry(message) {
       if (meta.agent_refused) return refusalCard(text, meta, time);
       if (meta.role_wait) return roleWaitCard(text, meta, time);
       // "Started “X” · new because …": the why is on hover (a " · " in the title is the title's).
+      // A second worker started from a busy one is a line of its own, marked ⑂ (E148).
       const started = /^(Started|New task|Continued|Restarted)/.test(text);
-      const node = eventLine({ mark: started ? "" : "·", kind: started ? "started" : "", text: headOf(text), time, view: meta.session_id ? () => focusTask(meta.task_id || "", meta.session_id) : null });
+      const node = eventLine({ mark: meta.fork ? "⑂" : started ? "" : "·", kind: meta.fork ? "fork" : started ? "started" : "", text: headOf(text), time, view: meta.session_id ? () => focusTask(meta.task_id || "", meta.session_id) : null });
       node.querySelector(".what").title = text;
       // Its agent (while more than one is on): Restart on another before its first step.
       const chip = /^(Started|Queued|Restarted)/.test(text) && meta.session_id ? agentChip(meta.session_id) : null;
@@ -1611,7 +1612,8 @@ const ROUTING = /^(Started|Queued|New task|Continued|Told)\b/;
 function foldOf(message) {
   if (state.selected !== HOME || message.session_id !== routerId()) return "";
   if (message.kind === "peer") return "team";
-  return message.kind === "notice" && message.meta?.session_id && ROUTING.test(message.text || "") ? "routing" : "";
+  // A second worker started from a busy one is never folded away (E148: it went unseen).
+  return message.kind === "notice" && message.meta?.session_id && !message.meta.fork && ROUTING.test(message.text || "") ? "routing" : "";
 }
 // A line that may start a fold says its kind (not in the page: a line alone is as it was);
 // a fold says it in data-fold.

@@ -7038,12 +7038,17 @@ async def round_fork(runtime, browser, failures: list[str]):
             await expect(page.locator("#application")).to_be_visible()
             if width < 1100:
                 await page.locator("#home-tabs [data-tab=chat]").click()
+            # One line of its own, marked ⑂, saying why: never folded away with the routing
+            # lines around it (E148: the "New task" line just before folded it out of sight).
             line = page.locator(
-                "#timeline .event", has_text="Started a second worker for “Export to Parquet”"
+                "#timeline .event", has_text="(it was busy) for “Export to Parquet”"
             )
             await expect(line.locator(".what")).to_have_text(
-                f"Started a second worker for “Export to Parquet” (context from “{origin}”)"
+                f"Started a second worker from “{origin}” (it was busy) for “Export to Parquet”"
             )
+            await expect(line.locator(".mark")).to_have_text("⑂")
+            await expect(line).to_be_visible()
+            assert not await line.evaluate("n => !!n.closest('[data-fold]')"), "not folded"
             # The sidebar: right under the busy worker, nested on a thin line.
             items = page.locator("#session-list .item")
             listed = await items.evaluate_all(

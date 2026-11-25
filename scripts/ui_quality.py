@@ -1414,7 +1414,7 @@ async def fork_views(runtime, browser, quality: Quality):
         await page.goto(f"{BASE}/#token={TOKEN}")
         await expect(page.locator("#application")).to_be_visible()
         line = page.locator("#timeline .event", has_text="Started a second worker")
-        # In a run of the Router's routing lines it is folded (0.1.53): open the fold.
+        # A line of its own since 0.1.58 (E148); folded with the routing lines before: open it.
         fold = page.locator("#timeline .fold.routing", has_text="Started a second worker")
         for width in WIDTHS:
             await page.set_viewport_size({"width": width, "height": 900})

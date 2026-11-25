@@ -381,6 +381,7 @@ class Delivery:
         state.echo_wait.clear()  # Sent again with its next message, under a new digest.
         firsts = [entry[2] for entry in state.unread.values()] + list(state.unseen.values())
         state.unread.clear()
+        state.unread_orders.clear()
         state.unseen.clear()
         if not firsts:
             return False
@@ -564,6 +565,12 @@ class Delivery:
                 tuple(m["meta"].get("task_id") or "" for m in pending),
                 pending[0]["id"],
             )
+            if orders := [m for m in pending if instructs(m)]:
+                # What of it asks something of it: what a report before it is held back for.
+                state.unread_orders[marker["digest"]] = (
+                    orders[-1]["text"][:300],
+                    tuple(m["meta"].get("task_id") or "" for m in orders),
+                )
         self.store.set(f"prevsent:{session_id}", str(mark))  # To send again after a failure.
         self.store.set(f"sent:{session_id}", str(pending[-1]["id"]))
         if digest_upto:
@@ -959,6 +966,21 @@ class Delivery:
 
 def digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:24]
+
+
+def instructs(message: dict) -> bool:
+    """Whether a message to a worker asks something of it (E145): the Router's or the owner's
+    own (not a check-back's wake, nor the results of tasks it waited for), or what the owner
+    did with its draft when they said why. Not a thread's or PR's news (untrusted), a peer's
+    note, or another of Chief of Staff's wakes and notices: a report written before it reached
+    the worker is no less its report."""
+    meta = message["meta"]
+    prompt = str(meta.get("prompt") or "")
+    if prompt.startswith(('<message from="router"', '<message from="owner"')):
+        return not meta.get("check_back") and not prompt.startswith(
+            '<message from="router" type="results"'
+        )
+    return bool(meta.get("owner_said"))
 
 
 async def queue_holds(session) -> bool:
