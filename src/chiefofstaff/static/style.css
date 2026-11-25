@@ -1429,6 +1429,8 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tp-line .pair .pa { position: absolute; width: 16px; height: 16px; font-size: 9px; box-shadow: 0 0 0 1.5px var(--card); }
 .tp-line .pair .pa:first-child { left: 0; top: 0; }
 .tp-line .pair .pa:last-child { right: 0; bottom: 0; }
+/* A state's ring is the plan's: the small avatars of a line, the To line and notes have none. */
+:is(.tp-line, .tp-talk, #composer-to, .tp-to-menu) .pa .ring { display: none; }
 .tp-line .you { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--bubble); color: var(--soft); font-size: 10px; font-weight: 600; }
 .tp-line .what { min-width: 0; }
 .tp-line .what .main { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
@@ -1453,7 +1455,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tp-panel-head h2 { margin: 0; font-size: var(--title); font-weight: 600; }
 .tp-panel-head span { font-size: var(--small); color: var(--muted); }
 .tp-sofar-panel .items { gap: 0; }
-.tp-sofar-panel .tp-line { margin: 0 -6px; align-items: start; }
+.tp-sofar-panel .tp-line { align-items: start; }
 .tp-sofar-panel .tp-line > :is(.pa, .pair, .you) { margin-top: 2px; }
 .tp-sofar-panel .tp-line .what .main { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .tp-sofar-panel .tp-line .what .sub { white-space: normal; }

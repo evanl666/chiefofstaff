@@ -212,7 +212,7 @@ def test_every_read_is_by_a_key_or_an_index(harness):
         "SELECT l.task_id, l.ack, d.id, d.text, d.status, d.replaces, d.created_at "
         "FROM task_decisions l JOIN decisions d ON d.id=l.decision_id WHERE l.task_id IN (?,?)",
         "SELECT id, kind, meta, created_at FROM messages WHERE id IN (?,?)",
-        "SELECT id, status, closed FROM questions WHERE id IN (?,?)",
+        "SELECT id, status, asked, closed FROM questions WHERE id IN (?,?)",
     ]
     for sql in reads:
         plan = " | ".join(

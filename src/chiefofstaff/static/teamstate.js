@@ -298,10 +298,11 @@ export function briefOf(team, st, now = Date.now()) {
     const after = waitingOn(team, st.held.id, st).map(name);
     return { kind: "held", part: st.held, question: st.held.held, to: name(st.held.held.to), waited: st.held.held.minutes, unblocks: after.length ? `${listed(after)} can't start until ${st.held.name} is done.` : "" };
   }
-  const working = st.parts.filter((part) => part.state === "working" || part.state === "blocked");
+  const working = st.parts.filter((part) => part.state === "working");
+  const waiting = st.parts.filter((part) => part.state === "blocked").map((part) => `${part.name} waits on ${name(part.held.to)}'s answer`);
   const next = st.parts.find((part) => part.state === "watching" && part.next);
   const words = next ? startsWords(team, st, next) : "";
-  return { kind: "calm", working: working.map((part) => part.name), next: next || null, nextWords: words === "Up next" ? "" : words.charAt(0).toLowerCase() + words.slice(1) };
+  return { kind: "calm", working: working.map((part) => part.name), waiting, next: next || null, nextWords: words === "Up next" ? "" : words.charAt(0).toLowerCase() + words.slice(1) };
 }
 
 // A part's one status line on the plan, in plain words (never an internal word). `ask`: the
