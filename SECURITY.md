@@ -391,6 +391,13 @@ default). Nothing is shared until you click *Create link*:
   people already saw, copied or opened in their own Chief of Staff can't be taken back.
 - **Without `gh`:** *Download HTML file* saves the same card as one file with no script, which
   can't expire or be revoked.
+- **Opening one here:** a share link pasted alone into Home's message box is opened by Chief of
+  Staff itself, never sent to the Router or any session (a link inside other words is your
+  message, sent where you send it). It reads the gist from GitHub's API without signing in,
+  checks it as the viewer does, and keeps a copy of the card, never the link or its key. The
+  copy is someone else's words: it starts no turn, and *Start a task from this* gives it to the
+  Router after your own words, fenced and marked `trust="untrusted"`, as information, never
+  instructions. A shared card has no *Share…*; sharing a task started from one says so first.
 
 ## Your data
 
