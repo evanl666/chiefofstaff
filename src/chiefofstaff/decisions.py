@@ -508,10 +508,11 @@ class Decisions:
         choice = clean(decision.text, 500)
         if not choice:
             raise ValueError("Pick an option or write your decision.")
-        if target.get("options") and not self.named(target, choice):
-            # Words that pick none of its options (E154: "try more variants first" replaced the
-            # decision in force and reopened six finished tasks): the owner's note to the
-            # workers that asked; what was decided stays.
+        if kept and target.get("options") and not self.named(target, choice):
+            # A reconsideration answered in words that pick none of its options (E154: "try
+            # more variants first" replaced the decision in force and reopened six finished
+            # tasks): the owner's note to the workers that asked; what was decided stays. On a
+            # first card, their words are their decision.
             return await self.note(card, kept, choice)
         tasks = [asker["task_id"] for asker in target["askers"] if asker["task_id"]]
         replaces = [self.current(target["replaces"])["id"]] if target.get("replaces") else []
@@ -558,21 +559,18 @@ class Decisions:
         await self.tell_askers(card, text, f"Kept: {short}", kept["id"], f"Kept: {short}")
         return card
 
-    async def note(self, card: dict, kept: dict | None, said: str) -> dict:
-        """The owner answered a card in words that pick none of its options: their note to the
-        workers that asked (an instruction), not a decision; a decision in force stays."""
-        outcome = "Kept your decision; sent your note" if kept else "Sent your note"
-        card = self.close(card["id"], "answered", outcome)
+    async def note(self, card: dict, kept: dict, said: str) -> dict:
+        """The owner answered a reconsideration in words that pick none of its options: their
+        note to the workers that asked (an instruction), not a decision; the decision in force
+        stays."""
+        card = self.close(card["id"], "answered", "Kept your decision; sent your note")
         text = (
-            f"The owner picked none of the options: {said}"
-            + (f"\nTheir decision stays in force: {kept['text']}." if kept else "")
-            + "\nTake this as their instruction and go on; if a decision is still needed after "
-            "it, ask again."
+            f"The owner picked none of the options: {said}\nTheir decision stays in force: "
+            f"{kept['text']}.\nTake this as their instruction and go on; if a decision is still "
+            "needed after it, ask again."
         )
         short = said if len(said) <= 80 else said[:79].rstrip() + "\u2026"
-        await self.tell_askers(
-            card, text, f"Note: {said}", kept["id"] if kept else "", f"Your note: {short}"
-        )
+        await self.tell_askers(card, text, f"Note: {said}", kept["id"], f"Your note: {short}")
         return card
 
     @staticmethod
@@ -723,12 +721,11 @@ class Decisions:
         )
         for card in left:
             target = card["target"]
-            if target.get("options") and not self.named(target, text):
-                # Not one of its options: their chat with it, the decision as it was (E154).
-                kept = "Kept your decision; sent your note" if target.get("replaces") else ""
-                outcome = kept or "Sent your note"
+            if target.get("replaces") and target.get("options") and not self.named(target, text):
+                # A reconsideration, and none of its options: their chat with it, the decision
+                # as it was (E154).
                 if self.store.draft(card["id"])["status"] != "pending":
-                    self.close(card["id"], "answered", outcome)
+                    self.close(card["id"], "answered", "Kept your decision; sent your note")
                 continue
             tasks = [
                 asker["task_id"]

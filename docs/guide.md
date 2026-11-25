@@ -763,9 +763,8 @@ notification:
 
 - **Decisions**: a choice that is yours (scope, a trade-off, a risky change such as a migration).
   The card says why it comes up, the options and what each means, and what the worker
-  recommends; pick one, or write your own decision (on a card with options, words that name
-  none of them are a note to the worker: it goes on with them as your instruction, and
-  nothing is decided). Workers that hit the same question wait on the same card, and one
+  recommends; pick one, or write your own decision. Workers that hit the same question wait on
+  the same card, and one
   answer reaches all of them, at once: a worker that asked and kept at other parts of its
   task reads it in that same turn. A worker that asks again in other words while its card
   waits updates that card (it says *updated 10:42*) instead of making another. Answering in the worker's chat answers its card
@@ -896,8 +895,10 @@ before reading a newer message of yours or the Router's about its task: it reads
 
 When what it found since calls one of your decisions into question, its card says *You answered
 this at 10:02 (“…”). Asked again because: …*. **Keep** leaves your answer in force (the worker
-goes on with it), and so does *Not now*, for now; picking one of its options replaces that
-decision (one decision stays in force), and every other task that relied on it is told, as
+goes on with it), and so does *Not now*, for now; words that name none of its options are a note
+to the worker (it goes on with them as your instruction, your answer still in force); picking
+one of its options replaces that decision (one decision stays in force), and every other task
+that relied on it is told, as
 above: each worker once, however many of its tasks rely on it; a finished task reopens only when
 the answer itself changed, and changes of one decision within two hours are one *Decision
 changed* card. Decided another way meanwhile (told the Router, say), the card leaves and its task

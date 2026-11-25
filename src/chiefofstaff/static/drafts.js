@@ -326,8 +326,8 @@ function decisionCard(draft) {
   // Asked again by its worker with what it found since: the same card, saying when.
   if (target.updated_at) node.querySelector(":scope > .head").append(el("span", { class: "updated", text: `updated ${clock(target.updated_at)}` }));
   const decide = decider(draft, node, error);
-  // Words that name none of its options are a note to the worker, not a decision (the server
-  // says which it was).
+  // On a reconsideration, words that name none of its options are a note to the worker, not a
+  // decision (the server says which it was).
   const outcome = (result) => (/sent your note/i.test(result?.outcome || "") ? `${result.outcome}.` : "Decided.");
   const answer = (text) => text.trim() && decide({ action: "answer", text }, outcome);
   const lowered = (target.recommendation || "").toLowerCase();
@@ -356,11 +356,14 @@ function decisionCard(draft) {
   }
   if (!answered && target.precedents?.length) node.append(el("div", { class: "precedents", html: inlineHtml(`You decided before: ${target.precedents.join(" · ")}`) }));
   const options = Boolean(target.options?.length);
+  // On a reconsideration, words that name none of its options are a note (the answer stays);
+  // on a first card, they are the decision.
+  const notes = Boolean(answered && options);
   const field = () => {
-    const label = options ? "Your decision, or a note" : "Your decision";
+    const label = notes ? "Your decision, or a note" : "Your decision";
     const input = keepTyped(el("input", { placeholder: label, autocomplete: "off", "aria-label": label }), `${draft.id}:decision`);
     input.addEventListener("keydown", (event) => submits(event) && answer(input.value));
-    return [input, el("button", { type: "button", class: answered ? "text" : "secondary", text: options ? "Send" : "Decide", onclick: () => answer(input.value) })];
+    return [input, el("button", { type: "button", class: answered ? "text" : "secondary", text: notes ? "Send" : "Decide", onclick: () => answer(input.value) })];
   };
   // Typed into before it was drawn again: the field is open with it.
   const open = options && !typed.get(`${draft.id}:decision`) ? later("Something else…", field) : field();

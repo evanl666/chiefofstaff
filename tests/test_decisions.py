@@ -839,13 +839,31 @@ async def test_e154_words_that_pick_no_option_are_a_note_and_the_decision_stays(
     [now] = runtime.decisions.active()
     assert now["text"] == "0.5 or 0.25, then? → 0.25, please", "words that name one decide"
 
-    plain = await spawn(runtime, harness.router_id, "Docs", why_new="separate")
-    await call_tool(runtime, "ask_decision", plain["session_id"], question="Docs in English?",
-                    options=[{"choice": "English"}, {"choice": "Both"}], distinct=True)  # fmt: skip
+
+async def test_e154_on_a_first_card_the_owners_own_words_are_the_decision(harness):
+    """The owner's decision (2026-11-25): only a reconsideration keeps its decision against
+    words that name no option. On a first card, nothing in force, their words decide, as before
+    (fewer clicks: no "Decide or just a note")."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Docs")
+    sid = worker["session_id"]
+    await call_tool(runtime, "ask_decision", sid, question="Docs in English or in both languages?",
+                    options=[{"choice": "English"}, {"choice": "Both"}])  # fmt: skip
     [card] = harness.store.drafts()
-    card = await runtime.drafts.resolve(card["id"], DraftDecision(action="answer",
-                                                                  text="Ask the PM."))  # fmt: skip
-    assert card["outcome"] == "Sent your note" and len(runtime.decisions.active()) == 1
+    said = "Spanish only, for now"
+    card = await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text=said))
+    await settle(runtime)
+    [decision] = runtime.decisions.active()
+    assert card["outcome"] == said
+    assert decision["text"] == f"Docs in English or in both languages? → {said}"
+    assert f"The owner decided: {said}" in harness.session(sid).sent[-1]
+
+    other = await spawn(runtime, harness.router_id, "Docs site", why_new="separate")
+    await call_tool(runtime, "ask_decision", other["session_id"], question="Light or dark theme?",
+                    options=[{"choice": "Light"}, {"choice": "Dark"}])  # fmt: skip
+    await runtime.owner_send(other["session_id"], "Follow the system setting.")
+    assert any(d["text"] == "Light or dark theme? → Follow the system setting."
+               for d in runtime.decisions.active()), "in its chat too"  # fmt: skip
 
 
 async def test_e154_a_change_tells_each_worker_once_and_reopens_only_on_a_new_value(harness):

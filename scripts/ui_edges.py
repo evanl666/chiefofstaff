@@ -6516,12 +6516,14 @@ async def round_decision_steer(runtime, browser, failures: list[str]):
         runtime.publish_state()
         return card_of(worker)["id"]
 
+    # (Made before the page loads: it is in the state the page reads first.)
+    first = await reconsider()
     context = await browser.new_context(viewport={"width": 1280, "height": 900})
     page = await context.new_page()
     page.on("pageerror", lambda error: failures.append(str(error)))
     await page.goto(f"{BASE}/#token={TOKEN}")
     await expect(page.locator("#application")).to_be_visible()
-    asked = page.locator(f'#needs .card.draft[data-id="{await reconsider()}"]')
+    asked = page.locator(f'#needs .card.draft[data-id="{first}"]')
     await expect(asked).to_be_visible(timeout=15000)
     await expect(asked.locator(".answered")).to_have_text(re.compile(
         r"^You answered this at .+ \(“Rule A”\)\. Asked again because: Rule A still ties 61% of "

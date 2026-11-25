@@ -87,11 +87,12 @@ Your answer to a decision card reaches its worker at once, and a decided questio
   force and the worker goes on with it. Picking one of its options changes it. *Not now* on a
   reconsideration told the worker to go on with its recommendation, which there is the change:
   it now keeps your answer, for now.
-- **Words that pick no option are a note, not a decision.** "Try more variants with a lower
-  weight first" on a reconsideration replaced the decision in force, reopened six finished
-  tasks and sent "Decision changed" six times. Only a picked option, or words that clearly name
-  one, decide; other words reach the workers that asked as your note, and the card says *Kept
-  your decision; sent your note*.
+- **Words that pick no option on a reconsideration are a note, not a decision.** "Try more
+  variants with a lower weight first" on a reconsideration replaced the decision in force,
+  reopened six finished tasks and sent "Decision changed" six times. There, only a picked
+  option, or words that clearly name one, change your decision; other words reach the workers
+  that asked as your note, and the card says *Kept your decision; sent your note*. On a first
+  card your own words are your decision, as before.
 - **A changed decision tells each worker once.** One message for each worker, however many of
   its tasks rely on the decision; a finished task reopens only when the answer itself changed
   (not for the same answer in other words); changes of one decision within two hours are one
