@@ -169,6 +169,7 @@ name = "chiefofstaff"
 version = "0.1.57"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "github-copilot-sdk" },
     { name = "httpx" },
@@ -199,6 +200,7 @@ dev = [
 requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.2.182,<0.3" },
     { name = "claude-agent-sdk", marker = "extra == 'dev'", specifier = ">=0.2.182,<0.3" },
+    { name = "cryptography", specifier = ">=44,<52" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "github-copilot-sdk", specifier = ">=1.0.28,<1.0.29" },
     { name = "httpx", specifier = ">=0.28,<1" },

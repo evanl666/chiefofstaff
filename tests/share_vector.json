@@ -1,0 +1,106 @@
+{
+  "about": "Share links format 1, sealed by WebCrypto (site/s/sharecrypto.js sealWith): Python must make the same bytes and open them. The key and nonce as bytes.",
+  "key_bytes": [
+    3,
+    10,
+    17,
+    24,
+    31,
+    38,
+    45,
+    52,
+    59,
+    66,
+    73,
+    80,
+    87,
+    94,
+    101,
+    108,
+    115,
+    122,
+    129,
+    136,
+    143,
+    150,
+    157,
+    164,
+    171,
+    178,
+    185,
+    192,
+    199,
+    206,
+    213,
+    220
+  ],
+  "nonce_bytes": [
+    5,
+    18,
+    31,
+    44,
+    57,
+    70,
+    83,
+    96,
+    109,
+    122,
+    135,
+    148
+  ],
+  "owner_id": 4242001,
+  "payload": {
+    "v": 1,
+    "kind": "card",
+    "created_at": "2026-11-22T22:05:00Z",
+    "expires_at": "2026-11-29T22:05:00Z",
+    "by": {
+      "login": "jordan",
+      "id": 4242001
+    },
+    "app": "0.1.58",
+    "card": {
+      "title": "Fix the flaky login test",
+      "status": "review",
+      "status_words": "Ready for review",
+      "finished_at": "2026-11-22T21:58:00Z",
+      "result": "Fixed it: `app/login.py` takes the clock — café, 中文, 🦆, \"quotes\", <b>tags</b>, \\ and \n new lines.",
+      "verdict": "verified",
+      "criteria": [
+        {
+          "text": "`uv run pytest -q` passes",
+          "state": "verified",
+          "check": "uv run pytest -q"
+        }
+      ],
+      "checks": [
+        {
+          "label": "tests",
+          "command": "uv run pytest -q",
+          "outcome": "passed",
+          "failed_before": true,
+          "runs": 3
+        }
+      ],
+      "changes": {
+        "files": 1,
+        "insertions": 1,
+        "deletions": 1,
+        "commits": 1
+      },
+      "at": "75dc3be",
+      "prs": [
+        {
+          "label": "acme/api#418",
+          "url": "https://github.com/acme/api/pull/418",
+          "title": "Inject the clock",
+          "state": "OPEN",
+          "checks": "passing",
+          "review": ""
+        }
+      ],
+      "flags": []
+    }
+  },
+  "blob": "AQUSHyw5RlNgbXqHlEuZPP7gu3whFzLt9A9Sy1_R5w5gxqGhowRBg6QO3_6Wb9hq3HZojxjawztRnUl-SB4M9U7Owspt1i-N0JWy-DHzHn8_5j_iLk4UpkdXnclgkGloczEO2o_9GxcZ2bjtBdzEs9NIgqLafcIdc3TWsT0b92x8i4TYUYDaGbcU0hHYNqCK3TgaCdsc4GdmMd12sfdC2LwvP3OwcgAVvuWtcarhvKycvOAvHOVlAQs3FArdb73nyyo33kNDJtKHivpBIGnRmyuOOyxK_Qyez7neOHzqFM4jFI3-Z2f0z_jb3x_2-8A3zxSLFlc4HugtwRB-b-b6Y2bC9DXwHr071MAeigbsoLT0xrYcCD8EL-i6zRXz6OeE9rBnbQRJ3sUN6xqAORBh0ulFJFnaSs8BZIvIk5ZQBkGCbCIT8siDm-v8-EI1S_dFBlzPk75AYZLYQdUPmNUQx4mujGVW1A7JtIvIDojl_a43N1eBsb6i6mVlTdNpNEoNyZtztWXYofJpaU_khGsp05P4Rr2SXWTR0LRBXfceOQh1BkYDllhYK8lKhlou0H5s5Xw9CQJkUyILhh-3MDsxDb7PvImLvQdgUqByAQGzrjbsPciOXq0gKADdJZ6lbBbI2Knc7yiqKVDD1AyiV6J00LoX5CQ2ikPNuZ5RSKOaOJHyfo9ka-bZiWbMTFnvzGA1K1CjPhecjEtgHrqlaVPFYFIingxCHcu9kWKDo1ZIGwkf9UxNBMtQhptJc6RF-qe-nDEnjuhENje9-cZEPJ4FQZBI1Te2OESq6a-p9ZJKsKa7uo_6-3WahkGTJEY8lS90m3USdqlBT5l8qkK6ry6yakMCfsOXfaKI1ML-uZM4Ha8yVpa4n_2E18o6c6LtLp0sdbLW4O9CoQ1ADFgK4p4ckqcR7Mr7IgqKvta67Me2-cxeIYnwntB6tfTetailaQKQU_RQEblcvUOiMPrVaTrXWuoAGoO5fG3Qx_SAWYWVD1AR2PlIOu3SafeGygyxawZOKKPsckiDyiX6JQ0os5HUKkKqEC90cIC-bPkcBsUmtJWZsTdCW61uCvc0JslQtvZApQZT56yqtGqJEkOxn3goBKoeAfPFaDs93eDDnIkuNQzZFvp_Vm7JWXIsNCYGhuPG87NzgobNDYKcGm33VVC4b2DfdvXKqdDMdLH0OE6P"
+}
