@@ -547,6 +547,29 @@ FIXES: list[Allow] = [
     # 0.1.58 (QA E141): who accepted a task (the owner, or a report they read settled for them)
     # is kept, so that the Router is told "accepted by the owner" only of what the owner accepted.
     Allow("E141: who accepted a task", data=r"\.db\.kv\.acceptedby:<task-\d+>$"),
+    # 0.1.59, team-page-v4 (phase 1, "Run the team"): the team page, Home's Teams row and the
+    # team send path, by name. The Router's prompts and tool schemas are the same (its copy of
+    # what the owner told a team is the to-worker kind it already knows, deferred: no turn).
+    Allow(
+        "the team page: the brief, the plan on its rail, So far in Home's side panel, Delivered, "
+        "Tell the team's To line",
+        element="#timeline .team-page, #panel .tp-sofar-panel, #composer-to",
+        views=r"^team",
+    ),
+    Allow(
+        "Home's Teams row: the newest change, the outcome when done, live segments",
+        element="#tasks-teams .team2-row",
+        views=r"^home",
+    ),
+    Allow(
+        "the team send path: what the owner told a team, a note for a part not started yet, "
+        "the owner's last look (passive marks)",
+        data=r"\.db\.kv\.(teamtells|teamnote|teamlook):",
+    ),
+    Allow(
+        "the team send path: the team and parts a message went to, in its meta",
+        data=r"messages.*\.meta\.(team|to_parts|to_title)$",
+    ),
     # 0.1.57 (owner report): an answer the owner asked for (the Router asked a worker for them,
     # or they asked it on Home) stands apart on Home: an Answer label, its worker's short name
     # and its first line in the text's colour (was "Answer/Update from “<task>”: …", muted).
