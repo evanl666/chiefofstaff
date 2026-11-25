@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Share a finished card as a link.** *Share…* in a finished card's ⋯ menu (right after *Copy
+  report*) shows the card exactly as people with the link will see it; tokens, keys, private or
+  internal addresses, Slack links and email addresses are in red, to remove or keep, and *Create
+  link* waits until each is decided (paths on your computer are shortened by themselves; the
+  conversation, the changes themselves and cost are never shared). The link works for 1, 7 or 30
+  days (7 by default): the card is encrypted (AES-256-GCM) in a secret gist of your GitHub
+  account, made with `gh`, and the key is only in the link, so GitHub can't read it. Anyone
+  holding it opens it in a browser at `evanl666.github.io/chiefofstaff/s/`, with nothing to
+  install or sign in to. *Revoke* (on the card, or Settings → You → *Shared links*, shown only
+  while you have one) deletes the gist and the link stops working at once; it also ends by itself,
+  and Chief of Staff deletes the gist then. Without `gh`, *Download HTML file* saves the card as
+  one file.
 - **Your other Copilot sessions say where they stand again on Copilot CLI 1.0.115.** That
   version no longer records which app started a session you run in its terminal, and logs the
   tools a session's first model call is given: every such session showed no status (*Copilot
