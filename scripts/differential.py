@@ -533,6 +533,9 @@ FIXES: list[Allow] = [
         element=".avatar[class*=' c'], .pa[class*=' c'], .tv2-node[class*=' c']",
         views=r"^(home|sidebar)",
     ),
+    # 0.1.58 (QA E141): who accepted a task (the owner, or a report they read settled for them)
+    # is kept, so that the Router is told "accepted by the owner" only of what the owner accepted.
+    Allow("E141: who accepted a task", data=r"\.db\.kv\.acceptedby:<task-\d+>$"),
     # 0.1.57 (owner report): an answer the owner asked for (the Router asked a worker for them,
     # or they asked it on Home) stands apart on Home: an Answer label, its worker's short name
     # and its first line in the text's colour (was "Answer/Update from “<task>”: …", muted).
