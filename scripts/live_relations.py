@@ -422,22 +422,29 @@ async def r6_two_requests_talk(ctx: Ctx):
     )
     asker = await titled(ctx, later, "asker")
 
-    def open_question() -> str:
+    def its_question() -> tuple[str, str]:
         database = ctx.app.data / "chiefofstaff.db"
         with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
             found = db.execute(
-                "SELECT id FROM questions WHERE asker=? AND status='open'", (asker["session_id"],)
+                "SELECT id, status FROM questions WHERE asker=? ORDER BY asked DESC LIMIT 1",
+                (asker["session_id"],),
             ).fetchone()
-        return found[0] if found else ""
+        return (found[0], found[1]) if found else ("", "")
 
     async def asked():
-        return open_question() or None
+        return its_question()[0] and its_question()
 
-    question = await wait_for("the asker's question", asked, 600, ctx.app)
-    said = await ctx.app.post(f"/api/questions/{question}/nudge")
-    log(f"R6: nudged {question}: {said['said'][:120]!r}")
-    nudged = [m for m in await messages(ctx, keeper["session_id"]) if m["meta"].get("nudge")]
-    assert nudged and nudged[0]["meta"]["nudge"] == question, nudged
+    # A keeper whose sleep runs in the background (Copilot's async shell) may read and answer the
+    # question within seconds: then there is nothing left to nudge (Nudge's own path is covered by
+    # tests/test_teams*.py and ui_edges), and the check is that the two requests made no team.
+    question, status = await wait_for("the asker's question", asked, 600, ctx.app)
+    if status == "open":
+        said = await ctx.app.post(f"/api/questions/{question}/nudge")
+        log(f"R6: nudged {question}: {said['said'][:120]!r}")
+        nudged = [m for m in await messages(ctx, keeper["session_id"]) if m["meta"].get("nudge")]
+        assert nudged and nudged[0]["meta"]["nudge"] == question, nudged
+    else:
+        log(f"R6: the keeper answered {question} ({status}) before a nudge was needed")
     written = await file_of(ctx, later, "term.txt", "the asker's answer", 900)
     assert "west wind" in written.read_text().lower(), written.read_text()
     for task in (keeper["id"], asker["id"]):
