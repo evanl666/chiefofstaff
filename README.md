@@ -44,6 +44,8 @@ only with a decision to make or a draft to approve.
 - Shows what was observed next to each report (test runs, commits, diff, PR checks), and flags
   claims nothing backs.
 - Lets you comment on the diff, send it back, and open the PR in one click.
+- Shares a finished card as a link that expires: encrypted in a secret gist of yours, opened in
+  any browser, with what looks private marked for you to remove first.
 
 **Learns how you work**
 - Picks up how you write and what you keep asking for. Your style applies at once; habits wait

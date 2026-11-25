@@ -714,6 +714,26 @@ can't read says why, and the PR opens once you click *Open it anyway*). An open 
 task stays under *Monitoring* until the PR is merged or closed, and waits for your *Accept* until
 you give it (merging does not accept it).
 
+## Share links
+
+*Share…* in a finished card's ⋯ menu (right after *Copy report*) makes a link to the card that
+anyone holding it can open in a browser, with nothing to install or sign in to. The dialog shows
+the card exactly as they will see it. What looks private (tokens and keys, private or internal
+addresses, Slack links, email addresses) is in red: *Remove* or *Keep* each one; *Create link*
+waits until every one is decided. Paths on your computer are shortened by themselves. Never
+shared: the worker's conversation, the changes themselves, cost and Slack threads.
+
+Choose how long it works (1, 7 or 30 days) and *Create link*: the card is encrypted and kept in a
+secret gist of your GitHub account (the one signed in to `gh`; with several, you pick), and the
+link, copied for you, holds the key. Its page (`evanl666.github.io/chiefofstaff/s/`) decrypts it
+in the browser.
+
+*Share…* on a card with a live link shows it, to copy or *Revoke*; Settings → You → *Shared links*
+lists your links while you have any. Revoke deletes the gist and the link stops working at once;
+it ends by itself when it expires, and Chief of Staff deletes the gist then. What people have
+already seen or copied can't be taken back. Without `gh`, or for a copy that never ends,
+*Download HTML file* saves the card as one file.
+
 ## When a session needs you
 
 Sessions ask instead of guessing. Each request is a card under *Needs you*, with a desktop

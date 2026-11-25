@@ -364,6 +364,34 @@ replies for your PRs in their worker, and publishes only what you approve:
   than run without the keychain held, and a worker on another agent is never opened in a step's
   place.
 
+## Share links
+
+*Share…* on a finished card makes a link anyone holding it can open, for 1, 7 or 30 days (7 by
+default). Nothing is shared until you click *Create link*:
+
+- **What:** the card as its preview shows it, by an allow-list (title, result, its checks and
+  criteria, change counts, the commit it is about, its PRs and warnings), never the worker's
+  conversation, the changes themselves, cost, branches or paths on your computer (shortened to
+  the file's name). Tokens, keys, private and internal addresses, Slack links and email addresses
+  are marked in red, and *Create link* waits until you remove or keep each one; the server scans
+  again and refuses if the card changed since the preview.
+- **Where:** a secret gist of your own GitHub account, made with that account's own token from
+  `gh` (its identity checked, never another account), holding only ciphertext: AES-256-GCM with
+  a fresh key per link, bound to your GitHub user id, at most 64 KiB, with the expiry inside. The
+  key is only in the link's `#` fragment, which browsers never send to a server; GitHub sees
+  the gist's id, size and who fetched it, never the card.
+- **The viewer** (`https://evanl666.github.io/chiefofstaff/s/`, `site/` in this repository) is a
+  static page: it fetches the gist from GitHub's API and decrypts it in the browser, under a
+  Content-Security-Policy that allows its own scripts and GitHub's API only, with Trusted Types,
+  no cookies, storage, analytics or third-party code, and no card drawn inside another page's
+  frame. Who shared it is GitHub's owner of the gist, never what the card says.
+- **Ending:** *Revoke* (on the card's *Share…*, or Settings → You → *Shared links*) deletes the
+  gist, and the link stops working at once; at expiry Chief of Staff deletes it too (at its next
+  start if it was off), and an expired link opens nowhere even while its gist exists. What
+  people already saw, copied or opened in their own Chief of Staff can't be taken back.
+- **Without `gh`:** *Download HTML file* saves the same card as one file with no script, which
+  can't expire or be revoked.
+
 ## Your data
 
 Everything stays on your machine: a SQLite database and work folders in the data directory
