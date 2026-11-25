@@ -2686,7 +2686,8 @@ class Tools:
             # Busy with other work: a second worker with its context takes it now (forks.py).
             title = deliverable_title(params.title)
             self.check_title_style(title, "Not sent")
-            forked = await self.fork_task(caller, target, params, title, why_new, request)
+            busy = bool(self.runtime.forks.busy(target))
+            forked = await self.fork_task(caller, target, params, title, why_new, request, busy)
             if forked is not None:
                 return forked
             if parallel:
@@ -3097,11 +3098,12 @@ class Tools:
         title: str,
         why_new: str,
         request: str = "",
+        busy: bool = False,
     ) -> dict | None:
         """A new task for a busy worker, given to a second worker of it (forks.py: on its
         session's fork, or with a brief of its work), in a workspace made as for its own
         projects; None when that could not be done (nothing of it is left: the task then goes
-        to the busy worker, as before)."""
+        to the busy worker, as before). `busy`: that is why (not work wanted in parallel)."""
         spawn = SpawnWorker.model_construct(
             title=title,
             instructions=params.text,
@@ -3115,7 +3117,7 @@ class Tools:
             why_new=why_new,
             replaces=params.replaces,
         )
-        return await self.start_second(target, spawn, caller, title, request=request)
+        return await self.start_second(target, spawn, caller, title, request=request, busy=busy)
 
     def second_workspace(self, source: dict) -> dict:
         """A second worker works on the projects the worker it comes from works on, as it does:
@@ -3137,14 +3139,16 @@ class Tools:
         title: str,
         refused: bool = False,
         request: str = "",
+        busy: bool = False,
     ) -> dict | None:
         """A second worker of `source` for this task (forks.py); None when none could be made
         (nothing of it is left). `refused`: what keeps it from being made is said (raised), as
-        spawn_worker says it."""
+        spawn_worker says it. `busy`: it takes the task because `source` is busy."""
         forks = self.runtime.forks
         second = await forks.second(source, title)
         if second is None:
             return None
+        second.busy = busy
         try:
             # One that reads Slack holds Slack's words in its context: so does its fork.
             return await self.t_spawn_worker(
