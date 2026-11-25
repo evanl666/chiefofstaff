@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.57 (2026-11-25)
+
+No worker posts, reviews or merges on GitHub as you, yolo or not; Settings has one page for agents
+and models; a team is one of your requests, with clear names; the sidebar is one list of workers;
+an answer you asked for stands out; and Copilot CLI 1.0.115's sessions show their status again.
 
 - **Your other Copilot sessions say where they stand again on Copilot CLI 1.0.115.** That
   version no longer records which app started a session you run in its terminal, and logs the
