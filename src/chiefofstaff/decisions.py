@@ -435,7 +435,7 @@ class Decisions:
             "options": options,
             "recommendation": clean(params.recommendation, 300),
         }
-        target |= {key: value for key, value in changed.items() if value}
+        target |= {key: said for key, said in changed.items() if said}
         if target == card["target"]:
             return (
                 f"Card {card['id']} asks that already: it waits for the owner's decision. End "
@@ -569,7 +569,10 @@ class Decisions:
             + "\nTake this as their instruction and go on; if a decision is still needed after "
             "it, ask again."
         )
-        await self.tell_askers(card, text, f"Note: {said}", kept["id"] if kept else "", "")
+        short = said if len(said) <= 80 else said[:79].rstrip() + "\u2026"
+        await self.tell_askers(
+            card, text, f"Note: {said}", kept["id"] if kept else "", f"Your note: {short}"
+        )
         return card
 
     @staticmethod
@@ -1024,7 +1027,8 @@ class Decisions:
             one = its[0]["id"] if len(its) == 1 else None
             named = ", ".join(f"{task['id']} “{task['title']}”" for task in its)
             text = f"The owner decided: {decision['text']} ({decision['id']}). Your task"
-            text += f"{'s' if len(its) > 1 else ''} {named} rely on it: work to it."
+            text += f"s {named} rely" if len(its) > 1 else f" {named} relies"
+            text += " on it: work to it."
             if settled:
                 asked = "; ".join(f"“{clean(q['text'], 200)}”" for q in settled)
                 text += f" It settles what you asked the owner ({asked}): go on with it."
