@@ -547,6 +547,14 @@ FEATURES["other_sessions"] = Feature(
             value="GET /api/others",
         ),
         Allow("the `others` events", data=r"^steps\.\w+\.bus\.others$"),
+        # The fix for Copilot 1.0.115 (against the baseline, with --keep-on other_sessions): its
+        # terminal session asks, where 0.1.56 showed it without a status ("Copilot did not say
+        # which app started it").
+        Allow(
+            "a session open in Copilot 1.0.115's terminal says it asks you, not no status",
+            element="#sidebar #external",
+            views=r"^(home|sidebar)",
+        ),
     ],
 )
 
@@ -1256,14 +1264,17 @@ class Tokens:
 
 def others(project: str) -> list[dict]:
     """The owner's own Copilot sessions: one open in a terminal, asking the owner something, one
-    older; made in a terminal (as Copilot's list says), their logs as the CLI writes them."""
+    older; made in a terminal (as Copilot's list says), their logs as the CLI writes them. And
+    one open in Copilot 1.0.115's terminal, asking too: listed with no maker, only the client that
+    last ran it, its log with the tools its first model call was given (session.tool_baseline)."""
     from types import SimpleNamespace
 
-    def meta(session_id: str, summary: str, age: timedelta):
+    def meta(session_id: str, summary: str, age: timedelta, made: str = "github/cli",
+             last: str = ""):  # fmt: skip
         context = SimpleNamespace(working_directory=project, repository="", branch="main")
         found = SimpleNamespace(session_id=session_id, summary=summary, is_remote=False,
                                 modified_time=CLOCK - age, context=context)  # fmt: skip
-        vars(found).update(client_name="github/cli", last_client_name="", clients_listed=True)
+        vars(found).update(client_name=made, last_client_name=last, clients_listed=True)
         return found
 
     def log(session_id: str, age: timedelta, *events: tuple) -> list[dict]:
@@ -1277,7 +1288,24 @@ def others(project: str) -> list[dict]:
 
     asking, older = "0d3e8c7a-5b1f-4c2e-9a6d-2f8b1c4e7a90", "7b2e4f1a-9c3d-4e8b-a5f6-1d0c9e8b7a64"
     ask = {"toolCallId": "c-1", "name": "ask_user", "arguments": {"message": "Batch them now?"}}
+    newer = "3c9a1e5f-2b7d-4f0a-8e6c-5a4b3d2c1e0f"
+    form = {"type": "object", "properties": {"alias": {"type": "string", "enum": ["yes", "no"]}},
+            "required": ["alias"]}  # fmt: skip
+    ask_form = {"toolCallId": "c-2", "name": "ask_user",
+                "arguments": {"message": "Keep the old module name as an alias?",
+                              "requestedSchema": form}}  # fmt: skip
     return [
+        {"meta": meta(newer, "Rename the billing module", timedelta(minutes=2), "", "github/cli"),
+         "open": True,
+         "log": log(newer, timedelta(minutes=2),
+                    ("user.message", {"content": "Rename the billing module to invoicing."}),
+                    ("assistant.turn_start", {"turnId": "0"}),
+                    ("session.tool_baseline", {"model": "a-model",
+                                               "tools": [{"name": "bash", "deferred": False},
+                                                         {"name": "ask_user", "deferred": False}]}),
+                    ("assistant.message", {"content": "", "toolRequests": [ask_form]}),
+                    ("tool.execution_start", {"toolCallId": "c-2", "toolName": "ask_user",
+                                              "arguments": ask_form["arguments"]}))},
         {"meta": meta(asking, "Profile the slow orders page", timedelta(minutes=5)),
          "open": True,
          "log": log(asking, timedelta(minutes=5),
