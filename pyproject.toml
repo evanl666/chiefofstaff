@@ -33,6 +33,8 @@ dependencies = [
   "mcp>=1.24,<2",
   "github-copilot-sdk>=1.0.28,<1.0.29",
   "httpx>=0.28,<1",
+  # Share links (sharing.py): AES-256-GCM. Already installed with mcp (pyjwt[crypto]).
+  "cryptography>=44,<52",
   "psutil>=7,<8; sys_platform == 'win32'",
 ]
 
