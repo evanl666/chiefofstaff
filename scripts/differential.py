@@ -562,6 +562,21 @@ FIXES: list[Allow] = [
         data=r"^backend\.owner\[\d+\]\.answer$",
         added=r',"delivery":"[a-z]*"',
     ),
+    # 0.1.58 (owner report R1): the owner's answer to a decision card says in its message's
+    # meta what it answers (the card, its question, their answer, the decision) and that the
+    # words are the owner's, for a worker asking again before it read it to get it (held_ask).
+    Allow(
+        "the owner's answer to a decision card: what it answers, in its message's meta",
+        data=r"^steps\.\w+\.(?:api\./api/sessions/[^.]+/messages|db\.messages)\[\d+\]\.meta\."
+        r"(?:answers|asked|answer|owner_said|decision)$",
+    ),
+    # 0.1.58 (QA E157): a task blocked on another worker says on whom (its view's waits_on, ""
+    # for none), for Home to show it under Monitoring.
+    Allow(
+        "a task's waits_on: the workers it is blocked on (none here)",
+        data=r"^steps\.\w+\.api\./api/state\.tasks\[\d+\]\.waits_on$",
+        value="",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
