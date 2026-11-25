@@ -1092,11 +1092,11 @@ for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
   question, which is the worker's), or a habit you wrote or kept in the page. Each answer quotes
   a whole sentence or clause of yours that says it, in the worker's chat too (*Autopilot
   answered: Postgres, because you said “Postgres for v1”*): one that names the option it chose
-  (and no other) or holds its whole answer, in a sentence where nothing says no, before it or
-  after it, in English or Chinese (*Redis is not an option* never means Redis; *Use Postgres, not
-  Redis* waits for you). It decides with the Router's model and effort (Settings → Models), on
-  Copilot. What workers note, what the Router writes or decides, files in a repository, away
-  answers, Send to Chief notes and Slack messages are never your word.
+  (and no other) or holds its whole answer, from words of yours where nothing says no, in
+  English or Chinese (*Redis? No.* never means Redis; *Use Postgres, not Redis* waits for you).
+  It decides with the Router's model and effort (Settings → Models), on Copilot. What workers
+  note, what the Router writes or decides, files in a repository, away answers, Send to Chief
+  notes and Slack messages are never your word.
 - What nothing you said settles waits for you under *Needs you*, saying why (*Set aside: nothing
   you said settles it*), as does a recommendation alone, any permission (pushing, publishing,
   deleting, merging, commenting…), and anything irreversible or outside this computer (a
