@@ -1,0 +1,65 @@
+/* The viewer page: Home's style.css (its variables, light and dark, the card) and only this
+   page's layout. No colour of its own. */
+
+body.viewer { height: auto; min-height: 100vh; display: grid; grid-template-rows: auto 1fr auto; background: var(--bg); }
+.v-top { display: flex; align-items: center; gap: 10px; padding: 18px 32px; }
+.v-brand { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-weight: 600; text-decoration: none; }
+.v-brand:hover { text-decoration: none; opacity: 0.85; }
+.v-brand .duck { width: 30px; }
+
+.v-main { width: min(1040px, 100%); margin: 0 auto; padding: 12px 32px 48px; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 40px; align-items: start; align-content: start; }
+#state { min-width: 0; display: grid; gap: 10px; }
+.v-by { margin: 0; color: var(--soft); font-size: var(--body); }
+.v-by a { font-weight: 600; }
+.v-note { margin: 2px 0 0; color: var(--muted); font-size: var(--small); line-height: 1.5; }
+
+/* The card as on Home, a little roomier: its whole title, its report open. */
+.card.shared { padding: 16px 20px 18px; }
+.card.shared .head { align-items: baseline; }
+.card.shared .head .dot { align-self: center; }
+.card.shared .head .title { margin: 0; font-size: var(--title); line-height: 1.35; white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.card.shared .meta { max-width: none; flex: none; }
+.card.shared .report { overflow-wrap: anywhere; }
+
+/* Opening, and a link that can't show its card. */
+.v-loading { color: var(--muted); padding: 24px 0; margin: 0; }
+.v-notice { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); box-shadow: var(--shadow); padding: 28px 28px 24px; display: grid; gap: 6px; justify-items: start; }
+.v-notice h1 { margin: 0; font-size: var(--title); font-weight: 600; }
+.v-notice p { margin: 0; color: var(--soft); max-width: 56ch; line-height: 1.55; }
+.v-notice button { margin-top: 10px; }
+
+/* Made with Chief of Staff: beside the card on a wide window, below it on a narrow one. */
+.v-made { position: sticky; top: 24px; border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 18px 18px 16px; display: grid; gap: 10px; font-size: var(--small); color: var(--soft); }
+.v-made-head { display: flex; align-items: center; gap: 10px; color: var(--text); font-size: var(--body); font-weight: 600; }
+.v-made-head .duck { width: 36px; }
+.v-made p { margin: 0; line-height: 1.55; }
+.v-install { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 10px; border-radius: var(--radius); background: var(--bubble); }
+.v-install code { flex: 1; font: var(--small) var(--mono); color: var(--text); }
+.v-install code::before { content: "$ "; color: var(--muted); }
+.v-install button { min-height: 28px; padding: 0 10px; font-size: var(--small); background: var(--card); color: var(--text); box-shadow: var(--shadow); }
+.v-links { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.v-links a { font-weight: 500; }
+.v-have { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 6px; }
+.v-have button.secondary { justify-self: start; min-height: 30px; }
+#open-help { color: var(--soft); }
+
+.v-foot { padding: 20px 32px 28px; color: var(--muted); font-size: var(--small); display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: center; text-align: center; }
+.v-foot a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+
+@media (max-width: 900px) {
+  .v-main { grid-template-columns: minmax(0, 1fr); gap: 24px; width: min(720px, 100%); }
+  .v-made { position: static; }
+}
+@media (max-width: 560px) {
+  .v-top { padding: 14px 16px; }
+  .v-main { padding: 4px 12px 32px; }
+  .card.shared { padding: 14px 14px 16px; }
+  .card.shared .head { flex-wrap: wrap; row-gap: 0; }
+  .card.shared .head .meta { flex-basis: 100%; margin-left: 16px; }
+  .card.task.shared .chips, .card.task.shared .report { margin-left: 0; }
+  .v-notice { padding: 22px 18px 20px; }
+  .v-foot { padding: 16px 16px 24px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v-made .duck, .v-brand .duck { animation: none; }
+}

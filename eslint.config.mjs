@@ -9,7 +9,27 @@ const browser = Object.fromEntries(
   ].map((name) => [name, "readonly"]),
 );
 
+// The share links viewer (site/s/): a page of its own, with WebCrypto.
+const viewer = {
+  ...browser,
+  ...Object.fromEntries(["crypto", "TextEncoder", "TextDecoder", "atob", "btoa"].map((name) => [name, "readonly"])),
+};
+const rules = {
+  "no-undef": "error",
+  "no-unused-vars": ["error", { args: "none", caughtErrors: "none" }],
+  "no-redeclare": "error",
+  "no-var": "error",
+  "prefer-const": "error",
+  eqeqeq: ["error", "smart"],
+  "no-implicit-globals": "error",
+};
+
 export default [
+  {
+    files: ["site/**/*.js"],
+    languageOptions: { ecmaVersion: 2024, sourceType: "module", globals: viewer },
+    rules,
+  },
   {
     files: ["src/chiefofstaff/static/**/*.js"],
     languageOptions: { ecmaVersion: 2024, sourceType: "module", globals: browser },
