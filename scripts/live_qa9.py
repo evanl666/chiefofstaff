@@ -15,7 +15,8 @@ W3  (E140) a worker in a silent step (`sleep`) is flagged once 45 s pass without
 Uses your signed-in Copilot CLI (a Copilot home of its own, made from your config) and consumes
 premium requests; the Copilot sessions it creates are deleted at the end. Set TMPDIR to a
 scratch folder of yours; LIVE_QA9_PORT moves its ports (the app's, and the stand-in Slack's 200
-above it); QA9_MODEL picks the model. Scenarios by name run alone (W2 and W3 run side by side).
+above it, or LIVE_QA9_SLACK_PORT); QA9_MODEL picks the model. Scenarios by name run alone
+(W2 and W3 run side by side).
 
     LIVE_QA9_PORT=18797 uv run --with playwright python scripts/live_qa9.py [W1] [W2] [W3]
 """
@@ -35,7 +36,7 @@ import live_e2e
 import live_parity  # noqa: F401  (it sets its own port: this one is set after)
 
 live_e2e.PORT = int(os.environ.get("LIVE_QA9_PORT", "18797"))
-live_e2e.SLACK_PORT = live_e2e.PORT + 200
+live_e2e.SLACK_PORT = int(os.environ.get("LIVE_QA9_SLACK_PORT", live_e2e.PORT + 200))
 live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
 from live_e2e import App, cleanup, data_dir, log, transcript, wait_for  # noqa: E402
 from live_parity import setup  # noqa: E402
