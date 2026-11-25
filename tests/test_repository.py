@@ -17,6 +17,7 @@ TOP = {
     "LICENSE",
     "README.md",
     "README.zh-CN.md",
+    "SECURITY-REVIEW.md",
     "SECURITY.md",
     "docs",
     "eslint.config.mjs",
