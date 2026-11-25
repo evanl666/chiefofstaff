@@ -367,8 +367,7 @@ class TeamsLite:
         replanned = {
             new
             for new in replaced
-            if (later or {}).get(new)
-            and set((later or {})[new].split(",")) <= set(replaced)
+            if (later or {}).get(new) and set((later or {})[new].split(",")) <= set(replaced)
         }
         inside = set(entry.tasks) | replanned
         parent = {task: task for task in inside}
@@ -701,23 +700,27 @@ class TeamsLite:
             other = part_of.get(meta.get("to_task", ""))
             if not one or not other or one[0] != other[0] or one[1] == other[1]:
                 continue
-            kind = "told" if row["kind"] == "tell" else "asked"
-            offer(one[0], {"kind": kind, "from": one[1], "to": other[1], "at": row["created_at"]})
-            if kind == "asked" and meta.get("question_id"):
-                asks.append((meta["question_id"], one, other))
-        if asks:
-            questions = {
-                row["id"]: row
-                for row in self.rows(
-                    "SELECT id, status, closed FROM questions WHERE id IN ({})",
-                    [question for question, _, _ in asks],
+            if row["kind"] == "tell":
+                offer(
+                    one[0],
+                    {"kind": "told", "from": one[1], "to": other[1], "at": row["created_at"]},
                 )
-            }
-            for question, one, other in asks:
-                row = questions.get(question)
-                if row and row["status"] == "answered" and row["closed"]:
-                    answered = {"kind": "answered", "from": other[1], "to": one[1]}
-                    offer(one[0], {**answered, "at": iso(row["closed"])})
+            elif meta.get("question_id"):
+                asks.append((meta["question_id"], one, other, row["created_at"]))
+        questions = {
+            row["id"]: row
+            for row in self.rows(
+                "SELECT id, status, asked, closed FROM questions WHERE id IN ({})",
+                [question for question, _, _, _ in asks],
+            )
+        }
+        for question, one, other, sent in asks:
+            row = questions.get(question)
+            asked = {"kind": "asked", "from": one[1], "to": other[1]}
+            offer(one[0], {**asked, "at": iso(row["asked"]) if row else sent})
+            if row and row["status"] == "answered" and row["closed"]:
+                answered = {"kind": "answered", "from": other[1], "to": one[1]}
+                offer(one[0], {**answered, "at": iso(row["closed"])})
         return found
 
     # Questions between workers, by the tasks they went between.

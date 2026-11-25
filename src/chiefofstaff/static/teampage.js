@@ -62,13 +62,16 @@ export async function showTeam(teamId) {
 }
 
 // Leaving a team's page (session.js setLayout): Home's panel and the composer as they were.
+// Home's panel keeps all it holds (Needs you, Teams, Running, Monitoring, Recently finished,
+// Artifacts) while a team's page shows So far in its place: out of sight, then as it was.
+function homePanel(panel) {
+  if (!panel.classList.contains("tp-panel")) return;
+  panel.classList.remove("tp-panel");
+  panel.setAttribute("aria-label", "Needs you and tasks");
+  panel.querySelector(":scope > .tp-sofar-panel")?.remove();
+}
 export function leaveTeamPage() {
-  const panel = $("#panel");
-  if (panel.classList.contains("tp-panel")) {
-    panel.classList.remove("tp-panel");
-    panel.setAttribute("aria-label", "Needs you and tasks");
-    panel.querySelector(":scope > .tp-sofar-panel")?.remove();
-  }
+  homePanel($("#panel"));
   const composer = $("#composer");
   if (composer.classList.contains("tp-composer")) {
     composer.classList.remove("tp-composer");
@@ -291,6 +294,7 @@ export function renderTeam() {
   $("#timeline").replaceChildren(root);
   scroller.scrollTop = top;
   panel(model);
+  paint(view, $("#panel > .tp-sofar-panel"));
   composer(model, view);
   drawRails();
   travel(model, view);
@@ -375,7 +379,9 @@ function briefCard(model, view) {
   }
   node.classList.add("working");
   node.setAttribute("aria-label", "Where it stands");
-  say.textContent = `Nothing needs you.${brief.working.length ? ` ${ts.listed(brief.working)} ${brief.working.length > 1 ? "are" : "is"} at work.` : ""}`;
+  const atWork = brief.working.length ? `${ts.listed(brief.working)} ${brief.working.length > 1 ? "are" : "is"} at work` : "";
+  const busy = [atWork, ...brief.waiting].filter(Boolean).join("; ");
+  say.textContent = `Nothing needs you.${busy ? ` ${busy.charAt(0).toUpperCase()}${busy.slice(1)}.` : ""}`;
   if (brief.next) put(then, "Next: ", el("b", { text: brief.next.name }), brief.nextWords ? ` ${brief.nextWords}.` : " starts next.");
   put(node, el("span", { class: "captain" }, captain(brief.working.length ? "working" : "watching")), say, brief.next ? then : null, ...bar(model));
   return node;
@@ -497,13 +503,12 @@ const openChat = (part) => select(part.moved_out?.session || part.session, { tas
 // 2 · Since you looked: one line, only when something changed; each item jumps to its line.
 function sinceLine(model, view) {
   if (!model.since.length) return null;
-  const known = new Set(view.prev?.since || []);
   return el(
     "div",
     { class: "tp-since", role: "status" },
     el("span", { class: "lead", text: `Since you looked at ${clock(view.since)}` }),
     ...model.since.flatMap((item, index) => {
-      const button = el("button", { type: "button", class: `link${view.prev && !known.has(item.key) && moving() ? " fresh-in" : ""}`, text: item.text, onclick: () => jump(item.target) });
+      const button = el("button", { type: "button", class: "link", "data-key": item.key, text: item.text, onclick: () => jump(item.target) });
       return index ? [el("span", { class: "sep", text: "·", "aria-hidden": "true" }), button] : [button];
     }),
   );
@@ -536,11 +541,11 @@ function whoMark(model, who) {
   return found ? partAvatar(found) : el("span", { class: "you", text: "·" });
 }
 const TONE_CHIP = { good: "done", bad: "failed", wait: "waiting" };
-function line(model, { key, who, main, sub, chip, tone, at, kind, url }, { fresh = false } = {}) {
+function line(model, { key, who, main, sub, chip, tone, at, kind, url }) {
   const name = url ? el("a", { href: url, target: "_blank", rel: "noopener", text: main }) : document.createTextNode(main);
   return el(
     "div",
-    { class: `tp-line${model.unseen(at) ? " unseen" : ""}${fresh ? " fresh" : ""}`, "data-line": key },
+    { class: `tp-line${model.unseen(at) ? " unseen" : ""}`, "data-line": key },
     whoMark(model, who),
     el("span", { class: "what" }, el("span", { class: "main", title: main }, kind ? el("span", { class: "kind", text: kind }) : null, name), sub ? el("span", { class: "sub", text: sub }) : null),
     el("span", { class: "end" }, chip ? el("span", { class: `chip ${TONE_CHIP[tone] || ""}`.trim(), text: chip }) : null),
@@ -549,12 +554,11 @@ function line(model, { key, who, main, sub, chip, tone, at, kind, url }, { fresh
 function soFarGroups(model) {
   const { st } = model;
   const name = (id) => st.parts.find((part) => part.id === id)?.name || "";
-  const fresh = (key, at) => Boolean(page?.prev) && !page.prev.lines.includes(key) && recent(at) && moving();
-  const made = model.made.map((item) => line(model, { key: item.line, who: item.part, main: item.name, sub: [name(item.part), item.status && item.at ? `${item.status} ${clock(item.at)}` : item.status].filter(Boolean).join(" · "), chip: item.status, tone: item.tone, at: item.at, kind: item.kind === "PR" ? "PR" : item.kind === "Doc" ? "DOC" : "RUN", url: item.url }, { fresh: fresh(item.line, item.at) }));
+  const made = model.made.map((item) => line(model, { key: item.line, who: item.part, main: item.name, sub: [name(item.part), item.status && item.at ? `${item.status} ${clock(item.at)}` : item.status].filter(Boolean).join(" · "), chip: item.status, tone: item.tone, at: item.at, kind: item.kind === "PR" ? "PR" : item.kind === "Doc" ? "DOC" : "RUN", url: item.url }));
   const decided = model.decided.map((entry) => {
     const who = entry.kind === "yours" ? "you" : [entry.from, entry.to];
     const sub = entry.kind === "yours" ? `You decided${entry.parts.length ? ` for ${ts.listed(entry.parts.map(name))}` : ""} at ${clock(entry.at)}` : `${name(entry.from)} answered ${name(entry.to)}'s question`;
-    return line(model, { key: entry.key, who, main: entry.text, sub, at: entry.at }, { fresh: fresh(entry.key, entry.at) });
+    return line(model, { key: entry.key, who, main: entry.text, sub, at: entry.at });
   });
   const watch = model.watch.map((item) => {
     const node = line(model, { key: item.key, who: item.parts.length > 1 ? item.parts.slice(0, 2) : item.parts[0], main: item.text, sub: item.sub });
@@ -580,9 +584,7 @@ function panel(model) {
   const node = $("#panel");
   if (!wide()) {
     node.hidden = true;
-    node.classList.remove("tp-panel");
-    node.setAttribute("aria-label", "Needs you and tasks");
-    node.querySelector(":scope > .tp-sofar-panel")?.remove();
+    homePanel(node);
     return;
   }
   node.hidden = false;
@@ -862,7 +864,7 @@ function composer(model, view) {
   parts.forEach((part, index) => {
     if (index) names.push(el("span", { class: "to-word", text: "·", "aria-hidden": "true" }));
     const [how] = ts.tellHow(model.team, model.st, part);
-    names.push(el("span", { class: "rcpt" }, partAvatar(part), part.name, how === "start" ? el("span", { class: "later", text: "(when it starts)" }) : how === "reopen" ? el("span", { class: "later", text: "(reopens it)" }) : null));
+    names.push(el("span", { class: "rcpt" }, partAvatar(part), el("span", { class: "name", text: part.name }), how === "start" ? el("span", { class: "later", text: "(when it starts)" }) : how === "reopen" ? el("span", { class: "later", text: "(reopens it)" }) : null));
   });
   const change = el("button", { type: "button", class: "change", "aria-haspopup": "dialog", "aria-expanded": String(view.toOpen), text: "Change ▾" });
   change.addEventListener("click", (event) => {
@@ -978,49 +980,92 @@ function snapshotOf(model) {
   };
 }
 const briefKey = (model) => `${model.brief.kind}|${model.brief.part?.id || ""}|${model.brief.need || ""}`;
+// What moves, once found (a redraw diffs what it draws with the last one), carries on through
+// the redraws that follow (the page is drawn again on every event): each by when it began.
+const MOVES = { fresh: 3200, "fresh-in": 450, swap: 500, just: 1200, "tp-lit": 1600 };
+function began(view, key, kind) {
+  view.moves ||= new Map();
+  if (!view.moves.has(key)) view.moves.set(key, { kind, at: performance.now() });
+}
+function moving_(view, key) {
+  const found = view.moves?.get(key);
+  if (!found) return null;
+  const elapsed = performance.now() - found.at;
+  if (elapsed > MOVES[found.kind]) {
+    view.moves.delete(key);
+    return null;
+  }
+  return { ...found, elapsed };
+}
+function lit(node, view, key) {
+  const found = node && moving_(view, key);
+  if (!found) return;
+  node.classList.add(found.kind);
+  // Where it was in its animation (both of a fresh line's, rising in and lit).
+  const delay = `-${Math.round(found.elapsed)}ms`;
+  node.style.animationDelay = found.kind === "fresh" ? `${delay}, ${delay}` : delay;
+}
 function motion(model, view, root) {
   const prev = view.prev;
-  if (!prev || !moving()) return;
-  for (const part of model.st.parts) {
-    const row = root.querySelector(`.tp-part[data-part="${CSS.escape(part.id)}"]`);
-    if (!row) continue;
-    const was = prev.states[part.id];
-    if (was && was !== `${part.state}|${part.finished}|${part.accepted}`) {
-      if (part.finished && part.accepted && !was.includes("|true|true")) row.classList.add("just");
+  if (prev && moving()) {
+    // What is new since the last drawing, and under a minute old.
+    for (const item of model.made) if (!prev.lines.includes(item.line) && recent(item.at)) began(view, `line:${item.line}`, "fresh");
+    for (const entry of model.decided) if (!prev.lines.includes(entry.key) && recent(entry.at)) began(view, `line:${entry.key}`, "fresh");
+    for (const item of model.since) if (!prev.since.includes(item.key)) began(view, `since:${item.key}`, "fresh-in");
+    for (const part of model.st.parts) {
+      const was = prev.states[part.id];
+      if (was && was !== `${part.state}|${part.finished}|${part.accepted}` && part.finished && part.accepted) began(view, `just:${part.id}`, "just");
+      if (prev.words[part.id] && prev.words[part.id] !== ts.partWords(model.team, model.st, part, { clock })) began(view, `swap:${part.id}`, "swap");
     }
-    if (prev.words[part.id] && prev.words[part.id] !== ts.partWords(model.team, model.st, part, { clock })) row.querySelector(".status")?.classList.add("swap");
+    if (prev.brief !== briefKey(model)) began(view, "brief", "tp-lit");
+    // A segment fills as its part finishes.
+    root.querySelectorAll(".tp-bar i").forEach((node, index) => {
+      if (prev.segments[index] && prev.segments[index] !== "done" && model.st.segments[index] === "done") node.classList.add(`was-${prev.segments[index]}`);
+    });
+    requestAnimationFrame(() => requestAnimationFrame(() => document.querySelectorAll(".tp-bar i[class*='was-']").forEach((node) => node.classList.forEach((name) => name.startsWith("was-") && node.classList.remove(name)))));
   }
-  if (prev.brief !== briefKey(model)) root.querySelector("#tp-brief")?.classList.add("tp-lit");
-  // A segment fills as its part finishes.
-  root.querySelectorAll(".tp-bar i").forEach((node, index) => {
-    if (prev.segments[index] && prev.segments[index] !== "done" && model.st.segments[index] === "done") node.classList.add(`was-${prev.segments[index]}`);
-  });
-  requestAnimationFrame(() => requestAnimationFrame(() => document.querySelectorAll(".tp-bar i[class*='was-']").forEach((node) => node.classList.forEach((name) => name.startsWith("was-") && node.classList.remove(name)))));
+  paint(view, root);
+}
+function paint(view, root) {
+  if (!root) return;
+  if (!moving()) return view.moves?.clear();
+  for (const node of root.querySelectorAll("[data-line]")) lit(node, view, `line:${node.dataset.line}`);
+  for (const node of root.querySelectorAll(".tp-since button[data-key]")) lit(node, view, `since:${node.dataset.key}`);
+  for (const row of root.querySelectorAll(".tp-part")) {
+    lit(row, view, `just:${row.dataset.part}`);
+    lit(row.querySelector(".status"), view, `swap:${row.dataset.part}`);
+  }
+  lit(root.querySelector("#tp-brief"), view, "brief");
 }
 // Dots in the sender's colour along the rail: a result handed on, an answer between parts.
+// Each goes on where it was when the page is drawn again before it arrives.
 function travel(model, view) {
   const prev = view.prev;
   const card = document.querySelector("#timeline .tp-plan");
-  if (!prev || !card || !moving() || model.st.done) return;
-  const trips = [];
-  for (const edge of model.team.edges || []) {
-    const was = prev.edges[`${edge.from}>${edge.to}`];
-    const source = model.st.parts.find((part) => part.id === edge.from);
-    if (was && was !== "met" && edge.state === "met" && recent(source?.row?.ended_at || source?.row?.updated_at)) trips.push([edge.from, edge.to, 1000]);
+  if (!card || !moving() || model.st.done) return (view.trips = []);
+  view.trips ||= [];
+  if (prev) {
+    for (const edge of model.team.edges || []) {
+      const was = prev.edges[`${edge.from}>${edge.to}`];
+      const source = model.st.parts.find((part) => part.id === edge.from);
+      if (was && was !== "met" && edge.state === "met" && recent(source?.row?.ended_at || source?.row?.updated_at)) view.trips.push({ from: edge.from, to: edge.to, time: 1000, at: performance.now() });
+    }
+    for (const entry of model.decided) if (entry.kind === "between" && !prev.lines.includes(entry.key) && recent(entry.at)) view.trips.push({ from: entry.from, to: entry.to, time: 900, at: performance.now() });
   }
-  for (const entry of model.decided) if (entry.kind === "between" && !prev.lines.includes(entry.key) && recent(entry.at)) trips.push([entry.from, entry.to, 900]);
-  for (const [from, to, time] of trips) {
-    const a = centreOf(card, from);
-    const b = centreOf(card, to);
-    const part = model.st.parts.find((one) => one.id === from);
+  view.trips = view.trips.filter((trip) => performance.now() - trip.at < trip.time);
+  for (const trip of view.trips) {
+    const a = centreOf(card, trip.from);
+    const b = centreOf(card, trip.to);
+    const part = model.st.parts.find((one) => one.id === trip.from);
     if (!a || !b || !part) continue;
     const dot = el("span", { class: `travel ${part.color}` });
     dot.style.left = `${a.x}px`;
     dot.style.top = `${a.y}px`;
     card.append(dot);
-    const motionPath = dot.animate([{ transform: "translate(0, 0)" }, { transform: `translate(${b.x - a.x}px, ${b.y - a.y}px)` }], { duration: time, easing: "cubic-bezier(0.45, 0, 0.55, 1)" });
-    motionPath.onfinish = () => dot.remove();
-    motionPath.oncancel = () => dot.remove();
+    const path = dot.animate([{ transform: "translate(0, 0)" }, { transform: `translate(${b.x - a.x}px, ${b.y - a.y}px)` }], { duration: trip.time, easing: "cubic-bezier(0.45, 0, 0.55, 1)" });
+    path.currentTime = performance.now() - trip.at;
+    path.onfinish = () => dot.remove();
+    path.oncancel = () => dot.remove();
   }
 }
 
