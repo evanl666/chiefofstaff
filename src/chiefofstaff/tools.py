@@ -1033,9 +1033,9 @@ def risky(text: str) -> re.Match | None:
 
 # A new task for a worker given one this recently is asked about once (see recent_task).
 ADD_MINUTES = 30
-# A busy worker's task whose draft the owner rejected this recently is superseded by the new
-# task a second worker of it takes (supersede_rejected).
-SUPERSEDE_MINUTES = 10
+# A busy worker's task whose draft the owner rejected this recently: its worker is told when
+# a second worker of it takes the new request (tell_rejected).
+REJECTED_MINUTES = 10
 # A task over, as far as more of it goes: what a new task may only add to is not one of these.
 FINISHED = frozenset({"done", "review", "failed", "cancelled"})
 # Internal ids a worker may write in its report: a draft's ("d4d31ea2f"), a Slack message's
@@ -2714,8 +2714,8 @@ class Tools:
                 caller, target, params, title, why_new, request, busy, why
             )
             if forked is not None:
-                if stopped := await self.supersede_rejected(target, forked["task_id"], title):
-                    forked["superseded"] = stopped
+                if told := await self.tell_rejected(target):
+                    forked["rejected_draft"] = told
                 return forked
             if parallel:
                 raise ValueError(self.not_in_parallel(target, "starting it failed"))
@@ -3151,32 +3151,42 @@ class Tools:
             target, spawn, caller, title, request=request, busy=busy, why=why
         )
 
-    async def supersede_rejected(self, busy: dict, new_id: str, title: str) -> list[str]:
-        """A busy worker's task whose draft the owner just rejected, saying why, while its new
-        task went to a second worker (E148: the first went on with the rejected work): the new
-        task supersedes it, so it is cancelled and its worker stops it. What it says of each,
-        for the Router."""
-        since = (datetime.now(UTC) - timedelta(minutes=SUPERSEDE_MINUTES)).isoformat()
-        said = []
+    async def tell_rejected(self, busy: dict) -> str:
+        """A busy worker whose draft the owner just rejected, saying why, while a second worker
+        of it takes the new request (E148: the first went on with the rejected work): it is
+        told so once, in a plain note. Its task stays as it is: only the Router (cancel_task,
+        or a new task that supersedes it) or the owner ends it. What the Router hears of it;
+        "" when there is none."""
+        since = (datetime.now(UTC) - timedelta(minutes=REJECTED_MINUTES)).isoformat()
+        told = []
         for task in self.tasks.for_session(busy["id"]):
             rejected = self.store.get(f"ownerrejected:{task['id']}") or ""
             if task["status"] not in {"running", "waiting"} or rejected < since:
                 continue
-            self.store.set(f"supersededby:{task['id']}", new_id)
-            try:
-                await self.runtime.task_actions.cancel(
-                    task["id"],
-                    f"Superseded by “{title}”, which a second worker does: you rejected its draft.",
-                    by="Chief of Staff",
-                )
-            except ValueError:
-                self.store.delete(f"supersededby:{task['id']}")
-                continue
-            said.append(
-                f"Task {task['id']} “{task['title']}”, whose draft the owner rejected, is "
-                f"cancelled as superseded by {new_id}: its worker stops it."
+            if self.store.get(f"rejectednote:{task['id']}") == rejected:
+                continue  # Told already.
+            self.store.set(f"rejectednote:{task['id']}", rejected)
+            text = (
+                "Your draft was rejected; a second worker is doing the new request. Stop the "
+                "old one unless told otherwise."
             )
-        return said
+            with suppress(Exception):
+                await self.delivery.deliver(
+                    busy["id"],
+                    wrap("system", "draft-rejected", text, task=task["id"]),
+                    kind="notice",
+                    display=text,
+                    meta={"task_id": task["id"]},
+                    steer=True,
+                )
+                told.append(f"{task['id']} “{task['title']}”")
+        if not told:
+            return ""
+        return (
+            f"The owner rejected the draft of its task {', '.join(told)}: its worker was told to "
+            "stop that work unless told otherwise. The task stays open: if the new task "
+            "replaces it, cancel it with cancel_task; if the owner wants it, tell its worker."
+        )
 
     def second_workspace(self, source: dict) -> dict:
         """A second worker works on the projects the worker it comes from works on, as it does:

@@ -182,10 +182,11 @@ async def test_a_second_worker_is_one_line_in_the_owners_chat_saying_why(harness
     assert line["meta"]["fork"] is True, "a line of its own, never folded with routing lines"
 
 
-async def test_work_the_owner_rejected_stops_when_a_second_worker_takes_the_new_work(tmp_path):
+async def test_a_busy_worker_whose_draft_was_rejected_is_told_and_its_task_left_be(tmp_path):
     """Live 14:42 PT: the owner rejected a worker's draft and asked for a new analysis; that
     went to a second worker, and the first went on with the rejected work (its next report
-    "written before a newer message": the rejection)."""
+    "written before a newer message": the rejection). It is told, once, in a plain note; its
+    task stays as it is (only the Router or the owner cancels it), and the Router hears so."""
     harness = Harness(tmp_path / "data", Settings())
     runtime = await harness.connect()
     worker, old = await spawn(runtime, harness.router_id, "Analyze the reach drop")
@@ -195,13 +196,26 @@ async def test_work_the_owner_rejected_stops_when_a_second_worker_takes_the_new_
     await runtime.drafts.resolve(
         draft["id"], DraftDecision(action="reject", reason="Wrong cause: redo it by region.")
     )
+    session = harness.session(worker)
+    sent = len(session.sent)
     forked = await new_task(runtime, harness, worker, "Analyze the reach drop by region")
+    await settle(runtime)
     assert forked["session_id"] != worker
-    shown = runtime.tasks.get(old["id"])
-    assert shown["status"] == "cancelled", "the work it rejected does not go on"
-    assert harness.store.get(f"supersededby:{old['id']}") == forked["task_id"]
-    assert harness.session(worker).aborted, "its worker stops it"
-    assert "superseded" in " ".join(forked["superseded"])
+    assert runtime.tasks.get(old["id"])["status"] == "running", "not cancelled on a guess"
+    assert not harness.store.get(f"supersededby:{old['id']}") and not session.aborted
+    [note] = session.sent[sent:]
+    assert (
+        "Your draft was rejected; a second worker is doing the new request. Stop the old one "
+        "unless told otherwise." in note
+    )
+    assert f'task="{old["id"]}"' in note
+    assert old["id"] in forked["rejected_draft"] and "cancel_task" in forked["rejected_draft"]
+    again = await new_task(runtime, harness, worker, "Chart the reach drop by region")
+    assert len(session.sent) == sent + 1 and "rejected_draft" not in again, "once"
+    # It stops; no report is asked of the task, which waits for the Router's or owner's word.
+    await idle(runtime, session, "Stopped the holiday analysis, as the owner rejected it.")
+    assert len(session.sent) == sent + 1, "no report asked for"
+    assert runtime.tasks.get(old["id"])["status"] == "running"
 
 
 async def test_a_busy_workers_other_work_goes_on(harness):
@@ -210,5 +224,5 @@ async def test_a_busy_workers_other_work_goes_on(harness):
     worker, old = await spawn(runtime, harness.router_id, "Analyze the reach drop")
     await at_work(runtime, harness, worker, 21)
     forked = await new_task(runtime, harness, worker, "Check the changelog")
-    assert forked["session_id"] != worker and "superseded" not in forked
+    assert forked["session_id"] != worker and "rejected_draft" not in forked
     assert runtime.tasks.get(old["id"])["status"] == "running"

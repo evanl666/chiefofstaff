@@ -47,10 +47,11 @@
   Only the Router's or your message (and your reason when you reject a draft) holds a report
   back now.
 - **A second worker for a busy one says so in your chat.** *⑂ Started a second worker from “…”
-  (it was busy) for “…”* is a line of its own, never folded into the routing updates. When its
-  task is what you asked for on rejecting the busy worker's draft, the work you rejected is
-  cancelled (superseded by the new task) and that worker stops it. Busy is twenty minutes in a
-  turn now, not ten (or two open tasks, as before).
+  (it was busy) for “…”* is a line of its own, never folded into the routing updates. When you
+  had just rejected the busy worker's draft, it is told once that a second worker is doing the
+  new request and to stop the old work unless told otherwise; its task stays as it is until the
+  Router or you cancel it. Busy is twenty minutes in a turn now, not ten (or two open tasks, as
+  before).
 
 ## 0.1.57 (2026-11-25)
 

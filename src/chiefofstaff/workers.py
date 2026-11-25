@@ -62,6 +62,9 @@ WAITS = re.compile(
     r"|在等|等待|等着|等候|等\s*[A-Za-z“\"「(\uff08]",
     re.IGNORECASE,
 )
+# The note to a busy worker whose draft the owner rejected while a second worker took the new
+# request (Tools.tell_rejected).
+REJECTED_NOTE = '<message from="system" type="draft-rejected"'
 # The Router telling a worker its task is not finished: what the worker answers to that is an
 # acknowledgement (E139: "Understood. This task stays open…" was filed as the task's result).
 KEEP_OPEN = re.compile(
@@ -475,6 +478,10 @@ class Workers:
             task = at
         if self.store.get(f"checkback:{task['id']}"):
             return  # It said when it looks again: woken then, it reports.
+        if str(asked["meta"].get("prompt") or "").startswith(REJECTED_NOTE):
+            # Told to stop the work its rejected draft was for: the Router or the owner decides
+            # what becomes of that task (Tools.tell_rejected, E148), not a report asked of it.
+            return
         nudged = bool(asked["meta"].get("report_nudge"))
         chat = asked["meta"].get("chat") or not asked["meta"].get("task_id")
         if asked["kind"] == "owner" and chat:
