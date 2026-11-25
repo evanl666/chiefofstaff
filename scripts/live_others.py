@@ -133,14 +133,22 @@ CHOSEN = "\u276f"
 # Sessions whose rows say whose they are, not where they stand.
 NOT_OWNERS = {"unlisted", "unknown", "another"}
 
+# ask_user's input as the CLI takes it (1.0.115: a form, its `requestedSchema` an object; a model
+# that passed it as a string was refused, "Expected object, received string").
+ASK_FORM = (
+    "Give ask_user a `message` (the question) and a `requestedSchema` that is a JSON object, not "
+    'a string: {"type": "object", "properties": {"port": {"type": "string", "enum": ["8080", '
+    '"9090"]}}, "required": ["port"]}.'
+)
 ASK = (
     "Before doing anything, ask me with your ask_user tool which port to use, offering the "
-    "choices 8080 and 9090. Then write only the chosen number to port.txt and reply with just "
-    "the number."
+    f"choices 8080 and 9090. {ASK_FORM} Then write only the chosen number to port.txt and reply "
+    "with just the number."
 )
 ASK_AGAIN = (
     "Use your ask_user tool now to ask me which port to use, offering the choices 8080 and "
-    "9090. Then write only the chosen number to port.txt and reply with just the number."
+    f"9090. {ASK_FORM} Then write only the chosen number to port.txt and reply with just the "
+    "number."
 )
 SLEEPY = (
     f"Run the shell command `sleep {SLEEP}` in the foreground and wait for it to finish (it "
@@ -274,6 +282,7 @@ class State:
     ask_at: str = ""  # the ask's own time (the log's)
     ask_seen: float = 0.0  # when this test saw it written
     ask_arguments: dict = field(default_factory=dict, compare=False)
+    asks_refused: int = 0  # ask_user calls the CLI refused (a form it could not take)
     turn: str = "none"  # none, open or ended
     ended: str = ""  # answered, stopped or failed
     ended_seen: float = 0.0  # when this test saw it end
@@ -337,6 +346,8 @@ def advance(state: State, kind: str, data: dict, timestamp: str, seen: float) ->
         call = str(data.get("toolCallId"))
         if call == state.ask_call:
             change = {"ask": None, "ask_call": "", "words": ""}
+            if data.get("success") is False:
+                change["asks_refused"] = state.asks_refused + 1
         pending.pop(call, None)
     elif kind == "assistant.turn_end":
         if state.turn == "open" and state.final and not pending and state.ask is None:
@@ -1097,14 +1108,21 @@ class Ctx:
 
 
 async def asked(ctx: Ctx, term: Terminal, truth: Truth):
-    """Waits for its ask_user question; asks again once when the model answered without it."""
+    """Waits for its ask_user question, waiting for the owner: its form on the screen (a call
+    the CLI refused, its form passed as a string, starts and fails at once, with no form); asks
+    again once when the model answered without one."""
     for attempt in (1, 2):
-        count = truth.state.answered
+        count, refused = truth.state.answered, truth.state.asks_refused
         state = await truth.until(
-            "it asks through ask_user (or answers without)",
-            lambda s, count=count: s.ask is not None or s.answered > count,
+            "it asks through ask_user, its form shown (or answers without)",
+            lambda s, count=count: (
+                (s.ask is not None and "needs information" in term.text()) or s.answered > count
+            ),
             120,
         )
+        if state.asks_refused > refused:
+            log(f"{truth.label}: the CLI refused {state.asks_refused - refused} of the model's "
+                f"ask_user calls (their form)")  # fmt: skip
         if state.ask is not None:
             return
         if attempt == 1:
