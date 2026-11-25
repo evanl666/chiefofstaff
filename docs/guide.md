@@ -734,6 +734,13 @@ it ends by itself when it expires, and Chief of Staff deletes the gist then. Wha
 already seen or copied can't be taken back. Without `gh`, or for a copy that never ends,
 *Download HTML file* saves the card as one file.
 
+Someone sent you a link and you use Chief of Staff too? Paste it alone into Home's message box
+and press Enter (the page's *Open in my Chief* copies it): Chief of Staff opens the card itself,
+as a line in the chat, and its link is sent to no AI. It is someone else's words, read as
+information. *Start a task from this* puts it above the message box: write what you want done,
+and your chief of staff gets your words with the card quoted. The same link again shows the
+copy you have; the copy stays after the link ends (⋯ *Remove* deletes it).
+
 ## When a session needs you
 
 Sessions ask instead of guessing. Each request is a card under *Needs you*, with a desktop
