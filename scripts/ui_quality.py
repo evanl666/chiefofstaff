@@ -1076,9 +1076,11 @@ async def needs_dots_views(runtime, browser, quality: Quality):
 async def teams_views(runtime, browser, quality: Quality):
     """E129: Home's chat with what workers told each other folded (one line: how many, who, what
     waits) and the routing receipts folded, open. Teams lite: teams-list (Home's Teams rows and
-    Past teams), teams-needs (a held question's card, in a team and in none), teams-active (a
-    team at work: its map, what they handed each other), teams-idle (waiting on your OK),
-    teams-done (the calm Done row); 800 to 1440 px, light and dark (browser-shots/teams/)."""
+    Past teams), teams-needs (a held question's card, in a team and in none); a team's page
+    (team-page-v4): teams-active (a team at work), teams-idle (waiting on your OK), teams-done,
+    team-live (the prototype's scene: the brief asking, the plan on its rail, So far), team-tell
+    (the message written, who gets it chosen), team-review (Review in place) and team-delivered;
+    800 to 1440 px, light and dark (browser-shots/teams/)."""
     import teams_scene
     from ui_edges import teams_seeded
 
@@ -1091,8 +1093,23 @@ async def teams_views(runtime, browser, quality: Quality):
     pages = {
         "teams-active": next(i for g, i in ids.items() if g.startswith("设计")),
         "teams-idle": next(i for g, i in ids.items() if g.startswith("Ship")),
-        "teams-done": next(i for g, i in ids.items() if g.startswith("给")),
+        "teams-done": next(i for g, i in ids.items() if g.startswith("给 Chief")),
     }
+
+    async def show(page, team):
+        await page.evaluate(
+            f"import('/static/team.js').then((m) => m.showTeam({json.dumps(team)}))"
+        )
+        await expect(page.locator("#timeline .team-page .tp-plan")).to_be_visible()
+
+    async def widths(page, name, scheme):
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 1000})
+            await page.wait_for_timeout(250)
+            await page.locator("#main").screenshot(path=folder / f"{name}-{width}-{scheme}.png")
+            await quality.check(page, f"{name} {width} {scheme}", "#main")
+        await quality.contrast(page, f"{name} {scheme}", "#main")
+
     for scheme in ("light", "dark"):
         context = await browser.new_context(
             viewport={"width": 1440, "height": 1000}, color_scheme=scheme, bypass_csp=True
@@ -1128,18 +1145,41 @@ async def teams_views(runtime, browser, quality: Quality):
         await quality.contrast(page, f"teams-list {scheme}", "#tasks-teams")
         for name, team in pages.items():
             await page.set_viewport_size({"width": 1440, "height": 1000})
-            await page.evaluate(
-                f"import('/static/team.js').then((m) => m.showTeam({json.dumps(team)}))"
-            )
-            await expect(page.locator("#timeline .team-page .tv2-map")).to_be_visible()
-            for width in WIDTHS:
-                await page.set_viewport_size({"width": width, "height": 1000})
-                await page.wait_for_timeout(250)
-                await page.locator("#main").screenshot(path=folder / f"{name}-{width}-{scheme}.png")
-                await quality.check(page, f"{name} {width} {scheme}", "#main")
-            await quality.contrast(page, f"{name} {scheme}", "#main")
+            await show(page, team)
+            await widths(page, name, scheme)
         quality.failures += [f"page error {scheme}: {error}" for error in errors]
         await context.close()
+    # The prototype's scene: live (the brief asking), Tell the team (the message written, who
+    # gets it chosen), Review in place (邮件通知 reported), then delivered.
+    refund = await teams_scene.refund_team(runtime)
+    for state in ("team-live", "team-tell", "team-review", "team-delivered"):
+        if state == "team-review":
+            await teams_scene.refund_reports(runtime, refund)
+        if state == "team-delivered":
+            await teams_scene.refund_done(runtime, refund)
+        for scheme in ("light", "dark"):
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 1000}, color_scheme=scheme, bypass_csp=True
+            )
+            page = await context.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+            await show(page, refund["team"])
+            if state == "team-tell":
+                await page.locator("#composer-input").fill(
+                    "退款弹窗和邮件里都加一句：部分退款会在 3 个工作日内原路退回。"  # noqa: RUF001
+                )
+                await page.locator("#composer-to button", has_text="Change").click()
+                await expect(page.locator(".tp-to-menu")).to_be_visible()
+            if state == "team-review":
+                part = page.locator(f'.tp-part[data-part="{refund["mail_task"]}"]')
+                await part.locator(".act button", has_text="Review").click()
+                await expect(page.locator("#timeline .tp-review")).to_be_visible()
+            await widths(page, state, scheme)
+            quality.failures += [f"page error {scheme}: {error}" for error in errors]
+            await context.close()
 
 
 async def relations_views(runtime, browser, quality: Quality):
