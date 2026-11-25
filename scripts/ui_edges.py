@@ -2284,6 +2284,33 @@ async def round_six(runtime, browser, failures: list[str]):
     await context.close()
 
 
+async def share_beside_copy(page, scope: str) -> int:
+    """Each card's ⋯ menu in `scope`, item by item: Share… right after Copy report where that
+    is (a finished card), nowhere else. How many cards have it."""
+    found = 0
+    cards = page.locator(f"{scope} .card.task")
+    for index in range(await cards.count()):
+        card = cards.nth(index)
+        button = card.locator(".more-button").first
+        if not await button.count() or not await button.is_visible():
+            continue
+        await button.click()
+        items = [
+            text.strip()
+            for text in await card.locator(".menu:not([hidden])")
+            .first.get_by_role("menuitem")
+            .all_inner_texts()
+        ]
+        await page.keyboard.press("Escape")
+        if "Copy report" in items:
+            assert items[items.index("Copy report") + 1] == "Share…", items
+            assert items.count("Share…") == 1, items
+            found += 1
+        else:
+            assert "Share…" not in items, items
+    return found
+
+
 async def round_seven(runtime, browser, failures: list[str]):
     """The 0.1.27 bug bash, round 3 (UI): a title with " · " whole in its chat line; workers by
     the name they show in @ and the "To" chip; what Watches says after hours; a withdrawn
@@ -2485,6 +2512,12 @@ async def round_seven(runtime, browser, failures: list[str]):
     await expect(tidy.get_by_role("menuitem", name="Create PR")).to_have_count(0)
     await page.keyboard.press("Escape")
     log("a large new file said so; Create PR on a branch of its own, not on main")
+
+    # Share links: Share… is in a card's ⋯ menu exactly where Copy report is (a finished card),
+    # right after it; every other item as it was.
+    shared = await share_beside_copy(page, "#panel")
+    assert shared >= 2, f"Share… on {shared} cards"
+    log(f"Share… right after Copy report on each of {shared} finished cards, on no other")
 
     # U17: a name starts at the left of its row. QA E25: a mockup file is no artifact (PRs,
     # docs and flows only); it stays on its task's card.

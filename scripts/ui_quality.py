@@ -1465,6 +1465,236 @@ async def fork_views(runtime, browser, quality: Quality):
     )
 
 
+SHARED_TITLE = "Fix the flaky logout test"
+
+
+async def shared_card(runtime, title: str = SHARED_TITLE) -> str:
+    """A finished card to share: its result with a staging address, a token and an email."""
+    from share_world import RESULT
+
+    store = runtime.store
+    router = store.get("router_id")
+    # A slot for it now (the seed's are busy, one more is queued; the last round, so what it
+    # starts stays as it is), the setting as it was after.
+    settings = store.settings()
+    slots = max(settings.max_workers, runtime.workers.running()) + 2
+    store.save_settings(settings.model_copy(update={"max_workers": slots}))
+    spawned = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                              why_new="test", done_when=["`uv run pytest -q` passes"])  # fmt: skip
+    worker = json.loads(spawned.text_result_for_llm)
+    await settle(runtime)
+    for _ in range(100):
+        await settle(runtime)
+        if session := runtime.states.handle(worker["session_id"]):
+            break
+        await asyncio.sleep(0.05)
+    else:
+        row = store.session(worker["session_id"])
+        raise AssertionError(f"{title}: its worker did not start ({row['status']})")
+    for call, said in (("s1", "1 failed in 0.2s\n<exited with exit code 1>"),
+                       ("s2", "8 passed in 0.3s\n<exited with exit code 0>")):  # fmt: skip
+        session.emit("tool.execution_start", tool_name="bash", tool_call_id=call,
+                     arguments={"command": "uv run pytest -q"})  # fmt: skip
+        session.emit("tool.execution_complete", tool_call_id=call, success=True,
+                     result=SimpleNamespace(content=said))  # fmt: skip
+    await settle(runtime)
+    await call_tool(
+        runtime, "report", worker["session_id"], status="done", task_id=worker["task_id"],
+        summary=RESULT.replace("login", "logout"),
+        criteria=[{"criterion": "`uv run pytest -q` passes", "result": "met",
+                   "evidence": "`uv run pytest -q`: 8 passed"}],
+    )  # fmt: skip
+    await settle(runtime)
+    store.save_settings(store.settings().model_copy(update={"max_workers": settings.max_workers}))
+    return worker["task_id"]
+
+
+async def open_share(page, title: str, width: int):
+    """The card's ⋯ menu under Needs you, open: its items."""
+    if width < 1100:
+        await page.locator("#home-tabs [data-tab=needs]").click()
+    card = page.locator("#needs .card.task", has_text=title)
+    await card.scroll_into_view_if_needed()
+    await card.locator(".more-button").first.click()
+    menu = card.locator(".menu:not([hidden])")
+    await expect(menu.get_by_role("menuitem", name="Share…")).to_be_visible()
+    return menu
+
+
+async def share_views(runtime, browser, quality: Quality):
+    """Share links (share.js): a finished card's ⋯ menu with Share…, the preview with three
+    things that look private (one decided, then all), the link made, the card's live link with
+    Revoke asked in place, no gh sign-in, Settings → You → Shared links and the HTML file; 1440
+    and 800 px, light and dark (browser-shots/share/). On a fake gh: no gist is really made."""
+    from share_world import FakeGitHub
+
+    from chiefofstaff import sharing
+
+    folder = SHOTS / "share"
+    folder.mkdir(exist_ok=True)
+    fake = FakeGitHub()
+    raw, runtime.github.raw = runtime.github.raw, fake
+    # gh's own accounts, as fake gh says (a round before may have stood its own reading in).
+    stood_in = runtime.github.__dict__.pop("signed_in", None)
+    task_id = await shared_card(runtime)
+    try:
+        for scheme in ("light", "dark"):
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 900}, color_scheme=scheme, bypass_csp=True,
+                accept_downloads=True,
+            )  # fmt: skip
+            await context.grant_permissions(["clipboard-read", "clipboard-write"])
+            page = await context.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            for width in (1440, 800):
+                await page.set_viewport_size({"width": width, "height": 900})
+                await page.wait_for_timeout(200)
+
+                async def shot(name: str, page=page, width: int = width, scheme: str = scheme):
+                    await page.evaluate(
+                        "document.querySelectorAll('#toasts > *').forEach((n) => n.remove())"
+                    )
+                    await page.screenshot(
+                        path=folder / f"home-{name}-{width}-{scheme}.png", animations="disabled"
+                    )
+
+                where = f"share {width} {scheme}"
+                menu = await open_share(page, SHARED_TITLE, width)
+                items = [
+                    text.strip() for text in await menu.get_by_role("menuitem").all_inner_texts()
+                ]
+                if items[items.index("Copy report") + 1] != "Share…":
+                    quality.failures.append(
+                        f"{where}: Share… is not right after Copy report: {items}"
+                    )
+                await menu.get_by_role("menuitem", name="Share…").hover()
+                await shot("menu")
+                # (The menu and its card; the rows other rounds left on Home are theirs.)
+                await quality.check(
+                    page, f"{where} menu", f"#needs .card.task[data-task='{task_id}']"
+                )
+                await menu.get_by_role("menuitem", name="Share…").click()
+                dialog = page.locator("dialog.share-dialog")
+                await expect(dialog.locator(".share-flags li")).to_have_count(3)
+                create = dialog.get_by_role("button", name="Create link")
+                if not await create.is_disabled():
+                    quality.failures.append(
+                        f"{where}: Create link is on before every hit is decided"
+                    )
+                marked = await dialog.locator(".share-preview").evaluate("n => n.textContent")
+                if "/Users/" in marked or "/home/" in marked:
+                    quality.failures.append(f"{where}: a local path in the preview")
+                await (
+                    dialog.locator(".share-flags li")
+                    .nth(1)
+                    .get_by_role("button", name="Remove")
+                    .click()
+                )
+                await page.wait_for_timeout(150)
+                await shot("preview")
+                await quality.check(page, f"{where} preview", "dialog.share-dialog")
+                await quality.contrast(page, f"{where} preview", "dialog.share-dialog")
+                await (
+                    dialog.locator(".share-flags li")
+                    .nth(0)
+                    .get_by_role("button", name="Remove")
+                    .click()
+                )
+                await (
+                    dialog.locator(".share-flags li")
+                    .nth(2)
+                    .get_by_role("button", name="Keep")
+                    .click()
+                )
+                await expect(dialog.get_by_role("button", name="Create link")).to_be_enabled()
+                await expect(dialog.locator(".share-flags h3")).to_have_text(
+                    "Checked: 2 removed, 1 kept"
+                )
+                await shot("ready")
+                await quality.check(page, f"{where} ready", "dialog.share-dialog")
+                async with page.expect_download() as downloading:
+                    await dialog.get_by_role("button", name="Download HTML file").click()
+                saved = folder / f"export-{scheme}.html"
+                await (await downloading.value).save_as(saved)
+                html = saved.read_text()
+                if "<script" in html or "ghp_" in html or "10.20.4.17" in html:
+                    quality.failures.append(f"{where}: the HTML file has a script or a removed hit")
+                await dialog.get_by_role("button", name="Create link").click()
+                await expect(dialog.get_by_role("heading", name="Link ready")).to_be_visible()
+                link = await dialog.locator(".share-link input").input_value()
+                parsed = sharing.parse_link(link)
+                if not parsed or parsed["gist_id"] not in fake.gists:
+                    quality.failures.append(f"{where}: the link names no gist made ({link})")
+                elif await page.evaluate("navigator.clipboard.readText()") != link:
+                    quality.failures.append(f"{where}: the link was not copied")
+                await page.wait_for_timeout(250)
+                await shot("created")
+                await quality.check(page, f"{where} created", "dialog.share-dialog")
+                await quality.contrast(page, f"{where} created", "dialog.share-dialog")
+                await dialog.get_by_role("button", name="Done").click()
+                menu = await open_share(page, SHARED_TITLE, width)
+                await menu.get_by_role("menuitem", name="Share…").click()
+                await expect(dialog.get_by_text("This card has a link already.")).to_be_visible()
+                await dialog.get_by_role("button", name="Revoke link…").click()
+                await expect(
+                    dialog.get_by_role("button", name="Revoke link", exact=True)
+                ).to_be_visible()
+                await shot("manage")
+                await quality.check(page, f"{where} manage", "dialog.share-dialog")
+                await dialog.get_by_role("button", name="Keep it").click()
+                await dialog.get_by_role("button", name="Close").click()
+                fake.sign_out("jordan")
+                menu = await open_share(page, SHARED_TITLE, width)
+                await menu.get_by_role("menuitem", name="Share…").click()
+                await dialog.get_by_role("button", name="New link…").click()
+                for row in range(3):
+                    await (
+                        dialog.locator(".share-flags li")
+                        .nth(row)
+                        .get_by_role("button", name="Remove")
+                        .click()
+                    )
+                await expect(dialog.locator(".share-blocked")).to_be_visible()
+                await shot("nogh")
+                await quality.check(page, f"{where} no gh", "dialog.share-dialog")
+                fake.accounts["jordan"]["in"] = True
+                await dialog.get_by_role("button", name="Cancel").click()
+                await page.locator("#settings-button").click()
+                await page.locator("#settings-tabs [data-tab=you]").click()
+                section = page.locator("#settings-dialog .shared-links-section")
+                await expect(section.locator("li:not(.off)")).to_have_count(1)
+                row = section.locator("li:not(.off)").first
+                await row.get_by_role("button", name="Revoke…").click()
+                await section.scroll_into_view_if_needed()
+                await page.wait_for_timeout(150)
+                await shot("shared")
+                await quality.check(page, f"{where} shared links", "#settings-dialog")
+                await quality.contrast(page, f"{where} shared links", "#settings-dialog")
+                ended = await section.locator("li.off").count()
+                await row.get_by_role("button", name="Revoke link").click()
+                await expect(section.locator("li.off")).to_have_count(ended + 1)
+                if fake.gists:
+                    quality.failures.append(f"{where}: Revoke left its gist")
+                await page.locator("#settings-cancel").click()
+            file_page = await context.new_page()
+            await file_page.set_viewport_size({"width": 1440, "height": 900})
+            await file_page.goto(saved.as_uri())
+            await file_page.screenshot(
+                path=folder / f"export-file-1440-{scheme}.png", full_page=True
+            )
+            await file_page.close()
+            quality.failures += [f"page error share {scheme}: {error}" for error in errors]
+            await context.close()
+    finally:
+        runtime.github.raw = raw
+        if stood_in:
+            runtime.github.signed_in = stood_in
+    log("share links: the menu, the preview, the link, Revoke, no gh, Shared links (share/)")
+
+
 # On Home with worker PRs, what today's rows were made with (a PR's receipt link, 18 px tall)
 # and Artifacts' known findings (KNOWN_ROW_FINDINGS, its 10 px kind label among the sizes): not
 # Prepared for you's; anything else found there fails.
@@ -1632,11 +1862,14 @@ async def main():
         quality = Quality()
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
-            # `UI_QUALITY_ONLY=shepherd`: only Prepared for you's views; `=teams`: only Teams'.
+            # `UI_QUALITY_ONLY=shepherd`: only Prepared for you's views; `=teams`: only Teams';
+            # `=share`: only share links'.
             only = os.environ.get("UI_QUALITY_ONLY", "")
             if only == "teams":
                 await teams_views(runtime, browser, quality)
                 await relations_views(runtime, browser, quality)
+            elif only == "share":
+                await share_views(runtime, browser, quality)
             elif only != "shepherd":
                 await report_views(runtime, browser, quality)
                 await run(runtime, seeded, browser, quality, phase)
@@ -1665,8 +1898,10 @@ async def main():
                 log("Needs you's dots, read or not, and a new result's word (needs-dots/)")
                 await fork_views(runtime, browser, quality)
                 log("a busy worker's second worker (fork/)")
-            if only != "teams":
+            if only not in {"teams", "share"}:
                 await shepherd_views(runtime, browser, quality)
+            if not only:
+                await share_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True
         await serving

@@ -135,12 +135,13 @@ export async function api(path, { method = "GET", body } = {}) {
     const fields = Array.isArray(data.detail) ? data.detail.map(fieldName).filter(Boolean) : [];
     // `anyway`: the words of what the owner may do anyway (open the PR all the same). `fresh`:
     // a session Copilot can't reopen, which a fresh one can go on for (freshButton).
-    throw Object.assign(new Error(errorText(data, response.status)), { fields, anyway: data.anyway || "", fresh: data.fresh || "" });
+    // `changed`: what it was about changed since the page showed it (Share…'s preview).
+    throw Object.assign(new Error(errorText(data, response.status)), { fields, anyway: data.anyway || "", fresh: data.fresh || "", changed: Boolean(data.changed) });
   }
   return data;
 }
 // Secondary actions behind "⋯" (or behind a named button, `text`): items are { text, onclick,
-// danger }; falsy ones are left out. `label` says what they are (on hover; a named button is
+// danger, key }; falsy ones are left out. `label` says what they are (on hover; a named button is
 // called by its own words, the label describes it); `name`, what "⋯" is called (whose actions).
 export function moreMenu(items, label = "More actions", text = "⋯", name = label) {
   const list = items.filter(Boolean);
@@ -153,6 +154,8 @@ export function moreMenu(items, label = "More actions", text = "⋯", name = lab
         type: "button",
         role: "menuitem",
         class: item.danger ? "danger" : "",
+        // (Share…'s: what the off-state check names; no other item has one.)
+        "data-item": item.key || undefined,
         text: item.text,
         onclick: (event) => {
           menu.hidden = true;
