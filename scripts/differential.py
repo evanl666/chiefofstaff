@@ -215,6 +215,9 @@ class Feature:
     # differences allowed then only (never in a run of every feature).
     setup: str = ""
     allow_setup: list[Allow] = field(default_factory=list)
+    # A feature with no setting (off={}): the file it ships in. A baseline without it lacks the
+    # feature, so its allow_off holds in every run against it (--copilot-alone, --feature too).
+    ships_in: str = ""
 
 
 FEATURES: dict[str, Feature] = {}
@@ -1075,6 +1078,7 @@ FEATURES["worker_fork"] = Feature(
 FEATURES["share_links"] = Feature(
     off={},
     on={},
+    ships_in="src/chiefofstaff/shares.py",
     allow_off=[
         Allow(
             "Share… in a finished card's ⋯ menu, right after Copy report",
@@ -2868,17 +2872,29 @@ def classify(differences: list[Difference]):
 
 
 def baseline_lacks(baseline: str) -> list[str]:
-    """The features behind a setting the baseline has none of (in its Settings, models.py): off in
-    every run against it, whichever feature is chosen, as one on by default (delegate_reply)
-    would differ there."""
+    """The features the baseline has none of: behind a setting, none of its settings (in its
+    Settings, models.py), off in every run against it, whichever feature is chosen, as one on by
+    default (delegate_reply) would differ there; with no setting, not its file (ships_in), its
+    differences allowed in every run against it."""
     models = git("show", f"{baseline}:src/chiefofstaff/models.py")
+
+    def shipped(path: str) -> bool:
+        try:
+            git("cat-file", "-e", f"{baseline}:{path}")
+        except RuntimeError:
+            return False
+        return True
+
     return [
         name
         for name, feature in FEATURES.items()
-        if feature.off
-        and not any(
-            re.search(rf"^\s+{re.escape(key)}\s*:", models, re.MULTILINE) for key in feature.off
+        if (
+            feature.off
+            and not any(
+                re.search(rf"^\s+{re.escape(key)}\s*:", models, re.MULTILINE) for key in feature.off
+            )
         )
+        or (feature.ships_in and not shipped(feature.ships_in))
     ]
 
 
