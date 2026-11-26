@@ -647,6 +647,14 @@ FIXES: list[Allow] = [
         + "|".join(map(re.escape, ROUTER_ANSWER_BEFORE + ROUTER_ANSWER_AFTER))
         + ")$",
     ),
+    # 0.1.60 (owner report): a finished report in a chat shares its card as the card's Share…
+    # does: on its line on Home beside View (in its worker's chat beside its time, not
+    # photographed here). Share links shipped in 0.1.58, so in every run against it.
+    Allow(
+        "Share… on a finished report's line on Home, beside View",
+        element="#timeline .event button[data-share-task]",
+        views=r"^home",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
