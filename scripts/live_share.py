@@ -13,6 +13,9 @@ unless the bound account is that one. Chief of Staff's own code makes, opens and
   S6  One that expired while its Chief was stopped: the viewer says expired though its gist is
       still there, and the next start deletes it.
   S7  An uncertain create (no answer after the gist was made) is found and deleted.
+  S8  Share… on a report in a chat (0.1.60): from a report its card has a newer result than,
+      the card as it is now (said so; not from its latest report or its line on Home); its
+      link opens in the viewer with that latest result, and Revoke deletes its gist.
   At the end, no gist this run made is left (each is deleted in `finally` too).
 
     uv run --extra dev --with playwright python scripts/live_share.py
@@ -59,7 +62,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "scripts"))
 from build_site import build  # noqa: E402
-from conftest import Harness, settle  # noqa: E402
+from conftest import Harness, call_tool, settle  # noqa: E402
 from share_world import finished_task  # noqa: E402
 
 from chiefofstaff import shares as shares_module  # noqa: E402
@@ -275,6 +278,49 @@ async def scenario(guard: Guard, base: str, page):
         check("didn't answer, so nothing was shared" in str(said), f"no answer is said ({said})")
     [uncertain] = MADE - before
     check(await gist_status(uncertain) == 404, "the gist it made anyway was found and deleted")
+
+    print("S8 share from a report in a chat")
+    task = await finished_task(
+        owner, title="Speed up the nightly export", result="Made the export faster by batching."
+    )
+    said = await call_tool(
+        owner.runtime, "report", task["session_id"], status="done", task_id=task["id"],
+        summary="Made the export faster with one streaming query: 41 minutes down to 4.",
+    )  # fmt: skip
+    check(said.result_type == "success", "its report amended (the same turn): a newer result")
+    rows = owner.store.all(
+        "SELECT id, kind FROM messages WHERE json_extract(meta, '$.task_id')=? "
+        "AND json_extract(meta, '$.status')='done' ORDER BY id",
+        (task["id"],),
+    )
+    reports = [row["id"] for row in rows if row["kind"] == "report"]
+    [home] = [row["id"] for row in rows if row["kind"] == "inbound"]
+    preview = await shares.preview(task["id"], reports[0])
+    check(
+        [account["login"] for account in preview["accounts"]] == [ACCOUNT],
+        "the bound account is the test account",
+    )
+    check(
+        preview["older_report"] and "one streaming query" in preview["card"]["result"],
+        "from its earlier report: the card as it is now, and the dialog says so",
+    )
+    for message in (reports[-1], home):
+        check(
+            not (await shares.preview(task["id"], message))["older_report"],
+            "from its latest report, or its line on Home: nothing more said",
+        )
+    decisions = {hit["id"]: "remove" for hit in preview["hits"]}
+    made = await shares.create(task["id"], decisions, preview["digest"], 1, ACCOUNT)
+    state = await viewer_state(page, base, made["link"])
+    shown = await page.locator("main").inner_text()
+    check(
+        state == "card" and "one streaming query" in shown and "batching" not in shown,
+        f"the viewer opens it with its latest result (state {state})",
+    )
+    await page.screenshot(path=SHOTS / "live-viewer-from-report-1440-light.png", full_page=True)
+    await shares.revoke(made["share"]["id"])
+    report_gist = sharing.parse_link(made["link"])["gist_id"]
+    check(await gist_status(report_gist) == 404, "revoked: its gist is gone")
 
 
 async def main() -> int:
