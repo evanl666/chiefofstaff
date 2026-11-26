@@ -3583,6 +3583,9 @@ class Tools:
                 found.append({"pr": f"{repo}#{number}", "error": str(exc)[-300:]})
                 continue
             rollup = view.get("statusCheckRollup") or []
+            with suppress(Exception):
+                await self.runtime.github.not_run(repo, rollup)
+            not_run, why = receipts.not_run_checks(rollup)
             found.append(
                 {
                     "pr": f"{repo}#{number}",
@@ -3591,6 +3594,8 @@ class Tools:
                     "state": "DRAFT" if view.get("isDraft") else view.get("state", ""),
                     "checks": receipts.checks_state(rollup),
                     "failing": receipts.failing_checks(rollup),
+                    # GitHub never started them (its Actions minutes used up): no code to fix.
+                    **({"not_run": not_run, "why_not_run": why} if not_run else {}),
                     "review": view.get("reviewDecision") or "none yet",
                     "mergeable": view.get("mergeable", ""),
                     "updated": view.get("updatedAt", ""),

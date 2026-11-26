@@ -8,6 +8,14 @@ and You regrouped; every PR a task opened shows where it stands, however many; w
 at once; Claude sets itself up; and a worker waiting on another stays at work, while the Watchdog
 no longer takes long work for silence.
 
+- **CI that GitHub never started is not a failing check.** When GitHub refuses to run a PR's
+  CI (the account's Actions minutes or spending limit used up, or the account locked), each job
+  "fails" within seconds. Its card said *⚠ Checks are failing on …: rules-and-server, e2e*, and
+  its worker could be woken to fix code that nothing had found wrong. Such a check is now *CI
+  didn't run*: the card says once, calmly, *CI didn't run on app#15: GitHub Actions minutes
+  are used up*; it brings nothing under *Needs you*, its worker hears nothing to fix,
+  Prepared for you prepares no fix, and Merge when ready waits for CI to run. A check that ran
+  and failed still says so.
 - **A worker waiting for another worker stays at work.** A worker told to wait for another
   one's message ended its turn with "I'll launch once <worker> sends the release", and its task
   was filed as done with "Nothing is launched yet" as its result. A wait is now read from the

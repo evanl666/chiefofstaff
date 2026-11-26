@@ -772,9 +772,12 @@ async def merge_blockers(shepherd: Shepherd, claim: dict, details: dict) -> list
     checks = details.get("checks") or []
     if any(check["status"] != "COMPLETED" for check in checks):
         found.append("checks to finish")
-    if any(check.get("required") and check["conclusion"] not in {"SUCCESS", "NEUTRAL", "SKIPPED"}
+    if any(check.get("required") and not check.get("not_run")
+           and check["conclusion"] not in {"SUCCESS", "NEUTRAL", "SKIPPED"}
            for check in checks):  # fmt: skip
         found.append("required checks to pass")
+    if refused := [check for check in checks if check.get("required") and check.get("not_run")]:
+        found.append(f"CI to run (it didn't: {refused[0]['not_run']})")
     ran = set((claim.get("accepted") or {}).get("checks") or [])
     if missing := ran - {check["name"] for check in checks}:
         found.append(f"{', '.join(sorted(missing)[:2])} to run on this commit")

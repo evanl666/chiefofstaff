@@ -1350,3 +1350,21 @@ async def test_pause_watching_says_it_pauses_prepared_for_you_too(world):
         "Stops Slack, GitHub, Watches, away notices, learning and Prepared for you "
         "(what it had ready is withdrawn)."
     ), helper
+
+
+async def test_ci_github_never_started_is_nothing_to_fix_and_merges_once_it_runs():
+    """Owner report 0.1.58: a check GitHub refused to start (the account's Actions minutes
+    used up) is no CI failure to prepare a fix for; Merge when ready waits for CI to run."""
+    from chiefofstaff.control import IDLE
+    from chiefofstaff.publish import merge_blockers
+    from chiefofstaff.shepherd import failing
+
+    why = "GitHub Actions minutes are used up"
+    refused = {"name": "e2e", "status": "COMPLETED", "conclusion": "FAILURE", "required": True,
+               "not_run": why}  # fmt: skip
+    approved = [{"state": "APPROVED", "commit": "abc", "author": "bob"}]
+    details = {"head": "abc", "checks": [refused], "reviews": approved, "author": "me",
+               "merge_state": "CLEAN"}  # fmt: skip
+    assert failing(details) == []
+    claim = {"accepted": {"sha": "abc"}, "state": IDLE, "holder_kind": "task"}
+    assert await merge_blockers(None, claim, details) == [f"CI to run (it didn't: {why})"]

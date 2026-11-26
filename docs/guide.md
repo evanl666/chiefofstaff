@@ -686,7 +686,10 @@ after the report (work on its PR). A test run Copilot left running (a long suite
 background) shows *… tests running* and gets its result when it ends; a command that never ran
 (refused, blocked) is no failed run; in `pytest && git push`, a rejected push is not failed
 tests. A PR shows in a few words, as GitHub has it now: *app#7 · ✓ CI · approved*, *CI
-running*, *✗ CI* (hover for the failing checks), *merged*. When the PR's checks passed after
+running*, *✗ CI* (hover for the failing checks), *merged*. CI GitHub never started (the
+account's Actions minutes or spending limit used up, the account locked) is no failure: the
+card says once *CI didn't run on app#7: GitHub Actions minutes are used up*, and nothing asks
+you or its worker to fix it. When the PR's checks passed after
 the last local test run failed, the card says so (*✗ tests locally*, and *The last local test
 run failed (exit 1), but the checks on … pass now*): CI has the newer word.
 

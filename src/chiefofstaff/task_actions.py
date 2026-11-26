@@ -925,6 +925,8 @@ def pr_status(pr: dict) -> str:
         return "merge conflicts"
     if pr.get("checks") == "failing":
         return "CI failing"
+    if pr.get("checks") == "not_run":
+        return "CI didn't run"  # Nothing to fix (its Actions minutes used up): no marker.
     if pr.get("awaiting"):
         return "awaiting approval"
     if pr.get("checks") == "pending":
@@ -1889,6 +1891,9 @@ class TaskActions:
             # Read: a follow that could not read the PR itself can again.
             self.runtime.github.read_ok(threads.normalize(f"github:{repo}#{number}"), whole=False)
             rollup = view.get("statusCheckRollup") or []
+            # Checks GitHub never started (its Actions minutes used up): CI that did not run.
+            await self.runtime.github.not_run(repo, rollup)
+            not_run, why = receipts.not_run_checks(rollup)
             prs.append(
                 {
                     "label": f"{repo}#{number}",
@@ -1899,6 +1904,7 @@ class TaskActions:
                     "checks": receipts.checks_state(rollup),
                     "failing": receipts.failing_checks(rollup)[:5],
                     "awaiting": receipts.awaiting_approval(rollup)[:3],
+                    **({"not_run": not_run[:5], "not_run_why": why} if not_run else {}),
                     "checks_started": receipts.checks_started(rollup),
                     "review": view.get("reviewDecision") or "",
                     "merge_state": view.get("mergeStateStatus") or "",
@@ -2973,6 +2979,7 @@ class TaskActions:
             edited = " with uncommitted edits" if item["edited"] else ""
             observed.append(f"- Checked at `{item['commit'][:7]}`{edited}")
         observed += [f"- ⚠ {flag}" for flag in found.get("flags", [])]
+        observed += [f"- {note}" for note in found.get("notes", [])]
         if results := found.get("criteria"):
             marks = {"verified": "✅", "claimed": "☑️", "contradicted": "❌", "not_met": "❌"}
             words = {

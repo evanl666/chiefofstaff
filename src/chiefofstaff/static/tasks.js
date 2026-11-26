@@ -1318,10 +1318,11 @@ function prChip(pr, role = "") {
   // merge conflicts and failing CI); a word only about CI is not said again beside the CI mark,
   // and "in review" (nothing to say yet) is left out.
   const [word] = prStatus(pr);
-  const stands = word === "in review" || (word === "CI failing" && ci) || (word === "CI running" && ci) ? "" : word;
+  // CI that didn't run is said once, on the card's line (why), not on the chip too.
+  const stands = word === "in review" || word === "CI didn't run" || (word === "CI failing" && ci) || (word === "CI running" && ci) ? "" : word;
   const review = { APPROVED: "approved", CHANGES_REQUESTED: "changes requested" }[pr.review] || "";
   const failing = pr.checks === "failing" && pr.failing?.length ? `\nFailing: ${pr.failing.join(", ")}` : "";
-  const ciWords = { passing: "Checks pass", failing: "Checks fail", pending: "Checks are running", none: "No checks" }[pr.checks] || "";
+  const ciWords = { passing: "Checks pass", failing: "Checks fail", pending: "Checks are running", none: "No checks", not_run: `CI didn't run${pr.not_run_why ? `: ${pr.not_run_why}` : ""}` }[pr.checks] || "";
   const seen = pr.at ? `\nAs of ${new Date(pr.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
   const title = [pr.label, named ? `“${named}”` : "", ciWords + failing, !state && pr.awaiting?.length && `Waiting for approval: ${pr.awaiting.join(", ")}`, review && `Review: ${review}`, word === "ready to merge" && "GitHub would merge it now", word === "merge conflicts" && "It conflicts with its base branch: GitHub cannot merge it", state && `PR ${state}`, reviewedWords(pr), PR_ROLES[role] && `${PR_ROLES[role]} by this task`].filter(Boolean).join("\n") + seen;
   // Its number and title (shortened to fit), then where it stands (always in sight).
@@ -1382,8 +1383,10 @@ export function chips(task, phase) {
   });
   const more = linkGroups(task, delivered.shown, mentioned, delivered.off);
   const flags = (receipts?.flags || []).map((flag) => el("div", { class: "flag", text: flag }));
+  // Said calmly (CI GitHub never started): no warning, nothing to act on.
+  const notes = (receipts?.notes || []).map((note) => el("div", { class: "receipt-note", text: note }));
   const toggle = el("button", { type: "button", class: "expand link", text: "Show report", onclick: (event) => expandTask(event.currentTarget.closest(".card"), undefined, true) });
-  return el("div", { class: "chips" }, el("div", { class: "receipts", "data-tip": "Observed while it worked, not just reported" }, ...items, toggle), more || "", ...flags);
+  return el("div", { class: "chips" }, el("div", { class: "receipts", "data-tip": "Observed while it worked, not just reported" }, ...items, toggle), more || "", ...flags, ...notes);
 }
 // The whole report: what the worker wrote, each criterion and how it was checked.
 function report(task) {

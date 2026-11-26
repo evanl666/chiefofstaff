@@ -1974,6 +1974,7 @@ button.receipt.changes:hover { text-decoration: underline; }
 .diff-lines .note { padding: 6px 10px; margin: 0; }
 .flag { font-size: var(--small); color: var(--amber); }
 .flag::before { content: "⚠ "; }
+.receipt-note { font-size: var(--small); color: var(--muted); }
 
 .card.draft .quoted {
   white-space: pre-wrap;

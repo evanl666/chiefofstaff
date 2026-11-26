@@ -836,6 +836,14 @@ def summarize(
         ):
             names = ", ".join(pr.get("failing") or [])
             flags.append(f"Checks are failing on {pr['label']}" + (f": {names}." if names else "."))
+    # CI GitHub never started (the account's Actions minutes used up): no failure, nothing to
+    # fix; said once, calmly, on its card.
+    notes = [
+        f"CI didn't run on {pr['label'].split('/', 1)[-1]}: "
+        + (pr.get("not_run_why") or "GitHub didn't start it")
+        for pr in prs
+        if pr.get("checks") == "not_run" and pr.get("state") not in {"CLOSED", "MERGED"}
+    ]
     results = criteria_results(criteria or [], claims or [], commands, earlier, since)
     for item in results:
         if item["state"] == "contradicted":
@@ -878,6 +886,8 @@ def summarize(
         ],
         "observed": len(commands),
         "flags": flags,
+        # (Only when there is one: receipts are as they were otherwise.)
+        **({"notes": notes} if notes else {}),
     }
 
 
@@ -919,11 +929,63 @@ def latest_checks(rollup: list[dict]) -> list[dict]:
 
 
 def outcome(item: dict) -> str:
+    if item.get("not_run"):
+        return NOT_RUN_OUTCOME
     return (item.get("conclusion") or item.get("state") or item.get("status") or "").upper()
 
 
 FAILED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
 PENDING = {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED", "WAITING", ""}
+# A check GitHub refused to start (see not_run_why): CI that did not run, not a failure.
+NOT_RUN_OUTCOME = "NOT_RUN"
+# GitHub ends a job it refuses to start within seconds; only such a failure is looked into.
+NOT_RUN_SECONDS = 20
+# What GitHub says of a job it never started: the account's Actions minutes or spending limit,
+# its billing, or the account locked. Then (and only then) why, as the owner reads it.
+NOT_RUN_REASONS = (
+    (
+        re.compile(
+            r"spending limit|account payments have failed|billing|\bminutes\b.*\b(used|run out|"
+            r"exceeded|quota)|included minutes",
+            re.IGNORECASE,
+        ),
+        "GitHub Actions minutes are used up",
+    ),
+    (re.compile(r"account (?:is|has been) locked", re.IGNORECASE), "the account is locked"),
+    (re.compile(r"job was not started", re.IGNORECASE), "GitHub didn't start it"),
+)
+# An Actions job's link (…/actions/runs/<run>/job/<id>), or a check run's (…/<repo>/runs/<id>).
+CHECK_RUN_ID = re.compile(r"/job/(\d+)|^https://github\.com/[^/]+/[^/]+/runs/(\d+)")
+
+
+def not_run_why(messages: Iterable[str]) -> str:
+    """Why GitHub never started a check, from what its annotations or output say ("" when
+    they say nothing of the kind: it ran, and failed)."""
+    text = "\n".join(message or "" for message in messages)
+    return next((why for pattern, why in NOT_RUN_REASONS if pattern.search(text)), "")
+
+
+def check_run_id(item: dict) -> int | None:
+    """A check run's id (an Actions job's), from what gh gives: its id, or its details link."""
+    for key in ("databaseId", "id"):
+        if isinstance(item.get(key), int):
+            return item[key]
+    found = CHECK_RUN_ID.search(item.get("detailsUrl") or item.get("details_url") or "")
+    return int(found.group(1) or found.group(2)) if found else None
+
+
+def failed_at_once(item: dict) -> bool:
+    """A check run that failed within seconds of starting: one GitHub may have refused to
+    start (the only ones whose annotations are read, see GitHubSource.not_run)."""
+    if (item.get("conclusion") or "").upper() not in {"FAILURE", "STARTUP_FAILURE"}:
+        return False
+    started = when(item, "startedAt", "started_at")
+    ended = when(item, "completedAt", "completed_at")
+    try:
+        took = (datetime.fromisoformat(ended) - datetime.fromisoformat(started)).total_seconds()
+    except ValueError:
+        return False
+    return took <= NOT_RUN_SECONDS and check_run_id(item) is not None
 
 
 # Checks that wait for a person, not for CI: "Owner Approval", "Code owner review", sign-offs.
@@ -944,7 +1006,7 @@ def awaiting_approval(rollup: list[dict]) -> list[str]:
 
 
 def failing_checks(rollup: list[dict]) -> list[str]:
-    """The names of the checks whose latest run failed."""
+    """The names of the checks whose latest run failed (not one GitHub never started)."""
     return [
         item.get("name") or item.get("context") or "a check"
         for item in latest_checks(rollup)
@@ -952,10 +1014,18 @@ def failing_checks(rollup: list[dict]) -> list[str]:
     ]
 
 
+def not_run_checks(rollup: list[dict]) -> tuple[list[str], str]:
+    """The checks GitHub never started (marked `not_run` with why, see GitHubSource.not_run),
+    by each check's latest run, and why: ([], "") for none."""
+    found = [item for item in latest_checks(rollup) if item.get("not_run")]
+    return [check_name(item) for item in found], (found[0]["not_run"] if found else "")
+
+
 def checks_state(rollup: list[dict]) -> str:
-    """passing, failing, pending or none, from gh's statusCheckRollup, by each check's latest
-    run. A check waiting for a person's approval is not CI still running (awaiting_approval
-    names it)."""
+    """passing, failing, pending, not_run or none, from gh's statusCheckRollup, by each check's
+    latest run. A check waiting for a person's approval is not CI still running (awaiting_approval
+    names it); one GitHub never started (its Actions minutes used up) is CI that did not run,
+    not a failure: "not_run" unless another check failed or still runs."""
     if not rollup:
         return "none"
     states = {
@@ -969,6 +1039,8 @@ def checks_state(rollup: list[dict]) -> str:
         return "failing"
     if states & PENDING:
         return "pending"
+    if NOT_RUN_OUTCOME in states:
+        return "not_run"
     return "passing"
 
 

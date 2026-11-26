@@ -115,6 +115,9 @@ def fake_gh(state):
             )
         if path.startswith("repos/acme/app/commits/") and path.endswith("/status"):
             return json.dumps({"statuses": state.get("statuses", [])})
+        if path.startswith("repos/acme/app/check-runs/") and path.endswith("/annotations"):
+            state.setdefault("annotations_read", []).append(path)
+            return json.dumps(state.get("annotations", {}).get(path.split("/")[-2], []))
         raise AssertionError(path)
 
     return gh
@@ -974,3 +977,39 @@ async def test_a_workers_quiet_commit_is_not_news_on_its_pr(tmp_path, git_repo):
     }
     await source.poll_once()
     assert "1 new commit(s)" in host.deliveries[-1][2] and "W: Theirs" in host.deliveries[-1][2]
+
+
+async def test_ci_github_never_started_is_no_failure_for_a_worker_to_fix(tmp_path):
+    """Owner report 0.1.58: GitHub refused to start a PR's CI (the account's Actions minutes
+    used up), each job "failed" within seconds; it was news of failing CI to fix."""
+    store = Store(tmp_path / "data")
+    store.save_settings(Settings())
+    billing = (
+        "The job was not started because recent account payments have failed or your "
+        "spending limit needs to be increased."
+    )
+    state = {
+        "state": "open", "merged": False, "comments": [], "line_comments": [],
+        "annotations": {"211": [{"message": billing}], "446": [{"message": billing}]},
+        "runs": [
+            {"id": 211, "name": "e2e", "status": "completed", "conclusion": "failure",
+             "started_at": "2999-01-01T00:00:17Z", "completed_at": "2999-01-01T00:00:19Z"},
+            {"id": 446, "name": "rules", "status": "completed", "conclusion": "failure",
+             "started_at": "2999-01-01T00:00:17Z", "completed_at": "2999-01-01T00:00:19Z"},
+            {"id": 512, "name": "lint", "status": "completed", "conclusion": "failure",
+             "started_at": "2999-01-01T00:00:17Z", "completed_at": "2999-01-01T00:04:19Z"},
+        ],
+    }  # fmt: skip
+    host = Host(store)
+    source = GitHubSource(store, host, gh_command=fake_gh(state))
+    await source.poll_once()
+    [ci] = [text for _, _, text in host.deliveries if "CI on" in text]
+    assert ci.endswith("failed: lint"), "only the check that ran and failed"
+    assert len(state["annotations_read"]) == 2, "not that of a check that ran minutes"
+
+    state |= {"sha": "def5678", "compare": {"status": "ahead", "commits": []}}
+    state["runs"] = state["runs"][:2]
+    seen = len(host.deliveries)
+    await source.poll_once()
+    assert not any("CI on" in text for _, _, text in host.deliveries[seen:]), "nothing to fix"
+    assert len(state["annotations_read"]) == 2, "each check run read once"

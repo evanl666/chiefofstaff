@@ -653,3 +653,45 @@ def test_a_search_that_finds_nothing_backs_a_claim_that_nothing_remains():
     broken = {**grep, "exit_code": 2}
     [result] = criteria_results(["No `hello` remains"], [gone], [broken])
     assert result["state"] == "contradicted", "2 is grep's error"
+
+
+def test_a_check_github_never_started_is_ci_that_did_not_run():
+    """Owner report 0.1.58: jobs GitHub refused to start (the account's Actions minutes used
+    up) were "Checks are failing", for a worker to fix."""
+    job = "https://github.com/acme/app/actions/runs/45746310947/job/"
+    refused = {
+        "name": "e2e",
+        "conclusion": "FAILURE",
+        "detailsUrl": f"{job}139663115446",
+        "startedAt": "2026-11-26T03:02:17Z",
+        "completedAt": "2026-11-26T03:02:19Z",
+    }
+    ran = {
+        "name": "lint",
+        "conclusion": "FAILURE",
+        "detailsUrl": f"{job}139663115447",
+        "startedAt": "2026-11-26T03:02:17Z",
+        "completedAt": "2026-11-26T03:09:19Z",
+    }
+    skipped = {"name": "tested", "conclusion": "SKIPPED", "startedAt": "2026-11-26T03:02:18Z"}
+    assert receipts.check_run_id(refused) == 139663115446, "the job, not its workflow run"
+    assert receipts.failed_at_once(refused) and not receipts.failed_at_once(ran)
+    billing = "The job was not started because recent account payments have failed or your "
+    billing += "spending limit needs to be increased."
+    assert receipts.not_run_why([billing]) == "GitHub Actions minutes are used up"
+    assert receipts.not_run_why(["Your account is locked."]) == "the account is locked"
+    assert receipts.not_run_why(["Process completed with exit code 1."]) == ""
+    marked = {**refused, "not_run": "GitHub Actions minutes are used up"}
+    assert receipts.checks_state([marked, skipped]) == "not_run"
+    assert receipts.failing_checks([marked, skipped]) == []
+    assert receipts.not_run_checks([marked, skipped]) == (
+        ["e2e"],
+        "GitHub Actions minutes are used up",
+    )
+    assert receipts.checks_state([marked, ran]) == "failing", "a check that ran and failed"
+    assert receipts.failing_checks([marked, ran]) == ["lint"]
+    pr = {"label": "acme/app#15", "state": "OPEN", "checks": "not_run",
+          "not_run_why": "GitHub Actions minutes are used up"}  # fmt: skip
+    found = receipts.summarize([], {"prs": [pr]}, "")
+    assert found["notes"] == ["CI didn't run on app#15: GitHub Actions minutes are used up"]
+    assert not found["flags"]

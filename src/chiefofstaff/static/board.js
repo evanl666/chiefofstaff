@@ -67,6 +67,8 @@ export function prStatus(pr) {
   if (pr.review === "CHANGES_REQUESTED") return ["changes requested", "bad"];
   if (pr.merge_state === "DIRTY") return ["merge conflicts", "bad"];
   if (pr.checks === "failing") return ["CI failing", "bad"];
+  // GitHub never started its CI (the account's Actions minutes used up): nothing to fix.
+  if (pr.checks === "not_run") return ["CI didn't run", "muted"];
   if (pr.awaiting?.length) return ["awaiting approval", "wait"];
   if (pr.checks === "pending") return ["CI running", "active"];
   // GitHub would merge it now (approved, or no review required): a Ready-to-merge card says so.

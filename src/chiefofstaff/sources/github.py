@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from .. import threads
+from .. import receipts, threads
 from ..receipts import APPROVAL, listed
 from ..store import Store, now
 from . import SourceHost
@@ -31,6 +31,8 @@ NOT_FOUND = re.compile(
     r"HTTP 404\b|\bgh: Not Found\b|Could not resolve to a (?:Repository|PullRequest)\b"
 )
 FAILED = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
+# Check runs whose word on whether GitHub started them is kept (see GitHubSource.not_run).
+NOT_RUN_KEPT = 400
 # A followed PR shows as unreadable on its task after this many failed reads in a row.
 SHOWN_AFTER = 3
 # How often followed PRs are read (a new follow wakes the loop sooner).
@@ -1107,9 +1109,10 @@ class GitHubSource:
             items.append((f"github:head:{repo}#{number}@{sha}", line))
         self.reading[thread] = "CI checks"
         ci = await self.ci_result(base, sha)
-        if ci and not last and ci["at"] and ci["at"] < github_time(since):
+        if ci and (ci.get("not_run") or (not last and ci["at"] and ci["at"] < github_time(since))):
             # Its first look, at CI that finished before it was followed: where it stands, not
-            # news (a PR named in passing would bring its old failures).
+            # news (a PR named in passing would bring its old failures). CI GitHub never started
+            # (its Actions minutes used up) is nothing for a worker to fix: its card says so.
             self.store.add_trigger("github", f"github:ci:{repo}#{number}@{sha}:{ci['outcome']}", "")
         elif ci:
             # Keyed by the outcome too: a check that failed and passed when run again on the
@@ -1276,6 +1279,7 @@ class GitHubSource:
         runs = json.loads(
             await self.gh("api", f"{base}/commits/{sha}/check-runs?per_page=100")
         ).get("check_runs", [])
+        await self.not_run(base.removeprefix("repos/"), runs)
         try:
             statuses = json.loads(await self.gh("api", f"{base}/commits/{sha}/status")).get(
                 "statuses", []
@@ -1294,7 +1298,8 @@ class GitHubSource:
             when = run.get("completed_at") or ""
             ended = max(ended, when)
             if when >= latest.get(run["name"], ("", ""))[0]:
-                latest[run["name"]] = (when, run.get("conclusion") or "")
+                latest[run["name"]] = (when, "not_run" if run.get("not_run") else
+                                       run.get("conclusion") or "")  # fmt: skip
         for status in statuses:  # GitHub lists each context's latest first.
             if status["context"] not in latest:
                 if status.get("state") == "pending" and APPROVAL.search(status["context"]):
@@ -1314,6 +1319,14 @@ class GitHubSource:
                 "outcome": "failed-" + ",".join(failed),
                 "text": f"failed: {', '.join(failed)}",
                 "at": ended,
+            }
+        if refused := sorted(name for name, (_, outcome) in latest.items() if outcome == "not_run"):
+            why = next(run["not_run"] for run in runs if run.get("not_run"))
+            return {
+                "outcome": "notrun-" + ",".join(refused),
+                "text": f"didn't run: {why}",
+                "at": ended,
+                "not_run": why,
             }
         if waiting_for:
             names = ", ".join(sorted(set(waiting_for)))
@@ -1816,7 +1829,8 @@ class GitHubSource:
         "reviewThreads(first:100){nodes{id isResolved isOutdated path line "
         "comments(first:50){nodes{databaseId author{login} body createdAt url}}}} "
         "commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:100){nodes{"
-        "__typename ... on CheckRun{name status conclusion detailsUrl databaseId "
+        "__typename ... on CheckRun{name status conclusion detailsUrl databaseId startedAt "
+        "completedAt "
         "isRequired(pullRequestNumber:NUMBER) checkSuite{workflowRun{databaseId}}} "
         "... on StatusContext{context state targetUrl isRequired(pullRequestNumber:NUMBER)}"
         "}}}}}}}}}"
@@ -1849,6 +1863,8 @@ class GitHubSource:
                     "conclusion": (node.get("conclusion") or "").upper(),
                     "required": node.get("isRequired"), "url": node.get("detailsUrl") or "",
                     "id": node.get("databaseId"), "run": run,
+                    "started_at": node.get("startedAt") or "",
+                    "completed_at": node.get("completedAt") or "",
                 })  # fmt: skip
             elif node.get("__typename") == "StatusContext":
                 state = (node.get("state") or "").upper()
@@ -1860,6 +1876,8 @@ class GitHubSource:
                     "required": node.get("isRequired"), "url": node.get("targetUrl") or "",
                     "id": None, "run": None,
                 })  # fmt: skip
+        # A check GitHub never started is CI that did not run: nothing to fix (Shepherd.failing).
+        await self.not_run(repo, checks)
         threads_found = []
         for node in (pull.get("reviewThreads") or {}).get("nodes") or []:
             comments = [
@@ -2008,6 +2026,32 @@ class GitHubSource:
             if len(lines) < most:
                 lines.append(line)
         return "\n".join(line for lines in kept.values() for line in lines)
+
+    async def not_run(self, repo: str, checks: list[dict]) -> int:
+        """Marks each check GitHub refused to start (the account's Actions minutes or spending
+        limit used up, the account locked): `not_run` says why (receipts.not_run_why). Only a
+        check that failed within seconds is looked into, by its annotations, once per check run
+        (the answer is kept); one that cannot be read now stays as it is. How many it marked."""
+        kept = json.loads(self.store.get("checksnotrun") or "{}")
+        marked, read = 0, False
+        for check in checks:
+            if not receipts.failed_at_once(check):
+                continue
+            key = f"{repo.lower()}:{receipts.check_run_id(check)}"
+            if key not in kept:
+                try:
+                    found = await self.annotations(repo, int(key.rsplit(":", 1)[1]))
+                except Exception:
+                    logger.info("Could not read the annotations of %s.", key, exc_info=True)
+                    continue
+                kept[key] = receipts.not_run_why(item["message"] for item in found)
+                read = True
+            if kept[key]:
+                check["not_run"] = kept[key]
+                marked += 1
+        if read:
+            self.store.set("checksnotrun", json.dumps(dict(list(kept.items())[-NOT_RUN_KEPT:])))
+        return marked
 
     async def annotations(self, repo: str, check_id: int) -> list[dict]:
         found = json.loads(

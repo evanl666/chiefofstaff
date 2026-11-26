@@ -191,12 +191,14 @@ FAILED_CHECK = frozenset(
 
 
 def failing(details: dict) -> list[dict]:
-    """The checks that failed at the head (each by its latest run), not a person's approval."""
+    """The checks that failed at the head (each by its latest run), not a person's approval,
+    nor one GitHub never started (its Actions minutes used up: no code to fix)."""
     return [
         check
         for check in details.get("checks") or []
         if check.get("status") == "COMPLETED"
         and check.get("conclusion") in FAILED_CHECK
+        and not check.get("not_run")
         and not APPROVAL.search(check.get("name") or "")
     ]
 
