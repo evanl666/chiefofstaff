@@ -968,7 +968,27 @@ async def round_two(runtime, browser, failures: list[str]):
     await runtime.task_actions.nudge(quiet_task["id"])
     await settle(runtime)
     await expect(asked.locator(".actions .error")).to_be_hidden(timeout=10000)
-    log("a Nudge that could not ask its worker says why on its card; a Nudge again forgets it")
+
+    # A note by Enter in its form: the form's own button says so (not the "⋯" it came from).
+    async def held_note(route):
+        await asyncio.sleep(1.5)
+        await route.continue_()
+
+    await page.route("**/api/tasks/*/follow-up", held_note)
+    await asked.locator(".more-button").click()
+    await asked.get_by_role("menuitem", name="Add a note…").click()
+    await asked.locator(".actions textarea").fill("Use the staging data")
+    await asked.locator(".actions textarea").press("Enter")
+    await expect(asked.locator(".actions button.working")).to_have_text("Send")
+    await expect(asked.locator(".more-button.working")).to_have_count(0)
+    await expect(page.locator(".toast", has_text="Sent to the worker.").last).to_be_visible(
+        timeout=10000
+    )
+    await page.unroute("**/api/tasks/*/follow-up", held_note)
+    log(
+        "a Nudge that could not ask its worker says why on its card; a Nudge again forgets it; "
+        "a note sent by Enter: its form's Send says it is at work"
+    )
 
     # Events that ask for the whole state again: one read for a burst, at most one a second
     # while they keep coming (0.1.59: one each, 150 ms after it, however many).

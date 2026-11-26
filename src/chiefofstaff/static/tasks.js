@@ -482,9 +482,9 @@ function taskCard(task, phase = phaseOf(task)) {
   function working(words) {
     let button = pressed?.isConnected && node.contains(pressed) ? pressed : null;
     pressed = null;
-    if (button?.closest(".menu")) button = button.closest(".menu-wrap")?.querySelector(":scope > button") || null;
-    // Enter in a form: its own button.
-    if (!button && actions.dataset.editing) button = actions.querySelector(":scope > button:last-child");
+    // A form open on it (Enter in it, or its own button): that form's button.
+    if (actions.dataset.editing && !actions.contains(button)) button = actions.querySelector(":scope > button:last-child");
+    else if (button?.closest(".menu")) button = button.closest(".menu-wrap")?.querySelector(":scope > button") || null;
     if (button) {
       button.style.width = `${button.getBoundingClientRect().width}px`;
       button.classList.add("working");
