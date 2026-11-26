@@ -126,17 +126,18 @@ export async function api(path, { method = "GET", body } = {}) {
   if (response.status === 401) {
     $("#application").hidden = true;
     $("#signin").hidden = false;
-    throw new Error(errorText(data, 401));
+    throw Object.assign(new Error(errorText(data, 401)), { answered: true });
   }
   // Starlette's own "Not Found": this page is newer than the server that is still running.
-  if (response.status === 404 && data.detail === "Not Found") throw new Error("Chief of Staff was updated. Restart it to use this.");
+  if (response.status === 404 && data.detail === "Not Found") throw Object.assign(new Error("Chief of Staff was updated. Restart it to use this."), { answered: true });
   if (!response.ok) {
     // With the fields it is about, for a form to show them.
     const fields = Array.isArray(data.detail) ? data.detail.map(fieldName).filter(Boolean) : [];
     // `anyway`: the words of what the owner may do anyway (open the PR all the same). `fresh`:
     // a session Copilot can't reopen, which a fresh one can go on for (freshButton).
     // `changed`: what it was about changed since the page showed it (Share…'s preview).
-    throw Object.assign(new Error(errorText(data, response.status)), { fields, anyway: data.anyway || "", fresh: data.fresh || "", changed: Boolean(data.changed) });
+    // `answered`: the server said no (not a connection cut off before its answer).
+    throw Object.assign(new Error(errorText(data, response.status)), { fields, anyway: data.anyway || "", fresh: data.fresh || "", changed: Boolean(data.changed), answered: true });
   }
   return data;
 }

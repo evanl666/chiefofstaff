@@ -3,7 +3,7 @@
 import { $, api, closeMenus, closeOnBackdrop, FRESH_START, rememberKey, startFresh, submits, toast } from "./dom.js";
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, othersOn, routerId, state, viewedId } from "./state.js";
 import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
-import { agentModels, answerSending, appendMessages, chatAnchor, dropSending, followAnchor, renderHeader, repeatSending, scrolledByOwner, scrollToBottom, select, showSending } from "./session.js";
+import { agentModels, answerSending, appendMessages, chatAnchor, dropSending, followAnchor, forgetUnsent, noteUnsent, renderHeader, repeatSending, scrolledByOwner, scrollToBottom, select, showSending, unsentFor } from "./session.js";
 import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setAgent, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
@@ -85,14 +85,19 @@ function bindUi() {
     const chat = other ? "" : viewedId();
     const key = JSON.stringify([chat, to?.id || "", text, chosen, files.map((file) => [file.name, file.url.length])]);
     if (chat && repeatSending(key)) return;
-    const clientId = chat ? newClientId() : "";
-    if (chat) showSending(sendingMessage({ clientId, chat, text, to, chosen, files }), key);
+    // Words back from a send this page lost on a reload go again under its id (never twice).
+    const clientId = chat ? unsentFor(chat, text, to?.id)?.id || newClientId() : "";
+    if (chat) {
+      noteUnsent({ id: clientId, chat, text, to: to ? { id: to.id, title: to.title } : null, images: files.length });
+      showSending(sendingMessage({ clientId, chat, text, to, chosen, files }), key);
+    }
     // Images go along only when there are any: a server without them takes the message as before.
     const body = (extra = {}) => ({ text, ...extra, ...(files.length ? { attachments: attachmentBody(files) } : {}), ...(clientId ? { client_id: clientId } : {}) });
     try {
       if (to) {
         // Straight to one worker; the Router hears of it with its next message.
         const sent = await api(`/api/sessions/${routerId()}/messages`, { method: "POST", body: body({ to: to.id }) });
+        forgetUnsent(clientId);
         setRecipient(null);
         // Home shows its copy ("→ worker").
         answerSending(clientId, sent.copy || null);
@@ -119,12 +124,21 @@ function bindUi() {
       // On Home, a card someone shared goes along, quoted as information (Start a task from this).
       const card = sessionId === HOME ? withCardBody() : {};
       const extra = { ...chosen, ...card, ...(task ? { task_id: task } : {}), ...(held ? { settings_digest: held } : {}) };
-      answerSending(clientId, await api(`/api/sessions/${chat}/messages`, { method: "POST", body: body(extra) }));
+      const sent = await api(`/api/sessions/${chat}/messages`, { method: "POST", body: body(extra) });
+      forgetUnsent(clientId);
+      answerSending(clientId, sent);
       if (agent || compare.length) setAgent(null);
       if (card.shared_card) leaveOut();
     } catch (error) {
       if (other) input.disabled = false;
+      // Cut off by the page going away (a reload): whether it was stored is looked up once the
+      // page is back (session.js recoverUnsent); its words are not kept as a draft meanwhile.
+      if (unloading && !error.answered) return;
       dropSending(clientId);
+      // Answered with an error, it was not taken: as before, its words back to change or send
+      // again (a new send). Never answered (the connection broke), it may have been: sent
+      // again, it goes under the same id.
+      if (error.answered) forgetUnsent(clientId);
       if (error.fresh) {
         // Kept for its worker (its Copilot session can't be reopened): not to be sent twice.
         toast(error.message, "error", null, { text: FRESH_START, onclick: () => startFresh(error.fresh) });
@@ -204,6 +218,11 @@ function bindUi() {
   // Running cards say how long a step has taken: refreshed while Home is shown.
   setInterval(scheduleHome, 30000);
 }
+// The page is going away (a reload, a closed tab): a send cut off by it is not one that failed.
+let unloading = false;
+window.addEventListener("beforeunload", () => (unloading = true));
+window.addEventListener("pagehide", () => (unloading = true));
+window.addEventListener("pageshow", () => (unloading = false));
 // The page's own id for one send (the server knows it by it: never sent twice).
 function newClientId() {
   return [...window.crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, "0")).join("");

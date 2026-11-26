@@ -359,6 +359,10 @@ TERMINALS_WAIT = 3.0
 # How long the owner's sends from the page are known by the id the page gave each (seconds):
 # one sent again with it in that time is answered with what the first stored (owner_send_once).
 CLIENT_SEND_SECONDS = 300.0
+# How many of a session's latest owner messages are looked through for one (sent_with), and how
+# long a page that reloaded waits for its send still on its way (client_sent; seconds).
+CLIENT_SENT_LOOK = 200
+CLIENT_SENT_WAIT = 20.0
 
 
 # How long a turn of another agent waits for what the last one spent (seconds).
@@ -9452,12 +9456,18 @@ class Runtime:
         return found
 
     async def owner_send_once(
-        self, session_id: str, client_id: str, send: Callable[[], Awaitable[dict]]
+        self,
+        session_id: str,
+        client_id: str,
+        send: Callable[[], Awaitable[dict]],
+        again: Callable[[dict], dict] | None = None,
     ) -> dict:
         """The owner's send from the page, once for the id the page gave it (`client_id`): the
         same again within CLIENT_SEND_SECONDS (a retry, a second Enter that got through while
-        the first was on its way) gets what the first stored, and nothing is sent twice. One
-        that failed may be tried again."""
+        the first was on its way) gets what the first stored, and nothing is sent twice. Later,
+        or after a restart, one stored for it (sent_with) is answered with `again` (the page
+        sends it again under its id once it reloaded mid-send: see client_sent). One that failed
+        may be tried again."""
         if not client_id:
             return await send()
         now = time.monotonic()
@@ -9467,6 +9477,8 @@ class Runtime:
         key = (session_id, client_id)
         if key in self.client_sends:
             return await asyncio.shield(self.client_sends[key][1])
+        if again and (found := self.sent_with(session_id, client_id)):
+            return again(found)
         sent: asyncio.Future = asyncio.get_running_loop().create_future()
         self.client_sends[key] = (now, sent)
         try:
@@ -9481,6 +9493,28 @@ class Runtime:
             raise
         sent.set_result(message)
         return message
+
+    def sent_with(self, session_id: str, client_id: str) -> dict | None:
+        """The owner's message stored in a session for the page's send `client_id` (its own, or
+        Home's copy of one sent to a worker from there), among its latest CLIENT_SENT_LOOK."""
+        if not client_id:
+            return None
+        for row in self.store.all(
+            "SELECT * FROM messages WHERE session_id=? AND kind='owner' ORDER BY id DESC LIMIT ?",
+            (session_id, CLIENT_SENT_LOOK),
+        ):
+            meta = json.loads(row["meta"] or "{}")
+            if meta.get("client_id") == client_id:
+                return {**row, "meta": meta}
+        return None
+
+    async def client_sent(self, session_id: str, client_id: str) -> dict | None:
+        """Whether the page's send `client_id` was stored, for a page that reloaded while it was
+        on its way (its answer lost): one still on its way here is waited for, CLIENT_SENT_WAIT
+        at most. The message, or None."""
+        if entry := self.client_sends.get((session_id, client_id)):
+            await asyncio.wait({entry[1]}, timeout=CLIENT_SENT_WAIT)
+        return self.sent_with(session_id, client_id)
 
     async def owner_send(
         self,

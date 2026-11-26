@@ -70,7 +70,9 @@ the Router says it had finished. What you send shows in the chat at once, as you
 when it takes a moment to reach Chief of Staff (a busy computer), *Sending…* under it. Sending
 the same words to the same chat again while it is on its way sends nothing more: its message
 stands out a moment instead (sent again once it went, it is a message of its own). If it cannot
-be sent, it goes from the chat and your words and images are back in the box, with why. Under
+be sent, it goes from the chat and your words and images are back in the box, with why. If the
+page reloads while it is on its way, the page asks once it is back whether it was stored: if not,
+its words are back in the box (*Not sent — press Enter to send it*), and they still go once. Under
 your latest messages to a session its chat says where
 they stand: *Waiting to be sent*, *Sent*, *Received* (its conversation shows it), *Handled* (the
 turn it was in ended); one its conversation does not show within 20 seconds, and that Copilot

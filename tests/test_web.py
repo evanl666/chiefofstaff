@@ -161,6 +161,61 @@ async def test_the_same_send_twice_at_once_is_sent_once(harness):
     assert retried["text"] == "Tried again"
 
 
+def test_a_page_that_reloaded_mid_send_asks_whether_it_was_stored(app_client):
+    """A page reloaded while its send was on its way loses the answer: it asks by the send's id
+    whether it was stored. Sent again under that id once the server no longer has it in mind (a
+    restart, minutes later), it is answered with what was stored, not sent twice; to a worker
+    from Home, with Home's copy."""
+    sign_in(app_client)
+    runtime = app_client.app.state.runtime
+    router = app_client.get("/api/state").json()["router_id"]
+    url = f"/api/sessions/{router}/messages"
+    sent_id = "f6" * 16
+    assert app_client.get(f"/api/sessions/{router}/sends/{sent_id}").json() == {"message": None}
+    assert app_client.get(f"/api/sessions/{router}/sends/nope").status_code == 404
+    send = {"text": "Plan the launch", "client_id": sent_id}
+    first = app_client.post(url, json=send, headers=ORIGIN).json()
+    found = app_client.get(f"/api/sessions/{router}/sends/{sent_id}").json()["message"]
+    assert found["id"] == first["id"] and "delivery" in found and "prompt" not in found["meta"]
+    runtime.client_sends.clear()  # As after a restart, or five minutes on.
+    assert app_client.post(url, json=send, headers=ORIGIN).json()["id"] == first["id"]
+    assert app_client.fake.sessions[router].sent == [said("Plan the launch")]
+
+    result = app_client.portal.call(
+        lambda: call_tool(runtime, "spawn_worker", router, title="Docs", instructions="Write docs")
+    )
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    told = {"text": "Keep it short", "to": worker, "client_id": "a7" * 16}
+    copy = app_client.post(url, json=told, headers=ORIGIN).json()["copy"]
+    runtime.client_sends.clear()
+    again = app_client.post(url, json=told, headers=ORIGIN).json()
+    assert again["copy"]["id"] == copy["id"] and "prompt" not in again["copy"]["meta"]
+    assert app_client.fake.sessions[worker].sent[-1].count("Keep it short") == 1
+    looked = app_client.get(f"/api/sessions/{router}/sends/{'a7' * 16}").json()["message"]
+    assert looked["id"] == copy["id"]
+
+
+async def test_a_send_still_on_its_way_is_waited_for_when_asked(harness):
+    """Asked about a send still on its way here (the page reloaded at once), the answer waits
+    for it: stored, it is that message."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    gate = asyncio.Event()
+
+    async def slow():
+        await gate.wait()
+        return await runtime.owner_send(router, "Slow one", typed=True, client_id="b8" * 16)
+
+    sending = asyncio.ensure_future(runtime.owner_send_once(router, "b8" * 16, slow))
+    await asyncio.sleep(0)
+    asked = asyncio.ensure_future(runtime.client_sent(router, "b8" * 16))
+    await asyncio.sleep(0.05)
+    assert not asked.done(), "waits for the send on its way"
+    gate.set()
+    assert (await asked)["id"] == (await sending)["id"]
+    assert await runtime.client_sent(router, "c9" * 16) is None
+
+
 def test_settings_are_validated(app_client, tmp_path):
     sign_in(app_client)
     project = tmp_path / "project"

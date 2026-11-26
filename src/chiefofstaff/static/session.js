@@ -709,8 +709,10 @@ export function showDraft(chat) {
   const input = $("#composer-input");
   if (drafted === null) {
     input.addEventListener("input", keepDraft);
+    input.addEventListener("input", () => showUnsent(null));
     // Sent: the composer is emptied first (and the text put back if sending fails).
     $("#composer").addEventListener("submit", () => setTimeout(keepDraft));
+    $("#composer").addEventListener("submit", () => showUnsent(null));
     window.addEventListener("pagehide", keepDraft);
   } else if (drafted === chat) {
     return;
@@ -718,10 +720,79 @@ export function showDraft(chat) {
     keepDraft();
   }
   drafted = chat;
-  input.value = localStorage.getItem(DRAFT + chat) || "";
+  showUnsent(null);
+  setDraft(localStorage.getItem(DRAFT + chat) || "");
+  recoverUnsent(chat);
+}
+function setDraft(text) {
+  const input = $("#composer-input");
+  input.value = text;
   input.style.height = "auto";
   if (input.value && input.scrollHeight) input.style.height = `${input.scrollHeight}px`;
   showLength();
+}
+// Sends on their way from this page, kept through a reload (its answer is lost with the page): by
+// the page's id for each, its chat, its words and whom it was to. One stored is forgotten (and
+// its words kept as a draft as the page went go); one that was not comes back in its chat's box,
+// to be sent again under the same id, so that one that reached Chief of Staff after all is not
+// sent twice. A day later, forgotten.
+const UNSENT = "cos.unsent";
+const UNSENT_KEPT = 86400000;
+function unsentList() {
+  try {
+    const list = JSON.parse(localStorage.getItem(UNSENT) || "[]");
+    return Array.isArray(list) ? list.filter((item) => item?.id && Date.now() - item.at < UNSENT_KEPT) : [];
+  } catch {
+    return [];
+  }
+}
+function keepUnsent(list) {
+  if (list.length) localStorage.setItem(UNSENT, JSON.stringify(list));
+  else localStorage.removeItem(UNSENT);
+}
+export function noteUnsent(record) {
+  keepUnsent([...unsentList().filter((item) => item.id !== record.id), { ...record, at: Date.now() }]);
+}
+export function forgetUnsent(id) {
+  if (id) keepUnsent(unsentList().filter((item) => item.id !== id));
+}
+// The one these words to this chat (and worker) came back from: sent again under its id.
+export const unsentFor = (chat, text, to = "") => unsentList().find((item) => item.chat === chat && item.text === text && (item.to?.id || "") === to) || null;
+let recovering = null;
+async function recoverUnsent(chat) {
+  const looked = (recovering = {});
+  // Home's words go to the Router's chat.
+  const session = chat === HOME ? routerId() : chat;
+  for (const record of unsentList().filter((item) => session && item.chat === session && !sending.has(item.id))) {
+    let found;
+    try {
+      ({ message: found } = await api(`/api/sessions/${session}/sends/${record.id}`));
+    } catch {
+      continue;  // Not known now: looked at again when this chat is shown next.
+    }
+    if (recovering !== looked || drafted !== chat) return;
+    const input = $("#composer-input");
+    const typed = input.value.trim();
+    if (found) {
+      forgetUnsent(record.id);
+      if (typed === record.text) {
+        setDraft("");
+        keepDraft();
+      }
+    } else if (!typed || typed === record.text) {
+      setDraft(record.text);
+      keepDraft();
+      if (record.to && chat === HOME && byId(record.to.id)) setRecipient(byId(record.to.id));
+      showUnsent(record);
+    }
+  }
+}
+// Under the box, quietly, while those words came back unsent.
+function showUnsent(record) {
+  const line = $("#composer-unsent");
+  if (!line) return;
+  line.hidden = !record;
+  line.textContent = record ? `Not sent — press Enter to send it${record.images ? " (its images: add them again)" : ""}` : "";
 }
 async function showTaskInTimeline(taskId) {
   const find = () => {
@@ -1694,6 +1765,12 @@ export function appendMessages(messages) {
   for (const entry of waiting) entry.node.remove();
   messages.forEach((message, index) => {
     const mine = message.session_id === viewed && sendingFor(message);
+    if (mine && !mine.id && timeline.querySelector(`.msg.owner[data-id="${message.id}"]`)) {
+      // Stored before (sent again under its id after a reload): shown already, not twice.
+      mine.id = message.id;
+      if (mine.answered) sending.delete(message.meta.client_id);
+      return;
+    }
     if (mine && !mine.id) {
       placeSent(timeline, mine, message, shown);
       return;

@@ -678,6 +678,8 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 /* How long the message is, near the limit; over it, in red (it is not sent). */
 #composer-count { flex-basis: 100%; font-size: var(--small); color: var(--muted); font-variant-numeric: tabular-nums; }
 #composer-count.over { color: var(--red); }
+/* Words back from a send the page lost on a reload, not stored: one quiet line. */
+#composer-unsent { flex-basis: 100%; font-size: var(--small); color: var(--muted); }
 #composer #composer-to .clear {
   width: 28px;
   height: 28px;

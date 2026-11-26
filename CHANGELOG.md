@@ -57,7 +57,11 @@ no longer takes long work for silence.
   same words sent to the same chat again while it is on its way are not sent twice: its
   message stands out a moment instead. Sent again on purpose once it went, it is a message of
   its own. If it cannot be sent, it goes from the chat, and your words and images are back in
-  the box, with why. A send your browser happens to make twice is stored and sent once.
+  the box, with why. A send your browser happens to make twice is stored and sent once. If
+  the page reloads (or the tab closes) while a message is on its way, its words no longer come
+  back as an unsent draft when Chief of Staff had it: back, the page asks; stored, nothing comes
+  back; not stored, your words are back in the box with *Not sent — press Enter to send it*, and
+  sent again they still go once.
 - **Your message to the Router waits less on a busy computer.** Before it was stored, the
   sessions you opened in a terminal since the Router last looked were listed twice (again for
   one of Chief of Staff's own opened beside them), and that listing is slow when the computer

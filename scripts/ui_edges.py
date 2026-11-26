@@ -3479,7 +3479,10 @@ async def round_scale(runtime, browser, failures: list[str]):
     await page.locator("#back-home").click()
     await expect(composer).to_have_value("Half a question about the echo")
     await composer.press("Enter")
-    await expect(timeline.locator(".msg.owner", has_text="Half a question")).to_be_visible()
+    # Stored (an id, in place of the bubble shown at once) before the reload: sent, it is gone.
+    await expect(timeline.locator(".msg.owner", has_text="Half a question")).to_have_attribute(
+        "data-id", re.compile(r"^\d+$")
+    )
     await page.reload()
     await expect(page.locator("#application")).to_be_visible()
     await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
@@ -6311,6 +6314,99 @@ class Held:
             await route.continue_()
 
 
+UNSENT_GONE = "() => !localStorage.getItem('cos.unsent')"
+
+
+async def composer_reloads(runtime, page, router: str, bubble):
+    """0.1.58 (round_scale C5 under load): the page reloaded while a send was on its way. The
+    answer is lost with the page; its words were put back and kept as a draft as it went, though
+    Chief of Staff had it: sent again, it went twice. Now its words are no draft; back, the page
+    asks whether it was stored: stored, nothing comes back; not, its words do, with a quiet "Not
+    sent — press Enter to send it", and go again under the same id (one that reached Chief of
+    Staff after all is not sent twice)."""
+    box = page.locator("#composer-input")
+    unsent = page.locator("#composer-unsent")
+    posts: list[dict] = []
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def stored_on_the_way(route):
+        if route.request.method != "POST":
+            await route.continue_()
+            return
+        posts.append(route.request.post_data_json)
+        await route.fetch()  # Chief of Staff has it: stored.
+        reached.set()
+        await release.wait()
+        # Its answer never reaches the page: cut off, as the reload cut it off before the page
+        # went (its words put back, then kept as a draft as it went).
+        await route.abort()
+
+    url = f"**/api/sessions/{router}/messages"
+    await page.route(url, stored_on_the_way)
+    stored = "Reloaded on its way, and stored"
+    await box.fill(stored)
+    await box.press("Enter")
+    await asyncio.wait_for(reached.wait(), 15)
+    release.set()
+    await expect(box).to_have_value(stored)
+    await page.reload()
+    await expect(page.locator("#application")).to_be_visible()
+    await expect(bubble(stored)).to_have_count(1, timeout=15000)
+    await page.wait_for_function(UNSENT_GONE, timeout=15000)
+    await expect(box).to_have_value("")
+    assert await page.evaluate("localStorage.getItem('cos.draft.home')") is None
+    await expect(unsent).to_be_hidden()
+    await page.unroute(url, stored_on_the_way)
+    log("reloaded on its way, stored: no draft of it after, the message once")
+
+    # Not stored: back in the box, said so; sent again under its id, once, though the first
+    # reached Chief of Staff meanwhile.
+    held_back = asyncio.Event()
+
+    async def lost_on_the_way(route):
+        if route.request.method != "POST":
+            await route.continue_()
+            return
+        posts.append(route.request.post_data_json)
+        await held_back.wait()
+        with contextlib.suppress(Exception):
+            await route.abort()
+
+    await page.route(url, lost_on_the_way)
+    lost = "Reloaded on its way, never stored"
+    await box.fill(lost)
+    await box.press("Enter")
+    await expect(bubble(lost)).to_have_count(1)
+    await page.reload()
+    held_back.set()
+    await page.unroute(url, lost_on_the_way)
+    await expect(page.locator("#application")).to_be_visible()
+    await expect(box).to_have_value(lost, timeout=15000)
+    await expect(unsent).to_have_text("Not sent — press Enter to send it")
+    await expect(bubble(lost)).to_have_count(0)
+    first = posts[-1]["client_id"]
+    # It reaches Chief of Staff after all (late), before the owner sends it again.
+    await runtime.owner_send_once(
+        router, first, lambda: runtime.owner_send(router, lost, typed=True, client_id=first)
+    )
+    await expect(bubble(lost)).to_have_count(1)
+    async with page.expect_request(
+        lambda request: request.method == "POST" and request.url.endswith("/messages")
+    ) as again:
+        await box.press("Enter")
+    assert (await again.value).post_data_json["client_id"] == first, "the same id"
+    await expect(unsent).to_be_hidden()
+    await page.wait_for_function(UNSENT_GONE, timeout=15000)
+    await page.wait_for_timeout(500)
+    await expect(bubble(lost)).to_have_count(1)
+    await expect(box).to_have_value("")
+    owners = [
+        m for m in runtime.store.messages(router) if m["text"] == lost and m["kind"] == "owner"
+    ]
+    assert len(owners) == 1, owners
+    log("reloaded on its way, not stored: its words back, Not sent; sent again, once")
+
+
 async def round_composer(runtime, browser, failures: list[str]):
     """0.1.58 (owner report "我输了回车 没有反应 又输了一遍"): Enter shows the owner's message at
     once, "Sending…" under it once that takes a moment, until it is stored; then the stored one
@@ -6446,6 +6542,8 @@ async def round_composer(runtime, browser, failures: list[str]):
     await expect(bubble(chosen).locator(".to")).to_have_text(on)
     assert home.posts[-1]["agent"] == "copilot" and home.posts[-1]["agent_model"] == "smart-model"
     log("to one worker and with an agent chosen: the bubble says so at once, as the stored one")
+    await page.unroute(f"**/api/sessions/{router}/messages", home)
+    await composer_reloads(runtime, page, router, bubble)
 
     # In a worker's chat.
     chat = Held()

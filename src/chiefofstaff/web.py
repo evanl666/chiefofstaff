@@ -138,6 +138,10 @@ def settings_from(values: dict[str, Any], old: Settings) -> Settings:
 MODEL_FIELDS = {"router": "Router", "worker": "Workers", "slack": "Slack", "watchdog": "Watchdog"}
 
 
+# The page's own id for one send (models.OwnerMessage.client_id).
+CLIENT_ID = re.compile(r"[0-9a-f]{32}")
+
+
 def shown(message: dict) -> dict:
     """A message as the page shows it: without the prompt it was sent as (as long again)."""
     meta = message.get("meta")
@@ -368,6 +372,14 @@ def create_app(
             for row in runtime.workers.recently_closed(None, helpers=False)
         ]
 
+    def standing(message: dict) -> dict:
+        """An owner's message as the page shows it, with where it stands now (sent, waiting to
+        be sent…), as its chat says it."""
+        if "delivery" not in message:
+            found = runtime.delivery.delivery_for(message["session_id"], [message])
+            message = {**message, "delivery": found[0]}
+        return shown(message)
+
     @app.post("/api/sessions/{session_id}/messages")
     async def send(session_id: str, payload: OwnerMessage):
         async def sending() -> dict:
@@ -402,13 +414,24 @@ def create_app(
                 shared_card=payload.shared_card,
                 client_id=payload.client_id,
             )
-            # Where it stands now (sent, waiting to be sent…), as its chat says it.
-            if "delivery" not in sent:
-                found = runtime.delivery.delivery_for(sent["session_id"], [sent])
-                sent = {**sent, "delivery": found[0]}
-            return shown(sent)
+            return standing(sent)
 
-        return await runtime.owner_send_once(session_id, payload.client_id, sending)
+        def again(found: dict) -> dict:
+            # Stored already for this send (its page reloaded on the way): Home's copy is what
+            # one sent to a worker from there answers with.
+            message = standing(found)
+            return {**message, "note": "", "copy": message} if payload.to else message
+
+        return await runtime.owner_send_once(session_id, payload.client_id, sending, again)
+
+    @app.get("/api/sessions/{session_id}/sends/{client_id}")
+    async def sent_from_page(session_id: str, client_id: str):
+        """Whether the page's send `client_id` to this session was stored (the page reloaded
+        while it was on its way): {"message": the stored one, or null}."""
+        if not CLIENT_ID.fullmatch(client_id):
+            raise HTTPException(404)
+        found = await runtime.client_sent(store.session(session_id)["id"], client_id)
+        return {"message": standing(found) if found else None}
 
     @app.get("/api/attachments/{name}")
     async def attachment(name: str):
