@@ -3446,7 +3446,18 @@ async def i4_nudge_a_quiet_task(ctx: Ctx):
 
     await wait_for("step one reported", paused, 600, ctx.app)
     nudged = now()
-    await ctx.app.post(f"/api/tasks/{task['id']}/nudge")
+    # It answers at once (0.1.60): its worker is asked right after, not before the answer.
+    started = time.monotonic()
+    view = await ctx.app.post(f"/api/tasks/{task['id']}/nudge")
+    took = time.monotonic() - started
+    assert view["nudged_at"] and "nudge_failed" not in view, view.get("nudge_failed")
+    assert took < 2, f"Nudge answered in {took:.1f} s"
+
+    async def asked():
+        rows = await messages(ctx, task["session_id"])
+        return [m for m in rows if m["text"] == "Asked where it stands."] or None
+
+    await wait_for("the nudge in its chat", asked, 120, ctx.app)
 
     async def answered():
         # It says where it stands: in a report, or in its reply (then it may check back).
@@ -3455,7 +3466,7 @@ async def i4_nudge_a_quiet_task(ctx: Ctx):
         return [m for m in rows if m["kind"] in said and m["created_at"] > nudged] or None
 
     reports = await wait_for("its answer to the nudge", answered, 600, ctx.app)
-    log(f"I4: {[m['text'][:120] for m in reports]}")
+    log(f"I4: answered in {took:.2f} s; {[m['text'][:120] for m in reports]}")
     log("I4 passed")
 
 
