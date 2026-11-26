@@ -19,7 +19,10 @@ def owner_request(runtime, text: str, minutes_ago: int = 0) -> str:
     if minutes_ago:
         at = (datetime.now(UTC) - timedelta(minutes=minutes_ago)).isoformat()
         runtime.store.execute("UPDATE messages SET created_at=? WHERE id=?", (at, message["id"]))
-    runtime.states[router].turn_request = str(message["id"])
+    state = runtime.states[router]
+    state.turn_request = str(message["id"])
+    # A turn of its own: what another scene's turn recorded is not this request's to rely on.
+    state.turn_decisions, state.turn_tasks = [], []
     return str(message["id"])
 
 
