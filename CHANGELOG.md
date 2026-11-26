@@ -88,7 +88,9 @@ waits for its worker, and the page's state is read several times faster.
   instead. Each agent that failed one is tried again after a growing wait, also across a restart;
   with none that can, it waits, and goes on by itself once one can. New workers do the same.
 - **Chief of Staff runs without Copilot.** With only Codex or only Claude Code, it runs everything
-  there: a first start picks the agent that is installed and signed in, and says so. Copilot's row
+  there: a first start picks the agent that is installed and signed in, and says so (with only
+  Claude Code, on an install without the Claude extra, it sets Claude up first, saying *Setting up
+  Claude Code* on Home, and starts on it once done). Copilot's row
   has *Use* like the others (the last agent on stays on); signed out or not installed, the next
   agent runs its work meanwhile, and Copilot is tried again by itself. With no agent ready, Home's
   *Set up a coding agent* card says what each needs, and Chief of Staff starts by itself once one

@@ -520,12 +520,14 @@ class ClaudeSetup:
             with contextlib.suppress(BaseException):
                 await self.task
 
-    async def wait(self, seconds: float = WAIT_SECONDS) -> str:
+    async def wait(self, seconds: float | None = None) -> str:
         """Before a Claude worker's process starts: a setup under way waited for, `seconds` at
         most. Why Claude can't run yet for it ("" when it can, or when the SDK's own words say
         it: backend_claude.sdk_refused)."""
         if sys.platform == "win32":
             return ""
+        if seconds is None:
+            seconds = WAIT_SECONDS  # (Read now: tests shorten it.)
         if self.running() and self.task:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(self.task), seconds)

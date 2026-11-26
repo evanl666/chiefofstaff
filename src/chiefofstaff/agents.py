@@ -762,10 +762,11 @@ async def look(name: str, folder: Path | None = None) -> dict[str, Any]:
     raise RuntimeError(f"This Chief of Staff does not run {name}.")
 
 
-async def glance(name: str, folder: Path | None = None) -> dict[str, Any]:
+async def glance(name: str, folder: Path | None = None, sdk: bool = True) -> dict[str, Any]:
     """An agent's version and sign-in from its CLI's own short commands, in `folder` (Chief of
     Staff's own for it), for a first-run card at startup: nothing more is run until the owner
-    opens Settings (look). Raises with why it cannot run here."""
+    opens Settings (look). Raises with why it cannot run here; `sdk` False: but for Claude's
+    Agent SDK (Chief of Staff sets it up itself: claude_setup.py)."""
     if name == "codex":
         from .backend_codex import glance as glance_at_codex
 
@@ -773,7 +774,7 @@ async def glance(name: str, folder: Path | None = None) -> dict[str, Any]:
     if name == "claude":
         from .backend_claude import glance as glance_at_claude
 
-        return await glance_at_claude(command(name), folder)
+        return await glance_at_claude(command(name), folder, sdk=sdk)
     raise RuntimeError(f"This Chief of Staff does not run {name}.")
 
 

@@ -1025,6 +1025,41 @@ async def test_claude_on_without_its_sdk_is_set_up_at_start_and_turns_ready_with
         await runtime.stop()
 
 
+async def test_a_first_start_with_claude_alone_and_no_sdk_sets_it_up_and_starts_on_it(
+    tmp_path, claude_on_path, sdk, quick, monkeypatch
+):
+    """agents-anywhere.md 12.3: a core install (no Claude extra), Claude Code installed and
+    signed in, no Copilot: the first start turns Claude on (Copilot off), sets its Agent SDK up
+    itself, says so calmly on Home at once (the page not held back by the wait), and runs on
+    Claude once it is set up, with no restart: the Router, new workers and Watch for you."""
+    harness = Harness(tmp_path / "data")
+    runtime = harness.runtime
+    runtime.backend_factory = lambda settings: (_ for _ in ()).throw(
+        RuntimeError("Copilot CLI 'copilot' not found.")
+    )
+    installer = runtime.claude_setup.runner = Installer(sdk)
+    installer.gate.clear()
+    began = time.monotonic()
+    await runtime.start()
+    try:
+        assert time.monotonic() - began < claude_setup.WAIT_SECONDS / 2
+        assert runtime.status.get("settingup") and runtime.status["waits"]
+        assert runtime.status["state"] == "error" and not runtime.ready()
+        assert agents.enabled(harness.store, "claude") and not agents.copilot_on(harness.store)
+        await until(lambda: installer.calls)
+        installer.gate.set()
+        await until(runtime.ready, 30)
+        router = harness.store.get("router_id")
+        assert runtime.agent(router) == "claude"
+        said = [m["text"] for m in harness.store.messages(router) if m["kind"] == "notice"]
+        assert said[0].startswith("Chief of Staff runs on Claude"), said
+        assert len(installer.calls) == 1
+        assert agents.default_agent(harness.store) == "claude"
+        assert agents.role_agent(harness.store, "connector") == "claude"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_failed_setup_says_why_offers_retry_and_is_not_tried_again_by_itself(
     tmp_path, claude_on_path, sdk, quick
 ):

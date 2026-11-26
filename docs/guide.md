@@ -1626,7 +1626,9 @@ started on.
 start it runs on the first one installed and signed in (Copilot, then Codex, then Claude Code) and
 says so in your chat (*Chief of Staff runs on Codex (uses your ChatGPT sign-in).*); with none ready,
 Home's *Set up a coding agent* card says what each needs, and Chief of Staff starts by itself once
-one is ready (or *Retry*). Once another agent is here, Copilot's row has *Use* too: turned off,
+one is ready (or *Retry*). With Claude Code alone, signed in, on an install without the Claude
+extra, it turns Claude on and sets it up first (**Setting up Claude**): Home says *Setting up Claude
+Code* meanwhile, and Chief of Staff starts on it once that is done. Once another agent is here, Copilot's row has *Use* too: turned off,
 Copilot is never started, its workers at work stop (their tasks wait under *Needs you*) and Chief of
 Staff's own sessions go on with the next agent on; the last agent on can't be turned off. While
 Copilot is on but signed out, not installed or unable to start, Chief of Staff runs on the next agent
@@ -1668,8 +1670,8 @@ token (CODEX_ACCESS_TOKEN)"). `CODEX_API_KEY` and `OPENAI_API_KEY` don't change 
 use (only `codex exec` reads the first), so nothing is said of them.
 
 **Setting up Claude.** Claude workers also need Anthropic's Agent SDK for Python (Chief of Staff's
-Claude extra). While Claude is on for workers (or the Router or the Watchdog runs on it) and the
-SDK is missing, or is a version this release was not tested with, Chief of Staff installs the
+Claude extra). While Claude is on for workers (or any of Chief of Staff's own sessions runs on it)
+and the SDK is missing, or is a version this release was not tested with, Chief of Staff installs the
 tested one by itself: as it starts, as you turn Claude on, or when you click *Retry*. Claude's row
 says *Setting up Claude…* meanwhile (usually under a minute), then *Ready*, with no restart. With
 Claude off, its row says *Not set up yet*: turning on *Use* sets it up (turning it off

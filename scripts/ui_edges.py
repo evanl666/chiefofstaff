@@ -10171,12 +10171,20 @@ async def agents_setup_card(runtime, browser):
         await expect(card).to_contain_text("claude auth login")
         await expect(card).to_contain_text("It starts by itself once one is ready, or Retry here.")
         await shoot(page, "setup-card", "light", 1280, target="#home-setup")
+        # Claude alone, its Agent SDK being set up: said calmly, nothing to do.
+        said = "Claude could not start: Claude is being set up."
+        runtime.status |= {"error": said, "settingup": True}
+        runtime.publish_state()
+        await expect(card.locator(".label")).to_have_text("Setting up Claude Code")
+        await expect(card).to_contain_text("It starts by itself once that is done.")
+        await expect(card.locator("button")).to_have_count(0)
+        await shoot(page, "setup-card-settingup", "light", 1280, target="#home-setup")
         assert not errors, errors
         await context.close()
     finally:
         runtime.status = kept
         runtime.publish_state()
-    log("agents: no agent ready, Home's card says what each needs")
+    log("agents: no agent ready, Home's card says what each needs (or that Claude is set up)")
 
 
 async def agents_off(runtime, browser, scheme: str, runs: Path):

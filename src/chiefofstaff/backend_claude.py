@@ -821,15 +821,16 @@ async def look(command: str = "claude", folder: Path | None = None) -> dict:
     }
 
 
-async def glance(command: str = "claude", folder: Path | None = None) -> dict:
+async def glance(command: str = "claude", folder: Path | None = None, sdk: bool = True) -> dict:
     """What a first-run card needs of Claude Code, looked at as lightly as it can be (at
     startup, before the owner opened Settings): its version (`claude --version`) and how it is
     signed in (`claude auth status`, only where Claude was set up: set_up); raises with why its
-    workers cannot run. Nothing else: its models and its check's key are Settings' look's."""
+    workers cannot run (`sdk` False: but for its Agent SDK, which Chief of Staff sets up
+    itself). Nothing else: its models and its check's key are Settings' look's."""
     path = shutil.which(command)
     if not path:
         raise RuntimeError(NOT_FOUND)
-    if why := sdk_refused():
+    if sdk and (why := sdk_refused()):
         raise RuntimeError(why)
     version = await claude_version(path, folder)
     if why := claude_refused(version):

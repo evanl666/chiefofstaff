@@ -693,7 +693,7 @@ const NO_PROJECTS = "cos.noProjectsCard";  // The owner chose to work without pr
 
 function setupCard() {
   const snap = state.snapshot;
-  const key = `${snap.runtime.state}:${snap.runtime.error}:${snap.settings.projects.length}:${snap.settings.code_folder}`;
+  const key = `${snap.runtime.state}:${snap.runtime.error}:${Boolean(snap.runtime.settingup)}:${snap.settings.projects.length}:${snap.settings.code_folder}`;
   let node = document.getElementById("home-setup");
   if (node?.dataset.key === key) return node;
   if (snap.runtime.state === "error") {
@@ -708,7 +708,14 @@ function setupCard() {
     } });
     // It goes on by itself once an agent is ready (`waits`); Retry tries now.
     const then = snap.runtime.waits ? "It starts by itself once one is ready, or Retry here." : "Retry here.";
-    node = snap.runtime.setup
+    node = snap.runtime.settingup
+      ? el(
+          "div",
+          { id: "home-setup", class: "card setup" },
+          el("div", { class: "head" }, el("span", { class: "label", text: "Setting up Claude Code" })),
+          el("p", { text: "Chief of Staff is installing what it needs to run on Claude Code, usually in under a minute. It starts by itself once that is done." }),
+        )
+      : snap.runtime.setup
       ? el(
           "div",
           { id: "home-setup", class: "card setup" },

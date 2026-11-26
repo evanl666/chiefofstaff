@@ -1352,8 +1352,11 @@ class Runtime:
                 if self.agent_waits:
                     # No agent can run it: it goes on by itself once one can (copilot_again);
                     # Home's card lists them, but for Copilot's own (as before) when it is
-                    # the only one.
+                    # the only one, and says so calmly while Claude is being set up (it starts
+                    # once that is done: claude_setup_changed).
                     self.status |= {"waits": True, "setup": isinstance(exc, NoAgentError)}
+                    if self.claude_setup.running():
+                        self.status["settingup"] = True
                     if sys.platform == "win32":
                         self.status["windows"] = True  # (Copilot only, for now.)
                 if self.backend and not self.backend.alive():
@@ -1443,7 +1446,12 @@ class Runtime:
             return ""  # (Codex and Claude need macOS or Linux for now.)
         for name in agents.NAMES:
             try:
-                facts = await self.glance_agent(name)
+                if name == "claude" and self.claude_setup.refused(fresh=True):
+                    # Installed and signed in is enough: its Agent SDK is Chief of Staff's to set
+                    # up (claude_setup.py), started as it is turned on here.
+                    facts = await agents.glance(name, self.agent_folder(name), sdk=False)
+                else:
+                    facts = await self.glance_agent(name)
             except Exception:  # noqa: S112 (Not ready: the next one is looked at.)
                 continue
             config = agents.stored(self.store)
@@ -1453,6 +1461,8 @@ class Runtime:
             self.store.set(f"{agents.OFFERED}{name}", "first run")
             self.agents[name] = self.agent_connection(name)
             self.roles_seen = agents.roles(self.store)
+            if name == "claude":
+                self.claude_setup.turned_on()
             pays = agents.pays(name, facts.get("account", ""), facts.get("key_env", ""))
             self.store.set("firstagent", json.dumps([name, pays]))
             return name
@@ -1485,7 +1495,13 @@ class Runtime:
             if entry is None or not entry.enabled():
                 continue
             try:
-                if not entry.backend:
+                if name == "claude" and self.claude_setup.refused():
+                    # Its Agent SDK set up first (as at a start, tried again at most once per
+                    # version). Not waited for here, so the page opens at once and says so
+                    # calmly; Chief of Staff starts on it once set up (claude_setup_changed).
+                    if self.claude_setup.at_start():
+                        raise RuntimeError(claude_setup.BEING_SET_UP)
+                elif not entry.backend:
                     await self.glance_agent(name)  # Signed in (no model call), installed.
                 await self.connect_agent(name)
                 await self.recheck_agent(name)
@@ -1740,7 +1756,18 @@ class Runtime:
             self.agent_failed.pop("claude", None)  # (Its start failed for its setup: past.)
             if "claude" in self.agents_found():
                 self.glance_soon("claude")
+        if done is not None and self.status.get("waits"):
+            # Chief of Staff waits for an agent (Claude, being set up, its only one): it starts
+            # now, or says why not.
+            self.copilot_retry = 0.0
+            self.background(self.copilot_again() if done else self.connect_after_setup())
         self.publish_state()
+
+    async def connect_after_setup(self):
+        """Claude's setup failed while Chief of Staff waited for it: connecting again says why
+        on Home (its card; Claude's row in Settings has Retry)."""
+        if not (self.connecting and not self.connecting.done()):
+            await self.reconnect()
 
     async def retry_claude_setup(self, name: str) -> dict:
         """The owner's Retry (or Set up) on Claude's row: its Agent SDK installed again, whatever
