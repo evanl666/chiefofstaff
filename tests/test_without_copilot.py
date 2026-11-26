@@ -16,7 +16,8 @@ from conftest import FakeClient, Harness, call_tool, settle
 from test_roles import saved, until
 
 from chiefofstaff import agents
-from chiefofstaff.roles import WORKER
+from chiefofstaff.models import Settings
+from chiefofstaff.roles import ROUTER, WORKER
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Other agents need macOS/Linux")
 
@@ -133,6 +134,7 @@ async def test_copilot_signed_out_at_a_start_runs_on_codex_and_back_without_a_re
         worker = await spawned(runtime, again)
         assert runtime.agent(worker) == "codex", "the next agent that can"
         # Signed in: tried again by itself, the Router back where it was put.
+        assert agents.copilot_on(again.store), "a later start never turns Copilot off"
         client.signed_in = True
         runtime.copilot_retry = 0.0
         await runtime.copilot_again()
@@ -140,6 +142,58 @@ async def test_copilot_signed_out_at_a_start_runs_on_codex_and_back_without_a_re
         await until(lambda: runtime.agent(router) == "copilot")
         assert runtime.copilot_ready() and copilot_status(runtime)["status"] == "ready"
         assert runtime.agent(await spawned(runtime, again, "Next")) == "copilot"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_later_start_without_copilot_keeps_the_owners_choices(tmp_path, codex_installed):
+    """Only a true first start turns Copilot off: a later one where Copilot is gone (not
+    installed) runs on the agents the owner turned on, Copilot still on and their choices as
+    they were; with none but Copilot ever on, nothing is turned on: it waits for Copilot."""
+    harness = Harness(tmp_path / "data")
+    await (await harness.connect()).stop()
+    router = harness.router_id
+    calls: list = []
+    alone = Harness(tmp_path / "data")
+    alone.runtime.backend_factory = not_installed(calls)
+    runtime = await alone.connect()
+    try:
+        assert runtime.status["state"] == "error" and runtime.status.get("waits")
+        assert not runtime.status.get("setup"), "Copilot's own card, as before"
+        assert alone.store.get(agents.CONFIG) is None, "Codex, ready here, is not turned on"
+        assert agents.copilot_on(alone.store)
+    finally:
+        await runtime.stop()
+    on = Harness(tmp_path / "data")
+    await (await on.connect()).stop()  # (Copilot back: Codex turned on, nothing else.)
+    store = on.store
+    store.set(agents.CONFIG, json.dumps({"codex": {"enabled": True}}))
+    later = Harness(tmp_path / "data")
+    later.runtime.backend_factory = not_installed(calls)
+    runtime = await later.connect()
+    try:
+        assert runtime.ready()
+        await until(lambda: runtime.agent(router) == "codex")
+        assert agents.copilot_on(later.store) and copilot_status(runtime)["on"]
+        assert json.loads(later.store.get(agents.CONFIG)) == {"codex": {"enabled": True}}
+        assert not [
+            line for line in notices(later, router) if line.startswith("Chief of Staff runs")
+        ]
+        assert runtime.role_line(ROUTER).startswith("On Codex for now: Copilot CLI")
+    finally:
+        await runtime.stop()
+
+
+async def test_stored_settings_make_a_start_no_first_one(tmp_path, codex_installed):
+    """A data folder with no Router yet but the owner's choices of models (Settings: kept in the
+    agents' configuration from the start, agents.migrate) is not a first start: Copilot not
+    ready, it waits for Copilot, nothing turned on or off."""
+    harness = Harness(tmp_path / "data", Settings(role_models={"worker": "smart-model"}))
+    harness.runtime.backend_factory = not_installed([])
+    runtime = await harness.connect()
+    try:
+        assert runtime.status["state"] == "error" and runtime.status["error"] == NOT_FOUND
+        assert not agents.turned_on(harness.store) and agents.copilot_on(harness.store)
     finally:
         await runtime.stop()
 
