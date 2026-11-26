@@ -115,8 +115,9 @@ waits for its worker, and the page's state is read several times faster.
   at 10:01*. The Router's own note on a choice a worker asked already joins that ask instead of
   being a second item, and one on a choice you decided is not shown again. A decision the Router
   records on a choice you decided replaces the one in force (its tasks' workers told once each),
-  never a second value beside it; one only possibly the same stays, and the Router hears which it
-  may change.
+  never a second value beside it; the same value in other words is kept quietly (nobody is told
+  to redo anything, nothing reopens); one only possibly the same stays, and the Router hears
+  which it may change.
 - **Another question on a decided task is asked.** On a task linked to any decision (one you
   gave the Router with the request that made the task, say), an unrelated question came back
   *already decided*, and its worker had to insist. Now only the same choice (in other words,
@@ -129,6 +130,7 @@ waits for its worker, and the page's state is read several times faster.
 - **Workers keep up with your decisions.** A worker whose open tasks rely on a decision it was
   not told reads *Decisions in force for your tasks* with its next message, once (nothing is
   added when there is none).
+
 ## 0.1.59 (2026-11-26)
 
 Chief of Staff starts, and stops, however large a worker's Copilot session has grown.

@@ -973,8 +973,9 @@ the answer itself changed, and changes of one decision within two hours are one 
 changed* card. Decided another way meanwhile (told the Router, say), the card leaves and its task
 goes on under your new decision. A decision the Router records on a choice you decided already
 (the same choice, as Chief of Staff tells it) replaces that one, as a change does: one value for
-one choice; one only possibly the same is kept beside it, and the Router is told which it may
-change. A decision the Router records for tasks already given reaches
+one choice. When it only says the same value in other words ("the ranker serves k 1.11" after
+you picked 1.11), it is kept quietly: nobody is told to redo anything, and nothing reopens. One
+only possibly the same is kept beside it, and the Router is told which it may change. A decision the Router records for tasks already given reaches
 their workers too (a question one of them asked you stays until the Router says the decision
 answers it). What workers confirm about a change stays on its card after *Got it*.
 

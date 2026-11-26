@@ -113,6 +113,33 @@ def likeness(one: str, other: str) -> tuple[str, float]:
     return "", 0.0
 
 
+# Words that say nothing of a decision's value. Not "no", "only", "not", "all": they are it
+# ("email only" is not "email and SMS"); nor one letter (rule A is not rule B).
+VALUE_STOP = frozenset(
+    "an as at be by for from in into is it its of on so that the their them then this to use "
+    "using we with".split()
+)
+
+
+def value_words(text: str) -> frozenset[str]:
+    text = unicodedata.normalize("NFKC", text).casefold()
+    found = {stem(word) for word in LATIN.findall(text) if word not in VALUE_STOP}
+    for run in catalog.CJK.findall(text):
+        pairs = [run] if len(run) == 1 else [run[i : i + 2] for i in range(len(run) - 1)]
+        found.update(pair for pair in pairs if pair not in CJK_STOP)
+    return frozenset(found)
+
+
+def same_value(old: str, new: str) -> bool:
+    """Whether a decision recorded on a choice says what the one in force on it says, in other
+    words ("Which k? → 1.11", then "The ranker serves k 1.11"): every word of the old answer is
+    in it (numbers whole: 1.11 is not 1.12), and it says nothing the old one (its question with
+    its answer) did not. When unsure, not the same: its workers hear it."""
+    answer = old.partition(" \u2192 ")[2]
+    said = value_words(new)
+    return bool(said) and value_words(answer or old) <= said and said <= value_words(old)
+
+
 def related(one: str, other: str) -> bool:
     """Whether a question is about what a decision of its own task settled: the same, or half
     the telling words of the shorter shared (R1: "Which tie rule, then?" of "Rule A or rule

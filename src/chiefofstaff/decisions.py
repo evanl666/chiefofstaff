@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from .asks import asks_back, clock
 from .envelope import wrap
-from .ledger import related
+from .ledger import related, same_value
 from .models import DraftDecision, NestedArguments
 from .roles import ROUTER, WORKER
 from .store import hours_ago, now
@@ -868,7 +868,12 @@ class Decisions:
         # Workers given their task before it hear it; those given one in this turn had it in
         # the owner's message.
         given = [task["id"] for task in named]
-        result = await self.record(params.decision, tasks, replaces, "owner", given)
+        # Replaced by itself, in other words: the same value, kept quietly (E154: no worker
+        # told to redo anything, no finished task reopened). Named by the Router: as asked.
+        reworded = bool(same and same_value(same["text"], params.decision))
+        result = await self.record(
+            params.decision, tasks, replaces, "owner", given, reworded=reworded
+        )
         decision, affected = result["decision"], result["affected"]
         state.turn_decisions.append(decision["id"])
         if not replaces:
@@ -884,6 +889,12 @@ class Decisions:
             "replaces if it changes it."
             for d in possibly
         )
+        if result.get("same") and reworded:
+            return (
+                f"{head}: the same value, reworded. Nothing changed: no worker was told, no "
+                f"finished task reopened. Linked to {len(tasks)} more task(s)"
+                f"{self.titles(tasks)}.{tail}"
+            )
         if result.get("same"):
             return (
                 f"{head}, the same decision as before: nothing changed, no worker was told. "
@@ -947,8 +958,11 @@ class Decisions:
         replaces: list[str],
         source: str,
         tell: list[str] | None = None,
+        reworded: bool = False,
     ) -> dict:
-        """`tell`: tasks of a new decision (replacing none) whose workers hear it now."""
+        """`tell`: tasks of a new decision (replacing none) whose workers hear it now.
+        `reworded`: it says what the one it replaces said, in other words (Ledger.same_value):
+        nothing changed."""
         text = clean(text, 500)
         if not text:
             raise ValueError("Say what was decided.")
@@ -996,7 +1010,11 @@ class Decisions:
                 # Told of the change below, as every task that relied on it.
                 self.tasks.move(task_id, "running", reason="decision", progress=f"Decided: {short}")
         affected = []
-        if old and not moot and all(same_words(value(row["text"]), value(text)) for row in old):
+        if (
+            old
+            and not moot
+            and (reworded or all(same_words(value(row["text"]), value(text)) for row in old))
+        ):
             # Recorded again in the same words, or the same answer in other words (to link more
             # tasks, say): nothing changed, so no worker is told to redo anything, and no
             # finished task reopens (E154).

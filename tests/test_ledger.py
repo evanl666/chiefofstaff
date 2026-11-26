@@ -9,7 +9,7 @@ from conftest import call_tool, env, settle
 from test_ui_text import STATIC, run_js
 
 from chiefofstaff.digest import needs
-from chiefofstaff.ledger import embedded_ask, likeness, related, still_waits
+from chiefofstaff.ledger import embedded_ask, likeness, related, same_value, still_waits
 from chiefofstaff.models import DraftDecision
 
 
@@ -53,6 +53,25 @@ def held_for(harness, session_id: str) -> str:
 def test_e159_chief_of_staff_tells_which_asks_are_one_choice(one, other, level):
     assert likeness(one, other)[0] == level
     assert likeness(other, one)[0] == level
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "same"),
+    [
+        ("Which k should the ranker serve? → 1.11", "The ranker serves k 1.11", True),
+        ("Which k should the ranker serve? → 1.11", "Ranker: k=1.11", True),
+        ("Round totals to cents or whole units? → Cents", "Round totals to cents", True),
+        ("Ties: rule A", "Ties: use rule A", True),
+        ("Which k should the ranker serve? → 1.11", "The ranker serves k 1.12", False),
+        ("Ties: rule A", "Ties: rule B", False),
+        ("Ties: rule B", "Ties: rule A", False),
+        ("Login v1? → Email and SMS", "Login v1: email only, no SMS", False),
+        ("Login v1? → Email only", "Login v1: email and SMS", False),
+        ("Ties: rule A", "Ties: rule A, and log every tie", False),
+    ],
+)
+def test_a_decision_recorded_again_in_other_words_is_the_same_value(old, new, same):
+    assert same_value(old, new) is same
 
 
 def test_item1_a_question_relates_to_its_tasks_decision_only_by_its_words():
@@ -306,6 +325,59 @@ async def test_a_routers_decision_on_a_decided_choice_replaces_it(harness):
         sent = harness.session(told["session_id"]).sent
         assert sum('type="decision-changed"' in text for text in sent) == 1, "once each"
         assert "Now: Ties: rule B" in sent[-1]
+
+
+async def decided_and_finished(runtime, harness):
+    """A worker that asked which k, was answered 1.11, and finished its task on it."""
+    worker = await spawn(runtime, harness.router_id, "Serve the ranker")
+    await call_tool(runtime, "ask_decision", worker["session_id"],
+                    question="Which k should the ranker serve?",
+                    options=[{"choice": "1.11"}, {"choice": "1.12"}])  # fmt: skip
+    [card] = harness.store.drafts()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="1.11"))
+    await settle(runtime)
+    await call_tool(runtime, "report", worker["session_id"], status="done",
+                    summary="The ranker serves k 1.11.")  # fmt: skip
+    await settle(runtime)
+    [decision] = runtime.decisions.active()
+    return worker, decision
+
+
+async def test_the_router_recording_a_decided_value_in_other_words_changes_nothing(harness):
+    """E154-style fan-out: the Router recorded the owner's decision again in its own words; as a
+    replacement, its workers were told to redo their work and finished tasks reopened. The same
+    value, reworded, is kept quietly."""
+    runtime = await harness.connect()
+    worker, first = await decided_and_finished(runtime, harness)
+    was = runtime.tasks.get(worker["task_id"])["status"]
+    sent = len(harness.session(worker["session_id"]).sent)
+    recorded = await call_tool(
+        runtime, "record_decision", harness.router_id, decision="The ranker serves k 1.11"
+    )
+    said = recorded.text_result_for_llm
+    assert "the same value, reworded" in said, said
+    [now] = runtime.decisions.active()
+    assert now["text"] == "The ranker serves k 1.11"
+    assert runtime.decisions.get(first["id"])["replaced_by"] == now["id"]
+    assert runtime.tasks.get(worker["task_id"])["status"] == was, "not reopened"
+    assert len(harness.session(worker["session_id"]).sent) == sent, "no worker told"
+    assert not [d for d in harness.store.drafts() if d["kind"] == "change"], "no change card"
+
+
+async def test_the_router_recording_another_value_of_a_decided_choice_changes_it(harness):
+    """1.11, then 1.12 (numbers whole): another value, a change its workers hear."""
+    runtime = await harness.connect()
+    worker, first = await decided_and_finished(runtime, harness)
+    recorded = await call_tool(
+        runtime, "record_decision", harness.router_id, decision="The ranker serves k 1.12"
+    )
+    said = recorded.text_result_for_llm
+    assert "reworded" not in said and f"in place of {first['id']}" in said, said
+    [now] = runtime.decisions.active()
+    assert now["text"] == "The ranker serves k 1.12"
+    sent = harness.session(worker["session_id"]).sent
+    assert sum('type="decision-changed"' in text for text in sent) == 1
+    assert runtime.tasks.get(worker["task_id"])["status"] == "running", "its result reopens"
 
 
 async def test_a_routers_decision_only_possibly_on_a_decided_choice_keeps_both(harness):
