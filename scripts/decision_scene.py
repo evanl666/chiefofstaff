@@ -3,7 +3,14 @@ owner picked A, and the worker asks again with what it found since (replaces=…
 through the real tools on a fake Copilot, so it shows what the version in use makes of it; the
 card at 800 and 1440 px wide, light and dark, into --out.
 
+--scene subject (the decision ledger, 0.1.59): two workers of one request ask the owner one
+choice (a decision card, a question report) and the Router notes it too, and another request
+decided something like it before: Needs you as a whole, and the card with what the other asked
+unfolded.
+
     uv run --extra dev --with playwright python scripts/decision_scene.py --out <folder>
+    uv run --extra dev --with playwright python scripts/decision_scene.py --scene subject \
+        --out <folder>
 
 DECISION_SCENE_PORT (20710) is the app's port."""
 
@@ -63,7 +70,50 @@ async def reconsideration(runtime) -> str:
     return card["id"]
 
 
-async def photograph(out: Path):
+async def subject(runtime) -> str:
+    """One choice asked three ways in one request, and decided before in another: the card
+    Needs you shows for it. Its id."""
+    store = runtime.store
+    router = store.get("router_id")
+
+    async def start(title, request):
+        made = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                               why_new="scene")  # fmt: skip
+        found = json.loads(made.text_result_for_llm)
+        store.set(f"req:{found['task_id']}", request)
+        await settle(runtime)
+        return found["session_id"]
+
+    options = [
+        {"choice": "Cents", "effect": "Totals match the line items"},
+        {"choice": "Whole units", "effect": "Simpler; totals may differ by a unit"},
+    ]
+    receipts = await start("Receipts", "41")
+    await call_tool(runtime, "ask_decision", receipts,
+                    question="Round receipt totals to cents or to whole units?",
+                    options=options)  # fmt: skip
+    [card] = [d for d in store.drafts() if d["kind"] == "decision"]
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Cents"))
+    await settle(runtime)
+    api = await start("Invoice API", "42")
+    page = await start("Invoice page", "42")
+    await call_tool(runtime, "ask_decision", api,
+                    question="Should invoice totals round to cents or to whole units?",
+                    why="The tax line is computed per item; rounding the total can differ by 1.",
+                    options=options, recommendation="Cents: totals match the items",
+                    distinct=True, seen_precedents=True)  # fmt: skip
+    await call_tool(runtime, "report", page, status="question",
+                    summary="Round invoice totals to whole units or cents? The page shows both.",
+                    options=["Cents", "Whole units"])  # fmt: skip
+    noted = "Need your call: round invoice totals to cents or whole units?"
+    await call_tool(runtime, "notify_owner", router, needs_action=True, text=noted)
+    await settle(runtime)
+    [card] = [d for d in store.drafts() if d["kind"] == "decision"]
+    runtime.publish_state()
+    return card["id"]
+
+
+async def photograph(out: Path, scene: str = "reconsideration"):
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cos-decision-scene-") as temporary:
         holder: dict = {}
@@ -89,7 +139,7 @@ async def photograph(out: Path):
             if runtime.ready():
                 break
             await asyncio.sleep(0.1)
-        card = await reconsideration(runtime)
+        card = await (subject(runtime) if scene == "subject" else reconsideration(runtime))
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
             for scheme in ("light", "dark"):
@@ -104,7 +154,15 @@ async def photograph(out: Path):
                     if width < 1000 and await tab.count():
                         await tab.click()
                     await found.wait_for()
-                    await found.screenshot(path=out / f"reconsideration-{width}-{scheme}.png")
+                    if scene == "subject":
+                        await page.locator("#needs").screenshot(
+                            path=out / f"subject-needs-{width}-{scheme}.png"
+                        )
+                        if await (more := found.locator(".sub-evidence summary")).count():
+                            await more.click()
+                        await found.screenshot(path=out / f"subject-card-{width}-{scheme}.png")
+                    else:
+                        await found.screenshot(path=out / f"reconsideration-{width}-{scheme}.png")
                     await context.close()
             await browser.close()
         server.should_exit = True
@@ -114,7 +172,11 @@ async def photograph(out: Path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", required=True, type=Path)
-    asyncio.run(photograph(parser.parse_args().out))
+    parser.add_argument(
+        "--scene", choices=("reconsideration", "subject"), default="reconsideration"
+    )
+    arguments = parser.parse_args()
+    asyncio.run(photograph(arguments.out, arguments.scene))
 
 
 if __name__ == "__main__":

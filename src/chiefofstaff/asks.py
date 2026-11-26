@@ -158,6 +158,9 @@ class Asks:
         self.signin_locks: dict[str, asyncio.Lock] = {}
         self.signin_pending: dict[str, asyncio.Event] = {}
         self.signin_declined: dict[str, float] = {}
+        # Questions answered with the same answer as another ask of theirs (Ledger.settle):
+        # the Router heard it with that one.
+        self.router_heard: set[str] = set()
 
     # A worker's question to the owner (report "question" or "blocked"): it stays under Needs
     # you until the owner answers or dismisses it, whatever becomes of its task meanwhile (its
@@ -196,11 +199,14 @@ class Asks:
         options: Sequence[str] = (),
         next_step: str = "",
         kind: str = "question",
-    ):
+        choice: bool = False,
+    ) -> dict | None:
         """`about_draft`: its session says it only asks the owner to decide its draft (see
         Drafts.asked_with). `why` the owner is needed, the `options` it gives (none: their own
         words), what it does `next_step` once answered, and its `kind` ("question", or
-        "blocked": it cannot go on without them): kept with it until it is answered."""
+        "blocked": it cannot go on without them): kept with it until it is answered. `choice`:
+        it asks the owner to choose, options or not (its answer is their decision). Its ask in
+        the ledger (None: one about its draft)."""
         text = text.strip()[:6000]
         key = f"ownerq:{session_id}:{task_id}"
         # Asked again on its task: the same question (its id, when it was first asked), as it
@@ -233,7 +239,19 @@ class Asks:
             if changed or before.get("updated_at"):
                 question["updated_at"] = now() if changed else before["updated_at"]
         self.store.set(key, json.dumps(question))
+        filed = None
+        if not about_draft:
+            # Under its subject (E152): asked by others in its request too, it is one ask.
+            filed = self.runtime.ledger.file(
+                "question",
+                key.removeprefix("ownerq:"),
+                session_id,
+                task_id,
+                text,
+                options=question["options"] or ([] if choice else None),
+            )
         self.runtime.publish_state()
+        return filed
 
     def held_ask(self, session_id: str, task: dict | None) -> str:
         """A worker asks the owner about a task (a decision card, a question or blocked report,
@@ -332,10 +350,19 @@ class Asks:
             and not (question.get("went_on") and (by == "worker" or not went_on))
         ]
         gone = []
+        ledger = self.runtime.ledger
         for question in questions:
             if self.store.get(f"ownerq:{question['id']}"):
+                # Any answer settles its subject (E151): the others asked the same hear it.
+                claimed = (
+                    ledger.claim("question", question["id"], text)
+                    if by in {"owner", "router"} and text.strip()
+                    else ([], [])
+                )
                 self.store.delete(f"ownerq:{question['id']}")
                 gone.append(question)
+                if claimed[0]:
+                    self.runtime.background(ledger.pass_on(claimed, text, by=by))
         if gone:
             self.closed(session_id, gone, "answered" if by == "owner" else "", text)
             self.runtime.publish_state()
@@ -363,10 +390,15 @@ class Asks:
         whose = "the Slack session" if row["role"] == "slack" else f"\u201c{name}\u201d"
         for question in questions:
             task = self.runtime.tasks.find(question.get("task_id") or "")
+            if how == "answered" and question["id"] in self.router_heard:
+                self.router_heard.discard(question["id"])  # Told with the ask it was the same as.
+                continue
             if how == "answered" and text.strip():
                 # What they said, not only that they did (E151): it may settle a choice others
                 # rely on.
-                self.tell_router_answer(session_id, question["text"], text, task)
+                self.tell_router_answer(
+                    session_id, question["text"], text, task, bool(question.get("options"))
+                )
                 continue
             on = f" on task {task['id']} “{task['title']}”" if task else ""
             asked = " ".join(question["text"].split())[:300]
@@ -385,10 +417,12 @@ class Asks:
                 meta={"session_id": session_id, **({"task_id": task["id"]} if task else {})},
             )
 
-    def tell_router_answer(self, session_id: str, asked: str, text: str, task: dict | None):
+    def tell_router_answer(
+        self, session_id: str, asked: str, text: str, task: dict | None, choice: bool = False
+    ):
         """The owner answered a worker's question (under Needs you, on its question card, in its
-        chat): the Router hears what they said with its next message (E151, until answers are
-        kept as decisions by subject)."""
+        chat): the Router hears what they said with its next message (E151). An answer to a
+        choice (`choice`: it gave options) is kept as their decision on it by the ledger."""
         router = self.store.get("router_id") or ""
         row = self.store.find_session(session_id)
         if not router or not row:
@@ -404,8 +438,14 @@ class Asks:
                 "system",
                 "question-closed",
                 f"The owner answered “{asked}” ({name}{on}): {said}. It is no longer open under "
-                "Needs you: do not ask it again or call it open. If this settles a choice others "
-                "rely on, record_decision.",
+                "Needs you: do not ask it again or call it open. "
+                + (
+                    "Chief of Staff keeps it as their decision on that choice (unless it picks "
+                    "none of the options of one decided before) and tells every worker that "
+                    "asked the same: do not record it again."
+                    if choice
+                    else "If this settles a choice others rely on, record_decision."
+                ),
                 worker=short(session_id),
                 task=task["id"] if task else None,
             ),
@@ -504,7 +544,18 @@ class Asks:
             "went_on": True,
             "draft_id": draft["id"],
         }
-        self.store.set(f"ownerq:{row['id']}:{task_id or '-'}:{draft['id']}", json.dumps(question))
+        ref = f"{row['id']}:{task_id or '-'}:{draft['id']}"
+        self.store.set(f"ownerq:{ref}", json.dumps(question))
+        subject = self.runtime.ledger.subject_of("ask_user", draft["id"])
+        self.runtime.ledger.file(
+            "question",
+            ref,
+            row["id"],
+            task_id or "",
+            text,
+            options=question["options"] or None,
+            subject=subject["id"] if subject else "",
+        )
         self.runtime.publish_state()
         return True
 
@@ -658,6 +709,7 @@ class Asks:
         *,
         done: asyncio.Event | None = None,
         on_expiry: Callable[[dict], dict] | None = None,
+        filed: Callable[[dict], object] | None = None,
     ) -> dict | None:
         """Show the owner a card and wait for the answer (or for `done`); None on timeout, or
         what `on_expiry` makes of the card then.
@@ -667,6 +719,8 @@ class Asks:
         """
         row = self.store.session(session_id)
         draft = self.store.create_draft(session_id, kind, target, text)
+        if filed:
+            filed(draft)
         self.runtime.add_message(
             session_id, "draft", text, {"draft_id": draft["id"], "label": LABELS[kind]}
         )
@@ -766,7 +820,7 @@ class Asks:
                 return self.answer_request(draft, DraftDecision(action="answer", text=text))
         return None
 
-    def answer_request(self, draft: dict, decision: DraftDecision) -> dict:
+    def answer_request(self, draft: dict, decision: DraftDecision, settle: bool = True) -> dict:
         answer = self.requests.get(draft["id"])
         if not answer or answer.done():
             self.close_request(draft["id"], "expired", "No longer waiting.")
@@ -787,7 +841,7 @@ class Asks:
                 row = self.store.find_session(draft["session_id"])
                 if row and row["role"] == "worker":
                     task = self.runtime.tasks.find(draft["target"].get("task_id") or "")
-                    self.tell_router_answer(row["id"], draft["text"], text, task)
+                    self.tell_router_answer(row["id"], draft["text"], text, task, bool(choices))
             elif kind == "form":
                 content = form_values(draft["target"].get("schema") or {}, decision.content)
                 result = {"action": "accept", "content": content}
@@ -799,6 +853,14 @@ class Asks:
             draft = self.close_request(draft["id"], "answered", outcome)
         else:
             raise ValueError("Answer or decline this request.")
+        if settle and kind == "question":
+            # Any answer settles its subject (E151): the others asked the same hear it.
+            said = decision.text.strip() if decision.action == "answer" else decision.reason
+            ledger = self.runtime.ledger
+            if (claimed := ledger.claim("ask_user", draft["id"], said))[0]:
+                self.runtime.background(
+                    ledger.pass_on(claimed, said, declined=decision.action == "reject")
+                )
         answer.set_result(result)
         return draft
 
@@ -819,11 +881,47 @@ class Asks:
             if said := self.held_ask(session_id, task):
                 return {"answer": said, "wasFreeform": True}  # No card built without it.
             target["task_id"] = task["id"] if task else ""
+            if said := self.decided_already(session_id, task, question):
+                return {"answer": f"({said})", "wasFreeform": True}
             self.drop_went_on(session_id, target["task_id"], question[:2000])
+
+        def filed(draft: dict):
+            if row and row["role"] == "worker":
+                self.runtime.ledger.file(
+                    "ask_user",
+                    draft["id"],
+                    session_id,
+                    target.get("task_id") or "",
+                    question,
+                    options=target["choices"] or None,
+                )
+
         result = await self.ask_owner(
-            session_id, "question", target, question[:2000], on_expiry=self.went_on
+            session_id, "question", target, question[:2000], on_expiry=self.went_on, filed=filed
         )
         return result if result is not None else {"answer": NO_ANSWER, "wasFreeform": True}
+
+    def decided_already(self, session_id: str, task: dict | None, question: str) -> str:
+        """A question card on a choice the owner decided already (in its request, or for its
+        task): their decision is its answer, no card (E152). Once for each decision: asked the
+        same again, the owner sees it (the card says what they decided before)."""
+        ledger = self.runtime.ledger
+        linked = {d["id"] for d in self.runtime.decisions.for_task(task["id"])} if task else set()
+        for match in ledger.match(question, ledger.anchor(session_id, task["id"] if task else "")):
+            decision = ledger.decided(match["subject"]) if match["level"] == "same" else None
+            if not decision or not (match["joins"] or decision["id"] in linked):
+                continue
+            key = f"decidedasked:{session_id}:{decision['id']}"
+            if self.store.get(key):
+                return ""
+            self.store.set(key, now())
+            return (
+                f"Not asked: the owner decided this already, at {clock(decision['created_at'])}: "
+                f"{decision['text']} ({decision['id']}). Go on with it. If what you found since "
+                f'calls it into question, use ask_decision with replaces="{decision["id"]}" and '
+                "say what changed; if yours is another question, ask it again."
+            )
+        return ""
 
     async def on_elicitation(self, context: dict) -> dict:
         session_id = self.runtime.row_id(context.get("session_id", ""))

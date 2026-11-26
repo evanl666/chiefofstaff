@@ -110,6 +110,7 @@ from .forks import Forks
 from .habits import Habits
 from .handled import Handled
 from .learning import Learning
+from .ledger import Ledger
 from .models import AS_SAVED, Attachment, SentItem, Settings
 from .notify import mac_notification
 from .others import Others
@@ -987,6 +988,9 @@ class Runtime:
         self.asks.migrate_questions()
         self.accounts = Accounts(self)
         self.decisions = Decisions(self)
+        # Every ask of the owner under its subject: one choice asked once (ledger.py).
+        self.ledger = Ledger(self)
+        self.ledger.migrate()
         self.peers = Peers(self)
         self.relations = Relations(self)
         self.teams = Teams(self)
@@ -9798,6 +9802,9 @@ class Runtime:
                 + f": {clip(q['question'])}"
                 for q in owner_questions
             ]
+        if subjects := self.ledger.router_lines():
+            lines.append("\nAsked of the owner by more than one (one answer reaches them all):")
+            lines += subjects
         if questions := self.store.all(
             "SELECT * FROM questions WHERE target=? AND status='open'", (router,)
         ):
@@ -12131,6 +12138,9 @@ class Runtime:
             # questions holding a worker up half an hour (Needs you, one each).
             **self.teams_lite.snapshot(listed),
             "updates": self.owner_updates(),
+            # Asks of the owner by subject (one card for one choice), when one is asked by more
+            # than one, was decided before, or is possibly the same as another.
+            **({"subjects": subjects} if (subjects := self.ledger.view()) else {}),
             "tasks": [self.task_actions.view(task) for task in listed],
             "settings": settings.model_dump(),
             # Off macOS no desktop notification can show (notify.py): Settings leaves out its line.

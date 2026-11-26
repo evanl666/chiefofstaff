@@ -252,6 +252,21 @@ class Store:
             task_id TEXT NOT NULL, decision_id TEXT NOT NULL, ack TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (task_id, decision_id)
         );
+        CREATE TABLE IF NOT EXISTS subjects (
+            id TEXT PRIMARY KEY, anchor TEXT NOT NULL DEFAULT '', title TEXT NOT NULL,
+            decision_id TEXT NOT NULL DEFAULT '', merged_into TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS asks (
+            id TEXT PRIMARY KEY, subject_id TEXT NOT NULL, channel TEXT NOT NULL,
+            ref TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, options TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open', answer TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, settled_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS asks_by_subject ON asks(subject_id, status);
+        CREATE INDEX IF NOT EXISTS asks_by_ref ON asks(channel, ref);
+        CREATE INDEX IF NOT EXISTS asks_open ON asks(status);
         CREATE TABLE IF NOT EXISTS observations (
             id INTEGER PRIMARY KEY, source TEXT NOT NULL, kind TEXT NOT NULL,
             ref TEXT NOT NULL UNIQUE, text TEXT NOT NULL, meta TEXT NOT NULL DEFAULT '{}',

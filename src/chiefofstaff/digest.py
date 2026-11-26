@@ -226,7 +226,26 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
         )
     for note in runtime.owner_updates():
         found.items.append({"kind": "note", "note": note, "session_id": router})
+    # One item for each subject asked more than once (E158): the others fold into it.
+    keyed = {item_key(item): item for item in found.items}
+    for key, fold in runtime.ledger.folded(set(keyed) - {""}).items():
+        keyed[key]["folded"] = fold
+    found.items = [item for item in found.items if not item.get("folded")]
     return found
+
+
+def item_key(item: dict) -> str:
+    """An item's key under Home's Needs you (inbox.js)."""
+    kind = item["kind"]
+    if kind in {"card", "send"}:
+        return f"draft:{item['draft']['id']}"
+    if kind == "task":
+        return f"task:{item['task']['id']}"
+    if kind == "question":
+        return f"question:{item['question']['id']}"
+    if kind == "note":
+        return f"update:{item['note']['id']}"
+    return ""
 
 
 def task_words(task: dict, found: Needs) -> str:

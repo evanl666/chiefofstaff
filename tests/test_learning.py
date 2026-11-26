@@ -106,14 +106,16 @@ async def test_a_worker_hears_how_the_owner_decided_before(harness):
     await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Per account"))
     second = await spawn(runtime, harness.router_id, "Signup limits")
     question = "Limit signup attempts per account or per IP?"
+    # Chief of Staff tells sameness (E159): another request's decision is said, not a refusal;
+    # the owner's card shows it with Merge.
     asked = await call_tool(runtime, "ask_decision", second["session_id"], question=question)
-    assert asked.result_type == "failure"
+    assert asked.result_type == "success"
     assert "Limit login attempts per account? → Per account" in asked.text_result_for_llm
-    await call_tool(
-        runtime, "ask_decision", second["session_id"], question=question, seen_precedents=True
-    )
     [card] = harness.store.drafts()
-    assert card["target"]["precedents"] == ["Limit login attempts per account? → Per account"]
+    [subject] = runtime.snapshot()["subjects"]
+    assert [ask["keys"] for ask in subject["asks"]] == [[f"draft:{card['id']}"]]
+    [possibly] = subject["possibly"]
+    assert possibly["decided"] == "Per account"
 
 
 async def test_a_learner_that_stopped_does_not_block_learning(harness):

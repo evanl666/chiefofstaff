@@ -971,6 +971,11 @@ class OpenFolder(StrictModel):
     app: Literal["finder", "vscode"]
 
 
+class MergeSubjects(StrictModel):
+    # The subject (sub…) the owner says this one is the same choice as.
+    into: str = Field(min_length=1, max_length=64)
+
+
 class OpenPr(StrictModel):
     # The owner's word that it opens though a submodule's files couldn't be read (MayHoldWorkError).
     anyway: bool = False

@@ -17,10 +17,17 @@ async def spawn(runtime, router, title, **extra):
     return json.loads(result.text_result_for_llm)
 
 
+def one_request(harness, *workers, request="9001"):
+    """Workers' tasks made for one owner request (a Router turn's: Tasks.create stamps them)."""
+    for worker in workers:
+        harness.store.set(f"req:{worker['task_id']}", request)
+
+
 async def test_workers_ask_one_decision_and_the_owner_changes_it_later(harness):
     runtime = await harness.connect()
     api = await spawn(runtime, harness.router_id, "Login API")
     form = await spawn(runtime, harness.router_id, "Login form", why_new="parallel")
+    one_request(harness, api, form)
     asked = await call_tool(
         runtime,
         "ask_decision",
@@ -37,11 +44,13 @@ async def test_workers_ask_one_decision_and_the_owner_changes_it_later(harness):
     assert card["kind"] == "decision" and card["id"] in asked.text_result_for_llm
     assert runtime.tasks.get(api["task_id"])["status"] == "waiting"
 
+    # The same choice in other words, in the same request: joined by Chief of Staff (E159).
     again = await call_tool(
         runtime, "ask_decision", form["session_id"], question="Is there SMS login?"
     )
-    assert again.result_type == "failure" and card["id"] in again.text_result_for_llm
-    await call_tool(runtime, "ask_decision", form["session_id"], question="x", same_as=card["id"])
+    assert again.result_type == "success" and card["id"] in again.text_result_for_llm
+    assert "“Login API” asked the owner the same" in again.text_result_for_llm
+    assert runtime.tasks.get(form["task_id"])["status"] == "waiting"
     card = harness.store.draft(card["id"])
     assert [a["title"] for a in card["target"]["askers"]] == ["Login API", "Login form"]
     assert len(harness.store.drafts()) == 1, "one card for one decision"
@@ -321,12 +330,10 @@ async def test_a_decision_asked_again_on_its_task_gets_its_answer_not_a_card(har
     assert retry.result_type == "success" and "留到下一晚" in said and decision["id"] in said
     assert not harness.store.drafts() and runtime.tasks.get(task)["status"] == "running"
 
+    # Another question on that task is asked as such (owner report 0.1.58: "already decided").
     lighthouse = "Light the lighthouse at dusk?"
-    shown = await call_tool(runtime, "ask_decision", sid, question=lighthouse,
-                            seen_precedents=True)  # fmt: skip
-    assert "decided for your task already" in shown.text_result_for_llm
-    assert not harness.store.drafts(), "a decided task: its decision first, not a card (R1)"
-    await call_tool(runtime, "ask_decision", sid, question=lighthouse, distinct=True)
+    shown = await call_tool(runtime, "ask_decision", sid, question=lighthouse)
+    assert "Asked the owner" in shown.text_result_for_llm and len(harness.store.drafts()) == 1
     await runtime.owner_send(sid, "Yes, at dusk.")
     again = await call_tool(runtime, "ask_decision", sid, question=lighthouse,
                             seen_precedents=True)  # fmt: skip

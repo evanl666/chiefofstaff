@@ -24,9 +24,9 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from . import catalog
 from .asks import clock
 from .envelope import wrap
+from .ledger import related
 from .models import DraftDecision, NestedArguments
 from .roles import ROUTER, WORKER
 from .store import hours_ago, now
@@ -196,27 +196,6 @@ class Decisions:
             seen.add(found["id"])
         return found
 
-    def decided_for(self, task: dict | None, question: str) -> dict | None:
-        """The owner's answer to this question for this task, as it stands now (one that
-        replaced it since), when they gave one: asked again, it is that answer."""
-        for linked in reversed(self.for_task(task["id"]) if task else []):
-            if same_words(question, linked["text"].partition(" \u2192 ")[0]):
-                return self.current(linked["id"])
-        return None
-
-    def similar(self, question: str, limit: int = 3) -> list[dict]:
-        """The owner's decisions in force that are about something like this question."""
-        rows = {
-            row["id"]: row
-            for row in self.store.all(
-                "SELECT * FROM decisions WHERE status='active' ORDER BY created_at DESC LIMIT 200"
-            )
-        }
-        docs = {identifier: {"title": row["text"]} for identifier, row in rows.items()}
-        ranked = catalog.rank(question, docs)
-        # One shared word is not the same question.
-        return [rows[identifier] for identifier, terms in ranked if len(terms) >= 2][:limit]
-
     @staticmethod
     def recommended(target: dict) -> str:
         """The option the worker recommended, if its recommendation names one."""
@@ -274,10 +253,15 @@ class Decisions:
             card := next((c for c in mine if c["id"] == own), None)
         ):
             # What it found since, on the card it asked (E155): the same card, updated.
-            return self.update_card(card, params, question)
-        in_force: list[dict] = []
+            return self.update_card(card, params, question, caller)
+        ledger = self.runtime.ledger
+        anchor = ledger.anchor(caller, task["id"] if task else "")
+        # The subject it asks about (E159: Chief of Staff tells which asks are one choice, not
+        # the asking model): joined within its request, decided already, or a card of its own.
+        subject: dict | None = None
+        found: list[dict] = []
+        linked = {d["id"] for d in self.for_task(task["id"])} if task else set()
         if not (params.same_as.strip() or reconsidered):
-            # Asked again (owner report 0.1.53, item 1: a new card, the task waiting again).
             same = [card for card in mine if same_words(question, card["target"]["question"])]
             if same:
                 return (
@@ -285,6 +269,7 @@ class Decisions:
                     'arrives as a type="decision" message. End your turn now, unless parts of '
                     "your task do not depend on it."
                 )
+            joined = [c for c in mine if any(a.get("joined") for a in c["target"]["askers"])]
             if mine and not params.distinct:
                 # Asked again in other words while its card waits (never a second card of its
                 # own for it).
@@ -295,84 +280,114 @@ class Decisions:
                     "options as they stand now: that card is updated. Only if yours is another "
                     "decision, ask it with distinct=true."
                 )
-            if decided := self.decided_for(task, question):
-                return (
-                    f"The owner decided this for your task already: {decided['text']} "
-                    f"({decided['id']}). Go on with it: do not ask again. If what you found since "
-                    f'calls it into question, ask again with replaces="{decided["id"]}" and say '
-                    "what changed in why."
+            if joined:
+                # Another decision after all: off the card it was joined to.
+                for card in joined:
+                    ledger.drop("decision", card["id"], caller)
+                self.drop_askers(
+                    lambda a: bool(a.get("joined")) and self.asker_of(a, caller, task),
+                    "expired",
+                    CLOSED,
                 )
-            in_force = [
-                self.get(linked["id"])
-                for linked in reversed(self.for_task(task["id"]) if task else [])
-                if linked["status"] == "active"
-            ]
-            if in_force and not self.shown(caller, task, in_force, params.distinct):
-                # A decided task: asked again, it gets the decision (owner report 0.1.57, R1: a
-                # reworded re-ask with seen_precedents was a new card, both answers in force). A
-                # new card is a reconsideration that says why, or another decision it says is.
-                listed = "\n".join(
-                    f"- {d['id']} ({clock(d['created_at'])}): {d['text']}" for d in in_force
-                )
-                return (
-                    f"The owner decided for your task already:\n{listed}\nGo on with that: do "
-                    "not ask again. If what you found since calls it into question, ask again "
-                    'with replaces="<its id>" and say in why what changed: the owner reconsiders '
-                    "it. Only if yours is another decision that these do not settle, ask it "
-                    "again with distinct=true."
-                )
-        precedents = [] if params.same_as.strip() or reconsidered else self.similar(question)
-        linked = {d["id"] for d in in_force}
-        if precedents and not params.seen_precedents and {p["id"] for p in precedents} - linked:
-            listed = "\n".join(
-                f"- {p['id']}: {p['text']} ({p['created_at'][:10]})" for p in precedents
+            found = [m for m in ledger.match(question, anchor) if m["level"] == "same"]
+            decision = next(
+                (
+                    d
+                    for match in found
+                    if (d := ledger.decided(match["subject"]))
+                    and (match["joins"] or d["id"] in linked)
+                ),
+                None,
+            ) or next(
+                (
+                    self.current(d["id"])
+                    for d in reversed(self.for_task(task["id"]) if task else [])
+                    if d["status"] == "active"
+                    and related(question, d["text"].partition(" \u2192 ")[0])
+                ),
+                None,
             )
-            raise ValueError(
-                f"The owner decided similar questions before:\n"
-                f"{listed}\nIf one settles yours, follow it without asking and say so in your "
-                "report, unless your task asks you to ask the owner this time (then ask anyway). "
-                "If what you found since calls one of them into question, ask again with "
-                "replaces=<its id> and say what changed in why: the owner reconsiders it, and "
-                "their answer replaces it. Otherwise (yours is another question) call "
-                "ask_decision again with seen_precedents=true: the card shows these to the owner."
-            )
-        # The decisions its task relies on: the card shows them with the others.
-        known = {p["id"] for p in precedents}
-        precedents += [d for d in in_force if d["id"] not in known]
+            if decision and not self.shown(caller, task, [decision], params.distinct):
+                # A choice the owner made already (its request's, or one its task relies on
+                # in other words): asked again, it gets their decision (owner report 0.1.57,
+                # R1). Not another question on that task (owner report 0.1.58). A new card
+                # is a reconsideration that says why, or another decision it says is.
+                return (
+                    f"The owner decided this already ({clock(decision['created_at'])}): "
+                    f"{decision['text']} ({decision['id']}). Go on with it: do not ask "
+                    "again. If what you found since calls it into question, ask again with "
+                    f'replaces="{decision["id"]}" and say in why what changed: the owner '
+                    "reconsiders it. Only if yours is another decision that this does not "
+                    "settle, ask it again with distinct=true."
+                )
+            if not params.distinct:
+                subject = next((m["subject"] for m in found if m["joins"]), None)
+            if subject and (
+                card := next(
+                    (
+                        c
+                        for c in cards
+                        if (ledger.subject_of("decision", c["id"]) or {}).get("id") == subject["id"]
+                    ),
+                    None,
+                )
+            ):
+                # The same choice another asker's card waits on: one card, one answer.
+                params = params.model_copy(update={"same_as": card["id"]})
+        in_force = [
+            self.get(d["id"])
+            for d in reversed(self.for_task(task["id"]) if task else [])
+            if d["status"] == "active" and not (subject and ledger.decided(subject) == d)
+        ]
+        precedents = [] if params.same_as.strip() or reconsidered else in_force
         if reconsidered and (
-            joined := next(
+            joined_card := next(
                 (c for c in cards if c["target"].get("replaces") == reconsidered["id"]), None
             )
         ):
             # Another worker asks the owner to reconsider it already: one card for it.
-            params = params.model_copy(update={"same_as": joined["id"]})
+            params = params.model_copy(update={"same_as": joined_card["id"]})
+        if reconsidered:
+            subject = ledger.of_decision(reconsidered)
         if params.same_as.strip():
             card = next((c for c in cards if c["id"] == params.same_as.strip()), None)
             if not card:
                 raise ValueError(f"No open decision card {params.same_as}. Ask without same_as.")
             target = card["target"]
+            auto = not reconsidered and subject is not None and card not in mine
             if caller not in {a["session_id"] for a in target["askers"]}:
-                target["askers"].append(asker)
+                target["askers"].append({**asker, **({"joined": True} if auto else {})})
                 self.bus.publish("draft", self.store.update_draft_target(card["id"], target))
+            ledger.file(
+                "decision",
+                card["id"],
+                caller,
+                asker["task_id"],
+                question,
+                options=[o["choice"] for o in target.get("options") or []],
+                subject=(ledger.subject_of("decision", card["id"]) or {}).get("id", ""),
+            )
             self.runtime.add_message(
                 caller, "notice", f"Waits for the owner's decision: {target['question']}"
             )
-        else:
-            others = [
-                {
-                    "id": card["id"],
-                    "question": card["target"]["question"],
-                    "asked_by": [a["title"] for a in card["target"]["askers"]],
-                }
-                for card in cards
-                if caller not in {a["session_id"] for a in card["target"]["askers"]}
-            ]
-            if others and not params.distinct and not reconsidered:
-                raise ValueError(
-                    "Other workers wait for these decisions. If yours is the same question, call "
-                    "ask_decision with same_as=<its id>; otherwise call it again with "
-                    "distinct=true.\n" + json.dumps(others, ensure_ascii=False)
+            if auto:
+                others = ", ".join(
+                    f"“{a['title']}”" for a in target["askers"] if a["session_id"] != caller
                 )
+                if task and task["status"] in OPEN:
+                    self.tasks.move(
+                        task["id"], "waiting", progress=f"Needs your decision: {target['question']}"
+                    )
+                self.runtime.update_session(caller, status="waiting")
+                return (
+                    f"Asked already: {others or 'another worker'} asked the owner the same "
+                    f"(card {card['id']}: “{target['question']}”). You wait on that card now: "
+                    'one answer reaches you both, as a type="decision" message. End your turn '
+                    "now, unless parts of your task do not depend on it. Only if yours is "
+                    "another decision, ask again with distinct=true and say in why how it "
+                    "differs."
+                )
+        else:
             options = [
                 {"choice": clean(o.choice, 120), "effect": clean(o.effect, 300)}
                 for o in params.options
@@ -394,6 +409,16 @@ class Decisions:
                     "previous_at": reconsidered["created_at"],
                 }
             card = self.store.create_draft(caller, "decision", target, question)
+            ledger.file(
+                "decision",
+                card["id"],
+                caller,
+                asker["task_id"],
+                question,
+                options=[o["choice"] for o in options],
+                subject=subject["id"] if subject else "",
+                join=False,
+            )
             self.runtime.add_message(
                 caller, "draft", question, {"draft_id": card["id"], "label": "Decision"}
             )
@@ -404,9 +429,21 @@ class Decisions:
         if task and task["status"] in OPEN:
             self.tasks.move(task["id"], "waiting", progress=f"Needs your decision: {question}")
         self.runtime.update_session(caller, status="waiting")
+        # Decided elsewhere in the same words (another request's): the card says so, for the
+        # owner to answer it with that decision in one click (Merge), never by itself (E159).
+        before = [
+            d
+            for match in found
+            if not match["joins"] and (d := self.runtime.ledger.decided(match["subject"]))
+        ][:2]
+        said = "".join(
+            f" The owner decided something like it before ({clock(d['created_at'])}): "
+            f"“{d['text']}” ({d['id']}): the card shows it to them."
+            for d in before
+        )
         return (
             f'Asked the owner (card {card["id"]}). The decision arrives as a type="decision" '
-            "message. End your turn now, unless parts of your task do not depend on it."
+            f"message. End your turn now, unless parts of your task do not depend on it.{said}"
         )
 
     def shown(self, caller: str, task: dict | None, decisions: list[dict], distinct: bool) -> bool:
@@ -420,7 +457,7 @@ class Decisions:
         self.store.set(key, json.dumps(sorted(seen | ids)))
         return False
 
-    def update_card(self, card: dict, params: AskDecision, question: str) -> str:
+    def update_card(self, card: dict, params: AskDecision, question: str, caller: str) -> str:
         """Its own open card, asked again with what it found since (E155): the same card, its
         question, why, options and recommendation as they stand now, stamped updated."""
         target = dict(card["target"])
@@ -444,6 +481,16 @@ class Decisions:
         target["updated_at"] = now()
         card = self.store.update_draft_target(card["id"], target)
         self.bus.publish("draft", card)
+        for asker in target["askers"]:
+            if asker["session_id"] == caller:
+                self.runtime.ledger.file(
+                    "decision",
+                    card["id"],
+                    asker["session_id"],
+                    asker.get("task_id") or "",
+                    target["question"],
+                    options=[o["choice"] for o in target.get("options") or []],
+                )
         return (
             f"Updated card {card['id']}: the owner sees what you found since, on the card they "
             'have. The decision arrives as a type="decision" message. End your turn now, '
@@ -502,6 +549,7 @@ class Decisions:
                 "otherwise report(status=\"blocked\")."
             )  # fmt: skip
             await self.tell_askers(card, text, "Not decided", "", "Not decided by you")
+            await self.settled(card, reason, declined=True)
             return card
         if decision.action != "answer":
             raise ValueError("Decide, or say Not now.")
@@ -534,7 +582,25 @@ class Decisions:
         await self.tell_askers(
             card, text, f"Decision: {choice}", recorded["decision"]["id"], f"Decided: {short}"
         )
+        await self.settled(card, choice, recorded["decision"])
         return card
+
+    async def settled(
+        self,
+        card: dict,
+        answer: str,
+        decision: dict | None = None,
+        note: bool = False,
+        declined: bool = False,
+    ):
+        """The owner answered a card: the other asks on its subject (other workers' questions,
+        the Router's note) are answered with it (E151)."""
+        try:
+            await self.runtime.ledger.settle(
+                "decision", card["id"], answer, decision=decision, note=note, declined=declined
+            )
+        except Exception:
+            logger.warning("Could not pass the answer to %s on.", card["id"], exc_info=True)
 
     async def keep(self, card: dict, kept: dict, reason: str = "", later: bool = False) -> dict:
         """The owner keeps the decision a reconsideration asked them to change (Keep; Not now,
@@ -557,6 +623,7 @@ class Decisions:
             "with it, and do not change it" + (f". They said: {reason}" if reason else ".")
         )
         await self.tell_askers(card, text, f"Kept: {short}", kept["id"], f"Kept: {short}")
+        await self.settled(card, answer, kept)
         return card
 
     async def note(self, card: dict, kept: dict, said: str) -> dict:
@@ -571,6 +638,7 @@ class Decisions:
         )
         short = said if len(said) <= 80 else said[:79].rstrip() + "\u2026"
         await self.tell_askers(card, text, f"Note: {said}", kept["id"], f"Your note: {short}")
+        await self.settled(card, said, kept, note=True)
         return card
 
     @staticmethod
@@ -726,6 +794,12 @@ class Decisions:
                 # as it was (E154).
                 if self.store.draft(card["id"])["status"] != "pending":
                     self.close(card["id"], "answered", "Kept your decision; sent your note")
+                with suppress(Exception):
+                    kept = self.current(target["replaces"])
+                    await self.runtime.ledger.settle(
+                        "decision", card["id"], text, session_id=session_id, decision=kept,
+                        note=True,
+                    )  # fmt: skip
                 continue
             tasks = [
                 asker["task_id"]
@@ -736,9 +810,14 @@ class Decisions:
                 replaces = (
                     [self.current(target["replaces"])["id"]] if target.get("replaces") else []
                 )
-                await self.record(
+                recorded = await self.record(
                     f"{target['question']} → {text}", tasks, replaces, f"chat:{card['id']}"
                 )
+                # Any answer settles its subject (E151): the others that wait on it hear it.
+                await self.runtime.ledger.settle(
+                    "decision", card["id"], text, session_id=session_id,
+                    decision=recorded["decision"],
+                )  # fmt: skip
             except Exception:
                 # Their message reaches the worker whatever becomes of keeping it.
                 logger.warning("Could not keep the decision answered in chat.", exc_info=True)
@@ -795,6 +874,8 @@ class Decisions:
         result = await self.record(params.decision, tasks, params.replaces, "owner", given)
         decision, affected = result["decision"], result["affected"]
         state.turn_decisions.append(decision["id"])
+        if not params.replaces:
+            self.runtime.ledger.recorded(decision, tasks)
         if result.get("same"):
             return (
                 f"Recorded {decision['id']}, the same decision as before: nothing changed, no "
@@ -900,6 +981,8 @@ class Decisions:
                 (identifier, row["id"]),
             )
         decision = self.get(identifier)
+        # The subjects the old ones settled are this one's now.
+        self.runtime.ledger.carry([row["id"] for row in old], identifier)
         for card in moot:
             self.close(card["id"], "expired", f"Decided meanwhile: {text}")
         short = text if len(text) <= 80 else text[:79].rstrip() + "\u2026"
@@ -934,7 +1017,7 @@ class Decisions:
                 task = self.tasks.get(task_id)
                 if task["status"] in {"failed", "cancelled"}:
                     continue
-                if source.startswith(("card:", "chat:")) and task_id in tasks:
+                if source.startswith(("card:", "chat:", "ask:")) and task_id in tasks:
                     continue  # It asked: the owner's answer reaches it as such.
                 workers.setdefault(task["session_id"], []).append(task)
             for its in workers.values():

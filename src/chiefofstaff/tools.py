@@ -22,7 +22,7 @@ from copilot import ToolResult, define_tool
 from pydantic import BaseModel, Field, create_model
 
 from . import agents, prompts, receipts, threads
-from .asks import AnswerSession, AskSession, RecordSetup
+from .asks import AnswerSession, AskSession, RecordSetup, clock
 from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .digest import NEEDS_WORDS, Needs, needs, task_words, waiting_parts
@@ -30,6 +30,7 @@ from .envelope import clean_title, language, short, wrap
 from .forks import EVERY_WORKER_WAITS, Second
 from .habits import UpdateStyle
 from .learning import ProposeLessons
+from .ledger import embedded_ask, likeness, still_waits
 from .models import (
     MAX_DRAFT,
     DraftDecision,
@@ -38,7 +39,7 @@ from .models import (
     WithdrawDraft,
     leak_proof,
 )
-from .peers import TellSession
+from .peers import TellSession, clip
 from .policy import within
 from .roles import ROUTER, SLACK, WATCHDOG, WORKER
 from .sources.github import NO_ACCESS, diff_lines, snippet
@@ -2847,8 +2848,11 @@ class Tools:
         ):
             # The Router answers or redirects the question of the task it writes about, saying
             # so (a new task does not answer it; another task's question stays).
-            self.runtime.asks.answered(target["id"], task["id"] if task else "", by="router")
-            self.runtime.asks.answered(target["id"], "", by="router")
+            # (Its words answer the others that asked the same too: Ledger.settle.)
+            self.runtime.asks.answered(
+                target["id"], task["id"] if task else "", by="router", text=params.text
+            )
+            self.runtime.asks.answered(target["id"], "", by="router", text=params.text)
             if (
                 task
                 and task["status"] == "waiting"
@@ -3843,6 +3847,10 @@ class Tools:
                 {"id": item["note"]["id"], "text": item["note"]["text"][:300]}
                 for item in found.of("note")
             ],
+            # One choice asked by several (E158): one item above, one answer for them all.
+            **(
+                {"asked_by_several": lines} if (lines := self.runtime.ledger.router_lines()) else {}
+            ),
         }
 
     def session_entry(self, row: dict) -> dict:
@@ -4140,12 +4148,51 @@ class Tools:
             # must make too: said there, it is not said twice).
             return "Not sent: the owner wrote to you, so say this in your reply instead."
         asked = self.asked_already(caller, params.text) if params.needs_action else []
-        if asked and params.text in self.refused_notes:
-            asked = []  # Sent again unchanged: about something else.
+        # Asked by a worker in other words, on any card (E152), or decided already: the subject
+        # is the same (Ledger).
+        joined, decided = (
+            self.asked_by_subject(params.text)
+            if params.needs_action and not asked
+            else (None, None)
+        )
+        if (asked or joined or decided) and params.text in self.refused_notes:
+            asked, joined, decided = [], None, None  # Sent again unchanged: about something else.
+            self.runtime.ledger.unjoin(caller, params.text)
         self.refused_notes.discard(params.text)
+        if decided and not params.urgent:
+            self.refused_notes.add(params.text)
+            return (
+                f"Not shown: the owner decided this already ({clock(decided['created_at'])}): "
+                f"{decided['text']} ({decided['id']}). Tell the workers that need it. If the "
+                "owner must reconsider it, call notify_owner again with your note unchanged."
+            )
+        if joined and not params.urgent:
+            self.refused_notes.add(params.text)
+            ledger = self.runtime.ledger
+            open_asks = ledger.live(joined["id"])
+            ledger.file(
+                "notify", f"r:{joined['id']}", caller, "", params.text, subject=joined["id"]
+            )
+            self.runtime.publish_state()
+            return (
+                "Not shown: the owner has this under Needs you already, asked by "
+                f"{ledger.who(open_asks)} (“{clip(joined['title'], 200)}”). Do not ask it "
+                "again: one answer settles it, and you hear it. If your note is about something "
+                "else, call notify_owner again with it unchanged."
+            )
         if asked and not params.urgent:
             # Asked once: a note about something else is shown when it is sent again.
             self.refused_notes.add(params.text)
+            for question in asked:
+                # The Router asks it too: it hears the answer with the worker's (Ledger). (Not
+                # a note only this turn's reports made look like it: shown, it is its own.)
+                if likeness(params.text, question["text"])[0] != "same":
+                    continue
+                if subject := self.runtime.ledger.subject_of("question", question["id"]):
+                    self.runtime.ledger.file(
+                        "notify", f"r:{subject['id']}", caller, "", params.text,
+                        subject=subject["id"],
+                    )  # fmt: skip
             listed = "; ".join(
                 f"“{question['worker']}”"
                 + (f" on task {question['task']}" if question["task"] else "")
@@ -4161,7 +4208,10 @@ class Tools:
         meta: dict[str, Any] = {"needs_action": params.needs_action, "urgent": params.urgent}
         if asked:
             meta["questions"] = [question["id"] for question in asked]  # Gone once answered.
-        self.runtime.add_message(caller, "update", params.text, meta, unread=True)
+        note = self.runtime.add_message(caller, "update", params.text, meta, unread=True)
+        if params.needs_action and not asked:
+            # An ask of the owner's too: one a worker asks the same later joins it.
+            self.runtime.ledger.file("notify", str(note["id"]), caller, "", params.text, join=False)
         self.runtime.alert(
             params.text,
             session_id=caller,
@@ -4169,6 +4219,19 @@ class Tools:
             urgent=params.urgent,
         )
         return "Shown to the owner."
+
+    def asked_by_subject(self, text: str) -> tuple[dict | None, dict | None]:
+        """The open subject a note of the Router's asks the same as (any worker's ask: the
+        Router joins any), or the decision in force on one."""
+        ledger = self.runtime.ledger
+        for match in ledger.match(text, ""):
+            if match["level"] != "same":
+                continue
+            if ledger.live(match["subject"]["id"]):
+                return match["subject"], None
+            if decision := ledger.decided(match["subject"]):
+                return None, decision
+        return None, None
 
     async def t_close_worker(self, params: CloseWorker, caller: str):
         self.caller(caller, ROUTER)
@@ -4463,6 +4526,22 @@ class Tools:
             # The owner's answer, or the Router's or their newer word on this task, is unread:
             # no question built without it (E156).
             raise ValueError(said)
+        if (
+            task
+            and row["role"] == WORKER
+            and params.status in {"question", "blocked"}
+            and not peers
+            and (said := self.runtime.asks.decided_already(caller, task, params.summary))
+        ):
+            # A choice the owner made already, asked again as a question (E152): their decision.
+            raise ValueError(said)
+        # A done report that asks the owner what its open ask asks, or ends asking them to
+        # choose (E152, live D6): held once; reported again, its ask stays open (or is kept).
+        done_ask = (
+            self.ask_in_done(caller, task, params.summary)
+            if task and row["role"] == WORKER and params.status == "done"
+            else ("", "", False)
+        )
         finished = bool(
             task
             and (
@@ -4834,10 +4913,11 @@ class Tools:
         if not answer:
             # An answer changes nothing: asked about its work, it returns to where it was.
             self.states[caller].resting = ""
+        filed = None
         if params.status in {"question", "blocked"} and not peers:
             # Under Needs you until answered, whatever becomes of the task (the Slack
             # session's too: it has no task).
-            self.runtime.asks.record_question(
+            filed = self.runtime.asks.record_question(
                 caller,
                 params.summary,
                 task["id"] if task else "",
@@ -4847,10 +4927,14 @@ class Tools:
                 next_step=params.next,
                 kind=params.status,
             )
-        elif not answer and params.status != "progress":
+        elif not answer and params.status != "progress" and done_ask[0] != "open":
             # It finished this task (done, failed): its question is behind it (another task's
-            # stays). Progress keeps it: answered, withdrawn or asked again, it ends (E155).
+            # stays). Progress keeps it: answered, withdrawn or asked again, it ends (E155). A
+            # done report that asks it again keeps it (live D6).
             self.runtime.asks.answered(caller, task["id"] if task else "", by="worker")
+        if done_ask[0] == "embedded" and task:
+            # What it asks the owner at its end is their question, not lost with the result.
+            self.runtime.asks.record_question(caller, done_ask[1], task["id"], choice=done_ask[2])
         if row["role"] == WORKER and params.status in {"progress", "done"}:
             # A PR it delivers is its PR: reviews, comments and CI come back to it. Not every
             # PR it mentions (stale CI news of others' PRs would follow).
@@ -4934,6 +5018,18 @@ class Tools:
                 "reports this task again: wait for that report, or send your message again with "
                 f"task_id='{task['id']}'. Never move that work into another task."
             )
+        # Asked by others in its request already (E152): one card, one answer for them all.
+        joined = (
+            [a for a in self.runtime.ledger.live(filed["subject_id"]) if a["session_id"] != caller]
+            if filed
+            else []
+        )
+        if joined:
+            crossed = (
+                f"{crossed} The owner has this asked already by "
+                f"{self.runtime.ledger.who(joined)}: one card under Needs you, and one answer "
+                "reaches them all. Do not notify the owner of it again."
+            ).strip()
         told_status = "answer" if answer else params.status
         if task and params.status == "done" and self.states[caller].filing:
             filed = (
@@ -4966,7 +5062,61 @@ class Tools:
                 'were given ends with report(status="done"), never "answer", even when its result '
                 "is only an answer or a message to pass on." + self.run_note(row, task, "done")
             )
+        if joined:
+            split_note += (
+                f" {self.runtime.ledger.who(joined)} asked the owner the same: one answer "
+                "reaches you both."
+            )
         return "Reported to the Router." + split_note + self.run_note(row, task, params.status)
+
+    def ask_in_done(self, caller: str, task: dict, summary: str) -> tuple[str, str, bool]:
+        """A done report that asks the owner again what its task's open ask asks (its question,
+        its decision card), or says it still waits on them ("open"), or ends asking them to
+        choose ("embedded", E152): the kind, the ask, and whether it is a choice. Held once
+        (raises), with how to ask; reported again, it is taken as it is. ("", "", False) for
+        neither."""
+        asked = [
+            question["text"]
+            for question in self.runtime.asks.session_questions(caller)
+            if question.get("task_id") == task["id"] and not question.get("went_on")
+        ] + [
+            card["target"]["question"]
+            for card in self.runtime.decisions.open_cards("decision")
+            if any(
+                a["session_id"] == caller and a.get("task_id") == task["id"]
+                for a in card["target"]["askers"]
+            )
+        ]
+        ending = embedded_ask(summary)
+        if asked and (
+            still_waits(summary) or (ending and any(likeness(ending, text)[0] for text in asked))
+        ):
+            kind, said, choice = "open", asked[-1], False
+        elif ending:
+            kind, said = "embedded", ending
+            choice = not still_waits(summary)
+        else:
+            return "", "", False
+        key = f"doneask:{task['id']}"
+        mark = f"{kind}:{hashlib.sha256(said.encode()).hexdigest()[:12]}"
+        if self.store.get(key) == mark:
+            return kind, said, choice
+        self.store.set(key, mark)
+        if kind == "open":
+            raise ValueError(
+                f"Not reported: your ask to the owner on task {task['id']} (“{clip(said, 300)}”) "
+                "is still open under Needs you, and this report asks it again. If the task "
+                "still needs their answer, end your turn: it arrives as a message (to change "
+                'what you ask, report(status="blocked") with it as it stands now). Report done '
+                "with what is finished without it, and leave the ask out. If it is finished and "
+                "the ask still stands, call report again unchanged: the ask stays open."
+            )
+        raise ValueError(
+            f"Not reported: this report ends asking the owner (“{clip(said, 300)}”), and a "
+            "result's card asks them nothing. Ask with ask_decision (a choice) or "
+            'report(status="question"), or report done without the ask. To report it as it is, '
+            "call report again unchanged: the ask is kept as your question to the owner."
+        )
 
     def blocked_on_peers(self, caller: str, task: dict | None, summary: str) -> list[dict]:
         """The workers a blocked report waits on (E157): those it names that are still at their

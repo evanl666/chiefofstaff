@@ -4276,10 +4276,11 @@ class TaskActions:
             raise ValueError("Say what to change.")
         return await self.follow_up(task_id, text.strip(), changes=by)
 
-    async def answer_question(self, question_id: str, text: str) -> dict:
+    async def answer_question(self, question_id: str, text: str, tell_router: bool = True) -> dict:
         """The owner answers a worker's question kept under Needs you (by its id, or by its
         worker's). Answering it, they want the work: a task cancelled or finished meanwhile
-        goes on with the answer."""
+        goes on with the answer. `tell_router`: False when the Router hears it otherwise (the
+        same answer to another ask on its subject: Ledger.settle)."""
         question = self.runtime.asks.owner_question(question_id)
         if not question:
             raise ValueError("That question was answered or dismissed already.")
@@ -4299,13 +4300,19 @@ class TaskActions:
                     kind="notice",
                     display=f"Answering: {said[:200]}",
                 )
-            await self.runtime.owner_send(session_id, text, clear_questions=False)
+            await self.runtime.owner_send(
+                session_id, text, clear_questions=False, tell_router=tell_router
+            )
             return {"session_id": session_id}
         if question.get("went_on"):
             # The worker went on without it: told which question this answers, on its task (or
             # on the task that continues it).
-            return await self.follow_up(task["id"], text, resume=True, answers=question)
-        return await self.follow_up(task["id"], text, resume=True, question=question)
+            return await self.follow_up(
+                task["id"], text, resume=True, answers=question, tell_router=tell_router
+            )
+        return await self.follow_up(
+            task["id"], text, resume=True, question=question, tell_router=tell_router
+        )
 
     async def handed_over(self, session_id: str, replaced: list[dict], new: dict, label: str):
         """A worker's work went on with a new one (Continue with…): the tasks it had open are
@@ -4445,8 +4452,8 @@ class TaskActions:
         changes: its worker hears so plainly. `answers`: the question (Asks.keep_unanswered)
         this answers, which its worker went on without: it hears which. `question`: the one
         under Needs you this answers (Asks.held_ask reads the message so). `tell_router`: the
-        Router hears of it (not for Tell the team: one copy for the send); `extra_meta`, kept
-        on the message."""
+        Router hears of it (not for Tell the team: one copy for the send; nor when it hears this
+        answer otherwise: Ledger.settle); `extra_meta`, kept on the message."""
         task = self.tasks.get(task_id)
         # Go on (a stopped task's button, from two tabs say): sent once, while it is stopped.
         going_on = text.strip() == "Go on where you stopped."

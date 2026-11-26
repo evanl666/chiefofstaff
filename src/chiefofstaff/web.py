@@ -33,6 +33,7 @@ from .models import (
     FollowRetry,
     GitIdentity,
     GitQuarantine,
+    MergeSubjects,
     NewLesson,
     OpenFolder,
     OpenPr,
@@ -788,6 +789,18 @@ def create_app(
         if not payload.text.strip():
             raise ValueError("Write your answer.")
         await runtime.task_actions.answer_question(question_id, payload.text)
+        return runtime.snapshot()
+
+    @app.post("/api/subjects/{subject_id}/merge")
+    async def merge_subjects(subject_id: str, payload: MergeSubjects):
+        # The owner says two asks are one choice ("possibly the same as …": Merge).
+        await runtime.ledger.merge(subject_id, payload.into)
+        return runtime.snapshot()
+
+    @app.post("/api/asks/{ask_id}/apart")
+    async def ask_apart(ask_id: str):
+        # The owner says an ask folded into another is not the same choice.
+        runtime.ledger.split(ask_id)
         return runtime.snapshot()
 
     @app.post("/api/questions/{question_id}/dismiss")

@@ -1,5 +1,6 @@
 """Live test of the owner's answers reaching the worker that asked (0.1.58, owner report R1 and QA
-E153-E157), against real Copilot: the scenarios of the decision-card repeat fix, phase 1.
+E153-E157), against real Copilot: the scenarios of the decision-card repeat fix, phase 1, and of
+the decision ledger (0.1.59).
 
 D1  The owner answers a decision card while its worker is still in the turn that asked (it runs
     a slow simulation after asking): the answer reaches it in that turn (no turn of it ended in
@@ -17,6 +18,18 @@ D6  A worker blocked on three things only the owner can give; the owner asks the
     separate question, which it relays to that worker on the same task: the blocked ask stays
     under Needs you and its task waits (owner report, 0.1.58).
 
+The decision ledger (0.1.59, QA10 E151, E152, E158, E159):
+
+D7  Two workers of one request ask the owner the same choice, each in its own words: one card
+    under Needs you, asked by both (Chief of Staff joins them, not the model).
+D8  The Router is asked to put the same question to the owner as a note: it joins the open ask
+    (no second item under Needs you), which now says the Router asks too.
+D9  The owner answers that one card: every asker hears it and uses it, and one decision is in
+    force for both tasks.
+D10 A worker reports done with an ask for the owner at its end: the report is held once with
+    how to ask; the ask then reaches Needs you (or the report leaves it out), never lost with
+    the result.
+
 Uses your signed-in Copilot CLI and consumes premium requests (LIVE_COPILOT_MODEL,
 claude-sonnet-5.5 by default); the Copilot sessions it creates are deleted at the end; about 20
 minutes. Its data folder has a space in its path, as macOS's own has. Set TMPDIR to a scratch
@@ -25,6 +38,9 @@ app, the next one for the stand-in Slack. Scenarios by name run alone (D3 runs D
 
     TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py
     TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D1 D6
+    TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D7 D10
+
+D8 and D9 run D7 first.
 """
 
 import asyncio
@@ -386,6 +402,130 @@ async def d6_a_side_question_leaves_the_blocked_ask_open(run: Run):
     )
 
 
+def pending_cards(run: Run) -> list[dict]:
+    """Every decision card under Needs you, oldest first."""
+    rows = run.db(
+        "SELECT id, session_id, target FROM drafts WHERE kind='decision' AND status='pending' "
+        "ORDER BY created_at"
+    )
+    return [{**row, "target": json.loads(row["target"])} for row in rows]
+
+
+async def d7_one_choice_asked_by_two_is_one_card(run: Run) -> tuple[dict, dict, dict]:
+    app = run.app
+    await run.say(
+        "Start two workers in parallel (no project), titled 'Invoice API' and 'Invoice Page', "
+        "for one piece of work: invoice totals. Tell each, word for word: Before you write "
+        "anything, ask me with ask_decision, in your own words, whether invoice totals round to "
+        "cents or to whole units, with the options 'Cents' and 'Whole units', and end your turn "
+        "to wait for my decision. Once it reaches you, write the rounding I picked alone into "
+        "rounding.txt in your own folder and report done."
+    )
+    api = await run.worker("Invoice API")
+    page = await run.worker("Invoice Page")
+
+    async def both_asked():
+        cards = pending_cards(run)
+        askers = {a["session_id"] for c in cards for a in c["target"]["askers"]}
+        return cards if {api["id"], page["id"]} <= askers else None
+
+    cards = await wait_for("both workers' asks", both_asked, 600, app)
+    subjects = (await app.get("/api/state")).get("subjects") or []
+    run.check(
+        "D7 the same choice asked by two workers is one card",
+        len(cards) == 1 and len(cards[0]["target"]["askers"]) == 2,
+        f"{len(cards)} card(s): {[c['target']['question'][:60] for c in cards]}; subjects "
+        f"{[(s['title'][:40], s['asked_by']) for s in subjects]}",
+    )
+    return api, page, cards[0]
+
+
+async def d8_a_router_note_joins_the_open_ask(run: Run, card: dict):
+    app = run.app
+    before = len((await app.get("/api/state")).get("updates") or [])
+    await run.say(
+        "Use notify_owner with needs_action=true to ask me, as a note of yours: should invoice "
+        "totals round to cents or to whole units? Then tell me in one line what notify_owner "
+        "answered you."
+    )
+
+    async def router_asked():
+        subjects = (await app.get("/api/state")).get("subjects") or []
+        found = [s for s in subjects if "the Router" in s["asked_by"]]
+        return found[0] if found else None
+
+    subject = await wait_for("the Router's note joined", router_asked, 300, app)
+    state = await app.get("/api/state")
+    run.check(
+        "D8 the Router's note joins the open ask: no second item",
+        len(state.get("updates") or []) == before
+        and any(f"draft:{card['id']}" in ask["keys"] for ask in subject["asks"]),
+        f"{subject['asked_by']}; Router notes under Needs you {len(state.get('updates') or [])}",
+    )
+
+
+async def d9_one_answer_reaches_every_asker(run: Run, api: dict, page: dict, card: dict):
+    app = run.app
+    await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "text": "Cents"})
+    for worker in (api, page):
+        await run.task(worker["id"], *FINISHED)
+    api = await app.get(f"/api/sessions/{api['id']}")
+    page = await app.get(f"/api/sessions/{page['id']}")
+    found = run.db(
+        "SELECT d.id, d.text, count(l.task_id) AS tasks FROM decisions d "
+        "LEFT JOIN task_decisions l ON l.decision_id=d.id WHERE d.status='active' "
+        "AND d.text LIKE '%→ Cents' GROUP BY d.id"
+    )
+    run.check(
+        "D9 one answer reached both askers, and both used it",
+        written(api, "rounding.txt") == "Cents" and written(page, "rounding.txt") == "Cents",
+        f"API {written(api, 'rounding.txt')!r}, page {written(page, 'rounding.txt')!r}",
+    )
+    run.check(
+        "D9 one decision in force, for both tasks",
+        len(found) == 1 and found[0]["tasks"] >= 2 and not pending_cards(run),
+        f"{found}",
+    )
+
+
+async def d10_a_done_report_with_an_ask_is_held(run: Run):
+    app = run.app
+    await run.say(
+        "Start a worker titled 'Parser Ship' (no project). Tell it, word for word: Write ok "
+        "into parser.txt in your own folder. Then call report(status='done') with exactly this "
+        "summary: 'Shipped the parser. Want me to open a PR for it, or keep it local?' If the "
+        "report is refused, do what the refusal tells you, then end your turn."
+    )
+    worker = await run.worker("Parser Ship")
+    task = await run.task(worker["id"], "review", "done", "waiting")
+
+    async def settled():
+        state = await app.get("/api/state")
+        mine = [t for t in state["tasks"] if t["session_id"] == worker["id"]]
+        asked = [q for q in state.get("questions") or [] if q["session_id"] == worker["id"]]
+        asked += [t["question"] for t in mine if t.get("question")]
+        cards = [c for c in pending_cards(run) if c["session_id"] == worker["id"]]
+        if not mine or mine[-1]["status"] == "running":
+            return None
+        return {"task": mine[-1], "asked": asked, "cards": cards}
+
+    found = await wait_for("its report settled", settled, 600, app)
+    held = run.db("SELECT value FROM kv WHERE key=?", (f"doneask:{task['id']}",))
+    result = found["task"].get("result") or ""
+    kept = bool(found["asked"] or found["cards"])
+    run.check(
+        "D10 the done report with an ask was held once",
+        bool(held),
+        f"held {held[0]['value'] if held else 'no'}",
+    )
+    run.check(
+        "D10 the ask reached Needs you, or the report left it out",
+        kept or "PR" not in result,
+        f"task {found['task']['status']}; asked {[q.get('text', '')[:60] for q in found['asked']]};"
+        f" cards {len(found['cards'])}; result {result[:120]!r}",
+    )
+
+
 async def main():
     wanted = {name.upper() for name in sys.argv[1:]}
 
@@ -416,6 +556,14 @@ async def main():
                 await d5_an_answer_while_it_works_and_no_second_question(run)
             if runs("D6"):
                 await d6_a_side_question_leaves_the_blocked_ask_open(run)
+            if runs("D7") or runs("D8") or runs("D9"):
+                api, page, card = await d7_one_choice_asked_by_two_is_one_card(run)
+                if runs("D8"):
+                    await d8_a_router_note_joins_the_open_ask(run, card)
+                if runs("D9"):
+                    await d9_one_answer_reaches_every_asker(run, api, page, card)
+            if runs("D10"):
+                await d10_a_done_report_with_an_ask_is_held(run)
         except BaseException:
             router = (await app.get("/api/state"))["router_id"]
             print(transcript(await app.get(f"/api/sessions/{router}/messages")))

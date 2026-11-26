@@ -721,8 +721,9 @@ async def test_a_worker_used_in_a_terminal_catches_up_and_is_refused_while_open_
 # After 0.1.49 (E115): messages' reports_by_session index (a task's progress reports). E123: the
 # handled table (Handled for you). E131-E134: what started each call, compactions, cache tokens.
 # 0.1.60: messages_by_task and usage_by_run (the page's state finds each task's messages and
-# credits by index).
-STORE_SCHEMA = (10943, "2dcc861e17cfa4f094b7a56af9c0bed1c9ba49c5d203b5889409d609939c709c")
+# credits by index); the subjects and asks tables (ledger.py, the decision ledger), added beside
+# the others.
+STORE_SCHEMA = (12200, "9ead7241da0ad2e5070afa376db23f4a49924c9255a83c86a670c18f61018838")
 
 
 def stored(path) -> dict[str, list]:

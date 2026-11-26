@@ -13,6 +13,7 @@ import { preparedItems } from "./prepared.js";
 import { duck } from "./mascot.js";
 import { agentName } from "./agentpick.js";
 import { heldItem, heldQuestions, peerWaiting, teamsSection } from "./team.js";
+import { folding, subjectVersion } from "./subjects.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
 // Needs you (waiting for an answer, failed, a result to accept, news, no progress); a
 // worker's question whose task does not show it (cancelled, finished, or none); the Router's
@@ -28,8 +29,23 @@ export function needsYou() {
   const ok = pending.filter((draft) => YOUR_OK.has(draft.kind));
   const kinds = [...new Set(pending.map((draft) => draft.kind))];
   const drafts = pending.filter((draft) => !YOUR_OK.has(draft.kind)).sort((a, b) => kinds.indexOf(a.kind) - kinds.indexOf(b.kind));
+  // One choice asked by several (ledger.py): one item, the others folded into it (E158).
+  const updates = ownerUpdates();
+  const present = new Set([...drafts.map((draft) => `draft:${draft.id}`), ...waiting.map((task) => `task:${task.id}`), ...questions.map((question) => `question:${question.id}`), ...updates.map((update) => `update:${update.id}`)]);
+  const { folded, shown } = folding(state.snapshot?.subjects, present);
+  const kept = (key) => !folded.has(key);
   // A question between workers that holds its asker up half an hour: a card each (Teams lite).
-  return { drafts, ok, uncertain: uncertainDrafts(), tasks: waiting, questions, updates: ownerUpdates(), held: heldQuestions(), board: found };
+  return {
+    drafts: drafts.filter((draft) => kept(`draft:${draft.id}`)),
+    ok,
+    uncertain: uncertainDrafts(),
+    tasks: waiting.filter((task) => kept(`task:${task.id}`)),
+    questions: questions.filter((question) => kept(`question:${question.id}`)),
+    updates: updates.filter((update) => kept(`update:${update.id}`)),
+    held: heldQuestions(),
+    board: found,
+    subjects: shown,
+  };
 }
 // What the badge counts: not the cards the owner just acted on; Your OK once.
 export function needsCount() {
@@ -273,13 +289,14 @@ function renderPanel() {
   // A card per thing to do: a task's own row holds all it waits for (a result to accept, its
   // question), once.
   const embedded = new Set();
+  const about = (key, item) => (items.subjects.has(key) ? subjectItem(item, items.subjects.get(key)) : item);
   const needItems = [
-    ...items.updates.map(updateItem),
+    ...items.updates.map((update) => about(`update:${update.id}`, updateItem(update))),
     ...okItem(items.ok),
-    ...items.drafts.map((draft) => draftItem(draft, tasks.phases, embedded)),
+    ...items.drafts.map((draft) => about(`draft:${draft.id}`, draftItem(draft, tasks.phases, embedded))),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
-    ...items.tasks.map((task) => taskItem(task, tasks.phases.get(task.id))),
-    ...items.questions.map(questionItem),
+    ...items.tasks.map((task) => about(`task:${task.id}`, taskItem(task, tasks.phases.get(task.id)))),
+    ...items.questions.map((question) => about(`question:${question.id}`, questionItem(question))),
     ...items.held.map(heldItem),
   ];
   // Folded, it opens by itself when something new needs the owner.
@@ -335,6 +352,50 @@ function renderPanel() {
   tabs[1].textContent = active ? String(active) : "";
 }
 const FINISHED_PAGE = 30;
+// An item one choice's other asks fold into (E158): who asked it, what each asked, what the
+// owner decided on it before, and another choice it is possibly the same as (Merge).
+function subjectItem(item, subject) {
+  const version = subjectVersion(subject);
+  return {
+    ...item,
+    key: `${item.key}|${subject.id}`,
+    version: `${item.version || ""}|${version}`,
+    build: () => withSubject(item.build(), subject),
+    refresh: (node) => withSubject(item.refresh ? item.refresh(node) || node : node, subject),
+  };
+}
+function withSubject(node, subject) {
+  node.querySelector(":scope > .subject")?.remove();
+  const block = el("div", { class: "subject" });
+  if (subject.asks.length > 1) block.append(el("div", { class: "sub-asked muted", text: `${subject.asked_by[0].toUpperCase()}${subject.asked_by.slice(1)}: one answer reaches them all` }));
+  if (subject.others.length) {
+    const list = el("details", { class: "sub-evidence" }, el("summary", { text: subject.others.length === 1 ? "What the other asked" : `What the ${subject.others.length} others asked` }));
+    for (const ask of subject.others) {
+      const apart = ask.router ? "" : el("button", { type: "button", class: "link sub-apart", text: "Not the same", "data-tip": "Not the same question: it gets a card of its own", onclick: () => once(`apart:${ask.id}`, null, () => apiState(`/api/asks/${encodeURIComponent(ask.id)}/apart`)) });
+      const who = ask.task_title && ask.task_title !== ask.worker ? `${ask.worker} · ${ask.task_title}` : ask.worker;
+      list.append(el("div", { class: "sub-ask" }, el("span", { class: "who", text: who }), el("span", { class: "said" }, ask.text, apart ? " " : "", apart)));
+    }
+    block.append(list);
+  }
+  const reconsidering = node.classList.contains("decision") && node.querySelector(".answered");
+  if (subject.decided && !reconsidering) block.append(el("div", { class: "sub-decided muted", text: `Decided before: you picked “${subject.decided.value}” at ${clock(subject.decided.at)}${subject.decided.in_force ? "" : " (changed since)"}` }));
+  for (const other of subject.possibly || []) {
+    const merge = el("button", { type: "button", class: "link sub-merge", text: "Merge", "data-tip": other.decided ? `The same question: answer this with “${other.decided}”` : "The same question: one card, one answer", onclick: () => once(`merge:${subject.id}`, null, () => apiState(`/api/subjects/${encodeURIComponent(subject.id)}/merge`, { into: other.id })) });
+    block.append(el("div", { class: "sub-possibly muted" }, `Possibly the same as “${other.title}”${other.decided ? ` (decided: ${other.decided})` : ""} `, merge));
+  }
+  // Above its own actions: who else waits on the answer, before giving it.
+  const actions = node.querySelector(":scope > .actions");
+  if (block.children.length) node.insertBefore(block, actions);
+  return node;
+}
+async function apiState(path, body = undefined) {
+  try {
+    await api(path, { method: "POST", ...(body ? { body } : {}) });
+    await loadState();
+  } catch (failure) {
+    toast(failure.message);
+  }
+}
 // Your OK (E123): the approvals, one card, drawn again as any of them changes.
 function okItem(drafts) {
   const shown = drafts.filter((draft) => !state.leaving.has(`draft:${draft.id}`));

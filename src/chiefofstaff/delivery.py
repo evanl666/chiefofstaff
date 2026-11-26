@@ -532,6 +532,14 @@ class Delivery:
         )
         if team_digest:
             prompts.insert(0, team_digest)
+        # The owner's decisions its open tasks rely on that it was not given yet (none: no line).
+        in_force, given = (
+            self.runtime.ledger.in_force(session_id, "\n\n".join(prompts))
+            if worker["role"] == WORKER
+            else ("", [])
+        )
+        if in_force:
+            prompts.insert(0, in_force)
         if preamble := self.store.get(f"preamble:{session_id}"):
             prompts.insert(0, preamble)  # A new Router's handover, before what is new.
         text = "\n\n".join(prompts)
@@ -576,6 +584,7 @@ class Delivery:
             if starts:
                 state.awaiting = None
             raise
+        self.runtime.ledger.given(session_id, given)
         if starts:
             asyncio.get_running_loop().call_later(
                 START_CHECK,
