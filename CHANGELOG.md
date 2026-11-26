@@ -120,8 +120,8 @@ waits for its worker, and the page's state is read several times faster.
   which it may change.
 - **Another question on a decided task is asked.** On a task linked to any decision (one you
   gave the Router with the request that made the task, say), an unrelated question came back
-  *already decided*, and its worker had to insist. Now only the same choice (in other words,
-  too) gets your decision back.
+  *already decided*, and its worker had to insist. Now only the same choice (in other words, or
+  among the same options, too) gets your decision back.
 - **An ask at the end of a finished task is not lost.** A worker that reported its task done
   while still waiting on you ("I'm blocked: I asked you for three things") took its blocked
   question off *Needs you*; one ending "Want me to open a PR for it?" lost the ask once you

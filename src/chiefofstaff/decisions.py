@@ -45,6 +45,15 @@ CHANGE_DEBOUNCE_HOURS = 2
 QUOTES = re.compile("[\"'`\u2018\u2019\u201c\u201d\u300c\u300d\u300e\u300f()\\[\\]]")
 
 
+# Options any choice may offer: two of them in common say nothing.
+TRIVIAL = frozenset({"", "yes", "no", "ok", "skip", "none", "other", "neither", "both", "later"})
+
+
+def same_key(text: str) -> str:
+    """An option as compared: case, spacing, quotes and final punctuation aside."""
+    return " ".join(QUOTES.sub(" ", text.casefold()).split()).rstrip(".!?\u3002\uff01\uff1f")
+
+
 def same_words(one: str, other: str) -> bool:
     """The same decision, written again (case, spacing and final punctuation aside)."""
 
@@ -293,7 +302,10 @@ class Decisions:
                     self.current(d["id"])
                     for d in reversed(self.for_task(task["id"]) if task else [])
                     if d["status"] == "active"
-                    and related(question, d["text"].partition(" \u2192 ")[0])
+                    and (
+                        related(question, d["text"].partition(" \u2192 ")[0])
+                        or self.same_options(d, params.options)
+                    )
                 ),
                 None,
             )
@@ -435,6 +447,22 @@ class Decisions:
             f'Asked the owner (card {card["id"]}). The decision arrives as a type="decision" '
             f"message. End your turn now, unless parts of your task do not depend on it.{said}"
         )
+
+    def same_options(self, decision: dict, options: list[DecisionOption]) -> bool:
+        """Whether a question offers the choices a decision its task relies on was made among
+        (live D2: "Which file format does the export use?" with CSV and JSON, after "CSV or
+        JSON?"): two of them or more, not counting yes, no and the like."""
+        asked = {plain for o in options if (plain := same_key(o.choice)) not in TRIVIAL}
+        if len(asked) < 2:
+            return False
+        decided = {same_key(value(decision["text"]))}
+        subject = self.runtime.ledger.of_decision(decision)
+        for row in self.store.all(
+            "SELECT options FROM asks WHERE subject_id=? AND options!=''",
+            (subject["id"] if subject else "",),
+        ):
+            decided |= {same_key(choice) for choice in json.loads(row["options"])}
+        return len(asked & (decided - TRIVIAL)) >= 2
 
     def shown(self, caller: str, task: dict | None, decisions: list[dict], distinct: bool) -> bool:
         """Whether it was shown these decisions its task relies on and says its question is

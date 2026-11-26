@@ -951,7 +951,7 @@ worker that asked it, and not kept as a decision. A card of a choice you decided
 quietly: *Decided before: you picked “1.11” at 10:01*.
 
 When a worker asks a choice you decided before (in its request, or for its own task in other
-words), it gets your decision back, not a card: it asks again only to have you reconsider,
+words or among the same options), it gets your decision back, not a card: it asks again only to have you reconsider,
 saying why, or for another decision it says is one. Another question on a task you decided
 something for is asked as usual. A worker whose open tasks rely on a decision it was not told
 (nothing else said it) reads *Decisions in force for your tasks* with its next message, once. A

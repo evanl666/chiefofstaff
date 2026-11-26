@@ -286,6 +286,28 @@ async def test_item1_another_question_on_a_decided_task_or_a_new_one_is_asked(ha
     assert decision["id"] in same.text_result_for_llm and not harness.store.drafts()
 
 
+async def test_asked_again_among_the_same_options_in_other_words_it_gets_the_decision(harness):
+    """Live D2: answered CSV on "CSV or JSON?", the worker asked "Which file format does the
+    export use?" with CSV and JSON again (no word in common but "export"): a second card. The
+    same options on its task are the same choice; yes or no are not."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Export format")
+    sid = worker["session_id"]
+    formats = [{"choice": "CSV"}, {"choice": "JSON"}]
+    await call_tool(runtime, "ask_decision", sid, question="Should the export be CSV or JSON?",
+                    options=formats)  # fmt: skip
+    [card] = harness.store.drafts()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="CSV"))
+    await settle(runtime)
+    [decision] = runtime.decisions.active()
+    check = "Which file format does the export use? (double-check)"
+    again = await call_tool(runtime, "ask_decision", sid, options=formats, question=check)
+    assert decision["id"] in again.text_result_for_llm and not harness.store.drafts()
+    other = await call_tool(runtime, "ask_decision", sid, question="Gzip the export file?",
+                            options=[{"choice": "Yes"}, {"choice": "No"}])  # fmt: skip
+    assert "Asked the owner" in other.text_result_for_llm, other.text_result_for_llm
+
+
 async def test_item2_a_task_given_in_the_turn_of_a_decision_asks_another_question(harness):
     """ui_edges: a decision recorded in a Router turn was inherited by the task it gave out in
     that turn (it came with the owner's message), and its first unrelated question came back
