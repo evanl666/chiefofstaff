@@ -866,8 +866,8 @@ COMMANDS_KEPT = 200
 
 def summarized(known: tuple, commands: list[dict], *args: Any, **kwargs: Any) -> dict:
     """receipts.summarize(commands, *args, **kwargs), read once for the same arguments: the
-    commands by what they are known as (`known`: their task, and the version read, see
-    TaskActions.task_commands), the rest as they are."""
+    commands by what they are known as (`known`: their data folder, task, and the version read,
+    see TaskActions.task_commands), the rest as they are."""
     key = hashlib.blake2b(
         json.dumps([known, args, kwargs], default=str).encode(), digest_size=16
     ).digest()
@@ -1084,8 +1084,8 @@ class TaskActions:
         earlier, since = self.earlier_claims(runs) if criteria else ([], "")
         said = self.store.get(f"saidchanged:{latest['id']}") if latest else None
         found = summarized(
-            (task["id"], version), commands, evidence, task["result"] or task["progress"],
-            criteria, claims, earlier=earlier, since=since,
+            (str(self.store.directory), task["id"], version), commands, evidence,
+            task["result"] or task["progress"], criteria, claims, earlier=earlier, since=since,
             said_changed=None if said is None else said == "1",
         )  # fmt: skip
         found["flags"] += failing
