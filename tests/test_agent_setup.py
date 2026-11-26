@@ -1137,9 +1137,18 @@ async def test_with_claude_off_nothing_is_installed_until_the_owner_turns_it_on(
         assert (status["status"], status["said"]) == (agents.NOT_SET_UP, "Not set up yet")
         (claude,) = (await runtime.look_for_agents())["agents"]
         assert (claude["problem"], claude["status"]) == ("", agents.NOT_SET_UP), "not a reason"
+        installer.gate.clear()
+        await saved(runtime, {"claude": {"enabled": True}})
+        await until(lambda: installer.calls)
+        assert runtime.agent_status("claude")["status"] == agents.SETTING_UP
+        # Turned off again before it was set up: the install stops, nothing more is installed.
+        await saved(runtime, {"claude": {"enabled": False}})
+        assert not runtime.claude_setup.running() and sdk["version"] == ""
+        assert runtime.agent_status("claude")["status"] == agents.NOT_SET_UP
+        installer.gate.set()
         await saved(runtime, {"claude": {"enabled": True}})
         await until(lambda: runtime.agent_status("claude")["status"] == agents.READY)
-        assert len(installer.calls) == 1
+        assert len(installer.calls) == 2
     finally:
         await runtime.stop()
 

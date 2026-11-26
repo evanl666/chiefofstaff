@@ -1599,7 +1599,8 @@ Claude extra). While Claude is on for workers (or the Router or the Watchdog run
 SDK is missing, or is a version this release was not tested with, Chief of Staff installs the
 tested one by itself: as it starts, as you turn Claude on, or when you click *Retry*. Claude's row
 says *Setting up Claude…* meanwhile (usually under a minute), then *Ready*, with no restart. With
-Claude off, its row says *Not set up yet*: turning on *Use for workers* sets it up. It installs only
+Claude off, its row says *Not set up yet*: turning on *Use for workers* sets it up (turning it off
+again before it is done stops it). It installs only
 the version its Claude extra names, into its own environment (a `uv tool`, pipx or other virtual
 environment: with `uv pip install`, or that environment's `pip`). Started with `uvx`, whose
 environment lives in uv's cache, it installs into a folder of its own in its data folder instead,

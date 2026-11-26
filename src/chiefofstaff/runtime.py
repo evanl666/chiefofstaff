@@ -2654,6 +2654,8 @@ class Runtime:
         now = agents.turned_on(self.store)
         if "claude" in now and "claude" not in was_on:
             self.claude_setup.turned_on()  # Its Agent SDK set up now, where it is missing.
+        elif "claude" in was_on and "claude" not in now:
+            await self.claude_setup.stop()  # Off before it was set up: nothing more installed.
         for name in now:
             if name not in self.agents:
                 self.agents[name] = self.agent_connection(name)
