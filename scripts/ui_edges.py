@@ -6804,7 +6804,7 @@ HOME_PARTS = ("#needs", "#tasks-teams", "#tasks-running", "#tasks-monitoring", "
 
 async def home_whole(page, width: int):
     """Home keeps every part it has (Needs you, Teams, Running, Monitoring, Recently finished,
-    Artifacts) and the sidebar its Closed and Other Copilot sessions groups."""
+    Artifacts) and the sidebar its Closed and Other sessions groups."""
     await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
     await expect(page.locator("#panel > .tp-sofar-panel")).to_have_count(0)
     await expect(page.locator("#panel")).not_to_have_class(re.compile(r"\btp-panel\b"))
@@ -6815,7 +6815,7 @@ async def home_whole(page, width: int):
             await expect(page.locator(part)).to_be_visible()
     await expect(page.locator("#closed > summary")).to_have_text(re.compile(r"^Closed · \d+"))
     await expect(page.locator("#closed")).to_be_visible()
-    await expect(page.locator("#external > summary")).to_contain_text("Other Copilot sessions")
+    await expect(page.locator("#external > summary")).to_contain_text("Other sessions")
     await expect(page.locator("#external")).to_be_visible()
 
 
@@ -6824,7 +6824,7 @@ async def round_team_v4(runtime, browser, failures: list[str]):
     place, Since you looked, the plan on its rail, So far in Home's side panel from 1100 px and
     under the plan below, Tell the team (who gets it always in sight; each part as it stands,
     one Router copy), Delivered; motion only for events and none with reduced motion; Home's
-    Teams row; Home keeps every part (and the sidebar its Closed and Other Copilot sessions)
+    Teams row; Home keeps every part (and the sidebar its Closed and Other sessions)
     while a team is open and after; 800, 1024 and 1440 px, light and dark
     (browser-shots/team-v4/, TEAM_V4_SHOTS; a recording with TEAM_V4_VIDEO)."""
     import teams_scene
