@@ -1033,17 +1033,17 @@ class Events:
             # Its agent's own sign-in lost (signed out, expired): Sign-in needed wherever its
             # status shows, at once (an MCP server's sign-in is that server's).
             self.runtime.sign_in_lost(self.runtime.agent(session_id), message)
-        if (
-            row["role"] != WORKER
-            and not self.runtime.on_copilot(session_id)
-            and self.runtime.role_turn_failed(
-                row,
-                message,
-                getattr(event.data, "error_type", "") or "",
-                getattr(event.data, "limit", None),
-            )
+        if self.runtime.role_key(row) and self.runtime.role_turn_failed(
+            row,
+            message,
+            getattr(event.data, "error_type", "") or "",
+            getattr(event.data, "limit", None),
         ):
-            return  # Chief of Staff's own session goes on on Copilot (Runtime.role_failed).
+            # One of Chief of Staff's own sessions (a helper too, its job kept), on any agent:
+            # it goes on with the next agent that can (Runtime.role_failed). The owner's workers
+            # go on as they do: a plan's limit pauses them (plan_limited), a lost sign-in says
+            # Sign-in needed with Go on, anything else fails them with Retry.
+            return
         if getattr(event.data, "error_type", "") == "plan_limit" and row["role"] == WORKER:
             self.plan_limited(row, message, getattr(event.data, "limit", None))
             return

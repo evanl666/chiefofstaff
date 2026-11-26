@@ -21,8 +21,9 @@ from conftest import call_tool, settle
 
 GOLDEN = Path(__file__).with_name("teams_day_v0156.json")
 # What Teams lite adds to what is stored (declared, teams-v2.md §7): which task sent and which
-# received an exchange. No one is given them.
-ADDED_META = {"from_task", "to_task"}
+# received an exchange; and (agents-anywhere.md 6) the agent a worker's start line names. No one
+# is given them.
+ADDED_META = {"from_task", "to_task", "agent"}
 IDS = [
     re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
     re.compile(r"\bt[0-9a-f]{7}\b"),

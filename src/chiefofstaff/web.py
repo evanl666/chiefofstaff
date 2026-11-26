@@ -152,6 +152,35 @@ MODEL_FIELDS = {"router": "Router", "worker": "Workers", "slack": "Slack", "watc
 # The page's own id for one send (models.OwnerMessage.client_id).
 CLIENT_ID = re.compile(r"[0-9a-f]{32}")
 
+# A worker's start line (Started, Queued, Restarted): its chip says its agent (Copilot's too).
+START_LINE = re.compile(r"^(Started|Queued|Restarted)\b")
+
+
+def with_agents(store: Any, rows: list[dict]) -> list[dict]:
+    """Messages as the page shows them, each start line of a worker with the agent it runs on
+    (`meta.agent`; a line from before 0.1.59 had none: its worker's, none for Copilot's), so a
+    closed worker's line says it too."""
+    seen: dict[str, str] = {}
+    found = []
+    for row in rows:
+        meta = row.get("meta")
+        if not isinstance(meta, dict):
+            found.append(row)
+            continue
+        worker = meta.get("session_id")
+        if (
+            row.get("kind") != "notice"
+            or not isinstance(worker, str)
+            or "agent" in meta
+            or not START_LINE.match(str(row.get("text") or ""))
+        ):
+            found.append(row)
+            continue
+        if worker not in seen:
+            seen[worker] = store.get(f"agent:{worker}") or agents.COPILOT
+        found.append({**row, "meta": {**meta, "agent": seen[worker]}})
+    return found
+
 
 def shown(message: dict) -> dict:
     """A message as the page shows it: without the prompt it was sent as (as long again)."""
@@ -379,6 +408,7 @@ def create_app(
         # Where each message it was sent stands: queued, sent, received, processed...
         found = runtime.delivery.delivery_for(session_id, rows)
         rows = [{**row, "delivery": delivery} for row, delivery in zip(rows, found, strict=True)]
+        rows = with_agents(store, rows)
         return rows if prompts else [shown(row) for row in rows]
 
     @app.get("/api/sessions/{session_id}/messages/count")
@@ -1149,12 +1179,13 @@ def create_app(
                 runtime.check_agents(plan, settings)
             if plan is not None:
                 await runtime.check_agent_models(plan)
+            models = agents.work_view(store, old)["models"]
             store.save_settings(settings)
             before, chose = agents.configured(store), agents.router_chooses(store)
             changed = plan is not None and agents.save(store, plan)
         stopped = await runtime.settings_changed(old, settings)
         if changed:
-            stopped += await runtime.agents_saved(before, chose)
+            stopped += await runtime.agents_saved(before, chose, models)
         snapshot = runtime.snapshot()
         if stopped:
             # One toast says how many it stopped, and why.

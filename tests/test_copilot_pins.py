@@ -303,12 +303,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     "checker, created": (699, "a089fbe5e42c13409b02b96f0c7e30ccde7de55b97d784adb7fd7779bbb5daa5"),
     "checker, resumed": (663, "0fd3f07f25e389254270de251c11b316daef1c8069bf8da005aefd41033ea8e1"),
     "connector, created": (
-        3313,
-        "201f64ae0bb06e335c934eef7207e9c9ee9404fff0537dd1f647acb179e5807b",
+        3305,
+        "749debd4b4711a87ea03f7f4675156abe8e5541583afb4b23ba9c3ca08ba630f",
     ),
     "connector, resumed": (
-        3276,
-        "314a438a3b11c4d4b0a6a2f3a5b462721de773ba57102cfcd0804ab14ec9127b",
+        3268,
+        "7de7c7ca881b3433aaf6f3b376e6b3e39294d797b7a426dd97300cbc2bc19dba",
     ),
     "distill, created": (19091, "7d382be86a83932736baa6d948d0eef369b90fc2575eccfc13143c37046b09de"),
     "distill, resumed": (19054, "6c5416d3f0a328b25a937eeaff51cffa43379d7c012e6998e039386d3a4da88f"),
@@ -333,8 +333,8 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     ),
     "router, created": (31091, "a31108d0ea221d70ac7bda8882ff2706286b447ba940f8e5a84c4d7254a68028"),
     "router, resumed": (31055, "6e442da3b2091392ef862c15e15d03a2710906d7356a5cf7ed3e1e674da7b202"),
-    "slack, created": (4649, "cfc2802714c98894a53bc5a78caf731e99e920f6a736c2057e7aa87e9120529f"),
-    "slack, resumed": (4614, "11f01623ea397aaeed389c49a3a21790c68577cea19be7c921a6fb246e08189d"),
+    "slack, created": (3879, "7735ab2a6ab25e110861b4ccf3f097c8447928fea70a23684ad9f27add144b01"),
+    "slack, resumed": (3844, "5cda5ecbb80934eaefa01b4ca7346ecc2e6d60af55db76dce71d008fd5760868"),
     "the Copilot sandbox of a worker asking first": (
         946,
         "4e17ae9d8664283969ddf98e0c9637579ce9d568ecee2eb460504e64cab83e41",
@@ -358,12 +358,12 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
         "3f5ff502ccbbd1ba0e1290015e54fd6cb3cf5023d5306f30d1fd5f26f232964e",
     ),
     "worker that reads Slack, created": (
-        22283,
-        "8b82e4c076bb5d99e4e0cfb9f86e60fa02bec640ad06ada8ab446e3dfd0afb45",
+        21840,
+        "134b3cf98a339054bf9bef51a8fe029ff0064e0a85f5967e3ee2cc3ca4f01098",
     ),
     "worker that reads Slack, resumed": (
-        22236,
-        "034decc4d6d81859aa73fa957fce44a08fd0ee3e905523106e73a4f4a5e08ba8",
+        21793,
+        "839bb8335e3bc61b10c3ef8c7822da95fee7ca8ca0f3ddd155bf67c712b63581",
     ),
     "worker with its model, created": (
         19193,

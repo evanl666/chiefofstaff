@@ -1107,10 +1107,10 @@ class SlackSource:
         return "keychain" if self.tokens.get() else ""
 
     async def read_proxy(self) -> dict | None:
-        """Slack's read tools for a worker whose agent takes MCP servers of Chief of Staff's own
-        process (Claude's): their descriptions, and a call Chief of Staff makes itself with the
-        token it holds, which never reaches the agent (no file, no argument, no variable). None
-        while Slack is off, or cannot be reached."""
+        """Slack's read tools for a session that reads Slack, on any agent: their descriptions,
+        and a call Chief of Staff makes itself with the token it holds, which never reaches an
+        agent (no file, no argument, no variable: Runtime.slack_read_tools). None while Slack
+        is off, or cannot be reached."""
         if not self.configured():
             return None
         if not self.read_specs:
@@ -1126,19 +1126,6 @@ class SlackSource:
         if name not in self.read_specs or name == SEND_TOOL:
             raise SlackError(f"{name} is not one of Slack's read tools.")
         return await self.mcp.call(name, arguments)
-
-    def session_mcp_config(self) -> dict | None:
-        """MCP config for model sessions: read-only tools only, never send/write tools."""
-        token = self.tokens.get()
-        if not (self.store.settings().slack_enabled and token):
-            return None
-        tools = [name for name in (self.read_tools or KNOWN_READ_TOOLS) if name != SEND_TOOL]
-        return {
-            "type": "http",
-            "url": self.mcp.url,
-            "headers": {"Authorization": f"Bearer {token}"},
-            "tools": tools,
-        }
 
     async def start(self):
         self.job = asyncio.create_task(self.loop())

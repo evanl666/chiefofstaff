@@ -1405,9 +1405,9 @@ class ClaudeWorker:
             # Its commands' caches (a sandboxed worker's init script, Runtime.cache_script):
             # Claude sources it before each command, as Copilot does a worker's.
             environment["CLAUDE_ENV_FILE"] = str(env_file)
+        # Chief of Staff's tools, Slack's read tools among them for a session that reads Slack
+        # (Runtime.slack_read_tools: Slack's token stays in this process).
         servers: dict[str, Any] = {"chief": self.chief_server()}
-        if slack := self.slack_server():
-            servers["slack"] = slack
 
         def reported(hook: Any) -> Any:
             return [HookMatcher(matcher=REPORTING_TOOLS, hooks=[hook], timeout=HOOK_SECONDS)]
@@ -3395,39 +3395,6 @@ class ClaudeWorker:
             )
         server = create_sdk_mcp_server("chief", version=client_version(), tools=tools)
         return {**server, "alwaysLoad": True}
-
-    def slack_server(self) -> Any:
-        """Slack's read tools for a worker that reads Slack, as an MCP server in this process:
-        Chief of Staff calls Slack with the token it holds (Runtime.open_live: read_proxy), so
-        that token is in no file, argument or variable of Claude's."""
-        from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
-
-        proxy = mapping(self.options.get("slack_proxy"))
-        call: Any = proxy.get("call")
-        if not callable(call) or not proxy.get("tools"):
-            return None
-        invoke: Any = call  # (Slack's own read_call: a coroutine function.)
-
-        def handler(name: str) -> Callable[[dict], Awaitable[dict]]:
-            async def handle(arguments: dict) -> dict:
-                try:
-                    text, failed = str(await invoke(name, dict(arguments or {}))), False
-                except Exception as exc:
-                    text, failed = f"Slack: {exc}"[:600], True
-                return {"content": [{"type": "text", "text": text}], "is_error": failed}
-
-            return handle
-
-        tools = [
-            SdkMcpTool(
-                name=str(spec["name"]),
-                description=str(spec.get("description") or spec["name"]),
-                input_schema=dict(spec.get("input_schema") or {"type": "object"}),
-                handler=handler(str(spec["name"])),
-            )
-            for spec in proxy["tools"]
-        ]
-        return create_sdk_mcp_server("slack", version=client_version(), tools=tools)
 
     def tool_handler(self, name: str) -> Callable[[dict], Awaitable[dict]]:
         async def handler(arguments: dict) -> dict:

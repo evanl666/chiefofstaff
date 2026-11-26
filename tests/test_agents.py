@@ -216,7 +216,7 @@ def test_saving_the_group_with_nothing_turned_on_stores_nothing(web, codex_on_pa
         ({"codex": {"enabled": True, "limit": 1.5}}, "Limit per worker: a whole number"),
         ({"codex": {"enabled": True, "limit": True}}, "Limit per worker: a whole number"),
         ({"codex": {"enabled": True, "limit": 10**12 + 1}}, "Limit per worker: at most"),
-        ({"codex": {"enabled": "yes"}}, "Codex, Use for workers: on or off."),
+        ({"codex": {"enabled": "yes"}}, "Codex, Use: on or off."),
         ({"codex": {"enabled": True, "model": 5}}, "Model: a model's name"),
         ({"codex": {"enabled": True, "effort": "loud"}}, "Effort: none, low, medium, high,"),
         ({"codex": {"enabled": True, "effort": 3}}, "Effort: none, low, medium, high,"),
@@ -224,7 +224,7 @@ def test_saving_the_group_with_nothing_turned_on_stores_nothing(web, codex_on_pa
         ({"gemini": {"enabled": True}}, "Agents & models: Chief of Staff does not run 'gemini'."),
         (
             {"new_workers": "codex"},
-            "New workers run on: Copilot, Last used, or an agent turned on below.",
+            "New workers run on: Last used, or an agent turned on below.",
         ),
         ([], "Agents & models: expected each agent's settings."),
     ],
@@ -548,9 +548,11 @@ async def test_when_the_default_agent_cannot_run_a_new_worker_starts_on_copilot_
         await runtime.stop()
 
 
-async def test_new_workers_use_the_default_agent_and_workers_that_read_slack_copilot(
+async def test_new_workers_use_the_default_agent_also_those_that_read_slack(
     tmp_path, codex_on_path
 ):
+    """agents-anywhere.md 4: a worker that reads Slack runs where new workers do (here Codex,
+    which has no sandbox Chief of Staff checked: it asks first), not on Copilot by itself."""
     harness, runtime = await started(tmp_path, Settings(slack_enabled=True))
     try:
         await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
@@ -560,8 +562,11 @@ async def test_new_workers_use_the_default_agent_and_workers_that_read_slack_cop
         assert runtime.agent(worker) == "codex"
         assert [k for k, _ in harness.kinds(worker)].count("notice") == 0
         reads = await spawn_on(harness, runtime, title="Answer", instructions="Do it.", slack=True)
-        assert runtime.agent(reads["session_id"]) == "copilot"
+        assert runtime.agent(reads["session_id"]) == "codex"
         assert "notice" not in [k for k, _ in harness.kinds(reads["session_id"])], "nothing to say"
+        row = harness.store.session(reads["session_id"])
+        if row["slack"]:
+            assert runtime.agent_options(row)["ask_first"] is True
     finally:
         await runtime.stop()
 

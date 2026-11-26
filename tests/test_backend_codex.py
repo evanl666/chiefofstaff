@@ -2206,10 +2206,11 @@ async def test_a_codex_worker_runs_only_where_it_may(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="turned off"):
             await runtime.connect_agent("codex")
         agents.configure(harness.store, "codex", enabled=True)
+        # Chief of Staff's helpers and workers that read Slack run there too (agents-anywhere).
         harness.store.set(f"learner:{worker}", "1")
-        assert runtime.agent_block(row) == "Only your own workers run on Codex."
+        assert "Only your own workers" not in runtime.agent_block(row)
         harness.store.delete(f"learner:{worker}")
-        assert runtime.agent_block({**row, "slack": 1}).startswith("Workers that read Slack")
+        assert not runtime.agent_block({**row, "slack": 1}).startswith("Workers that read Slack")
         harness.store.set(f"agent:{worker}", "elsewhere")
         assert "not available" in runtime.agent_block(row)
     finally:

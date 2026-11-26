@@ -171,7 +171,6 @@ async def test_disabled_or_tokenless_watcher_stays_idle(source):
     source.store.save_settings(Settings(slack_enabled=False))
     await source.poll_once()
     assert source.status["error"] == ""
-    assert source.session_mcp_config() is None
 
 
 async def test_watcher_pages_through_busy_windows(source):

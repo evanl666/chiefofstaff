@@ -7,7 +7,8 @@ SIGNED_OUT, REQUIREMENTS (JSON), CONFIG and LAYERS (JSON: what config/read answe
 merged into thread/start and thread/resume answers: an administrator's override), FEATURES (JSON:
 the features an administrator keeps on or off), UNASKED (actions taken without asking),
 RESTORES_LESS (what a resumed thread's totals lose), LOG (a file each request's method and params
-are appended to, one JSON line each), RUNS (a file each run's arguments are appended to), PLUGINS
+are appended to, one JSON line each), RUNS (a file each run's arguments are appended to), ENVS
+(a file each run's environment is appended to, one JSON line each), PLUGINS
 (JSON: the plugins on, and the MCP servers each adds), FAILS_ON (a turn whose prompt has it fails
 at once). A prompt saying "Lose the sign-in" fails, after its commands ran, as for a sign-in
 that ended (a 401), signed out from then on.
@@ -1441,6 +1442,10 @@ def main():
     if runs := os.environ.get("FAKE_CODEX_RUNS"):
         with Path(runs).open("a") as file:
             file.write(" ".join(sys.argv[1:]) + "\n")
+    if envs := os.environ.get("FAKE_CODEX_ENVS"):
+        # Each run's whole environment, one JSON line (what a test looks for in it).
+        with Path(envs).open("a") as file:
+            file.write(json.dumps(dict(os.environ)) + "\n")
     if sys.argv[1:2] == ["login"]:
         login(sys.argv[2:])
         return

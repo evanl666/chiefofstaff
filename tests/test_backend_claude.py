@@ -941,12 +941,15 @@ async def test_its_mcp_servers_and_prompt_are_in_files_only_the_owner_reads(
     assert not any(path.exists() for path in files), "gone with its process"
 
 
-async def test_slacks_read_tools_are_served_from_this_process_never_given_its_token(
+async def test_slacks_read_tools_are_chief_of_staffs_own_never_given_its_token(
     agent, tmp_path, monkeypatch
 ):
-    """A worker that reads Slack: Slack's read tools are an MCP server of Chief of Staff's own
-    process, which calls Slack itself with the token it holds (Runtime.open_live: read_proxy),
-    so that token is in none of the worker's files, arguments or variables."""
+    """A session that reads Slack: Slack's read tools are Chief of Staff's own tools (in its
+    `chief` server, Runtime.slack_read_tools), which call Slack in this process with the token it
+    holds, so that token is in none of the worker's files, arguments or variables; no server
+    named slack is its to call."""
+    from chiefofstaff.runtime import slack_tool
+
     starts = tmp_path / "starts.jsonl"
     monkeypatch.setenv("FAKE_CLAUDE_STARTS", str(starts))
     calls = []
@@ -957,23 +960,22 @@ async def test_slacks_read_tools_are_served_from_this_process_never_given_its_to
 
     schema = {"type": "object", "properties": {"query": {"type": "string"}}}
     search = {"name": "slack_search_public", "description": "Search Slack.", "input_schema": schema}
-    proxy = {"tools": [search], "call": call}
     session = await agent.create_session(
         session_id="a7" * 16,
         name="t",
-        **options(tmp_path, slack_proxy=proxy, slack_tools=["slack_search_public"]),
+        **options(tmp_path, tools=[slack_tool(search, call)], slack_tools=[]),
     )
     turn = Turn(session)
-    await session.send("Call the MCP tool slack_search_public of slack, then reply with just: ok")
+    await session.send("Call the MCP tool slack_search_public of chief, then reply with just: ok")
     await turn.ended()
     assert calls == [("slack_search_public", {})]
     (done,) = turn.of("tool.execution_complete")
     assert done.success and "Found 2 messages." in done.result.content
     (started,) = [json.loads(line) for line in starts.read_text().splitlines()]
-    assert started["servers"] == ["chief", "slack"]
+    assert started["servers"] == ["chief"]
     files = list(session.backend.private)
     assert not any(path.name.endswith("-mcp.json") for path in files), "no file of servers"
-    # Not one of Slack's read tools: refused before it reaches Chief of Staff's call.
+    # A server named slack (the owner's own, say) is not its to call.
     turn = Turn(session)
     await session.send("Call the MCP tool slack_send_message of slack, then reply with just: ok")
     await turn.ended()

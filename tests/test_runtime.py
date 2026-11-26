@@ -614,11 +614,13 @@ async def test_slack_session_drafts_and_owner_decides(tmp_path):
     await runtime.slack.discover()
     slack_row = harness.store.open_sessions("slack")[0]
     slack = harness.session(slack_row["id"])
-    mcp = slack.options["mcp_servers"]["slack"]
-    assert mcp["headers"] == {"Authorization": "Bearer xoxp-test"}
-    assert "slack_read_thread" in mcp["tools"]
-    assert not {"slack_send_message", "slack_schedule_message"} & set(mcp["tools"])
-    assert {tool.name for tool in slack.options["tools"]} == {
+    # Slack's read tools are Chief of Staff's own: no server of Slack's, no token in its options.
+    assert "slack" not in (slack.options.get("mcp_servers") or {})
+    assert "xoxp-test" not in repr(slack.options)
+    names = {tool.name for tool in slack.options["tools"]}
+    assert "slack_read_thread" in names
+    assert not {"slack_send_message", "slack_schedule_message"} & names
+    assert {name for name in names if not name.startswith("slack_")} == {
         "report",
         "follow_thread",
         "unfollow_thread",
@@ -1602,7 +1604,7 @@ async def test_slack_session_only_has_its_own_tools(tmp_path):
     await harness.connect()
     options = harness.session(harness.store.open_sessions("slack")[0]["id"]).options
     assert {"report", "draft_slack_reply", "follow_thread"} <= set(options["available_tools"])
-    assert "slack-slack_read_thread" in options["available_tools"]
+    assert "slack_read_thread" in options["available_tools"]
     assert not any("send" in name for name in options["available_tools"])
     assert options["disabled_mcp_servers"] == ["github-mcp-server"]
 

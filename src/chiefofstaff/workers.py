@@ -2083,16 +2083,18 @@ class Workers:
         }
 
     async def refresh_elsewhere(self):
-        """Which sessions are open in a terminal now; the UI marks the managed ones."""
-        if not self.runtime.backend:
-            return
-        before = self.runtime.elsewhere
-        self.runtime.elsewhere = await self.runtime.open_elsewhere()
-        changed = set(before) ^ set(self.runtime.elsewhere)
+        """Which sessions are open in a terminal now; the UI marks the managed ones. Copilot's
+        while it runs, each other agent's on whether or not Copilot does."""
+        changed: set[str] = set()
+        looked: set[str] = set()
+        if self.runtime.backend:
+            before = self.runtime.elsewhere
+            self.runtime.elsewhere = await self.runtime.open_elsewhere()
+            changed = set(before) ^ set(self.runtime.elsewhere)
+            looked.add(COPILOT_AGENT)
         # Each other agent on, its conversations open in a terminal; one whose backend starts or
         # ends now is not looked at (its workers' state there is not known: nothing is decided
         # of them).
-        looked = {COPILOT_AGENT}
         for agent in self.runtime.agents_on():
             was = set(self.runtime.elsewhere_on.get(agent, {}))
             if (found := await self.runtime.agent_elsewhere(agent)) is None:

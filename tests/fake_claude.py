@@ -167,6 +167,8 @@ class Fake:
                 "cwd": self.cwd,
                 "pwd": os.environ.get("PWD"),
                 "own": sorted(k for k in os.environ if k.startswith("CHIEFOFSTAFF_")),
+                "environment": dict(os.environ),
+                "argv": sys.argv[1:],
                 "servers": sorted(self.servers),
                 "appended": self.appended,
                 "plugins": flags.get("plugin-dir"),

@@ -901,7 +901,7 @@ def restate(criteria: list[str]) -> str:
 CONNECTOR = """\
 <chiefofstaff_role>
 You are Chief of Staff's connector: you reach the owner's world (Slack, mail, documents, a
-company search such as Glean) with the tools this Copilot session has: its MCP servers, skills
+company search such as Glean) with the tools this session has: its MCP servers, skills
 and CLIs, whichever work on this machine. Chief of Staff sends you jobs (the first one as your
 task, later ones as from="system" messages):
 {rules}
@@ -973,7 +973,7 @@ others'). If no tool here reaches the owner's messages, call report_owner_words 
 
 # The Router's last rule while other coding agents are on, on one line.
 AGENTS_RULE = (
-    "- Workers can run on {agents} as well as Copilot: set spawn_worker's agent only when the "
+    "- Workers can run on {agents} as well as {default}: set spawn_worker's agent only when the "
     "owner names one for the task, else leave it empty (Settings chooses). If the agent they "
     "named cannot run it, a card in this chat tells them why and what they can do: do not say "
     "it again, and never start it on another. A model for such a worker "
@@ -984,13 +984,13 @@ AGENTS_RULE = (
 )
 
 CHOOSES_RULE = (
-    "- Workers can run on {agents} as well as Copilot, and the owner lets you choose: set "
+    "- Workers can run on {agents} as well as {default}, and the owner lets you choose: set "
     "spawn_worker's agent for each new worker, the one they name for the task (owner_named "
     "true), else the one that suits it best among those list_sessions().agents.available says "
-    "can run now (empty: Copilot). Say which you chose and why in one line of your reply "
+    "can run now (empty: {default}). Say which you chose and why in one line of your reply "
     '("On Codex: a long refactor it handles well."). If the agent they named cannot run it, a '
     "card in this chat tells them why and what they can do: do not say it again, and never "
-    "start it on another unless they say so; one you chose that cannot run starts on Copilot, "
+    "start it on another unless they say so; one you chose that cannot run starts on {default}, "
     "and says why. A model for such a worker is one from list_sessions().agents.models of its "
     "agent. When they ask to move a worker's work to another agent, use continue_worker. When "
     'they ask to compare (the same task on two agents: "do this with Codex and Claude"), call '
@@ -1096,6 +1096,26 @@ AGENT_WORDS = {
 }
 
 
+# The Router's few lines that name Copilot as where sessions run, as they read where Copilot is
+# off (agents-anywhere.md 3): its words for the agent new work runs on. Copilot's text is
+# unchanged.
+ROUTER_WORDS = {
+    "coordinates other Copilot\nsessions.": "coordinates other\n{agent} sessions.",
+    "the owner's own Copilot sessions open in a terminal now": (
+        "the owner's own {agent} sessions open in a terminal now"
+    ),
+}
+
+
+def router_on(agent: str, prompt: str) -> str:
+    """The Router's role where its workers run on `agent` (its display name) by default."""
+    if agent == "Copilot":
+        return prompt
+    for copilot, theirs in ROUTER_WORDS.items():
+        prompt = prompt.replace(copilot, theirs.format(agent=agent))
+    return prompt
+
+
 def worker_on(agent: str, prompt: str) -> str:
     """The worker's role as a worker on that agent reads it."""
     for copilot, theirs in AGENT_WORDS.get(agent, {}).items():
@@ -1103,10 +1123,15 @@ def worker_on(agent: str, prompt: str) -> str:
     return prompt
 
 
-def with_agents_rule(prompt: str, names: list[str], chooses: bool = False) -> str:
+def with_agents_rule(
+    prompt: str, names: list[str], chooses: bool = False, default: str = "Copilot"
+) -> str:
     """The Router's role while other coding agents are on (more-agents.md 5.9): one rule,
-    after its others (`chooses`: the owner lets it choose each new worker's agent)."""
-    rule = (CHOOSES_RULE if chooses else AGENTS_RULE).format(agents=" or ".join(names))
+    after its others (`chooses`: the owner lets it choose each new worker's agent; `default`:
+    the agent a worker runs on when none is named, Copilot unless it is off)."""
+    rule = (CHOOSES_RULE if chooses else AGENTS_RULE).format(
+        agents=" or ".join(names), default=default
+    )
     head, end, tail = prompt.rpartition("\n</chiefofstaff_role>")
     return f"{head}\n{rule}{end}{tail}"
 

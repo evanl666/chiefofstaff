@@ -20,8 +20,8 @@ out, and the shard stops at a limit of the owner's plan):
 S1-S5 as R1-R5
 
 Shard W, Watch for you (Claude on):
-W1  while what reads Slack doesn't run on Claude (agents.SLACK_READERS), Settings offers no
-    choice for it and a scan runs on Copilot; once it does, put on Claude, a scan completes there
+W1  Watch for you put on Claude (every session can run on any agent): a scan completes there
+    (with LIVE_CLAUDE_TURNS=0, it stays on Copilot and the scan completes there)
 
 Shard F, Copilot while the agent can't run it, and back (a `codex` on the shard's PATH that is
 the owner's own, run with a Codex folder of the shard's own, empty, while a flag file exists):
@@ -133,10 +133,12 @@ async def router_view(ctx: Ctx) -> dict:
 
 
 async def put(ctx: Ctx, role: str, agent: str):
-    """Settings → Agents & models (its own sessions): where a role runs."""
-    on = {ctx.agent: {"enabled": True, **({"model": lc.CLAUDE_MODEL} if ctx.agent == "claude"
-                                          else {})}}  # fmt: skip
-    await la.settings(ctx, agents={**on, "roles": {role: agent}})
+    """Settings → Agents & models (Who does the work): where a role runs, with Claude's
+    cheapest model for it there (and for new workers on Claude)."""
+    cheap = {"model": lc.CLAUDE_MODEL} if ctx.agent == "claude" else {}
+    on = {ctx.agent: {"enabled": True, **cheap}}
+    models = {"models": {role: {agent: cheap}}} if cheap and agent == "claude" else {}
+    await la.settings(ctx, agents={**on, **models, "roles": {role: agent}})
 
 
 async def ask(ctx: Ctx, text: str, timeout: float = 300) -> str:
@@ -279,24 +281,18 @@ async def s5_back_to_copilot(ctx: Ctx):
 
 
 async def w1_watch_for_you(ctx: Ctx):
-    from chiefofstaff import agents
-
     looked = await ctx.app.get("/api/agents")
     roles = {role["role"]: role for role in looked.get("roles") or []}
-    held = "claude" not in agents.role_agents("connector")
     await la.settings(
         ctx,
         watches=[{"what": "Direct messages and mentions of me on Slack", "enabled": True}],
         watch_after_hours_minutes=5,
     )
-    if held:
-        assert "connector" not in roles and "slack" not in roles, sorted(roles)
-    else:
-        assert roles["connector"]["agents"] == ["claude"], roles["connector"]
-    on_claude = not held and CLAUDE_TURNS
+    assert "connector" in roles and "slack" in roles, sorted(roles)
+    on_claude = bool(CLAUDE_TURNS)
     if on_claude:
         await put(ctx, "connector", "claude")
-    elif not held:
+    else:
         log("W1: not put on Claude (LIVE_CLAUDE_TURNS=0): its scan runs on Copilot")
     await ctx.app.post("/api/watch/scan", {})
 

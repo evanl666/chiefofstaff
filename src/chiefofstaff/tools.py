@@ -1923,8 +1923,8 @@ class Tools:
         if row["status"] in {"queued", "starting", "working"} and not row["closed_at"]:
             raise ValueError(f"“{row['title']}” is at work already.")
         # Held as reopening does: a removal of its folder started when it closed waits.
-        # Watch for you's run on the agent Settings put it on (Copilot until that can run it).
-        agent = await self.runtime.helper_agent(special) if special == "connector" else ""
+        # Its run on the agent Settings put its kind on (another while that can't run it).
+        agent = await self.runtime.helper_agent(agents.kind_of(WORKER, special))
         async with self.states[session_id].checkouts, self.states[session_id].lifecycle:
             await self.runtime.drop_handle(session_id)
             fresh = str(uuid4())
@@ -2105,9 +2105,10 @@ class Tools:
                 raise
             if named and agent == named:
                 agents.used(self.store, agent)  # The owner's choice: Last used's.
-        if special == "connector":
-            # Watch for you on the agent Settings put it on, once that can run it.
-            agent = await self.runtime.helper_agent(special)
+        if special:
+            # Watch for you and the helpers on the agent Settings put their kind on, once that
+            # can run them (another meanwhile).
+            agent = await self.runtime.helper_agent(agents.kind_of(WORKER, special))
         if agent == agents.COPILOT:
             await self.runtime.check_model(params.model)
         else:
@@ -2388,6 +2389,7 @@ class Tools:
                 {
                     "session_id": session_id,
                     "task_id": task["id"],
+                    "agent": agent,
                     **({"fork": True} if fork else {}),
                 },
             )

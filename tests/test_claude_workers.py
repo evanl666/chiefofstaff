@@ -534,22 +534,29 @@ async def test_claude_runs_no_sandboxed_worker_its_own_settings_would_widen(
         await runtime.stop()
 
 
-async def test_a_worker_that_reads_slack_runs_on_copilot_not_claude_for_now(
+async def test_a_worker_that_reads_slack_runs_on_claude_in_its_sandbox(
     tmp_path, claude_on_path, monkeypatch
 ):
-    """Held until Claude's Slack safeguards are reviewed: whatever its version's check showed,
-    a worker that reads Slack is not run on Claude (it runs on Copilot, saying why)."""
+    """agents-anywhere.md 4 (d82aff5's hold lifted): a worker that reads Slack runs on Claude,
+    in Claude's sandbox with the network limited as a Copilot one's, asking first, its Slack
+    reads Chief of Staff's own tools (no server named slack is its to call)."""
     monkeypatch.setitem(PASSED, "sandbox", "")
-    _, runtime = await started(tmp_path)
+    harness, runtime = await started(tmp_path)
     try:
         await saved(runtime, {"claude": {"enabled": True}, "new_workers": "claude"})
         await runtime.connect_agent("claude")
-        row = {"id": "", "role": "worker", "slack": 1, "yolo": "", "closed_at": None}
-        assert runtime.blocked_on("claude", row) == (
-            "Workers that read Slack run on Copilot, not Claude: Chief of Staff does not run "
-            "them on Claude yet."
-        )
+        row = {"id": "", "role": "worker", "slack": 1, "yolo": "", "closed_at": None, "cwd": ""}
+        assert runtime.blocked_on("claude", row) == ""
         assert runtime.blocked_on("claude", {**row, "slack": 0}) == ""
+        runtime.sandbox_host = True
+        worker = harness.store.create_session(
+            "c1" * 16, "worker", "Answer", "idle", cwd=str(tmp_path), slack=1
+        )
+        runtime.set_agent(worker["id"], "claude")
+        options = runtime.agent_options(harness.store.session(worker["id"]))
+        assert options["ask_first"] is True
+        assert options["slack_tools"] == []
+        assert options["sandbox"].allowed_hosts and not options["sandbox"].local_network
     finally:
         await runtime.stop()
 
