@@ -1516,8 +1516,9 @@ worker flagged as quiet is looked at again just before that: still at work, noth
 After two nudges without a new report the problem goes to the Router. It does not coach a worker
 that is making progress, however long it takes; a nudge says why it stepped in (*Watchdog ·
 looks stuck*, and the evidence). A worker waiting for your word on its folder's settings is left
-alone: its card under *Needs you* has it. Its switch, and *View activity* (its session), are in
-Settings → Agents & models → *Chief of Staff's own sessions*.
+alone: its card under *Needs you* has it. Its switch, the agent it runs on, its model and effort
+are its row in Settings → Agents & models → *Who does the work*; *Its activity* (its session) is
+just below.
 
 ## What runs without asking
 
@@ -1559,15 +1560,22 @@ model.
 
 ## Models and usage
 
-Settings → *Agents & models* sets them. Copilot's row (unfold it with **›**) has the *Model for
-workers*, their *Effort* and a *Limit per worker (credits)*; *Chief of Staff's own sessions*
-(folded) has the Router's, Slack's and the Watchdog's model and effort on Copilot, and the
-*Default* model, of any session on Copilot without one of its own (Watch for you and Chief of
-Staff's helpers use the workers' model). A menu lists the models Copilot offers and the efforts
-the chosen model offers (*Auto*, which picks a model each turn, takes none); a value saved that it
-no longer lists stays as saved, said *not offered now*, until you change it. A
-session's **⋯** (top right; on Home, the Router's) switches its model, effort and context window
-(where the model has a long-context tier). The Router may choose a stronger or cheaper model or effort for one task.
+Settings → *Agents & models* sets them. *Who does the work*, at the top, has a row for each kind of
+work: *New workers*, then Chief of Staff's own sessions: the *Router*, the *Watchdog*, *Slack* (the
+session that drafts your Slack replies), *Watch for you* and the *Helpers* (they learn how you
+work, suggest checks and your profile, and message you when you're away). Each row has where it
+*Runs on* (any agent on: see [Workers on other coding agents](#workers-on-other-coding-agents)),
+then its *Model* and *Effort* on that agent. The menus list the models that agent offers and the
+efforts the chosen model offers (*Auto*, which picks a model each turn, takes none); the first,
+*Default*, is the agent's own default model, named where known. Switching *Runs on* shows that
+agent's models; what a row had on each agent is kept, for when it runs there again. A value saved
+that its agent no longer lists stays as saved, said *not offered now*, until you change it. The
+*Default* model of before (Copilot's, for a session without one of its own) is gone: on updating,
+each row that took it got it as its own, and so did *Watch for you* and the *Helpers*, which took the
+workers' model, so nothing changes until you change it. Copilot's row below (unfold it with **›**)
+has the *Limit per worker (credits)*. A session's **⋯** (top right; on Home, the Router's) switches
+its model, effort and context window (where the model has a long-context tier). The Router may
+choose a stronger or cheaper model or effort for one task.
 **Usage** (the chart icon, bottom left, with today's credits) totals credits by session, task,
 model and role for any date range; every task shows its own credits (hover its time). Premium
 requests are counted as Copilot counts them: one for each message a session is sent, at its
@@ -1584,30 +1592,35 @@ runaway workers.
 
 Your workers can also run on [Codex](https://developers.openai.com/codex/cli), OpenAI's coding
 agent, or on [Claude Code](https://docs.claude.com/en/docs/claude-code), Anthropic's, each with
-your own sign-in, and so can the Router and the Watchdog. The Slack session, *Watch for you* and
-Chief of Staff's own helpers stay on Copilot. With neither installed, nothing of this shows
-anywhere.
+your own sign-in, and so can every one of Chief of Staff's own sessions: the Router, the Watchdog,
+the Slack session, *Watch for you* and the helpers. Every worker shows the agent it runs on (Copilot
+too): a small diamond of its colour on its sidebar row, a chip on its line in your chat, its name in
+its header. Codex and Claude Code run on macOS and Linux; on Windows, Chief of Staff runs on Copilot
+for now.
 
 **Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once per agent:
-*Codex is ready. Allow workers to use it?* *Allow* makes it available to workers (new workers stay
-on Copilot); *Not now* leaves it off and is not asked again. Settings → *Agents & models* has a row
-per agent installed (with Copilot alone, only Copilot's; one not installed has none, but for one
-still on, *Not installed*, so you can turn it off): its status in a few words
+*Codex is ready. Allow workers to use it?* *Allow* makes it available (new workers and Chief of
+Staff's own sessions stay where they run); *Not now* leaves it off and is not asked again. Settings →
+*Agents & models* has, under *Who does the work*, a row per agent installed (with Copilot alone, only
+Copilot's, and a line saying which others it runs on; one not installed has none, but for one still
+on, *Not installed*, so you can turn it off): its status in a few words
 (*Ready*, *Sign in needed*, *Not installed*, *At its limit · resets …*, *Setting up Claude…*,
 *Can't run here*), a small
 meter of the most-used of its plan's limits (each limit and when it resets on hover or focus), its
-one action (*Sign in*: see **Signing in and installing from here** below) and *Use for
-workers*, which turns on only once it is ready (turning it off always works, whatever its status).
+one action (*Sign in*: see **Signing in and installing from here** below) and *Use*, which turns on
+only once it is ready (turning it off always works, whatever its status; what ran on it moves to the
+first agent on, as the page shows before you save).
 What costs money or stops its work is a line under it, never folded away: a limit reached with
 extra usage carrying its workers on, a limit used up, a rate limit, a sign-in ending within a
-week, why it can't run here. Unfolded (**›**): the *Model* and *Effort* its workers use (empty: the
-agent's default) and a *Limit per worker* in tokens (empty: none); then its version, how it is
-signed in, whose plan or key it uses and *Sign in again*, or, not ready yet, its command with *Copy
-command* to run it in a terminal yourself instead. A changed model or effort reaches its workers
-that have none of their own, and the Router or the Watchdog on it, from their next turn. The first
-line, *New workers run on*, says the agent and model new work uses: Copilot by default, each agent
-used for workers that can run (picking one uses it for workers), or *Last used* (the agent you
-last chose for a worker), and whose plan it uses. A worker keeps the agent it started on.
+week, why it can't run here. Unfolded (**›**): a *Limit per worker* in tokens (empty: none); then its
+version, how it is signed in, whose plan or key it uses and *Sign in again*, or, not ready yet, its
+command with *Copy command* to run it in a terminal yourself instead. *New workers* in *Who does the
+work* says the agent new work uses (Copilot by default; each agent on, one that can't run now with
+its status, "Codex · Sign in needed"; picking one turns it on; or *Last used*: the agent you last
+chose for a worker), its model and effort there (also what `@codex` uses for one task), and whose
+plan it uses. A changed model or effort reaches the workers on that agent that have none of their
+own, and each of Chief of Staff's own sessions, from their next turn. A worker keeps the agent it
+started on.
 
 **Signing in and installing from here.** Wherever an agent says *Sign-in needed* (the `@` list, the
 chip's popover, a card in your chat, its row in Settings), *Sign in* runs that
@@ -1642,7 +1655,7 @@ Claude extra). While Claude is on for workers (or the Router or the Watchdog run
 SDK is missing, or is a version this release was not tested with, Chief of Staff installs the
 tested one by itself: as it starts, as you turn Claude on, or when you click *Retry*. Claude's row
 says *Setting up Claude…* meanwhile (usually under a minute), then *Ready*, with no restart. With
-Claude off, its row says *Not set up yet*: turning on *Use for workers* sets it up (turning it off
+Claude off, its row says *Not set up yet*: turning on *Use* sets it up (turning it off
 again before it is done stops it). It installs only
 the version its Claude extra names, into its own environment (a `uv tool`, pipx or other virtual
 environment: with `uv pip install`, or that environment's `pip`). Started with `uvx`, whose
@@ -1665,9 +1678,9 @@ too ("do this with Claude"). The chip wins over the Router's own choice. Claude'
 aliases, each with the exact model it stands for now ("Opus (now claude-opus-5-5)": it follows
 Claude Code's updates), and those exact models, to pin one ("claude-opus-5-5 (pinned)"); the first
 choice is what Settings chose ("Settings: Opus (now …)"), or Claude Code's own default where Settings
-chose none. While more than one agent
-is on, each worker shows its agent's mark (a small diamond of its colour, its model on hover) on its
-sidebar row, its tasks and its header, and on the line that says it started in your chat.
+chose none. Each worker shows its agent's mark (a small diamond of its colour, its model on hover)
+on its sidebar row, its tasks and its header, and a chip on the line that says it started in your
+chat, Copilot's too, also once it is closed.
 
 **Comparing two agents.** Pick two agents (`@codex`, then `@claude`: "Compare on Codex and
 Claude"), or say "do this with Codex and Claude": the same task runs on each, a worker each in a
@@ -1694,7 +1707,10 @@ picks that agent's model and effort. Once it has begun, *Continue with…* is wh
   with *Continue with Copilot*: a new worker there goes on from a summary of its work, with what it
   was given. One that can't run for another reason (too old, turned off) says why, with *Wait* or
   *Run on Copilot instead*, and nothing starts elsewhere.
-- The agent new workers use cannot run: they start on Copilot, and their name says why.
+- The agent new workers use cannot run: they start on the next agent on that can (Copilot, Codex,
+  Claude Code, in that order), their line in your chat says why, and so does *New workers* in
+  Settings ("New workers start on Copilot (Claude Sonnet 5.5, uses your Copilot plan) until then:
+  Codex is not signed in.").
 - A plan's usage limit used up, or a rate limit the agent gave up on, in the middle of a task:
   the worker pauses, saying which limit and until when ("Codex's weekly limit is used up · resets
   tomorrow 11:11 AM", in your local time; Codex's limits are read when it doesn't say them first).
@@ -1709,29 +1725,38 @@ picks that agent's model and effort. Once it has begun, *Continue with…* is wh
   is saved: … starts on Codex once it resets"), with *Continue with Copilot* and *Don't run it*,
   and starts there by itself, once, after the reset. Nothing switches by itself.
 
-**The Router and the Watchdog on another agent.** Once Codex or Claude is used for workers, *Chief
-of Staff's own sessions* on the same page has a *Runs on* for the Router and the Watchdog (Copilot
-by default; its folded line names any that runs elsewhere). Put on Codex or Claude, each runs there with nothing but
-its own tools, as on Copilot: none of the agent's commands, files, web search, subagents, hooks or
-MCP servers. The switch needs nothing from you: a fresh session on that agent takes over (the
-Router's with a summary of what it knew: your open work, cards, decisions and your conversation),
-your chat stays one, and one line in it says so ("The Router runs on Codex now, with a summary of
-what it knew."). Its **⋯** then lists that agent's models; it uses the *Model* and *Effort* of the
-agent's row unless you pick one there (its Copilot model and effort are kept, for when it runs on
-Copilot). Its spend is tokens on that agent (in *Usage*), with no limit per worker.
-If the agent can't run it (signed out, not installed, a plan's limit reached, its process stopped),
-it goes on on Copilot by itself, with what it was answering, says why in one line ("The Router runs
-on Copilot for now: Codex is not signed in: …", also under its choice in Settings), and goes back by
-itself once the agent can (once the limit resets; at once when you sign in here, within a couple of
-minutes when you sign in elsewhere). Under each, *If it can't run there* chooses that (*Use Copilot and
-tell me*, the default) or *Ask me*: it waits instead, what it is sent kept, its card in your chat
-saying why ("The Router waits for Codex. Codex needs you to sign in. What it is sent is kept until
-then.") with *Sign in* and *Use Copilot until then*. An agent it runs on that is not ready shows
-*Sign in* in its row (not installed, the command that installs it, unfolded). The agent compacts a
-long conversation itself, where on Copilot the Router moves to a fresh session with a summary. The Slack session and *Watch for you* read your
-messages as you: they stay on Copilot (Watch for you runs commands, which only Copilot's and
-Claude's sandboxes hold, and what reads Slack doesn't run on Claude yet). Turning an agent off puts
-them back on Copilot; so does `chiefofstaff --prepare-downgrade`.
+**Chief of Staff's own sessions on another agent.** In *Who does the work*, each of them runs on
+any agent on (Copilot by default). Where it needs nothing but Chief of Staff's own tools (the
+Router, the Watchdog, the Slack session, and the helpers that only read what they are given: the
+learner and the checker), it runs there with nothing but those, as on Copilot: none of the agent's
+commands, files, web search, subagents, hooks or MCP servers; the Slack session's Slack reads are
+Chief of Staff's own tools, which call Slack with the token Chief of Staff holds (no agent's
+settings ever hold it). *Watch for you*, the profile helper and the messenger work as workers do
+(*Watch for you* reaches your world with the MCP servers and tools of the agent it runs on: set up
+your Slack, mail or search servers there). The switch needs nothing from you: a fresh session on
+that agent takes over (the Router's with a summary of what it knew: your open work, cards,
+decisions and your conversation), your chat stays one, and one line in it says so ("The Router
+runs on Codex now, with a summary of what it knew."). Its **⋯** then lists that agent's models; it
+uses the *Model* and *Effort* of its own row on that agent unless you pick one there. Its spend is
+tokens on that agent (in *Usage*), with no limit per worker.
+If the agent can't run it (signed out, not installed, a plan's limit reached, its process stopped,
+a turn that lost its sign-in), it goes on with the next agent on that can, in the order Copilot,
+Codex, Claude Code, by itself, with what it was answering (a helper with its job), says why in one
+line ("The Router runs on Copilot for now: Codex is not signed in: …", also under its row in
+Settings, with that agent's model and whose plan it uses), and goes back by itself once the agent
+can (once the limit resets; at once when you sign in here, within a couple of minutes when you sign
+in elsewhere). Each agent that failed one is tried again for it after a wait that grows with each
+failure in a row, also across a restart. At the foot of *Who does the work*, *If its agent can't
+run it* chooses that (*Use another that can, and tell me*, the default) or *Wait, and ask me*: the
+Router, the Watchdog or the Slack session waits instead, what it is sent kept, one card in your
+chat saying why ("The Router waits for Codex. Codex needs you to sign in. What it is sent is kept
+until then.") with *Sign in* and *Use Copilot until then* (the agent that can run it meanwhile).
+With no agent on that can run it, it waits that way whatever you chose, and goes on by itself once
+one can. *Watch for you* and the helpers run now and then: they always go on with another agent
+that can. An agent it runs on that is not ready shows *Sign in* in its row (not installed, the
+command that installs it, unfolded). The agent compacts a long conversation itself, where on
+Copilot the Router moves to a fresh session with a summary. Turning an agent off puts what ran on
+it on the first agent on; so does `chiefofstaff --prepare-downgrade` (on Copilot).
 
 **Continue with another agent.** An idle worker's **⋯** has *Continue with Claude…* (or another
 agent on), and you can ask the Router ("hand this to Claude"). A dialog says in one line what
@@ -1829,7 +1854,13 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   with the environment and `PATH` a Copilot worker's commands get; Codex puts its own helpers
   first on `PATH` and sets a few variables of its own (such as `LANG` and `LC_ALL` to `C.UTF-8`,
   `TERM=dumb`, `PAGER=cat`).
-- **Workers that read Slack** run on Copilot, and say why: not on Codex, and not on Claude yet.
+- **Workers that read Slack** run on any agent, as other workers do, and ask first unless you
+  set it otherwise for one: on Copilot and on Claude their commands run in the sandbox, with the
+  network limited to GitHub, as always; on Codex, which has no sandbox Chief of Staff checked,
+  every command, edit and MCP call they make asks Chief of Staff first, which refuses fetching
+  URLs and network commands for them, but Codex itself runs its own read-only commands (`cat`,
+  `ls`, `grep`) without asking. Their Slack reads are Chief of Staff's own tools on every agent.
+  See [SECURITY.md](../SECURITY.md).
 - **Memory:** Codex's memories and Claude's auto memory are off in Chief of Staff's workers
   (Codex's run commands nobody is asked about; Claude's folder is shared with your own sessions).
   Your own sessions keep theirs.

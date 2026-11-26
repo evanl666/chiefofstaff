@@ -71,6 +71,26 @@ waits for its worker, and the page's state is read several times faster.
 - **A burst of events reads the state once.** The page read the whole state 150 ms after each
   event that asked for it, however many came, several at a time; now once shortly after the
   first, at most once a second while more come, one at a time.
+- **Every one of Chief of Staff's own sessions runs on the agent you choose.** Settings → *Agents &
+  models* starts with *Who does the work*: a row each for *New workers*, the *Router*, the
+  *Watchdog*, *Slack*, *Watch for you* and the *Helpers* (learning how you work, checks, your
+  profile, messages when you're away), with the agent it runs on, and its model and effort there.
+  Codex and Claude Code can run every one of them, the Slack session and *Watch for you* too, and
+  workers that read Slack (on Claude in its sandbox; on Codex asking first: see SECURITY.md).
+  Each row's model is its own on each agent, kept as you switch; the *Default* model and the
+  folded *Chief of Staff's own sessions* are gone, and what took the Default model has it as its
+  own, so nothing changes until you change it. A choice an earlier version held back (*Watch for
+  you* on Claude) runs as you chose; Home says so once.
+- **When an agent can't run one, the next one does.** A session whose agent can't run it
+  (signed out, not installed, its limit, a turn that lost its sign-in) goes on with the next agent
+  on that can, in the order Copilot, Codex, Claude Code, says so in one line, with that agent's
+  model and whose plan it uses, and goes back by itself; *Wait, and ask me* holds it with one card
+  instead. Each agent that failed one is tried again after a growing wait, also across a restart;
+  with none that can, it waits, and goes on by itself once one can. New workers do the same.
+- **Every worker says its agent**, Copilot's too: a mark on its row and a chip on its line in
+  your chat, also once it is closed.
+- **No agent is ever given your Slack token.** Slack's read tools are Chief of Staff's own on
+  every agent, Copilot included: it calls Slack with the token it holds.
 
 ## 0.1.59 (2026-11-26)
 

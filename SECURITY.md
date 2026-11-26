@@ -34,12 +34,12 @@ makes a mistake.
 | Workers never see your GitHub token; `git` and `gh` authenticate through Copilot's local proxy | **OS sandbox** + Copilot's credential proxy | Sandbox is on |
 | Workers cannot read `~/.ssh` keys or other files outside their folders' read rules | **OS sandbox** | Sandbox is on |
 | Workers that read Slack reach only GitHub hosts over the network, and not localhost. Other workers may use localhost (servers their tests start, their build daemon) and so reach your local services; the tokens of your Gradle daemons and Jupyter servers are unreadable to them, and Unix sockets (Docker's) stay closed | **OS sandbox** | Sandbox is on |
-| The Router, the Slack session and the Watchdog have no shell, file or web tools | **Copilot** (session tool allowlist); on Codex or Claude (the Router, the Watchdog), **that agent** with its own tools, servers, hooks and plugins off, read back as each session opens (see below) | Always |
-| Slack messages are sent only after you approve a draft | **Chief of Staff** (Slack write tools are refused; only the app sends) | Always for the Slack tools; sessions are never given your Slack token |
+| The Router, the Slack session, the Watchdog and the helpers that only read what they are given (learner, checker) have no shell, file or web tools | **Copilot** (session tool allowlist); on Codex or Claude, **that agent** with its own tools, servers, hooks and plugins off, read back as each session opens (see below) | Always, on every agent |
+| Slack messages are sent only after you approve a draft | **Chief of Staff** (Slack write tools are refused; only the app sends) | Always for the Slack tools; no agent is ever given your Slack token: Slack's read tools are Chief of Staff's own, which call Slack with the token it holds |
 | No worker comments on, reviews, merges or closes a PR, opens, changes, comments on or closes an issue, writes through `gh api` or GitHub's MCP server, force-pushes a branch that isn't its own or pushes to `main`/`master`: PR reviews and replies go out only from a draft you approve | **Chief of Staff** (the floor: a check on each command and MCP call of every worker, before its mode is looked at; on Codex, ChatGPT's apps are off and GitHub's MCP servers made to ask) | Always, yolo or not, on Copilot, Codex and Claude Code. It reads commands as text, which can't be fully parsed: the push check is a best effort, not a sandbox, and an agent determined to evade it can (protect your default branch on the server, too). What a command does through another program (`curl` to GitHub's API with a token, a script), or a Codex rule of yours that lets a command run unasked, is not read |
 | No force push at all, no recursive delete of home or root, no `sudo`, no `curl \| sh` | **Chief of Staff** (permission check on each command) | Yolo is off for the worker (on by default, except for workers that read Slack). These checks read commands as text, which can't be fully parsed: they are a best effort, not a sandbox |
 | A worker does not write outside its folders with Copilot's file-edit tool | **Chief of Staff** (permission check) and Copilot (best effort) | Yolo is off for the worker |
-| The connector (watches, notifications when you are away) only looks, and messages nobody but you | **The model**, guided by instructions; it runs as a worker that reads Slack (sandboxed, permission checks on, Slack writes refused) | As far as the model follows its instructions. It can use every MCP server your Copilot has, including ones that can send: give it a way to reach you that can message only you if you can |
+| The connector (watches, notifications when you are away) only looks, and messages nobody but you | **The model**, guided by instructions; it runs as a worker that reads Slack (permission checks on, Slack writes refused; sandboxed on Copilot and Claude, not on Codex: see below) | As far as the model follows its instructions. It can use every MCP server of the agent it runs on, including ones that can send: give it a way to reach you that can message only you if you can |
 | A message cannot pretend to come from you or the Router | **Chief of Staff** (envelopes: only the app writes the sender; text inside is escaped) | Always |
 | Only your user can send to Chief of Staff with `chiefofstaff send`, and only a request, never an approval | **OS** (the socket and its folders) and **Chief of Staff** (who connected, checked at both ends; two routes) | Send to Chief is on (off by default). Programs running as you can send too (see [Send to Chief](#send-to-chief)) |
 | Content from Slack, GitHub and the web is treated as data, not instructions | **The model**, guided by marked envelopes (`trust="untrusted"`) | As far as the model follows its instructions |
@@ -140,16 +140,27 @@ Settings → *Agents & models*). For such a worker:
   without a model, with only an allowlisted environment and every connection caught by a proxy
   of its own on 127.0.0.1, that each kind of action asks it first; a version that fails runs no
   worker that asks first (or none at all, when its edits do not ask).
-- **Workers that read Slack** run on Copilot: not on Codex, and not on Claude yet.
-- **The Router and the Watchdog** can run on Codex or Claude too (Settings → *Agents & models*),
-  with nothing but Chief of Staff's tools, as on Copilot: on Codex, its commands, image viewing
-  and making, goals, its own questions, web search, hooks and plugins off, your MCP servers not
+- **Workers that read Slack, and *Watch for you*,** run on any agent you choose. On Copilot and
+  on Claude, their commands run in the sandbox, the network limited to GitHub, as before. **On Codex they have no sandbox**
+  (Codex's has not passed Chief of Staff's checks): they ask first (on a Codex version shown to
+  do so), and Chief of Staff refuses what it refuses a Copilot worker that reads Slack (fetching
+  URLs, network commands, writes outside its folders, the floor), reading commands as text;
+  but Codex runs its own read-only commands (`cat`, `ls`, `grep`) without asking, so text in a
+  Slack message that steers it could have it read a local file (your secrets included) and pass
+  what it read on through a call Chief of Staff allows (an MCP server's, or its report). Keep
+  them on Copilot or Claude if that matters to you. The profile helper (which reads Slack) is
+  the same; the messenger (your away notifications) asks first on Codex.
+- **Chief of Staff's own sessions on any agent** (Settings → *Agents & models* → *Who does the
+  work*). The Router, the Watchdog, the Slack session and the learner and checker run there with
+  nothing but Chief of Staff's tools, as on Copilot: on Codex, its commands, image viewing and
+  making, goals, its own questions, web search, hooks and plugins off, your MCP servers not
   started, ChatGPT's apps and subagents off, each of those features read back off before the
   session is used (its `apply_patch` stays, and every patch it tries is refused); on Claude, no
   built-in tool (`--tools ""`), no MCP server but Chief of Staff's (`--strict-mcp-config`), your
   hooks off, no update (as a worker's process), and a turn that shows any other tool stops.
   Every other call still asks Chief of Staff, which refuses it to them as to their Copilot
-  sessions. The Slack session and *Watch for you* (which read your messages) stay on Copilot.
+  sessions. The Slack session's Slack reads are Chief of Staff's own tools there too.
+  Turning an agent on lets Chief of Staff run any of its own work there, as you choose.
 - **What reaches a worker from outside.** A repository's own agent settings (Codex's `.codex/`,
   Claude's `.claude/` and `.mcp.json`) load only where you trust its folder in that agent; a
   worktree is trusted as its repository is. Elsewhere none of them loads, and its `AGENTS.md` or
@@ -244,8 +255,9 @@ Settings → *Agents & models*). For such a worker:
   text; a link only as a normalized http(s) address (none with credentials, other schemes or
   hidden characters, which leave it an ordinary error), labelled *Link supplied by <server>*
   unless it is one of the server's own addresses. Nothing opens it but your click.
-- **Your Slack token** is stored in the OS keychain and given only to Copilot as an MCP header;
-  sessions receive only read-only Slack tools.
+- **Your Slack token** is stored in the OS keychain and never given to an agent (Copilot, Codex
+  or Claude): sessions that read Slack get Slack's read-only tools as Chief of Staff's own,
+  which call Slack from Chief of Staff's process with that token.
 - **GitHub**: workers use your `gh` and `git` sign-in (through the sandbox proxy when it is on).
 - Chief of Staff removes its own `CHIEFOFSTAFF_*` environment variables before starting Copilot.
   Other secrets in your environment are visible to unsandboxed commands.
