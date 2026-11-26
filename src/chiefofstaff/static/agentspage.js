@@ -398,6 +398,9 @@ function syncWork() {
     if (kind === "workers") choices.push(["last", "Last used"]);
     // One turned off (in this draft too): it runs on the first agent on, as Save leaves it.
     fill(select, choices, choices.some(([id]) => id === keep) ? keep : on[0] || "copilot");
+    // The one chosen, by its name alone (why it can't run now is the line under the row; the
+    // others say it in the list).
+    for (const option of select.options) if (option.selected && ALL.includes(option.value)) option.textContent = short(option.value);
     select.hidden = !several;
     const agent = meant(select);
     const plain = row.querySelector(".runs .plain");

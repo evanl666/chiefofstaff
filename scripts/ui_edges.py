@@ -11234,12 +11234,14 @@ async def round_roles(runtime, browser, failures: list[str]):
                 )
                 await expect(choose).to_have_attribute("aria-describedby", "work-router-line")
                 await expect(choose).to_have_value("codex")
-                await expect(choose.locator("option")).to_have_text(
-                    ["Copilot", "Codex · Sign in needed"]
-                )
+                # The one chosen by its name (its line says why); the others with their status.
+                await expect(choose.locator("option")).to_have_text(["Copilot", "Codex"])
                 await role_shoot(page, "roles-fallback", scheme)
                 # Chosen again (not saved yet): where it is put, as chosen; no line for that.
                 await choose.select_option("copilot")
+                await expect(choose.locator("option")).to_have_text(
+                    ["Copilot", "Codex · Sign in needed"]
+                )
                 await expect(why).to_be_hidden()
                 await choose.select_option("codex")
                 await expect(why).to_be_visible()
