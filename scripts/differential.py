@@ -139,7 +139,9 @@ class Allow:
     left out of the DOM snapshots and hidden in the screenshots, on both sides, in the views
     whose names match `views`: screenshots home-1280, home-needs-800, sidebar-1024,
     sidebar-external-1440, settings-general-p1-1280 (p2... as it scrolls); DOM snapshots
-    home-1280, settings-1280 (the dialog without its tabs' sections), settings-general-1280."""
+    home-1280, settings-1280 (the dialog without its tabs' sections), settings-general-1280. With
+    an `attribute`, only that attribute of the `element` is left out of the DOM snapshots (nothing
+    is hidden in the screenshots): a key the page keeps for itself, say."""
 
     name: str
     setting: str = ""
@@ -149,6 +151,7 @@ class Allow:
     added: str = ""
     element: str = ""
     views: str = ""
+    attribute: str = ""
     # A count only this many more on the side tested (one more event, say), nothing else.
     more: int = 0
     # False: the views `views` names are not photographed at all, on either side (no screenshot,
@@ -665,6 +668,12 @@ FIXES: list[Allow] = [
     Allow(
         "the page's state: a task's receipts without the commands they count",
         data=r"/api/state\.tasks\[\d+\]\.receipts\.commands$",
+    ),
+    Allow(
+        "a result's card: its redraw key (data-version, its receipts) without those commands",
+        element=".card.task.review",
+        attribute="data-version",
+        views=r"^home",
     ),
 ]
 
@@ -2212,13 +2221,13 @@ QUIET = """([ms, cap]) => new Promise((resolve) => {
 
 # The DOM as lines: tag#id.classes [attributes, values of form fields] "its own text". Elements
 # matching `skip` are left out (allowed differences).
-DOM = """([selector, skip]) => {
+DOM = """([selector, skip, drops]) => {
   const lines = [];
   const walk = (node, depth) => {
     if (skip && node.matches(skip)) return;
     const tag = node.tagName.toLowerCase();
     if (tag === "script" || tag === "style") return;
-    const attrs = [...node.attributes].filter((a) => a.name !== "id" && a.name !== "class").map((a) => a.value === "" ? a.name : `${a.name}=${JSON.stringify(a.value)}`).sort();
+    const attrs = [...node.attributes].filter((a) => a.name !== "id" && a.name !== "class" && !(drops || []).some(([where, name]) => a.name === name && node.matches(where))).map((a) => a.value === "" ? a.name : `${a.name}=${JSON.stringify(a.value)}`).sort();
     if (node.matches("input, textarea, select")) {
       if (node.type === "checkbox" || node.type === "radio") attrs.push(node.checked ? ":checked" : ":unchecked");
       else attrs.push(`:value=${JSON.stringify(node.value)}`);
@@ -2266,7 +2275,8 @@ class Camera:
 
     def __init__(self, folder: Path, allowances: dict[str, Allow]):
         self.folder = folder
-        self.elements = {name: a for name, a in allowances.items() if a.element}
+        self.elements = {name: a for name, a in allowances.items() if a.element and not a.attribute}
+        self.attributes = {name: a for name, a in allowances.items() if a.attribute}
         self.unseen = {name: a for name, a in allowances.items() if not a.pixels}
         self.dom: dict[str, str] = {}
         self.hidden: Counter = Counter()  # Allowance -> screenshots it hid something in.
@@ -2291,7 +2301,12 @@ class Camera:
         if self.unpictured(view):
             return
         skip = ", ".join(filter(None, [self.skipped(view), skip]))
-        self.dom[view] = await page.evaluate(DOM, [selector, skip])
+        drops = [
+            [a.element, a.attribute]
+            for a in self.attributes.values()
+            if not a.views or re.search(a.views, view)
+        ]
+        self.dom[view] = await page.evaluate(DOM, [selector, skip, drops])
 
     async def shoot(
         self, page, view: str, scheme: str, selector: str = "", dom: str = "", restore=True
