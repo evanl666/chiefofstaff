@@ -655,6 +655,17 @@ FIXES: list[Allow] = [
         element="#timeline .event button[data-share-task]",
         views=r"^home",
     ),
+    # 0.1.60 (owner report: Home slow to answer): the page's state finds each task's messages and
+    # credits by index (two new indexes), and leaves out the commands its receipts count (the
+    # page never showed them; a task's own GET still has them). Nothing on the page changes.
+    Allow(
+        "indexes for each task's messages and credits",
+        data=r"\.db\._schema\.(messages_by_task|usage_by_run)$",
+    ),
+    Allow(
+        "the page's state: a task's receipts without the commands they count",
+        data=r"/api/state\.tasks\[\d+\]\.receipts\.commands$",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
