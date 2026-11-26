@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+A team's page is where you run your request, a finished report can be shared from its chat,
+and Home answers at once.
+
+- **Share a report from its chat.** A finished report in its worker's chat, and its line on Home
+  (beside *View*), has a quiet *Share…*: the same dialog as its card's *Share…*, for that report's
+  task, with the same preview, private-data check, expiry, link and *Revoke*. From an earlier
+  report whose card has a newer result since, the dialog says it shares the card as it is now: its
+  latest result, with the checks and criteria that go with it. A report of no task has none.
 - **A team's page is where you run it.** It had the request, the one thing that needs you, a flow
   map and what the parts handed each other: a pile to read, with nothing to do there. *The brief*
   now says where your request stands and the one thing that moves it, done right there: a part's
@@ -37,11 +45,7 @@
   tables are as before; what you tell a team reaches its workers as your messages do. An earlier
   version opens the folder as it was (a note kept for a part not started yet is simply not given
   there).
-- **Share a report from its chat.** A finished report in its worker's chat, and its line on Home
-  (beside *View*), has a quiet *Share…*: the same dialog as its card's *Share…*, for that report's
-  task, with the same preview, private-data check, expiry, link and *Revoke*. From an earlier
-  report whose card has a newer result since, the dialog says it shares the card as it is now: its
-  latest result, with the checks and criteria that go with it. A report of no task has none.
+
 Home answers at once: a button on a card shows it is at work as you press it, Nudge no longer
 waits for its worker, and the page's state is read several times faster.
 
