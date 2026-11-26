@@ -13,6 +13,9 @@ D4  A worker's question survives its progress report (E155): still under Needs y
     waiting; asked again with what it found since, it is the same question, updated.
 D5  The owner answers a worker's question while it works on (E156): the answer reaches that
     turn, and no second question or blocked card follows.
+D6  A worker blocked on three things only the owner can give; the owner asks the Router a
+    separate question, which it relays to that worker on the same task: the blocked ask stays
+    under Needs you and its task waits (owner report, 0.1.58).
 
 Uses your signed-in Copilot CLI and consumes premium requests (LIVE_COPILOT_MODEL,
 claude-sonnet-5.5 by default); the Copilot sessions it creates are deleted at the end; about 20
@@ -21,7 +24,7 @@ folder of yours (its temporary folders go there). Ports: LIVE_DECISIONS_PORT (20
 app, the next one for the stand-in Slack. Scenarios by name run alone (D3 runs D2 first).
 
     TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py
-    TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D1 D5
+    TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D1 D6
 """
 
 import asyncio
@@ -351,6 +354,38 @@ async def d5_an_answer_while_it_works_and_no_second_question(run: Run):
     )
 
 
+async def d6_a_side_question_leaves_the_blocked_ask_open(run: Run):
+    app = run.app
+    await run.say(
+        "Start a worker titled 'Beta Build' (no project). Tell it, word for word: You cannot go "
+        "on without three things only I can give: the Apple ID, the team id and the app icon. "
+        "Call report(status='blocked') now, asking me for those three, and end your turn."
+    )
+    worker = await run.worker("Beta Build")
+    asked = await run.question(worker["id"])
+    mark = max((m["id"] for m in await run.messages(worker["id"])), default=0)
+    await run.say(
+        "A separate question, not about those three things: ask the worker of 'Beta Build' "
+        "which GitHub account 'Rusty' is in its notes, and tell me what it says."
+    )
+
+    async def answered():
+        said = [m for m in await run.messages(worker["id"])
+                if m["id"] > mark and m["kind"] in {"report", "assistant"}]  # fmt: skip
+        return said[-1] if said else None
+
+    said = await wait_for("its answer to the side question", answered, 600, app)
+    await asyncio.sleep(15)  # Whatever the Router does with it.
+    tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker["id"]]
+    task = tasks[-1]
+    run.check(
+        "D6 a side question on the same task leaves the blocked ask under Needs you",
+        task["status"] == "waiting" and (task.get("question") or {}).get("id") == asked["id"],
+        f"task {task['status']}, question {(task.get('question') or {}).get('id')}; it said "
+        f"{said['text'][:120]!r}",
+    )
+
+
 async def main():
     wanted = {name.upper() for name in sys.argv[1:]}
 
@@ -379,6 +414,8 @@ async def main():
                 await d4_progress_keeps_the_question(run)
             if runs("D5"):
                 await d5_an_answer_while_it_works_and_no_second_question(run)
+            if runs("D6"):
+                await d6_a_side_question_leaves_the_blocked_ask_open(run)
         except BaseException:
             router = (await app.get("/api/state"))["router_id"]
             print(transcript(await app.get(f"/api/sessions/{router}/messages")))
