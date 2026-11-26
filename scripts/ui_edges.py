@@ -6485,6 +6485,9 @@ async def round_decision_steer(runtime, browser, failures: list[str]):
     new = old.model_copy(update={"max_workers": 1000})  # (Other rounds' workers hold slots.)
     store.save_settings(new)
     await runtime.settings_changed(old, new)
+    # A turn of the Router's own: a decision another round recorded through it (QA8's) is still
+    # in its turn otherwise, and a task it gives in that turn relies on it.
+    runtime.states[router].turn_decisions.clear()
 
     async def start(title):
         result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
