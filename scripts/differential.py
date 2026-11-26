@@ -562,6 +562,11 @@ FIXES: list[Allow] = [
         data=r"^backend\.owner\[\d+\]\.answer$",
         added=r',"delivery":"[a-z]*"',
     ),
+    # 0.1.58: under the box, hidden but for words back from a send a reload cut off, not stored
+    # ("Not sent — press Enter to send it").
+    Allow(
+        "the box's line for words back unsent, hidden", element="#composer-unsent", views="^home"
+    ),
     # 0.1.58 (owner report R1): the owner's answer to a decision card says in its message's
     # meta what it answers (the card, its question, their answer, the decision) and that the
     # words are the owner's, for a worker asking again before it read it to get it (held_ask).
