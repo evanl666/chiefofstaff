@@ -1022,6 +1022,8 @@ class TaskActions:
         self.going: dict[str, asyncio.Task] = {}
         # Each task's commands, as read for its receipts: (version, rows), see task_commands.
         self.commands_read: dict[str, tuple[int, list[dict]]] = {}
+        # The owner's Nudges whose worker is being reopened and asked now (nudge_now).
+        self.nudging: dict[str, asyncio.Task] = {}
         # An accepted task stays listed while something is followed up for it.
         self.tasks.monitored = lambda task: bool(self.monitoring(task))
         self.tasks.run_check = self.run_check
@@ -2208,7 +2210,9 @@ class TaskActions:
         moment = datetime.now(UTC)
         found = {k: v for k, v in found.items() if k not in {"attempts", "error", "due"}}
         self.store.set(f"checkback:{task_id}", json.dumps(found | {"at": moment.isoformat()}))
-        await self.wake_check_backs(moment)
+        # Its worker is woken after this answers (reopened first if closed): a failure is said
+        # on its card again, as the periodic check-backs' are.
+        self.runtime.background(self.wake_check_backs(moment))
         return self.view(self.tasks.get(task_id))
 
     def stop_check_back(self, task_id: str) -> dict:
@@ -4979,6 +4983,8 @@ class TaskActions:
         monitoring = self.monitoring(task, prs, follows)
         attention, why = self.attention(task, prs, monitoring)
         unknown = frozenset(item["url"] for item in monitoring if item.get("unknown"))
+        active = self.active_at(task, row) if row else task["updated_at"]
+        nudged = self.store.get(f"stallnudge:{task['id']}") or ""
         return {
             **task,
             # Its state, apart: where its run is (queued, running, waiting, finished,
@@ -5034,9 +5040,12 @@ class TaskActions:
             "watch_failing": (failing := self.failing(task, follows)),
             "watch_failing_why": self.failing_why(task, failing),
             "earlier_titles": json.loads(self.store.get(f"titles:{task['id']}") or "[]"),
-            # When its worker was last asked where this task stands (stalled).
-            "nudged_at": self.store.get(f"stallnudge:{task['id']}") or "",
-            "active_at": self.active_at(task, row) if row else task["updated_at"],
+            # When its worker was last asked where this task stands (stalled): while the owner's
+            # Nudge is on its way, as of now (its message is not activity on it).
+            "nudged_at": max(nudged, active) if nudged and task["id"] in self.nudging else nudged,
+            "active_at": active,
+            # Why the owner's Nudge could not ask its worker (said on its card), while it holds.
+            **({"nudge_failed": failed} if (failed := self.nudge_failed(task, active)) else {}),
             # Its worker has taken it up (a task given while it is on another is not, until
             # that one's turn ends): one not taken up waits its turn; one taken up and left
             # is paused, not up next.
@@ -5778,10 +5787,56 @@ class TaskActions:
 
     async def nudge(self, task_id: str, by: str = "you") -> dict:
         """Ask a stalled task's worker where it stands: it goes on, reports, or says what it
-        waits on (check_back) or what blocks it."""
+        waits on (check_back) or what blocks it. The owner's Nudge answers at once, the nudge
+        recorded: its worker is reopened and asked after that (nudge_now), and what kept it
+        from being asked is said on its card. The Watchdog's waits until it is asked."""
         task = self.tasks.get(task_id)
         if task["status"] not in {"running", "waiting"}:
             raise ValueError(f"Task {task_id} is {task['status']}: nothing to nudge.")
+        self.store.session(task["session_id"])
+        if by != "you":
+            await self.ask_where(task_id, by)
+        elif task_id not in self.nudging:  # (Asked once, from two tabs say.)
+            before = self.store.get(f"stallnudge:{task_id}")
+            self.store.delete(f"nudgefailed:{task_id}")
+            self.store.set(f"stallnudge:{task_id}", now())
+            self.nudging[task_id] = self.runtime.background(self.nudge_now(task_id, before))
+        return self.view(self.tasks.get(task_id))
+
+    async def nudge_now(self, task_id: str, before: str | None):
+        """The owner's Nudge, once answered: its worker is asked, unless the task ended
+        meanwhile. Not asked (its worker could not be reopened, the message not delivered):
+        the nudge is undone, and why is kept for its card (nudge_failed)."""
+        try:
+            if self.tasks.get(task_id)["status"] in {"running", "waiting"}:
+                await self.ask_where(task_id, "you")
+        except Exception as exc:
+            logger.warning("Could not nudge task %s.", task_id, exc_info=True)
+            if before is None:
+                self.store.delete(f"stallnudge:{task_id}")
+            else:
+                self.store.set(f"stallnudge:{task_id}", before)
+            failed = {"text": str(exc) or "Could not ask its worker.", "at": now()}
+            # A session Copilot can't reopen: its card offers Start fresh, as the chat does.
+            if fresh := getattr(exc, "fresh", ""):
+                failed["fresh"] = fresh
+            self.store.set(f"nudgefailed:{task_id}", json.dumps(failed))
+        finally:
+            self.nudging.pop(task_id, None)
+        with suppress(LookupError):
+            self.publish(self.tasks.get(task_id))
+
+    def nudge_failed(self, task: dict, active: str) -> dict | None:
+        """Why the owner's last Nudge could not ask its worker, while nothing happened on the
+        task since and it is still at work (a new Nudge forgets it)."""
+        failed = json.loads(self.store.get(f"nudgefailed:{task['id']}") or "null")
+        if not failed or task["status"] not in {"running", "waiting"} or failed["at"] < active:
+            return None
+        return failed
+
+    async def ask_where(self, task_id: str, by: str):
+        """The nudge itself: its worker, reopened if closed, is asked where the task stands."""
+        task = self.tasks.get(task_id)
         row = self.store.session(task["session_id"])
         if row["closed_at"]:
             await self.runtime.workers.reopen(row["id"])
@@ -5800,7 +5855,6 @@ class TaskActions:
             steer=True,
         )
         self.store.set(f"stallnudge:{task_id}", now())  # After it: the nudge is not activity.
-        return self.view(self.tasks.get(task_id))
 
     async def nudge_stalled(self, moment: datetime | None = None):
         """Each stalled task's worker is asked once where it stands (again only after more

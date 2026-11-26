@@ -3621,6 +3621,71 @@ async def test_a_stalled_task_is_asked_once_where_it_stands(harness):
     assert not runtime.task_actions.stalled(runtime.tasks.get(task["id"]), later), "it waits"
 
 
+async def quiet_worker(harness):
+    """A worker between turns whose task has said nothing for a while (a Nudge's case)."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "SLM eval")
+    task = runtime.tasks.current(worker)
+    session = harness.session(worker)
+    await call_tool(runtime, "report", worker, status="progress", summary="Started the run.")
+    session.emit("session.idle")
+    await settle(runtime)
+    session.emit("session.idle")
+    await settle(runtime)
+    return runtime, task, session
+
+
+async def test_the_owners_nudge_answers_before_its_worker_is_asked(harness):
+    """0.1.60: Nudge answered once its worker was reopened and the message delivered (3 s on
+    the owner's machine, nothing on the page meanwhile). Recorded and answered at once; its
+    worker is asked after, the nudge still no activity on the task."""
+    runtime, task, session = await quiet_worker(harness)
+    gate = asyncio.Event()
+    sent = session.send
+
+    async def slow(prompt, mode=None, attachments=None):
+        await gate.wait()  # Copilot taking its time (a resume, a big session).
+        return await sent(prompt, mode, attachments)
+
+    session.send = slow
+    nudges = lambda: [text for text in session.sent if 'type="nudge"' in text]  # noqa: E731
+    view = await asyncio.wait_for(runtime.task_actions.nudge(task["id"]), 2)
+    assert view["nudged_at"] and "nudge_failed" not in view and not nudges()
+    for _ in range(20):
+        await asyncio.sleep(0)  # Its message is kept for its worker, the send held.
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert shown["nudged_at"] >= shown["active_at"], "asked as far as the page goes"
+    await runtime.task_actions.nudge(task["id"])  # Again meanwhile (another tab): once.
+    gate.set()
+    await settle(runtime)
+    assert len(nudges()) == 1
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert shown["nudged_at"] >= shown["active_at"] and "nudge_failed" not in shown
+
+
+async def test_a_nudge_that_cannot_ask_its_worker_says_why_on_its_card(harness):
+    """The owner's Nudge answers first: what kept its worker from being asked comes after, on
+    its card (the nudge undone), until it is nudged again."""
+    runtime, task, session = await quiet_worker(harness)
+    sent = session.send
+
+    async def broken(prompt, mode=None, attachments=None):
+        raise RuntimeError("the CLI went away")
+
+    session.send = broken
+    view = await runtime.task_actions.nudge(task["id"])
+    assert view["nudged_at"] and "nudge_failed" not in view
+    await settle(runtime)
+    shown = runtime.task_actions.view(runtime.tasks.get(task["id"]))
+    assert shown["nudge_failed"]["text"] == "Could not deliver the message: the CLI went away."
+    assert not shown["nudged_at"], "not asked: the nudge is undone"
+    session.send = sent
+    view = await runtime.task_actions.nudge(task["id"])
+    assert "nudge_failed" not in view, "a Nudge again forgets it"
+    await settle(runtime)
+    assert [text for text in session.sent if 'type="nudge"' in text]
+
+
 async def test_a_worker_that_checks_back_is_not_asked_to_report_meanwhile(harness):
     from datetime import UTC, datetime, timedelta
 
