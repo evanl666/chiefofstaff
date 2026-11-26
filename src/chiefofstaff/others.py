@@ -1129,7 +1129,7 @@ class Others:
 
     def eligible(self) -> bool:
         """Read only with a tab to tell, and Copilot connected (phase 1 has no alerts)."""
-        return bool(self.bus.queues) and self.runtime.ready() and self.on()
+        return bool(self.bus.queues) and self.runtime.copilot_ready() and self.on()
 
     # The passes
 

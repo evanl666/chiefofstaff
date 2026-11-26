@@ -205,6 +205,7 @@ def prepare_downgrade(parser: argparse.ArgumentParser, data_dir: Path) -> int:
                 print("Nothing to prepare: no workers ran on another agent.", flush=True)
             return 0
         stopped, left = agents.prepare_downgrade(store)
+        copilot = agents.copilot_on(store)
     finally:
         data_lock.close()
     if stopped:
@@ -221,7 +222,8 @@ def prepare_downgrade(parser: argparse.ArgumentParser, data_dir: Path) -> int:
     print(
         "No process of another coding agent is running. An earlier Chief of Staff runs every "
         "worker on Copilot: close the workers on other agents you no longer need, then install "
-        "it.",
+        "it."
+        + ("" if copilot else " Copilot is turned off here: an earlier one needs it, signed in."),
         flush=True,
     )
     return 0

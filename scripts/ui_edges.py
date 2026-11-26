@@ -10079,9 +10079,93 @@ async def round_agents(runtime, browser, failures: list[str]):
             await agents_off(runtime, browser, scheme, runs)
             await agents_states(browser, scheme)
         await agents_on_and_worker(runtime, browser, runs)
+        await agents_copilot_use(runtime, browser)
     finally:
         await agents_saved(runtime, {"codex": {"enabled": False}})
         codex_off_path(folder)
+    await agents_setup_card(runtime, browser)
+
+
+async def agents_copilot_use(runtime, browser):
+    """Copilot's row has Use once another agent is here: turned off (Codex on), it says
+    Ready · off, the last agent on can't be turned off, Who does the work runs on Codex, and
+    Save sends it; Copilot then stops, Chief of Staff running on Codex. On again, it starts."""
+    from chiefofstaff import agents
+
+    await agents_saved(runtime, {"codex": {"enabled": True}})
+    context, page, errors, _ = await agents_page(browser, "light")
+    section = await open_agents(page)
+    copilot = section.locator("#agent-copilot")
+    box = copilot.locator("input[name=agent_copilot_enabled]")
+    await expect(copilot.locator("label.check")).to_have_text("Use")
+    await expect(box).to_be_checked()
+    await expect(copilot.locator(".status")).to_have_text("Ready")
+    await box.uncheck()
+    await expect(copilot.locator(".status")).to_have_text("Ready · off")
+    codex = section.locator("input[name=agent_codex_enabled]")
+    await expect(codex).to_be_disabled()
+    await expect(section.locator("#agent-codex label.check")).to_have_attribute(
+        "title", "Chief of Staff needs one agent on."
+    )
+    await expect(section.locator('.work-row[data-kind="router"] .runs .plain')).to_have_text(
+        "Codex"
+    )
+    async with page.expect_request("**/api/settings") as sent:
+        await page.locator("#settings-form footer button[type=submit]").click()
+    assert (await sent.value).post_data_json["agents"]["copilot"] == {"enabled": False}
+    await expect(page.locator("#settings-dialog")).to_be_hidden()
+    deadline = time.monotonic() + 30
+    while runtime.backend is not None or runtime.agent(runtime.store.get("router_id")) != "codex":
+        assert time.monotonic() < deadline, "Chief of Staff on Codex, Copilot stopped"
+        await asyncio.sleep(0.2)
+    assert not agents.copilot_on(runtime.store) and runtime.ready()
+    await shoot(page, "copilot-off", "light", 1280)
+    await context.close()
+    await agents_saved(runtime, {"copilot": {"enabled": True}})
+    assert runtime.copilot_ready() and runtime.role_target("router") == ("copilot", "")
+    # Back on Copilot once its turn on Codex is over (the stand-in Codex may take long with what
+    # earlier rounds left in its handover: stopped here).
+    router = runtime.store.get("router_id")
+    if runtime.store.session(router)["status"] == "working":
+        await runtime.workers.interrupt(router)
+    deadline = time.monotonic() + 60
+    while not runtime.copilot_ready() or runtime.agent(router) != "copilot":
+        assert time.monotonic() < deadline, (
+            "Copilot back, the Router on it",
+            runtime.copilot_problem,
+            runtime.role_target("router"),
+            runtime.store.session(router)["status"],
+        )
+        await asyncio.sleep(0.2)
+    assert not errors, errors
+    log("agents: Copilot's Use, off and on again; the last agent on stays on")
+
+
+async def agents_setup_card(runtime, browser):
+    """No agent can run Chief of Staff (a first start with none ready): Home's card says what
+    each needs, and that it starts by itself."""
+    kept = runtime.status
+    runtime.status = {
+        "state": "error",
+        "error": "Copilot CLI 'copilot' not found. Codex could not start: Not logged in.",
+        "waits": True,
+        "setup": True,
+    }
+    runtime.publish_state()
+    try:
+        context, page, errors, _ = await agents_page(browser, "light")
+        card = page.locator("#home-setup")
+        await expect(card.locator(".label")).to_have_text("Set up a coding agent")
+        await expect(card).to_contain_text("codex login")
+        await expect(card).to_contain_text("claude auth login")
+        await expect(card).to_contain_text("It starts by itself once one is ready, or Retry here.")
+        await shoot(page, "setup-card", "light", 1280, target="#home-setup")
+        assert not errors, errors
+        await context.close()
+    finally:
+        runtime.status = kept
+        runtime.publish_state()
+    log("agents: no agent ready, Home's card says what each needs")
 
 
 async def agents_off(runtime, browser, scheme: str, runs: Path):

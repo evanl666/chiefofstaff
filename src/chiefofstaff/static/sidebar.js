@@ -260,11 +260,13 @@ export function renderStatusLine() {
   const line = $("#status-line");
   const snap = state.snapshot;
   const nodes = [];
-  if (snap.runtime.state === "starting") nodes.push(el("div", { text: "Connecting to Copilot…" }));
+  // (Copilot by name only where it is the only agent: otherwise Chief of Staff's own.)
+  const several = (snap.work?.agents || ["copilot"]).some((name) => name !== "copilot");
+  if (snap.runtime.state === "starting") nodes.push(el("div", { text: several ? "Starting…" : "Connecting to Copilot…" }));
   // On Home the setup card says it, with what to do.
   if (snap.runtime.state === "error" && state.selected !== HOME) {
     nodes.push(
-      el("div", { class: "bad", text: `Copilot: ${snap.runtime.error}` }),
+      el("div", { class: "bad", text: `${several || snap.runtime.setup ? "Chief of Staff" : "Copilot"}: ${snap.runtime.error}` }),
       el("button", { type: "button", class: "link", text: "Retry", onclick: reconnect }),
     );
   }

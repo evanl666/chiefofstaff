@@ -281,6 +281,11 @@ class Delivery:
                 return  # Stopping or reconnecting: they are sent once connected (resume).
             agent = self.runtime.agent(session_id)
             backend, connection = self.runtime.connection(agent)
+            if agent == COPILOT_AGENT and backend is None and (why := self.runtime.copilot_down()):
+                # Chief of Staff runs without Copilot now: kept until Copilot runs again
+                # (Runtime.copilot_again resumes it).
+                self.copilot_down(session_id, why)
+                return
             try:
                 if await self.flush(session_id, await self.runtime.session_for(session_id)):
                     self.runtime.update_session(session_id, status="working")
@@ -343,9 +348,10 @@ class Delivery:
         alive = getattr(backend, "alive", None)
         return (callable(alive) and not alive()) or connection_lost(error)
 
-    def copilot_down(self, session_id: str):
-        """Said once in the session's chat while its backend (Copilot, or its agent) is down:
-        what it was given waits."""
+    def copilot_down(self, session_id: str, why: str = ""):
+        """Said once in the session's chat while its backend (Copilot, or its agent) is down
+        (`why`: Copilot can't run while Chief of Staff runs on another agent): what it was given
+        waits."""
         if self.store.get(f"undelivered:{session_id}"):
             return
         mark = int(self.store.get(f"sent:{session_id}") or 0)
@@ -354,7 +360,10 @@ class Delivery:
             ("Your message", "your message") if owner else ("What is waiting", "what was waiting")
         )
         agent = self.runtime.agent(session_id)
-        if agent == COPILOT_AGENT:
+        if agent == COPILOT_AGENT and why:
+            down = f"Copilot can't run now: {why.rstrip('.')}. {waiting[0]} goes out once it can."
+            back = f"Copilot runs again; {waiting[1]} went out."
+        elif agent == COPILOT_AGENT:
             down = f"Copilot stopped; reconnecting. {waiting[0]} goes out when it is back."
             back = f"Copilot stopped and reconnected; {waiting[1]} went out."
         else:

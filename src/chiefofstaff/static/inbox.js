@@ -11,6 +11,7 @@ import { expandTask, followUpItem, inTerminal, ownTasks, questionParts, syncTask
 import { artifactItems } from "./artifacts.js";
 import { preparedItems } from "./prepared.js";
 import { duck } from "./mascot.js";
+import { agentName } from "./agentpick.js";
 import { heldItem, heldQuestions, peerWaiting, teamsSection } from "./team.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
 // Needs you (waiting for an answer, failed, a result to accept, news, no progress); a
@@ -705,21 +706,39 @@ function setupCard() {
       }
       retry.disabled = false;
     } });
-    node = el(
-      "div",
-      { id: "home-setup", class: "card setup" },
-      el("div", { class: "head" }, el("span", { class: "label", text: "Connect GitHub Copilot" })),
-      el("p", { text: "Chief of Staff runs your work in GitHub Copilot sessions, and Copilot is not ready yet:" }),
-      el("p", { class: "muted", text: snap.runtime.error }),
-      el(
-        "ol",
-        {},
-        el("li", {}, "Install the Copilot CLI: ", el("code", { text: "npm install -g @github/copilot" })),
-        el("li", {}, "Sign in: ", el("code", { text: "copilot login" })),
-        el("li", { text: "Retry here." }),
-      ),
-      el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
-    );
+    // It goes on by itself once an agent is ready (`waits`); Retry tries now.
+    const then = snap.runtime.waits ? "It starts by itself once one is ready, or Retry here." : "Retry here.";
+    node = snap.runtime.setup
+      ? el(
+          "div",
+          { id: "home-setup", class: "card setup" },
+          el("div", { class: "head" }, el("span", { class: "label", text: "Set up a coding agent" })),
+          el("p", { text: "Chief of Staff runs your work in GitHub Copilot, Codex or Claude Code sessions, and none of them is ready yet:" }),
+          el("p", { class: "muted", text: snap.runtime.error }),
+          el(
+            "ol",
+            {},
+            el("li", {}, "Install one and sign in. Copilot: ", el("code", { text: "npm install -g @github/copilot" }), ", then ", el("code", { text: "copilot login" }), ". Codex: ", el("code", { text: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" }), ", then ", el("code", { text: "codex login" }), ". Claude Code: ", el("code", { text: "curl -fsSL https://claude.ai/install.sh | bash" }), ", then ", el("code", { text: "claude auth login" }), "."),
+            el("li", { text: then }),
+          ),
+          el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
+        )
+      : el(
+          "div",
+          { id: "home-setup", class: "card setup" },
+          el("div", { class: "head" }, el("span", { class: "label", text: "Connect GitHub Copilot" })),
+          el("p", { text: "Chief of Staff runs your work in GitHub Copilot sessions, and Copilot is not ready yet:" }),
+          el("p", { class: "muted", text: snap.runtime.error }),
+          snap.runtime.windows ? el("p", { class: "muted", text: "On Windows, Chief of Staff runs on GitHub Copilot for now: Codex and Claude Code need macOS or Linux." }) : [],
+          el(
+            "ol",
+            {},
+            el("li", {}, "Install the Copilot CLI: ", el("code", { text: "npm install -g @github/copilot" })),
+            el("li", {}, "Sign in: ", el("code", { text: "copilot login" })),
+            el("li", { text: then }),
+          ),
+          el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
+        );
   } else if (snap.runtime.state === "ready" && !snap.demo && !snap.settings.projects.length && !snap.settings.code_folder && localStorage.getItem(NO_PROJECTS) !== "1") {
     const input = el("input", { placeholder: "~/workspace", autocomplete: "off", "aria-label": "Code folder" });
     const error = el("span", { class: "error" });
@@ -765,7 +784,7 @@ function setupCard() {
   return node;
 }
 // Another coding agent installed and signed in, never asked about: may workers use it? Once
-// per agent, either way; new workers stay on Copilot unless the owner chooses otherwise.
+// per agent, either way; new workers stay on the default agent unless the owner chooses otherwise.
 function agentOfferCard() {
   const offer = (state.snapshot.agent_offers || [])[0];
   if (!offer) return null;
@@ -790,7 +809,7 @@ function agentOfferCard() {
     "div",
     { id: "agent-offer", class: "card setup agent-offer", "data-name": offer.name },
     el("div", { class: "head" }, el("span", { class: "label", text: `${offer.label} is ready` })),
-    el("p", { text: `Allow workers to use ${offer.label}${offer.state ? ` (${offer.state})` : ""}? New workers stay on Copilot unless you ask for ${offer.label}.` }),
+    el("p", { text: `Allow workers to use ${offer.label}${offer.state ? ` (${offer.state})` : ""}? New workers stay on ${agentName(state.snapshot.work?.default || "copilot")} unless you ask for ${offer.label}.` }),
     offer.note ? el("p", { class: "muted", text: offer.note }) : null,
     el("div", { class: "actions" }, later, allow),
   );

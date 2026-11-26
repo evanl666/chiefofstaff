@@ -465,9 +465,9 @@ def main(arguments: list[str] | None = None) -> int:
         if status == 429:
             return failed(detail or "Too many sent lately: not taken. Try again later.", LIMITED)
         if status == 503 and "not connected" in detail:
+            to = " to Copilot" if detail.startswith("Copilot") else ""
             return failed(
-                "Chief of Staff is reconnecting to Copilot: not taken. Try again in a moment.",
-                REFUSED,
+                f"Chief of Staff is reconnecting{to}: not taken. Try again in a moment.", REFUSED
             )
         if status == 503:
             why = detail.rstrip(".") or "it could not deliver it"

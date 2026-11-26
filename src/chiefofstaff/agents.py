@@ -501,10 +501,12 @@ API_KEY_PAYS = {"codex": "Uses your OpenAI API key", "claude": "Uses your Anthro
 # What makes an agent ready, as the owner would run it in a terminal (Copy command beside Sign
 # in and Install, which run the same for them: agentsetup.py): the command, and what to do after.
 INSTALL_FIX = {
+    "copilot": {"command": "npm install -g @github/copilot", "then": ""},
     "codex": {"command": "curl -fsSL https://chatgpt.com/codex/install.sh | sh", "then": ""},
     "claude": {"command": "curl -fsSL https://claude.ai/install.sh | bash", "then": ""},
 }
 SIGN_IN_FIX = {
+    "copilot": {"command": "copilot login", "then": ""},
     "codex": {"command": "codex login", "then": ""},
     "claude": {"command": "claude auth login", "then": ""},
 }

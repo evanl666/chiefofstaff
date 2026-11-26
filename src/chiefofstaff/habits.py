@@ -664,7 +664,7 @@ class Habits:
         """Once after a start, with Copilot connected and learning on: see forget."""
         await asyncio.sleep(FIRST_FORGET_DELAY)
         backend = self.runtime.backend
-        if not (backend and self.runtime.ready() and self.enabled()):
+        if not (backend and self.runtime.copilot_ready() and self.enabled()):
             return  # Before every learning run anyway.
         try:
             await self.forget(backend)

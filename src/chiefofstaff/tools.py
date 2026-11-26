@@ -1677,17 +1677,20 @@ class Tools:
         chooses: bool = False,
         shepherd: bool = False,
         forks: bool = False,
+        copilot: bool = True,
     ) -> Any:
         """spawn_worker as the Router has it while other coding agents are on: with `agent`,
-        set only when the owner named one (more-agents.md 5.9); `chooses` (the owner lets the
-        Router choose): for every worker, saying whether the owner named it (owner_named); while
-        Prepared for you is on, with `shepherd`; `forks` (second workers are on, forks.py): with
-        fork_of. Without them, the tool is as it always was (definitions)."""
+        set only when the owner named one (more-agents.md 5.9), among them and Copilot (while
+        it is on: `copilot`); `chooses` (the owner lets the Router choose): for every worker,
+        saying whether the owner named it (owner_named); while Prepared for you is on, with
+        `shepherd`; `forks` (second workers are on, forks.py): with fork_of. Without them, the
+        tool is as it always was (definitions)."""
         key = (
             *names,
             *(["chooses"] if chooses else []),
             *(["+shepherd"] if shepherd else []),
             *(["forks"] if forks else []),
+            *([] if copilot else ["-copilot"]),
         )
         if not names and not shepherd and not forks:
             return self.runtime.tools["spawn_worker"]
@@ -1696,7 +1699,7 @@ class Tools:
                 {"fork_of": (str, Field(default="", description=FORK_OF))} if forks else {}
             )
             if names:
-                fields |= self.agent_fields(names, chooses)
+                fields |= self.agent_fields(names, chooses, copilot)
             if shepherd:
                 fields["shepherd"] = SHEPHERD_FIELD
             params = create_model("SpawnWorker", __base__=SpawnWorker, **fields)
@@ -1712,10 +1715,11 @@ class Tools:
         return self.spawn_tools[key]
 
     @staticmethod
-    def agent_fields(names: Sequence[str], chooses: bool) -> dict[str, Any]:
+    def agent_fields(names: Sequence[str], chooses: bool, copilot: bool = True) -> dict[str, Any]:
         """spawn_worker's fields while other coding agents are on (spawn_on)."""
-        choices: Any = Literal.__getitem__(("", agents.COPILOT, *names))  # type: ignore[attr-defined]
-        named = ", ".join(agents.display(name) for name in (agents.COPILOT, *names))
+        names = [*([agents.COPILOT] if copilot else []), *names]
+        choices: Any = Literal.__getitem__(("", *names))  # type: ignore[attr-defined]
+        named = ", ".join(agents.display(name) for name in names)
         fields: dict[str, Any] = {
             "agent": (
                 choices,
@@ -1732,7 +1736,7 @@ class Tools:
                 ),
             )
         }
-        others: Any = Literal.__getitem__((agents.COPILOT, *names))  # type: ignore[attr-defined]
+        others: Any = Literal.__getitem__(tuple(names))  # type: ignore[attr-defined]
         fields["compare_with"] = (
             list[others],
             Field(
@@ -1753,12 +1757,14 @@ class Tools:
             )
         return fields
 
-    def continue_on(self, names: Sequence[str]) -> Any:
+    def continue_on(self, names: Sequence[str], copilot: bool = True) -> Any:
         """continue_worker, the Router's while other coding agents are on: the owner's "hand
-        this to Claude" (as Continue with… in a worker's ⋯)."""
+        this to Claude" (as Continue with… in a worker's ⋯), Copilot among them while it is on
+        (`copilot`)."""
+        names = [*([agents.COPILOT] if copilot else []), *names]
         key = ("continue", *names)
         if key not in self.spawn_tools:
-            choices: Any = Literal.__getitem__((agents.COPILOT, *names))  # type: ignore[attr-defined]
+            choices: Any = Literal.__getitem__(tuple(names))  # type: ignore[attr-defined]
             params = create_model(
                 "ContinueWorker",
                 session_id=(str, Field(description="The worker whose work goes on (its id)")),

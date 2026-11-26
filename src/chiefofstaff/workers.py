@@ -810,6 +810,16 @@ class Workers:
                     continue  # Until the owner says to use its folder's settings (settings_wait).
                 if not self.runtime.made(row["id"]) and self.waiting_for(row):
                     continue
+                if (
+                    self.runtime.backend is None
+                    and self.runtime.on_copilot(row["id"])
+                    and (down := self.runtime.copilot_down())
+                ):
+                    # Chief of Staff runs without Copilot now: it starts once Copilot runs
+                    # (Runtime.copilot_again).
+                    if row["activity"] != (said := f"Waits for Copilot: {down}"):
+                        self.runtime.update_session(row["id"], activity=said)
+                    continue
                 if short is not None and not self.runtime.special(row):
                     # More work now could freeze the computer: it starts once memory frees up.
                     if row["activity"] != memory_note(short):
@@ -1305,7 +1315,7 @@ class Workers:
                 await self.workspaces.restore(row)
             if row["cwd"] and not await asyncio.to_thread(os.path.isdir, row["cwd"]):
                 raise ValueError("That worker's directory is gone; start a new one instead.")
-            self.runtime.require_ready()
+            self.runtime.require_up()
             await self.runtime.start_agent_of(session_id)
             backend = self.runtime.backend_for(row)
             # Copilot's: by the row's own conversation, as always (also for a helper run again
@@ -1527,7 +1537,7 @@ class Workers:
         return self.listed_agent.get(session_id, COPILOT_AGENT)
 
     async def copilot_external(self, refresh: bool = False) -> list[dict]:
-        if not self.runtime.ready():
+        if not self.runtime.copilot_ready():
             return []
         cached_at, items = self.external_cache
         if not refresh and time.monotonic() - cached_at < 15:

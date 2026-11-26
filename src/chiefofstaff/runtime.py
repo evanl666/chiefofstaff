@@ -85,6 +85,7 @@ from .backend import (
     shell_init,
     switch_model,
 )
+from .backend import COPILOT as COPILOT_CAPS
 from .bus import Bus
 from .checks import Checks
 from .connector import Connector
@@ -365,6 +366,10 @@ DISCONNECT_WAIT = 5.0
 # at rest, with this, until the owner starts a fresh one for it.
 TOO_LARGE_WAIT = "waiting for you: its Copilot session is too large to reopen here"
 TOO_LARGE = "is too large for Copilot to reopen here"
+# While Chief of Staff runs on another agent, Copilot (signed out, not installed, can't start)
+# is tried again after this long (seconds), doubling up to RECONNECT_MOST; and Chief of Staff
+# waiting for an agent (none could run it) looks again this often.
+COPILOT_RETRY = float(os.environ.get("CHIEFOFSTAFF_COPILOT_RETRY", "30"))
 # Items sent with Send to Chief: at most this many in a while (seconds) are taken; the same
 # note and capture again within SENT_AGAIN_SECONDS is the command run twice.
 SENT_RATES = ((60, 10, "a minute"), (86400, 300, "a day"))
@@ -532,6 +537,21 @@ class AgentConnection:
 
 class IneligibleError(RuntimeError):
     """A worker on another agent may not run now (Runtime.agent_block says why)."""
+
+
+class NoAgentError(RuntimeError):
+    """No coding agent can run Chief of Staff now (Copilot off or unable, no other on that
+    can): why each can't, for Home's card (`setup`); it goes on once one can."""
+
+    def __init__(self, message: str, setup: bool = True):
+        super().__init__(message)
+        self.setup = setup
+
+
+# Copilot's Use switch off (Settings → Agents & models): nothing runs on it; turned on again,
+# it starts.
+COPILOT_OFF = "Copilot is turned off in Settings → Agents & models."
+COPILOT_STARTING = "Copilot is starting."
 
 
 class OpenElsewhereError(RuntimeError):
@@ -881,6 +901,16 @@ class Runtime:
         self.jobs: set[asyncio.Task] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.status = {"state": "starting", "error": ""}
+        # Why Copilot can't run while Chief of Staff runs on another agent ("" while Copilot
+        # runs, or while Chief of Staff itself waits for it): tried again by itself
+        # (copilot_again), at `copilot_retry` (monotonic) after `copilot_wait` seconds.
+        self.copilot_problem = ""
+        self.copilot_retry = 0.0
+        self.copilot_wait = COPILOT_RETRY
+        # Connecting: Copilot's CLI starting (a failure then may be a newer one's), no agent
+        # able to run Chief of Staff (it waits for one); why each other agent could not.
+        self.copilot_starting = self.agent_waits = False
+        self.hosts_failed: dict[str, str] = {}
         self.models_cache: tuple[float, list[dict]] = (0.0, [])
         # Copilot workers that wait for the owner to say to use their folder's changed agent
         # settings (settings_stop): not started from the queue meanwhile; and why, in words.
@@ -1257,60 +1287,45 @@ class Runtime:
             # Copilot starts afresh (at start, or reconnecting): the commands its shells were
             # running ended with the one before.
             self.end_commands(COPILOT_AGENT)
-            starting = False
+            self.copilot_starting = self.agent_waits = False
             self.status = {"state": "starting", "error": ""}
             self.publish_state()
             try:
-                # Copilot CLIs started before that outlived their connection (orphaned when
-                # their loader was killed, or this app stopped abruptly) hold sessions open. Only
-                # those still this data directory's to stop: never an original's processes that
-                # a copy of its data directory names (backend.copilot_orphans).
                 if self.own_code_paths is None:
                     self.own_code_paths = await asyncio.to_thread(own_code)
                 self.find_cache_facts()
-                records = self.recorded_processes()
-                directory = self.store.directory
-                if started := await asyncio.to_thread(copilot_orphans, records, directory):
-                    await asyncio.to_thread(lambda: end_processes(copilot_tree(started)))
-                self.backend = self.backend_factory(self.store.settings())
-                if isinstance(self.backend, CopilotBackend):
-                    self.backend.note = self.backend_note
-                    self.backend.refusals = directory / REFUSED_CLI
-                starting = True
-                await self.backend.start()
-                starting = False
-                auth = await self.backend.get_auth_status()
-                # It answered: its processes run now. Remembered, so they never count as the
-                # owner's terminal (even orphaned) and are stopped when they outlive it: with
-                # what tells them from another instance's later (backend.copilot_records).
-                pids = await asyncio.to_thread(self.backend.processes)
-                records = await asyncio.to_thread(copilot_records, pids, directory)
-                self.store.set("copilot_pids", json.dumps(records))
-                if not auth.isAuthenticated:
-                    raise RuntimeError("Copilot is not signed in. Run `copilot login`.")
-                warning = await self.version_warning()
-                with suppress(Exception):
-                    version = await self.backend.version()
-                    workspaces_module.ABSENT_HELD = not older(version, ABSENT_HELD_CLI)
-                self.sandbox_gh = await self.backend.gh_works_in_sandbox()
+                failed: Exception | None = None
+                warning = ""
+                if agents.copilot_on(self.store):
+                    try:
+                        warning = await self.start_copilot()
+                    except Exception as exc:
+                        failed = exc
+                else:
+                    failed = RuntimeError(COPILOT_OFF)
+                if failed is not None:
+                    # Copilot can't run (off, not installed, signed out, it would not start):
+                    # Chief of Staff runs on another agent on that can, Copilot tried again by
+                    # itself (copilot_again); none can, it waits for one (bootstrap).
+                    self.copilot_problem = self.copilot_why(failed)
+                    if not await self.host_without_copilot():
+                        self.agent_waits = True
+                        raise self.no_agent(failed)
+                    self.copilot_starting = False
+                    await self.drop_copilot(failed)
+                else:
+                    self.copilot_problem = ""
                 await self.ensure_router()
                 self.tell_freed_roles()
+                self.tell_first_agent()
                 self.toolset.ensure_profile_card()
                 # A worker whose start a stop interrupted starts again.
                 self.store.execute(
                     "UPDATE sessions SET status='queued' WHERE status='starting' "
                     "AND closed_at IS NULL"
                 )
-                # Its sessions that were at work or mid-send: resumed in the background, each
-                # bounded, so that no session (nor Copilot hanging on one) holds the connection.
-                self.resumes = {
-                    session_id: asyncio.Event() for session_id in self.to_resume(COPILOT_AGENT)
-                }
-                self.resume_job = self.background(self.resume_sessions(bool(self.connections)))
-                await asyncio.wait({self.resume_job}, timeout=RESUME_WAIT)
-                resumed = self.resume_job
-                if resumed.done() and not resumed.cancelled() and (error := resumed.exception()):
-                    raise error
+                if self.backend is not None:
+                    await self.copilot_resumes()
                 try:
                     await self.ensure_slack_session()
                 except Exception as exc:
@@ -1330,23 +1345,303 @@ class Runtime:
                 else:
                     logger.exception("Copilot runtime failed to start")
                 error = describe(exc)[:500]
-                if starting:
+                if self.copilot_starting:
                     # Copilot would not start at all: a newer Chief of Staff may run it.
                     error += " " + updates.start_hint(self.store)
                 self.status = {"state": "error", "error": error}
+                if self.agent_waits:
+                    # No agent can run it: it goes on by itself once one can (copilot_again);
+                    # Home's card lists them, but for Copilot's own (as before) when it is
+                    # the only one.
+                    self.status |= {"waits": True, "setup": isinstance(exc, NoAgentError)}
+                    if sys.platform == "win32":
+                        self.status["windows"] = True  # (Copilot only, for now.)
                 if self.backend and not self.backend.alive():
                     self.recover_later()  # Copilot stopped while connecting: again, later.
             self.publish_state()
         if self.ready():
-            # The one watching an earlier connection ends by itself.
-            self.process_job = asyncio.create_task(
-                self.watch_process(self.connected(), self.connections)
-            )
+            if self.backend is not None:
+                # The one watching an earlier connection ends by itself.
+                self.process_job = asyncio.create_task(
+                    self.watch_process(self.backend, self.connections)
+                )
             self.background(self.workers.pump())
             self.background(self.workers.refresh_elsewhere())
             self.background(self.github.signed_in())  # Which GitHub accounts workers can use.
             # Installed, signed in, never asked: a card (`offering`: until it has looked).
             self.offering = self.background(self.offer_agents())
+
+    async def start_copilot(self) -> str:
+        """Copilot's CLI started and signed in (`backend`): raises with why not. Returns a note
+        for the owner on its version (version_warning)."""
+        # Copilot CLIs started before that outlived their connection (orphaned when their
+        # loader was killed, or this app stopped abruptly) hold sessions open. Only those still
+        # this data directory's to stop: never an original's processes that a copy of its data
+        # directory names (backend.copilot_orphans).
+        records = self.recorded_processes()
+        directory = self.store.directory
+        if started := await asyncio.to_thread(copilot_orphans, records, directory):
+            await asyncio.to_thread(lambda: end_processes(copilot_tree(started)))
+        self.backend = self.backend_factory(self.store.settings())
+        if isinstance(self.backend, CopilotBackend):
+            self.backend.note = self.backend_note
+            self.backend.refusals = directory / REFUSED_CLI
+        self.copilot_starting = True
+        await self.backend.start()
+        self.copilot_starting = False
+        auth = await self.backend.get_auth_status()
+        # It answered: its processes run now. Remembered, so they never count as the owner's
+        # terminal (even orphaned) and are stopped when they outlive it: with what tells them
+        # from another instance's later (backend.copilot_records).
+        pids = await asyncio.to_thread(self.backend.processes)
+        records = await asyncio.to_thread(copilot_records, pids, directory)
+        self.store.set("copilot_pids", json.dumps(records))
+        if not auth.isAuthenticated:
+            raise RuntimeError("Copilot is not signed in. Run `copilot login`.")
+        warning = await self.version_warning()
+        with suppress(Exception):
+            version = await self.backend.version()
+            workspaces_module.ABSENT_HELD = not older(version, ABSENT_HELD_CLI)
+        self.sandbox_gh = await self.backend.gh_works_in_sandbox()
+        return warning
+
+    async def copilot_resumes(self):
+        """Copilot runs (at start, or again): its sessions that were at work or mid-send are
+        resumed in the background, each bounded, so that no session (nor Copilot hanging on
+        one) holds the connection; it waits for them RESUME_WAIT seconds at most."""
+        self.resumes = {session_id: asyncio.Event() for session_id in self.to_resume(COPILOT_AGENT)}
+        self.resume_job = self.background(self.resume_sessions(bool(self.connections)))
+        await asyncio.wait({self.resume_job}, timeout=RESUME_WAIT)
+        resumed = self.resume_job
+        if resumed.done() and not resumed.cancelled() and (error := resumed.exception()):
+            raise error
+
+    # Without Copilot (agents-anywhere.md 3): Chief of Staff runs on another agent while Copilot
+    # is off or can't run, and waits for an agent (bootstrap) while none can.
+
+    def copilot_down(self) -> str:
+        """Why Copilot can't run Chief of Staff's work now ("" when it can, or while Chief of
+        Staff, on Copilot alone, waits for it to connect)."""
+        if not agents.copilot_on(self.store):
+            return COPILOT_OFF
+        return self.copilot_problem
+
+    @staticmethod
+    def copilot_why(failed: BaseException) -> str:
+        return COPILOT_OFF if str(failed) == COPILOT_OFF else describe(failed)[:300]
+
+    def first_run(self) -> bool:
+        """A data directory Chief of Staff never ran in: no Router yet, no agent chosen."""
+        return not self.store.get("router_id") and self.store.get(agents.CONFIG) is None
+
+    async def first_agent(self) -> str:
+        """A first run where Copilot can't run (not installed, signed out): the first other
+        agent installed and signed in (Codex, then Claude) is turned on and runs everything,
+        Copilot turned off (the owner may turn it on again); said once on Home. "" when none
+        is ready."""
+        if sys.platform == "win32":
+            return ""  # (Codex and Claude need macOS or Linux for now.)
+        for name in agents.NAMES:
+            try:
+                facts = await self.glance_agent(name)
+            except Exception:  # noqa: S112 (Not ready: the next one is looked at.)
+                continue
+            config = agents.stored(self.store)
+            config[name] = {**(config.get(name) or {}), "enabled": True}
+            config[agents.COPILOT] = {"enabled": False}
+            self.store.set(agents.CONFIG, json.dumps(config))
+            self.store.set(f"{agents.OFFERED}{name}", "first run")
+            self.agents[name] = self.agent_connection(name)
+            self.roles_seen = agents.roles(self.store)
+            pays = agents.pays(name, facts.get("account", ""), facts.get("key_env", ""))
+            self.store.set("firstagent", json.dumps([name, pays]))
+            return name
+        return ""
+
+    def tell_first_agent(self):
+        """Once, on Home: the agent a first run found Chief of Staff running on."""
+        if not (found := self.store.get("firstagent")) or not self.store.get("router_id"):
+            return
+        self.store.delete("firstagent")
+        with suppress(ValueError, TypeError):
+            name, pays = json.loads(found)
+            pays = f" ({pays[:1].lower()}{pays[1:]})" if pays else ""
+            self.add_message(
+                self.router_id(),
+                "notice",
+                f"Chief of Staff runs on {agents.display(name)}{pays}. Change it in Settings → "
+                "Agents & models.",
+            )
+
+    async def host_without_copilot(self) -> str:
+        """Copilot off or unable to run: the first other agent on (Codex, then Claude) that is
+        signed in and starts, to run Chief of Staff's Router; "" when none can (why each can't:
+        `hosts_failed`). A first run turns on the first one ready (first_agent)."""
+        self.hosts_failed = {}
+        if self.first_run() and not self.agents:
+            await self.first_agent()
+        for name in agents.NAMES:
+            entry = self.agents.get(name)
+            if entry is None or not entry.enabled():
+                continue
+            try:
+                if not entry.backend:
+                    await self.glance_agent(name)  # Signed in (no model call), installed.
+                await self.connect_agent(name)
+                await self.recheck_agent(name)
+            except Exception as exc:
+                self.hosts_failed[name] = self.agent_start_failed(name, exc)
+                continue
+            if why := self.role_block(ROUTER, name):
+                self.hosts_failed[name] = why
+                continue
+            return name
+        return ""
+
+    def no_agent(self, failed: Exception) -> Exception:
+        """What Chief of Staff says when no agent can run it: Copilot's own error when it is
+        the only one (as before), else why each can't (Home's card lists them, with what to
+        do); it goes on by itself once one can (copilot_again)."""
+        if sys.platform == "win32" or (
+            not self.agents and agents.copilot_on(self.store) and not self.first_run()
+        ):
+            return failed
+        parts = [describe(failed).rstrip(".") + "."]
+        parts += [why.rstrip(".") + "." for why in self.hosts_failed.values()]
+        error = NoAgentError(" ".join(parts))
+        error.__cause__ = failed
+        return error
+
+    async def drop_copilot(self, failed: BaseException):
+        """Copilot can't run while Chief of Staff runs on another agent: its backend stops,
+        why is kept for its row (`copilot_problem`), and it is tried again by itself
+        (copilot_again). Its sessions at work go on elsewhere (Chief of Staff's own) or fail
+        with why (the owner's workers: Retry, or Continue with another agent)."""
+        why = self.copilot_problem = self.copilot_why(failed)
+        self.copilot_retry = time.monotonic() + self.copilot_wait
+        if self.backend is not None:
+            with suppress(Exception):
+                await self.disconnect()
+        for key in self.at_work_on(COPILOT_AGENT):
+            row = self.store.find_session(key)
+            if not row or row["closed_at"]:
+                continue
+            if self.role_key(row) and self.role_failed(row, f"Copilot can't run: {why}"):
+                continue
+            self.fail(row, f"Could not go on: Copilot can't run ({why}).")
+
+    async def copilot_again(self):
+        """Tried again by itself, its wait doubling after each failure (COPILOT_RETRY up to
+        RECONNECT_MOST): while no agent could run Chief of Staff, it starts once one can
+        (installed, signed in), without a restart; while it runs without Copilot, Copilot
+        (installed, signed in or turned on since): its sessions go on, and what was chosen for
+        it goes back to it (roles_check)."""
+        if self.stopping or (self.connecting and not self.connecting.done()):
+            return
+        if time.monotonic() < self.copilot_retry:
+            return
+        if self.status["state"] == "error" and self.status.get("waits"):
+            found = await self.agent_found()
+            self.copilot_wait = (
+                COPILOT_RETRY if found else min(self.copilot_wait * 2, RECONNECT_MOST)
+            )
+            self.copilot_retry = time.monotonic() + self.copilot_wait
+            if found:
+                await self.reconnect()
+            return
+        if not self.ready() or not self.copilot_problem or not agents.copilot_on(self.store):
+            return
+        if not self.copilot_found():
+            self.copilot_retry = time.monotonic() + self.copilot_wait
+            if self.copilot_problem == COPILOT_STARTING:
+                command = self.store.settings().copilot_command or "copilot"
+                self.copilot_problem = f"Copilot CLI '{command}' not found."
+                self.publish_state()
+            return  # (Not installed: looked at again, nothing started.)
+        async with self.connect_lock:
+            try:
+                await self.start_copilot()
+            except Exception as exc:
+                logger.info("Copilot still can't run: %s", describe(exc))
+                self.copilot_problem = self.copilot_why(exc)
+                self.copilot_wait = min(self.copilot_wait * 2, RECONNECT_MOST)
+                self.copilot_retry = time.monotonic() + self.copilot_wait
+                if self.backend is not None:
+                    with suppress(Exception):
+                        await self.disconnect()
+                self.publish_state()
+                return
+            self.copilot_problem = ""
+            self.copilot_wait = COPILOT_RETRY
+            try:
+                await self.copilot_resumes()
+            except Exception:
+                logger.exception("Recovering Copilot's sessions failed")
+        if self.backend is not None:
+            self.process_job = asyncio.create_task(
+                self.watch_process(self.backend, self.connections)
+            )
+        self.publish_state()
+        # What was chosen for Copilot goes back to it (what failed there while it could not run
+        # is past); what waited for it starts.
+        for role in agents.ROLES:
+            self.clear_role_holds(role, COPILOT_AGENT)
+        await self.place_roles()
+        self.background(self.workers.pump())
+        self.background(self.workers.refresh_elsewhere())
+
+    async def copilot_switched(self) -> bool:
+        """Copilot's Use switch saved: turned off, its workers at work stop (their tasks wait
+        under Needs you, as for any agent turned off) and its process ends, Chief of Staff's own
+        sessions going on elsewhere (place_roles); turned on, it starts now (copilot_again).
+        Whether it was switched."""
+        on = agents.copilot_on(self.store)
+        if not on and self.copilot_problem != COPILOT_OFF and self.status["state"] == "ready":
+            for key in self.at_work_on(COPILOT_AGENT):
+                row = self.store.find_session(key)
+                if row and not row["closed_at"] and not self.role_key(row):
+                    with suppress(Exception):
+                        await self.workers.interrupt(key, by="Settings")
+            await self.drop_copilot(RuntimeError(COPILOT_OFF))
+            return True
+        if on and self.copilot_problem == COPILOT_OFF:
+            # Started now, before what was chosen for it is placed (else each would say it
+            # runs elsewhere "for now" while it starts).
+            self.copilot_problem = COPILOT_STARTING
+            self.copilot_retry, self.copilot_wait = 0.0, COPILOT_RETRY
+            await self.copilot_again()
+            return True
+        return False
+
+    def copilot_found(self) -> bool:
+        """Whether Copilot's CLI is on this computer (Settings' command), as far as `which`
+        tells; another backend (a test's, the demo's) unless its last start said not found."""
+        if self.backend_factory is copilot_backend:
+            return bool(shutil.which(self.store.settings().copilot_command or "copilot"))
+        problem = self.copilot_problem
+        return not problem or agents.status_of(COPILOT_AGENT, problem)["status"] != agents.MISSING
+
+    async def agent_found(self) -> bool:
+        """While no agent could run Chief of Staff: whether one may now. Copilot signed in on
+        the CLI that runs (asked: no model call), or found where it was not; another agent on
+        (on a first run, any) whose glance finds it signed in."""
+        if agents.copilot_on(self.store):
+            backend = self.backend
+            if backend is not None and backend.alive():
+                with suppress(Exception):
+                    if (await backend.get_auth_status()).isAuthenticated:
+                        return True
+            elif backend is None and self.copilot_found():
+                return True
+        first = self.first_run()
+        for name in agents.NAMES:
+            entry = self.agents.get(name)
+            if not first and (entry is None or not entry.enabled()):
+                continue
+            with suppress(Exception):
+                await self.glance_agent(name)
+                return True
+        return False
 
     def backend_note(self, text: str) -> None:
         """What Copilot's start is doing when it takes a while: said as it connects."""
@@ -2062,6 +2357,8 @@ class Runtime:
         name = agents.display(agent)
         held = self.role_held(role, agent)
         if agent == COPILOT_AGENT:
+            if why := self.copilot_down():
+                return why
             if held and time.time() < float(held.get("until") or 0):
                 return str(held.get("why") or f"{name} could not run it.")
             return ""
@@ -2501,7 +2798,9 @@ class Runtime:
             if self.agent(row["id"]) == wanted and not waits:
                 continue
             entry = self.agents.get(wanted)
-            if wanted != COPILOT_AGENT and (entry is None or not entry.enabled()):
+            if (wanted != COPILOT_AGENT and (entry is None or not entry.enabled())) or (
+                wanted == COPILOT_AGENT and self.copilot_down()
+            ):
                 if waits:
                     await self.place_again(role)  # Another may run it now.
                 continue
@@ -2597,7 +2896,7 @@ class Runtime:
         """Why a new worker can't start on this agent now ("" when it can): its agent started
         for it (another's on first use)."""
         if agent == COPILOT_AGENT:
-            return ""
+            return self.copilot_down()
         if said := await self.looked_again(agent):
             # Signed out (in a terminal, a turn that lost it) while its process runs: held.
             how = "run" if agent in self.lost_sign_in else "start"
@@ -2619,6 +2918,8 @@ class Runtime:
     def agent_unavailable(self, name: str) -> str:
         """Why a new worker of the owner's could not run on this agent now ("" when it could,
         as far as is known before it starts)."""
+        if name == COPILOT_AGENT:
+            return self.copilot_down()
         entry = self.agents.get(name)
         if entry is not None and entry.offline:
             return f"{agents.display(name)} stopped and could not start again."
@@ -2857,6 +3158,7 @@ class Runtime:
             self.store.delete(f"agentpids:{name}")
             await asyncio.to_thread(agents.clear_private, self.agent_folder(name))
             self.agents[name].offline = False
+        switched = await self.copilot_switched()
         chosen = agents.roles(self.store)
         for role, agent in chosen.items():
             if agent != self.roles_seen.get(role, COPILOT_AGENT):
@@ -2865,7 +3167,11 @@ class Runtime:
                 self.agent_failed.pop(agent, None)
                 self.agent_checked_at.pop(agent, None)
         self.roles_seen = chosen
-        if was_on != now or (chose is not None and chose != agents.router_chooses(self.store)):
+        if (
+            was_on != now
+            or switched
+            or (chose is not None and chose != agents.router_chooses(self.store))
+        ):
             await self.refresh(ROUTER)  # Its spawn_worker and prompt name the agents on.
         await self.place_roles()  # (Opened anew where it runs now, with those.)
         # Sessions that take an agent's model or effort from Settings take a new one at rest:
@@ -3398,15 +3704,32 @@ class Runtime:
         return self.elsewhere.get(self.copilot_id(router_id), 0)
 
     def ready(self) -> bool:
-        return self.status["state"] == "ready" and self.backend is not None
+        """Chief of Staff is up: its Router runs, on Copilot, or, while Copilot is off or can't
+        run, on another agent (copilot_down)."""
+        return self.status["state"] == "ready" and (
+            self.backend is not None or bool(self.copilot_down())
+        )
 
-    def require_ready(self) -> AgentBackend:
-        """The connected backend; raises when Copilot is not connected."""
-        if not self.ready() or self.backend is None:
+    def copilot_ready(self) -> bool:
+        """Chief of Staff is up and Copilot runs: for what only Copilot has (its models, its
+        sessions' list and logs, its sandbox)."""
+        return self.ready() and self.backend is not None and not self.copilot_problem
+
+    def require_up(self):
+        """Raises while Chief of Staff is not up (ready): "Copilot is not connected" where
+        Copilot is the only agent (as before), else Chief of Staff's own words."""
+        if not self.ready():
+            who = "Copilot" if agents.usable(self.store) == [COPILOT_AGENT] else "Chief of Staff"
             raise RuntimeError(
-                "Copilot is not connected"
+                f"{who} is not connected"
                 + (f": {self.status['error']}" if self.status["error"] else ".")
             )
+
+    def require_ready(self) -> AgentBackend:
+        """Copilot's connected backend; raises when Copilot is not connected."""
+        if not self.ready() or self.backend is None:
+            why = self.status["error"] or (self.ready() and self.copilot_down())
+            raise RuntimeError("Copilot is not connected" + (f": {why}" if why else "."))
         return self.backend
 
     def connected(self) -> AgentBackend:
@@ -3452,9 +3775,13 @@ class Runtime:
         return bool(
             (self.store.settings().worker_sandbox or slack)
             and self.sandbox_host
-            and self.backend
-            and self.backend.capabilities.sandbox
+            and self.copilot_sandbox()
         )
+
+    def copilot_sandbox(self) -> bool:
+        """Whether Copilot has its sandbox here: its backend's, or, while Copilot does not run
+        (Chief of Staff on another agent), as Copilot has one."""
+        return bool(self.backend.capabilities.sandbox if self.backend else COPILOT_CAPS.sandbox)
 
     def held_where_it_runs(self, row: dict, sandbox: SandboxPolicy) -> SandboxPolicy:
         """A Claude worker's sandbox: Claude's lets a command write the folder it runs in,
@@ -3631,7 +3958,7 @@ class Runtime:
         """Whether its agent sandboxes its commands as Chief of Staff's sandbox says: Copilot's,
         and another's whose version's check showed its sandbox holding (agent_refused)."""
         if self.on_copilot(row["id"]) if row.get("id") else True:
-            return bool(self.backend and self.backend.capabilities.sandbox)
+            return self.copilot_sandbox()
         return self.agent_refused(self.agent(row["id"])).get("sandbox", SANDBOX_UNPROVEN) == ""
 
     def cache_plan(self, row: dict) -> caches.Plan:
@@ -4401,16 +4728,17 @@ class Runtime:
             # workers on (forks.py), spawn_worker can start from a related worker's conversation
             # (fork_of) and message_session can keep a new task for a busy worker.
             chooses = bool(on) and agents.router_chooses(self.store)
+            copilot = agents.copilot_on(self.store)
             variants = {
                 "spawn_worker": self.toolset.spawn_on(
-                    on, chooses=chooses, shepherd=kept, forks=forks
+                    on, chooses=chooses, shepherd=kept, forks=forks, copilot=copilot
                 ),
                 "message_session": self.toolset.message_on(kept, forks=forks),
             }
             tools = [variants.get(tool.name) or tool for tool in tools]
         if on:
             # It can move a worker's work to another (continue_worker).
-            tools.append(self.toolset.continue_on(on))
+            tools.append(self.toolset.continue_on(on, agents.copilot_on(self.store)))
         return tools + self.slack_read_tools(row)
 
     def slack_read_tools(self, row: dict) -> list:
@@ -4836,11 +5164,17 @@ class Runtime:
 
     def instead_of(self, agent: str) -> str:
         """The agent a task the owner named another for is offered on instead: the one new
-        workers start on, where it can run them now; else Copilot."""
-        default = agents.new_workers(self.store)
-        if default in {agent, COPILOT_AGENT} or self.agent_unavailable(default):
-            return COPILOT_AGENT
-        return default
+        workers start on, where it can run them now; else the first other that can, in the one
+        order (Copilot, Codex, Claude)."""
+        others = [
+            other
+            for other in [agents.new_workers(self.store), *agents.fallbacks(self.store, agent)]
+            if other != agent
+        ]
+        return next(
+            (other for other in others if not self.agent_unavailable(other)),
+            others[0] if others else COPILOT_AGENT,
+        )
 
     async def answer_refusal(self, key: str, action: str) -> dict:
         """The owner's answer on an agent refusal's card: start it on the agent it offers
@@ -5678,14 +6012,14 @@ class Runtime:
         """New workers as Settings shows them: the agent chosen, and the one they start on now
         (the next that can, when that can't: why), as far as is known without starting any."""
         chosen = agents.new_workers(self.store)
-        why = self.agent_unavailable(chosen) if chosen != COPILOT_AGENT else ""
+        why = self.agent_unavailable(chosen)
         now = chosen
         if why:
             now = next(
                 (
                     other
                     for other in agents.fallbacks(self.store, chosen)
-                    if other == COPILOT_AGENT or not self.agent_unavailable(other)
+                    if not self.agent_unavailable(other)
                 ),
                 "",
             )
@@ -5886,10 +6220,14 @@ class Runtime:
         uses), its sign-in needed or not installed (and the command that makes it ready, the
         owner's to run), or why it cannot run; whether it is on for workers. From what is known
         (its glance, its process, its last start), nothing run for it."""
-        on = name == COPILOT_AGENT or name in agents.turned_on(self.store)
+        on = (
+            agents.copilot_on(self.store)
+            if name == COPILOT_AGENT
+            else (name in agents.turned_on(self.store))
+        )
         entry: dict[str, Any] = {"name": name, "label": agents.display(name), "on": on}
         if name == COPILOT_AGENT:
-            return entry | {"status": agents.READY, "said": "Ready", "pays": agents.COPILOT_PAYS}
+            return entry | self.copilot_status(on)
         if name not in self.agents_found():
             return entry | self.unready(name, "not installed")
         if name == "claude" and (setup := self.claude_setup.status()):
@@ -5923,6 +6261,22 @@ class Runtime:
             # Signing in again is the owner's to ask for (Settings: Sign in again).
             "ways": agentsetup.sign_in_methods(name),
         }
+
+    def copilot_status(self, on: bool) -> dict:
+        """Copilot as the @ picker and Settings say it: ready, starting, or why it can't run
+        (its sign-in, not installed, its start), with the command that makes it ready; off,
+        as found or not."""
+        ready = {"status": agents.READY, "said": "Ready", "pays": agents.COPILOT_PAYS}
+        if not on:
+            return ready if self.copilot_found() else agents.status_of(COPILOT_AGENT, "not found")
+        if (why := self.copilot_problem) == COPILOT_STARTING:
+            return {"status": agents.CHECKING, "said": "Starting…"}
+        if why:
+            found = agents.status_of(COPILOT_AGENT, why)
+            return found | ({"said": "Can't start"} if found["status"] == agents.PROBLEM else {})
+        if self.backend is None:
+            return {"status": agents.CHECKING, "said": "Starting…"}
+        return ready
 
     @staticmethod
     def unready(name: str, why: str) -> dict:
@@ -6649,6 +7003,9 @@ class Runtime:
                 await session.disconnect()
 
     async def available_models(self) -> list[dict]:
+        """Copilot's models (none while Chief of Staff runs without Copilot)."""
+        if self.backend is None and self.copilot_down():
+            return []
         cached_at, models = self.models_cache
         if models and time.monotonic() - cached_at < 600:
             return models
@@ -9425,10 +9782,12 @@ class Runtime:
             and (
                 not self.on_copilot(row["id"])
                 or agents.role_agent(self.store, ROUTER) != COPILOT_AGENT
+                or self.backend is None
             )
         ):
-            # On another agent (or to be): it starts there aside, Chief of Staff ready
-            # meanwhile; on Copilot while that agent can't run it (place_role).
+            # On another agent (or to be, or Copilot can't run it): it starts there aside,
+            # Chief of Staff ready meanwhile; on the next agent that can while that one can't
+            # (place_role).
             self.background(self.open_role(ROUTER))
             return
         if row and not row["closed_at"]:
@@ -9458,6 +9817,7 @@ class Runtime:
             session_id, ROUTER, "Router", "idle", cwd=str(self.role_dir(ROUTER))
         )
         self.store.set("router_id", session_id)
+        await self.place_new_role(ROUTER, row)  # (Made where it runs: Copilot's, or not.)
         await self.open_live(row, create=True)
 
     async def renew_router(self, row: dict, error: str):
@@ -10576,7 +10936,7 @@ class Runtime:
         kind: str = "event",
     ) -> bool:
         """A new event for the Router; kind="delegated" when the owner handed it over."""
-        self.require_ready()
+        self.require_up()
         fresh = [key for key in keys if self.store.add_trigger(source, key, text[:4000])]
         if not fresh:
             return False
@@ -10610,7 +10970,7 @@ class Runtime:
         key = f"send:{item.item}"
         if found := self.store.sent(key):
             return self.receipt(item.item, {"taken": False, **found})
-        self.require_ready()
+        self.require_up()
         for seconds, most, said in SENT_RATES:
             since = datetime.fromtimestamp(time.time() - seconds, UTC).isoformat()
             sent = self.store.value(
@@ -10923,7 +11283,7 @@ class Runtime:
         """New activity in a followed thread goes straight to its followers, not the Router.
         `replies`: of a PR's items, those that answer a comment Chief of Staff posted there
         (key -> the task that posted it, "" when not known, and the item's line)."""
-        self.require_ready()
+        self.require_up()
         followers = self.store.followers(thread)
         if thread.startswith("slack:"):
             # A second guard: Slack content reaches only sessions that may read Slack.
@@ -11072,6 +11432,8 @@ class Runtime:
                 self.workers.refresh_elsewhere,
                 # Chief of Staff's own sessions back on the agent chosen for them, once it can.
                 self.roles_check,
+                # Copilot (or, while none could, any agent) tried again by itself.
+                self.copilot_again,
                 # Disk space: read, measured and cleaned in the background (see storage.py).
                 self.storage.tick,
                 # Prepared for you, while on (shepherd.py).
@@ -11836,7 +12198,7 @@ class Runtime:
             await self.reconnect()
         elif old.slack_enabled != new.slack_enabled:
             await self.refresh_slack()
-        if self.ready() and any(getattr(old, key) != getattr(new, key) for key in defaults):
+        if self.copilot_ready() and any(getattr(old, key) != getattr(new, key) for key in defaults):
             for session_id in self.states.live_ids():
                 row = self.store.find_session(session_id)
                 # Copilot's models: not for a worker on another agent (its own, in its group).

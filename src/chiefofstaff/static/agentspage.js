@@ -170,8 +170,13 @@ function modelName(agent, id) {
   if (agent === "copilot") return id ? copilotName(id) : copilotName(work().copilot_default || "") || "Copilot's default";
   return agentModelName(agent, id) || `${label(agent)}'s default`;
 }
-const savedOn = (name) => name === "copilot" || (looked ? Boolean(lookOf(name)?.enabled) : Boolean(state.snapshot?.agents?.on?.includes(name)));
-const onNow = (name) => name === "copilot" || Boolean(field(`agent_${name}_enabled`)?.checked);
+// Copilot is on unless the owner turned it off (its Use, once another agent is here).
+const copilotSaved = () => state.snapshot.work?.agents?.includes("copilot") ?? true;
+const savedOn = (name) => (name === "copilot" ? copilotSaved() : looked ? Boolean(lookOf(name)?.enabled) : Boolean(state.snapshot?.agents?.on?.includes(name)));
+function onNow(name) {
+  const box = field(`agent_${name}_enabled`);
+  return box ? box.checked : name === "copilot" && copilotSaved();
+}
 const sandboxed = () => Boolean(looked?.sandboxed);
 function nowOf(name) {
   let look = lookOf(name);
@@ -452,8 +457,15 @@ function copilotRow() {
   const limit = el("input", { name: "worker_credit_limit", type: "number", min: "0", step: "1", placeholder: "No limit", value: settings.worker_credit_limit ? String(settings.worker_credit_limit) : "" });
   const command = el("input", { name: "copilot_command", autocomplete: "off", spellcheck: "false", value: settings.copilot_command || "" });
   const reconnect = el("button", { type: "button", class: "setup-action compact", id: "copilot-reconnect", hidden: true, text: "Reconnect", "aria-label": "Reconnect to Copilot" });
+  // With another agent here, Copilot can be turned off too (Chief of Staff then runs on another).
+  let use = el("span", { class: "always", text: "Always on" });
+  if (others.length) {
+    const box = el("input", { type: "checkbox", name: "agent_copilot_enabled", "aria-label": "Use Copilot", "aria-describedby": "agent-copilot-status agent-copilot-alerts" });
+    box.checked = copilotSaved();
+    use = el("label", { class: "check use" }, box, " Use");
+  }
   return rowShell("copilot", {
-    aside: [reconnect, el("span", { class: "always", text: "Always on" })],
+    aside: [el("span", { class: "action-slot" }), reconnect, use],
     body: [
       el("div", { class: "agent-fields" }, el("label", {}, el("span", { text: "Limit per worker (credits)" }), limit, el("small", { text: "Empty: none. At least 30." }))),
       el(
@@ -466,18 +478,41 @@ function copilotRow() {
     ],
   });
 }
-// Copilot's status, from the runtime: Ready, Starting…, or Can't start (and Reconnect).
+// Copilot's status: with another agent here, as the server says it (Ready, Sign-in needed, Not
+// installed, Can't start, off); with Copilot alone, from the runtime: Ready, Starting…, or
+// Can't start (and Reconnect).
 function drawCopilot() {
   const runtime = state.snapshot.runtime || {};
   const status = $("#agent-copilot-status");
-  const words = runtime.state === "error" ? ["Can't start", "bad"] : runtime.state === "starting" ? ["Starting…", "off"] : ["Ready", "ready"];
+  const known = statusOf("copilot");
+  const box = field("agent_copilot_enabled");
+  let words = runtime.state === "error" ? ["Can't start", "bad"] : runtime.state === "starting" ? ["Starting…", "off"] : ["Ready", "ready"];
+  let problem = runtime.state === "error" ? runtime.error : "";
+  if (known && (runtime.state === "ready" || !known.on)) {
+    const off = box ? !box.checked : !known.on;
+    words = { ready: [off ? "Ready · off" : "Ready", off ? "off" : "ready"], signin: ["Sign-in needed", "bad"], missing: ["Not installed", off ? "off" : "bad"], checking: ["Starting…", "off"] }[known.status] || ["Can't start", "bad"];
+    problem = known.status === "problem" && !off ? known.said : "";
+  }
   status.textContent = words[0];
   status.className = `status ${words[1]}`;
-  $("#copilot-reconnect").hidden = runtime.state !== "error";
-  alertsInto("copilot", runtime.state === "error" && runtime.error ? [{ tone: "bad", text: runtime.error }] : []);
+  const fix = known && (known.status === "signin" || known.status === "missing") ? known.fix : null;
+  const action = $("#agent-copilot .action-slot");
+  action.replaceChildren(...(fix?.command ? [el("button", { type: "button", class: "setup-action compact", text: "Copy command", title: fix.command, "aria-label": `Copy the command that ${known.status === "signin" ? "signs in to" : "installs"} Copilot`, "data-copy": "copilot" })] : []));
+  $("#copilot-reconnect").hidden = !problem;
+  alertsInto("copilot", problem ? [{ tone: "bad", text: problem }] : []);
   const warning = $("#copilot-warning");
   warning.textContent = runtime.warning || "";
   warning.hidden = !runtime.warning;
+  // Chief of Staff needs one agent on: the last one on can't be turned off.
+  for (const name of ["copilot", ...others]) {
+    const use = field(`agent_${name}_enabled`);
+    if (!use) continue;
+    const alone = use.checked && agentsOnNow().length === 1;
+    use.toggleAttribute("data-alone", alone);
+    if (alone) use.disabled = true;
+    else if (name === "copilot") use.disabled = false;
+    use.closest("label").title = alone ? "Chief of Staff needs one agent on." : "";
+  }
 }
 function agentRow(name) {
   const box = el("input", { type: "checkbox", name: `agent_${name}_enabled`, "aria-label": `Use ${label(name)}`, "aria-describedby": `agent-${name}-status agent-${name}-alerts` });
@@ -788,6 +823,8 @@ function checkLimit(input) {
 // runs, and Copilot's models of Watch for you and the helpers, once changed.
 export function agentsBody() {
   const body = {};
+  const copilot = field("agent_copilot_enabled");
+  if (copilot && copilot.checked !== copilotSaved()) body.copilot = { enabled: copilot.checked };
   for (const name of others) {
     const entry = {};
     const box = field(`agent_${name}_enabled`);
