@@ -4349,7 +4349,7 @@ class Tools:
                 )
             if title or off:
                 made = self.runtime.task_actions.split_off(
-                    task, title or f"Work on branch {off[2] if off else ''}"
+                    task, title or f"Work on branch {off[2] if off else ''}", params.summary
                 )
                 kept = (
                     "keeps its result"
@@ -4713,10 +4713,11 @@ class Tools:
                 self.store.delete(f"followup:{task['id']}")
                 self.store.delete(f"newresult:{task['id']}")
                 self.store.delete(f"ownchange:{task['id']}")
+                # (Kept as the owner had it, read or not, before this result replaces it.)
+                self.runtime.task_actions.keep_earlier_result(task, clip_report(shown))
                 self.store.delete(f"read:{task['id']}")  # A new result, not read yet.
                 self.states[caller].turn_reported.add(task["id"])
                 self.runtime.task_actions.remember_prs(task["id"], params.summary)
-                self.runtime.task_actions.keep_earlier_result(task, clip_report(shown))
                 # Read in the background (below): its receipts say so until then, not that it
                 # changed nothing.
                 self.runtime.task_actions.result_due(task["id"])

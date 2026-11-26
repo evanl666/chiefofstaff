@@ -28,7 +28,7 @@ from .roles import WORKER
 from .sources.github import MISSING_TRIES, NOT_FOUND
 from .sources.slack import describe
 from .store import hours_ago, now
-from .tasks import ADOPTED, OPEN
+from .tasks import ADOPTED, FINISHED, OPEN
 from .workspaces import (
     CommandRun,
     Scope,
@@ -3573,7 +3573,11 @@ class TaskActions:
         for row in moving:
             meta = json.loads(row["meta"] or "{}")
             self.store.update_message_meta(row["id"], {**meta, "task_id": made["id"]})
-        undo = self.split_changes(task, made, latest, moving[0]["created_at"] if moving else now())
+        # The work that made the result that moves: since it was asked for, from the start of
+        # the run that ended with it (a build the owner asked for in its chat, its PR).
+        began = self.run_began(task_id, latest["created_at"])
+        since = min(filter(None, [began, moving[0]["created_at"] if moving else ""]), default="")
+        undo = self.split_changes(task, made, latest, since or now())
         names = json.loads(self.store.get(f"titles:{made['id']}") or "[]")
         names.append({"title": f"split from “{task['title']}”", "at": now(), "by": by})
         self.store.set(f"titles:{made['id']}", json.dumps(names))
@@ -3589,14 +3593,145 @@ class TaskActions:
         self.tasks.update(task_id, result=earlier["text"])
         # Its result again, not one of its earlier ones (the one split off went with it).
         kept = json.loads(self.store.get(f"results:{task_id}") or "[]")
+        back: dict = {}
         if kept and kept[0].get("text") == earlier["text"]:
             self.store.set(f"results:{task_id}", json.dumps(kept[1:]))
-            found = json.loads(self.store.get(f"splitfrom:{made['id']}") or "{}")
-            found["undo"] = {**found.get("undo", {}), "results": json.dumps(kept)}
-            self.store.set(f"splitfrom:{made['id']}", json.dumps(found))
+            back = {"results": json.dumps(kept)} | self.as_it_was(task_id, kept[0])
+        # What the work split off made or named (its PR, its links) is its own, wherever its
+        # checkout was; its report as the Router has it too.
+        back["handed"] = self.hand_over(self.tasks.get(task_id), made, latest["text"], since)
+        self.router_copy(task, made, latest)
+        found = json.loads(self.store.get(f"splitfrom:{made['id']}") or "{}")
+        found["undo"] = {**found.get("undo", {}), **back}
+        self.store.set(f"splitfrom:{made['id']}", json.dumps(found))
         self.publish(self.tasks.get(task_id))
         self.runtime.publish_session(self.store.session(task["session_id"]))
         return self.view(self.tasks.get(made["id"]))
+
+    def run_began(self, task_id: str, before: str = "") -> str:
+        """When its latest run (by `before`) began: when work on it was taken up last."""
+        return (
+            self.store.value(
+                "SELECT max(started_at) FROM runs WHERE task_id=? AND started_at<=?",
+                (task_id, before or "9"),
+            )
+            or ""
+        )
+
+    def as_it_was(self, task_id: str, entry: dict) -> dict:
+        """A task whose follow-up was split off is as the owner had it before (see
+        keep_earlier_result): read (no "New"), accepted (not to accept again). What undoing
+        the split puts back."""
+        undo: dict = {}
+        if entry.get("read") and not self.store.get(f"read:{task_id}"):
+            self.store.set(f"read:{task_id}", entry["read"])
+            undo["unread"] = True
+        task = self.tasks.get(task_id)
+        if entry.get("status") == "done" and task["status"] == "review":
+            self.tasks.move(task_id, "done")
+            self.tasks.update(task_id, ended_at=entry.get("at") or task["ended_at"])
+            undo["status"] = "review"
+        return undo
+
+    # What a task's PRs and links are kept under: lists of links, and links (keys) to when or
+    # what.
+    HANDED_LISTS = ("prs", "cited", "links", "madelinks")
+    HANDED_MAPS = ("linksat", "linknames")
+
+    def hand_over(self, task: dict, made: dict, moves: str, since: str) -> dict:
+        """The PRs and links of work split off a task as a task of its own go with it (also from
+        a checkout outside Chief of Staff's folders): those its result names, or that its
+        worker opened or first reported since that work began (`since`), unless a result the
+        task keeps names them too; with the follows of those PRs. What it moved."""
+        keeps = " ".join(
+            [task["result"] or ""]
+            + [
+                item.get("text") or ""
+                for item in json.loads(self.store.get(f"results:{task['id']}") or "[]")
+            ]
+        )
+        kept = {threads.link_key(url) for url in threads.links(keeps)}
+        first = json.loads(self.store.get(f"linksat:{task['id']}") or "{}")
+        named = {threads.link_key(url) for url in threads.links(moves)}
+        named |= {key for key, at in first.items() if since and at >= since}
+        opened = self.store.all(
+            "SELECT c.output FROM commands c JOIN runs r ON r.id=c.run_id WHERE r.task_id IN "
+            "(?, ?) AND c.kind='pr' AND c.started_at>=?",
+            (task["id"], made["id"], since or "9"),
+        )
+        named |= {threads.link_key(url) for row in opened for url in threads.links(row["output"])}
+        goes = named - kept
+        moved: dict = {}
+        for name in self.HANDED_LISTS:
+            items = json.loads(self.store.get(f"{name}:{task['id']}") or "[]")
+            if going := [url for url in items if threads.link_key(url) in goes]:
+                self.store.set(
+                    f"{name}:{task['id']}", json.dumps([u for u in items if u not in going])
+                )
+                theirs = json.loads(self.store.get(f"{name}:{made['id']}") or "[]")
+                self.store.set(
+                    f"{name}:{made['id']}", json.dumps(list(dict.fromkeys(theirs + going)))
+                )
+                moved[name] = going
+        for name in self.HANDED_MAPS:
+            items = json.loads(self.store.get(f"{name}:{task['id']}") or "{}")
+            key_of = (lambda key: key) if name == "linksat" else threads.link_key
+            if going := {k: v for k, v in items.items() if key_of(k) in goes}:
+                self.store.set(
+                    f"{name}:{task['id']}",
+                    json.dumps({k: v for k, v in items.items() if k not in going}),
+                )
+                theirs = json.loads(self.store.get(f"{name}:{made['id']}") or "{}")
+                self.store.set(f"{name}:{made['id']}", json.dumps({**theirs, **going}))
+                moved[name] = going
+        follows = []
+        for key in threads.pull_requests(
+            " ".join(moved.get("prs", []) + moved.get("cited", []) + moved.get("links", []))
+        ):
+            bound = self.store.follow_tasks(task["session_id"], key)
+            if task["id"] in bound:
+                self.store.set(
+                    f"followtask:{task['session_id']}:{key}",
+                    json.dumps(
+                        list(dict.fromkeys(made["id"] if t == task["id"] else t for t in bound))
+                    ),
+                )
+                follows.append(key)
+        if follows:
+            moved["follows"] = follows
+        return moved
+
+    def hand_back(self, task_id: str, made_id: str, moved: dict, session_id: str):
+        """Undo of hand_over."""
+        for name in self.HANDED_LISTS:
+            if going := moved.get(name):
+                items = json.loads(self.store.get(f"{name}:{task_id}") or "[]")
+                self.store.set(f"{name}:{task_id}", json.dumps(list(dict.fromkeys(items + going))))
+        for name in self.HANDED_MAPS:
+            if going := moved.get(name):
+                items = json.loads(self.store.get(f"{name}:{task_id}") or "{}")
+                self.store.set(f"{name}:{task_id}", json.dumps({**items, **going}))
+        for key in moved.get("follows") or []:
+            bound = self.store.follow_tasks(session_id, key)
+            self.store.set(
+                f"followtask:{session_id}:{key}",
+                json.dumps(list(dict.fromkeys(task_id if t == made_id else t for t in bound))),
+            )
+
+    def router_copy(self, task: dict, made: dict, latest: dict):
+        """The report split off, as the Router's chat has it: the new task's."""
+        with suppress(RuntimeError):
+            line = self.store.one(
+                "SELECT id, meta FROM messages WHERE session_id=? AND kind='inbound' "
+                "AND json_extract(meta, '$.from')=? AND json_extract(meta, '$.task_id')=? "
+                "AND created_at>=? ORDER BY id LIMIT 1",
+                (self.runtime.router_id(), task["session_id"], task["id"], latest["created_at"]),
+            )
+            if line:
+                meta = json.loads(line["meta"] or "{}")
+                self.store.update_message_meta(
+                    line["id"], {**meta, "task_id": made["id"], "title": made["title"]}
+                )
 
     def last_message(self, session_id: str, task_id: str) -> int:
         """The id of the newest message about this task: when it last saw activity."""
@@ -3656,6 +3791,15 @@ class TaskActions:
         self.store.delete(f"news:{task_id}")
         if undo.get("results"):
             self.store.set(f"results:{original}", undo["results"])
+        # Its follow-up's result its own again: not read yet, to accept; its PRs and links.
+        if undo.get("unread"):
+            self.store.delete(f"read:{original}")
+        if undo.get("status") and self.tasks.get(original)["status"] == "done":
+            self.tasks.move(original, undo["status"])
+        if undo.get("handed"):
+            self.hand_back(original, task_id, undo["handed"], made["session_id"])
+        for name in (*self.HANDED_LISTS, *self.HANDED_MAPS):
+            self.store.delete(f"{name}:{task_id}")
         back = self.store.one(
             "SELECT id FROM runs WHERE task_id=? ORDER BY started_at DESC LIMIT 1", (original,)
         )
@@ -3738,7 +3882,7 @@ class TaskActions:
         ]
         return self.base_from(found[-1]["at"], found[-1]["trees"]) if found else {}
 
-    def split_off(self, task: dict, title: str) -> dict:
+    def split_off(self, task: dict, title: str, report: str = "") -> dict:
         """A report on work apart from a task's result (its worker says it is another
         deliverable, or it is on another branch than the task's open PR): a new task of the
         same worker gets it, with what asked for it since the task was taken up again (the
@@ -3792,6 +3936,9 @@ class TaskActions:
             )
         if touched := self.store.get(f"touched:{task['id']}"):
             self.store.set(f"touched:{made['id']}", touched)
+        if task["result"]:
+            # Its PRs and links (the PR it opened in a checkout of its own, say): this work's.
+            self.hand_over(task, made, report, since or self.run_began(task["id"]))
         names = [{"title": f"split from \u201c{task['title']}\u201d", "at": now(), "by": "worker"}]
         self.store.set(f"titles:{made['id']}", json.dumps(names))
         # A task with no result yet stays as it is: its worker goes on with it (the task it is
@@ -3804,6 +3951,9 @@ class TaskActions:
             for key in ("followup", "morefor", "newresult", "ownchange"):
                 self.store.delete(f"{key}:{task['id']}")
             if task["status"] in OPEN and (was := self.reopened(task["id"])):
+                # Followed up on, its result was seen: not New again (owner report 0.1.58).
+                if not self.store.get(f"read:{task['id']}"):
+                    self.store.set(f"read:{task['id']}", self.run_began(task["id"]) or now())
                 self.tasks.move(task["id"], was)
             self.store.set(f"turntask:{task['session_id']}", made["id"])
         if task["result"]:
@@ -3890,7 +4040,18 @@ class TaskActions:
         if kept and kept[0].get("text") == task["result"]:
             return
         at = task.get("ended_at") or task["updated_at"]
-        kept.insert(0, {"at": at, "text": task["result"]})
+        entry = {"at": at, "text": task["result"]}
+        # How the owner had it: read (followed up on, it was), accepted. Its follow-up split
+        # off as a task of its own (split), it is so again, not a new result (owner report
+        # 0.1.58).
+        reopened = self.store.get(f"reopened:{task['id']}") or ""
+        if read := self.store.get(f"read:{task['id']}") or (
+            reopened and self.run_began(task["id"])
+        ):
+            entry["read"] = read
+        if (was := reopened or task["status"]) in FINISHED:
+            entry["status"] = was
+        kept.insert(0, entry)
         self.store.set(f"results:{task['id']}", json.dumps(kept[:10]))
 
     def news(self, task_id: str, text: str):

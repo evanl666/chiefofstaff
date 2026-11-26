@@ -11,6 +11,10 @@ W2  (E140) a worker in one long shell step whose output keeps growing (a line ev
 W3  (E140) a worker in a silent step (`sleep`) is flagged once 45 s pass without output, and the
     Watchdog is told what it is at: "Now: in a turn since HH:MM (tool `…` running since HH:MM,
     no output yet)".
+W4  (owner report 0.1.58) a research-only result the owner followed up on with new work ("now
+    write it as a file"), that work reported on the same task and split off as a task of its
+    own: the first result is as the owner had it (seen, not New), the file and the work go
+    with the new task (its result, to accept, not read yet).
 
 Uses your signed-in Copilot CLI (a Copilot home of its own, made from your config) and consumes
 premium requests; the Copilot sessions it creates are deleted at the end. Set TMPDIR to a
@@ -18,7 +22,7 @@ scratch folder of yours; LIVE_QA9_PORT moves its ports (the app's, and the stand
 above it, or LIVE_QA9_SLACK_PORT); QA9_MODEL picks the model. Scenarios by name run alone
 (W2 and W3 run side by side).
 
-    LIVE_QA9_PORT=18797 uv run --with playwright python scripts/live_qa9.py [W1] [W2] [W3]
+    LIVE_QA9_PORT=18797 uv run --with playwright python scripts/live_qa9.py [W1] [W2] [W3] [W4]
 """
 
 import asyncio
@@ -45,7 +49,7 @@ MODEL = os.environ.get("QA9_MODEL", "claude-sonnet-5.5")
 STALL = "45"
 SNAPSHOT = "S-4471"
 FINISHED = {"review", "done"}
-SCENARIOS = {"W1", "W2", "W3"}
+SCENARIOS = {"W1", "W2", "W3", "W4"}
 
 
 class Run:
@@ -167,6 +171,53 @@ async def w1_a_worker_waiting_for_a_peer_stays_at_work_and_is_woken(run: Run):
     run.check("W1 it did the work then", SNAPSHOT in written, written[:80])
 
 
+async def w4_a_follow_up_split_off_leaves_the_result_seen(run: Run):
+    await run.say(
+        "Start a worker 'Count Planets' with no project: research only, change and write "
+        "nothing. It answers how many planets the Solar System has, in one sentence, and "
+        "reports done."
+    )
+    worker = await run.worker("Count Planets")
+    task = await run.finished((await run.task_of(worker["id"]))["id"], 600)
+    first = task["result"]
+    # The owner reads it in its chat and asks for more work there.
+    await run.app.post(f"/api/tasks/{task['id']}/follow-up", {"text": (
+        "Now write the eight planets' names, one a line, into planets.txt in your folder, "
+        f"and report that as done on task {task['id']}.")})  # fmt: skip
+
+    async def reported():
+        now = await run.app.get(f"/api/tasks/{task['id']}")
+        others = [t for t in (await run.app.get("/api/state"))["tasks"]
+                  if t["session_id"] == worker["id"] and t["id"] != task["id"]]  # fmt: skip
+        if now["status"] in FINISHED and now.get("result") != first:
+            return now, None  # Reported on the task: split it off as the Router would.
+        if others and others[0]["status"] in FINISHED:
+            return now, others[0]  # Reported as a task of its own.
+        return None
+
+    _, made = await wait_for("the follow-up's report", reported, 900, run.app)
+    if made is None:
+        try:
+            made = await run.app.post(
+                f"/api/tasks/{task['id']}/split", {"text": "Write the planets file"}
+            )
+        except RuntimeError:  # The Router split it first.
+            _, made = await wait_for("its split", reported, 120, run.app)
+    kept = await run.app.get(f"/api/tasks/{task['id']}")
+    made = await run.app.get(f"/api/tasks/{made['id']}")
+    run.check(
+        "W4 the first result is kept", kept.get("result") == first, kept.get("result", "")[:80]
+    )
+    run.check(
+        "W4 seen, not New again",
+        bool(kept.get("read")),
+        f"{kept['status']} read={kept.get('read')}",
+    )
+    run.check("W4 the follow-up's result is the new task's, to accept",
+              made["status"] == "review" and "planets.txt" in (made.get("result") or ""),
+              f"{made['status']}: {(made.get('result') or '')[:80]}")  # fmt: skip
+
+
 async def long_step(run: Run, title: str, script: Path) -> tuple[dict, dict]:
     await run.say(
         f"Start a worker titled '{title}' (no project): run {script} in the foreground as one "
@@ -239,6 +290,8 @@ async def main():
                 "mac_notifications": False, "digest_time": ""})  # fmt: skip
             if "W1" in wanted:
                 await w1_a_worker_waiting_for_a_peer_stays_at_work_and_is_woken(run)
+            if "W4" in wanted:
+                await w4_a_follow_up_split_off_leaves_the_result_seen(run)
             parts = []
             if "W2" in wanted:
                 parts.append(w2_a_long_step_with_growing_output_is_not_flagged(run))

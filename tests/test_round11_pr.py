@@ -412,3 +412,163 @@ async def test_a_dry_run_push_changes_no_pr(harness):
     assert roles(runtime, task) == {
         "acme/app#12": "referenced", "acme/app#13": "referenced", "acme/app#14": "modified",
     }  # fmt: skip
+
+
+# What GitHub annotates a job with when it refuses to start it (the account's billing).
+BILLING = (
+    "The job was not started because recent account payments have failed or your spending "
+    "limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+)
+
+
+def refused(number=15):
+    """A PR whose CI GitHub never started: each job failed within seconds, annotated so."""
+    job = "https://github.com/acme/app/actions/runs/45/job/"
+    rollup = [
+        {"__typename": "CheckRun", "name": "already-tested", "workflowName": "CI",
+         "status": "COMPLETED", "conclusion": "SKIPPED", "detailsUrl": f"{job}116",
+         "startedAt": "2999-01-01T00:00:18Z", "completedAt": "2999-01-01T00:00:17Z"},
+        {"__typename": "CheckRun", "name": "rules-and-server", "workflowName": "CI",
+         "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": f"{job}211",
+         "startedAt": "2999-01-01T00:00:17Z", "completedAt": "2999-01-01T00:00:19Z"},
+        {"__typename": "CheckRun", "name": "e2e", "workflowName": "CI",
+         "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": f"{job}446",
+         "startedAt": "2999-01-01T00:00:17Z", "completedAt": "2999-01-01T00:00:19Z"},
+    ]  # fmt: skip
+    return pr_view(number, statusCheckRollup=rollup, mergeStateStatus="UNSTABLE",
+                   reviewDecision="", title="Phone app")  # fmt: skip
+
+
+def billing_refused(harness, number=15):
+    harness.gh_replies[f"pr view {url(number)}"] = refused(number)
+    for job in (211, 446):
+        harness.gh_replies[f"api repos/acme/app/check-runs/{job}/annotations"] = json.dumps(
+            [{"path": ".github", "annotation_level": "failure", "message": BILLING}]
+        )
+
+
+def opens_pr(harness, worker, number=15):
+    """Its worker opens a PR from a checkout outside Chief of Staff's folders, with a long PR
+    body first (the command line kept is cut before `gh pr create`)."""
+    body = "The phone app, and the server support it needs. " * 60
+    command = (
+        f"cd /src/app && cat > /src/pr.md <<'EOF'\n{body}\nEOF\ngh pr create --body-file /src/pr.md"
+    )
+    shell(harness, worker, "pr1", command, url(number))
+
+
+def annotation_reads(harness) -> int:
+    return sum("/annotations" in " ".join(call) for call, _ in harness.gh_calls)
+
+
+async def test_a_follow_up_split_off_leaves_the_result_seen_and_ci_that_never_ran_is_no_failure(
+    harness,
+):
+    """Owner report 0.1.58: an evaluation the owner had read and followed up on in its chat
+    ("go build it") came back as New to accept once the Router split the build off, with the
+    PR the build opened (from a checkout of its own) and "Checks are failing" on it, though
+    GitHub had never started its CI (the account's Actions minutes used up)."""
+    runtime = await harness.connect()
+    harness.own_pull("acme/app", 15)
+    worker, task = await spawn(runtime, harness.router_id, "Evaluate a phone app for Sly Town")
+    await call_tool(runtime, "report", worker, status="done",
+                    summary="Research only: no code written, nothing made.")  # fmt: skip
+    await settle(runtime)
+    # Read in its chat, not opened on Home: followed up on, it was seen.
+    await runtime.task_actions.follow_up(task["id"], "Go build it, phones only.")
+    shell(harness, worker, "b1", "make app", "app built")
+    harness.session(worker).emit("assistant.message", content="Built. Opening the PR next.")
+    opens_pr(harness, worker)
+    await settle(runtime)
+    billing_refused(harness)
+    built = f"The phone app is in beta. The server part: {url(15)}"
+    await call_tool(runtime, "report", worker, status="done", task_id=task["id"],
+                    summary=built)  # fmt: skip
+    await settle(runtime)
+    split = await call_tool(runtime, "split_task", harness.router_id, task_id=task["id"],
+                            title="Deliver the phone app to beta")  # fmt: skip
+    assert split.result_type == "success", split.text_result_for_llm
+    await settle(runtime)
+    [made] = [t for t in runtime.tasks.for_session(worker) if t["id"] != task["id"]]
+
+    kept = shown(runtime, task)
+    assert kept["result"].startswith("Research only") and kept["read"], "seen: not New again"
+    assert url(15) not in runtime.task_actions.pr_urls(kept), "the PR is the build's"
+    assert not [pr for pr in kept["receipts"]["prs"] if pr["label"] == "acme/app#15"]
+    assert not any("Checks are failing" in flag for flag in kept["receipts"]["flags"])
+    assert not kept["receipts"]["build"] and not kept["links"], "the build's, not the evaluation's"
+
+    build = shown(runtime, made)
+    assert build["receipts"]["build"]["passed"]
+    assert "acme/app#15" in runtime.task_actions.opened_prs(made["id"])
+    [pr] = build["receipts"]["prs"]
+    assert (pr["role"], pr["checks"], pr["failing"]) == ("created", "not_run", [])
+    assert build["receipts"]["notes"] == [
+        "CI didn't run on app#15: GitHub Actions minutes are used up"
+    ]
+    assert not any("failing" in flag.lower() for flag in build["receipts"]["flags"])
+    assert runtime.task_actions.own_pr_standing(runtime.tasks.get(made["id"])) == ("", "")
+    assert build["attention"] != "pr-failing"
+    told = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
+    assert told[-1]["meta"]["task_id"] == made["id"], "the Router's copy names the new task"
+
+    # Read once per check run: the next refresh asks GitHub nothing more of them.
+    reads = annotation_reads(harness)
+    assert reads == 2
+    await runtime.task_actions.refresh_prs(made["id"], first="acme/app#15")
+    assert annotation_reads(harness) == reads
+
+
+async def test_an_accepted_result_followed_up_and_split_off_stays_accepted(harness):
+    """The follow-up of an accepted result split off as a task of its own: the result is
+    accepted still, not back to accept; undoing the split makes the follow-up's its own again."""
+    runtime = await harness.connect()
+    worker, task = await spawn(runtime, harness.router_id, "Evaluate a phone app for Sly Town")
+    await call_tool(runtime, "report", worker, status="done", summary="Research only.")
+    await settle(runtime)
+    runtime.task_actions.mark_read(task["id"])
+    runtime.task_actions.accept(task["id"])
+    await runtime.task_actions.follow_up(task["id"], "Go build it, phones only.")
+    await call_tool(runtime, "report", worker, status="done", task_id=task["id"],
+                    summary="The phone app is in beta.")  # fmt: skip
+    assert runtime.tasks.get(task["id"])["status"] == "review"
+    made = runtime.task_actions.split(task["id"], "Deliver the phone app to beta")
+    kept = shown(runtime, task)
+    assert (kept["status"], kept["result"], kept["read"]) == ("done", "Research only.", True)
+    assert made["status"] == "review" and not made["read"]
+    runtime.task_actions.merge_back(made["id"])
+    back = shown(runtime, task)
+    assert (back["status"], back["read"]) == ("review", False)
+    assert back["result"] == "The phone app is in beta."
+
+
+async def test_work_reported_as_a_new_task_takes_the_pr_it_opened_with_it(harness):
+    """new_task_title: the PR its worker opened from a checkout of its own in the owner's
+    follow-up, and the links it reported meanwhile, are the new task's; the result followed
+    up on is as the owner had it (read), and the Router hears of the new task."""
+    runtime = await harness.connect()
+    harness.own_pull("acme/app", 15)
+    worker, task = await spawn(runtime, harness.router_id, "Evaluate a phone app for Sly Town")
+    await call_tool(runtime, "report", worker, status="done", summary="Research only.")
+    await settle(runtime)
+    # Read in its chat, not opened on Home: followed up on, it was seen.
+    await runtime.task_actions.follow_up(task["id"], "Go build it, phones only.")
+    opens_pr(harness, worker)
+    blocked = f"Opened {url(15)}; create the app at https://store.acme.dev/apps"
+    await call_tool(runtime, "report", worker, status="blocked", task_id=task["id"],
+                    summary=blocked)  # fmt: skip
+    await runtime.task_actions.follow_up(task["id"], "Created it.")
+    billing_refused(harness)
+    await call_tool(runtime, "report", worker, status="done", task_id=task["id"],
+                    new_task_title="Deliver the phone app to beta",
+                    summary="The phone app is in beta.")  # fmt: skip
+    await settle(runtime)
+    [made] = [t for t in runtime.tasks.for_session(worker) if t["id"] != task["id"]]
+    kept = shown(runtime, task)
+    assert (kept["status"], kept["result"], kept["read"]) == ("review", "Research only.", True)
+    assert url(15) not in runtime.task_actions.pr_urls(kept)
+    assert not kept["links"]
+    assert url(15) in runtime.task_actions.pr_urls(made)
+    assert "https://store.acme.dev/apps" in shown(runtime, made)["links"]
+    told = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
+    assert told[-1]["meta"]["task_id"] == made["id"]

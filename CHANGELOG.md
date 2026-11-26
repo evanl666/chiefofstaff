@@ -16,6 +16,13 @@ no longer takes long work for silence.
   are used up*; it brings nothing under *Needs you*, its worker hears nothing to fix,
   Prepared for you prepares no fix, and Merge when ready waits for CI to run. A check that ran
   and failed still says so.
+- **A result you had seen stays seen when its follow-up becomes a task of its own.** You read
+  an evaluation and told its worker in its chat to build it; once the build was reported and
+  split off as a task of its own, the evaluation came back as *New*, to accept again, with the
+  build's PR and its checks on it. Now it is as you had it (read, and accepted if you had
+  accepted it), and the PR and links the follow-up made, even from a checkout outside Chief of
+  Staff's folders, go with the new task, as the Router's copy of the report does. A PR a worker
+  opens with a long description is its task's own work too.
 - **A worker waiting for another worker stays at work.** A worker told to wait for another
   one's message ended its turn with "I'll launch once <worker> sends the release", and its task
   was filed as done with "Nothing is launched yet" as its result. A wait is now read from the

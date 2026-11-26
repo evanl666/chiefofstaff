@@ -389,8 +389,9 @@ class Events:
         if row := self.store.find_session(session_id):
             # (A branch update that failed partway: the worker is told to put its tree back.)
             self.runtime.update_failed(row, ran, code, output)
-        if code == 0 and ran["run_id"] and OPENS_PR.search(ran["command"]):
-            # The PR it opened is its task's own work (not one its report only mentions).
+        if code == 0 and ran["run_id"] and (kind == "pr" or OPENS_PR.search(ran["command"])):
+            # The PR it opened is its task's own work (not one its report only mentions); its
+            # kind was read from the whole command (`gh pr create` after a long PR body).
             run = self.store.one("SELECT task_id FROM runs WHERE id=?", (ran["run_id"],))
             if run and (urls := threads.PR_URL.findall(output)):
                 self.runtime.task_actions.record_opened(
