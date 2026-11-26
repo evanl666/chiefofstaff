@@ -100,7 +100,11 @@ follows up on your next message (*Following up*, not under *Needs you*, then). I
 to the Router's note about finished work never is. A message there that asks for something else ("New, separate task: add mod()
 on a new branch", another PR or question) is told apart by the worker that reads it, not by
 its words: it reports that work as a task of its own, with your message and what it ran for
-it, and the task it was on keeps its result (or, still at work, goes on).
+it, and the task it was on keeps its result (or, still at work, goes on). Reported on the task
+and then moved to a task of its own (*Move the latest result to a new task…*, or the Router
+doing so), the same: the PRs, links and commands of that work go with it, wherever its checkout
+was, and the result it followed up on is as you had it (seen, not *New*; accepted, if you had
+accepted it).
 More asked of a reported result (*Follow up…*, or the Router continuing it)
 comes back as the whole result, updated: its worker is told that its report replaces the
 result, and one that reports only what it added is asked once for the whole. Written to it from Home (@ in the Router chat), its answer shows there too
