@@ -42,6 +42,31 @@
   task, with the same preview, private-data check, expiry, link and *Revoke*. From an earlier
   report whose card has a newer result since, the dialog says it shares the card as it is now: its
   latest result, with the checks and criteria that go with it. A report of no task has none.
+Home answers at once: a button on a card shows it is at work as you press it, Nudge no longer
+waits for its worker, and the page's state is read several times faster.
+
+- **A card's button says it is at work as you press it.** Nudge, Accept, Follow up, Request
+  changes, Retry, Mark ended, Stop tracking, Dismiss and the other actions on a task's card showed
+  nothing until Chief of Staff answered (about 3 seconds for Nudge on a quiet worker). The button
+  you press now shows a small spinner at once, in its own width (an item of **⋯**: that button);
+  when the action takes a moment, what it does is said beside it (*Asking its worker…*,
+  *Sending to its worker…*). Nothing on the card moves; success and failure are as before.
+- **Nudge answers at once.** It waited for its worker to be reopened and the message delivered.
+  Now the nudge is recorded and the card updated at once, and its worker is reopened and asked
+  right after. If it can't be asked (its session can't be reopened, the message can't be
+  delivered), the nudge is undone and its card says why, with a toast, as a failed action does
+  (with *Start a fresh worker with its context* where that is the way on). *Retry check-back*
+  answers at once too. Follow up, Request changes and Retry still wait for the delivery (a
+  failed one puts the task back as it was and keeps your words in the form), with the spinner.
+- **The page's state is read several times faster.** On a data folder of 22,000 messages, 81
+  tasks and a worker with 6,000 commands, it took 0.2-0.5 s under load (the server answering
+  nothing else meanwhile); now 40-80 ms. Each task's messages and credits are found by index (two
+  new indexes, made at the first start), and receipts and results that did not change are not
+  worked out again. The commands behind a task's receipts are no longer in it (the page never
+  showed them; `GET /api/tasks/<id>` still has them): about 8% smaller.
+- **A burst of events reads the state once.** The page read the whole state 150 ms after each
+  event that asked for it, however many came, several at a time; now once shortly after the
+  first, at most once a second while more come, one at a time.
 
 ## 0.1.59 (2026-11-26)
 
