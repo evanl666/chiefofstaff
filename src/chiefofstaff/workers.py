@@ -1697,7 +1697,10 @@ class Workers:
             return  # (A notice may come first: why it waited to open.)
         if events is None:
             try:
-                read = list(await session.get_events())
+                # (A big Copilot session: its log's latest part, never its whole history.)
+                read = list(
+                    await self.runtime.delivery.conversation(row["id"], session, latest=True)
+                )
             except Exception:
                 logger.warning("Could not read the history of %s.", row["id"], exc_info=True)
                 return

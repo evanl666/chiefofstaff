@@ -24,6 +24,10 @@ from . import agents, compat
 from .backend import (
     COPILOT_AGENT,
     NotStartedError,
+    big_log,
+    logged_event,
+    read_log,
+    received_in_log,
     running_background,
     stop_background,
     take_queued,
@@ -98,6 +102,11 @@ class FreshStartError(RuntimeError):
         self.fresh = session_id
 
 
+class TooLargeError(RuntimeError):
+    """A Copilot session too large for Copilot to reopen here (Runtime.too_large): never
+    resumed; what it is sent waits for the owner's Start fresh, as FreshStartError's."""
+
+
 def connection_lost(error: BaseException | None) -> bool:
     """Whether an error (or one it came from) says the Copilot CLI's connection ended."""
     for _ in range(10):  # A chain of causes, not a loop.
@@ -114,6 +123,29 @@ class Delivery:
         self.runtime = runtime
         self.store = runtime.store
         self.states = runtime.states
+        # What each big Copilot session's log showed it received (conversation): Copilot
+        # session id -> (where that read ended, its user messages).
+        self.logs_read: dict[str, tuple[int, list[dict]]] = {}
+
+    async def conversation(self, session_id: str, session, latest: bool = False) -> list:
+        """A session's history as get_events gives it, of which its user messages are read
+        (what it received). Asked of the session; but a Copilot session whose log is
+        backend.BIG_LOG or more is never asked for it whole (an answer that size killed
+        Copilot's connection): its user messages are read from that log instead, from where
+        the last read ended; or, `latest`, the events of its log's latest part (LOG_TAIL)."""
+        if self.runtime.agent(session_id) == COPILOT_AGENT:
+            backend, _ = self.runtime.connection(COPILOT_AGENT)
+            copilot = getattr(session, "session_id", "") or self.runtime.copilot_id(session_id)
+            log = backend.session_log(copilot) if backend else None
+            if log and await asyncio.to_thread(big_log, log):
+                if latest:
+                    events, _, _ = await asyncio.to_thread(read_log, log, 0)
+                    return [logged_event(event) for event in events]
+                known = self.logs_read.get(copilot, (0, []))
+                read = await asyncio.to_thread(received_in_log, log, known)
+                self.logs_read[copilot] = read
+                return [logged_event(event) for event in read[1]]
+        return await session.get_events()
 
     async def deliver(
         self,
@@ -217,7 +249,9 @@ class Delivery:
                 # Kept to send: it goes out once Copilot runs again (Runtime.resume_working).
                 self.copilot_down(session_id)
                 return message
-            if agent == COPILOT_AGENT and refused_for_version(exc):
+            if agent == COPILOT_AGENT and (
+                refused_for_version(exc) or isinstance(exc, TooLargeError)
+            ):
                 raise self.fresh_needed(row) from exc  # Kept for it, unlike any other.
             # Not replayed later: the caller sees the error (a watcher re-polls the event).
             self.store.update_message_meta(message["id"], meta or {})
@@ -254,7 +288,9 @@ class Delivery:
                 logger.warning("Could not deliver held messages to %s.", session_id, exc_info=True)
                 if self.copilot_gone(exc, backend, connection, agent):
                     self.copilot_down(session_id)  # Not Copilot's own output: it reconnects.
-                elif agent == COPILOT_AGENT and refused_for_version(exc):
+                elif agent == COPILOT_AGENT and (
+                    refused_for_version(exc) or isinstance(exc, TooLargeError)
+                ):
                     self.fresh_needed(row)
                     return  # Kept until the owner starts it fresh: tried again, it would fail.
                 elif attempt == 0:
@@ -270,11 +306,13 @@ class Delivery:
 
         self.runtime.background(later())
 
-    def fresh_needed(self, row: dict) -> FreshStartError:
+    def fresh_needed(self, row: dict, why: str = "") -> FreshStartError:
         """A session Copilot can't reopen, nor a fresh one go on for: said once in its chat,
-        plainly, with Start fresh; what it was sent kept for that."""
+        plainly (`why` it can't, when said), with Start fresh; what it was sent kept for
+        that."""
         who = "This worker's" if row["role"] == WORKER else "Its"
-        text = f"{who} Copilot session can't be reopened; your message is kept for a fresh start."
+        why = why or "can't be reopened"
+        text = f"{who} Copilot session {why}; your message is kept for a fresh start."
         if not self.store.get(f"freshneeded:{row['id']}"):
             note = self.runtime.add_message(row["id"], "error", text, {"fresh": True})
             self.store.set(f"freshneeded:{row['id']}", str(note["id"]))
@@ -624,7 +662,7 @@ class Delivery:
                 arrived = any(
                     getattr(event.type, "value", "") == "user.message"
                     and digest(getattr(event.data, "content", "") or "") == marker["digest"]
-                    for event in await session.get_events()
+                    for event in await self.conversation(session_id, session)
                 )
         except SettingsChangedError:
             pass  # Not opened (its timeline says why): unknown, sent again once it may.
@@ -647,7 +685,7 @@ class Delivery:
                 return messages
             shown = "\n".join(
                 getattr(event.data, "content", "") or ""
-                for event in await session.get_events()
+                for event in await self.conversation(session_id, session)
                 if getattr(event.type, "value", "") == "user.message"
             )
         except SettingsChangedError:
@@ -812,7 +850,7 @@ class Delivery:
             self.check_echo_later(session_id, session, sent, later)  # check_started has it.
             return
         try:
-            events = await session.get_events()
+            events = await self.conversation(session_id, session)
         except Exception:
             logger.warning("Could not check whether %s got a message.", session_id, exc_info=True)
             self.check_echo_later(session_id, session, sent, later)
@@ -926,7 +964,7 @@ class Delivery:
         if self.states.handle(session_id) is not session:
             return
         try:
-            events = await session.get_events()
+            events = await self.conversation(session_id, session)
         except Exception:
             logger.warning("Could not check whether %s started.", session_id, exc_info=True)
             return
