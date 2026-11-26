@@ -341,11 +341,15 @@ async def refund_team(runtime, looked_minutes: int = 22) -> dict:
     await tool("report", mail, status="progress", summary="邮件模板已完成，正在接入发送队列。")
     await tool("report", ui, status="progress", summary="确认弹窗接上 API，金额按分显示为元。")
     with_prs(runtime, ui_task, [pull(415, "订单页退款按钮和确认弹窗", draft=True, at=at(19))])
-    await tool("ask_decision", ui, question="部分退款要支持吗？",
-               why="API 已支持按金额退款。只做全额，弹窗更简单，测试也少一半。",
-               options=[{"choice": "只允许全额退款", "effect": "弹窗只有确认按钮；今天就能交付"},
-                        {"choice": "支持部分退款", "effect": "弹窗加金额输入，上限为实付金额；多约 30 分钟"}],
-               recommendation="支持部分退款：客服最常见的诉求是只退运费。")  # fmt: skip
+    # (Another round's cards may wait too: this is another decision.)
+    said = await tool("ask_decision", ui, question="部分退款要支持吗？",
+                      why="API 已支持按金额退款。只做全额，弹窗更简单，测试也少一半。",
+                      options=[{"choice": "只允许全额退款", "effect": "弹窗只有确认按钮；今天就能交付"},
+                               {"choice": "支持部分退款", "effect": "弹窗加金额输入，上限为实付金额；多约 30 分钟"}],
+                      recommendation="支持部分退款：客服最常见的诉求是只退运费。",
+                      distinct=True, seen_precedents=True)  # fmt: skip
+    if not any(d["kind"] == "decision" and d["session_id"] == ui for d in store.drafts()):
+        raise AssertionError(f"订单页's decision card: {said}")
     runtime.states.handle(ui).emit("session.idle")
     await settle(runtime)
     # As the minute it shows: the API took 38 min and finished 27 min ago; 订单页 asked 18 min
@@ -430,7 +434,12 @@ async def refund_done(runtime, found: dict):
         await settle(runtime)
 
     for draft in store.drafts():
-        if draft["kind"] == "decision" and draft["status"] == "pending":
+        # 订单页's own (another round's cards are not this scene's to answer).
+        if (
+            draft["kind"] == "decision"
+            and draft["status"] == "pending"
+            and draft["session_id"] == found["ui"]
+        ):
             await runtime.drafts.resolve(
                 draft["id"], DraftDecision(action="answer", text="支持部分退款")
             )
