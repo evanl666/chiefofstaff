@@ -488,6 +488,10 @@ summary { min-height: 28px; }
 }
 .card .more { margin-top: 4px; padding: 0; background: none; color: var(--accent); font-size: var(--small); font-weight: 500; }
 .card .more:not(:disabled):hover { text-decoration: underline; opacity: 1; }
+/* Share… on a finished report in a chat: quiet beside its time, as a line's View is. */
+.card .head .share-from { flex: none; font-size: var(--small); border-radius: 6px; }
+.card:hover .head .share-from, .card .head .share-from:focus-visible { color: var(--accent); }
+.card .head .share-from:not(:disabled):hover { background: var(--hover); color: var(--accent); }
 /* Status is said by a chip, not by colored edges; what needs the owner is tinted. */
 .card.attention { background: var(--amber-soft); border-color: transparent; }
 

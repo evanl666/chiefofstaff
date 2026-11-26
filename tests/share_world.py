@@ -1,9 +1,11 @@
 """A GitHub for share links' tests: gh as shares.py calls it (accounts signed in, their tokens,
 `api user`, gists made, listed and deleted) and GitHub's API as the viewer and an import read a
-gist (an httpx transport), with the faults a test asks for. And a finished card to share."""
+gist (an httpx transport), with the faults a test asks for. And a finished card to share, and a
+worker's task finished twice with its reports in its chat and on Home."""
 
 import json
 import secrets
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -188,3 +190,39 @@ async def finished_task(harness, title="Fix the flaky login test", result=RESULT
     task = runtime.tasks.get(spawned["task_id"])
     assert task["status"] == "review"
     return task
+
+
+SHARE_REPORT_TITLE = "Speed up the nightly export"
+SHARE_REPORT_FIRST = "\n".join(
+    ["Made the nightly export faster by batching its queries.", ""]
+    + [f"- Step {n}: batched the {name} query" for n, name in enumerate(
+        ("orders", "refunds", "invoices", "customers", "addresses", "payments", "coupons",
+         "shipments", "returns", "notes", "taxes", "currencies", "regions", "audits"), 1)]
+    + ["", "The export took 41 minutes; it now takes 9."]
+)  # fmt: skip
+SHARE_REPORT_SECOND = (
+    "Made the nightly export faster with one streaming query instead of batches.\n\n"
+    "- The export took 41 minutes; it now takes 4.\n- Memory stays under 300 MB."
+)
+
+
+def share_report_seeded(runtime) -> dict:
+    """A worker's task finished twice (its first result replaced by its second), its reports in
+    its chat and its line on Home; beside them, a progress report and a report of no task."""
+    store = runtime.store
+    router = store.get("router_id")
+    session = "wsharereport"
+    store.create_session(session, "worker", SHARE_REPORT_TITLE, "idle", cwd=str(Path.home()))
+    task = runtime.tasks.create(session, SHARE_REPORT_TITLE, SHARE_REPORT_TITLE, status="running")
+    done = {"status": "done", "task_id": task["id"]}
+    runtime.add_message(session, "report", "Profiling the export's queries first.",
+                        {"status": "progress", "task_id": task["id"]})  # fmt: skip
+    runtime.add_message(session, "report", SHARE_REPORT_FIRST, done)
+    runtime.add_message(session, "report", SHARE_REPORT_SECOND, done)
+    runtime.add_message(session, "report", "Checked the disk: 40 GB free, nothing to do.",
+                        {"status": "done", "task_id": None})  # fmt: skip
+    runtime.add_message(router, "inbound", SHARE_REPORT_SECOND,
+                        {"from": session, "title": SHARE_REPORT_TITLE, **done})  # fmt: skip
+    runtime.tasks.move(task["id"], "review", result=SHARE_REPORT_SECOND)
+    runtime.bus.publish("state")
+    return {"session": session, "task": task["id"]}

@@ -13,7 +13,7 @@ import { setupAction, setupKind } from "./agentsetup.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
 import { duck } from "./mascot.js";
-import { sharedEntry } from "./share.js";
+import { openShare, sharedEntry } from "./share.js";
 import { avatar, labelOf, peerOf, peerLine, showTeam, TEAM, teamOfPeers, teamOfWorker, waitingWords, workerLineage } from "./team.js";
 import { leaveTeamPage } from "./teampage.js";
 // A chat loads a page of its messages at a time: its latest, then earlier ones when asked.
@@ -878,13 +878,39 @@ function showChip(node, status = "done") {
   node.textContent = review ? MARKERS.review : STATUS_CHIP[status];
   node.classList.toggle("waiting", review);
 }
-// As its task stands now: accepted since, it is done.
+// As its task stands now: accepted since, it is done; at work again, no Share… until finished.
 export function refreshChips() {
   for (const node of document.querySelectorAll("#timeline .chip[data-task]")) showChip(node);
+  for (const node of document.querySelectorAll("#timeline [data-share-task]")) node.hidden = !shareable(node.dataset.shareTask);
   refreshFolds();
 }
-// A card: a header (what, status, time, optional "Open"), then the markdown body. Long bodies fold.
-function card({ label, body, className = "", status, task = "", time, open }) {
+// Share… on a finished report in a chat (its worker's, the Router's, its line on Home): its
+// task's card, as the card's own Share… opens it (share.js). None for a report of no task, nor
+// while its task is not finished; one that ended days ago is not listed here: the server says
+// if it can't be shared.
+function shareable(taskId) {
+  const task = tasks().find((item) => item.id === taskId);
+  return !task || ["review", "done"].includes(task.status);
+}
+function shareButton(message, className) {
+  const meta = message.meta || {};
+  if (meta.status !== "done" || !meta.task_id || !message.id) return null;
+  return el("button", {
+    type: "button",
+    class: className,
+    text: "Share…",
+    title: "Share this card as a link",
+    "data-share-task": meta.task_id,
+    hidden: !shareable(meta.task_id),
+    onclick: (event) => {
+      event.stopPropagation();
+      openShare({ id: meta.task_id, title: tasks().find((item) => item.id === meta.task_id)?.title }, { message: message.id });
+    },
+  });
+}
+// A card: a header (what, status, time, optional Share… and "Open"), then the markdown body. Long
+// bodies fold.
+function card({ label, body, className = "", status, task = "", time, open, share = null }) {
   const content = el("div", { class: "body markdown", html: markdown(body) });
   const node = el(
     "div",
@@ -896,6 +922,7 @@ function card({ label, body, className = "", status, task = "", time, open }) {
       chip(status, task),
       el("span", { class: "spacer" }),
       time ? el("time", { text: clock(time), title: new Date(time).toLocaleString() }) : null,
+      share,
       open ? el("button", { type: "button", class: "open", text: "Open", onclick: open }) : null,
     ),
     content,
@@ -913,11 +940,12 @@ function card({ label, body, className = "", status, task = "", time, open }) {
 }
 // One line in the Home chat: a mark, what happened, a link to where it is; with `body` (or
 // `content`, drawn already), it opens in place to read it all.
-function eventLine({ mark = "·", kind = "", text, time, view = null, viewText = "View", body = "", content = null }) {
+function eventLine({ mark = "·", kind = "", text, time, view = null, viewText = "View", body = "", content = null, share = null }) {
   const parts = [
     el("span", { class: "mark", text: mark }),
     el("span", { class: "what", text, title: text }),
     view ? el("button", { type: "button", class: "link", text: viewText, onclick: (event) => { event.preventDefault(); event.stopPropagation(); view(); } }) : null,
+    share,
     time ? el("time", { text: clock(time), title: new Date(time).toLocaleString() }) : null,
   ];
   if (!body && !content) return el("div", { class: `event ${kind}`.trim() }, ...parts);
@@ -979,7 +1007,7 @@ function homeEntry(message) {
         // What it found, or why it could not go on, in a line (the whole report opens here;
         // its card has the receipts).
         const said = SAYS_WHY.has(meta.status) ? gist(text) : "";
-        return eventLine({ mark, kind, text: `${meta.title} ${what}${said ? `: ${said}` : ""}`, time, body: said ? text : "", view: () => focusTask(meta.task_id, meta.from) });
+        return eventLine({ mark, kind, text: `${meta.title} ${what}${said ? `: ${said}` : ""}`, time, body: said ? text : "", view: () => focusTask(meta.task_id, meta.from), share: shareButton(message, "link") });
       }
       if (meta.asked_by) return eventLine({ mark: "?", text: `Question from “${meta.title}”: ${firstLine(text)}`, time, body: text, view: () => select(meta.asked_by), viewText: "Open" });
       if (meta.answered_by) return answerLine(meta.answered_by, meta.title, firstLine(text), { time, body: text, view: () => select(meta.answered_by), viewText: "Open" });
@@ -1224,7 +1252,7 @@ function renderOne(original) {
       // Another Claude session's message to a Claude worker: its sender's, never the owner's.
       if (meta.claude_session) return card({ label: `From Claude session “${meta.claude_session}”`, body: message.text, className: "inbound", time });
       if (meta.from) {
-        return card({ label: meta.title, body: message.text, className: `report ${meta.status}`, status: meta.status, task: meta.task_id, time, open: () => select(meta.from) });
+        return card({ label: meta.title, body: message.text, className: `report ${meta.status}`, status: meta.status, task: meta.task_id, time, open: () => select(meta.from), share: shareButton(message, "link share-from") });
       }
       if (meta.source === "capture") return card({ label: `You sent this from the ${meta.client || "command line"}`, body: message.text, className: "inbound", time });
       const source = SOURCES[meta.source] || "Event";
@@ -1244,7 +1272,7 @@ function renderOne(original) {
       return card({ label, body: message.text, className: meta.needs_action ? "update attention" : "update", time });
     }
     case "report":
-      return card({ label: "Report", body: message.text, className: `report ${meta.status}`, status: meta.status, task: meta.task_id, time });
+      return card({ label: "Report", body: message.text, className: `report ${meta.status}`, status: meta.status, task: meta.task_id, time, share: shareButton(message, "link share-from") });
     case "answer":
       return card({ label: `Answer from “${meta.from_title}”`, body: message.text, className: "inbound answer", time, open: () => select(meta.session_id) });
     case "draft": {

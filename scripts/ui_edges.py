@@ -6254,7 +6254,8 @@ async def main():
                           round_settings, round_teams_v2,
                           round_answer_label, round_sidebar_flat,
                           round_composer, round_decision_steer,
-                          round_ci_not_run, round_team_v4):  # fmt: skip
+                          round_ci_not_run, round_team_v4,
+                          round_share_from_report):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -7387,6 +7388,94 @@ PALETTE_HUES = """() => {
   return [[0, 1, 2, 3, 4, 5, 6, 7].map((i) => hsl(`--c${i}`)),
           ['--accent', '--amber', '--green', '--red'].map((name) => hsl(name)[0])];
 }"""
+
+
+async def round_share_from_report(runtime, browser, failures: list[str]):
+    """0.1.60 (owner report): a finished report in a chat shares its task's card, as the
+    card's own Share… does: a quiet Share… on each done report of a task in its worker's chat,
+    and on its line on Home; none on a progress report or a report of no task, none while its
+    task is not finished. From a report its card has a newer result than, the dialog says it
+    shares the card as it is now (its latest result)."""
+    from share_world import (
+        SHARE_REPORT_SECOND,
+        SHARE_REPORT_TITLE,
+        FakeGitHub,
+        share_report_seeded,
+    )
+
+    seeded = share_report_seeded(runtime)
+    shots = SHOTS / "share-report"
+    shots.mkdir(parents=True, exist_ok=True)
+    fake = FakeGitHub()
+    raw, runtime.github.raw = runtime.github.raw, fake
+    stood_in = runtime.github.__dict__.pop("signed_in", None)
+    older = "This shares the card as it is now: its latest result."
+    share = "Share…"
+    try:
+        context = await browser.new_context(viewport={"width": 1440, "height": 900})
+        page = await context.new_page()
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await page.locator(f'#session-list .item[data-id="{seeded["session"]}"]').click()
+        timeline = page.locator("#timeline")
+        reports = timeline.locator(".card.report")
+        await expect(reports).to_have_count(4)
+        first = reports.filter(has_text="batching its queries")
+        latest = reports.filter(has_text="one streaming query")
+        for report in (first, latest):
+            await expect(report.locator(".head").get_by_role("button", name=share)).to_be_visible()
+        for words in ("Profiling the export", "Checked the disk"):
+            other = reports.filter(has_text=words)
+            await expect(other.get_by_role("button", name=share)).to_have_count(0)
+        # Its head stays one line, at 800 px too, Share… whole beside its time.
+        for width in (1440, 800):
+            await page.set_viewport_size({"width": width, "height": 900})
+            for report in (first, latest):
+                head = await report.locator(".head").bounding_box()
+                assert head and head["height"] <= 32, (width, head)
+                found = await report.locator(".head").evaluate(OVERFLOWS)
+                assert not found, (width, found)
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        # From the latest report: the card's own dialog, nothing more said.
+        dialog = page.locator("dialog.share-dialog")
+        heading = dialog.get_by_role("heading", name=f"Share “{SHARE_REPORT_TITLE}”")
+        await latest.get_by_role("button", name=share).click()
+        await expect(heading).to_be_visible()
+        await expect(dialog.locator(".share-preview")).to_contain_text("one streaming query")
+        await expect(dialog.get_by_text(older)).to_have_count(0)
+        await dialog.get_by_role("button", name="Cancel").click()
+        await expect(dialog).to_have_count(0)
+        # From the earlier one (folded, Show more): the card as it is now, and the dialog says so.
+        await expect(first.get_by_role("button", name="Show more")).to_be_visible()
+        await first.get_by_role("button", name=share).click()
+        await expect(dialog.get_by_text(older)).to_be_visible()
+        await expect(dialog.locator(".share-preview")).to_contain_text("one streaming query")
+        await expect(dialog.locator(".share-preview")).not_to_contain_text("batching its")
+        await page.wait_for_timeout(300)
+        await page.screenshot(path=shots / "older-1440-light.png", animations="disabled")
+        await dialog.get_by_role("button", name="Cancel").click()
+        # On Home: its line, beside View.
+        await page.locator(".home-item").click()
+        line = timeline.locator(".event", has_text=f"{SHARE_REPORT_TITLE} finished")
+        await expect(line).to_have_count(1)
+        await expect(line.get_by_role("button", name="View")).to_be_visible()
+        await line.get_by_role("button", name=share).click()
+        await expect(heading).to_be_visible()
+        await expect(dialog.get_by_text(older)).to_have_count(0)
+        await dialog.get_by_role("button", name="Cancel").click()
+        # Its task at work again (a follow-up): no Share… until it is finished again.
+        runtime.tasks.move(seeded["task"], "running")
+        runtime.bus.publish("state")
+        await expect(line.get_by_role("button", name=share)).to_be_hidden()
+        runtime.tasks.move(seeded["task"], "review", result=SHARE_REPORT_SECOND)
+        runtime.bus.publish("state")
+        await expect(line.get_by_role("button", name=share)).to_be_visible()
+        await context.close()
+    finally:
+        runtime.github.raw = raw
+        if stood_in:
+            runtime.github.signed_in = stood_in
+    log("a finished report in a chat (its worker's, its line on Home): Share…, its card as it is")
 
 
 async def round_sidebar_flat(runtime, browser, failures: list[str]):

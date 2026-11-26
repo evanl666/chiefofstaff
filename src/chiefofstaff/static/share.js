@@ -12,6 +12,8 @@ const LEFT_OUT = "Not shared: the worker's conversation, the changes themselves,
 const CANT_RECALL = "What people have already seen, copied or opened in their own Chief of Staff can't be taken back.";
 const REVOKE_ASK = "Revoke this link? It stops working at once, for everyone. What people have already seen, copied or opened in their own Chief stays with them.";
 const DAYS = { 1: "in 1 day", 7: "in 7 days", 30: "in 30 days" };
+// Share… on a report its card has a newer result than: the card is shared as it is now.
+const OLDER_REPORT = "This shares the card as it is now: its latest result.";
 
 // One dialog, its content redrawn in place as the owner decides (no flash, the focus kept on
 // the control that had it: each has a data-key).
@@ -54,15 +56,22 @@ async function copyText(text) {
   }
 }
 
-// Share… on a finished card: its live link if it has one, else the preview.
-export async function openShare(task) {
+// The preview of a task's card; from a report in a chat (`task.fromReport`), whether the card has
+// a newer result than that report.
+const previewOf = (task) => api(`/api/tasks/${task.id}/share${task.fromReport ? `?message=${encodeURIComponent(task.fromReport)}` : ""}`);
+
+// Share… on a finished card, or on a finished report in a chat (`message`: that report, whose
+// task's card it shares, as the card's own Share… does): its live link if it has one, else the
+// preview.
+export async function openShare(task, { message } = {}) {
   let data;
   try {
-    data = await api(`/api/tasks/${task.id}/share`);
+    data = await previewOf({ ...task, fromReport: message });
   } catch (error) {
     toast(error.message, "error");
     return;
   }
+  task = { ...task, title: task.title || data.card.title, fromReport: message };
   if (data.live) manage(task, data);
   else preview(task, data);
 }
@@ -148,7 +157,9 @@ function preview(task, data, decisions = {}, choice = {}) {
   const cancel = el("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => node.close() });
   const footer = signedIn ? el("footer", {}, download, el("span", { class: "spacer" }), why, cancel, create) : el("footer", {}, el("span", { class: "spacer" }), why, cancel, download);
   const scrolled = document.querySelector("dialog.share-dialog .share-preview")?.scrollTop || 0;
-  const node = dialog(head(`Share “${card.title}”`, "Anyone with the link can see this card, exactly as below, until it expires."), flags, holder, leftOut, signedIn ? options : blocked, errorLine(), footer);
+  const header = head(`Share “${card.title}”`, "Anyone with the link can see this card, exactly as below, until it expires.");
+  if (data.older_report) header.append(el("p", { class: "hint share-older", role: "note", text: OLDER_REPORT }));
+  const node = dialog(header, flags, holder, leftOut, signedIn ? options : blocked, errorLine(), footer);
   holder.scrollTop = scrolled;
   return node;
 }
@@ -167,7 +178,7 @@ async function createLink(task, data, decisions, days, login, node) {
   } catch (error) {
     reject(error);
     if (error.changed) {
-      const fresh = await api(`/api/tasks/${task.id}/share`).catch(() => null);
+      const fresh = await previewOf(task).catch(() => null);
       if (fresh) showError(preview(task, fresh, {}, { days, login }), error.message);
       return;
     }
@@ -279,7 +290,7 @@ async function exportFile(task, data, decisions, node) {
     toast(`Saved ${made.name}: it can't expire or be revoked.`);
   } catch (error) {
     if (error.changed) {
-      const fresh = await api(`/api/tasks/${task.id}/share`).catch(() => null);
+      const fresh = await previewOf(task).catch(() => null);
       if (fresh) showError(preview(task, fresh), error.message);
       return;
     }

@@ -1867,6 +1867,82 @@ async def secret_views(runtime, browser, quality: Quality):
     log("share links: secrets over several lines, marked and removed whole (share/home-secrets-*)")
 
 
+async def report_share_views(runtime, browser, quality: Quality):
+    """Share… from a finished report in a chat (0.1.60): a worker's chat with its reports (Share…
+    on each done one of its task, quiet until the report is hovered), the dialog opened from the
+    earlier one (its card as it is now, said so), Home's line with Share… beside View; 1440 and
+    800 px, light and dark (browser-shots/share/report-*). On a fake gh."""
+    from share_world import SHARE_REPORT_TITLE, FakeGitHub, share_report_seeded
+
+    folder = SHOTS / "share"
+    folder.mkdir(exist_ok=True)
+    fake = FakeGitHub()
+    raw, runtime.github.raw = runtime.github.raw, fake
+    stood_in = runtime.github.__dict__.pop("signed_in", None)
+    seeded = share_report_seeded(runtime)
+    try:
+        for scheme in ("light", "dark"):
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 900}, color_scheme=scheme, bypass_csp=True
+            )
+            page = await context.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            for width in (1440, 800):
+                where = f"report share {width} {scheme}"
+                await page.set_viewport_size({"width": width, "height": 900})
+
+                async def shot(name: str, page=page, width: int = width, scheme: str = scheme):
+                    await page.evaluate(
+                        "document.querySelectorAll('#toasts > *').forEach((n) => n.remove())"
+                    )
+                    await page.screenshot(
+                        path=folder / f"report-{name}-{width}-{scheme}.png", animations="disabled"
+                    )
+
+                await page.locator(f'#session-list .item[data-id="{seeded["session"]}"]').click()
+                reports = page.locator("#timeline .card.report")
+                latest = reports.filter(has_text="one streaming query")
+                first = reports.filter(has_text="batching its queries")
+                await expect(latest.get_by_role("button", name="Share…")).to_be_visible()
+                await latest.scroll_into_view_if_needed()
+                await latest.hover()
+                await page.wait_for_timeout(200)
+                await shot("chat")
+                await quality.check(page, f"{where} chat", "#timeline")
+                await quality.contrast(page, f"{where} chat", "#timeline")
+                await first.get_by_role("button", name="Share…").click()
+                dialog = page.locator("dialog.share-dialog")
+                await expect(dialog.locator(".share-older")).to_have_text(
+                    "This shares the card as it is now: its latest result."
+                )
+                await page.wait_for_timeout(250)
+                await shot("dialog")
+                await quality.check(page, f"{where} dialog", "dialog.share-dialog")
+                await quality.contrast(page, f"{where} dialog", "dialog.share-dialog")
+                await dialog.get_by_role("button", name="Cancel").click()
+                await page.locator(".home-item").click()
+                if width < 1100:
+                    await page.locator("#home-tabs [data-tab=chat]").click()
+                line = page.locator("#timeline .event", has_text=f"{SHARE_REPORT_TITLE} finished")
+                await expect(line.get_by_role("button", name="Share…")).to_be_visible()
+                await line.scroll_into_view_if_needed()
+                await line.hover()
+                await page.wait_for_timeout(200)
+                await shot("home")
+                await quality.check(page, f"{where} home", "#timeline")
+                await quality.contrast(page, f"{where} home", "#timeline")
+            quality.failures += [f"page error report share {scheme}: {error}" for error in errors]
+            await context.close()
+    finally:
+        runtime.github.raw = raw
+        if stood_in:
+            runtime.github.signed_in = stood_in
+    log("share links: Share… on a finished report in a chat and on Home (share/report-*)")
+
+
 async def import_views(runtime, browser, quality: Quality):
     """A card someone shared, opened here (phase 2): its link pasted alone into Home's message
     box (its note line), the line in the chat with the card, Start a task from this with the
@@ -2169,6 +2245,7 @@ async def main():
             elif only == "share":
                 await share_views(runtime, browser, quality)
                 await secret_views(runtime, browser, quality)
+                await report_share_views(runtime, browser, quality)
                 await import_views(runtime, browser, quality)
             elif only != "shepherd":
                 await report_views(runtime, browser, quality)
@@ -2203,6 +2280,7 @@ async def main():
             if not only:
                 await share_views(runtime, browser, quality)
                 await secret_views(runtime, browser, quality)
+                await report_share_views(runtime, browser, quality)
                 await import_views(runtime, browser, quality)
             await browser.close()
         server.should_exit = True
