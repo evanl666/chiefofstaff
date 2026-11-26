@@ -1436,7 +1436,7 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
 .tp-answer .recommendation { font-size: var(--small); color: var(--soft); margin-top: 8px; }
 .tp-answer .own-row { display: flex; gap: 8px; margin-top: 10px; }
 .tp-answer .own-row[hidden] { display: none; }
-.tp-answer button.link.other { min-height: 24px; margin-top: 6px; padding: 0; font-size: var(--small); }
+.tp-answer button.link.other { min-height: 28px; margin: 4px 0 -2px; padding: 0; font-size: var(--small); }
 .tp-answer .own { flex: 1; min-width: 0; min-height: 32px; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); color: var(--text); font: inherit; }
 .tp-answer .error:empty { display: none; }
 /* A bar with a segment per part: the same as Home's row, larger; segments fill as parts finish. */
