@@ -12726,7 +12726,8 @@ async def round_agent_smooth(runtime, browser, failures: list[str]):
                 await page.keyboard.press("Escape")
             assert not errors, errors
             await context.close()
-        assert runtime.agent_status("claude")["status"] == agents.READY
+        # (A look the page asked for as it closed may still be Checking…: once it ends.)
+        await until(lambda: runtime.agent_status("claude")["status"] == agents.READY, 20)
         assert str(installed) in os.environ["PATH"].split(os.pathsep)
         # Codex's weekly limit used up until tomorrow: the @ list says until when (picked all the
         # same: the chip says it too), and work held for it says so, with Continue with Copilot.
