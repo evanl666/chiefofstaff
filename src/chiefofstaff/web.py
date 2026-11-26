@@ -680,7 +680,14 @@ def create_app(
 
     @app.get("/api/tasks/{task_id}")
     async def task(task_id: str):
-        return runtime.task_actions.view(runtime.tasks.get(task_id))
+        """A task as its card has it, with the commands its receipts count (the page's state
+        leaves them out: its cards never show which)."""
+        found = runtime.tasks.get(task_id)
+        view = runtime.task_actions.view(found)
+        if not view["receipts"]:
+            return view
+        ran = (runtime.task_actions.receipts(found) or {}).get("commands", [])
+        return {**view, "receipts": {**view["receipts"], "commands": ran}}
 
     @app.get("/api/tasks/{task_id}/report")
     async def task_report(task_id: str):

@@ -341,3 +341,52 @@ def test_settings_are_read_once_and_again_after_any_change(tmp_path, monkeypatch
     )
     assert store.settings().max_workers == 7
     assert len(parsed) == 3
+
+
+# 0.1.60: Home's state on the owner's size (a long chat, thousands of commands and usage rows).
+
+
+async def test_the_pages_state_stays_quick_with_long_chats_and_many_commands(harness):
+    """Each listed task's card read its worker's whole chat (its messages about it), all usage
+    and all its commands, every time: 0.5-1 s on the owner's data, the server blocked meanwhile.
+    By index now, and what did not change is not worked out again. A guard, generous: about a
+    tenth of it here, several times over it before (0.1.59)."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, "Long chat")
+    store = harness.store
+    first = runtime.tasks.current(worker)
+    made = [first]
+    for i in range(16):
+        task = runtime.tasks.create(worker, f"Earlier work {i}", f"Do part {i}", status="running")
+        runtime.tasks.move(task["id"], "done", result=f"Part {i} is done: `src/part_{i}.py`.")
+        made.append(runtime.tasks.get(task["id"]))
+    run = runtime.tasks.start_run(first["id"], "test")
+    at = "2026-11-20T10:00:00+00:00"
+    # Its chat: a hundred messages about each listed task, and 60,000 about work long done.
+    store.execute_many(
+        "INSERT INTO messages(session_id,kind,text,meta,created_at) VALUES(?,?,?,?,?)",
+        [
+            (worker, "tool" if i % 3 else "router", f"step {i}",
+             json.dumps({"task_id": made[i % len(made)]["id"] if i < 1700 else "t-old",
+                         "prompt": "p" * 400}), at)
+            for i in range(61700)
+        ],
+    )  # fmt: skip
+    store.execute_many(
+        "INSERT INTO usage(session_id,role,model,credits,premium,input_tokens,output_tokens,at,"
+        "run_id) VALUES(?,?,?,?,?,?,?,?,?)",
+        [(worker, "worker", "m", 0.1, 0.1, 10, 10, 1.0, "") for _ in range(50000)],
+    )
+    store.execute_many(
+        "INSERT INTO commands(session_id,run_id,call_id,command,kind,exit_code,started_at,"
+        "ended_at) VALUES(?,?,?,?,?,?,?,?)",
+        [(worker, run["id"], f"c{i}", f"pytest tests/test_{i}.py -q", "test", 0, at, at)
+         for i in range(6000)],
+    )  # fmt: skip
+    assert len(runtime.snapshot()["tasks"]) == 17
+    took = []
+    for _ in range(3):
+        started = time.perf_counter()
+        runtime.snapshot()
+        took.append(time.perf_counter() - started)
+    assert sorted(took)[1] < 0.25, f"the page's state took {sorted(took)[1]:.2f} s"

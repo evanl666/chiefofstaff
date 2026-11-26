@@ -5,6 +5,7 @@ receipts and shareable report of finished work.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -12,9 +13,11 @@ import os
 import re
 import shlex
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlsplit
@@ -851,6 +854,51 @@ FOLLOW_UP_SENTENCE = re.compile(
 )
 
 
+# Receipts as summarize made them, by a digest of what they were made of (oldest dropped first):
+# the same commands, evidence and report give the same receipts, so the page's state, which shows
+# every listed task's, does not work them out again each time. Kept as JSON: each caller gets a
+# copy of its own to change.
+SUMMARIES: OrderedDict[bytes, str] = OrderedDict()
+SUMMARIES_KEPT = 256
+# Tasks whose commands are kept read (TaskActions.task_commands): all forgotten past this many.
+COMMANDS_KEPT = 200
+
+
+def summarized(known: tuple, commands: list[dict], *args: Any, **kwargs: Any) -> dict:
+    """receipts.summarize(commands, *args, **kwargs), read once for the same arguments: the
+    commands by what they are known as (`known`: their task, and the version read, see
+    TaskActions.task_commands), the rest as they are."""
+    key = hashlib.blake2b(
+        json.dumps([known, args, kwargs], default=str).encode(), digest_size=16
+    ).digest()
+    if (kept := SUMMARIES.get(key)) is not None:
+        SUMMARIES.move_to_end(key)
+        return json.loads(kept)
+    SUMMARIES[key] = kept = json.dumps(receipts.summarize(commands, *args, **kwargs))
+    while len(SUMMARIES) > SUMMARIES_KEPT:
+        SUMMARIES.popitem(last=False)
+    return json.loads(kept)
+
+
+@lru_cache(maxsize=128)
+def result_as_shown(result: str, merged: tuple[str, ...]) -> str:
+    """A result once its PR is open (see TaskActions.shown_result), `merged` the labels of its
+    PRs merged since: the same words every time, so read once (the page's state shows every
+    listed task's)."""
+    result = without_status(result, not_pushed) or result
+    for label in merged:
+        names = pr_names(label)
+
+        def unmerged(clause: str, names: re.Pattern = names) -> bool:
+            return status_only(clause, STALE_ONCE_MERGED, names)
+
+        result = without_status(result, unmerged) or result
+        said = re.split(r"(?<=[.!?])\s+|\n", result)
+        if not any(names.search(part) and re.search(r"\bmerged\b", part) for part in said):
+            result = f"{label} is merged.\n\n{result}"
+    return result
+
+
 def without_follow_up(text: str) -> str:
     """A result without what only the reader of its follow-up needs: what is new, or the same
     as in the result before ("(new)", "This is unchanged from before.")."""
@@ -972,6 +1020,8 @@ class TaskActions:
         # Each task's wait for its limit's reset (go_on_at): ended when something else is said
         # to its worker (stop_going_on), not left asleep until then.
         self.going: dict[str, asyncio.Task] = {}
+        # Each task's commands, as read for its receipts: (version, rows), see task_commands.
+        self.commands_read: dict[str, tuple[int, list[dict]]] = {}
         # An accepted task stays listed while something is followed up for it.
         self.tasks.monitored = lambda task: bool(self.monitoring(task))
         self.tasks.run_check = self.run_check
@@ -988,13 +1038,26 @@ class TaskActions:
             return task["title"]
         return f"{task['title']}: {detail[:600]}"
 
-    def receipts(self, task: dict) -> dict | None:
-        """Observed commands, changes and PRs for a task, beside its report."""
-        commands = self.store.all(
+    def task_commands(self, task_id: str) -> tuple[int, list[dict]]:
+        """The commands a task's runs ran, as of a version of them (Store.commands_changes):
+        read again only once a command or a run changed since (one task can have thousands)."""
+        version = self.store.commands_changes
+        kept = self.commands_read.get(task_id)
+        if kept and kept[0] == version:
+            return kept
+        found = self.store.all(
             """SELECT c.command, c.kind, c.exit_code, c.ended_at FROM commands c
             JOIN runs r ON r.id=c.run_id WHERE r.task_id=? ORDER BY c.id""",
-            (task["id"],),
+            (task_id,),
         )
+        if len(self.commands_read) >= COMMANDS_KEPT:
+            self.commands_read.clear()
+        self.commands_read[task_id] = (version, found)
+        return version, found
+
+    def receipts(self, task: dict) -> dict | None:
+        """Observed commands, changes and PRs for a task, beside its report."""
+        version, commands = self.task_commands(task["id"])
         # Claims are saved with the report; what was observed follows from git and gh.
         runs = self.store.all(
             """SELECT id, started_at, evidence, criteria FROM runs WHERE task_id=?
@@ -1018,9 +1081,10 @@ class TaskActions:
         claims = json.loads(latest["criteria"]) if latest and latest["criteria"] else []
         earlier, since = self.earlier_claims(runs) if criteria else ([], "")
         said = self.store.get(f"saidchanged:{latest['id']}") if latest else None
-        found = receipts.summarize(
-            commands, evidence, task["result"] or task["progress"], criteria, claims,
-            earlier=earlier, since=since, said_changed=None if said is None else said == "1",
+        found = summarized(
+            (task["id"], version), commands, evidence, task["result"] or task["progress"],
+            criteria, claims, earlier=earlier, since=since,
+            said_changed=None if said is None else said == "1",
         )  # fmt: skip
         found["flags"] += failing
         if due:
@@ -2735,21 +2799,10 @@ class TaskActions:
         noted = json.loads(self.store.get(f"mergedprs:{task['id']}") or "[]")
         if not result or not (own or noted or self.opened_prs(task["id"])):
             return result
-        result = without_status(result, not_pushed) or result
         merged = {pr["label"].lower(): pr["label"] for pr in own if pr.get("state") == "MERGED"}
         for label in noted:
             merged.setdefault(label.lower(), label)
-        for label in merged.values():
-            names = pr_names(label)
-
-            def unmerged(clause: str, names: re.Pattern = names) -> bool:
-                return status_only(clause, STALE_ONCE_MERGED, names)
-
-            result = without_status(result, unmerged) or result
-            said = re.split(r"(?<=[.!?])\s+|\n", result)
-            if not any(names.search(part) and re.search(r"\bmerged\b", part) for part in said):
-                result = f"{label} is merged.\n\n{result}"
-        return result
+        return result_as_shown(result, tuple(merged.values()))
 
     async def diff(self, task_id: str) -> list[dict]:
         """What the task's worker changed, per checkout, as unified diffs."""
@@ -4961,7 +5014,10 @@ class TaskActions:
             "credits": self.tasks.credits(task["id"]),
             **self.agent_spend(task, row),
             "blocked": task["status"] == "queued" and bool(self.tasks.broken(task)),
-            "receipts": shown_receipts,
+            # (Without the commands it ran: the page says how many, never which.)
+            "receipts": {k: v for k, v in shown_receipts.items() if k != "commands"}
+            if shown_receipts
+            else shown_receipts,
             "progress_updates": self.progress_updates(task),
             # What it reported before its latest result (see keep_earlier_result).
             "earlier_results": json.loads(self.store.get(f"results:{task['id']}") or "[]"),
@@ -5631,8 +5687,13 @@ class TaskActions:
         ]
         found = []
         for path in json.loads(self.store.get(f"touched:{task['id']}") or "[]"):
-            if not any(within(path, folder) for folder in folders) or any(
-                within(path, c) for c in checkouts
+            # As policy.within has it, each path resolved once (not again for each folder).
+            try:
+                real = Path(path).expanduser().resolve()
+            except (OSError, ValueError):
+                continue
+            if not any(real.is_relative_to(folder) for folder in folders) or any(
+                real.is_relative_to(c) for c in checkouts
             ):
                 continue
             with suppress(OSError):

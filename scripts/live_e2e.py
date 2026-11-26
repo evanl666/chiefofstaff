@@ -281,7 +281,8 @@ async def scenario_worker(app: App, project: Path) -> dict:
     for item in found.get("criteria", []):
         how = f"{item['command']!r} (exit {item['exit_code']})"
         log(f"  {item['state']}: evidence {item['evidence']!r} -> {how}")
-    for command in found.get("commands", []):
+    ran = (await app.get(f"/api/tasks/{task['id']}")).get("receipts") or {}
+    for command in ran.get("commands", []):
         log(f"  ran (exit {command['exit_code']}): {command['command'][:300]}")
     return worker
 
@@ -1140,7 +1141,9 @@ async def scenario_owner_flow(app: App, root: Path):
     assert "|---" in result.replace(" ", "") or "|:--" in result.replace(" ", ""), result[:800]
     assert "east" in result.lower() and len(result) > 400, "the whole explanation, in the report"
     assert not analyst["branch"], "an analysis needs no branch"
-    commands = (task.get("receipts") or {}).get("commands", [])
+    # (The commands its receipts count: the one task's view has them, not the page's state.)
+    ran = await app.get(f"/api/tasks/{task['id']}")
+    commands = (ran.get("receipts") or {}).get("commands", [])
     assert not any("git push" in c["command"] for c in commands), commands
     await asyncio.sleep(15)  # The Router's turn about the report.
     after = await app.get(f"/api/sessions/{router}/messages?after={mark}")

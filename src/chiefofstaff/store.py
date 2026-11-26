@@ -138,6 +138,7 @@ class Store:
         store.directory = directory
         store.lock = threading.RLock()
         store.cached = None
+        store.commands_changes = 0
         uri = f"{(directory / DB_NAME).absolute().as_uri()}?mode=ro"
         store.db = sqlite3.connect(uri, uri=True, check_same_thread=False)
         store.db.row_factory = sqlite3.Row
@@ -150,6 +151,9 @@ class Store:
         self.lock = threading.RLock()
         # (until when, settings): read once for many calls (a snapshot makes hundreds).
         self.cached: tuple[float, Settings] | None = None
+        # Writes that may change which commands a task's runs ran, or how they ended: a task's
+        # are read again for its receipts only after one (TaskActions.task_commands).
+        self.commands_changes = 0
         self.db = sqlite3.connect(directory / DB_NAME, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -361,6 +365,15 @@ class Store:
                 WHERE m.session_id=sessions.id AND m.kind='router' ORDER BY m.id LIMIT 1), '')
             WHERE role='worker';
             """)
+        # The page's state reads each listed task's credits and its messages in its worker's
+        # chat: found by these, not by reading all usage or all of a long chat. (A message whose
+        # meta SQLite cannot read leaves the second out: never a start that fails for it.)
+        self.db.execute("CREATE INDEX IF NOT EXISTS usage_by_run ON usage(run_id)")
+        with suppress(sqlite3.OperationalError):
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS messages_by_task "
+                "ON messages(session_id, json_extract(meta, '$.task_id'))"
+            )
         self.db.commit()
         (directory / DB_NAME).chmod(0o600)
         if not self.one("SELECT id FROM settings WHERE id=1"):
@@ -432,6 +445,8 @@ class Store:
         with self.lock, self.db:
             if "settings" in sql:
                 self.cached = None
+            if "commands" in sql or "runs" in sql:
+                self.commands_changes += 1
             return self.db.execute(sql, params)
 
     def settings(self) -> Settings:
@@ -495,6 +510,8 @@ class Store:
     def execute_many(self, sql: str, rows: list[tuple]):
         """One statement for each of these rows: one transaction."""
         with self.lock, self.db:
+            if "commands" in sql or "runs" in sql:
+                self.commands_changes += 1
             self.db.executemany(sql, rows)
 
     def set_many(self, values: list[tuple[str, str]], deleted: list[str] | None = None):
