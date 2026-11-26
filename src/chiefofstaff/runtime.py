@@ -22,6 +22,7 @@ wires together the parts that do the rest, each in its own module:
 import asyncio
 import base64
 import binascii
+import contextvars
 import hashlib
 import json
 import logging
@@ -67,6 +68,7 @@ from .backend import (
     CopilotBackend,
     SandboxPolicy,
     UnavailableError,
+    big_log,
     copilot_backend,
     copilot_home,
     copilot_orphans,
@@ -85,7 +87,7 @@ from .bus import Bus
 from .checks import Checks
 from .connector import Connector
 from .decisions import Decisions
-from .delivery import Delivery
+from .delivery import Delivery, TooLargeError
 from .digest import digest, needs, task_words
 from .drafts import Drafts
 from .envelope import (
@@ -349,6 +351,20 @@ MODEL_NOT_OFFERED = re.compile(r"\bnot (?:available|supported|enabled|allowed)\b
 PROCESS_CHECK = float(os.environ.get("CHIEFOFSTAFF_PROCESS_CHECK", "2"))
 RECONNECT_DELAY = float(os.environ.get("CHIEFOFSTAFF_RECONNECT_DELAY", "3"))
 RECONNECT_MOST = 300.0
+# As Copilot connects, its sessions that were at work or mid-send are resumed (resume_sessions):
+# in the background, each in SESSION_RESUME seconds at most; the connection waits for them up to
+# RESUME_WAIT seconds (all of them, as a rule), then is ready without them. What is sent to one
+# of them meanwhile waits for it (session_for).
+RESUME_WAIT = float(os.environ.get("CHIEFOFSTAFF_RESUME_WAIT", "5"))
+SESSION_RESUME = float(os.environ.get("CHIEFOFSTAFF_SESSION_RESUME", "180"))
+# Set in resume_sessions' own work (what it sends does not wait for itself).
+RESUMING: contextvars.ContextVar[bool] = contextvars.ContextVar("resuming", default=False)
+# How long Copilot's sessions are given to let go as it disconnects (seconds).
+DISCONNECT_WAIT = 5.0
+# A worker whose Copilot session is too large for Copilot to reopen here (Runtime.too_large):
+# at rest, with this, until the owner starts a fresh one for it.
+TOO_LARGE_WAIT = "waiting for you: its Copilot session is too large to reopen here"
+TOO_LARGE = "is too large for Copilot to reopen here"
 # Items sent with Send to Chief: at most this many in a while (seconds) are taken; the same
 # note and capture again within SENT_AGAIN_SECONDS is the command run twice.
 SENT_RATES = ((60, 10, "a minute"), (86400, 300, "a day"))
@@ -750,6 +766,12 @@ class Runtime:
         # the Router is no longer open in a terminal.
         self.process_job: asyncio.Task | None = None
         self.recovery: asyncio.Task | None = None
+        # Resuming the sessions that were at work as Copilot connected (resume_sessions), and
+        # each of those still to be resumed: set once it is.
+        self.resuming: asyncio.Task | None = None
+        self.resumes: dict[str, asyncio.Event] = {}
+        # Copilot sessions its connection died after (Runtime.disconnect): how many times.
+        self.killed_by: dict[str, int] = {}
         self.stopping = False
         self.backend: AgentBackend | None = None
         self.connections = 0  # Counts disconnects: a session opened before one is not usable.
@@ -1236,15 +1258,16 @@ class Runtime:
                     "UPDATE sessions SET status='queued' WHERE status='starting' "
                     "AND closed_at IS NULL"
                 )
-                await self.reconcile_sends()
-                if self.connections:
-                    # Copilot stopped (crashed, killed) and started again: what the turns it cut
-                    # short used is in their logs, not in events that came by.
-                    await self.workers.sync_all_usage()
-                # Held for their folder's settings by an earlier version (or with the sandbox
-                # on then): without it now, they go on (release_unguarded).
-                await self.release_unguarded()
-                await self.resume_working()
+                # Its sessions that were at work or mid-send: resumed in the background, each
+                # bounded, so that no session (nor Copilot hanging on one) holds the connection.
+                self.resumes = {
+                    session_id: asyncio.Event() for session_id in self.to_resume(COPILOT_AGENT)
+                }
+                self.resuming = self.background(self.resume_sessions(bool(self.connections)))
+                await asyncio.wait({self.resuming}, timeout=RESUME_WAIT)
+                resumed = self.resuming
+                if resumed.done() and not resumed.cancelled() and (error := resumed.exception()):
+                    raise error
                 try:
                     await self.ensure_slack_session()
                 except Exception as exc:
@@ -1310,14 +1333,34 @@ class Runtime:
         # Not ready from the first moment: nothing starts (a pump, a delivery) while it stops.
         backend, self.backend = self.backend, None
         self.connections += 1
+        if self.resuming and not self.resuming.done():
+            self.resuming.cancel()
+        for gate in self.resumes.values():
+            gate.set()  # (What waits for one goes on: to a new connection.)
+        if culprit := getattr(backend, "culprit", ""):
+            await self.after_death(backend, culprit)
         mine = self.on_agent(COPILOT_AGENT, self.states.ids())
         sessions = self.states.take_handles(mine)
         # Their turns end with the connection: no idle event will come to free their slots.
         self.states.end_turns(mine)
-        await asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True)
+        # (A dead connection lets go of none: not waited for long.)
+        with suppress(TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(*(s.disconnect() for s in sessions), return_exceptions=True),
+                DISCONNECT_WAIT,
+            )
         if backend:
             with suppress(Exception):
                 await backend.stop()
+
+    async def after_death(self, backend: AgentBackend, copilot_id: str):
+        """Copilot's connection died after this Copilot session was resumed or read whole
+        (backend.suspect). Too large for Copilot to reopen here when its log is big
+        (backend.BIG_LOG), or when it happened after it twice: never resumed again."""
+        self.killed_by[copilot_id] = self.killed_by.get(copilot_id, 0) + 1
+        size = await asyncio.to_thread(big_log, backend.session_log(copilot_id))
+        if size or self.killed_by[copilot_id] >= 2:
+            self.mark_too_large(copilot_id, size)
 
     async def reconnect(self):
         if not (self.connecting and not self.connecting.done()):
@@ -3166,11 +3209,13 @@ class Runtime:
         owner sees it, and it connects again."""
         while self.backend is backend and self.connections == connection:
             if not backend.alive():
-                logger.warning("The Copilot CLI stopped by itself; connecting again.")
-                self.status = {
-                    "state": "error",
-                    "error": "Copilot stopped unexpectedly. Connecting again…",
-                }
+                if getattr(backend, "dead", ""):
+                    logger.warning("The Copilot CLI stopped answering; connecting again.")
+                    error = "Copilot stopped answering. Connecting again…"
+                else:
+                    logger.warning("The Copilot CLI stopped by itself; connecting again.")
+                    error = "Copilot stopped unexpectedly. Connecting again…"
+                self.status = {"state": "error", "error": error}
                 self.publish_state()
                 self.recover_later(at_once=True)
                 return
@@ -6520,6 +6565,9 @@ class Runtime:
                 # be resumed after a restart, and is created again instead.
                 self.store.set(f"fresh:{copilot_id}", "1")
         else:
+            if agent == COPILOT_AGENT and self.store.get(f"toolarge:{copilot_id}"):
+                # Its resume killed Copilot's connection: never tried again (too_large).
+                raise TooLargeError(TOO_LARGE)
             await self.refuse_if_open_elsewhere(row)
             try:
                 session = await self.without_unsupported_effort(
@@ -6588,6 +6636,39 @@ class Runtime:
         self.publish_session(self.store.session(session_id))
         return session
 
+    def too_large(self, session_id: str) -> bool:
+        """Whether its Copilot session is too large for Copilot to reopen here (once its resume
+        killed Copilot's connection: mark_too_large). Never resumed then: it waits for the
+        owner's Start fresh, which a fresh session goes on with (start_fresh)."""
+        return bool(self.store.get(f"toolarge:{self.copilot_id(session_id)}"))
+
+    def mark_too_large(self, copilot_id: str, size: int):
+        """Copilot's connection died after this Copilot session was resumed or read (backend
+        culprit), and its log is big, or it did twice: too large for Copilot to reopen here."""
+        row = self.store.find_session(self.row_id(copilot_id))
+        if not row or row["closed_at"] or self.copilot_id(row["id"]) != copilot_id:
+            return
+        if row["role"] != WORKER:
+            return  # (The Router's goes on in a fresh session as its context grows.)
+        why = f" (a log of {size:,} bytes)" if size else " twice"
+        logger.warning("Copilot stopped answering after resuming %s%s: it is not resumed again.",
+                       row["id"], why)  # fmt: skip
+        self.store.set(f"toolarge:{copilot_id}", str(size))
+        self.hold_too_large(row)
+
+    def hold_too_large(self, row: dict):
+        """A session too large for Copilot to reopen here, at rest: said once in its chat, with
+        Start fresh (Delivery.fresh_needed); what it is sent waits for that."""
+        self.states[row["id"]].busy = False
+        self.delivery.fresh_needed(row, TOO_LARGE)
+        if row["role"] == WORKER:
+            values: dict[str, Any] = {"activity": TOO_LARGE_WAIT}
+            if row["status"] in {"working", "starting"}:
+                values["status"] = "idle"  # Nothing of it runs: it was to go on.
+            self.update_session(row["id"], **values)
+        elif row["status"] in {"working", "starting"}:
+            self.update_session(row["id"], status="idle", activity="")
+
     async def continue_fresh(self, row: dict, old: str, error: BaseException):
         """Its Copilot session could not be resumed for a version mismatch (compat.MISMATCHES:
         the extensions it asks for, even declined; a method, a parameter or a session format
@@ -6647,6 +6728,18 @@ class Runtime:
                         "Copilot couldn't start a fresh session for it; try again in a while."
                     ) from exc
         self.delivery.fresh_started(session_id)
+        if self.store.session(session_id)["activity"] == TOO_LARGE_WAIT:
+            self.update_session(session_id, activity="")
+            if (task := self.tasks.current(session_id)) and task["status"] == "running":
+                # It was at work: its fresh session goes on with that (told where it was).
+                note = "Continue the work of your earlier session where it left off."
+                await self.delivery.deliver(
+                    session_id,
+                    wrap("system", "restart", note),
+                    kind="notice",
+                    display="Started a fresh session; asked it to continue.",
+                )
+                return "Started a fresh worker with its context."
         if row["role"] != WORKER:
             if self.delivery.has_unsent(session_id):
                 self.delivery.schedule_flush(session_id, 0)
@@ -8795,6 +8888,13 @@ class Runtime:
     async def session_for(self, session_id: str):
         if session := self.states.handle(session_id):
             return session
+        gate = self.resumes.get(session_id)
+        if gate and not gate.is_set() and not RESUMING.get():
+            # Being resumed as Copilot connected (resume_sessions): after that.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(gate.wait(), SESSION_RESUME)
+            if session := self.states.handle(session_id):
+                return session
         row = self.store.find_session(session_id) if self.agents else None
         if row and (role := self.role_key(row)) in PLACED_ROLES:
             return await self.role_session(row, role)
@@ -9186,6 +9286,47 @@ class Runtime:
             await self.ensure_slack_session()
         self.publish_state()
 
+    def to_resume(self, agent: str) -> list[str]:
+        """The agent's open sessions that resume_sessions resumes: mid-send when it stopped, or
+        at work."""
+        sending = {key.removeprefix("sending:") for key in self.store.keys("sending:")}
+        rows = self.store.open_sessions()
+        ids = [row["id"] for row in rows if row["status"] == "working" or row["id"] in sending]
+        return self.on_agent(agent, ids)
+
+    async def resume_sessions(self, reconnected: bool):
+        """As Copilot connects: its sessions' interrupted sends checked, then those at work
+        continued (each in SESSION_RESUME seconds at most). What is sent to one of them waits
+        until it is done with it (session_for)."""
+        RESUMING.set(True)
+        try:
+            await self.reconcile_sends()
+            if reconnected:
+                # Copilot stopped (crashed, killed) and started again: what the turns it cut
+                # short used is in their logs, not in events that came by.
+                await self.workers.sync_all_usage()
+            # Held for their folder's settings by an earlier version (or with the sandbox
+            # on then): without it now, they go on (release_unguarded).
+            await self.release_unguarded()
+            await self.resume_working()
+        finally:
+            for gate in self.resumes.values():
+                gate.set()
+
+    def resumed(self, session_id: str) -> None:
+        """resume_sessions is done with this session."""
+        if gate := self.resumes.get(session_id):
+            gate.set()
+
+    async def bounded(self, session_id: str, work: Awaitable, what: str) -> Any:
+        """One session's part of resume_sessions, in SESSION_RESUME seconds at most: None when it
+        took longer (said in the log; Copilot's connection is watched on its own)."""
+        try:
+            return await asyncio.wait_for(work, SESSION_RESUME)
+        except TimeoutError:
+            logger.warning("%s %s took over %d s: given up.", what, session_id, SESSION_RESUME)
+            return None
+
     async def reconcile_sends(self, agent: str = COPILOT_AGENT, only: list[str] | None = None):
         """Sends to the agent's sessions (`only` these) that a stop interrupted: check whether
         they arrived before anything is resent."""
@@ -9197,9 +9338,15 @@ class Runtime:
             if not row or row["closed_at"]:
                 self.store.delete(key)
                 continue
-            arrived = await self.delivery.reconcile(session_id)
+            if self.too_large(session_id):
+                continue  # Never resumed for it: what it was sent waits for a fresh one.
+            arrived = await self.bounded(
+                session_id, self.delivery.reconcile(session_id), "Checking a send to"
+            )
             outcome = {True: "it arrived", False: "resending", None: "unknown, resending"}
             logger.info("Interrupted send to %s: %s.", session_id, outcome[arrived])
+            if row["status"] != "working":
+                self.resumed(session_id)
 
     async def resume_working(self, agent: str = COPILOT_AGENT, only: list[str] | None = None):
         """After a restart, the agent's sessions that were mid-turn continue, with what they had
@@ -9226,57 +9373,67 @@ class Runtime:
                     # Events held, or a send interrupted, when Chief of Staff stopped.
                     self.background(self.delivery.resume(row["id"]))
                 continue
-            mark = int(self.store.get(f"idle:{row['id']}", "0"))
-            sent = int(self.store.get(f"sent:{row['id']}") or 0)
-            since = [
-                message
-                for message in self.store.messages(row["id"], after=mark)
-                if "prompt" in message["meta"]
-            ]
-            given = [message for message in since if message["id"] <= sent]
-            # Sent, but not in its conversation (Copilot stopped before it wrote them down):
-            # they go out again in full, as messages it never received.
-            received = await self.delivery.received(row["id"], given)
-            if resent := given[len(received) :]:
-                self.store.set(f"sent:{row['id']}", str(resent[0]["id"] - 1))
-            # Messages it never received go out as they are, with the note; only the rest
-            # are quoted.
-            unhandled = [message["meta"]["prompt"] for message in received]
-            # Quoted, their tasks are taken up (their instructions show only as quotes).
-            if row["role"] == WORKER and (
-                named := [task for m in given for task in tasks_named(m["meta"]["prompt"])]
-            ):
-                self.took_up(row["id"], named, switch=False)
-            if any(message["kind"] == "owner" for message in since):
-                self.states[row["id"]].owner_turn = True
-            note = f"{what} while you were working. Continue where you left off."
-            if unhandled:
-                # The newest whole (a task's instructions, say); older ones cut.
-                quoted = unhandled[-10:]
-                note += (
-                    " Messages you received since you were last idle (some may already be "
-                    "handled), quoted:\n\n"
-                    + "\n\n".join([text[:1500] for text in quoted[:-1]] + quoted[-1:])
-                )
-            if resent:
-                note = (
-                    note + "\n\nThe message(s) before this note had not reached you yet: they "
-                    "are new to you."
-                    if unhandled
-                    else f"{what} just after sending you the message(s) above, before they "
-                    "reached you: they are new to you."
-                )
-            prompt = wrap("system", "restart", note)
-            try:
-                await self.delivery.deliver(
-                    row["id"],
-                    prompt,
-                    kind="notice",
-                    display=f"{what}; asked the session to continue.",
-                )
-            except Exception as exc:
-                self.states[row["id"]].owner_turn = False
-                self.fail(row, f"Could not resume after restart: {describe(exc)}")
+            if agent == COPILOT_AGENT and self.too_large(row["id"]):
+                self.hold_too_large(row)  # Never resumed: it waits for a fresh one.
+                self.resumed(row["id"])
+                continue
+            await self.bounded(row["id"], self.continue_working(row, what), "Resuming")
+            self.resumed(row["id"])
+
+    async def continue_working(self, row: dict, what: str):
+        """resume_working's for one session at work: it continues, told what it had not
+        handled."""
+        mark = int(self.store.get(f"idle:{row['id']}", "0"))
+        sent = int(self.store.get(f"sent:{row['id']}") or 0)
+        since = [
+            message
+            for message in self.store.messages(row["id"], after=mark)
+            if "prompt" in message["meta"]
+        ]
+        given = [message for message in since if message["id"] <= sent]
+        # Sent, but not in its conversation (Copilot stopped before it wrote them down):
+        # they go out again in full, as messages it never received.
+        received = await self.delivery.received(row["id"], given)
+        if resent := given[len(received) :]:
+            self.store.set(f"sent:{row['id']}", str(resent[0]["id"] - 1))
+        # Messages it never received go out as they are, with the note; only the rest
+        # are quoted.
+        unhandled = [message["meta"]["prompt"] for message in received]
+        # Quoted, their tasks are taken up (their instructions show only as quotes).
+        if row["role"] == WORKER and (
+            named := [task for m in given for task in tasks_named(m["meta"]["prompt"])]
+        ):
+            self.took_up(row["id"], named, switch=False)
+        if any(message["kind"] == "owner" for message in since):
+            self.states[row["id"]].owner_turn = True
+        note = f"{what} while you were working. Continue where you left off."
+        if unhandled:
+            # The newest whole (a task's instructions, say); older ones cut.
+            quoted = unhandled[-10:]
+            note += (
+                " Messages you received since you were last idle (some may already be "
+                "handled), quoted:\n\n"
+                + "\n\n".join([text[:1500] for text in quoted[:-1]] + quoted[-1:])
+            )
+        if resent:
+            note = (
+                note + "\n\nThe message(s) before this note had not reached you yet: they "
+                "are new to you."
+                if unhandled
+                else f"{what} just after sending you the message(s) above, before they "
+                "reached you: they are new to you."
+            )
+        prompt = wrap("system", "restart", note)
+        try:
+            await self.delivery.deliver(
+                row["id"],
+                prompt,
+                kind="notice",
+                display=f"{what}; asked the session to continue.",
+            )
+        except Exception as exc:
+            self.states[row["id"]].owner_turn = False
+            self.fail(row, f"Could not resume after restart: {describe(exc)}")
 
     # Messages
 

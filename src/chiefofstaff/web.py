@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import secrets
 import time
@@ -65,6 +66,15 @@ from .updates import installed
 
 logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
+# How long the server waits for the runtime to start before it serves the page all the same
+# (seconds): the browser is opened once it answers (__main__.open_when_ready, about 10 s).
+START_WAIT = float(os.environ.get("CHIEFOFSTAFF_START_WAIT", "8"))
+
+
+def started_late(starting: asyncio.Future) -> None:
+    """A start that went on after the page was served: its failure said in the log."""
+    if not starting.cancelled() and (error := starting.exception()):
+        logger.error("Chief of Staff did not start fully.", exc_info=error)
 
 
 class ShepherdDecision(BaseModel):
@@ -232,10 +242,21 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
-        await runtime.start()
+        # Bounded: the page is served once the runtime has started, or after START_WAIT seconds
+        # of a start that goes on (Copilot not answering): it says "Connecting…" meanwhile.
+        starting = asyncio.ensure_future(runtime.start())
+        await asyncio.wait({starting}, timeout=START_WAIT)
+        if starting.done():
+            starting.result()
+        else:
+            logger.warning("Chief of Staff is still starting; its page is served meanwhile.")
+            starting.add_done_callback(started_late)
         try:
             yield
         finally:
+            if not starting.done():
+                starting.cancel()
+                await asyncio.gather(starting, return_exceptions=True)
             await runtime.stop()
             store.close()
 
