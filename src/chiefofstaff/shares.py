@@ -24,6 +24,7 @@ from . import sharing
 from .envelope import UNTRUSTED, wrap
 from .sendsocket import fenced
 from .sources.github import GitHubError, answered
+from .tools import clip_report, owner_words
 from .updates import installed
 
 if TYPE_CHECKING:
@@ -203,7 +204,8 @@ class Shares:
         hits = sharing.scan(card, environment())
         return card, shortened, hits, sharing.digest(card, hits), cut
 
-    async def preview(self, task_id: str) -> dict:
+    async def preview(self, task_id: str, message_id: int | None = None) -> dict:
+        """`message_id`: Share… on a report in a chat (its task's card, as it is now)."""
         task = self.finished(task_id)
         card, shortened, hits, digest, cut = self.prepared(task)
         accounts, private = await asyncio.gather(self.accounts(), self.private_repos(card))
@@ -219,7 +221,29 @@ class Shares:
             "live": self.live_for(task_id),
             "days": list(sharing.EXPIRY_DAYS),
             "started_from": self.started_from(task),
+            "older_report": bool(message_id) and self.older_report(task, message_id),
         }
+
+    def older_report(self, task: dict, message_id: int) -> bool:
+        """A report in a chat (its worker's, or its line on Home) that is not the card's result
+        any more: a newer one replaced it. Share… there shares the card as it is now, its latest
+        result with the checks, criteria and verdict that go with it, and says so."""
+        try:
+            message = self.store.message(message_id)
+        except LookupError:
+            return False
+        meta = message["meta"] or {}
+        result = (task.get("result") or "").strip()
+        if message["kind"] not in {"report", "inbound"} or meta.get("task_id") != task["id"]:
+            return False
+        if not result:
+            return False
+        said = [message["text"] or ""]
+        if message["kind"] == "inbound" and meta.get("from"):
+            # Home's line has the worker's words as sent; its report, as the owner reads them.
+            drafts = self.store.all("SELECT id FROM drafts WHERE session_id=?", (meta["from"],))
+            said.append(owner_words(said[0], {row["id"] for row in drafts}))
+        return all(clip_report(text).strip() != result for text in said)
 
     async def accounts(self) -> list[dict]:
         """The github.com accounts signed in to gh, gh's active one first."""

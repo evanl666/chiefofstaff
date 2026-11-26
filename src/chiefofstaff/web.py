@@ -688,8 +688,9 @@ def create_app(
 
     # Share links (shares.py): a finished card's preview, its link, the HTML file; the links.
     @app.get("/api/tasks/{task_id}/share")
-    async def share_preview(task_id: str):
-        return await runtime.shares.preview(task_id)
+    async def share_preview(task_id: str, message: int | None = None):
+        # `message`: Share… on a report in a chat (says when the card has a newer result).
+        return await runtime.shares.preview(task_id, message)
 
     @app.post("/api/tasks/{task_id}/share")
     async def share_create(task_id: str, payload: ShareCreate):

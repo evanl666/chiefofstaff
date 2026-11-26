@@ -137,6 +137,46 @@ async def test_what_remove_takes_out_is_out_of_the_file_the_link_and_a_copy_open
         assert not [secret for secret in secrets if secret in every]
 
 
+def reports_of(world, task_id: str) -> tuple[list[int], list[int]]:
+    """A task's done reports in its worker's chat, and their lines in the Router's (Home)."""
+    rows = world.store.all(
+        "SELECT id, kind FROM messages WHERE json_extract(meta, '$.task_id')=? "
+        "AND json_extract(meta, '$.status')='done' AND kind IN ('report', 'inbound') ORDER BY id",
+        (task_id,),
+    )
+    return [r["id"] for r in rows if r["kind"] == "report"], [
+        r["id"] for r in rows if r["kind"] == "inbound"
+    ]
+
+
+async def test_share_from_a_report_in_a_chat_says_when_the_card_has_a_newer_result(world):
+    from conftest import call_tool
+
+    task = await finished_task(world)
+    [report], [home] = reports_of(world, task["id"])
+    for message in (report, home, None):
+        assert (await world.shares.preview(task["id"], message))["older_report"] is False
+    # Reported again (amended in the same turn): a new report in the worker's chat; Home's line
+    # says it as it is now. The first report is no longer the card's result.
+    said = await call_tool(
+        world.runtime, "report", task["session_id"], status="done", task_id=task["id"],
+        summary="Fixed the flaky login test with a fake clock instead; all tests pass.",
+    )  # fmt: skip
+    assert said.result_type == "success", said.text_result_for_llm
+    [first, newer], [line] = reports_of(world, task["id"])
+    assert (first, line) == (report, home)
+    older = await world.shares.preview(task["id"], first)
+    assert older["older_report"] is True
+    assert older["card"]["result"].startswith("Fixed the flaky login test with a fake clock")
+    for message in (newer, line):
+        assert (await world.shares.preview(task["id"], message))["older_report"] is False
+    # Not a report of this card's task, or no message: nothing to say.
+    other = await finished_task(world, title="Speed up the importer", result="Twice as fast.")
+    [elsewhere], _ = reports_of(world, other["id"])
+    for message in (elsewhere, 10**9):
+        assert (await world.shares.preview(task["id"], message))["older_report"] is False
+
+
 async def test_only_a_finished_card_can_be_shared(world):
     task = await finished_task(world)
     world.runtime.tasks.move(task["id"], "running")
@@ -330,6 +370,16 @@ def test_the_routes_preview_create_list_and_revoke(client):
     runtime.tasks.move(task["id"], "review", result="Notes for a.b@example.com")
     preview = client.get(f"/api/tasks/{task['id']}/share").json()
     assert [hit["label"] for hit in preview["hits"]] == ["an email address"]
+    # From a report in a chat: whether the card's result is still that report's words.
+    meta = {"status": "done", "task_id": task["id"]}
+    said = runtime.add_message(runtime.router_id(), "report", "Notes for a.b@example.com", meta)
+    earlier = runtime.add_message(runtime.router_id(), "report", "Notes, first draft", meta)
+    older = [
+        client.get(f"/api/tasks/{task['id']}/share", params={"message": m["id"]}).json()
+        for m in (said, earlier)
+    ]
+    assert [each["older_report"] for each in older] == [False, True]
+    assert preview["older_report"] is False
     body = {
         "decisions": {"h1": "remove"},
         "digest": preview["digest"],
