@@ -23,10 +23,12 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Sequence
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, Protocol
 
 from copilot import CopilotClient, RuntimeConnection
@@ -391,6 +393,18 @@ class MallocNotice(logging.Filter):
 logging.getLogger("copilot._jsonrpc").addFilter(MallocNotice())
 
 
+class DeadConnection(logging.Filter):
+    """The SDK's warning, with its traceback, for each request that failed because Copilot's
+    connection is dead (TransportDeadError): said once instead (CopilotBackend.died)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        error = record.exc_info[1] if record.exc_info else None
+        return not isinstance(error, TransportDeadError)
+
+
+logging.getLogger("copilot._jsonrpc").addFilter(DeadConnection())
+
+
 # A newer Copilot's events this SDK can't read are taken as unknown ones (compat.open_enum: a
 # session.shutdown's "destroy", which Copilot 1.0.112 sends when a session is deleted, failed with
 # a traceback in the log and the event was dropped).
@@ -502,6 +516,45 @@ class NotStartedError(ConnectionError):
     could not be set up): what was to be sent waits until it runs."""
 
 
+# Copilot's CLI answering Chief of Staff (JSON-RPC over its stdio). Copilot 1.0.115 and 1.0.116
+# write each answer to the pipe at once, and an answer too large for one write (a session's
+# whole history, session.getMessages, of a session whose log is 808 MB) fails ("Rust JSON-RPC
+# transport error: Error: write EINVAL" in its log, on macOS): from then on it answers nothing,
+# and its process runs on. So no request waits for ever: each fails after RPC_TIMEOUTS' seconds
+# for its method (RPC_TIMEOUT for any other; None: as long as it takes, as a command a shepherd
+# step runs through Copilot); and the connection is watched (CopilotBackend.watch).
+RPC_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_RPC_TIMEOUT", "120"))
+RPC_TIMEOUTS: dict[str, float | None] = {
+    "session.create": 300.0,
+    "session.resume": 300.0,
+    "sessions.fork": 600.0,
+    "session.tools.execute": None,
+    "session.sendAndWait": None,
+}
+# A request unanswered for PROBE_AFTER seconds, or nothing answered for PROBE_IDLE: Copilot is
+# asked whether it answers at all (a ping, of PROBE_TIMEOUT seconds, twice; checked each
+# PROBE_EVERY). When it does not, its connection is dead (CopilotBackend.died).
+PROBE_AFTER = float(os.environ.get("CHIEFOFSTAFF_PROBE_AFTER", "20"))
+PROBE_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_PROBE_TIMEOUT", "10"))
+PROBE_EVERY = float(os.environ.get("CHIEFOFSTAFF_PROBE_EVERY", "5"))
+PROBE_IDLE = 60.0
+# The session that a dead connection is put down to (CopilotBackend.suspect): one it was
+# opening or reading the history of then, else the one resumed last, this many seconds before.
+SUSPECT_WINDOW = 60.0
+# Stopping Copilot (its sessions let go of, its runtime told to shut down) takes at most this
+# long; then its processes are ended (asked to, then killed).
+STOP_TIMEOUT = float(os.environ.get("CHIEFOFSTAFF_COPILOT_STOP", "5"))
+# A session log of this size or more is never asked of Copilot whole (session.getMessages):
+# what such a session received is read from the log itself (received_from_log). 300 MB was
+# answered in 4 s on Copilot 1.0.116, 808 MB killed its connection.
+BIG_LOG = int(os.environ.get("CHIEFOFSTAFF_BIG_LOG", str(32_000_000)))
+
+
+class TransportDeadError(ConnectionResetError):
+    """Copilot's CLI runs, but its connection stopped answering: what was asked of it fails, and
+    Chief of Staff connects to a new one (Runtime.watch_process)."""
+
+
 class CopilotBackend:
     """GitHub Copilot through its Python SDK: one CLI process runs every session."""
 
@@ -531,11 +584,24 @@ class CopilotBackend:
         # Its sessions say they run no extension (EXTENSIONS_REFUSED): on Copilot's own runtime,
         # or once Copilot refused one for them.
         self.no_extensions = False
+        # Its connection, watched (guard): requests unanswered (method, session id, when sent),
+        # when Copilot last answered anything, the session it last resumed (id, when), and why
+        # it is dead ("" while it answers) with the session that is put down to ("": none).
+        self.waiting: list[tuple[str, str, float]] = []
+        self.answered = time.monotonic()
+        self.last_resumed: tuple[str, float] = ("", 0.0)
+        self.dead = ""
+        self.culprit = ""
+        self.watcher: asyncio.Task | None = None
+        # What each big session's log showed it received (received_from_log): read from there
+        # on, next time.
+        self.logs_read: dict[str, tuple[int, list[dict]]] = {}
 
     async def start(self) -> None:
         self.starting = asyncio.get_running_loop().create_future()
         try:
             await self.start_one()
+            self.guard(self.client)
         finally:
             self.starting.set_result(None)
         prefetch()  # (After the start: never in its way.)
@@ -716,16 +782,121 @@ class CopilotBackend:
         return dict(self.started)
 
     def alive(self) -> bool:
+        if self.dead:
+            return False
         process = self.cli_process()
         return process is None or process.poll() is None
 
+    def guard(self, client: CopilotClient) -> None:
+        """Every request to the client's CLI with its timeout (RPC_TIMEOUTS), kept track of
+        while it waits, and the connection watched (watch). Once it is dead, nothing more is
+        sent: each request fails at once (TransportDeadError)."""
+        rpc = getattr(client, "_client", None)
+        if rpc is None or getattr(rpc, "guarded", False):
+            return
+        send = rpc.request
+
+        # (The SDK's own signature, its `timeout` among them.)
+        async def request(method: str, params: dict | None = None, timeout: float | None = None,  # noqa: ASYNC109
+                          **options: Any) -> Any:  # fmt: skip
+            if self.dead:
+                raise TransportDeadError(self.dead)
+            limit = timeout if timeout is not None else RPC_TIMEOUTS.get(method, RPC_TIMEOUT)
+            session = (params or {}).get("sessionId")
+            entry = (method, session if isinstance(session, str) else "", time.monotonic())
+            self.waiting.append(entry)
+            try:
+                result = await send(method, params, limit, **options)
+            finally:
+                self.waiting.remove(entry)
+            self.answered = time.monotonic()
+            if method == "session.resume":
+                self.last_resumed = (entry[1], self.answered)
+            return result
+
+        rpc.request = request
+        rpc.guarded = True
+        self.answered = time.monotonic()
+        self.watcher = asyncio.ensure_future(self.watch(rpc, send))
+
+    async def watch(self, rpc: Any, send: Callable[..., Any]) -> None:
+        """Whether Copilot still answers, while a request waits long (PROBE_AFTER) or nothing
+        was answered for a while (PROBE_IDLE): asked twice (a ping); when it answers neither,
+        its connection is dead (died)."""
+        while not self.dead:
+            await asyncio.sleep(PROBE_EVERY)
+            now = time.monotonic()
+            oldest = min((sent for _, _, sent in self.waiting), default=now)
+            if now - oldest < PROBE_AFTER and now - self.answered < PROBE_IDLE:
+                continue
+            if await self.answers(send) or await self.answers(send):
+                continue
+            self.died(rpc)
+
+    async def answers(self, send: Callable[..., Any]) -> bool:
+        try:
+            await send("ping", {}, PROBE_TIMEOUT)
+        except TimeoutError:
+            return False
+        except Exception:
+            # Refused (it answered), or its process ended (alive says so).
+            process = self.cli_process()
+            return process is not None and process.poll() is None
+        self.answered = time.monotonic()
+        return True
+
+    def died(self, rpc: Any) -> None:
+        """Its connection is dead: what waits for an answer fails now, the session it is put
+        down to is named (`culprit`), and alive() says False (Runtime.watch_process connects
+        to a new Copilot)."""
+        if self.dead:
+            return
+        self.culprit = self.suspect()
+        self.dead = "Copilot stopped answering."
+        logger.warning("Copilot's CLI stopped answering (its process still runs)%s.",
+                       f", after session {self.culprit}" if self.culprit else "")  # fmt: skip
+        with getattr(rpc, "_pending_lock", None) or nullcontext():
+            pending = list(getattr(rpc, "pending_requests", {}).values())
+        for future in pending:
+            if not future.done():
+                future.set_exception(TransportDeadError(self.dead))
+
+    def suspect(self) -> str:
+        """The session a dead connection is put down to: one being resumed or read whole
+        (session.getMessages) then, the longest waiting; else the one resumed last, shortly
+        before the first request that got no answer. "" for none."""
+        waiting = sorted(self.waiting, key=lambda entry: entry[2])
+        for method, session, _ in waiting:
+            if session and method in ("session.resume", "session.getMessages"):
+                return session
+        session, when = self.last_resumed
+        since = waiting[0][2] if waiting else time.monotonic()
+        return session if session and since - when <= SUSPECT_WINDOW else ""
+
     async def stop(self) -> Any:
+        """Copilot stopped, in STOP_TIMEOUT seconds at most: then its processes are ended
+        (asked to, then killed), whatever it was doing (a dead connection, a session that never
+        lets go)."""
+        if self.watcher:
+            self.watcher.cancel()
         tree = await asyncio.to_thread(lambda: copilot_tree(self.processes()))
         if not self.alive():
-            # The loader is gone, but the program it ran still holds the pipes: it goes first.
+            # The loader is gone, or its connection dead: the program it ran holds the pipes,
+            # and would not let go of its sessions.
             await asyncio.to_thread(end_processes, tree)
+        if self.dead:
+            with suppress(Exception):  # (Nothing to tell it: what it holds is let go of.)
+                await asyncio.wait_for(self.client.force_stop(), STOP_TIMEOUT)
+            return None
         try:
-            return await self.client.stop()
+            return await asyncio.wait_for(self.client.stop(), STOP_TIMEOUT)
+        except TimeoutError:
+            logger.warning("Copilot did not stop within %d s: its processes are ended.",
+                           STOP_TIMEOUT)  # fmt: skip
+            await asyncio.to_thread(end_processes, tree)
+            with suppress(Exception):
+                await asyncio.wait_for(self.client.force_stop(), STOP_TIMEOUT)
+            return None
         finally:
             # What Copilot left running (a shell's server), or Copilot itself if it hangs.
             await asyncio.to_thread(end_processes, tree)
@@ -1340,6 +1511,51 @@ def scan_log(log: Path, offset: int, *markers: bytes) -> tuple[list[dict], int]:
                         if isinstance(event := json.loads(line), dict):
                             found.append(event)
     return found, position
+
+
+USER_MESSAGE = b'"user.message"'
+# Of a big session's log, the user messages kept from one read to the next (received_in_log).
+RECEIVED_KEPT = 1000
+
+
+def big_log(log: Path | None) -> int:
+    """The size of a session's log when it is BIG_LOG or more (never asked of Copilot whole),
+    else 0."""
+    try:
+        size = log.stat().st_size if log else 0
+    except OSError:
+        return 0
+    return size if size >= BIG_LOG else 0
+
+
+def received_in_log(log: Path, known: tuple[int, list[dict]]) -> tuple[int, list[dict]]:
+    """The user messages in a session's log (user.message events): those `known` (where a
+    read ended, what it found) and those after; read from there only, the latest
+    RECEIVED_KEPT kept. A log rewritten since is read again whole."""
+    offset, found = known
+    try:
+        size = log.stat().st_size
+    except OSError:
+        return known
+    if offset > size:
+        offset, found = 0, []
+    events, end = scan_log(log, offset, USER_MESSAGE)
+    found = found + [event for event in events if event.get("type") == "user.message"]
+    return end, found[-RECEIVED_KEPT:]
+
+
+def snake(name: str) -> str:
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+
+
+def logged_event(event: dict) -> Any:
+    """An event of a Copilot session's log (a dict, its fields as the CLI writes them) as the
+    SDK gives a session's events: `type.value`, and `data` with snake_case fields."""
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    return SimpleNamespace(
+        type=SimpleNamespace(value=event.get("type")),
+        data=SimpleNamespace(**{snake(key): value for key, value in data.items()}),
+    )
 
 
 # What a session's log shows at the end of a turn (each of its model calls ends with

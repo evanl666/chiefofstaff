@@ -5,11 +5,14 @@ as it does). `copilot --version` says its version.
 
 FAKE_COPILOT_* variables shape it: VERSION, PROTOCOL (the one `connect` reports), STARTS (a file
 each start with --stdio appends a line to), REQUESTS (a file each request is appended to, as a
-JSON line: method and params), REFUSE (JSON: method -> the error message it answers with).
+JSON line: method and params), REFUSE (JSON: method -> the error message it answers with), DEAF
+(a method: once asked it, it answers nothing more and runs on, as Copilot 1.0.116 did after a write
+of an answer too large for its pipe failed), STUBBORN (1: it ignores SIGTERM).
 """
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +20,7 @@ from pathlib import Path
 VERSION = os.environ.get("FAKE_COPILOT_VERSION", "1.0.112")
 PROTOCOL = int(os.environ.get("FAKE_COPILOT_PROTOCOL", "3"))
 REFUSE = json.loads(os.environ.get("FAKE_COPILOT_REFUSE") or "{}")
+DEAF = os.environ.get("FAKE_COPILOT_DEAF", "")
 
 
 def read() -> dict | None:
@@ -46,6 +50,8 @@ def main():
     if "--version" in sys.argv:
         sys.stdout.write(f"GitHub Copilot CLI {VERSION}.\n")
         return
+    if os.environ.get("FAKE_COPILOT_STUBBORN") == "1":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if starts := os.environ.get("FAKE_COPILOT_STARTS"):
         with Path(starts).open("a") as file:
             file.write(f"{VERSION}\n")
@@ -54,6 +60,7 @@ def main():
         [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE
     )
     requests = os.environ.get("FAKE_COPILOT_REQUESTS")
+    deaf = False
     while (message := read()) is not None:
         if "id" not in message:
             continue
@@ -61,6 +68,9 @@ def main():
         if requests:
             with Path(requests).open("a") as file:
                 file.write(json.dumps({"method": method, "params": params}) + "\n")
+        deaf = deaf or (bool(DEAF) and method == DEAF)
+        if deaf:
+            continue
         if method in REFUSE:
             error = {"code": -32603, "message": REFUSE[method]}
             send({"jsonrpc": "2.0", "id": message["id"], "error": error})
