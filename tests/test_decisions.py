@@ -907,7 +907,8 @@ async def test_e154_a_change_tells_each_worker_once_and_reopens_only_on_a_new_va
 async def test_e153_a_new_decision_reaches_the_workers_whose_tasks_rely_on_it(harness):
     """E153: the Router recorded a decision linked to a worker's task, without replaces: nobody
     told it, and 75 s later it reported blocked, waiting for that decision. Each worker hears it
-    once; one that waits on the owner for it hears it at once, its question settled."""
+    once; one that waits on the owner hears it at once. Its question stays the owner's until the
+    Router says the decision answers it (it may ask something else: owner report, 0.1.58)."""
     runtime = await harness.connect()
     router = harness.router_id
     waiting = await spawn(runtime, router, "Serve the model")
@@ -924,6 +925,14 @@ async def test_e153_a_new_decision_reaches_the_workers_whose_tasks_rely_on_it(ha
         [note] = [s for s in session.sent if 'type="decision"' in s]
         assert decision["id"] in note and "Serve and tune k=1.12" in note
         assert session.modes[-1] == mode
+    assert len(runtime.asks.session_questions(waiting["session_id"])) == 1, "still the owner's"
+    assert runtime.tasks.get(waiting["task_id"])["status"] == "waiting", "under Needs you still"
+    assert "stays open under Needs you" in harness.session(waiting["session_id"]).sent[-1]
+    assert "Which k should I serve?" in said.text_result_for_llm, "the Router hears it is open"
+    assert "answers_question=true" in said.text_result_for_llm
+    await call_tool(runtime, "message_session", router, session_id=waiting["session_id"],
+                    task="note", task_id=waiting["task_id"], answers_question=True,
+                    text=f"The owner decided this: {decision['text']}.")  # fmt: skip
     assert not runtime.asks.session_questions(waiting["session_id"]), "its question settled"
     assert runtime.tasks.get(waiting["task_id"])["status"] == "running"
 
@@ -1019,3 +1028,36 @@ def test_e154_which_words_name_an_option(options, said, picked):
     from chiefofstaff.decisions import Decisions
 
     assert Decisions.named({"options": [{"choice": o} for o in options]}, said) == picked
+
+
+async def test_a_routers_side_question_on_the_same_task_leaves_the_blocked_ask_open(harness):
+    """Owner report (0.1.58): a worker reported blocked on three things only the owner can give;
+    10 s later the Router relayed a separate question of the owner's to the same worker on the
+    same task, and that closed the blocked ask (and the task went back to running): it never
+    stayed under Needs you. A Router message answers it only when it says so."""
+    runtime = await harness.connect()
+    router = harness.router_id
+    worker = await spawn(runtime, router, "Ship the iPhone build to TestFlight")
+    sid, task = worker["session_id"], worker["task_id"]
+    session = harness.session(sid)
+    blocked = "Three things from you and I can submit: the Apple ID, the team id, the icon."
+    await call_tool(runtime, "report", sid, status="blocked", summary=blocked)
+    [question] = runtime.asks.session_questions(sid)
+    await call_tool(runtime, "message_session", router, session_id=sid, task_id=task,
+                    text="Separately, answer with report(status='answer'): whose GitHub account "
+                    "is Rusty?")  # fmt: skip
+    told = session.sent[-1]
+    await call_tool(runtime, "report", sid, status="answer", summary="Rusty is the CI bot.")
+    assert [q["id"] for q in runtime.asks.session_questions(sid)] == [question["id"]]
+    assert runtime.tasks.get(task)["status"] == "waiting", "it still waits for the owner"
+    assert "stays open under Needs you" in told and blocked[:40] in told, "it is told so"
+    assert any(q["id"] == question["id"] for q in runtime.snapshot()["questions"]) or (
+        runtime.task_actions.view(runtime.tasks.get(task))["question"]["id"] == question["id"]
+    ), "under Needs you"
+
+    await call_tool(runtime, "message_session", router, session_id=sid, task_id=task,
+                    task="note", answers_question=True,
+                    text="The owner says: use the company Apple ID; the rest follows.")  # fmt: skip
+    assert not runtime.asks.session_questions(sid), "answered: it leaves Needs you"
+    assert runtime.tasks.get(task)["status"] == "running"
+    assert "stays open" not in session.sent[-1]

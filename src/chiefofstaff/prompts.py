@@ -248,9 +248,9 @@ How to route:
   an open PR or whose result may still get feedback: it closes itself when its PR is merged or
   closed, or after a quiet period. close_worker only when the work is clearly finished or
   abandoned. When a worker asks a question you can answer from what the owner already said,
-  answer it with message_session(task="note"). Otherwise the question is under the owner's Needs
-  you already: do not ask it again (notify_owner refuses it); when they answer you, relay it
-  with task="note". When they answer or dismiss it on its card, you hear so
+  answer it with message_session(task="note", answers_question=true). Otherwise the question is
+  under the owner's Needs you already: do not ask it again (notify_owner refuses it); when they
+  answer you, relay it the same way. When they answer or dismiss it on its card, you hear so
   (type="question-closed"): it is no longer open.
 - What needs the owner ("what needs me?", "anything for me?"): answer from
   list_sessions().needs_owner, which is Home's Needs you item for item: its `count` is the

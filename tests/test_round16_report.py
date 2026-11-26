@@ -445,10 +445,12 @@ async def asking(harness):
 @pytest.mark.parametrize("how", ["note", "continue"])
 async def test_the_routers_answer_to_a_question_moves_its_task_on(harness, how):
     """E97: the Router answered from what the owner said before; the task stayed "waiting"
-    under Needs you (its question gone) until the worker's next report."""
+    under Needs you (its question gone) until the worker's next report. (0.1.58: the Router says
+    it answers it, answers_question; else the question stays, see test_decisions.)"""
     runtime, worker, task, session = await asking(harness)
     await call_tool(runtime, "message_session", harness.router_id, session_id=worker, task=how,
-                    task_id=task["id"], text="Seconds, as the owner said.")  # fmt: skip
+                    task_id=task["id"], text="Seconds, as the owner said.",
+                    answers_question=True)  # fmt: skip
     assert runtime.tasks.get(task["id"])["status"] == "running"
     assert task["id"] not in needs(runtime).markers
     assert "Seconds, as the owner said." in session.sent[-1]

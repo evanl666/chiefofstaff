@@ -803,6 +803,13 @@ class Decisions:
         if not params.replaces:
             told = len(result.get("told") or [])
             said = f" {told} of their worker(s) were told." if told else ""
+            for question in result.get("open") or []:
+                said += (
+                    f" Task {question['task_id']}'s question to the owner stays open: "
+                    f"“{clean(question['text'], 200)}”. If this decision answers it, "
+                    f'message_session(task="note", task_id="{question["task_id"]}", '
+                    "answers_question=true)."
+                )
             return (
                 f"Recorded {decision['id']}, linked to {len(tasks)} task(s){self.titles(tasks)}."
                 + said
@@ -911,10 +918,10 @@ class Decisions:
         if not old and tell:
             # A new decision the Router recorded for tasks already given: their workers hear it
             # (E153: one waited for it, unaware, and asked the owner again).
-            told = await self.tell_linked(decision, tell)
+            told, still = await self.tell_linked(decision, tell)
             for task_id in relying:
                 self.runtime.task_actions.publish(self.tasks.get(task_id))
-            return {"decision": decision, "affected": [], "told": told}
+            return {"decision": decision, "affected": [], "told": told, "open": still}
         if old and source == "owner":
             self.runtime.learning.record(
                 "decision-changed",
@@ -999,42 +1006,42 @@ class Decisions:
             )
         return affected
 
-    async def tell_linked(self, decision: dict, tasks: list[str]) -> list[str]:
+    async def tell_linked(self, decision: dict, tasks: list[str]) -> tuple[list[str], list[dict]]:
         """A new decision linked to tasks given already: each of their workers with one of them
-        open hears it in one note (E153), at once when it waits for the owner on one of them; a
-        question it asked the owner on one is settled by it (the task goes on). The workers
-        told."""
+        open hears it in one note (E153), at once when it waits for the owner on one of them.
+        A question it asked the owner on one stays open (it may ask something else: owner
+        report, 0.1.58): the Router says when the decision answers it (message_session's
+        answers_question). The workers told, and the questions left open."""
         workers: dict[str, list[dict]] = {}
         for task_id in tasks:
             task = self.tasks.find(task_id)
             row = self.store.find_session(task["session_id"]) if task else None
             if task and row and not row["closed_at"] and task["status"] in OPEN:
                 workers.setdefault(row["id"], []).append(task)
-        told = []
+        told, still = [], []
         for session_id, its in workers.items():
-            settled = []
-            for task in its:
-                if task["status"] != "waiting" or self.store.get(f"stopped:{task['id']}"):
-                    continue
-                if closed := self.runtime.asks.answered(session_id, task["id"], by="router"):
-                    settled += closed
-                    if not self.waits_on(task["id"]):
-                        self.runtime.asks.go_on(task, chat=False)
+            ids = {task["id"] for task in its}
+            asked = [
+                question
+                for question in self.runtime.asks.session_questions(session_id)
+                if question.get("task_id") in ids and not question.get("went_on")
+            ]
+            still += asked
             waits = any(task["status"] == "waiting" for task in its)
             one = its[0]["id"] if len(its) == 1 else None
             named = ", ".join(f"{task['id']} “{task['title']}”" for task in its)
             text = f"The owner decided: {decision['text']} ({decision['id']}). Your task"
             text += f"s {named} rely" if len(its) > 1 else f" {named} relies"
             text += " on it: work to it."
-            if settled:
-                asked = "; ".join(f"“{clean(q['text'], 200)}”" for q in settled)
-                text += f" It settles what you asked the owner ({asked}): go on with it."
+            if asked:
+                listed = "; ".join(f"“{clean(q['text'], 200)}”" for q in asked)
+                text += (
+                    f" Your question to the owner ({listed}) stays open under Needs you until "
+                    "they or the Router answer it."
+                )
             meta: dict = {"decision": decision["id"]}
             if one:
                 meta["task_id"] = one
-            if settled:
-                meta |= {"answers": settled[0]["id"], "asked": settled[0]["text"][:300]}
-                meta["answer"] = decision["text"]
             try:
                 await self.delivery.deliver(
                     session_id,
@@ -1042,12 +1049,12 @@ class Decisions:
                     kind="router",
                     display=f"Decision: {decision['text']}",
                     meta=meta,
-                    steer=bool(settled) or waits,
+                    steer=waits,
                 )
                 told.append(session_id)
             except Exception:
                 logger.warning("Could not tell %s the decision.", session_id, exc_info=True)
-        return told
+        return told, still
 
     def change_card(self, decision: dict, old: list[dict], affected: list[dict]):
         changed = {row["id"] for row in old}

@@ -291,6 +291,17 @@ SLACK_SAID_AFTER = (
     "(their exact words only where they quoted them). The owner approves, edits or rejects it;",
     "you will get the outcome.",
 )
+# 0.1.58: the Router's rule on answering a worker's question, before and after.
+ROUTER_ANSWER_BEFORE = (
+    'answer it with message_session(task="note"). Otherwise the question is under the owner\'s Needs',
+    "you already: do not ask it again (notify_owner refuses it); when they answer you, relay it",
+    'with task="note". When they answer or dismiss it on its card, you hear so',
+)
+ROUTER_ANSWER_AFTER = (
+    'answer it with message_session(task="note", answers_question=true). Otherwise the question is',
+    "under the owner's Needs you already: do not ask it again (notify_owner refuses it); when they",
+    "answer you, relay it the same way. When they answer or dismiss it on its card, you hear so",
+)
 FIXES: list[Allow] = [
     # E126: tasks replaced before their replacedby: link was kept get it once, read back from
     # their progress words; the mark that this ran is in the store. Nothing is shown.
@@ -597,6 +608,21 @@ FIXES: list[Allow] = [
             ("said", "Not set up yet"),
             ("setup", {"state": "off"}),
         )
+    ),
+    # 0.1.58 (owner report "这个没有在need you显示"): a Router message settles a worker's open
+    # question only when it says it answers it (message_session's answers_question); the
+    # Router's rule on answering a worker's question says so, its lines wrapped again.
+    Allow(
+        "message_session's answers_question",
+        data=r"^backend\.sessions\.router.*\.options\.tools\[\d+\]\.parameters\.properties"
+        r"\.answers_question$",
+    ),
+    Allow(
+        "the Router's rule: answering a worker's question says so (answers_question=true)",
+        data=r"\.system_message\.content$",
+        lines=r"^\s*(?:"
+        + "|".join(map(re.escape, ROUTER_ANSWER_BEFORE + ROUTER_ANSWER_AFTER))
+        + ")$",
     ),
 ]
 

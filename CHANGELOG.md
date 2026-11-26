@@ -121,7 +121,15 @@ Your answer to a decision card reaches its worker at once, and a decided questio
   *Decision changed* card. What workers confirm stays on that card after *Got it*.
 - **A decision the Router records reaches the workers relying on it.** Recorded for tasks
   already given, it reached none of their workers (one asked you for it again, blocked). Each
-  hears it once, at once when it waits on you, and a question it asked you about it is settled.
+  hears it once, at once when it waits on you; a question it asked you stays under *Needs you*
+  until the Router says the decision answers it.
+- **A worker's question to you stays until it is answered.** A worker reported it was blocked
+  on three things only you could give; seconds later the Router passed it a separate question
+  of yours on the same task, and that took the blocked question off *Needs you* and set the
+  task going again, so you never saw it. A message from the Router now settles a worker's
+  question only when the Router says it answers it (or tells the worker to drop it); otherwise
+  the question stays under *Needs you*, its task waits for you, and the worker is told the
+  message does not answer it.
 - **Your question stays while its worker works on.** A progress report took the worker's open
   question off *Needs you* (and it came back with its next one). It stays until you answer it,
   its task ends, or the worker asks again: then it is the same question, saying *Updated 10:42*;

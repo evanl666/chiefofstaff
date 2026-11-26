@@ -292,6 +292,11 @@ class MessageSession(BaseModel):
         description="For continue or note: the id (t…) of the worker's task this is about. "
         "Needed when it has several open tasks; default its current task",
     )
+    answers_question: bool = Field(
+        default=False,
+        description="True when this answers the worker's open question to the owner, or tells "
+        "it to drop it: the question leaves Needs you. Otherwise it stays open",
+    )
     title: str = Field(
         default="",
         description="Required when task='new': what the new task delivers (a verb, the object "
@@ -2792,9 +2797,27 @@ class Tools:
                 target["id"]
             )  # A follow-up on an earlier task: same worker.
             target = self.store.session(target["id"])
-        if target["role"] == WORKER and params.task in {"continue", "note"}:
-            # The Router answers or redirects the question of the task it writes about (a new
-            # task does not answer it; another task's question stays).
+        # Its question to the owner this leaves open (a side question of theirs relayed on the
+        # same task does not answer it: owner report, 0.1.58).
+        still_asked: list[dict] = []
+        if (
+            target["role"] == WORKER
+            and params.task in {"continue", "note"}
+            and not (params.answers_question)
+        ):
+            still_asked = [
+                question
+                for question in self.runtime.asks.session_questions(target["id"])
+                if (question.get("task_id") or "") in {task["id"] if task else "", ""}
+                and not question.get("went_on")
+            ]
+        if (
+            target["role"] == WORKER
+            and params.task in {"continue", "note"}
+            and (params.answers_question)
+        ):
+            # The Router answers or redirects the question of the task it writes about, saying
+            # so (a new task does not answer it; another task's question stays).
             self.runtime.asks.answered(target["id"], task["id"] if task else "", by="router")
             self.runtime.asks.answered(target["id"], "", by="router")
             if (
@@ -2904,6 +2927,14 @@ class Tools:
                 prompt += "\n\n" + wrap("system", "context", text)
                 self.store.set(f"morefor:{task['id']}", "1")  # Its next report is checked.
             notice = self.told_line("Continued in", target, task)
+        if still_asked:
+            asked = "; ".join(f"“{' '.join(q['text'].split())[:200]}”" for q in still_asked)
+            prompt += "\n\n" + wrap(
+                "system",
+                "context",
+                f"Your question to the owner ({asked}) stays open under Needs you: this message "
+                "does not answer it. Answer this by itself, and wait for the owner on that.",
+            )
         # Followed for the task this is about (a new one, or the one it continues).
         self.runtime.follow(
             target["id"], to_follow, task_id=task["id"] if task else "", asked=params.follow

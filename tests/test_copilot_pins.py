@@ -324,15 +324,15 @@ SESSION_OPTIONS: dict[str, tuple[int, str]] = {
     ),
     # With the rule for busy workers' new tasks and their load (forks.py), on by default.
     "router with Slack, created": (
-        31074,
-        "4d1e99940d57a54db256d0624814b922b9bd6ac563009351bded61d2ce205c38",
+        31091,
+        "05764e621e0167c662fb08c47e3bf7e07bee154c727b1df6ce3ea9985656588c",
     ),
     "router with Slack, resumed": (
-        31038,
-        "3a92cc4f58b10d5fe03a96dfc2c3b973976ba05e69c5eeb7da6a80be622c0bcb",
+        31055,
+        "9611f3578009123bc75101124a6ff980e01986c607c8b68786126a85f3df0171",
     ),
-    "router, created": (31074, "9a9a86ae3843bed51395a4ea52d7462bcc54ea046496bcfb27d6b5df37cd4c07"),
-    "router, resumed": (31038, "d482e5d29ab8f29620410be193a0693f56deb8883c66d8ed163737608acce4cc"),
+    "router, created": (31091, "a31108d0ea221d70ac7bda8882ff2706286b447ba940f8e5a84c4d7254a68028"),
+    "router, resumed": (31055, "6e442da3b2091392ef862c15e15d03a2710906d7356a5cf7ed3e1e674da7b202"),
     "slack, created": (4649, "cfc2802714c98894a53bc5a78caf731e99e920f6a736c2057e7aa87e9120529f"),
     "slack, resumed": (4614, "11f01623ea397aaeed389c49a3a21790c68577cea19be7c921a6fb246e08189d"),
     "the Copilot sandbox of a worker asking first": (
@@ -421,7 +421,7 @@ TOOL_SCHEMAS: dict[str, tuple[int, str]] = {
     "find_sessions": (700, "7818ee46d8cd971b3b7d05afe1ce7f1c53dd73444c9c421924337ab09406e8f5"),
     "follow_thread": (622, "6ff7fbb6dd8bcea55d7cd7a0b529f9ffc63659a71f2bd64809750072d192778d"),
     "list_sessions": (387, "1a7cd32acbf4370d535391cf0fcc777f7cb70dc682395dc77ff675e1e994e939"),
-    "message_session": (4223, "98175d95ebcf1b0ee490df9291af8e0f52dfab70e45a1b9c1a8e28bfda6a9ce7"),
+    "message_session": (4496, "91b40f536092e4ab9102963b75b1a81058ec63687a3b0fd2a7b46e800a68bc8b"),
     "notify_owner": (932, "226014f3937727081727ba9cc2e3f7159b4a863bbef8e7133aabfac71e9b4801"),
     "propose_checks": (1633, "bc0fff0cc551ca97236f4c657864d62089afac9a23654017ed11cb143f2fb153"),
     "propose_lessons": (1504, "620f5327bee6d0b57eb7397df29db8bb62dcab9b8bb6b6632543767f55dd70e9"),
