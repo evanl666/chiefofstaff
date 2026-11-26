@@ -12,12 +12,12 @@ X2  a question the Router answers itself, on Codex: no worker started
 X3  a task: a worker on Codex does it; its result comes back through the Router
 X4  the Watchdog on a quiet worker: its own session, on Codex, reviews it
 X5  the owner profile distilled: its helper runs on Codex, the card comes to the inbox
-X6  distilled again: the helper is reused (the same session), on Codex again
+X6  distilled again once that run ended: a second run, on Codex again
 X7  away: the messenger, on Codex, tells the owner through a command-line tool (asking first:
     Chief of Staff's policy answers)
 X8  Slack: a DM reaches the Slack session, on Codex, whose reply waits as a draft (its reads are
     Chief of Staff's own tools: Slack's token in no Codex request)
-X9  Watch for you: a scan completes on Codex
+X9  Watch for you: a scan completes on Codex; another, in the same session (a helper reused)
 X10 a mistake learned (a failure case there before a restart): the checker runs on Codex
 
 Shard D, the demo with no agent's CLI on the PATH:
@@ -196,22 +196,32 @@ async def distilled(ctx: Ctx) -> dict:
     return await wait_for("the profile card", card, 900, ctx.app)
 
 
+async def helper_ended(ctx: Ctx, session_id: str, what: str) -> dict:
+    async def ended():
+        view = await la.session(ctx, session_id)
+        return view if view["status"] not in {"working", "queued", "starting"} else None
+
+    return await wait_for(what, ended, 600, ctx.app)
+
+
 async def x5_distill(ctx: Ctx):
     card = await distilled(ctx)
     (helper,) = helpers(ctx, HELPER)
     await on_codex(ctx, helper, "the profile's helper")
     assert card["text"].strip(), card
-    ctx.notes["distill"] = helper
     await ctx.app.post(f"/api/drafts/{card['id']}", {"action": "reject", "reason": "live run"})
+    await helper_ended(ctx, helper, "its run ends")
     log(f"X5: a card of {len(card['text'])} chars")
 
 
 async def x6_distill_again(ctx: Ctx):
-    await distilled(ctx)
+    card = await distilled(ctx)
     found = helpers(ctx, HELPER)
-    assert found == [ctx.notes.get("distill", found[0])], ("reused", found)
-    await on_codex(ctx, found[0], "the profile's helper, again")
-    log("X6: the same helper, on Codex")
+    assert len(found) == 2, found
+    await on_codex(ctx, found[-1], "the profile's helper, again")
+    await ctx.app.post(f"/api/drafts/{card['id']}", {"action": "reject", "reason": "live run"})
+    await helper_ended(ctx, found[-1], "its run ends")
+    log("X6: a second run, on Codex")
 
 
 async def x7_away(ctx: Ctx):
@@ -288,17 +298,27 @@ async def x9_watch(ctx: Ctx):
         watches=[{"what": "Direct messages and mentions of me on Slack", "enabled": True}],
         watch_after_hours_minutes=5,
     )
-    await ctx.app.post("/api/watch/scan", {})
 
-    async def scanned():
-        found = (await la.state(ctx))["connector"]
-        if not found["scanned_at"] or found["scanning"] or not found["session_id"]:
-            return None
-        return found["session_id"]
+    async def scan() -> str:
+        before = (await la.state(ctx))["connector"]["scanned_at"]
+        await ctx.app.post("/api/watch/scan", {})
 
-    session_id = await wait_for("the scan completes", scanned, 900, ctx.app)
-    await on_codex(ctx, session_id, "Watch for you")
-    log("X9: scanned on Codex")
+        async def scanned():
+            found = (await la.state(ctx))["connector"]
+            if found["scanned_at"] == before or found["scanning"] or not found["session_id"]:
+                return None
+            return found["session_id"]
+
+        session_id = await wait_for("the scan completes", scanned, 900, ctx.app)
+        await on_codex(ctx, session_id, "Watch for you")
+        view = await la.session(ctx, session_id)
+        assert view["status"] != "failed", view
+        return session_id
+
+    first = await scan()
+    # Again: the same Watch for you session, reused (a helper's run on a fresh thread).
+    assert await scan() == first and helpers(ctx, "Watch for you") == [first]
+    log("X9: scanned on Codex, twice, in one Watch for you session")
 
 
 def seed_case(ctx: Ctx) -> None:
