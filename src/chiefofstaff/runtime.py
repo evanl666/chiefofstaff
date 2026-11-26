@@ -366,9 +366,9 @@ DISCONNECT_WAIT = 5.0
 # at rest, with this, until the owner starts a fresh one for it.
 TOO_LARGE_WAIT = "waiting for you: its Copilot session is too large to reopen here"
 TOO_LARGE = "is too large for Copilot to reopen here"
-# While Chief of Staff runs on another agent, Copilot (signed out, not installed, can't start)
-# is tried again after this long (seconds), doubling up to RECONNECT_MOST; and Chief of Staff
-# waiting for an agent (none could run it) looks again this often.
+# Recovery (Runtime.recover) waits RECONNECT_DELAY seconds at first while Chief of Staff can't
+# run, and this long while it runs on another agent with Copilot on but unable to run (signed
+# out, not installed, can't start), doubling up to RECONNECT_MOST.
 COPILOT_RETRY = float(os.environ.get("CHIEFOFSTAFF_COPILOT_RETRY", "30"))
 # Items sent with Send to Chief: at most this many in a while (seconds) are taken; the same
 # note and capture again within SENT_AGAIN_SECONDS is the command run twice.
@@ -807,7 +807,11 @@ class Runtime:
         # Watches that Copilot's CLI still runs; reconnects after it stopped by itself, or once
         # the Router is no longer open in a terminal.
         self.process_job: asyncio.Task | None = None
+        # The one recovery path (recover): its task, what asks it for its next step now, and
+        # what keeps its steps one at a time.
         self.recovery: asyncio.Task | None = None
+        self.recover_soon = asyncio.Event()
+        self.recover_lock = asyncio.Lock()
         # Resuming the sessions that were at work as Copilot connected (resume_sessions), and
         # each of those still to be resumed: set once it is.
         self.resume_job: asyncio.Task | None = None
@@ -902,11 +906,8 @@ class Runtime:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.status = {"state": "starting", "error": ""}
         # Why Copilot can't run while Chief of Staff runs on another agent ("" while Copilot
-        # runs, or while Chief of Staff itself waits for it): tried again by itself
-        # (copilot_again), at `copilot_retry` (monotonic) after `copilot_wait` seconds.
+        # runs, or while Chief of Staff itself waits for it): tried again by itself (recover).
         self.copilot_problem = ""
-        self.copilot_retry = 0.0
-        self.copilot_wait = COPILOT_RETRY
         # Connecting: Copilot's CLI starting (a failure then may be a newer one's), no agent
         # able to run Chief of Staff (it waits for one); why each other agent could not.
         self.copilot_starting = self.agent_waits = False
@@ -1306,7 +1307,7 @@ class Runtime:
                 if failed is not None:
                     # Copilot can't run (off, not installed, signed out, it would not start):
                     # Chief of Staff runs on another agent on that can, Copilot tried again by
-                    # itself (copilot_again); none can, it waits for one (bootstrap).
+                    # itself (recover); none can, it waits for one (recover too).
                     self.copilot_problem = self.copilot_why(failed)
                     if not await self.host_without_copilot():
                         self.agent_waits = True
@@ -1350,7 +1351,7 @@ class Runtime:
                     error += " " + updates.start_hint(self.store)
                 self.status = {"state": "error", "error": error}
                 if self.agent_waits:
-                    # No agent can run it: it goes on by itself once one can (copilot_again);
+                    # No agent can run it: it goes on by itself once one can (recover);
                     # Home's card lists them, but for Copilot's own (as before) when it is
                     # the only one, and says so calmly while Claude is being set up (it starts
                     # once that is done: claude_setup_changed).
@@ -1359,10 +1360,13 @@ class Runtime:
                         self.status["settingup"] = True
                     if sys.platform == "win32":
                         self.status["windows"] = True  # (Copilot only, for now.)
+                    self.recover_later()
                 if self.backend and not self.backend.alive():
                     self.recover_later()  # Copilot stopped while connecting: again, later.
             self.publish_state()
         if self.ready():
+            if self.copilot_wanted():
+                self.recover_later()  # Copilot on but unable to run: tried again by itself.
             if self.backend is not None:
                 # The one watching an earlier connection ends by itself.
                 self.process_job = asyncio.create_task(
@@ -1517,7 +1521,7 @@ class Runtime:
     def no_agent(self, failed: Exception) -> Exception:
         """What Chief of Staff says when no agent can run it: Copilot's own error when it is
         the only one (as before), else why each can't (Home's card lists them, with what to
-        do); it goes on by itself once one can (copilot_again)."""
+        do); it goes on by itself once one can (recover)."""
         if sys.platform == "win32" or (
             not self.agents and agents.copilot_on(self.store) and not self.first_run()
         ):
@@ -1531,10 +1535,9 @@ class Runtime:
     async def drop_copilot(self, failed: BaseException):
         """Copilot can't run while Chief of Staff runs on another agent: its backend stops,
         why is kept for its row (`copilot_problem`), and it is tried again by itself
-        (copilot_again). Its sessions at work go on elsewhere (Chief of Staff's own) or fail
-        with why (the owner's workers: Retry, or Continue with another agent)."""
+        (recover). Its sessions at work go on elsewhere (Chief of Staff's own) or fail with why
+        (the owner's workers: Retry, or Continue with another agent)."""
         why = self.copilot_problem = self.copilot_why(failed)
-        self.copilot_retry = time.monotonic() + self.copilot_wait
         if self.backend is not None:
             with suppress(Exception):
                 await self.disconnect()
@@ -1546,49 +1549,38 @@ class Runtime:
                 continue
             self.fail(row, f"Could not go on: Copilot can't run ({why}).")
 
-    async def copilot_again(self):
-        """Tried again by itself, its wait doubling after each failure (COPILOT_RETRY up to
-        RECONNECT_MOST): while no agent could run Chief of Staff, it starts once one can
-        (installed, signed in), without a restart; while it runs without Copilot, Copilot
-        (installed, signed in or turned on since): its sessions go on, and what was chosen for
-        it goes back to it (roles_check)."""
-        if self.stopping or (self.connecting and not self.connecting.done()):
-            return
-        if time.monotonic() < self.copilot_retry:
-            return
-        if self.status["state"] == "error" and self.status.get("waits"):
-            found = await self.agent_found()
-            self.copilot_wait = (
-                COPILOT_RETRY if found else min(self.copilot_wait * 2, RECONNECT_MOST)
-            )
-            self.copilot_retry = time.monotonic() + self.copilot_wait
-            if found:
-                await self.reconnect()
-            return
-        if not self.ready() or not self.copilot_problem or not agents.copilot_on(self.store):
+    def copilot_wanted(self) -> bool:
+        """Chief of Staff runs on another agent while Copilot is on but can't run (signed out,
+        not installed, can't start): tried again by itself (recover)."""
+        return bool(self.copilot_problem) and agents.copilot_on(self.store) and self.ready()
+
+    async def restart_copilot(self):
+        """recover's step while Chief of Staff runs without Copilot that is on: Copilot started
+        again once it may (installed, signed in or turned on since), its sessions resumed in
+        the background (copilot_resumes), and what was chosen for it goes back to it
+        (place_roles)."""
+        if self.connecting and not self.connecting.done():
             return
         if not self.copilot_found():
-            self.copilot_retry = time.monotonic() + self.copilot_wait
             if self.copilot_problem == COPILOT_STARTING:
                 command = self.store.settings().copilot_command or "copilot"
                 self.copilot_problem = f"Copilot CLI '{command}' not found."
                 self.publish_state()
             return  # (Not installed: looked at again, nothing started.)
         async with self.connect_lock:
+            if not self.copilot_wanted():
+                return
             try:
                 await self.start_copilot()
             except Exception as exc:
                 logger.info("Copilot still can't run: %s", describe(exc))
                 self.copilot_problem = self.copilot_why(exc)
-                self.copilot_wait = min(self.copilot_wait * 2, RECONNECT_MOST)
-                self.copilot_retry = time.monotonic() + self.copilot_wait
                 if self.backend is not None:
                     with suppress(Exception):
                         await self.disconnect()
                 self.publish_state()
                 return
             self.copilot_problem = ""
-            self.copilot_wait = COPILOT_RETRY
             try:
                 await self.copilot_resumes()
             except Exception:
@@ -1609,7 +1601,7 @@ class Runtime:
     async def copilot_switched(self) -> bool:
         """Copilot's Use switch saved: turned off, its workers at work stop (their tasks wait
         under Needs you, as for any agent turned off) and its process ends, Chief of Staff's own
-        sessions going on elsewhere (place_roles); turned on, it starts now (copilot_again).
+        sessions going on elsewhere (place_roles); turned on, it starts now (recover_now).
         Whether it was switched."""
         on = agents.copilot_on(self.store)
         if not on and self.copilot_problem != COPILOT_OFF and self.status["state"] == "ready":
@@ -1624,8 +1616,7 @@ class Runtime:
             # Started now, before what was chosen for it is placed (else each would say it
             # runs elsewhere "for now" while it starts).
             self.copilot_problem = COPILOT_STARTING
-            self.copilot_retry, self.copilot_wait = 0.0, COPILOT_RETRY
-            await self.copilot_again()
+            await self.recover_now()
             return True
         return False
 
@@ -1639,15 +1630,16 @@ class Runtime:
 
     async def agent_found(self) -> bool:
         """While no agent could run Chief of Staff: whether one may now. Copilot signed in on
-        the CLI that runs (asked: no model call), or found where it was not; another agent on
-        (on a first run, any) whose glance finds it signed in."""
+        the CLI that runs (asked: no model call), or installed while none runs (not started, or
+        stopped or stopped answering: a new one started, as connecting again does); another
+        agent on (on a first run, any) whose glance finds it signed in."""
         if agents.copilot_on(self.store):
             backend = self.backend
             if backend is not None and backend.alive():
                 with suppress(Exception):
                     if (await backend.get_auth_status()).isAuthenticated:
                         return True
-            elif backend is None and self.copilot_found():
+            elif self.copilot_found():
                 return True
         first = self.first_run()
         for name in agents.NAMES:
@@ -1758,16 +1750,9 @@ class Runtime:
                 self.glance_soon("claude")
         if done is not None and self.status.get("waits"):
             # Chief of Staff waits for an agent (Claude, being set up, its only one): it starts
-            # now, or says why not.
-            self.copilot_retry = 0.0
-            self.background(self.copilot_again() if done else self.connect_after_setup())
+            # now, or says why not (Home's card; Claude's row in Settings has Retry).
+            self.background(self.recover_now())
         self.publish_state()
-
-    async def connect_after_setup(self):
-        """Claude's setup failed while Chief of Staff waited for it: connecting again says why
-        on Home (its card; Claude's row in Settings has Retry)."""
-        if not (self.connecting and not self.connecting.done()):
-            await self.reconnect()
 
     async def retry_claude_setup(self, name: str) -> dict:
         """The owner's Retry (or Set up) on Claude's row: its Agent SDK installed again, whatever
@@ -3700,26 +3685,76 @@ class Runtime:
             await asyncio.sleep(PROCESS_CHECK)
 
     def recover_later(self, at_once: bool = False):
-        if not self.stopping and not (self.recovery and not self.recovery.done()):
-            self.recovery = asyncio.ensure_future(self.recover(at_once))
+        """Recovery (recover) runs, unless it already does; `at_once`: its next step now."""
+        if self.stopping:
+            return
+        if self.recovery and not self.recovery.done():
+            if at_once:
+                self.recover_soon.set()
+            return
+        self.recovery = asyncio.ensure_future(self.recover(at_once))
+
+    def recovering(self) -> bool:
+        """Whether there is something to recover: Chief of Staff not running (Copilot stopped
+        or stopped answering, a start failed, the Router open in a terminal, no agent ready),
+        or running on another agent while Copilot is on but can't run."""
+        return not self.stopping and (not self.ready() or self.copilot_wanted())
+
+    def recover_delay(self) -> float:
+        """recover's first wait: short while Chief of Staff can't run, longer while it runs."""
+        return COPILOT_RETRY if self.ready() else RECONNECT_DELAY
 
     async def recover(self, at_once: bool = False):
-        """Connect again until Copilot runs, waiting longer after each failure; while the Router
-        is open in a terminal, as soon as it is closed there."""
-        delay = RECONNECT_DELAY
+        """The one recovery path: until Chief of Staff runs, and Copilot with it while it is
+        on, what is missing is tried again (recover_step), waiting longer after each failure
+        (recover_delay, doubling up to RECONNECT_MOST; from the start again when what is
+        missing changes); while the Router is open in a terminal, as soon as it is closed
+        there. What may let it go on (Copilot dead, turned on; Claude set up) asks for its next
+        step now (recover_later, at_once)."""
+        delay = self.recover_delay()
         wait = 0.0 if at_once else delay
-        while not self.ready() and not self.stopping:
-            await asyncio.sleep(wait)
-            if self.ready() or self.stopping:
+        while self.recovering():
+            with suppress(TimeoutError):
+                await asyncio.wait_for(self.recover_soon.wait(), wait)
+            self.recover_soon.clear()
+            if not self.recovering():
                 return
-            if await self.router_elsewhere():
+            if not self.ready() and await self.router_elsewhere():
                 wait = RECONNECT_DELAY  # Looked at again shortly.
                 continue
+            before = self.recover_delay()
             try:
-                await self.reconnect()
+                await self.recover_step()
             except Exception:
-                logger.warning("Connecting to Copilot again failed.", exc_info=True)
+                logger.warning("Recovering failed.", exc_info=True)
+            if (base := self.recover_delay()) != before:
+                delay = base
             wait, delay = delay, min(delay * 2, RECONNECT_MOST)
+
+    async def recover_step(self):
+        """recover's one step. Chief of Staff not running: connected again (Copilot's client
+        replaced, its sessions resumed in the background, each bounded: connect), at once when
+        Copilot stopped or a start failed, and while it waits for an agent once one may run it
+        (agent_found) or Claude's setup ended (to say how). Running without Copilot that is on:
+        Copilot started again (restart_copilot). One step at a time; none while a connect goes
+        on (its outcome decides)."""
+        async with self.recover_lock:
+            if self.stopping or self.connect_lock.locked():
+                return
+            if not self.ready():
+                if self.status.get("waits"):
+                    ended = self.status.get("settingup") and not self.claude_setup.running()
+                    if not (ended or await self.agent_found()):
+                        return
+                await self.reconnect()
+            elif self.copilot_wanted():
+                await self.restart_copilot()
+
+    async def recover_now(self):
+        """recover's step now (Copilot turned on, Claude set up); it goes on by itself after
+        that while anything is still missing."""
+        await self.recover_step()
+        self.recover_later()
 
     async def router_elsewhere(self) -> int:
         """The process that has the Router open in another Copilot window, if one does."""
@@ -11459,8 +11494,6 @@ class Runtime:
                 self.workers.refresh_elsewhere,
                 # Chief of Staff's own sessions back on the agent chosen for them, once it can.
                 self.roles_check,
-                # Copilot (or, while none could, any agent) tried again by itself.
-                self.copilot_again,
                 # Disk space: read, measured and cleaned in the background (see storage.py).
                 self.storage.tick,
                 # Prepared for you, while on (shepherd.py).

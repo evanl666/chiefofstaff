@@ -1631,8 +1631,8 @@ extra, it turns Claude on and sets it up first (**Setting up Claude**): Home say
 Code* meanwhile, and Chief of Staff starts on it once that is done. Once another agent is here, Copilot's row has *Use* too: turned off,
 Copilot is never started, its workers at work stop (their tasks wait under *Needs you*) and Chief of
 Staff's own sessions go on with the next agent on; the last agent on can't be turned off. While
-Copilot is on but signed out, not installed or unable to start, Chief of Staff runs on the next agent
-on meanwhile (its row says why, and each session that moved says so in one line), Copilot is tried
+Copilot is on but signed out, not installed or unable to start (also when it stopped answering and
+the new Copilot Chief of Staff starts can't run), Chief of Staff runs on the next agent on meanwhile (its row says why, and each session that moved says so in one line), Copilot is tried
 again by itself, and what was chosen for it goes back to it once it runs; what you send a Copilot
 worker meanwhile waits for it. What needs Copilot for now: *Prepared for you* still finds what
 needs doing but prepares no fixes (its steps run in Copilot's sandbox); *Where your other sessions

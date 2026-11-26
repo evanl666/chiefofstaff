@@ -816,7 +816,7 @@ class Workers:
                     and (down := self.runtime.copilot_down())
                 ):
                     # Chief of Staff runs without Copilot now: it starts once Copilot runs
-                    # (Runtime.copilot_again).
+                    # (Runtime.recover).
                     if row["activity"] != (said := f"Waits for Copilot: {down}"):
                         self.runtime.update_session(row["id"], activity=said)
                     continue

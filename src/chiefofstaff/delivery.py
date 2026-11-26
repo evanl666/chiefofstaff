@@ -283,7 +283,7 @@ class Delivery:
             backend, connection = self.runtime.connection(agent)
             if agent == COPILOT_AGENT and backend is None and (why := self.runtime.copilot_down()):
                 # Chief of Staff runs without Copilot now: kept until Copilot runs again
-                # (Runtime.copilot_again resumes it).
+                # (Runtime.recover resumes it).
                 self.copilot_down(session_id, why)
                 return
             try:

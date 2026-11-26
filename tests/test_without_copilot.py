@@ -16,6 +16,7 @@ from conftest import FakeClient, Harness, call_tool, settle
 from test_roles import saved, until
 
 from chiefofstaff import agents
+from chiefofstaff import runtime as runtime_module
 from chiefofstaff.models import Settings
 from chiefofstaff.roles import ROUTER, WORKER
 
@@ -35,6 +36,34 @@ class SignedOut(FakeClient):
 
     async def get_auth_status(self):
         return SimpleNamespace(isAuthenticated=self.signed_in)
+
+
+class Stops(SignedOut):
+    """A signed-in Copilot whose connection stops answering (`dead`, as CopilotBackend's once
+    its pings go unanswered); a new one, started, is signed in or not as `signed_in` says."""
+
+    def __init__(self):
+        super().__init__(signed_in=True)
+        self.dead = ""
+
+    def alive(self):
+        return not self.dead and not self.crashed
+
+    async def start(self):
+        self.dead = ""
+
+
+def counting(runtime, name: str) -> list:
+    """Each call of the runtime's `name` (a coroutine method), counted."""
+    calls: list = []
+    method = getattr(runtime, name)
+
+    async def counted(*args):
+        calls.append(1)
+        return await method(*args)
+
+    setattr(runtime, name, counted)
+    return calls
 
 
 def not_installed(calls: list):
@@ -95,8 +124,7 @@ async def test_a_first_run_with_only_codex_ready_runs_everything_there(tmp_path,
         # Copilot's own: nothing asked of it, nothing said wrong.
         assert await runtime.available_models() == []
         assert await runtime.workers.copilot_external() == []
-        runtime.copilot_retry = 0.0
-        await runtime.copilot_again()
+        await runtime.recover_now()
         assert len(calls) == 1, "off from then on: never started again"
         # The second start: as the first left it, not a first run any more.
         await runtime.stop()
@@ -136,8 +164,7 @@ async def test_copilot_signed_out_at_a_start_runs_on_codex_and_back_without_a_re
         # Signed in: tried again by itself, the Router back where it was put.
         assert agents.copilot_on(again.store), "a later start never turns Copilot off"
         client.signed_in = True
-        runtime.copilot_retry = 0.0
-        await runtime.copilot_again()
+        await runtime.recover_now()
         await settle(runtime)
         await until(lambda: runtime.agent(router) == "copilot")
         assert runtime.copilot_ready() and copilot_status(runtime)["status"] == "ready"
@@ -251,12 +278,10 @@ async def test_with_no_agent_it_waits_and_starts_by_itself_once_one_can(
         assert (status["state"], status.get("waits"), status.get("setup")) == ("error", True, True)
         assert status["error"].startswith(NOT_FOUND), status["error"]
         assert not runtime.ready() and not harness.router_id
-        runtime.copilot_retry = 0.0
-        await runtime.copilot_again()
+        await runtime.recover_now()
         assert runtime.status["state"] == "error", "still none"
         monkeypatch.delenv("FAKE_CODEX_SIGNED_OUT")
-        runtime.copilot_retry = 0.0
-        await runtime.copilot_again()
+        await runtime.recover_now()
         await settle(runtime)
         assert runtime.ready(), runtime.status
         assert runtime.agent(harness.router_id) == "codex"
@@ -276,12 +301,10 @@ async def test_copilot_alone_signed_out_starts_by_itself_once_signed_in(tmp_path
     try:
         assert runtime.status["error"] == "Copilot is not signed in. Run `copilot login`."
         assert runtime.status.get("waits") and not runtime.status.get("setup")
-        runtime.copilot_retry = 0.0
-        await runtime.copilot_again()
+        await runtime.recover_now()
         assert not runtime.ready()
         client.signed_in = True
-        runtime.copilot_retry = 0.0
-        await runtime.copilot_again()
+        await runtime.recover_now()
         await settle(runtime)
         assert runtime.copilot_ready() and harness.router_id
     finally:
@@ -333,5 +356,65 @@ async def test_the_router_and_new_workers_follow_copilots_own_problems(tmp_path,
         assert '"codex"' in schema and '"copilot"' not in schema
         view = runtime.new_workers_view()
         assert (view["chosen"], view["now"], view["why"]) == ("codex", "codex", "")
+    finally:
+        await runtime.stop()
+
+
+async def test_copilot_that_stops_answering_comes_back_by_the_one_recovery_path(
+    tmp_path, codex_installed, monkeypatch
+):
+    """0.1.59's client restart and agents-anywhere.md 12.2 as one path (Runtime.recover):
+    Copilot stops answering while Codex is on, and the new Copilot is signed out: Chief of
+    Staff goes on on Codex meanwhile, and back on Copilot once it is signed in, by one recovery
+    task, connecting again once (no restart, nothing else connecting meanwhile)."""
+    for name, value in (("PROCESS_CHECK", 0.02), ("RECONNECT_DELAY", 0.05)):
+        monkeypatch.setattr(runtime_module, name, value)
+    monkeypatch.setattr(runtime_module, "COPILOT_RETRY", 0.05)
+    client = Stops()
+    harness = Harness(tmp_path / "data", client=client)
+    runtime = await harness.connect()
+    router = harness.router_id
+    reconnects = counting(runtime, "reconnect")
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        assert runtime.copilot_ready() and not runtime.recovery
+        client.signed_in = False
+        client.dead = "Copilot stopped answering."
+        await until(lambda: runtime.ready() and runtime.agent(router) == "codex")
+        task = runtime.recovery
+        assert task and not task.done(), "Copilot is tried again"
+        assert copilot_status(runtime)["status"] == "signin"
+        client.signed_in = True
+        await until(lambda: runtime.copilot_ready() and runtime.agent(router) == "copilot")
+        await until(task.done)
+        assert runtime.recovery is task, "one recovery task throughout"
+        assert reconnects == [1], "connected again once; Copilot came back by itself"
+    finally:
+        await runtime.stop()
+
+
+async def test_waiting_for_an_agent_the_one_recovery_task_looks_and_connects_once_one_can(
+    tmp_path, codex_installed, monkeypatch
+):
+    """No agent ready at a first start: the recovery task only looks (agent_found), nothing
+    connecting again meanwhile, and connects once Codex is signed in."""
+    monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+    monkeypatch.setattr(runtime_module, "RECONNECT_DELAY", 0.05)
+    monkeypatch.setattr(runtime_module, "RECONNECT_MOST", 0.1)
+    harness = Harness(tmp_path / "data")
+    harness.runtime.backend_factory = not_installed([])
+    runtime = await harness.connect()
+    looks = counting(runtime, "agent_found")
+    reconnects = counting(runtime, "reconnect")
+    try:
+        task = runtime.recovery
+        assert task and not task.done() and runtime.status.get("waits")
+        await until(lambda: len(looks) >= 3)
+        assert reconnects == [] and not runtime.ready()
+        monkeypatch.delenv("FAKE_CODEX_SIGNED_OUT")
+        await until(runtime.ready)
+        assert reconnects == [1] and runtime.recovery is task
+        assert runtime.agent(harness.router_id) == "codex"
+        await until(task.done)
     finally:
         await runtime.stop()
