@@ -7,13 +7,16 @@ K1  On Home, a message to the Router: its bubble is there at once, before the se
     Timed: Enter to the bubble, Enter to the send's answer, Enter to the message stored.
 K2  The same words again while the first is on its way (its send held 3 s in the page, as a
     busy computer holds it): its bubble stands out, one send, one stored message, one answer.
+K3  The page reloads while a send is on its way (it reached Chief of Staff, its answer was cut
+    off): back, its words are no draft (no "Not sent" line), the message is there once, and the
+    Router answers it once.
 
 Uses your signed-in Copilot CLI (a Copilot home of its own, made from your config) and consumes a
 few premium requests (LIVE_COMPOSER_MODEL: claude-haiku-5.5 by default); about 2 minutes. The
 Copilot sessions it creates are deleted at the end. Set TMPDIR to a scratch folder of yours;
 LIVE_COMPOSER_PORT moves its ports (the app's, and the stand-in Slack's 200 above it).
 
-    LIVE_COMPOSER_PORT=18812 uv run --with playwright python scripts/live_composer.py [K1] [K2]
+    LIVE_COMPOSER_PORT=18812 uv run --with playwright python scripts/live_composer.py [K1] [K2] [K3]
 """
 
 import asyncio
@@ -39,6 +42,7 @@ from live_parity import setup  # noqa: E402
 MODEL = os.environ.get("LIVE_COMPOSER_MODEL", "claude-haiku-5.5")
 FIRST = "What is 17 + 25? Answer with the number only, and start no worker."
 AGAIN = "And 17 + 26? The number only, start no worker."
+RELOADED = "And 17 + 27? The number only, start no worker."
 # In the page: when Enter went down; the owner's bubbles with a text at each change of the
 # timeline (never none once shown, never two), when the first showed, and where it stood each
 # time that changed.
@@ -185,6 +189,46 @@ async def k2_the_same_again_is_not_sent_twice(run: Run, router: str):
     run.check("K2 held: never two bubbles", held((await page.evaluate("window.seen"))["counts"]))
 
 
+async def k3_a_reload_mid_send_leaves_no_draft(run: Run, router: str):
+    page = run.page
+    reached = asyncio.Event()
+
+    async def cut_off(route):
+        if route.request.method != "POST":
+            await route.continue_()
+            return
+        await route.fetch()  # Chief of Staff has it.
+        reached.set()
+        await route.abort()  # Its answer never reaches the page.
+
+    url = f"**/api/sessions/{router}/messages"
+    await page.route(url, cut_off)
+    box = page.locator("#composer-input")
+    await box.fill(RELOADED)
+    await box.press("Enter")
+    await asyncio.wait_for(reached.wait(), 60)
+    await page.reload()
+    await page.unroute(url, cut_off)
+    await expect(page.locator("#application")).to_be_visible()
+    bubble = run.bubble(RELOADED)
+    await expect(bubble).to_have_count(1, timeout=30000)
+    await page.wait_for_function("() => !localStorage.getItem('cos.unsent')", timeout=30000)
+    stored = await run.stored(router, RELOADED)
+    said = await run.answer_after(router, stored[0]["id"], "44") if stored else ""
+    value = await box.input_value()
+    draft = await page.evaluate("localStorage.getItem('cos.draft.home')")
+    run.check(
+        "K3 reloaded mid-send: no draft of it, no Not sent line, the message once, one answer",
+        not value
+        and draft is None
+        and await page.locator("#composer-unsent").is_hidden()
+        and len(stored) == 1
+        and await bubble.count() == 1
+        and bool(said),
+        f"box {value!r}, draft {draft!r}, stored {len(stored)}, answer {said[:40]!r}",
+    )
+
+
 async def main():
     wanted = {name.upper() for name in sys.argv[1:]}
     with tempfile.TemporaryDirectory(prefix="cos-composer-") as temporary:
@@ -212,6 +256,8 @@ async def main():
                     await k1_shown_at_once_then_stored_in_place(run, router)
                 if not wanted or "K2" in wanted:
                     await k2_the_same_again_is_not_sent_twice(run, router)
+                if not wanted or "K3" in wanted:
+                    await k3_a_reload_mid_send_leaves_no_draft(run, router)
                 run.check("no page errors", not errors, "; ".join(errors)[:200])
                 await browser.close()
         except BaseException:
