@@ -788,6 +788,10 @@ it ends by itself when it expires, and Chief of Staff deletes the gist then. Wha
 already seen or copied can't be taken back. Without `gh`, or for a copy that never ends,
 *Download HTML file* saves the card as one file.
 
+A finished report in its worker's chat, and its line on Home (beside *View*), has *Share…* too:
+the same dialog, for that report's task. A card is shared as it is now, so from an earlier report
+whose card has a newer result since, the dialog says it shares that latest result.
+
 Someone sent you a link and you use Chief of Staff too? Paste it alone into Home's message box
 and press Enter (the page's *Open in my Chief* copies it): Chief of Staff opens the card itself,
 as a line in the chat, and its link is sent to no AI. It is someone else's words, read as

@@ -366,8 +366,8 @@ replies for your PRs in their worker, and publishes only what you approve:
 
 ## Share links
 
-*Share…* on a finished card makes a link anyone holding it can open, for 1, 7 or 30 days (7 by
-default). Nothing is shared until you click *Create link*:
+*Share…* on a finished card (or on its report in a chat) makes a link anyone holding it can open,
+for 1, 7 or 30 days (7 by default). Nothing is shared until you click *Create link*:
 
 - **What:** the card as its preview shows it, by an allow-list (title, result, its checks and
   criteria, change counts, the commit it is about, its PRs and warnings), never the worker's
