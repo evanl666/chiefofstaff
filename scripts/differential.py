@@ -802,6 +802,12 @@ FEATURES["claude_agents"] = Feature(
             "one more session event: the Router's session opened again",
             data=r"^steps\.\w+\.bus\.session$",
         ),
+        # Without its Agent SDK on these sides: set up as Claude is turned on (claude_setup.py),
+        # stopped as it is turned off; the try is kept (at most one more by itself at a start).
+        Allow(
+            "Claude's setup, begun as it was turned on, stopped as it was turned off: its try",
+            data=r"\.db\.kv\.claudesetup:[^.]+$",
+        ),
     ],
     on_action="claude_drained",
 )
