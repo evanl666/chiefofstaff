@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+Chief of Staff starts, and stops, however large a worker's Copilot session has grown.
+
+- **A very large worker session no longer keeps Chief of Staff from starting.** With Copilot CLI
+  1.0.115 and 1.0.116, Chief of Staff never became ready (the browser did not open: "server did
+  not become ready"), at every restart, once a worker at work had a Copilot session of several
+  hundred MB (one's log was 808 MB). At each start, and after each message to a worker, Chief of
+  Staff asked Copilot for the session's whole history to check what it had received; Copilot
+  failed to write an answer that large ("Rust JSON-RPC transport error: Error: write EINVAL" in
+  its log), then answered nothing more while its process ran on, and Chief of Staff waited for it
+  for ever. Chief of Staff now reads what such a session received from the session's own log, a
+  little at a time, and never asks Copilot for it whole (sessions under 32 MB are asked as
+  before).
+- **Copilot that stops answering no longer stops Chief of Staff.** Every request to Copilot has a
+  time limit, and Copilot is asked whether it still answers when one waits long. When it does
+  not, Chief of Staff starts a new Copilot by itself (no restart of its own), as when Copilot
+  crashes, and the workers at work go on. A worker whose session Copilot stopped answering after
+  is not reopened again: it rests, its task says *Waiting for you: its Copilot session is too
+  large to reopen here*, and its chat says so in one line with *Start a fresh worker with its
+  context*, which goes on with its task in a fresh session, told where it was. What you send it
+  meanwhile is kept for that.
+- **Chief of Staff's page opens even while Copilot is slow.** The workers at work resume in the
+  background as Copilot connects, each for three minutes at most, and the page is served after 8
+  seconds of a start that goes on (it says Copilot is connecting meanwhile). What you send to a
+  worker still resuming goes once it has.
+- **Stopping Chief of Staff no longer hangs.** Copilot is given 5 seconds to stop; then its
+  processes are ended, and killed if they ignore that (it waited for ever in "Waiting for
+  application shutdown" once Copilot stopped answering).
+
 ## 0.1.58 (2026-11-26)
 
 Your answer to a decision card reaches its worker at once and stays decided, and a worker's

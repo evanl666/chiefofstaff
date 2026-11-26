@@ -1930,3 +1930,12 @@ sessions, tasks and timelines, workspaces under `work/` and, while Send to Chief
 socket in `send/`. Conversations themselves are
 stored by Copilot in `~/.copilot/session-state`; every session is a real Copilot session
 (`copilot --resume <id>` works).
+
+A worker's Copilot session can grow very large over weeks of work (hundreds of MB). What such a
+session received is read from its own log, never asked of Copilot whole. Should Copilot still
+stop answering after reopening one, Chief of Staff starts a new Copilot by itself and the other
+workers go on; that worker is not reopened again: its task says *Waiting for you: its Copilot
+session is too large to reopen here*, and its chat says so with *Start a fresh worker with its
+context*, which goes on with its task in a fresh session, told where it was. Chief of Staff's
+page opens even while Copilot is slow to start (it says Copilot is starting), and stopping it
+never waits on Copilot for more than a few seconds.
