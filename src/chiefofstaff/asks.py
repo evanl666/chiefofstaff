@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
@@ -84,6 +85,16 @@ class AskSession(BaseModel):
 class AnswerSession(BaseModel):
     question_id: str = Field(description="The question attribute of the question message")
     answer: str
+
+
+# A message that ends asking something ("before I pick: what does B change?"), whatever closes
+# it (quotes, brackets, an emoji).
+ASKS_BACK = re.compile(r"[?\uff1f][\s\"'\u201d\u2019)\]\u3009\u300b\u300d\u300f\uff09]*\W{0,3}\s*$")
+
+
+def asks_back(text: str) -> bool:
+    """A question back is no answer to a decision or a question."""
+    return bool(ASKS_BACK.search(text.strip()))
 
 
 def clock(iso: str) -> str:
@@ -356,7 +367,7 @@ class Asks:
                 # Any answer settles its subject (E151): the others asked the same hear it.
                 claimed = (
                     ledger.claim("question", question["id"], text)
-                    if by in {"owner", "router"} and text.strip()
+                    if by in {"owner", "router"} and text.strip() and not asks_back(text)
                     else ([], [])
                 )
                 self.store.delete(f"ownerq:{question['id']}")
@@ -839,7 +850,8 @@ class Asks:
                 result = {"answer": text, "wasFreeform": text not in choices}
                 outcome = text[:500]
                 row = self.store.find_session(draft["session_id"])
-                if row and row["role"] == "worker":
+                if row and row["role"] == "worker" and settle:
+                    # (Answered with another ask of its choice, the Router hears it with that.)
                     task = self.runtime.tasks.find(draft["target"].get("task_id") or "")
                     self.tell_router_answer(row["id"], draft["text"], text, task, bool(choices))
             elif kind == "form":

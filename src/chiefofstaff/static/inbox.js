@@ -289,7 +289,12 @@ function renderPanel() {
   // A card per thing to do: a task's own row holds all it waits for (a result to accept, its
   // question), once.
   const embedded = new Set();
-  const about = (key, item) => subjectItem(item, items.subjects.get(key));
+  // The items one choice's other asks fold into: their subject, drawn in them below.
+  const subjectOf = new Map();
+  const about = (key, item) => {
+    if (items.subjects.has(key)) subjectOf.set(item.key, items.subjects.get(key));
+    return item;
+  };
   const needItems = [
     ...items.updates.map((update) => about(`update:${update.id}`, updateItem(update))),
     ...okItem(items.ok),
@@ -304,6 +309,7 @@ function renderPanel() {
   if (state.needKeys && needKeys.some((key) => !state.needKeys.has(key) && !state.leaving.has(key))) needs.open = true;
   state.needKeys = new Set(needKeys);
   reconcile(needs.querySelector(".items"), steady(needs, needItems), editing);
+  for (const node of needs.querySelector(".items").children) withSubject(node, subjectOf.get(node.dataset.key));
   handledLine(needs);
 
   // Prepared for you (shepherd.py): what was found on the owner's other PRs, between Needs you
@@ -355,18 +361,13 @@ const FINISHED_PAGE = 30;
 // An item one choice's other asks fold into (E158): who asked it, what each asked, what the
 // owner decided on it before, and another choice it is possibly the same as (Merge). Drawn in
 // place as that changes (the card itself is not drawn again: a menu open on it stays).
-function subjectItem(item, subject) {
-  return {
-    ...item,
-    version: `${item.version ?? ""}${subject ? `|${subjectVersion(subject)}` : ""}`,
-    build: () => withSubject(item.build(), subject),
-    refresh: (node) => withSubject(item.refresh ? item.refresh(node) || node : node, subject),
-  };
-}
 function withSubject(node, subject) {
-  node.querySelector(":scope > .subject")?.remove();
+  const drawn = node.querySelector(":scope > .subject");
+  const version = subject ? subjectVersion(subject) : "";
+  if ((drawn?.dataset.v || "") === version) return node;
+  drawn?.remove();
   if (!subject) return node;
-  const block = el("div", { class: "subject" });
+  const block = el("div", { class: "subject", "data-v": version });
   if (subject.asks.length > 1) block.append(el("div", { class: "sub-asked muted", text: `${subject.asked_by[0].toUpperCase()}${subject.asked_by.slice(1)}: one answer reaches them all` }));
   if (subject.others.length) {
     const list = el("details", { class: "sub-evidence" }, el("summary", { text: subject.others.length === 1 ? "What the other asked" : `What the ${subject.others.length} others asked` }));
@@ -383,9 +384,10 @@ function withSubject(node, subject) {
     const merge = el("button", { type: "button", class: "link sub-merge", text: "Merge", "data-tip": other.decided ? `The same question: answer this with “${other.decided}”` : "The same question: one card, one answer", onclick: () => once(`merge:${subject.id}`, null, () => apiState(`/api/subjects/${encodeURIComponent(subject.id)}/merge`, { into: other.id })) });
     block.append(el("div", { class: "sub-possibly muted" }, `Possibly the same as “${other.title}”${other.decided ? ` (decided: ${other.decided})` : ""} `, merge));
   }
-  // Above its own actions: who else waits on the answer, before giving it.
-  const actions = node.querySelector(":scope > .actions");
-  if (block.children.length) node.insertBefore(block, actions);
+  // Above its own actions: who else waits on the answer, before giving it. (Nothing to say:
+  // an empty mark, so it is not worked out again.)
+  if (!block.children.length) block.hidden = true;
+  node.insertBefore(block, node.querySelector(":scope > .actions"));
   return node;
 }
 async function apiState(path, body = undefined) {

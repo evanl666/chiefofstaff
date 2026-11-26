@@ -351,3 +351,27 @@ def test_e158_home_folds_a_subjects_asks_into_one_item():
         "shown": ["draft:d2"],
         "others": ["a1", "a3"],
     }
+
+
+async def test_a_store_from_before_files_its_open_asks_and_decisions_once(harness):
+    """Opened by this version, a store from before has its decisions in force and its open
+    cards and questions under subjects, once; a worker asking one of them joins it."""
+    runtime = await harness.connect()
+    api = await spawn(runtime, harness.router_id, "Login API")
+    page = await spawn(runtime, harness.router_id, "Login page", why_new="parallel")
+    one_request(harness, api, page)
+    await call_tool(runtime, "record_decision", harness.router_id, decision="Login v1: email only",
+                    tasks=[api["task_id"]])  # fmt: skip
+    await call_tool(runtime, "report", page["session_id"], status="question",
+                    summary="Which font for the login page: Inter or system?")  # fmt: skip
+    for table in ("asks", "subjects"):
+        harness.store.execute(f"DELETE FROM {table}")  # noqa: S608  (as before the ledger)
+    harness.store.delete("migrated:ledger")
+    runtime.ledger.migrate()
+    runtime.ledger.migrate()
+    assert len(harness.store.all("SELECT * FROM subjects")) == 2
+    assert len(harness.store.all("SELECT * FROM asks")) == 1
+    await call_tool(runtime, "report", api["session_id"], status="question",
+                    summary="Inter or the system font on the login page?")  # fmt: skip
+    [subject] = runtime.snapshot()["subjects"]
+    assert subject["asked_by"] == "asked by 2 workers"

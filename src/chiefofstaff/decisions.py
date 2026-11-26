@@ -24,7 +24,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from .asks import clock
+from .asks import asks_back, clock
 from .envelope import wrap
 from .ledger import related
 from .models import DraftDecision, NestedArguments
@@ -132,16 +132,6 @@ def value(text: str) -> str:
 
 def clean(text: str, limit: int) -> str:
     return " ".join(text.split())[:limit]
-
-
-# A message that ends asking something ("before I pick: what does B change?"), whatever closes
-# it (quotes, brackets, an emoji).
-ASKS_BACK = re.compile(r"[?\uff1f][\s\"'\u201d\u2019)\]\u3009\u300b\u300d\u300f\uff09]*\W{0,3}\s*$")
-
-
-def asks_back(text: str) -> bool:
-    """A question back is no answer to a decision."""
-    return bool(ASKS_BACK.search(text.strip()))
 
 
 class Decisions:

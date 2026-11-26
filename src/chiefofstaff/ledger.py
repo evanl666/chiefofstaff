@@ -667,7 +667,7 @@ class Ledger:
             if not question:
                 return
             if declined or quiet or by == "router":
-                runtime.asks.dismiss(ask["ref"], "answered")
+                runtime.asks.dismiss(ask["ref"], "")  # (The Router heard it with the first.)
                 task = runtime.tasks.find(question.get("task_id") or "")
                 if task and not quiet:
                     runtime.asks.go_on(task)
@@ -891,6 +891,15 @@ class Ledger:
             if len(asks) < 2 and not decision and not possibly:
                 continue
             views = [self.ask_view(ask) for ask in asks]
+            for view, ask in zip(views, asks, strict=True):
+                # The Router's note that only says again what a worker asked: nothing to read.
+                mine = plain(ask["text"])
+                if view["router"] and any(
+                    other is not ask
+                    and (plain(other["text"]) in mine or mine in plain(other["text"]))
+                    for other in asks
+                ):
+                    view["restates"] = True
             shown.append(
                 {
                     "id": subject["id"],

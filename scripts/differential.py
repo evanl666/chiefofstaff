@@ -675,6 +675,26 @@ FIXES: list[Allow] = [
         attribute="data-version",
         views=r"^home",
     ),
+    # 0.1.59 (decision ledger, QA10 E151 E152 E158 E159): every ask of the owner is filed under
+    # its subject, the choice it is about (ledger.py): two tables beside the others, written as
+    # asks come and go, and the mark that the open ones were filed once at start.
+    Allow(
+        "the asks ledger's tables: subjects and asks, and their indexes",
+        data=r"\.db\._schema\.(?:subjects|asks|asks_by_ref|asks_by_subject|asks_open)$",
+    ),
+    Allow("the asks ledger: each ask under its subject", data=r"\.db\.(?:subjects|asks)$"),
+    Allow("the asks ledger: open asks filed once", data=r"\.db\.kv\.migrated:ledger$"),
+    # The decisions in force each worker was given (named in what it got): the line "Decisions
+    # in force for your tasks" brings it only those it was not.
+    Allow("the decisions each worker was given", data=r"\.db\.kv\.dgiven:"),
+    # Needs you by subject: a choice asked by more than one (here, the Router's note on a
+    # worker's blocked question joins it), decided before, or possibly the same as another.
+    Allow("Needs you's subjects", data=r"^steps\.\w+\.api\./api/state\.subjects$"),
+    Allow(
+        "a card's subject line: asked by a worker + the Router",
+        element="#needs .card > .subject",
+        views=r"^home",
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

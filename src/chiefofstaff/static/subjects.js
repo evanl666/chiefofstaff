@@ -22,7 +22,8 @@ export function folding(subjects, present) {
     }
     if (!keys.length) continue;
     const mine = own.get(keys[0]);
-    shown.set(keys[0], { ...subject, others: subject.asks.filter((ask) => ask.id !== mine && !(ask.keys || []).includes(keys[0])) });
+    // What the others asked (not the Router's note that only says a worker's ask again).
+    shown.set(keys[0], { ...subject, others: subject.asks.filter((ask) => ask.id !== mine && !ask.restates && !(ask.keys || []).includes(keys[0])) });
     for (const key of keys.slice(1)) folded.set(key, keys[0]);
   }
   return { folded, shown };
