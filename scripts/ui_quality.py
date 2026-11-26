@@ -1347,10 +1347,10 @@ async def agents_views(runtime, browser, quality: Quality):
                     await expect(group.locator("label.check.locked")).to_have_count(2)
                     await group.locator("#agent-claude .fold").click()
                 if state == "long":
-                    await group.locator("#own-sessions summary").click()
+                    await group.locator(".work-grid").scroll_into_view_if_needed()
                 if state in {"found", "enabling"}:
                     await expect(group.locator(".agent .status")).to_have_text(
-                        ["Ready", "Ready · off for workers", "Ready · off for workers"]
+                        ["Ready", "Ready · off", "Ready · off"]
                     )
                 if state == "enabling":
                     await group.locator("input[name=agent_codex_enabled]").check()

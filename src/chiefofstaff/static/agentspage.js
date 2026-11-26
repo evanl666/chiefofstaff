@@ -1,14 +1,16 @@
-// Settings → Agents & models (docs/design/settings-v2.md §3): who does the work, and with
-// which model. New workers run on (the answer at a glance), one row per agent (its status in
-// words, one action, its switch, a meter of its plan; unfolded, its model, effort and limit per
-// worker, and its details), and Chief of Staff's own sessions, folded.
+// Settings → Agents & models (docs/design/settings-v2.md §3, agents-anywhere.md §5): who does
+// the work, and with which model. Who does the work comes first: new workers and each of Chief
+// of Staff's own sessions, each with the agent it runs on, and its model and effort there (a
+// pair of menus per agent, the chosen agent's shown: switching keeps each agent's), and once
+// what one does if its agent can't run it. Then one row per agent (its status in words, one
+// action, its switch, a meter of its plan; unfolded, its limit per worker and its details).
 //
-// Drawn once each time Settings opens, from what is saved and the snapshot (agents_status):
-// nothing here asks the server until the page is shown. Then, while another agent is installed
-// or on, the look (GET /api/agents: a short process of each agent's own, never its backend, and
-// never /api/models?agent=) updates the rows in place, keeping every field's value and whether
-// the owner changed it (data-dirty). A menu keeps the saved value it can't list and is sent
-// only once the owner changed it (§8.7).
+// Drawn once each time Settings opens, from what is saved and the snapshot (work,
+// agents_status): nothing here asks the server until the page is shown. Then, while another
+// agent is installed or on, the look (GET /api/agents: a short process of each agent's own,
+// never its backend, and never /api/models?agent=) updates the rows and menus in place, keeping
+// every field's value and whether the owner changed it (data-dirty). A menu keeps the saved
+// value it can't list and is sent only once the owner changed it (§8.7).
 import { $, api, el, toast } from "./dom.js";
 import { state } from "./state.js";
 import { copyFix, endsLine, modelText, statusOf } from "./agentpick.js";
@@ -17,22 +19,42 @@ import { resetTime } from "./board.js";
 import { codeHtml } from "./text.js";
 
 export const AGENT_LABELS = { copilot: "Copilot", codex: "Codex", claude: "Claude Code" };
+// As the @ list and the menus say them.
+const SHORT = { copilot: "Copilot", codex: "Codex", claude: "Claude" };
 const OTHERS = ["codex", "claude"];
+const ALL = ["copilot", ...OTHERS];
 export const EFFORT_WORDS = { none: "None", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
 // Copilot's efforts where its model's are not known (Copilot's own default, a model not listed).
 const ANY_EFFORT = ["low", "medium", "high", "xhigh", "max"];
-const ROLES = [
-  ["router", "Router"],
-  ["slack", "Slack"],
-  ["watchdog", "Watchdog"],
+// Who does the work: new workers, then Chief of Staff's own sessions (agents.KINDS), each with
+// what it does on hover.
+const KINDS = [
+  ["workers", "New workers", "The agent, model and effort new work starts with. One task can go elsewhere: type @ and an agent."],
+  ["router", "Router", "Reads what you ask and hands it to workers."],
+  ["watchdog", "Watchdog", "Checks workers for stalls and drift."],
+  ["slack", "Slack", "Drafts your Slack replies for your OK."],
+  ["connector", "Watch for you", "Runs your watches, and learns how you write from what you wrote elsewhere."],
+  ["helpers", "Helpers", "Learn how you work, suggest checks and your profile, and message you when you're away."],
 ];
-// The roles that can run on another agent (agents.role_agents), as the look lists them.
-const PLACED = ["router", "watchdog"];
+const ROLE_KINDS = KINDS.slice(1).map(([kind]) => kind);
+// Copilot's model and effort Settings holds for these (role_models, role_efforts).
+const SETTINGS_ROLE = { workers: "worker", router: "router", slack: "slack", watchdog: "watchdog" };
 const GUIDE = "https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#workers-on-other-coding-agents";
+const COPILOT_PAYS = "Uses your Copilot plan";
 
 const form = () => $("#settings-form");
 const field = (name) => form()?.elements.namedItem(name) || null;
 const label = (name) => AGENT_LABELS[name] || state.snapshot?.agents?.names?.[name] || name;
+const short = (name) => SHORT[name] || label(name);
+// A kind's model and effort fields on an agent: Settings' own for Copilot where it holds them,
+// an agent's own for its workers, else the kind's on it (agents.MODELS).
+function fieldsOf(kind, agent) {
+  if (agent === "copilot" && SETTINGS_ROLE[kind]) return [`model_${SETTINGS_ROLE[kind]}`, `effort_${SETTINGS_ROLE[kind]}`];
+  if (kind === "workers") return [`agent_${agent}_model`, `agent_${agent}_effort`];
+  return [`kind_${kind}_${agent}_model`, `kind_${kind}_${agent}_effort`];
+}
+// Who does the work as saved (the snapshot's `work`).
+const work = () => state.snapshot.work || { agents: ["copilot"], default: "copilot", new_workers: state.snapshot.agents?.new_workers || "copilot", roles: {}, unavailable: {}, models: {} };
 // The page's own state, from one opening of Settings to the next.
 let looked = null; // The look's answer (GET /api/agents), once it came.
 let looking = null; // The look under way.
@@ -123,7 +145,7 @@ export function agentStatus(name, { look = null, status = null, sandboxed = fals
   if (cannotRun(look, status, sandboxed)) return { text: "Can't run here", tone: "bad", action: "" };
   if (now.status === "limited") return { text: `At its limit${now.resets_at ? ` · resets ${resetTime(now.resets_at * 1000)}` : ""}`, tone: "warn", action: "", works: true };
   if (now.status === "checking") return { text: "Checking…", tone: "off", action: "" };
-  if (now.status === "ready") return on ? { text: "Ready", tone: "ready", action: "", works: true } : { text: "Ready · off for workers", tone: "off", action: "", works: true };
+  if (now.status === "ready") return on ? { text: "Ready", tone: "ready", action: "", works: true } : { text: "Ready · off", tone: "off", action: "", works: true };
   return { text: now.status ? now.said || "" : "", tone: "off", action: "" };
 }
 
@@ -143,8 +165,13 @@ function agentModelName(name, id) {
   }
   return model.name || model.id;
 }
-const savedOn = (name) => (looked ? Boolean(lookOf(name)?.enabled) : Boolean(state.snapshot?.agents?.on?.includes(name)));
-const onNow = (name) => Boolean(field(`agent_${name}_enabled`)?.checked);
+// A model as the page names it on its agent ("" for its default: the agent's default by name).
+function modelName(agent, id) {
+  if (agent === "copilot") return id ? copilotName(id) : copilotName(work().copilot_default || "") || "Copilot's default";
+  return agentModelName(agent, id) || `${label(agent)}'s default`;
+}
+const savedOn = (name) => name === "copilot" || (looked ? Boolean(lookOf(name)?.enabled) : Boolean(state.snapshot?.agents?.on?.includes(name)));
+const onNow = (name) => name === "copilot" || Boolean(field(`agent_${name}_enabled`)?.checked);
 const sandboxed = () => Boolean(looked?.sandboxed);
 function nowOf(name) {
   let look = lookOf(name);
@@ -155,7 +182,10 @@ function nowOf(name) {
   const running = setupOf(name)?.state === "running" ? setupWords(name) : "";
   return { look, status, sandboxed: sandboxed(), on: onNow(name), running };
 }
-const canWork = (name) => Boolean(agentStatus(name, nowOf(name)).works);
+// The agents on now (drafts count), Copilot's place first: what each kind of work can run on.
+const agentsOnNow = () => ALL.filter((name) => (name === "copilot" || others.includes(name)) && onNow(name));
+const paysOf = (name) => (name === "copilot" ? COPILOT_PAYS : lookOf(name)?.pays || statusOf(name)?.pays || "");
+const lower = (text) => (text ? `${text[0].toLowerCase()}${text.slice(1)}` : "");
 
 // Drawn once per opening --------------------------------------------------------------------
 
@@ -177,23 +207,34 @@ export function renderAgentsPage() {
   else section.dataset.looked = "none";
   // (What the last opening drew goes first: nothing of its drafts is read again.)
   page.replaceChildren();
+  const activity = el("button", { type: "button", id: "watchdog-activity", class: "link quiet", hidden: true, text: "Its activity" });
   page.replaceChildren(
-    newWorkLine(),
-    el("div", { class: "box agent-rows", id: "agent-rows" }, copilotRow(), ...others.map(agentRow)),
+    workGrid(),
+    el("small", { class: "page-foot", id: "work-note" }, "Helpers learn how you work, suggest checks and your profile, and message you when you're away. The Watchdog checks workers for stalls and drift. ", activity),
+    el("div", { class: "section-label", id: "agents-label", text: "Agents" }),
+    el("div", { class: "box agent-rows", id: "agent-rows", "aria-labelledby": "agents-label" }, copilotRow(), ...others.map(agentRow)),
     el("small", { id: "agents-none", class: "page-foot", role: "status", hidden: true }),
-    ownSessions(),
-    ...(others.length ? [el("small", { class: "page-foot", id: "agents-guide" }, "What differs between agents: ", el("a", { class: "link", href: GUIDE, target: "_blank", rel: "noreferrer", text: "the guide" }))] : []),
+    agentsFoot(),
   );
-  const settings = snap.settings;
-  refreshEfforts(field("model_worker"), settings.role_efforts.worker || "");
-  for (const [role] of ROLES) refreshEfforts(field(`model_${role}`), settings.role_efforts[role] || "");
+  for (const select of form().querySelectorAll('#agents-page select[data-models="copilot"]')) refreshEfforts(select);
   for (const name of others) drawRow(name);
   drawCopilot();
-  syncRoles();
-  syncNewWork(snap.agents?.new_workers || "copilot");
+  syncWork();
   page.oninput = changed;
   page.onchange = changed;
   page.onclick = clicked;
+}
+// What else it runs on: the agents not installed here, and where to read how (the @ list
+// installs them too); with all three here, what differs between them.
+function agentsFoot() {
+  const missing = OTHERS.filter((name) => !others.includes(name)).map(label);
+  if (!missing.length) return el("small", { class: "page-foot", id: "agents-guide" }, "What differs between agents: ", el("a", { class: "link", href: GUIDE, target: "_blank", rel: "noreferrer", text: "the guide" }));
+  return el(
+    "small",
+    { class: "page-foot", id: "agents-guide" },
+    `Chief of Staff also runs on ${missing.join(" and ")}: install ${missing.length > 1 ? "either" : "it"} and it shows here. `,
+    el("a", { class: "link", href: GUIDE, target: "_blank", rel: "noreferrer", text: "How" }),
+  );
 }
 // The page is shown: the look runs, at most once per opening (again after one that failed),
 // while another agent is installed or on.
@@ -230,10 +271,7 @@ async function lookAtAgents() {
     if (look) fillAgentFields(name, look);
     drawRow(name);
   }
-  fillRoles();
-  const choice = field("agent_new_workers");
-  if (choice && !choice.dataset.dirty) choice.dataset.saved = answer.new_workers || "copilot";
-  syncNewWork(choice && !choice.dataset.dirty ? answer.new_workers : undefined);
+  syncWork();
   section.dataset.looked = "done";
 }
 
@@ -242,74 +280,157 @@ function noAgentWords(supported = ["the Codex CLI"]) {
   return `No supported coding agent found. Supported: ${listed} — install ${supported.length > 1 ? "one" : "it"}, then open this again.`;
 }
 
-// New workers run on: the agent and its model in words; a menu once another agent is on.
-function newWorkLine() {
-  const choice = el("select", { id: "new-work", name: "agent_new_workers", "aria-labelledby": "new-work-lead", "aria-describedby": "new-work-model new-work-hint" });
-  const shown = state.snapshot.agents?.new_workers || "copilot";
-  choice.dataset.saved = shown;
+// Who does the work ----------------------------------------------------------------------------
+
+// One grid: a row per kind of work (where it runs; its model and effort there), then what one
+// does if its agent can't run it.
+function workGrid() {
+  const saved = work();
+  const how = new Set(ROLE_KINDS.map((kind) => saved.unavailable?.[kind] || "next"));
+  const fallback = el(
+    "select",
+    { name: "work_unavailable", "aria-label": "If its agent can't run it" },
+    el("option", { value: "next", text: "Use another that can, and tell me" }),
+    el("option", { value: "ask", text: "Wait, and ask me" }),
+    how.size > 1 ? el("option", { value: "mixed", text: "As before (differs by session)" }) : null,
+  );
+  fallback.dataset.saved = how.size > 1 ? "mixed" : [...how][0];
+  fallback.value = fallback.dataset.saved;
   return el(
     "div",
-    { class: "box" },
+    { class: "box work-grid", role: "group", "aria-label": "Who does the work" },
+    el("div", { class: "work-head", "aria-hidden": "true" }, el("span"), el("span", { text: "Runs on" }), el("span", { text: "Model" }), el("span", { text: "Effort" })),
+    ...KINDS.map(([kind, name, tip]) => workRow(kind, name, tip)),
     el(
       "div",
-      { class: "default-line" },
-      el("span", { class: "lead", id: "new-work-lead", text: "New workers run on" }),
-      el(
-        "div",
-        { class: "pick" },
-        el("span", { class: "agent-mark", id: "new-work-mark", "data-agent": "copilot", "aria-hidden": "true" }),
-        withAgents() ? choice : null,
-        el("strong", { id: "new-work-plain", text: "Copilot" }),
-        el("span", { class: "sep", id: "new-work-sep", "aria-hidden": "true", text: "·" }),
-        el("span", { class: "model", id: "new-work-model" }),
-      ),
-      el("small", { id: "new-work-hint" }),
+      { class: "work-foot", id: "work-foot" },
+      el("span", { class: "alone", id: "work-alone", hidden: true }),
+      el("span", { class: "choose", id: "work-choose" }, el("span", { text: "If its agent can't run it" }), fallback, el("span", { class: "order", id: "work-order" })),
     ),
   );
 }
-// As the form has it now (drafts count): the agents on and able to work, Last used; the
-// chosen one's model and effort; whose plan; the Default chip on its row.
-function syncNewWork(chosen) {
-  const choice = field("agent_new_workers");
-  const able = others.filter((name) => onNow(name) && canWork(name));
-  let name = "copilot";
-  if (choice) {
-    const keep = chosen ?? (choice.value || choice.dataset.saved);
-    const choices = [["copilot", "Copilot"], ...able.map((agent) => [agent, label(agent)]), ["last", "Last used"]];
-    fill(choice, choices, choices.some(([id]) => id === keep) ? keep : "copilot");
-    choice.hidden = !able.length;
-    name = choice.value === "last" ? looked?.last_used || state.snapshot.agents?.new_workers || "copilot" : choice.value;
-    if (!able.includes(name)) name = "copilot";
+function workRow(kind, name, tip) {
+  const saved = work();
+  const chosen = kind === "workers" ? saved.new_workers : saved.roles?.[kind] || saved.default;
+  const select = el("select", { name: kind === "workers" ? "agent_new_workers" : `work_${kind}_agent`, "aria-label": `${name}: runs on`, "aria-describedby": `work-${kind}-line` });
+  select.dataset.saved = chosen || "copilot";
+  select.dataset.kind = kind;
+  const runs = el("span", { class: "runs" }, el("span", { class: "agent-mark", "data-agent": "copilot", "aria-hidden": "true" }), select, el("span", { class: "plain" }));
+  const watchdog = kind === "watchdog" ? el("input", { type: "checkbox", name: "watchdog_enabled", "aria-label": "Watchdog on: checks workers for stalls and drift" }) : null;
+  if (watchdog) watchdog.checked = Boolean(state.snapshot.settings.watchdog_enabled);
+  return el(
+    "div",
+    { class: `work-row${kind === "workers" ? " lead" : ""}`, "data-kind": kind },
+    el(watchdog ? "label" : "span", { class: "name", title: tip }, watchdog, name),
+    runs,
+    ...ALL.filter((agent) => agent === "copilot" || others.includes(agent)).map((agent) => modelPair(kind, name, agent)),
+    el("small", { class: "line warn", id: `work-${kind}-line`, hidden: true }),
+    kind === "workers" ? el("small", { class: "line", id: "work-workers-hint" }) : null,
+  );
+}
+// A kind's model and effort on one agent: shown while it runs there, kept while it does not.
+function modelPair(kind, name, agent) {
+  const [modelField, effortField] = fieldsOf(kind, agent);
+  const saved = work().models?.[kind]?.[agent] || {};
+  const model = el("select", { name: modelField, "data-models": agent, "data-first": "plain", "aria-label": `${name}: model on ${label(agent)}` });
+  const effort = el("select", { name: effortField, "data-efforts-for": modelField, "aria-label": `${name}: effort on ${label(agent)}` });
+  const shown = agent === "claude" && saved.model === "default" ? "" : saved.model || "";
+  model.dataset.savedValue = saved.model || "";
+  effort.dataset.savedValue = saved.effort || "";
+  if (agent === "copilot") fillCopilotModel(model, shown);
+  else {
+    // Kept as saved until the look lists its models (agents.configured_models said them).
+    fill(model, modelChoices([], shown, firstChoice(agent)), shown);
+    model.disabled = true;
+    effort.disabled = true;
   }
-  const menu = Boolean(choice && !choice.hidden);
-  $("#new-work-plain").hidden = menu;
-  $("#new-work-sep").hidden = menu;
-  $("#new-work-mark").dataset.agent = name;
-  let model;
-  let effort;
-  if (name === "copilot") {
-    const worker = field("model_worker")?.value || "";
-    const fallback = field("model")?.value || state.snapshot.settings.model || "";
-    model = worker || fallback ? copilotName(worker || fallback) : "Copilot's default model";
-    effort = field("effort_worker")?.value || "";
-  } else {
-    model = agentModelName(name, field(`agent_${name}_model`)?.value || "") || `${label(name)}'s default model`;
-    effort = field(`agent_${name}_effort`)?.value || "";
+  fill(effort, effortChoices(agent === "copilot" ? null : [], saved.effort || ""), saved.effort || "");
+  return el("span", { class: "cells", "data-cells": kind, "data-agent": agent, hidden: true }, model, effort);
+}
+// A model menu's first choice: the agent's own default, by name where known.
+function firstChoice(agent) {
+  if (agent === "copilot") {
+    const named = work().copilot_default ? copilotName(work().copilot_default) : "";
+    return named ? `Default (${named})` : "Copilot's default";
   }
-  $("#new-work-model").textContent = `${model}${effort ? ` · ${(EFFORT_WORDS[effort] || effort).toLowerCase()} effort` : ""}`;
-  const pays = name === "copilot" ? "Uses your Copilot plan" : lookOf(name)?.pays || statusOf(name)?.pays || "";
-  const now = choice?.value === "last" ? `Now ${label(name)}. ` : "";
-  const status = name === "copilot" ? null : agentStatus(name, nowOf(name));
-  const resets = statusOf(name)?.resets_at;
-  const waits = status?.text.startsWith("At its limit") && resets ? `${label(name)} is at its limit: new workers wait for it until ${resetTime(resets * 1000)}. ` : "";
-  const other = able.find((agent) => agent !== name) || (name !== "copilot" ? "copilot" : "");
-  const ask = other ? ` For one task, type @${other} or say “do this with ${label(other)}”.` : "";
-  $("#new-work-hint").textContent = `${now}${waits}${pays ? `${pays}.` : ""}${ask}`.trim();
-  for (const chip of document.querySelectorAll("#agent-rows .default-chip")) chip.hidden = !(able.length && chip.closest(".agent").dataset.agent === name);
+  // (By the model it stands for now, where its agent says: else plainly its agent's.)
+  const named = defaultModel(agent) ? agentModelName(agent, "") : "";
+  return named && named !== "Claude Code's default" ? `Default (${named})` : `${label(agent)}'s default`;
+}
+// Each agent's menus, once the look listed its models (a value the owner changed meanwhile stays).
+function fillWorkModels(name) {
+  for (const model of form().querySelectorAll(`#agents-page .cells[data-agent="${name}"] select[data-models]`)) {
+    const effort = model.closest(".cells").querySelector("select[data-efforts-for]");
+    const saved = name === "claude" && model.dataset.savedValue === "default" ? "" : model.dataset.savedValue || "";
+    model.disabled = false;
+    fillAgentModel(name, model, model.dataset.dirty ? model.value : saved);
+    refreshEfforts(model, effort.dataset.dirty ? effort.value : effort.dataset.savedValue || "");
+  }
+}
+// The agent a Runs on menu means now (Last used: the one last chosen for a worker).
+function meant(select) {
+  if (select.value !== "last") return select.value;
+  const last = looked?.last_used || state.snapshot.agents?.new_workers || "copilot";
+  return agentsOnNow().includes(last) ? last : agentsOnNow()[0] || "copilot";
+}
+// An agent in a Runs on menu: its name, and what keeps it from working now, if anything.
+function choiceText(name) {
+  if (name === "copilot") return short(name);
+  const status = agentStatus(name, nowOf(name));
+  return status.works ? short(name) : `${short(name)} · ${status.text}`;
+}
+// As the form has it now (drafts count): each row's menu (the agents on), the menus of the agent
+// it runs on, where it runs for now and why, and what the foot says.
+function syncWork() {
+  const on = agentsOnNow();
+  const several = on.length > 1;
+  for (const [kind] of KINDS) {
+    const row = form().querySelector(`#agents-page .work-row[data-kind="${kind}"]`);
+    if (!row) continue;
+    const select = row.querySelector("select[data-kind]");
+    const keep = select.dataset.dirty ? select.value : select.dataset.saved;
+    const choices = on.map((name) => [name, choiceText(name)]);
+    if (kind === "workers") choices.push(["last", "Last used"]);
+    // One turned off (in this draft too): it runs on the first agent on, as Save leaves it.
+    fill(select, choices, choices.some(([id]) => id === keep) ? keep : on[0] || "copilot");
+    select.hidden = !several;
+    const agent = meant(select);
+    const plain = row.querySelector(".runs .plain");
+    plain.textContent = short(agent);
+    plain.hidden = several;
+    row.querySelector(".runs .agent-mark").dataset.agent = agent;
+    for (const cells of row.querySelectorAll(".cells")) cells.hidden = cells.dataset.agent !== agent;
+    const line = $(`#work-${kind}-line`);
+    line.textContent = select.value === select.dataset.saved ? lineOf(kind) : "";
+    line.hidden = !line.textContent;
+  }
+  const workers = field("agent_new_workers");
+  const now = workers.value === workers.dataset.saved && looked?.workers?.now ? looked.workers.now : meant(workers);
+  const other = on.find((name) => name !== now);
+  const pays = paysOf(now);
+  $("#work-workers-hint").textContent = `${workers.value === "last" ? `Now ${short(now)}. ` : ""}${pays ? `${pays}.` : ""}${other ? ` For one task, type @${other} or say “do this with ${short(other)}”.` : ""}`.trim();
+  $("#work-alone").hidden = several;
+  $("#work-alone").textContent = several ? "" : `If ${short(on[0] || "copilot")} can't run one of these, it waits, and Home says why.`;
+  $("#work-choose").hidden = !several;
+  $("#work-order").textContent = several ? `In this order: ${on.map(label).join(", ")}.` : "";
+}
+// Where a kind runs for now and why, as the look found it: on another agent (its model there,
+// whose plan), or waiting ("" while it runs where it was put, or before the look).
+function lineOf(kind) {
+  const view = kind === "workers" ? looked?.workers : looked?.roles?.find((role) => role.role === kind);
+  if (!view?.why) return "";
+  if (!view.now) return kind === "workers" ? `New workers wait for ${short(view.chosen)}: ${view.why}` : `Waits for ${short(view.chosen)}: ${view.why}`;
+  const pays = paysOf(view.now);
+  const there = `${modelName(view.now, view.now_model)}${pays ? `, ${lower(pays)}` : ""}`;
+  if (kind === "workers") return `New workers start on ${short(view.now)} (${there}) until then: ${view.why}`;
+  if (view.waits) return `Waits for ${short(view.chosen)}: ${view.why}`;
+  return `On ${short(view.now)} for now (${there}): ${view.why}`;
 }
 
-// An agent's row: one line (fold, mark, name, status; on the right the Default chip, its meter,
-// its one action, its switch), its alert lines, and what it unfolds.
+// The agents ------------------------------------------------------------------------------------
+
+// An agent's row: one line (fold, mark, name, status; on the right its meter, its one action,
+// its switch), its alert lines, and what it unfolds.
 function rowShell(name, { aside, body }) {
   const id = `agent-${name}`;
   return el(
@@ -318,9 +439,9 @@ function rowShell(name, { aside, body }) {
     el(
       "div",
       { class: "agent-line" },
-      el("button", { type: "button", class: "fold", "aria-expanded": "false", "aria-controls": `${id}-body`, "aria-label": `${label(name)}: ${name === "copilot" ? "model, effort and details" : "model, effort, limit and details"}` }),
+      el("button", { type: "button", class: "fold", "aria-expanded": "false", "aria-controls": `${id}-body`, "aria-label": `${label(name)}: ${name === "copilot" ? "limit and details" : "limit, sign-in and details"}` }),
       el("div", { class: "who" }, el("span", { class: "agent-mark", "data-agent": name, "aria-hidden": "true" }), el("strong", { text: label(name) }), el("span", { class: "status", id: `${id}-status`, role: "status" })),
-      el("div", { class: "aside" }, el("span", { class: "chip default-chip", hidden: true, text: "Default" }), ...aside),
+      el("div", { class: "aside" }, ...aside),
     ),
     el("div", { class: "agent-alerts", id: `${id}-alerts`, hidden: true }),
     el("div", { class: "agent-body", id: `${id}-body`, hidden: true }, ...body),
@@ -328,32 +449,22 @@ function rowShell(name, { aside, body }) {
 }
 function copilotRow() {
   const settings = state.snapshot.settings;
-  const model = el("select", { name: "model_worker", "data-models": "copilot", "data-first": "workers" });
-  const effort = el("select", { name: "effort_worker", "data-efforts-for": "model_worker" });
   const limit = el("input", { name: "worker_credit_limit", type: "number", min: "0", step: "1", placeholder: "No limit", value: settings.worker_credit_limit ? String(settings.worker_credit_limit) : "" });
   const command = el("input", { name: "copilot_command", autocomplete: "off", spellcheck: "false", value: settings.copilot_command || "" });
   const reconnect = el("button", { type: "button", class: "setup-action compact", id: "copilot-reconnect", hidden: true, text: "Reconnect", "aria-label": "Reconnect to Copilot" });
-  const row = rowShell("copilot", {
+  return rowShell("copilot", {
     aside: [reconnect, el("span", { class: "always", text: "Always on" })],
     body: [
-      el(
-        "div",
-        { class: "agent-fields" },
-        el("label", {}, el("span", { text: "Model for workers" }), model),
-        el("label", {}, el("span", { text: "Effort" }), effort),
-        el("label", {}, el("span", { text: "Limit per worker (credits)" }), limit, el("small", { text: "Empty: none. At least 30." })),
-      ),
+      el("div", { class: "agent-fields" }, el("label", {}, el("span", { text: "Limit per worker (credits)" }), limit, el("small", { text: "Empty: none. At least 30." }))),
       el(
         "div",
         { class: "agent-details" },
-        el("span", { text: "Uses your Copilot plan" }),
+        el("span", { text: COPILOT_PAYS }),
         el("span", { id: "copilot-warning", hidden: true }),
         el("label", { class: "cmd" }, el("span", { text: "Command" }), command),
       ),
     ],
   });
-  fillCopilotModel(model, settings.role_models.worker || "");
-  return row;
 }
 // Copilot's status, from the runtime: Ready, Starting…, or Can't start (and Reconnect).
 function drawCopilot() {
@@ -369,10 +480,8 @@ function drawCopilot() {
   warning.hidden = !runtime.warning;
 }
 function agentRow(name) {
-  const box = el("input", { type: "checkbox", name: `agent_${name}_enabled`, "aria-label": `Use for workers: ${label(name)}`, "aria-describedby": `agent-${name}-status agent-${name}-alerts` });
+  const box = el("input", { type: "checkbox", name: `agent_${name}_enabled`, "aria-label": `Use ${label(name)}`, "aria-describedby": `agent-${name}-status agent-${name}-alerts` });
   box.checked = savedOn(name);
-  const model = el("select", { name: `agent_${name}_model`, "data-models": name, disabled: true });
-  const effort = el("select", { name: `agent_${name}_effort`, "data-efforts-for": `agent_${name}_model`, disabled: true });
   const errorId = `agent-${name}-limit-error`;
   const limit = el("input", { name: `agent_${name}_limit`, type: "text", inputmode: "numeric", placeholder: "No limit", autocomplete: "off", disabled: true, "aria-describedby": errorId });
   limit.addEventListener("blur", () => {
@@ -380,63 +489,48 @@ function agentRow(name) {
     if (count) limit.value = grouped(count);
   });
   limit.addEventListener("input", () => limit.hasAttribute("aria-invalid") && checkLimit(limit));
-  // Saved before the look answers (the snapshot names it for an agent on): kept until then.
-  const configured = state.snapshot.agents?.configured_models?.[name] || "";
-  const shown = name === "claude" && configured === "default" ? "" : configured;
-  fill(model, modelChoices([], shown, `${label(name)}'s default`), shown);
-  fill(effort, effortChoices([], ""), "");
   return rowShell(name, {
     aside: [
       el("span", { class: "meter-slot" }),
       el("span", { class: "action-slot" }),
-      el("label", { class: "check use" }, box, " Use for workers"),
+      el("label", { class: "check use" }, box, " Use"),
     ],
     body: [
       el("p", { class: "agent-note setup-note", hidden: true }),
       el("div", { class: "agent-details setup-details", hidden: true }),
       el("p", { class: "agent-note limited-note", hidden: true }),
-      el(
-        "div",
-        { class: "agent-fields" },
-        el("label", {}, el("span", { text: "Model" }), model),
-        el("label", {}, el("span", { text: "Effort" }), effort),
-        el("label", {}, el("span", { text: "Limit per worker (tokens)" }), limit, el("small", { id: errorId, class: "field-error", hidden: true })),
-      ),
-      el("small", { class: "agent-note for-roles", text: `For its workers, and for the Router or the Watchdog when they run on ${label(name)}.` }),
+      el("div", { class: "agent-fields" }, el("label", {}, el("span", { text: "Limit per worker (tokens)" }), limit, el("small", { id: errorId, class: "field-error", hidden: true }))),
       el("div", { class: "agent-details about", hidden: true }),
       el("small", { class: "agent-note plan-note", hidden: true }),
     ],
   });
 }
-// Its fields as saved, once the look says (a value the owner changed meanwhile stays).
+// Its fields as saved, once the look says (a value the owner changed meanwhile stays): its
+// switch and limit, and every menu of its models (Who does the work).
 function fillAgentFields(name, look) {
+  const limit = field(`agent_${name}_limit`);
+  limit.dataset.saved = "1";
+  limit.disabled = false;
+  limit.dataset.savedValue = String(look.limit || 0);
+  if (!limit.dataset.dirty) limit.value = look.limit ? grouped(look.limit) : "";
+  // Its workers' model and effort as saved: what the look says, over the snapshot's.
   const model = field(`agent_${name}_model`);
   const effort = field(`agent_${name}_effort`);
-  const limit = field(`agent_${name}_limit`);
-  const savedModel = name === "claude" && look.model === "default" ? "" : look.model || "";
-  for (const input of [model, effort, limit]) {
-    input.dataset.saved = "1";
-    input.disabled = false;
+  if (model && effort) {
+    model.dataset.savedValue = look.model || "";
+    effort.dataset.savedValue = look.effort || "";
+    model.dataset.saved = effort.dataset.saved = "1";
   }
-  model.dataset.savedValue = look.model || "";
-  effort.dataset.savedValue = look.effort || "";
-  limit.dataset.savedValue = String(look.limit || 0);
-  fillAgentModel(name, model, model.dataset.dirty ? model.value : savedModel);
-  refreshEfforts(model, effort.dataset.dirty ? effort.value : look.effort || "");
-  if (!limit.dataset.dirty) limit.value = look.limit ? grouped(look.limit) : "";
+  fillWorkModels(name);
   const box = field(`agent_${name}_enabled`);
   if (!box.dataset.dirty) box.checked = Boolean(look.enabled);
 }
 function fillAgentModel(name, select, value) {
-  const first = `${label(name)}'s default${defaultModel(name) ? ` (${agentModelName(name, "")})` : ""}`;
   const listed = agentModels(name).filter((model) => !(name === "claude" && model.id === "default"));
-  fill(select, modelChoices(listed, value, first, (model) => modelText(name, model)), value);
+  fill(select, modelChoices(listed, value, firstChoice(name), (model) => modelText(name, model)), value);
 }
-const defaultModelNow = () => field("model")?.value ?? state.snapshot.settings.model ?? "";
 function fillCopilotModel(select, value) {
-  const fallback = defaultModelNow();
-  const first = select.dataset.first === "workers" ? (fallback ? `Default (${copilotName(fallback)})` : "Copilot's default") : select.dataset.first === "copilot" ? "Copilot's default" : "Default";
-  fill(select, modelChoices(copilotModels(), value, first), value);
+  fill(select, modelChoices(copilotModels(), value, firstChoice("copilot")), value);
 }
 // An effort menu, as its model offers them (where that model is known), keeping its value.
 function refreshEfforts(modelSelect, value) {
@@ -447,7 +541,7 @@ function refreshEfforts(modelSelect, value) {
   const agent = modelSelect.dataset.models;
   let efforts = null;
   if (agent === "copilot") {
-    const id = modelSelect.value || (modelSelect.name === "model" ? "" : defaultModelNow());
+    const id = modelSelect.value || work().copilot_default || "";
     const info = id ? copilotModels().find((model) => model.id === id) : null;
     efforts = info ? info.efforts || [] : null;
   } else {
@@ -460,13 +554,12 @@ function refreshEfforts(modelSelect, value) {
 }
 // Copilot's models came (loadModels, after Settings opened): each menu again, its value kept.
 export function modelsArrived() {
-  if (!$("#settings-dialog")?.open) return;
-  for (const select of form().querySelectorAll('select[data-models="copilot"]')) {
+  if (!$("#settings-dialog")?.open || !$("#agents-page .work-grid")) return;
+  for (const select of form().querySelectorAll('#agents-page select[data-models="copilot"]')) {
     fillCopilotModel(select, select.value);
     refreshEfforts(select);
   }
-  syncNewWork();
-  ownSummary();
+  syncWork();
 }
 
 // What an agent's row says now: in place, its fields as they are.
@@ -484,7 +577,7 @@ function drawRow(name) {
   // Turning it on waits until it can work; turning it off never waits.
   const box = field(`agent_${name}_enabled`);
   const on = savedOn(name);
-  box.disabled = !on && !box.checked && !status.works && !status.turnsOn;
+  box.disabled = (!on && !box.checked && !status.works && !status.turnsOn) || (box.checked && agentsOnNow().length === 1);
   box.closest("label").classList.toggle("locked", box.disabled);
   // The meter: where the agent said how much of its plan is used.
   const meter = usageMeter(now.look?.usage);
@@ -519,12 +612,12 @@ function drawRow(name) {
   const unready = Boolean(now.running) || kind === "signin" || status.text === "Not installed";
   setupNote.hidden = !unready && !status.turnsOn;
   setupDetails.hidden = !(unready && fix?.command);
-  if (status.turnsOn) setupNote.textContent = "Turning on Use for workers sets it up: Chief of Staff installs what Claude workers need, in a minute or so.";
+  if (status.turnsOn) setupNote.textContent = "Turning on Use sets it up: Chief of Staff installs what Claude workers need, in a minute or so.";
   if (unready) {
     setupNote.textContent = setupOf(name)?.kind === "install"
       ? "Install runs the official installer in your account and shows its output; then Sign in."
       : status.text === "Not installed"
-      ? `${label(name)} isn't installed on this computer, so its work waits. Install it with this command in a terminal, or turn off Use for workers.`
+      ? `${label(name)} isn't installed on this computer, so its work waits. Install it with this command in a terminal, or turn off Use.`
       : `Sign in opens ${label(name)}'s own sign-in page in your browser; Chief of Staff never reads your sign-in. Or run the command in a terminal yourself.`;
     if (fix?.command) {
       setupDetails.replaceChildren(
@@ -537,9 +630,7 @@ function drawRow(name) {
   const resets = statusOf(name)?.resets_at;
   limitedNote.hidden = !(status.text.startsWith("At its limit") && resets);
   if (!limitedNote.hidden) limitedNote.textContent = `Work for ${label(name)} waits, and goes on by itself at ${resetTime(resets * 1000)}. For one task meanwhile, type @copilot.`;
-  const missing = status.text === "Not installed";
-  row.querySelector(".agent-fields").hidden = missing;
-  row.querySelector(".for-roles").hidden = missing;
+  row.querySelector(".agent-fields").hidden = status.text === "Not installed";
   const about = row.querySelector(".about");
   const look = lookOf(name);
   const signedIn = look?.state ? look.state.split(" · ").slice(1).join(" · ") : "";
@@ -589,9 +680,9 @@ function setupDetailsFold(name, setup, open) {
 }
 // A setup run's news (agentsetup.js): its row says it at once.
 export function setupChanged() {
-  if (!$("#settings-dialog")?.open) return;
+  if (!$("#settings-dialog")?.open || !$("#agents-page .work-grid")) return;
   for (const name of others) drawRow(name);
-  syncNewWork();
+  syncWork();
 }
 // The snapshot changed (an agent's status, Copilot's): the rows say so, fields untouched.
 export function agentsStateChanged() {
@@ -600,127 +691,7 @@ export function agentsStateChanged() {
   if (looked && !looking && others.some((name) => lookOf(name)?.setup && !statusOf(name)?.setup)) lookAtAgents();
   for (const name of others) drawRow(name);
   drawCopilot();
-  syncNewWork();
-}
-
-// Chief of Staff's own sessions --------------------------------------------------------------
-
-function ownSessions() {
-  const settings = state.snapshot.settings;
-  const placed = withAgents();
-  const cells = [];
-  cells.push(el("span", { class: "h", "aria-hidden": "true", text: "Session" }), el("span", { class: "h", "aria-hidden": "true", text: "Runs on" }), el("span", { class: "h", "aria-hidden": "true", text: "Model and effort" }));
-  for (const [role, name] of ROLES) {
-    const model = el("select", { name: `model_${role}`, "aria-label": `${name} model on Copilot`, "data-models": "copilot", "data-first": "plain" });
-    const effort = el("select", { name: `effort_${role}`, "aria-label": `${name} effort on Copilot`, "data-efforts-for": `model_${role}` });
-    fillCopilotModel(model, settings.role_models[role] || "");
-    const runs = placed && PLACED.includes(role)
-      ? el("span", { class: "runs" }, el("select", { name: `role_${role}`, "aria-label": `${name} runs on`, disabled: true }), el("span", { class: "fixed", text: "Copilot" }))
-      : el("span", { class: "fixed", text: "Copilot" });
-    const watchdog = role === "watchdog" ? el("input", { type: "checkbox", name: "watchdog_enabled", "aria-label": "Watchdog on: checks workers for stalls and drift" }) : null;
-    if (watchdog) watchdog.checked = Boolean(settings.watchdog_enabled);
-    cells.push(
-      el(watchdog ? "label" : "span", { class: "role" }, watchdog, name),
-      runs,
-      el("span", { class: "cells", "data-cells": role }, model, effort),
-      el("span", { class: "inherits", "data-inherits": role, hidden: true }),
-    );
-    if (placed && PLACED.includes(role)) {
-      const unavailable = el("select", { name: `unavailable_${role}`, "aria-label": `If its agent can't run the ${name}` }, el("option", { value: "copilot", text: "Use Copilot and tell me" }), el("option", { value: "ask", text: "Ask me" }));
-      cells.push(
-        el("span", { class: "sub", "data-sub": role, hidden: true }, "If it can't run there: ", unavailable, el("span", { class: "on-copilot", "data-on-copilot": role })),
-        el("small", { class: "sub role-line", id: `role-${role}-line`, hidden: true }),
-      );
-    }
-  }
-  const fallback = el("select", { name: "model", "aria-label": "Default model", "data-models": "copilot", "data-first": "copilot" });
-  fillCopilotModel(fallback, settings.model || "");
-  cells.push(el("span", { class: "role", text: "Default" }), el("span", { class: "fixed", text: "Copilot" }), el("span", { class: "cells" }, fallback, el("span")), el("span", { class: "inherits", hidden: true }));
-  const activity = el("button", { type: "button", id: "watchdog-activity", class: "link quiet", hidden: true, text: "View activity" });
-  return el(
-    "details",
-    { class: "section own", id: "own-sessions" },
-    el("summary", {}, el("span", { text: "Chief of Staff's own sessions" }), el("small", { id: "own-summary" })),
-    el(
-      "div",
-      { class: "section-body" },
-      el("div", { class: "own-grid" }, ...cells),
-      el("small", { class: "own-foot" }, "Default is the model of any session on Copilot without one of its own. Watch for you and helpers use the workers' model (Copilot's row). The Watchdog checks workers for stalls and drift · ", activity),
-    ),
-  );
-}
-// Where the Router and the Watchdog run, as the look says (chosen; why one runs on Copilot for
-// now; what it does if its agent can't run it).
-function fillRoles() {
-  for (const role of looked?.roles || []) {
-    const choice = field(`role_${role.role}`);
-    if (!choice) continue;
-    choice.dataset.saved = role.chosen || "copilot";
-    choice.dataset.agents = (role.agents || []).join(" ");
-    choice.disabled = false;
-    if (!choice.dataset.dirty) choice.dataset.keep = role.chosen || "copilot";
-    const fallback = field(`unavailable_${role.role}`);
-    if (fallback && role.unavailable) {
-      fallback.dataset.saved = role.unavailable;
-      if (!fallback.dataset.dirty) fallback.value = role.unavailable;
-    }
-    const line = $(`#role-${role.role}-line`);
-    if (line) {
-      line.textContent = role.line || "";
-      line.dataset.line = role.line || "";
-      if (role.line) choice.setAttribute("aria-describedby", line.id);
-      else choice.removeAttribute("aria-describedby");
-    }
-  }
-  syncRoles();
-}
-// Each role's Runs on menu: Copilot and the agents on (drafts count) that can run it; on another
-// agent, that agent's model and effort said instead of Copilot's menus (kept, unsent).
-function syncRoles() {
-  for (const role of PLACED) {
-    const choice = field(`role_${role}`);
-    if (!choice) continue;
-    const can = (choice.dataset.agents || OTHERS.join(" ")).split(" ");
-    const on = others.filter((name) => onNow(name) && can.includes(name));
-    const keep = choice.dataset.dirty ? choice.value : choice.dataset.keep || (role === "router" ? state.snapshot.agents?.router_on : "") || "copilot";
-    const choices = [["copilot", "Copilot"], ...on.map((name) => [name, label(name)])];
-    fill(choice, choices, choices.some(([id]) => id === keep) ? keep : "copilot");
-    // A menu only while there is a choice: else it runs on Copilot, said as such.
-    choice.hidden = !on.length;
-    choice.nextElementSibling.hidden = Boolean(on.length);
-    const where = choice.value;
-    const elsewhere = where !== "copilot";
-    form().querySelector(`[data-cells="${role}"]`).hidden = elsewhere;
-    const inherits = form().querySelector(`[data-inherits="${role}"]`);
-    inherits.hidden = !elsewhere;
-    inherits.textContent = elsewhere ? `${label(where)}'s model and effort (its row)` : "";
-    const sub = form().querySelector(`[data-sub="${role}"]`);
-    sub.hidden = !elsewhere;
-    if (elsewhere) {
-      const model = field(`model_${role}`).value;
-      const effort = field(`effort_${role}`).value;
-      sub.querySelector(".on-copilot").textContent = ` · on Copilot: ${model ? copilotName(model) : "the default model"}, ${(EFFORT_WORDS[effort] || "default").toLowerCase()} effort`;
-    }
-    const line = $(`#role-${role}-line`);
-    line.hidden = !line.dataset.line || where === "copilot";
-  }
-  ownSummary();
-}
-function ownSummary() {
-  const summary = $("#own-summary");
-  if (!summary) return;
-  const away = PLACED.map((role) => [role, field(`role_${role}`)]).filter(([, choice]) => choice && choice.value !== "copilot");
-  const fallback = field("model")?.value || "";
-  const watchdog = field("watchdog_enabled")?.checked === false ? " · Watchdog off" : "";
-  // Where each runs now: on Copilot for now where its agent can't run it (its line says why).
-  const where = ([role, choice]) => {
-    const name = role === "router" ? "Router" : "Watchdog";
-    const forNow = choice.value === choice.dataset.saved && $(`#role-${role}-line`)?.dataset.line;
-    return forNow ? `${name} on Copilot for now` : `${name} on ${label(choice.value)}`;
-  };
-  summary.textContent = away.length
-    ? `${away.map(where).join(" · ")} · others on Copilot${watchdog}`
-    : `All on Copilot · ${fallback ? copilotName(fallback) : "Copilot's default model"}${watchdog}`;
+  syncWork();
 }
 
 // The owner's drafts -------------------------------------------------------------------------
@@ -731,20 +702,14 @@ function changed(event) {
   const input = event.target;
   if (!input.name) return;
   input.dataset.dirty = "1";
-  if (input.matches("select[data-models]")) {
-    refreshEfforts(input);
-    if (input.name === "model") {
-      // Workers' first choice says what Default is; menus on Default take its efforts.
-      const workers = field("model_worker");
-      fillCopilotModel(workers, workers.value);
-      for (const select of form().querySelectorAll('select[data-models="copilot"]')) if (!select.value && select !== input) refreshEfforts(select);
-    }
-  }
+  if (input.matches("select[data-models]")) refreshEfforts(input);
   const agent = /^agent_(\w+)_enabled$/.exec(input.name)?.[1];
-  if (agent) drawRow(agent);
-  if (agent || /^(role|model|effort)_/.test(input.name) || ["model", "watchdog_enabled"].includes(input.name)) syncRoles();
-  if (input.name === "agent_new_workers") {
-    // Picked there, an agent is used for workers (its switch says so).
+  if (agent) {
+    for (const name of others) drawRow(name);
+    drawCopilot();
+  }
+  if (input.matches("select[data-kind]") && ALL.includes(input.value)) {
+    // Picked there, an agent is used (its switch says so).
     const box = field(`agent_${input.value}_enabled`);
     if (box && !box.checked) {
       box.checked = true;
@@ -752,7 +717,7 @@ function changed(event) {
       drawRow(input.value);
     }
   }
-  syncNewWork();
+  syncWork();
 }
 function clicked(event) {
   const fold = event.target.closest(".agent-line .fold");
@@ -777,7 +742,7 @@ function clicked(event) {
   const copy = event.target.closest("[data-copy]");
   if (copy) {
     const name = copy.dataset.copy;
-    const fix = (lookOf(name) || statusOf(name))?.fix;
+    const fix = (name === "copilot" ? statusOf(name) : lookOf(name) || statusOf(name))?.fix;
     if (fix) copyFix(fix);
     return;
   }
@@ -818,10 +783,10 @@ function checkLimit(input) {
   return count;
 }
 // The agents' group of a Save: only what changed. A switch is read whatever the look did (an
-// agent on can be turned off while it is looked at, or after a look that failed); a field only
-// once the look filled it and the owner changed it.
+// agent on can be turned off while it is looked at, or after a look that failed); another
+// agent's field only once the look filled it and the owner changed it; where each kind of work
+// runs, and Copilot's models of Watch for you and the helpers, once changed.
 export function agentsBody() {
-  if (!others.length) return null;
   const body = {};
   for (const name of others) {
     const entry = {};
@@ -832,8 +797,8 @@ export function agentsBody() {
       const model = field(`agent_${name}_model`);
       const effort = field(`agent_${name}_effort`);
       const limit = field(`agent_${name}_limit`);
-      if (model.dataset.dirty && model.value !== (name === "claude" && look.model === "default" ? "" : look.model || "")) entry.model = model.value;
-      if (effort.dataset.dirty && effort.value !== (look.effort || "")) entry.effort = effort.value;
+      if (model?.dataset.dirty && model.value !== (name === "claude" && look.model === "default" ? "" : look.model || "")) entry.model = model.value;
+      if (effort?.dataset.dirty && effort.value !== (look.effort || "")) entry.effort = effort.value;
       if (limit.dataset.dirty) {
         const count = checkLimit(limit);
         if (count === null) throw Object.assign(new Error("Limit per worker: enter a whole number of tokens."), { field: limit });
@@ -842,18 +807,26 @@ export function agentsBody() {
     }
     if (Object.keys(entry).length) body[name] = entry;
   }
-  const choice = field("agent_new_workers");
-  if (choice?.dataset.dirty && !choice.hidden && choice.value !== choice.dataset.saved) body.new_workers = choice.value;
+  const workers = field("agent_new_workers");
+  if (workers?.dataset.dirty && workers.value !== workers.dataset.saved) body.new_workers = workers.value;
   const roles = {};
-  const unavailable = {};
-  for (const role of PLACED) {
-    const where = field(`role_${role}`);
-    if (where?.dataset.dirty && !where.disabled && where.value !== where.dataset.saved) roles[role] = where.value;
-    const fallback = field(`unavailable_${role}`);
-    if (fallback?.dataset.dirty && fallback.dataset.saved && fallback.value !== fallback.dataset.saved) unavailable[role] = fallback.value;
+  for (const kind of ROLE_KINDS) {
+    const where = field(`work_${kind}_agent`);
+    if (where?.dataset.dirty && where.value !== where.dataset.saved) roles[kind] = where.value;
   }
   if (Object.keys(roles).length) body.roles = roles;
-  if (Object.keys(unavailable).length) body.role_unavailable = unavailable;
+  const how = field("work_unavailable");
+  if (how?.dataset.dirty && how.value !== how.dataset.saved && how.value !== "mixed") body.role_unavailable = Object.fromEntries(ROLE_KINDS.map((kind) => [kind, how.value]));
+  // Each kind's model and effort on an agent that Settings does not hold elsewhere.
+  const models = {};
+  for (const select of form().querySelectorAll('#agents-page select[name^="kind_"]')) {
+    const [, kind, agent, key] = /^kind_(\w+?)_(copilot|codex|claude)_(model|effort)$/.exec(select.name) || [];
+    if (!kind || !select.dataset.dirty || select.disabled || select.value === (select.dataset.savedValue || "")) continue;
+    if (agent !== "copilot" && !lookOf(agent)) continue;
+    models[kind] = models[kind] || {};
+    models[kind][agent] = { ...models[kind][agent], [key]: select.value };
+  }
+  if (Object.keys(models).length) body.models = models;
   return Object.keys(body).length ? body : null;
 }
 // After a save: what it saved is what the page shows as saved (the next opening draws again).

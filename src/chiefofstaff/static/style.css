@@ -731,6 +731,9 @@ a.button:hover { text-decoration: none; opacity: 0.88; }
 /* The agent chosen, as a chip: its popover picks the agent, its model and effort. */
 .agent-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--text); font: inherit; font-size: var(--small); cursor: pointer; }
 .agent-chip:hover { background: var(--hover); }
+/* A chip with nothing to pick (a closed worker's, or with one agent on): its agent, said. */
+.agent-chip.plain { cursor: default; }
+.agent-chip.plain:hover { background: var(--card); }
 .agent-chip strong { font-weight: 600; }
 .agent-chip .detail, .agent-chip .caret { color: var(--muted); }
 .agent-chip-name { display: inline-flex; align-items: center; gap: 4px; }
@@ -1015,18 +1018,9 @@ label.hours input { width: 118px; }
 #settings-pane .lesson-add select { width: auto; }
 .you-lists details.section + details.section { margin-top: 0; }
 
-/* Agents & models: new workers run on (the answer at a glance); a row per agent (its mark and
-   name, its status in a few words, its plan's meter, its one action, its switch; what must not
-   be folded away under it; unfolded, its model, effort and limit, and its details); Chief of
-   Staff's own sessions, folded. */
-.default-line { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 6px 14px; padding: 14px 16px; }
-.default-line .lead { color: var(--soft); }
-.default-line .pick { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
-.default-line .pick .agent-mark { margin: 0 0 0 2px; }
-.default-line .pick strong { font-weight: 600; }
-.default-line .pick .sep { color: var(--muted); }
-#settings-pane .default-line .pick select { width: auto; min-width: 150px; font-weight: 500; }
-.default-line > small { grid-column: 1 / -1; color: var(--muted); }
+/* Agents & models: who does the work (below); a row per agent (its mark and name, its status in
+   a few words, its plan's meter, its one action, its switch; what must not be folded away under
+   it; unfolded, its limit and its details). */
 .agent { display: grid; }
 .agent-line { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 56px; padding: 8px 16px 8px 8px; }
 .agent-line .fold { display: grid; place-items: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: var(--radius); background: none; color: var(--muted); font-weight: 400; }
@@ -1081,21 +1075,39 @@ dialog details.setup-fold summary { justify-self: start; margin: 0; color: var(-
 #settings-pane .agent-details .cmd > span { color: var(--muted); font-weight: 400; }
 #settings-pane .agent-details .cmd input { width: 160px; min-height: 28px; padding: 2px 8px; font: var(--small) var(--mono); }
 .agent-note { margin: 0; color: var(--muted); font-size: var(--small); }
-/* Chief of Staff's own sessions: where each runs, with which model and effort. */
-details.section.own > summary small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.own-grid { display: grid; grid-template-columns: 118px minmax(0, 1fr) minmax(0, 2.4fr); align-items: center; gap: 10px 12px; }
-.own-grid > .h { color: var(--muted); font-size: var(--small); }
-.own-grid > .role { display: flex; align-items: center; gap: 8px; min-height: 28px; font-weight: 500; }
-.own-grid > .fixed, .own-grid .runs > .fixed { padding-left: 2px; color: var(--soft); font-size: var(--small); }
-.own-grid > .runs { min-width: 0; }
-.own-grid > .runs [hidden] { display: none; }
-.own-grid > .cells { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 12px; }
-.own-grid > .cells[hidden], .own-grid > .inherits[hidden], .own-grid > .sub[hidden] { display: none; }
-.own-grid > .inherits { color: var(--soft); font-size: var(--small); }
-.own-grid > .sub { grid-column: 2 / -1; margin-top: -6px; color: var(--muted); font-size: var(--small); }
-#settings-pane .own-grid > .sub select { width: auto; min-height: 26px; padding: 0 8px; font-size: var(--small); }
-.own-foot { color: var(--muted); font-size: var(--small); }
-.own-foot button.link.quiet { padding: 0; }
+/* Who does the work: a row per kind of work (new workers first, then Chief of Staff's own
+   sessions), each with where it runs, its model and its effort there (the chosen agent's pair of
+   menus shown), and what one does if its agent can't run it, once, at the foot. */
+.work-grid { display: grid; }
+.work-head, .work-row { display: grid; grid-template-columns: 124px minmax(118px, 0.75fr) minmax(0, 1.55fr) minmax(0, 0.85fr); align-items: center; gap: 4px 12px; padding: 0 16px; }
+.work-head { min-height: 34px; padding-top: 6px; color: var(--muted); font-size: var(--small); }
+.work-row { min-height: 50px; padding-top: 7px; padding-bottom: 7px; }
+.work-row + .work-row { border-top: 1px solid var(--line); }
+.work-row.lead { min-height: 58px; }
+.work-row .name { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 500; }
+.work-row.lead .name { font-weight: 600; }
+#settings-pane .work-row label.name { flex-direction: row; min-height: 28px; font-size: var(--body); color: var(--text); }
+.work-row .runs { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.work-row .runs .agent-mark { margin: 0 1px 0 3px; }
+.work-row .runs .plain { color: var(--text); font-weight: 500; }
+.work-row .runs [hidden], .work-row .cells[hidden], .work-row .line[hidden], .work-foot [hidden] { display: none; }
+.work-row .cells { grid-column: 3 / -1; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 0.85fr); gap: 12px; min-width: 0; }
+#settings-pane .work-row select { width: 100%; min-width: 0; }
+.work-row .line { grid-column: 2 / -1; margin: -2px 0 1px; color: var(--muted); font-size: var(--small); line-height: 1.45; }
+.work-row .line.warn { color: var(--amber); }
+.work-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-height: 48px; padding: 8px 16px; border-top: 1px solid var(--line); color: var(--soft); font-size: var(--small); }
+.work-foot .choose { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+#settings-pane .work-foot select { width: auto; min-height: 28px; padding: 0 8px; font-size: var(--small); }
+.work-foot .order { color: var(--muted); }
+#settings-pane .section-label { margin: 2px 0 -12px 2px; color: var(--muted); font-size: var(--small); font-weight: 600; }
+#work-note button.link.quiet { padding: 0; }
+/* Narrow: each row's name on its own line, then where, model and effort. */
+@media (max-width: 900px) {
+  .work-head { display: none; }
+  .work-row { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr) minmax(0, 0.9fr); padding-top: 10px; padding-bottom: 10px; }
+  .work-row .name, .work-row .line { grid-column: 1 / -1; }
+  .work-row .cells { grid-column: 2 / -1; grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.9fr); }
+}
 
 /* Connections: a list of rows (its name and where it stands, one action when it needs one, ›
    to open it); a row opens its details in place (‹ Connections). */
@@ -1188,7 +1200,6 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
   #settings-form > footer { grid-area: 4 / 1; }
   .agent-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .agent-fields > :first-child { grid-column: 1 / -1; }
-  .own-grid { grid-template-columns: 108px minmax(0, 1fr) minmax(0, 2.2fr); }
   #settings-pane .line-row .field-wide { width: 220px; }
 }
 /* Under 600 px a line's controls go under its words. */
@@ -1196,13 +1207,12 @@ ul.memory button.link { flex: none; padding: 0 4px; font-size: var(--small); }
   .agent-line { grid-template-columns: 28px minmax(0, 1fr); }
   .agent-line .aside { grid-column: 2; justify-self: start; }
   .agent-fields { grid-template-columns: minmax(0, 1fr); }
-  .own-grid { grid-template-columns: minmax(0, 1fr); }
-  .own-grid > .sub { grid-column: 1; }
-  .default-line { grid-template-columns: minmax(0, 1fr); }
   .line-row { grid-template-columns: minmax(0, 1fr); }
   .line-row > .control { justify-self: start; }
   .line-row.check-line > .control { margin-left: 28px; }
   #settings-pane .unfold { padding-left: 16px; }
+  .work-row { grid-template-columns: minmax(0, 1fr); }
+  .work-row .runs, .work-row .cells { grid-column: 1; }
 }
 .error { color: var(--red); font-size: var(--small); margin: 0; white-space: pre-line; }
 .error:empty { display: none; }

@@ -10116,7 +10116,7 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     assert not any("/api/models?agent=" in r for r in requests), requests
     rows = group.locator("#agent-codex")
     state = rows.locator(".agent-line .status")
-    await expect(state).to_have_text("Ready · off for workers")
+    await expect(state).to_have_text("Ready · off")
     assert sum("/api/agents" in r for r in requests) == 1, requests
     await expect(rows.locator(".plan-meter")).to_have_text("42% 5-hour")
     await expect(rows.locator(".plan-meter")).to_have_attribute(
@@ -10126,8 +10126,8 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     # look ran its version and its sign-in's state, and started no session.
     claude = group.locator("#agent-claude")
     await expect(claude.locator(".who strong")).to_have_text("Claude Code")
-    await expect(claude.locator("label.check")).to_have_text("Use for workers")
-    await expect(claude.locator(".status")).to_have_text("Ready · off for workers")
+    await expect(claude.locator("label.check")).to_have_text("Use")
+    await expect(claude.locator(".status")).to_have_text("Ready · off")
     await unfold_agent(group, "claude")
     await expect(claude.locator(".about")).to_have_text(
         "Version 2.1.322Signed in with your Claude planUses your Claude planSign in again"
@@ -10145,32 +10145,23 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await expect(box).to_be_enabled()
     choose = group.locator("select[name=agent_new_workers]")
     await expect(choose).to_be_hidden()  # No other agent on: Copilot, said.
-    await expect(group.locator("#new-work-plain")).to_have_text("Copilot")
+    work = group.locator('.work-row[data-kind="workers"]')
+    await expect(work.locator(".runs .plain")).to_have_text("Copilot")
     for width in AGENT_WIDTHS:
         await shoot(page, "tab-found", scheme, width)
     await page.set_viewport_size({"width": 1280, "height": 900})
-    # Used for workers: new workers can run on it; its model, effort and limit unfold.
+    # Used: new workers can run on it; its limit unfolds (its model and effort are New
+    # workers', in Who does the work, once they run on it).
     await box.check()
     await expect(choose).to_be_visible()
     await unfold_agent(group, "codex")
     fields = rows.locator(".agent-fields")
-    # Its models by name, as its look listed them (never /api/models?agent=).
-    model = fields.locator("select[name=agent_codex_model]")
-    await expect(model.locator("option")).to_have_text(
-        ["Codex's default (GPT-TEST)", "GPT-TEST", "GPT-MINI"]
-    )
-    options = model.locator("option")
-    assert await options.evaluate_all("o => o.map((x) => x.value)") == ["", "gpt-test", "gpt-mini"]
-    effort = fields.locator("select[name=agent_codex_effort]")
-    await expect(effort.locator("option")).to_have_text(["Default", "Low", "Medium", "High"])
-    await expect(fields.locator("label > span")).to_have_text(
-        ["Model", "Effort", "Limit per worker (tokens)"]
-    )
+    await expect(fields.locator("label > span")).to_have_text(["Limit per worker (tokens)"])
     limit = fields.locator("input[name=agent_codex_limit]")
     await expect(limit).to_have_attribute("placeholder", "No limit")
     await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Last used"])
     await expect(choose).to_have_value("copilot")
-    await expect(group.locator("#new-work-hint")).to_have_text(
+    await expect(group.locator("#work-workers-hint")).to_have_text(
         "Uses your Copilot plan. For one task, type @codex or say \u201cdo this with Codex\u201d."
     )
     assert await group.locator("input[name=agent_router_chooses]").count() == 0
@@ -10178,9 +10169,21 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
         await shoot(page, "tab-enabling", scheme, width)
     await page.set_viewport_size({"width": 1280, "height": 900})
     await choose.select_option("codex")
-    await expect(group.locator("#new-work-model")).to_have_text("GPT-TEST")
+    # Its models by name, as its look listed them (never /api/models?agent=).
+    model = work.locator("select[name=agent_codex_model]")
+    await expect(model).to_be_visible()
+    await expect(model.locator("option")).to_have_text(
+        ["Default (GPT-TEST)", "GPT-TEST", "GPT-MINI"]
+    )
+    options = model.locator("option")
+    assert await options.evaluate_all("o => o.map((x) => x.value)") == ["", "gpt-test", "gpt-mini"]
+    effort = work.locator("select[name=agent_codex_effort]")
+    await expect(effort.locator("option")).to_have_text(["Default", "Low", "Medium", "High"])
+    await expect(group.locator("#work-workers-hint")).to_have_text(
+        "Uses your ChatGPT sign-in. For one task, type @copilot or say "
+        "\u201cdo this with Copilot\u201d."
+    )
     await effort.select_option("high")
-    await expect(group.locator("#new-work-model")).to_have_text("GPT-TEST · high effort")
     saved = []
     page.on(
         "request",
@@ -10224,7 +10227,7 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     await unfold_agent(group, "codex")
     await expect(fields.locator("input[name=agent_codex_limit]")).to_have_value("200,000")
     await expect(effort).to_have_value("high")
-    await expect(rows.locator(".default-chip")).to_be_visible()
+    await expect(work.locator(".runs .agent-mark")).to_have_attribute("data-agent", "codex")
     # Downgrading is for the guide (its section "What differs" opens), not this page.
     await expect(page.locator("#settings-form")).not_to_contain_text("prepare-downgrade")
     await expect(choose).to_have_value("codex")
@@ -10238,15 +10241,15 @@ async def agents_off(runtime, browser, scheme: str, runs: Path):
     assert not errors, errors
     await context.close()
     log(
-        f"agents ({scheme}): a row each, looked at once shown (by keyboard too); used for "
-        "workers, its model, effort and limit"
+        f"agents ({scheme}): a row each, looked at once shown (by keyboard too); used, its "
+        "limit, and New workers' model and effort on it"
     )
 
 
 async def agents_none(runtime, browser):
-    """Copilot alone (no other agent installed): Agents & models has Copilot's row and its own
-    sessions, nothing of other agents (no menu, no line about them), and asks nothing; nothing
-    of agents on Home or in the composer's @ list."""
+    """Copilot alone (no other agent installed): Agents & models has Who does the work, all on
+    Copilot (no menu), Copilot's row, and one line saying which others it runs on; it asks
+    nothing; nothing of agents on Home or in the composer's @ list."""
     runtime.found_cache = (float("-inf"), [])
     for scheme in ("light", "dark"):
         context, page, errors, requests = await agents_page(browser, scheme)
@@ -10262,16 +10265,25 @@ async def agents_none(runtime, browser):
         await expect(section).to_have_attribute("data-looked", "none")
         await expect(section.locator(".agent")).to_have_count(1)
         await expect(section.locator("#agent-copilot .always")).to_have_text("Always on")
-        await expect(section.locator("select[name=agent_new_workers]")).to_have_count(0)
-        await expect(section.locator("select[name^=role_]")).to_have_count(0)
-        await expect(section.locator("#agents-guide")).to_have_count(0)
-        assert not re.search(r"Codex|Claude Code", await section.inner_text())
+        # Who does the work: every row on Copilot, said, no menu (nothing to choose from).
+        await expect(section.locator(".work-row")).to_have_count(6)
+        await expect(section.locator(".work-row .runs .plain")).to_have_text(["Copilot"] * 6)
+        await expect(section.locator("select[name=agent_new_workers]")).to_be_hidden()
+        await expect(section.locator("select[name^=work_][name$=_agent]:visible")).to_have_count(0)
+        await expect(section.locator("#work-alone")).to_have_text(
+            "If Copilot can't run one of these, it waits, and Home says why."
+        )
+        # Where else it runs, once, at the foot: the agents not installed here.
+        await expect(section.locator("#agents-guide")).to_have_text(
+            "Chief of Staff also runs on Codex and Claude Code: install either and it shows "
+            "here. How"
+        )
         await quiet_for(page, 300)
         assert not any("/api/agents" in r for r in requests), requests
         await picker_shoot(page, "copilot-alone-models", scheme, "#settings-dialog")
         assert not errors, errors
         await context.close()
-    log("agents: with Copilot alone, Copilot's row and its own sessions; nothing of other agents")
+    log("agents: with Copilot alone, all on Copilot, its row, and which others it runs on")
 
 
 def with_status(entry: dict):
@@ -10309,7 +10321,7 @@ async def claude_setup_row(page, tab, name: str, scheme: str):
         await expect(box).not_to_be_checked()
         await unfold_agent(tab, "claude")
         await expect(row.locator(".setup-note")).to_have_text(
-            "Turning on Use for workers sets it up: Chief of Staff installs what Claude workers "
+            "Turning on Use sets it up: Chief of Staff installs what Claude workers "
             "need, in a minute or so."
         )
     else:
@@ -10484,11 +10496,7 @@ async def agents_states(browser, scheme: str):
             # it shows as code, its marks not as they are.
             problem = shown["problem"] or (answer["sandboxed"] and shown.get("sandbox")) or ""
             words = {"signed-out": "Sign in needed"}.get(name) or (
-                "Can't run here"
-                if problem
-                else "Ready"
-                if shown["enabled"]
-                else "Ready · off for workers"
+                "Can't run here" if problem else "Ready" if shown["enabled"] else "Ready · off"
             )
             await expect(status).to_have_text(words)
             said = [shown.get("limit_line")]
@@ -10497,7 +10505,7 @@ async def agents_states(browser, scheme: str):
             await expect(alerts).to_have_text([line for line in said if line])
             assert "`" not in await row.inner_text(), "no code marks shown as they are"
             label = row.locator("label.check")
-            await expect(label).to_have_text("Use for workers")
+            await expect(label).to_have_text("Use")
             if name in ("signed-out", "too-old", "sandboxed", "claude-widened"):
                 await expect(box).to_be_disabled()
                 await expect(label).to_have_class(re.compile(r"\blocked\b"))
@@ -10513,6 +10521,10 @@ async def agents_states(browser, scheme: str):
             if name == "usage-high":
                 await expect(meter).to_have_text("86% 5-hour")
                 await expect(meter).to_have_class(re.compile(r"\bhigh\b"))
+                # (In view first: the rows are below Who does the work, and a scroll hides a
+                # tip.)
+                await row.scroll_into_view_if_needed()
+                await page.wait_for_timeout(300)
                 await meter.focus()
                 tip = page.locator("#settings-dialog #tip")
                 await expect(tip).to_be_visible()
@@ -10889,7 +10901,7 @@ async def agents_stopped_by_settings(runtime, browser, spawned):
     for width in AGENT_WIDTHS:
         await shoot(page, "turned-off-toast", "light", width, "#application")
     group = await open_agents(page)
-    await expect(group.locator("#agent-codex .status")).to_have_text("Ready · off for workers")
+    await expect(group.locator("#agent-codex .status")).to_have_text("Ready · off")
     await page.keyboard.press("Escape")
     assert store.session(worker)["status"] == "idle"
     assert not errors, errors
@@ -11006,12 +11018,11 @@ async def role_shoot(page, name: str, scheme: str, focus=None):
 
 
 async def round_roles(runtime, browser, failures: list[str]):
-    """Where Chief of Staff's own sessions run (agent-roles.md; settings-v2.md §3.4): the
-    Router's and the Watchdog's Runs on in Chief of Staff's own sessions, a menu only once an
-    agent that can run them is on, listing only those; none for Slack nor Watch for you; on
-    Codex, Codex's model and effort said, its Copilot ones kept; the Router put on Codex says so
-    in its chat, whose header names Codex; Codex signed out, one line under its choice says why
-    it runs on Copilot for now."""
+    """Where Chief of Staff's own sessions run (agents-anywhere.md §5): each row's Runs on in
+    Who does the work, a menu only once another agent is on, listing the agents on; Slack,
+    Watch for you and the helpers too; on Codex, its model and effort there, its Copilot ones
+    kept; the Router put on Codex says so in its chat, whose header names Codex; Codex signed
+    out, one line under its row says where it runs for now, with what model and whose plan."""
     from chiefofstaff import agents
 
     folder, _ = codex_on_path()
@@ -11034,23 +11045,22 @@ async def round_roles(runtime, browser, failures: list[str]):
             )
             group = await open_agents(page)
             codex = group.locator("#agent-codex")
-            await expect(codex.locator(".status")).to_have_text("Ready · off for workers")
-            # Where they run: Chief of Staff's own sessions, folded; Copilot while none is on.
-            system = group.locator("#own-sessions")
-            await expect(system.locator("summary > span")).to_have_text(
-                "Chief of Staff's own sessions"
-            )
-            await system.locator("summary").click()
-            choose = group.locator("select[name=role_router]")
+            await expect(codex.locator(".status")).to_have_text("Ready · off")
+            # Where they run: Who does the work, nothing folded; Copilot while none is on.
+            row = group.locator('.work-row[data-kind="router"]')
+            choose = group.locator("select[name=work_router_agent]")
             await expect(choose).to_be_hidden()  # None on.
+            await expect(row.locator(".runs .plain")).to_have_text("Copilot")
             await codex.locator("input[type=checkbox]").check()
             await expect(choose).to_be_visible()
-            await expect(group.locator("select[name=role_watchdog]")).to_be_visible()
-            await expect(group.locator("select[name=role_slack]")).to_have_count(0)
-            # If it can't run there: only once one runs on another agent (round_agent_smooth).
-            for fallback in await group.locator("[data-sub]").all():
-                await expect(fallback).to_be_hidden()
-            assert "Watch for you runs on" not in await group.inner_text()
+            for kind in ("watchdog", "slack", "connector", "helpers"):
+                menu = group.locator(f"select[name=work_{kind}_agent]")
+                await expect(menu).to_be_visible()
+                await expect(menu.locator("option")).to_have_text(["Copilot", "Codex"])
+            await expect(group.locator("#work-choose")).to_be_visible()
+            await expect(group.locator("#work-order")).to_have_text(
+                "In this order: Copilot, Codex."
+            )
             await expect(choose.locator("option")).to_have_text(["Copilot", "Codex"])
             await expect(choose).to_have_value("copilot")
             await role_shoot(page, "roles-codex-on", scheme)
@@ -11059,15 +11069,13 @@ async def round_roles(runtime, browser, failures: list[str]):
             await expect(choose).to_be_hidden()
             await codex.locator("input[type=checkbox]").check()
             await choose.select_option("codex")
-            await expect(system.locator("#own-summary")).to_have_text(
-                "Router on Codex · others on Copilot"
-            )
-            # On Codex: Codex's model and effort, said; its Copilot ones kept, unsent.
-            await expect(group.locator("[data-inherits=router]")).to_have_text(
-                "Codex's model and effort (its row)"
-            )
-            await expect(group.locator("[data-cells=router]")).to_be_hidden()
-            await expect(group.locator("[data-sub=router]")).to_be_visible()
+            await expect(row.locator(".runs .agent-mark")).to_have_attribute("data-agent", "codex")
+            # On Codex: its model and effort there; its Copilot ones kept, unsent.
+            await expect(row.locator('.cells[data-agent="codex"]')).to_be_visible()
+            await expect(row.locator('.cells[data-agent="copilot"]')).to_be_hidden()
+            await expect(
+                row.locator("select[name=kind_router_codex_model] option").first
+            ).to_have_text("Default (GPT-TEST)")
             mark = max((m["id"] for m in runtime.store.messages(router)), default=0)
             runtime.store.set(f"sent:{router}", str(mark))
             await page.locator("#settings-form footer button[type=submit]").click()
@@ -11120,30 +11128,26 @@ async def round_roles(runtime, browser, failures: list[str]):
                 )
                 assert runtime.agent(router) == "copilot"
                 await open_agents(page)
-                if not await system.evaluate("n => n.open"):
-                    await system.locator("summary").click()
-                why = group.locator("#role-router-line")
+                why = group.locator("#work-router-line")
+                # Where it runs for now: that agent, its model there, whose plan; and why.
                 await expect(why).to_have_text(
-                    "On Copilot for now: Codex is not signed in: sign in from Settings → Agents "
-                    "& models.",
+                    re.compile(
+                        r"^On Copilot for now \(.+, uses your Copilot plan\): Codex is not signed "
+                        r"in: sign in from Settings → Agents & models\.$"
+                    ),
                     timeout=20000,
                 )
-                await expect(choose).to_have_attribute("aria-describedby", "role-router-line")
+                await expect(choose).to_have_attribute("aria-describedby", "work-router-line")
                 await expect(choose).to_have_value("codex")
-                # Folded, its line says where it runs now, not only where it was put.
-                await expect(system.locator("#own-summary")).to_have_text(
-                    "Router on Copilot for now · others on Copilot"
+                await expect(choose.locator("option")).to_have_text(
+                    ["Copilot", "Codex · Sign in needed"]
                 )
                 await role_shoot(page, "roles-fallback", scheme)
-                # Chosen again (not saved yet): where it is put, as chosen.
+                # Chosen again (not saved yet): where it is put, as chosen; no line for that.
                 await choose.select_option("copilot")
-                await expect(system.locator("#own-summary")).to_have_text(
-                    re.compile(r"^All on Copilot · ")
-                )
+                await expect(why).to_be_hidden()
                 await choose.select_option("codex")
-                await expect(system.locator("#own-summary")).to_have_text(
-                    "Router on Copilot for now · others on Copilot"
-                )
+                await expect(why).to_be_visible()
             finally:
                 os.environ.pop("FAKE_CODEX_SIGNED_OUT", None)
             await roles_check_unfinished(runtime, page, scheme)
@@ -11231,13 +11235,12 @@ async def round_claude_models(runtime, browser, failures: list[str]):
                 await picker_shoot(page, name, scheme, "#session-tuning", focus=options.first)
                 await page.keyboard.press("Escape")
                 if chosen and scheme == "light":
-                    # Settings' row: Claude Code's default first, by the alias it stands for
-                    # now (not listed twice), Opus chosen.
-                    section = await open_agents(page)
-                    await unfold_agent(section, "claude")
+                    # Settings (New workers on Claude): Claude Code's default first, by the
+                    # alias it stands for now (not listed twice), Opus chosen.
+                    await open_agents(page)
                     field = page.locator("select[name=agent_claude_model]")
                     await expect(field.locator("option")).to_have_text(
-                        ["Claude Code's default (Opus)", *rest], timeout=20000
+                        ["Default (Opus)", *rest], timeout=20000
                     )
                     await expect(field).to_have_value("opus")
                     await page.keyboard.press("Escape")
@@ -11277,14 +11280,13 @@ async def roles_check_unfinished(runtime, page, scheme: str):
         await agents_saved(runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"}})
         assert runtime.on_copilot(runtime.store.get("router_id"))
         await open_agents(page)
-        system = page.locator("#own-sessions")
-        if not await system.evaluate("n => n.open"):
-            await system.locator("summary").click()
-        await expect(page.locator("#role-router-line")).to_have_text(
-            f"On Copilot for now: {late}. It's tried again by itself.", timeout=20000
-        )
-        await expect(system.locator("#own-summary")).to_have_text(
-            "Router on Copilot for now · others on Copilot"
+        await expect(page.locator("#work-router-line")).to_have_text(
+            re.compile(
+                r"^On Copilot for now \(.+, uses your Copilot plan\): "
+                + re.escape(f"{late}. It's tried again by itself.")
+                + "$"
+            ),
+            timeout=20000,
         )
         await role_shoot(page, "roles-check-retry", scheme)
     finally:
@@ -11454,18 +11456,21 @@ async def picker_settings(runtime, browser):
         await expect(codex.locator(".plan-meter")).not_to_have_class(re.compile(r"\bhigh\b"))
         choose = tab.locator("select[name=agent_new_workers]")
         await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Last used"])
-        await expect(codex.locator("select[name=agent_codex_model]")).to_be_visible()
+        # Codex's model for its workers: New workers' menu, once they run on it.
+        await expect(tab.locator("select[name=agent_codex_model]")).to_have_count(1)
         await picker_shoot(page, "settings-rows", scheme, "#settings-dialog")
-        # Claude used for workers: new workers run on lists it, and the hint names another.
+        # Claude used: new workers run on lists it, and the hint names another.
         await claude.locator("input[name=agent_claude_enabled]").check()
         await expect(choose.locator("option")).to_have_text(
-            ["Copilot", "Codex", "Claude Code", "Last used"]
+            ["Copilot", "Codex", "Claude", "Last used"]
         )
         await choose.select_option("claude")
         await expect(claude.locator("input[name=agent_claude_enabled]")).to_be_checked()
-        await expect(claude.locator(".default-chip")).to_be_visible()
-        await expect(tab.locator("#new-work-hint")).to_have_text(
-            re.compile(r"For one task, type @codex or say “do this with Codex”\.$")
+        work = tab.locator('.work-row[data-kind="workers"]')
+        await expect(work.locator(".runs .agent-mark")).to_have_attribute("data-agent", "claude")
+        await expect(tab.locator("select[name=agent_claude_model]")).to_be_visible()
+        await expect(tab.locator("#work-workers-hint")).to_have_text(
+            re.compile(r"For one task, type @copilot or say “do this with Copilot”\.$")
         )
         await picker_shoot(page, "settings-start-on", scheme, "#settings-dialog")
         # The one new workers run on, turned off: they run on Copilot again.
@@ -11807,7 +11812,7 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
     Copy); the chip's popover (agent, its models and effort, whose plan it uses); two agents
     picked to compare, each worker a row of its own (⇄); each worker's agent mark on its
     row, task and header; the start line's chip (Restart on… before its first step); Settings'
-    status lines, Use for workers off until ready, Last used, its own sessions."""
+    status lines, Use off until ready, Last used, its own sessions."""
     from copilot.tools import ToolInvocation
 
     from chiefofstaff import agents
@@ -12063,8 +12068,8 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
         await ux_shoot(page, "restarted-line", "light", focus=restarted)
         assert not errors, errors
         await context.close()
-        # Settings: each row's status; Claude's sign-in needed: Use for workers off, Sign in,
-        # its command; whose plan new workers use; Last used; its own sessions, folded.
+        # Settings: each row's status; Claude's sign-in needed: Use off, Sign in, its command;
+        # whose plan new workers use; Last used; its own sessions, in Who does the work.
         for scheme in ("light", "dark"):
             context, page, errors, _ = await agents_page(browser, scheme)
             tab = await open_agents(page)
@@ -12083,7 +12088,7 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
             choose = tab.locator("select[name=agent_new_workers]")
             await expect(choose.locator("option")).to_have_text(["Copilot", "Codex", "Last used"])
             # Whose plan the agent chosen there uses, as its row says.
-            pays = tab.locator("#new-work-hint")
+            pays = tab.locator("#work-workers-hint")
             await expect(pays).to_have_text(re.compile(r"^Uses your Copilot plan\. "))
             await choose.select_option("codex")
             await expect(pays).to_have_text(re.compile(r"^Uses your ChatGPT sign-in\. "))
@@ -12092,10 +12097,11 @@ async def round_picker_ux(runtime, browser, failures: list[str]):
                 re.compile(r"^Now Codex\. Uses your ChatGPT sign-in\. ")
             )
             await choose.select_option("copilot")
-            await expect(tab.locator("#own-sessions summary > span")).to_have_text(
-                "Chief of Staff's own sessions"
+            # Chief of Staff's own sessions: rows of Who does the work, nothing folded.
+            await expect(tab.locator(".work-row .name")).to_have_text(
+                ["New workers", "Router", "Watchdog", "Slack", "Watch for you", "Helpers"]
             )
-            await expect(tab.locator("#own-sessions")).not_to_have_attribute("open", "")
+            await expect(tab.locator("details#own-sessions")).to_have_count(0)
             await ux_shoot(page, "settings-rows", scheme, "#settings-dialog")
             await page.keyboard.press("Escape")
             assert not errors, errors
@@ -12133,8 +12139,8 @@ async def round_agent_parity(runtime, browser, failures: list[str]):
     """Codex wherever Claude is (the owner's ask, 0.1.53): both signed in and on, each place
     that offers an agent offers both: the @ list, the chip's popover, Compare, a worker's Restart
     on… before its first step and Continue with… in its ⋯, the card for a named agent that
-    could not run, Settings' rows and its own sessions (the Router, the Watchdog). Watch for you is
-    offered on neither (what reads Slack stays on Copilot; never Codex)."""
+    could not run, Settings' rows and Who does the work (every one of its own sessions, Slack and
+    Watch for you too)."""
     from copilot.tools import ToolInvocation
 
     folder, _ = codex_on_path()
@@ -12241,8 +12247,7 @@ async def round_agent_parity(runtime, browser, failures: list[str]):
         await expect(card.locator(".card-outcome")).to_have_text("Not run")
         assert not errors, errors
         await context.close()
-        # Settings: a row each, ready; its own sessions: the Router and the Watchdog on either,
-        # no Watch for you.
+        # Settings: a row each, ready; Who does the work: every row on either.
         context, page, errors, _ = await agents_page(browser, "light")
         tab = await open_agents(page)
         for name, pays in (("codex", "Uses your ChatGPT sign-in"), ("claude", "")):
@@ -12254,15 +12259,13 @@ async def round_agent_parity(runtime, browser, failures: list[str]):
             await expect(row.locator(f"input[name=agent_{name}_enabled]")).to_be_checked()
         choose = tab.locator("select[name=agent_new_workers]")
         await expect(choose.locator("option")).to_have_text(
-            ["Copilot", "Codex", "Claude Code", "Last used"]
+            ["Copilot", "Codex", "Claude", "Last used"]
         )
-        system = tab.locator("#own-sessions")
-        await system.locator("summary").click()
-        for role in ("router", "watchdog"):
-            await expect(system.locator(f"select[name=role_{role}] option")).to_have_text(
-                ["Copilot", "Codex", "Claude Code"]
+        # Every one of its own sessions on either, Slack and Watch for you too.
+        for role in ("router", "watchdog", "slack", "connector", "helpers"):
+            await expect(tab.locator(f"select[name=work_{role}_agent] option")).to_have_text(
+                ["Copilot", "Codex", "Claude"]
             )
-        await expect(system.locator("select[name=role_connector]")).to_have_count(0)
         await ux_shoot(page, "parity-system-agents", "light", "#settings-dialog")
         await page.keyboard.press("Escape")
         assert not errors, errors
@@ -12548,15 +12551,17 @@ async def round_agent_smooth(runtime, browser, failures: list[str]):
         for scheme in ("light", "dark"):
             context, page, errors, _ = await agents_page(browser, scheme)
             tab = await open_agents(page)
-            system = tab.locator("#own-sessions")
-            await system.locator("summary").click()
+            system = tab.locator(".work-grid")
             await expect(tab.locator("#agent-codex .status")).to_have_text("Sign in needed")
             await expect(tab.locator("#agent-codex .action-slot .setup-action")).to_have_text(
                 "Sign in"
             )
-            await expect(system.locator("select[name=role_router]")).to_have_value("codex")
-            await expect(system.locator("[data-sub=router]")).to_be_visible()
-            await expect(system.locator("select[name=unavailable_router]")).to_have_value("ask")
+            await expect(system.locator("select[name=work_router_agent]")).to_have_value("codex")
+            await expect(system.locator("#work-router-line")).to_have_text(
+                re.compile(r"^Waits for Codex: ")
+            )
+            # Ask me for the Router only (0.1.57's choice): kept as it is, said so.
+            await expect(system.locator("select[name=work_unavailable]")).to_have_value("mixed")
             await role_shoot(page, "smooth-system-agents", scheme, system)
             await page.keyboard.press("Escape")
             await at_home(page)
@@ -13296,37 +13301,41 @@ async def settings_drafts(runtime, browser):
 
 
 async def settings_copilot_row(runtime, browser):
-    """Copilot's row: its workers' model and effort (Settings' role_models.worker and
-    role_efforts.worker), the credit limit per worker and the Copilot command; the effort menu
-    lists what the chosen model offers; the default model in its own sessions."""
+    """Who does the work on Copilot: New workers' model and effort (Settings' role_models.worker
+    and role_efforts.worker), the effort menu listing what the chosen model offers; Watch for
+    you's own model there (agents.MODELS, not a Settings field); Copilot's row: the credit limit
+    per worker and the Copilot command. No Default model any more."""
     store = runtime.store
     context, page, errors, _, posted = await settings_page(browser)
     section = await open_agents(page)
-    await unfold_agent(section, "copilot")
     effort = section.locator("select[name=effort_worker]")
     await section.locator("select[name=model_worker]").select_option("smart-model")
     await expect(effort.locator("option")).to_have_text(["Default", "Low", "Medium", "High"])
     await effort.select_option("high")
-    await expect(section.locator("#new-work-model")).to_have_text("Smart-Model · high effort")
+    await section.locator("select[name=kind_connector_copilot_model]").select_option("fast-model")
+    await unfold_agent(section, "copilot")
     await section.locator("input[name=worker_credit_limit]").fill("40")
-    await section.locator("#own-sessions summary").click()
-    await section.locator("select[name=model]").select_option("fast-model")
-    await expect(section.locator("#own-summary")).to_have_text("All on Copilot · Fast-Model")
+    await expect(section.locator("select[name=model]")).to_have_count(0)
     await save_settings_dialog(page)
     saved = store.settings()
     assert saved.role_models == {"worker": "smart-model"}, saved.role_models
     assert saved.role_efforts == {"worker": "high"}, saved.role_efforts
-    assert saved.worker_credit_limit == 40 and saved.model == "fast-model", saved
+    assert saved.worker_credit_limit == 40 and saved.model == "", saved
     assert posted[-1]["copilot_command"] == saved.copilot_command
+    assert posted[-1]["agents"] == {"models": {"connector": {"copilot": {"model": "fast-model"}}}}
+    from chiefofstaff import agents
+
+    assert agents.kind_model(store, "connector", "copilot")["model"] == "fast-model"
     store.save_settings(
-        saved.model_copy(
-            update={"role_models": {}, "role_efforts": {}, "worker_credit_limit": 0, "model": ""}
-        )
+        saved.model_copy(update={"role_models": {}, "role_efforts": {}, "worker_credit_limit": 0})
     )
+    config = agents.stored(store)
+    config.pop("models", None)
+    store.set(agents.CONFIG, json.dumps(config))
     runtime.publish_state()
     assert not errors, errors
     await context.close()
-    log("settings: Copilot's row saves the workers' model, effort and limit; Default its own")
+    log("settings: New workers' model and effort, Watch for you's own, Copilot's limit; no Default")
 
 
 async def settings_retained(runtime, browser):
@@ -13798,8 +13807,9 @@ async def settings_not_installed(runtime, browser):
 
 
 async def settings_router_elsewhere(runtime, browser):
-    """The Router on Codex with a Copilot model saved for it: its cell says Codex's model and
-    effort; Save untouched keeps the Copilot one (for when it runs there)."""
+    """The Router on Codex with a Copilot model saved for it: its row shows its menus on Codex
+    (its own model there); its Copilot ones are kept, shown again once it is put back on
+    Copilot (not saved yet); Save untouched keeps them (for when it runs there)."""
     store = runtime.store
     store.save_settings(
         store.settings().model_copy(
@@ -13809,13 +13819,13 @@ async def settings_router_elsewhere(runtime, browser):
     await agents_saved(runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"}})
     context, page, errors, _, posted = await settings_page(browser)
     section = await open_agents(page)
-    await section.locator("#own-sessions summary").click()
-    await expect(section.locator("[data-inherits=router]")).to_have_text(
-        "Codex's model and effort (its row)"
-    )
-    await expect(section.locator("[data-sub=router] .on-copilot")).to_have_text(
-        " · on Copilot: Smart-Model, high effort"
-    )
+    row = section.locator('.work-row[data-kind="router"]')
+    await expect(row.locator('.cells[data-agent="codex"]')).to_be_visible()
+    await expect(row.locator('.cells[data-agent="copilot"]')).to_be_hidden()
+    await row.locator("select[name=work_router_agent]").select_option("copilot")
+    await expect(row.locator("select[name=model_router]")).to_have_value("smart-model")
+    await expect(row.locator("select[name=effort_router]")).to_have_value("high")
+    await row.locator("select[name=work_router_agent]").select_option("codex")
     await save_settings_dialog(page)
     assert posted[-1]["role_models"] == {"router": "smart-model"}, posted[-1]
     assert posted[-1]["role_efforts"] == {"router": "high"}, posted[-1]
@@ -13824,7 +13834,7 @@ async def settings_router_elsewhere(runtime, browser):
     await agents_saved(runtime, {"roles": {"router": "copilot"}})
     assert not errors, errors
     await context.close()
-    log("settings: a role on Codex says Codex's model; its Copilot one is kept")
+    log("settings: a role on Codex shows its menus there; its Copilot ones are kept")
 
 
 async def settings_long_states(runtime, browser):

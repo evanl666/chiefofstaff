@@ -7,7 +7,7 @@ import { el } from "./dom.js";
 import { byId, closedWorkers } from "./state.js";
 import { select } from "./session.js";
 import { avatar, labelOf } from "./team.js";
-import { agentName, marksShown } from "./agentpick.js";
+import { agentName, severalAgents } from "./agentpick.js";
 
 const SVG = "http://www.w3.org/2000/svg";
 function svg(tag, attributes = {}, ...children) {
@@ -41,7 +41,7 @@ const workerOf = (id) => byId(id) || closedWorkers().find((item) => item.id === 
 // Compare is "Codex" or "Copilot", work handed on "handed to Claude".
 function agentOf(id) {
   const worker = workerOf(id);
-  if (!worker || !marksShown()) return "";
+  if (!worker || !severalAgents()) return "";
   return worker.agent_name || agentName(worker.agent || "copilot");
 }
 

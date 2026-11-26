@@ -2,13 +2,13 @@
 
 import { $, api, blobLive, blobUrl, el, foldable, freshButton, toast, whenNearScreen } from "./dom.js";
 import { clock, compactPaths, firstLine, gist, headOf, linkLabel, markdown, shorten, slackText, threadLabel } from "./text.js";
-import { byId, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, RECONNECTING, routerId, state, STATUS_TEXT, tasks, uncertainDrafts, upsertSession, viewedId, workerTitle } from "./state.js";
+import { byId, closedWorkers, current, DELIVERY_WORDS, HOME, markRead, otherItem, pendingDrafts, RECONNECTING, routerId, state, STATUS_TEXT, tasks, uncertainDrafts, upsertSession, viewedId, workerTitle } from "./state.js";
 import { MARKERS } from "./board.js";
 import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
-import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, markOf, marksShown, modelLabel, modelOptions, ready, statuses, statusOf } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, markOf, modelLabel, modelOptions, ready, severalAgents, statuses, statusOf } from "./agentpick.js";
 import { setupAction, setupKind } from "./agentsetup.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
@@ -91,9 +91,9 @@ export function renderHeader() {
   // On another coding agent: its name and model there after its state, and its tokens.
   if (session.agent) meta.splice(1, 0, AGENT, modelLabel(session.agent, session.model));
   if (session.agent && session.tokens) meta.push(session.token_limit ? `${tokenCount(session.tokens)} of ${tokenCount(session.token_limit)} tokens` : `${tokenCount(session.tokens)} tokens`);
-  // While other agents are on, a Copilot worker says so too (why, on hover, when it was to run
-  // on another).
-  if (session.role === "worker" && !session.agent && state.snapshot.agents) meta.splice(1, 0, FALLBACK);
+  // A Copilot worker says so too, as every worker says its agent (why, on hover, when it was to
+  // run on another).
+  if (session.role === "worker" && !session.agent) meta.splice(1, 0, FALLBACK);
   const follows = session.follows || [];
   if (follows.length && !session.closed_at) meta.push(`following ${follows.length}`);
   const titles = { router: "Chat with your chief of staff", slack: "Slack", watchdog: "Watchdog" };
@@ -282,12 +282,17 @@ export async function restartOn(session, picked) {
 }
 // Agents another worker can start on now (on, and ready as last known).
 const runnable = (name) => name === "copilot" || ready(statusOf(name) || { status: "ready" });
-// A worker's agent as a chip (its start line in the Router chat), while more than one agent is
-// on: before its first step, Restart on each other agent; after it, idle, Continue with….
-export function agentChip(sessionId) {
-  const first = byId(sessionId);
-  if (!first || first.role !== "worker" || !marksShown()) return null;
-  const agent = first.agent || "copilot";
+// A worker's agent as a chip (its start line in the Router chat), Copilot's too, for a closed
+// worker as well (`recorded`: the agent its line says): while other agents are on, a menu with,
+// before its first step, Restart on each other agent; after it, idle, Continue with….
+export function agentChip(sessionId, recorded = "") {
+  const first = byId(sessionId) || closedWorkers().find((item) => item.id === sessionId) || (recorded ? { id: sessionId, role: "worker", agent: recorded, closed_at: "closed" } : null);
+  if (!first || first.role !== "worker") return null;
+  const agent = first.agent || recorded || "copilot";
+  if (first.closed_at || !severalAgents()) {
+    const words = [agentName(agent), modelLabel(agent, first.model)].filter(Boolean).join(" · ");
+    return el("span", { class: "menu-wrap agent-chip-wrap" }, el("span", { class: "agent-chip plain", title: words }, agentMark(agent), el("span", { text: agentName(agent) })));
+  }
   const menu = el("div", { class: "menu", role: "menu", hidden: true });
   const button = el(
     "button",
@@ -398,12 +403,12 @@ function agentMeta(session, parts) {
   }
   $("#session-meta").replaceChildren(...nodes);
 }
-// Its agent in its header: with its mark while more than one agent is on; before its first
+// Its agent in its header, with its mark (every worker's, Copilot's too); before its first
 // step, a button whose popover changes its agent (Restart on…), model and effort.
 function agentBadge(session, text, title) {
   const agent = session.agent || "copilot";
-  const mark = marksShown() ? agentMark(agent, modelLabel(agent, session.model)) : "";
-  if (!session.untouched || session.closed_at || !marksShown()) return el("span", { class: "agent-name", title: title || undefined }, mark, text);
+  const mark = agentMark(agent, modelLabel(agent, session.model));
+  if (!session.untouched || session.closed_at || !severalAgents()) return el("span", { class: "agent-name", title: title || undefined }, mark, text);
   const button = el("button", { type: "button", class: "agent-chip", "aria-haspopup": "dialog", title: title || "Agent, model and effort, before it begins" }, mark, el("span", { text }), el("span", { class: "caret", "aria-hidden": "true", text: "▾" }));
   button.onclick = () =>
     agentPopover(button, { agent, model: session.model_choice || "", effort: session.effort_choice || "" }, async (picked) => {
@@ -1056,8 +1061,8 @@ function homeEntry(message) {
       const started = /^(Started|New task|Continued|Restarted)/.test(text);
       const node = eventLine({ mark: meta.fork ? "⑂" : started ? "" : "·", kind: meta.fork ? "fork" : started ? "started" : "", text: headOf(text), time, view: meta.session_id ? () => focusTask(meta.task_id || "", meta.session_id) : null });
       node.querySelector(".what").title = text;
-      // Its agent (while more than one is on): Restart on another before its first step.
-      const chip = /^(Started|Queued|Restarted)/.test(text) && meta.session_id ? agentChip(meta.session_id) : null;
+      // Its agent, always: Restart on another before its first step (while others are on).
+      const chip = /^(Started|Queued|Restarted)/.test(text) && meta.session_id ? agentChip(meta.session_id, meta.agent) : null;
       if (chip) node.querySelector(".what").after(chip);
       return node;
     }
@@ -1391,19 +1396,23 @@ function roleWaitCard(text, meta, time) {
     return node;
   }
   if (!(state.snapshot.role_waits || []).includes(meta.role_wait)) return node;
-  const copilot = el("button", { type: "button", class: "secondary", text: "Use Copilot until then" });
-  copilot.onclick = async () => {
-    copilot.disabled = true;
-    try {
-      state.snapshot = { ...state.snapshot, ...(await api(`/api/role-waits/${meta.role_wait}`, { method: "POST" })) };
-      node.querySelector(".actions")?.remove();
-    } catch (error) {
-      copilot.disabled = false;
-      toast(error.message, "error");
-    }
-  };
+  // The agent that can run it meanwhile (a card of before 0.1.59: Copilot), or none.
+  const instead = "instead" in meta ? meta.instead : "copilot";
+  const meanwhile = instead ? el("button", { type: "button", class: "secondary", text: `Use ${agentName(instead)} until then` }) : null;
+  if (meanwhile) {
+    meanwhile.onclick = async () => {
+      meanwhile.disabled = true;
+      try {
+        state.snapshot = { ...state.snapshot, ...(await api(`/api/role-waits/${meta.role_wait}`, { method: "POST" })) };
+        node.querySelector(".actions")?.remove();
+      } catch (error) {
+        meanwhile.disabled = false;
+        toast(error.message, "error");
+      }
+    };
+  }
   const first = setupAction(statusOf(meta.agent) || { name: meta.agent, status: meta.status });
-  node.append(el("div", { class: "actions" }, first || (meta.fix ? fixLine(meta.fix) : ""), el("span", { class: "spacer" }), copilot));
+  node.append(el("div", { class: "actions" }, first || (meta.fix ? fixLine(meta.fix) : ""), el("span", { class: "spacer" }), meanwhile));
   return node;
 }
 // "Use these settings": what changed is in its line; the worker goes on with them.

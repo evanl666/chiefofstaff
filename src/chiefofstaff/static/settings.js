@@ -50,12 +50,8 @@ export function showSettingsTab(name, { focus = false } = {}) {
   if (place.unfold === "prs" && $("#settings-form").proactive.checked) setUnfold("prs-more", true);
   const target = { more: "general-more", prs: "proactive-line" }[place.unfold] || place.scroll;
   if (target) document.getElementById(target)?.scrollIntoView?.({ block: "start" });
-  if (place.unfold === "models") {
-    // The models it named: Chief of Staff's own sessions where a role has one, else Copilot's.
-    const roles = state.snapshot?.settings?.role_models || {};
-    if (Object.entries(roles).some(([role, model]) => role !== "worker" && model)) $("#own-sessions").open = true;
-    else unfoldAgent("copilot");
-  }
+  // The models it named: Who does the work, at the top of its page, nothing folded.
+  if (place.unfold === "models") document.querySelector("#agents-page .work-grid")?.scrollIntoView({ block: "nearest" });
   // Agents & models looks at the installed agents when it is shown (at most once an opening).
   if (shown.dataset.tab === "agents") agentsShown();
   if (focus && !place.connection) document.querySelector(`#settings-tabs [role=tab][data-tab="${shown.dataset.tab}"]`)?.focus();
@@ -66,12 +62,6 @@ function setUnfold(id, open) {
   if (!part) return;
   part.hidden = !open;
   document.querySelector(`[aria-controls="${id}"]`)?.setAttribute("aria-expanded", String(open));
-}
-function unfoldAgent(name) {
-  const fold = document.querySelector(`#agent-${name} .fold`);
-  if (!fold) return;
-  fold.setAttribute("aria-expanded", "true");
-  document.getElementById(fold.getAttribute("aria-controls")).hidden = false;
 }
 // Narrow (900 px and below) the pages are tabs over the page, scrolling sideways where they
 // don't fit: the one shown is in view, whole, also as the width changes. Only the strip scrolls.

@@ -9,13 +9,13 @@ import { resetTime } from "./board.js";
 
 export const AGENT_NAMES = { copilot: "Copilot", codex: "Codex", claude: "Claude" };
 export const agentName = (name) => AGENT_NAMES[name] || state.snapshot?.agents?.names?.[name] || name;
-// The agents new work can run on now: Copilot and each one on, in the one order every list
-// has (Copilot, Codex, Claude), whichever was turned on first.
+// The agents new work can run on now: each one on (Copilot while it is), in the one order
+// every list has (Copilot, Codex, Claude), whichever was turned on first.
 const ORDER = Object.keys(AGENT_NAMES);
 const rank = (name) => (ORDER.includes(name) ? ORDER.indexOf(name) : ORDER.length);
-export const agentsOn = () => (state.snapshot?.agents ? ["copilot", ...[...state.snapshot.agents.on].sort((a, b) => rank(a) - rank(b))] : []);
-// Marks only where they tell something: more than one agent on.
-export const marksShown = () => agentsOn().length > 1;
+export const agentsOn = () => state.snapshot?.work?.agents || (state.snapshot?.agents ? ["copilot", ...[...state.snapshot.agents.on].sort((a, b) => rank(a) - rank(b))] : []);
+// More than one agent on: a worker can move to another, and what names one says which.
+export const severalAgents = () => agentsOn().length > 1;
 export const statuses = () => state.snapshot?.agents_status || [];
 export const statusOf = (name) => statuses().find((found) => found.name === name);
 export const ready = (status) => status?.status === "ready";
@@ -35,9 +35,10 @@ export function modelLabel(agent, id) {
   const listed = agent === "copilot" || !agent ? state.models : state.agentModels?.[agent];
   return state.snapshot?.agents?.model_names?.[agent]?.[id] || listed?.find?.((model) => model.id === id)?.name || id;
 }
-// A session's mark (its agent, its model on hover; why it fell back to Copilot), where shown.
+// A worker's mark (its agent, its model on hover; why it fell back to another): every worker
+// says its agent, Copilot's too, however many agents are on (agents-anywhere.md 6).
 export function markOf(session) {
-  if (!marksShown() || session?.role !== "worker") return null;
+  if (session?.role !== "worker") return null;
   const agent = session.agent || "copilot";
   return agentMark(agent, [modelLabel(agent, session.model), session.agent_fallback].filter(Boolean).join(" · "));
 }
