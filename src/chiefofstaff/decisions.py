@@ -858,20 +858,38 @@ class Decisions:
         if not params.replaces:
             # Tasks it gave out in this turn came with this decision in the owner's message.
             tasks = list(dict.fromkeys(tasks + state.turn_tasks))
+        replaces = list(params.replaces)
+        same, possibly = None, []
+        if not replaces:
+            # The owner's decision in force on the same choice is what this one changes (one
+            # value for one choice: E151, E153); one only possibly the same stays, said.
+            same, possibly = self.runtime.ledger.decided_as(params.decision, tasks)
+            replaces = [same["id"]] if same else []
         # Workers given their task before it hear it; those given one in this turn had it in
         # the owner's message.
         given = [task["id"] for task in named]
-        result = await self.record(params.decision, tasks, params.replaces, "owner", given)
+        result = await self.record(params.decision, tasks, replaces, "owner", given)
         decision, affected = result["decision"], result["affected"]
         state.turn_decisions.append(decision["id"])
-        if not params.replaces:
+        if not replaces:
             self.runtime.ledger.recorded(decision, tasks)
+        head = f"Recorded {decision['id']}"
+        if same:
+            head += (
+                f" in place of {same['id']} (“{clean(same['text'], 160)}”), the owner's decision "
+                "in force on the same choice"
+            )
+        tail = "".join(
+            f" Possibly the same as {d['id']} (\u2018{clean(d['text'], 160)}\u2019); pass "
+            "replaces if it changes it."
+            for d in possibly
+        )
         if result.get("same"):
             return (
-                f"Recorded {decision['id']}, the same decision as before: nothing changed, no "
-                f"worker was told. Linked to {len(tasks)} more task(s){self.titles(tasks)}."
+                f"{head}, the same decision as before: nothing changed, no worker was told. "
+                f"Linked to {len(tasks)} more task(s){self.titles(tasks)}.{tail}"
             )
-        if not params.replaces:
+        if not replaces:
             told = len(result.get("told") or [])
             said = f" {told} of their worker(s) were told." if told else ""
             for question in result.get("open") or []:
@@ -881,23 +899,20 @@ class Decisions:
                     f'message_session(task="note", task_id="{question["task_id"]}", '
                     "answers_question=true)."
                 )
-            return (
-                f"Recorded {decision['id']}, linked to {len(tasks)} task(s){self.titles(tasks)}."
-                + said
-            )
+            return f"{head}, linked to {len(tasks)} task(s){self.titles(tasks)}.{said}{tail}"
         if not affected:
-            return f"Recorded {decision['id']}. No open or finished task relied on what it changes."
+            return f"{head}. No open or finished task relied on what it changes.{tail}"
         told = [item for item in affected if item["told"]]
         redo = sum(item["was"] in {"review", "done"} for item in told)
         missed = [item["title"] for item in affected if not item["told"]]
-        text = f"Recorded {decision['id']}. It affects {len(affected)} task(s)"
+        text = f"{head}. It affects {len(affected)} task(s)"
         if redo:
             text += f"; {redo} checked result(s) are out of date and reopened"
         if told:
             text += f". {len(told)} worker(s) were told and must confirm"
         if missed:
             text += f". Could not tell: {', '.join(missed)} (their results are marked out of date)"
-        return text + ". The owner sees the impact on a card. Tell the owner in one line."
+        return text + f". The owner sees the impact on a card. Tell the owner in one line.{tail}"
 
     def check_finished(self, caller: str, text: str, named: list[dict]):
         """Asked once of finished tasks the Router names for a decision (live e2e r81: told a

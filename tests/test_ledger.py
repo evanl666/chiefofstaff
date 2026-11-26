@@ -285,6 +285,44 @@ async def test_item2_a_task_given_in_the_turn_of_a_decision_asks_another_questio
     assert "Asked the owner" in asked.text_result_for_llm, asked.text_result_for_llm
 
 
+async def test_a_routers_decision_on_a_decided_choice_replaces_it(harness):
+    """E151/E153: the Router recorded a second value for a choice the owner had decided, without
+    replaces: two decisions in force, and the workers relying on the first never heard. On the
+    same choice it replaces the one in force, each linked worker told once."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Tie breaker")
+    other = await spawn(runtime, harness.router_id, "Score page", why_new="parallel")
+    one_request(harness, worker, other)
+    await call_tool(runtime, "record_decision", harness.router_id, decision="Ties: rule A",
+                    tasks=[worker["task_id"], other["task_id"]])  # fmt: skip
+    [first] = runtime.decisions.active()
+    said = (
+        await call_tool(runtime, "record_decision", harness.router_id, decision="Ties: rule B")
+    ).text_result_for_llm
+    [now] = runtime.decisions.active()
+    assert now["text"] == "Ties: rule B" and f"in place of {first['id']}" in said, said
+    assert runtime.decisions.get(first["id"])["replaced_by"] == now["id"]
+    for told in (worker, other):
+        sent = harness.session(told["session_id"]).sent
+        assert sum('type="decision-changed"' in text for text in sent) == 1, "once each"
+        assert "Now: Ties: rule B" in sent[-1]
+
+
+async def test_a_routers_decision_only_possibly_on_a_decided_choice_keeps_both(harness):
+    """Only possibly the same choice: both stay in force, and the Router hears which one it may
+    change (replaces)."""
+    runtime = await harness.connect()
+    await call_tool(runtime, "record_decision", harness.router_id,
+                    decision="Deploy the api to staging, then prod")  # fmt: skip
+    [first] = runtime.decisions.active()
+    serves = "The api serves k 1.12 in prod"
+    noted = await call_tool(runtime, "record_decision", harness.router_id, decision=serves)
+    said = noted.text_result_for_llm
+    assert len(runtime.decisions.active()) == 2
+    assert f"Possibly the same as {first['id']} (\u2018Deploy the api to staging, then prod" in said
+    assert "pass replaces if it changes it" in said
+
+
 async def test_the_routers_answer_for_the_owner_reaches_every_worker_that_asked(harness):
     """The Router relays the owner's answer to one worker (answers_question): the others that
     asked the same in its request hear it too, their questions close."""

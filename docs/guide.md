@@ -971,7 +971,10 @@ that relied on it is told, as
 above: each worker once, however many of its tasks rely on it; a finished task reopens only when
 the answer itself changed, and changes of one decision within two hours are one *Decision
 changed* card. Decided another way meanwhile (told the Router, say), the card leaves and its task
-goes on under your new decision. A decision the Router records for tasks already given reaches
+goes on under your new decision. A decision the Router records on a choice you decided already
+(the same choice, as Chief of Staff tells it) replaces that one, as a change does: one value for
+one choice; one only possibly the same is kept beside it, and the Router is told which it may
+change. A decision the Router records for tasks already given reaches
 their workers too (a question one of them asked you stays until the Router says the decision
 answers it). What workers confirm about a change stays on its card after *Got it*.
 

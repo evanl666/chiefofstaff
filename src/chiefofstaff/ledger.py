@@ -350,6 +350,24 @@ class Ledger:
         )
         return self.subject(identifier)
 
+    def decided_as(self, text: str, tasks: list[str]) -> tuple[dict | None, list[dict]]:
+        """What a decision of the Router's (replacing none it named) changes: the one in force on
+        the same choice (in its tasks' request; any, for none), which it replaces (one value for
+        one choice: E151, E153), and those only possibly the same, which stay."""
+        task = self.runtime.tasks.find(tasks[0]) if tasks else None
+        anchor = self.anchor(task["session_id"], task["id"]) if task else ""
+        same: dict | None = None
+        possibly: list[dict] = []
+        for match in self.match(text.partition(" \u2192 ")[0], anchor):
+            decision = self.decided(match["subject"])
+            if not decision:
+                continue
+            if match["joins"] and not same:
+                same = decision
+            elif decision["id"] not in {d["id"] for d in [*possibly, *([same] if same else [])]}:
+                possibly.append(decision)
+        return same, possibly[:2]
+
     def recorded(self, decision: dict, tasks: list[str]):
         """A decision the Router recorded (replacing none): the subject it settles is the one
         asked the same (within its tasks' request), else one of its own. The asks open on it

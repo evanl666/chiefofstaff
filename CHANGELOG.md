@@ -113,7 +113,10 @@ waits for its worker, and the page's state is read several times faster.
   where it was asked, each worker once, and a pick is kept as your decision on it, replacing
   the one before; a card of a choice you decided before says *Decided before: you picked “1.11”
   at 10:01*. The Router's own note on a choice a worker asked already joins that ask instead of
-  being a second item, and one on a choice you decided is not shown again.
+  being a second item, and one on a choice you decided is not shown again. A decision the Router
+  records on a choice you decided replaces the one in force (its tasks' workers told once each),
+  never a second value beside it; one only possibly the same stays, and the Router hears which it
+  may change.
 - **Another question on a decided task is asked.** On a task linked to any decision (one you
   gave the Router with the request that made the task, say), an unrelated question came back
   *already decided*, and its worker had to insist. Now only the same choice (in other words,
