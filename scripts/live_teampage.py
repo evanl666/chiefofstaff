@@ -10,7 +10,8 @@ Router run forms the team; the owner runs it from its page.
   T3  The answer in the brief: the part's question is the brief's one need; the option chosen
       there reaches its worker.
   T4  Review in place: the first part's result reviewed and accepted on the plan; the part
-      after it starts, and the owner's word told before is in what it is first given.
+      after it (started once that result was ready), was first given the owner's word told
+      before it started.
 
 Uses your signed-in Copilot CLI (a scratch COPILOT_HOME, as live_wide does), consumes premium
 requests (LIVE_COPILOT_MODEL, claude-sonnet-5.5 by default) and takes about 15 minutes. Ports:
@@ -47,12 +48,14 @@ REQUEST = (
     "three wind names (zephyr, sirocco, mistral) and a one-line meaning each, and report done. "
     "'Glossary Check': it needs the draft, so it must not start before Glossary Draft is done; "
     "then it reads the draft and writes check.txt in its folder: 'ok' or the fixes, and reports "
-    "done. 'Glossary Cover': at the same time as the draft, before anything else, use "
-    "ask_decision to ask me whether the cover line should be formal or casual (the two options), "
-    "wait for my answer, then write cover.txt in your folder with one line in that tone, and "
-    "report done."
+    "done. 'Glossary Cover' works with 'Glossary Draft' on the same glossary, at the same time: "
+    "before anything else, use ask_decision to ask me whether the cover line should be formal or "
+    "casual (the two options), wait for my answer, then write cover.txt in your folder with one "
+    "line in that tone naming the draft's three winds, and report done."
 )
 TOLD = "Team note TP-7: end every file you write with a last line that says exactly TP-7."
+# Where a message is once its worker's conversation shows it (the page's "✓ read").
+READ = {"received", "processed"}
 # A word that may not end a name.
 DANGLING = re.compile(r"\s(?:a|an|the|of|for|to|in|on|at|with|and|or|by|from)$", re.IGNORECASE)
 
@@ -159,7 +162,7 @@ async def t2_t3_t4_run_the_team(ctx: Ctx):
             data = await team_data(ctx, team)
             [entry] = [e for e in data["tells"] if e["text"] == TOLD]
             state_ = {item["task"]: item["delivery"] for item in entry["to"]}
-            return state_ if state_.get(draft["id"]) == "read" else None
+            return state_ if state_.get(draft["id"]) in READ else None
 
         log(f"T2: delivered {await wait_for('the draft reading it', read, 600, ctx.app)}")
         log("T2 passed (the part not started: at its start, T4)")
