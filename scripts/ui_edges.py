@@ -6264,7 +6264,8 @@ async def main():
                           round_stacked_merge, round_fork, round_needs_dots,
                           round_settings, round_teams_v2,
                           round_answer_label, round_sidebar_flat,
-                          round_composer, round_decision_steer):  # fmt: skip
+                          round_composer, round_decision_steer,
+                          round_ci_not_run):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -12287,6 +12288,61 @@ async def round_e125(runtime, browser, failures: list[str]):
         assert not errors, errors
         await context.close()
     log("E125: an update's cleanup is one line under Handled for you, with when it was written")
+
+
+async def round_ci_not_run(runtime, browser, failures: list[str]):
+    """Owner report 0.1.58: CI GitHub never started (the account's Actions minutes used up) is
+    one calm line on the card, said once (not a ⚠ flag, not ✗ CI on the PR's chip), and the
+    task is to accept like any other: nothing more under Needs you. Light and dark, 800 and
+    1280 px."""
+    store = runtime.store
+    router = store.get("router_id")
+    result = await call_tool(runtime, "spawn_worker", router, title="Deliver the phone app",
+                             instructions="Deliver the phone app", why_new="test")  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    run = store.one("SELECT id FROM runs WHERE task_id=?", (task["id"],))
+    why = "GitHub Actions minutes are used up"
+    pr = {"label": "acme/app#15", "url": "https://github.com/acme/app/pull/15",
+          "title": "Phone app", "state": "OPEN", "checks": "not_run", "failing": [],
+          "not_run": ["rules-and-server", "e2e"], "not_run_why": why, "review": "",
+          "merge_state": "UNSTABLE", "own": True, "role": "created",
+          "at": datetime.now(UTC).isoformat()}  # fmt: skip
+    store.execute("UPDATE runs SET evidence=? WHERE id=?",
+                  (json.dumps({"checkouts": [], "prs": [pr]}), run["id"]))  # fmt: skip
+    runtime.tasks.move(task["id"], "review", result="The phone app is in beta: acme/app#15.")
+    await settle(runtime)
+    line = f"CI didn't run on app#15: {why}"
+    shots = Path(os.environ.get("CI_NOT_RUN_SHOTS", SHOTS / "ci-not-run"))
+    shots.mkdir(parents=True, exist_ok=True)
+    for width, scheme in itertools.product((1280, 800), ("light", "dark")):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 1200}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        card = page.locator("#needs .card.task", has_text="Deliver the phone app")
+        await expect(card).to_have_count(1, timeout=15000)
+        await expect(card.locator(".head .meta")).to_contain_text("Awaiting acceptance")
+        await card.get_by_role("button", name="View report").click()
+        await expect(card.locator(".receipt-note")).to_have_text(line)
+        await expect(card.locator(".flag")).to_have_count(0)
+        await expect(card.locator(".chips .receipt.pr")).to_have_text("app#15 · Phone app")
+        tip = await card.locator(".chips .receipt.pr").get_attribute("data-tip") or ""
+        assert f"CI didn't run: {why}" in tip and "Checks fail" not in tip, tip
+        assert await card.get_by_text("CI didn't run").count() == 1, "said once"
+        await card.screenshot(path=shots / f"card-{width}-{scheme}.png")
+        assert not errors, errors
+        await context.close()
+    runtime.tasks.move(task["id"], "cancelled")
+    await settle(runtime)
+    log("CI didn't run: one calm line on its card, said once, nothing more to act on")
 
 
 async def round_stacked_merge(runtime, browser, failures: list[str]):
