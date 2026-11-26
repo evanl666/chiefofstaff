@@ -171,9 +171,37 @@ export async function loadModels() {
   renderHeader();
   window.dispatchEvent(new Event("models"));
 }
+// Events that ask for the whole state read again (a read takes the server a moment): one read
+// for a burst of them, not one each. Shortly after the first; at most one a second while more
+// come; one at a time, and once more after it for what came meanwhile.
+const RELOAD_AFTER = 150;
+const RELOAD_EVERY = 1000;
+let reloading = false;
+let reloadAgain = false;
+let reloadedAt = 0;
 function scheduleReload() {
-  clearTimeout(state.reloadTimer);
-  state.reloadTimer = setTimeout(() => loadState().catch(() => {}), 150);
+  if (reloading) {
+    reloadAgain = true;
+    return;
+  }
+  if (state.reloadTimer) return;
+  state.reloadTimer = setTimeout(reload, Math.max(RELOAD_AFTER, reloadedAt + RELOAD_EVERY - Date.now()));
+}
+async function reload() {
+  state.reloadTimer = null;
+  reloading = true;
+  reloadedAt = Date.now();
+  try {
+    await loadState();
+  } catch {
+    // Read again with the next event, or when the page is back in sight.
+  } finally {
+    reloading = false;
+    if (reloadAgain) {
+      reloadAgain = false;
+      scheduleReload();
+    }
+  }
 }
 // The server's events. Kept: with the setting on, a stream that breaks drops every status.
 let events = null;

@@ -182,7 +182,7 @@ export function taskItem(task, phase = phaseOf(task)) {
   const made = [task.artifacts, task.links, task.files, task.made_links, task.link_names, task.watch_kind, task.watch_changed_at, task.deliverables, task.monitoring, state.snapshot?.artifacts_hidden];
   const asked = askedOf(task);
   return {
-    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}${choosing(task, phase)}${keptKey(task)}`,
+    key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}${choosing(task, phase)}${keptKey(task)}${task.nudge_failed ? `:nudge-failed:${task.nudge_failed.at}` : ""}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
     version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}${task.progress_updates?.length ? `:${keptWords(task.progress_updates).map((item) => item.at).join(",")}` : ""}${task.shepherd ? `:${task.shepherd.line}|${task.shepherd.accept_note}` : ""}`,
@@ -472,6 +472,38 @@ function taskCard(task, phase = phaseOf(task)) {
   }
   expandTask(node, task.status === "review" && openReports.has(task.id));
   const key = `task:${task.id}`;
+  // The button the owner pressed on it last (or Enter in its form): the one an action says it
+  // works on (see working).
+  let pressed = null;
+  node.addEventListener("click", (event) => (pressed = event.target.closest?.("button") || null), true);
+  // While an action is out, the button it came from says so at once, in its own width (an item
+  // of "⋯": that button); one that takes a moment says what it does beside it, on that line.
+  // What `working` returns puts it back.
+  function working(words) {
+    let button = pressed?.isConnected && node.contains(pressed) ? pressed : null;
+    pressed = null;
+    if (button?.closest(".menu")) button = button.closest(".menu-wrap")?.querySelector(":scope > button") || null;
+    // Enter in a form: its own button.
+    if (!button && actions.dataset.editing) button = actions.querySelector(":scope > button:last-child");
+    if (button) {
+      button.style.width = `${button.getBoundingClientRect().width}px`;
+      button.classList.add("working");
+      button.setAttribute("aria-busy", "true");
+    }
+    const note = el("span", { class: "working-note", role: "status", text: words });
+    // Only on a line the card shows already: never one of its own.
+    const later = setTimeout(() => {
+      if (!actions.classList.contains("inline") && actions.querySelector(":scope > button, :scope > .menu-wrap")) error.after(note);
+    }, SLOW_ACTION);
+    return () => {
+      clearTimeout(later);
+      note.remove();
+      if (!button) return;
+      button.classList.remove("working");
+      button.removeAttribute("aria-busy");
+      button.style.width = "";
+    };
+  }
 
   // The row leaves its place at once (`moves`); the task's new state puts it where it goes.
   // One request at a time: a second click (or Enter) while it is out does nothing.
@@ -481,6 +513,7 @@ function taskCard(task, phase = phaseOf(task)) {
     once(key, null, async () => {
       for (const button of actions.querySelectorAll("button")) button.disabled = true;
       error.textContent = "";
+      const over = working(WORKING.kept);
       try {
         await run();
         if (done) toast(done);
@@ -489,11 +522,14 @@ function taskCard(task, phase = phaseOf(task)) {
         error.textContent = failure.message;
         if (!error.isConnected) toast(failure.message, "error");
         for (const button of actions.querySelectorAll("button")) button.disabled = false;
+      } finally {
+        over();
       }
     });
   async function send(path, payload, done, moves, sends) {
     for (const button of actions.querySelectorAll("button")) button.disabled = true;
     error.textContent = "";
+    const over = working(WORKING[path.split("/").pop()] || WORKING.kept);
     if (moves) {
       state.leaving.add(key);
       node.classList.add("leaving");
@@ -526,12 +562,15 @@ function taskCard(task, phase = phaseOf(task)) {
       for (const button of actions.querySelectorAll("button")) button.disabled = false;
       renderSidebar();
       scheduleHome();
+    } finally {
+      over();
     }
   }
   function form(input, label, send) {
     input.addEventListener("keydown", (event) => {
       if (submits(event) && !event.shiftKey) {
         event.preventDefault();
+        pressed = null;
         send();
       }
     });
@@ -646,6 +685,7 @@ function taskCard(task, phase = phaseOf(task)) {
     return once(key, null, async () => {
       for (const button of actions.querySelectorAll("button")) button.disabled = true;
       error.textContent = "";
+      const over = working(WORKING.save);
       try {
         const { said } = await api(`/api/sessions/${task.session_id}/agent-settings`, { method: "POST", body: { digest: task.settings.digest } });
         toast(said);
@@ -653,6 +693,8 @@ function taskCard(task, phase = phaseOf(task)) {
         error.textContent = failure.message;
         toast(failure.message, "error");
         for (const button of actions.querySelectorAll("button")) button.disabled = false;
+      } finally {
+        over();
       }
     });
   }
@@ -802,7 +844,39 @@ function taskCard(task, phase = phaseOf(task)) {
     place();
   }
   showActions();
+  // Its last Nudge could not ask its worker (it answered at once, and asked after): said here
+  // as any action that failed is, with Start fresh where that is the way on.
+  const failed = task.nudge_failed;
+  if (failed) {
+    error.textContent = failed.text;
+    if (failed.fresh) error.append(" ", freshButton(failed.fresh, loadState));
+  }
   return node;
+}
+// What an action on a task card does while it takes a moment (by the last part of its path).
+const SLOW_ACTION = 400;
+const WORKING = {
+  nudge: "Asking its worker…",
+  "follow-up": "Sending to its worker…",
+  "request-changes": "Sending to its worker…",
+  retry: "Starting it again…",
+  accept: "Accepting…",
+  cancel: "Cancelling…",
+  pr: "Opening the PR…",
+  "check-back": "Checking back…",
+  save: "Saving…",
+  kept: "Working on it…",
+};
+for (const path of ["runs", "rename", "split", "merge-back", "news-seen", "go-on-at-reset"]) WORKING[path] = WORKING.save;
+// A Nudge that could not ask its worker, said once as it comes (its card says it as long as it
+// holds; one from before the page opened only there).
+const nudgeFailures = new Set();
+const opened = Date.now();
+function nudgeFailed(task) {
+  const failed = task.nudge_failed;
+  if (!failed || nudgeFailures.has(`${task.id}:${failed.at}`) || Date.parse(failed.at) < opened) return;
+  nudgeFailures.add(`${task.id}:${failed.at}`);
+  toast(failed.text, "error", null, failed.fresh ? { text: FRESH_START, onclick: () => startFresh(failed.fresh, loadState) } : null);
 }
 function taskBody(task, phase = {}) {
   const worker = byId(task.session_id);
@@ -1523,6 +1597,7 @@ export function upsertTask(task, reply = false) {
   if (!state.snapshot) return;
   const held = tasks().find((item) => item.id === task.id);
   if (reply && held?.updated_at && task.updated_at && task.updated_at < held.updated_at) return;
+  if (!reply) nudgeFailed(task);
   const list = tasks().filter((item) => item.id !== task.id);
   list.push(task);
   state.snapshot.tasks = list;

@@ -40,6 +40,7 @@ from conftest import (  # noqa: E402
 from chiefofstaff.models import DraftDecision  # noqa: E402
 from chiefofstaff.runtime import Runtime  # noqa: E402
 from chiefofstaff.sources.slack import SlackSource  # noqa: E402
+from chiefofstaff.store import now  # noqa: E402
 from chiefofstaff.web import create_app  # noqa: E402
 
 PORT = int(os.environ.get("UI_EDGES_PORT", "8798"))
@@ -914,6 +915,79 @@ async def round_two(runtime, browser, failures: list[str]):
     await unfold(idle)
     await expect(idle.get_by_role("button", name="Nudge")).to_be_visible()
     log("a worker with two tasks: the one it is on runs, the other paused; a quiet one says why")
+
+    # 0.1.60: Nudge says it works on it at once, in its own place (the owner saw nothing for 3
+    # s); a moment later, what it does beside it; then as before. The server is held a moment.
+    async def held(route):
+        await asyncio.sleep(1.5)
+        await route.continue_()
+
+    await page.route("**/api/tasks/*/nudge", held)
+    nudge = idle.get_by_role("button", name="Nudge")
+    before = await idle.bounding_box()
+    pressed = await nudge.evaluate(
+        """(button) => {
+            const box = button.getBoundingClientRect();
+            button.click();
+            const now = button.getBoundingClientRect();
+            const same = (a, b) => Math.abs(a - b) < 0.5;
+            return { working: button.classList.contains("working"),
+                     busy: button.getAttribute("aria-busy"),
+                     same: same(box.width, now.width) && same(box.height, now.height) };
+        }"""
+    )
+    assert pressed == {"working": True, "busy": "true", "same": True}, pressed
+    note = idle.locator(".actions .working-note")
+    await expect(note).to_have_text("Asking its worker…", timeout=1200)
+    during = await idle.bounding_box()
+    assert during and before and abs(during["height"] - before["height"]) < 0.5, (before, during)
+    await idle.screenshot(path=SHOTS / "ui-edges-nudge-working.png")
+    await expect(
+        page.locator(".toast", has_text="Asked its worker where it stands.")
+    ).to_be_visible(timeout=10000)
+    await expect(note).to_have_count(0)
+    await expect(idle.locator("button.working")).to_have_count(0)
+    await page.unroute("**/api/tasks/*/nudge", held)
+    log("Nudge: working at once in its own width, what it does after a moment, nothing moves")
+    # Its worker could not be asked after all (it answered first): said on its card and in a
+    # toast, as a failed action is; a Nudge again forgets it. (Asked, its worker is at work: the
+    # card is under Running now.)
+    quiet_task = runtime.tasks.current(quiet)
+    asked = board.locator(".card.task", has_text="Buyer Group Graph 7-pager")
+    store.set(
+        f"nudgefailed:{quiet_task['id']}",
+        json.dumps({"text": "Could not deliver the message: the CLI went away.", "at": now()}),
+    )
+    runtime.task_actions.publish(runtime.tasks.get(quiet_task["id"]))
+    await expect(asked.locator(".actions .error")).to_have_text(
+        "Could not deliver the message: the CLI went away.", timeout=10000
+    )
+    await expect(
+        page.locator(".toast.error", has_text="Could not deliver the message: the CLI went away.")
+    ).to_be_visible()
+    await runtime.task_actions.nudge(quiet_task["id"])
+    await settle(runtime)
+    await expect(asked.locator(".actions .error")).to_be_hidden(timeout=10000)
+    log("a Nudge that could not ask its worker says why on its card; a Nudge again forgets it")
+
+    # Events that ask for the whole state again: one read for a burst, at most one a second
+    # while they keep coming (0.1.59: one each, 150 ms after it, however many).
+    reads: list[float] = []
+    page.on(
+        "request",
+        lambda r: reads.append(time.monotonic()) if r.url.endswith("/api/state") else None,
+    )
+    for _ in range(20):
+        runtime.bus.publish("state")
+    await asyncio.sleep(2)
+    assert len(reads) == 1, f"a burst at once: {len(reads)} reads"
+    reads.clear()
+    for _ in range(20):
+        runtime.bus.publish("state")
+        await asyncio.sleep(0.2)
+    await asyncio.sleep(1.5)
+    assert 2 <= len(reads) <= 6, f"20 events over 4 s: {len(reads)} reads"
+    log(f"a burst of state events: 1 read; 20 over 4 s: {len(reads)} reads (was 20)")
 
     update = page.locator("#needs .card.task", has_text="Filter opt-outs before inference")
     # The news in its row's line; all of it on its card.
