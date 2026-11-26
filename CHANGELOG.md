@@ -24,8 +24,8 @@ Chief of Staff starts, and stops, however large a worker's Copilot session has g
   meanwhile is kept for that.
 - **Chief of Staff's page opens even while Copilot is slow.** The workers at work resume in the
   background as Copilot connects, each for three minutes at most, and the page is served after 8
-  seconds of a start that goes on (it says Copilot is connecting meanwhile). What you send to a
-  worker still resuming goes once it has.
+  seconds of a start that goes on (its message box says you can ask once Copilot is connected).
+  What you send to a worker still resuming goes once it has.
 - **Stopping Chief of Staff no longer hangs.** Copilot is given 5 seconds to stop; then its
   processes are ended, and killed if they ignore that (it waited for ever in "Waiting for
   application shutdown" once Copilot stopped answering).

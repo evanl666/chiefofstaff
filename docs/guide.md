@@ -1937,5 +1937,5 @@ stop answering after reopening one, Chief of Staff starts a new Copilot by itsel
 workers go on; that worker is not reopened again: its task says *Waiting for you: its Copilot
 session is too large to reopen here*, and its chat says so with *Start a fresh worker with its
 context*, which goes on with its task in a fresh session, told where it was. Chief of Staff's
-page opens even while Copilot is slow to start (it says Copilot is starting), and stopping it
+page opens even while Copilot is slow to start (you can ask once Copilot is connected), and stopping it
 never waits on Copilot for more than a few seconds.
