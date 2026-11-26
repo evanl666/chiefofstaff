@@ -708,11 +708,16 @@ function keepDraft() {
 export function showDraft(chat) {
   const input = $("#composer-input");
   if (drafted === null) {
-    input.addEventListener("input", keepDraft);
-    input.addEventListener("input", () => showUnsent(null));
+    // (Typed or sent, words that came back unsent are no longer said to be.)
+    input.addEventListener("input", () => {
+      keepDraft();
+      showUnsent(null);
+    });
     // Sent: the composer is emptied first (and the text put back if sending fails).
-    $("#composer").addEventListener("submit", () => setTimeout(keepDraft));
-    $("#composer").addEventListener("submit", () => showUnsent(null));
+    $("#composer").addEventListener("submit", () => {
+      showUnsent(null);
+      setTimeout(keepDraft);
+    });
     window.addEventListener("pagehide", keepDraft);
   } else if (drafted === chat) {
     return;
