@@ -41,6 +41,8 @@ def held_for(harness, session_id: str) -> str:
             "Invoice totals: whole units or cents?",
             "same",
         ),
+        ("How should invoice totals be rounded?", "Round invoice totals to cents?", "same"),
+        ("Serving k 1.12 from the ranker?", "Which k does the ranker serve?", "same"),
         ("夜港：金币要留到下一晚吗？", "金币留到下一晚吗", "same"),  # noqa: RUF001
         ("Limit login attempts per account?", "Limit signup attempts per account or IP?", "same"),
         ("Deploy the api to staging or prod?", "Which k should the api serve in prod?", "possibly"),

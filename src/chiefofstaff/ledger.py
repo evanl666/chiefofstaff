@@ -65,22 +65,29 @@ def plain(text: str) -> str:
     return " ".join(text.split()).rstrip(".!?\u3002\uff01\uff1f")
 
 
+def stem(word: str) -> str:
+    """A word without the ending its other forms differ by: serve, serves, served, serving."""
+    if not word.isalpha() or len(word) <= 3:
+        return word
+    for suffix in ("ing", "ed"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            word = word[: -len(suffix)]
+            break
+    else:
+        if word.endswith("s") and not word.endswith(("ss", "us", "is")):
+            word = word[:-1]
+    if len(word) > 3 and word.endswith("e"):
+        word = word[:-1]
+    if len(word) > 3 and word[-1] == word[-2] and word[-1] not in "aeiouls":
+        word = word[:-1]  # (running, runn: run)
+    return word
+
+
 def topic(text: str) -> frozenset[str]:
     """What a question is about: its telling words (numbers whole: "1.11", "v0.1.58"), and
     character pairs of Chinese and Japanese text."""
     text = unicodedata.normalize("NFKC", text).casefold()
-    found = set()
-    for word in LATIN.findall(text):
-        if word in STOP:
-            continue
-        if (
-            word.isalpha()
-            and len(word) > 3
-            and word.endswith("s")
-            and not word.endswith(("ss", "us", "is"))
-        ):
-            word = word[:-1]
-        found.add(word)
+    found = {stem(word) for word in LATIN.findall(text) if word not in STOP}
     for run in catalog.CJK.findall(text):
         pairs = [run] if len(run) == 1 else [run[i : i + 2] for i in range(len(run) - 1)]
         found.update(pair for pair in pairs if pair not in CJK_STOP)
