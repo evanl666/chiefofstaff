@@ -392,8 +392,10 @@ async def d6_a_side_question_leaves_the_blocked_ask_open(run: Run):
 
     said = await wait_for("its answer to the side question", answered, 600, app)
     await asyncio.sleep(15)  # Whatever the Router does with it.
+    # The task it is blocked on (the Router may give the side question as a task of its own).
     tasks = [t for t in (await app.get("/api/state"))["tasks"] if t["session_id"] == worker["id"]]
-    task = tasks[-1]
+    on = asked["id"].split(":", 1)[1]
+    task = next((t for t in tasks if t["id"] == on), tasks[-1])
     run.check(
         "D6 a side question on the same task leaves the blocked ask under Needs you",
         task["status"] == "waiting" and (task.get("question") or {}).get("id") == asked["id"],
