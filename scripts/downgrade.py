@@ -344,7 +344,11 @@ async def teams_downgrade(baseline: str) -> int:
         print(f"This tree: a team for one of the owner's requests ({ROOT})", flush=True)
         new, found = await side(ROOT, env, "--side", "teams-new", "--run", str(run))
         await new.wait()
-        checks.check(found["parts"] == ["API", "UI", "Tests"], "a team of three", found)
+        checks.check(
+            found["parts"] == ["Checkout API", "Checkout UI", "Checkout tests"],
+            "a team of three",
+            found,
+        )
         stamps = {"req", "reqtasks", "teamseen", "with", "xchg", "teamtells", "teamnote"}
         stamps |= {"teamlook"}
         checks.check(stamps <= set(found["keys"]), "its stamps, in kv", found["keys"])

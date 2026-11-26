@@ -29,8 +29,10 @@
   it re-plans stays in its team (it said "moved out"), and one it starts after a worker reports,
   waiting on or working with a request's parts, joins that request's team (it was in none). A
   team's name is your own words for the request (*Nightly export*, *给 Chief of Staff 做用户自定义
-  UI*), its parts' names short and whole (*Login page*, not *Page*), never cut inside a word or a
-  character, without "please", "帮我" or a pasted log.
+  UI*), its parts' names short and whole (*Login page*, not *Page*; *Glossary draft* for parts
+  you called "Glossary Draft", "Glossary Cover": a word every part shares stays, so a name says
+  what it is in any list), never cut inside a word or a character, without "please", "帮我" or a
+  pasted log.
 - How workers are linked, what the Router is given (its prompts and tools) and the data folder's
   tables are as before; what you tell a team reaches its workers as your messages do. An earlier
   version opens the folder as it was (a note kept for a part not started yet is simply not given

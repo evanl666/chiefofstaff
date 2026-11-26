@@ -5594,7 +5594,7 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         rows = section.locator(".team2-row")
         row = await team_row(page, checkout)
         await expect(row.locator(".goal")).to_have_text("Ship checkout v2 for acme-shop")
-        await expect(row.locator(".status")).to_have_text("Waiting on you · review UI")
+        await expect(row.locator(".status")).to_have_text("Waiting on you · review Checkout UI")
         await expect(row.locator(".frac")).to_have_text("1/3")
         await expect(row.locator(".segs i")).to_have_count(3)
         await expect(row.locator(".segs i").nth(1)).to_have_class("waiting")
@@ -5708,15 +5708,17 @@ async def round_teams_v2(runtime, browser, failures: list[str]):
         await (await team_row(page, checkout)).click()
         brief = page.locator("#timeline .tp-brief")
         await expect(brief.locator(".say")).to_have_text(
-            re.compile(r"^UI's result is ready: The v2 cart and payment pages")
+            re.compile(r"^Checkout UI's result is ready: The v2 cart and payment pages")
         )
-        await expect(brief.locator(".then")).to_have_text("Tests starts once you accept it.")
-        await expect(brief.locator(".acts button")).to_have_text(["Review UI"])
+        await expect(brief.locator(".then")).to_have_text(
+            "Checkout tests starts once you accept it."
+        )
+        await expect(brief.locator(".acts button")).to_have_text(["Review Checkout UI"])
         await expect(page.locator("#session-meta")).to_have_text(
             re.compile(r"^Waiting on you · 1 of 3 done · ")
         )
         await expect(page.locator("#timeline .tp-part").nth(2).locator(".status")).to_have_text(
-            "Has API's result ✓ · starts after your OK on UI"
+            "Has Checkout API's result ✓ · starts after your OK on Checkout UI"
         )
         await page.wait_for_timeout(200)
         await expect(page.locator("#timeline .tp-plan svg.rails path.owner")).to_have_count(1)

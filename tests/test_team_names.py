@@ -24,7 +24,8 @@ CASES = [
         ["Checkout API: the v2 endpoints", "Checkout UI: the v2 pages",
          "Checkout tests: end to end"],
         "Ship checkout v2 for acme-shop",
-        ["API", "UI", "Tests"],
+        # (The prototype had "API", "UI", "Tests": the owner keeps the word every part shares.)
+        ["Checkout API", "Checkout UI", "Checkout tests"],
         ["A", "U", "T"],
     ),
     (
@@ -88,6 +89,23 @@ def test_an_exchange_is_titled_by_its_lead_sentence(text, question, title, rest)
     assert (found[0][:1].upper() + found[0][1:], found[1]) == (title, rest)
 
 
+def test_a_word_every_part_shares_stays_in_its_name():
+    """Parts named "Glossary Draft", "Glossary Cover", "Glossary Check" (as the owner said them):
+    a name that stands alone ("Draft") loses its context in a list, so the word they share
+    stays, as a title in lower case keeps it ("Token writer"); its avatar is its own word's."""
+    titles = ["Glossary Draft", "Glossary Cover", "Glossary Check"]
+    names = part_names(titles, "A small glossary")
+    assert names == ["Glossary draft", "Glossary cover", "Glossary check"]
+    assert avatars(names) == ["D", "C", "H"]
+    tokens = part_names(["Token writer: put it in config", "Token scout: make one"], "Tokens")
+    assert (tokens, avatars(tokens)) == (["Token writer", "Token scout"], ["W", "S"])
+    # A part's own words after the shared one, as they were: a name of several, an acronym.
+    assert part_names(["Search API p95 latency", "Search cache hit rate"], "") == [
+        "API p95 latency",
+        "Cache hit rate",
+    ]
+
+
 def test_names_are_cut_by_display_columns_and_never_alike():
     assert columns("设计稿 UI") == 9
     assert cut("实例之间的点对点直连实例之间的点对点直连", 16) == "实例之间的点对…"
@@ -119,7 +137,7 @@ CORPUS = [
         "Ship checkout v2 for acme-shop: the API and the UI side by side, then end-to-end tests.",
         ["Checkout API: the v2 endpoints", "Checkout UI: the v2 pages", "Checkout tests: end to end"],
         "Ship checkout v2 for acme-shop",
-        ["API", "UI", "Tests"],
+        ["Checkout API", "Checkout UI", "Checkout tests"],
     ),
     (
         "Write the migration for the invoices table, then switch the billing API to it.",

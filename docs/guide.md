@@ -205,7 +205,8 @@ or does another's instead) make one: workers that only talk, work on another of 
 were started on their own never do. A part the Router replaces when it re-plans stays in its
 team; one it starts after a worker reports, waiting on or working with a request's parts, joins
 that request's team. A team's name is your own words for the request (*Nightly export*), its
-parts' names short and whole (*Login page*, *Token writer*), never cut inside a word.
+parts' names short and whole (*Login page*, *Token writer*; a word every part shares stays,
+*Glossary draft*), never cut inside a word.
 
 *Teams*, above *Running*, has a row per team: its request, a bar with a segment per part (the
 working ones gently alive), what needs you if anything does (*Waiting on you · answer UI*), else

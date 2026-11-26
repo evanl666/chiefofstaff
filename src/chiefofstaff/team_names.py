@@ -81,6 +81,9 @@ DOING = re.compile(
     "更新|修复|修|实现|添加|加|补|删除|删|调整|列出|写|做|设计|研究|回复|改|优化|重构|迁移|升级|"
     "部署|检查|整理|排查|调研|分析|导出|导入|发布|上线|接入|支持|清理|统一"
 )
+# A word in capitals only at its start ("Draft"), which a name after another word writes in
+# lower case ("Glossary draft"); an acronym or a name in capitals ("API", "iOS") stays.
+SENTENCE = re.compile(r"^[A-Z](?=[a-z]+$)")
 # One Latin word ("writer", "user_id"): no part's name once a word before it is gone.
 LONE = re.compile(r"^[A-Za-z][\w.\-/#]*$")
 # A plain word in lower case, which a name starts in capitals ("iOS", "user_id" as written).
@@ -319,12 +322,17 @@ def part_names(titles: list[str], goal: str) -> list[str]:
     left of a two-word name ("Token writer", "Login page"), nor an identifier for a head that
     is the goal itself ("修复 app.py 的 KeyError", not "user_id")."""
     shared = shared_start(titles)
-    if shared and " " not in shared.strip(" :：·-–—") and not wide(shared[0]):
+    word = shared.strip(" :：·-–—")
+    if shared and " " not in word and not wide(shared[0]):
         heads = [PART_HEAD.split(title[len(shared) :])[0].strip() for title in titles]
-        if all(re.fullmatch(r"[a-z][a-z\-]*", head) for head in heads):
-            # "Token writer", "Token scout": the shared word is half the name ("API", "UI" and
-            # "tests" of "Checkout …" are names of their own).
-            shared = ""
+        if all(LONE.match(head) for head in heads):
+            # "Glossary draft", "Token writer", "Checkout API": the word they share is half
+            # of each name, and one alone ("Draft") says little in a list.
+            kept = [
+                f"{word} {SENTENCE.sub(lambda found: found.group(0).lower(), head)}"
+                for head in heads
+            ]
+            return numbered([fit(name, PART_COLUMNS) or cut(name, PART_COLUMNS) for name in kept])
     names = []
     for title in titles:
         rest = title[len(shared) :] if shared else title
@@ -382,21 +390,30 @@ def part_names(titles: list[str], goal: str) -> list[str]:
         # A word in capitals as it is written ("iOS", "eBay"); a plain one starts in capitals.
         rest = PLAIN.sub(lambda found: found.group(0).upper(), rest)
         names.append(fit(rest, PART_COLUMNS) or cut(rest or title, PART_COLUMNS))
+    return numbered(names)
+
+
+def numbered(names: list[str]) -> list[str]:
+    """Names alike get a number ("Fix login 2")."""
     seen: dict[str, int] = {}
-    numbered = []
+    found = []
     for name in names:
         seen[name] = seen.get(name, 0) + 1
-        numbered.append(f"{name} {seen[name]}" if seen[name] > 1 else name)
-    return numbered
+        found.append(f"{name} {seen[name]}" if seen[name] > 1 else name)
+    return found
 
 
 def avatars(names: list[str]) -> list[str]:
-    """A part's avatar: its name's first character (a letter in capitals), else the next one
-    not taken in the team, else its number."""
+    """A part's avatar: the first character of its own words (after a first word every name
+    shares: "Glossary draft" is D), a letter in capitals; else the next one not taken in the
+    team, else its number."""
+    firsts = {name.split(" ", 1)[0] for name in names}
+    common = len(names) > 1 and len(firsts) == 1 and all(" " in name for name in names)
     used: set[str] = set()
     found = []
     for index, name in enumerate(names):
-        mark = next((ch.upper() for ch in re.sub(r"\s+", "", name) if ch.upper() not in used), "")
+        own = name.split(" ", 1)[1] if common else name
+        mark = next((ch.upper() for ch in re.sub(r"\s+", "", own) if ch.upper() not in used), "")
         mark = mark or str(index + 1)
         used.add(mark)
         found.append(mark)

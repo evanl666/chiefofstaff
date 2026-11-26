@@ -384,7 +384,7 @@ async def test_a_request_split_into_parts_is_one_team_named_from_its_words(harne
     assert team["id"] == f"team-{request}-{api['task_id']}"
     assert team["request"]["id"] == request and team["request"]["text"].startswith("Ship checkout")
     assert team["goal"] == "Ship checkout v2 for acme-shop"
-    assert parts(team) == [("API", "A"), ("UI", "U"), ("Tests", "T")]
+    assert parts(team) == [("Checkout API", "A"), ("Checkout UI", "U"), ("Checkout tests", "T")]
     assert [m["task"] for m in team["members"]] == [api["task_id"], ui["task_id"], tests["task_id"]]
     assert [m["color"] for m in team["members"]] == ["c0", "c3", "c5"]
     assert sorted((e["kind"], e["from"], e["to"], e["state"]) for e in team["edges"]) == sorted(
