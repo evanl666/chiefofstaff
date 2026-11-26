@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.1.58 (2026-11-26)
 
-Your answer to a decision card reaches its worker at once and stays decided; a finished card can
-be shared as a link, and opened in your own Chief of Staff; Settings has four pages, with General
-and You regrouped; every PR a task opened shows where it stands, however many; what you send shows
-at once; Claude sets itself up; and a worker waiting on another stays at work, while the Watchdog
-no longer takes long work for silence.
+Your answer to a decision card reaches its worker at once and stays decided, and a worker's
+question stays under Needs you until it is answered; a finished card can be shared as a link, and
+opened in your own Chief of Staff; Settings has four pages, with General and You regrouped; every
+PR a task opened shows where it stands, however many, and CI GitHub never started is not a failing
+check; what you send shows at once, and is sent once; Claude sets itself up; and a worker waiting
+on another stays at work, while the Watchdog no longer takes long work for silence.
 
 - **CI that GitHub never started is not a failing check.** When GitHub refuses to run a PR's
   CI (the account's Actions minutes or spending limit used up, or the account locked), each job
