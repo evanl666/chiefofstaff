@@ -386,7 +386,7 @@ async def teams_downgrade(baseline: str) -> int:
         moved = members[2]["moved_out"] if len(members) == 3 else None
         checks.check(
             bool(moved) and moved["task"] == result["instead"]["task_id"],
-            "a part done instead by a task of 0.1.56's (no request) has moved out",
+            "a part done instead by a task of the baseline's (no request) has moved out",
             members,
         )
         checks.check(
@@ -409,12 +409,20 @@ async def teams_downgrade(baseline: str) -> int:
                 for how, state in tells[0][1]
             ),
             "what the owner told it: given to the parts at work; the note for a part not started "
-            "then (0.1.56 started it: it knows no notes) never given",
+            "then (the baseline started it: it knows no notes) never given",
             tells,
         )
+        # From 0.1.57 on a tell between parts is stamped with their tasks (Teams lite): the
+        # baseline's own tell is in the history too; before, it has no tasks and is not.
+        stamped = (tree / "src" / "chiefofstaff" / "teams_lite.py").exists()
+        told = (
+            ["The pages are on staging", "Totals are in cents"]
+            if stamped
+            else ["Totals are in cents"]
+        )
         checks.check(
-            back["told"] == [["Totals are in cents"]],
-            "its history: what it handed on before (0.1.56's tell has no tasks: not in it)",
+            back["told"] == [told],
+            "its history: what was handed on (the baseline's tell too, once it stamps its tasks)",
             back["told"],
         )
     finally:
