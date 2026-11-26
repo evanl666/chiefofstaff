@@ -5,7 +5,7 @@ import asyncio
 import json
 
 import pytest
-from conftest import call_tool, settle
+from conftest import call_tool, env, settle
 from test_ui_text import STATIC, run_js
 
 from chiefofstaff.digest import needs
@@ -66,7 +66,7 @@ def test_item1_a_question_relates_to_its_tasks_decision_only_by_its_words():
         ("Done: both variants built.\n\nPlease choose which one we ship.", True, False),
         ("构建完成。\n\n用 A 方案还是 B 方案？", True, False),  # noqa: RUF001
         ("Built and uploaded. I'm blocked: I asked you for three things.", False, True),
-        ("构建已上传。差你的三样东西就能提交审核。", False, True),  # noqa: RUF001
+        ("构建已上传。差你的三样东西就能提交审核。", False, True),
         ("Fixed the flaky test. All 42 tests pass.", False, False),
         ("Which tests were flaky? The two in auth.\n\nAll fixed now.", False, False),
     ],
@@ -188,8 +188,10 @@ async def test_e152_every_channel_is_one_ask_and_one_answer_reaches_them_all(har
     )  # fmt: skip
     await settle(runtime)
     [card] = [d for d in harness.store.drafts() if d["kind"] == "question"]
-    noted = await call_tool(runtime, "notify_owner", harness.router_id, needs_action=True,
-                            text="Need your call: round invoices to cents or whole units?")  # fmt: skip
+    note = "Need your call: round invoices to cents or whole units?"
+    noted = await call_tool(
+        runtime, "notify_owner", harness.router_id, needs_action=True, text=note
+    )
     said = noted.text_result_for_llm
     assert said.startswith("Not shown") and "“Billing API”" in said, said
     [subject] = runtime.snapshot()["subjects"]
@@ -263,6 +265,24 @@ async def test_item1_another_question_on_a_decided_task_or_a_new_one_is_asked(ha
     assert decision["id"] in same.text_result_for_llm and not harness.store.drafts()
 
 
+async def test_item2_a_task_given_in_the_turn_of_a_decision_asks_another_question(harness):
+    """ui_edges: a decision recorded in a Router turn was inherited by the task it gave out in
+    that turn (it came with the owner's message), and its first unrelated question came back
+    "already decided". It still relies on that decision; another question is a card."""
+    runtime = await harness.connect()
+    harness.session(harness.router_id).emit(
+        "user.message", content=env("owner", "message", "Ties use rule A. Build the scoreboard.")
+    )
+    await settle(runtime)
+    await call_tool(runtime, "record_decision", harness.router_id, decision="Ties: rule A")
+    board = await spawn(runtime, harness.router_id, "Scoreboard")
+    [decision] = runtime.decisions.active()
+    assert runtime.decisions.linked(decision["id"]) == [board["task_id"]], "it relies on it"
+    asked = await call_tool(runtime, "ask_decision", board["session_id"],
+                            question="Show the scoreboard in dark mode?")  # fmt: skip
+    assert "Asked the owner" in asked.text_result_for_llm, asked.text_result_for_llm
+
+
 async def test_the_routers_answer_for_the_owner_reaches_every_worker_that_asked(harness):
     """The Router relays the owner's answer to one worker (answers_question): the others that
     asked the same in its request hear it too, their questions close."""
@@ -272,8 +292,8 @@ async def test_the_routers_answer_for_the_owner_reaches_every_worker_that_asked(
     one_request(harness, one, two)
     await call_tool(runtime, "report", one["session_id"], status="question",
                     summary="Which docs domain: docs.example.org or example.org/docs?")  # fmt: skip
-    await call_tool(runtime, "report", two["session_id"], status="blocked",
-                    summary="Blocked: which docs domain, docs.example.org or example.org/docs?")  # fmt: skip
+    blocked = "Blocked: which docs domain, docs.example.org or example.org/docs?"
+    await call_tool(runtime, "report", two["session_id"], status="blocked", summary=blocked)
     assert needs(runtime).count() == 1
     await call_tool(runtime, "message_session", harness.router_id, session_id=one["session_id"],
                     task="note", text="The owner said docs.example.org.",
@@ -321,8 +341,10 @@ def test_e158_home_folds_a_subjects_asks_into_one_item():
     present = ["task:t1", "draft:d2", "update:7", "draft:other"]
     found = run_js(
         f"const m = await import({json.dumps((STATIC / 'subjects.js').as_uri())});\n"
-        f"const {{ folded, shown }} = m.folding({json.dumps(subjects)}, new Set({json.dumps(present)}));\n"
-        "return { folded: [...folded.entries()], shown: [...shown.keys()], others: [...shown.values()][0].others.map((a) => a.id) };"
+        f"const {{ folded, shown }} = m.folding({json.dumps(subjects)}, "
+        f"new Set({json.dumps(present)}));\n"
+        "const others = [...shown.values()][0].others.map((a) => a.id);\n"
+        "return { folded: [...folded.entries()], shown: [...shown.keys()], others };"
     )
     assert found == {
         "folded": [["task:t1", "draft:d2"], ["update:7", "draft:d2"]],

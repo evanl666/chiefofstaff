@@ -100,7 +100,32 @@ waits for its worker, and the page's state is read several times faster.
   your chat, also once it is closed.
 - **No agent is ever given your Slack token.** Slack's read tools are Chief of Staff's own on
   every agent, Copilot included: it calls Slack with the token it holds.
-
+- **One choice is asked once, and one answer reaches everyone who asked it.** Workers asked you
+  the same choice on different channels: one on a decision card, another as a question, a third
+  on a question card, and the Router in a note of its own; you answered each separately, and
+  your last answer was not the one kept (the decision in force still said k 1.1 after you
+  picked 1.12 on a question). Every ask is now filed under the choice it is about, whatever it
+  came by, and Chief of Staff (not the asking worker) tells which asks are the same. Within one
+  of your requests they are one card under *Needs you*: *Asked by 2 workers + the Router: one
+  answer reaches them all*, what each asked folded in it, counted once. Across requests the card
+  says *Possibly the same as “…”*, and **Merge** makes them one. Any answer (a pick on any card,
+  your reply in a worker's chat, the Router passing yours on) answers every ask of that choice
+  where it was asked, each worker once, and a pick is kept as your decision on it, replacing
+  the one before; a card of a choice you decided before says *Decided before: you picked “1.11”
+  at 10:01*. The Router's own note on a choice a worker asked already joins that ask instead of
+  being a second item, and one on a choice you decided is not shown again.
+- **Another question on a decided task is asked.** On a task linked to any decision (one you
+  gave the Router with the request that made the task, say), an unrelated question came back
+  *already decided*, and its worker had to insist. Now only the same choice (in other words,
+  too) gets your decision back.
+- **An ask at the end of a finished task is not lost.** A worker that reported its task done
+  while still waiting on you ("I'm blocked: I asked you for three things") took its blocked
+  question off *Needs you*; one ending "Want me to open a PR for it?" lost the ask once you
+  accepted the result. Such a report is held once, with how to ask; sent again, the open ask
+  stays, and one at its end is kept as its question under *Needs you*.
+- **Workers keep up with your decisions.** A worker whose open tasks rely on a decision it was
+  not told reads *Decisions in force for your tasks* with its next message, once (nothing is
+  added when there is none).
 ## 0.1.59 (2026-11-26)
 
 Chief of Staff starts, and stops, however large a worker's Copilot session has grown.

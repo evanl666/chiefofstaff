@@ -6358,7 +6358,7 @@ async def main():
                           round_stacked_merge, round_fork, round_needs_dots,
                           round_settings, round_teams_v2,
                           round_answer_label, round_sidebar_flat,
-                          round_composer, round_decision_steer,
+                          round_composer, round_decision_steer, round_decision_ledger,
                           round_ci_not_run, round_team_v4,
                           round_share_from_report):  # fmt: skip
                 if not only or check.__name__ in only:
@@ -6791,6 +6791,95 @@ async def round_decision_steer(runtime, browser, failures: list[str]):
     await expect(row).to_contain_text("Waits on “QA10 schema API”")
     await expect(page.locator(f'#needs .card.task[data-task="{blocked_task}"]')).to_have_count(0)
     log("E157: blocked on another worker, it waits under Monitoring")
+    await context.close()
+
+
+async def round_decision_ledger(runtime, browser, failures: list[str]):
+    """0.1.59 (decision ledger, QA10 E151 E152 E158 E159): one choice asked by two workers of a
+    request and noted by the Router is one card under Needs you, counted once, what the others
+    asked folded in it; another request's ask of it says "possibly the same", and Merge makes
+    them one; Not the same gives an ask its own item again; one answer closes the rest."""
+    from chiefofstaff.digest import needs
+
+    store = runtime.store
+    router = store.get("router_id")
+    shots = Path(os.environ.get("DECISION_LEDGER_SHOTS", SHOTS / "decision-ledger"))
+    shots.mkdir(parents=True, exist_ok=True)
+    old = store.settings()
+    new = old.model_copy(update={"max_workers": 1000})
+    store.save_settings(new)
+    await runtime.settings_changed(old, new)
+    runtime.states[router].turn_decisions.clear()
+
+    async def start(title, request):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        found = json.loads(result.text_result_for_llm)
+        store.set(f"req:{found['task_id']}", request)
+        await settle(runtime)
+        return found["session_id"], found["task_id"]
+
+    def card_of(worker):
+        return [d for d in store.drafts() if d["kind"] == "decision" and d["session_id"] == worker][
+            -1
+        ]
+
+    options = [{"choice": "Cents"}, {"choice": "Whole units"}]
+    api, _ = await start("QA11 invoice API", "88001")
+    asker, asker_task = await start("QA11 invoice page", "88001")
+    other, _ = await start("QA11 receipts", "88002")
+    await call_tool(runtime, "ask_decision", api, options=options, distinct=True,
+                    question="QA11: round invoice totals to cents or to whole units?")  # fmt: skip
+    card = card_of(api)["id"]
+    await call_tool(runtime, "report", asker, status="question", options=["Cents", "Whole units"],
+                    summary="QA11: invoice totals, whole units or cents?")  # fmt: skip
+    await call_tool(runtime, "notify_owner", router, needs_action=True,
+                    text="QA11: your call: invoice totals in cents or whole units?")  # fmt: skip
+    await call_tool(runtime, "ask_decision", other, options=options, distinct=True,
+                    question="QA11: round receipt totals to cents or to whole units?")  # fmt: skip
+    receipts = card_of(other)["id"]
+    await settle(runtime)
+    runtime.publish_state()
+
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    shown = page.locator(f'#needs .card.draft[data-id="{card}"]')
+    await expect(shown.locator(".subject .sub-asked")).to_have_text(
+        "Asked by 2 workers + the Router: one answer reaches them all", timeout=15000
+    )
+    await expect(page.locator(f'#needs .card.task[data-task="{asker_task}"]')).to_have_count(0)
+    count = page.locator("#needs > summary .count")
+    await expect(count).to_have_text(str(needs(runtime).count()))
+    await shown.locator(".sub-evidence summary").click()
+    await expect(shown.locator(".sub-ask")).to_have_count(2)
+    await shown.screenshot(path=shots / "subject-1280.png")
+    log("E158: one choice asked three ways is one card, counted once, the others folded in it")
+
+    lone = page.locator(f'#needs .card.draft[data-id="{receipts}"]')
+    await expect(lone.locator(".sub-possibly")).to_contain_text("Possibly the same as")
+    await lone.get_by_role("button", name="Merge").click()
+    await expect(lone).to_have_count(0)
+    await expect(shown.locator(".sub-asked")).to_have_text(
+        "Asked by 3 workers + the Router: one answer reaches them all"
+    )
+    log("E159: another request's ask is possibly the same; Merge makes them one")
+
+    await shown.locator(".sub-evidence summary").click()
+    apart = shown.locator(".sub-ask", has_text="invoice totals, whole units or cents")
+    await apart.get_by_role("button", name="Not the same").click()
+    await expect(page.locator(f'#needs .card.task[data-task="{asker_task}"]')).to_be_visible()
+    log("Not the same: the ask has its own item again")
+
+    await shown.locator(".option", has_text="Cents").click()
+    await expect(shown).to_have_count(0)
+    await expect(page.locator(f'#needs .card.draft[data-id="{receipts}"]')).to_have_count(0)
+    assert store.draft(receipts)["status"] == "answered", store.draft(receipts)
+    assert runtime.asks.session_questions(asker), "kept apart: still asked"
+    await expect(count).to_have_text(str(needs(runtime).count()) if needs(runtime).count() else "")
+    log("E151: one answer closes every ask on the choice, and only those")
     await context.close()
 
 

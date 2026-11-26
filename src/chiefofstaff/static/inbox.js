@@ -289,7 +289,7 @@ function renderPanel() {
   // A card per thing to do: a task's own row holds all it waits for (a result to accept, its
   // question), once.
   const embedded = new Set();
-  const about = (key, item) => (items.subjects.has(key) ? subjectItem(item, items.subjects.get(key)) : item);
+  const about = (key, item) => subjectItem(item, items.subjects.get(key));
   const needItems = [
     ...items.updates.map((update) => about(`update:${update.id}`, updateItem(update))),
     ...okItem(items.ok),
@@ -353,19 +353,19 @@ function renderPanel() {
 }
 const FINISHED_PAGE = 30;
 // An item one choice's other asks fold into (E158): who asked it, what each asked, what the
-// owner decided on it before, and another choice it is possibly the same as (Merge).
+// owner decided on it before, and another choice it is possibly the same as (Merge). Drawn in
+// place as that changes (the card itself is not drawn again: a menu open on it stays).
 function subjectItem(item, subject) {
-  const version = subjectVersion(subject);
   return {
     ...item,
-    key: `${item.key}|${subject.id}`,
-    version: `${item.version || ""}|${version}`,
+    version: `${item.version ?? ""}${subject ? `|${subjectVersion(subject)}` : ""}`,
     build: () => withSubject(item.build(), subject),
     refresh: (node) => withSubject(item.refresh ? item.refresh(node) || node : node, subject),
   };
 }
 function withSubject(node, subject) {
   node.querySelector(":scope > .subject")?.remove();
+  if (!subject) return node;
   const block = el("div", { class: "subject" });
   if (subject.asks.length > 1) block.append(el("div", { class: "sub-asked muted", text: `${subject.asked_by[0].toUpperCase()}${subject.asked_by.slice(1)}: one answer reaches them all` }));
   if (subject.others.length) {
