@@ -81,13 +81,17 @@ only with a decision to make or a draft to approve.
 ## Install
 
 You need macOS, Linux or Windows (experimental), Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/)
-(or pipx) and the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli):
+(or pipx) and one coding agent, signed in: the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli),
+the [Codex CLI](https://developers.openai.com/codex/cli) or [Claude Code](https://docs.claude.com/en/docs/claude-code)
+(Codex and Claude Code on macOS and Linux; on Windows, Copilot for now):
 
 ```bash
-npm install -g @github/copilot
-copilot login
-uv tool install chiefofstaff && chiefofstaff   # or: pipx install chiefofstaff
+npm install -g @github/copilot && copilot login   # or: codex login, claude auth login
+uv tool install chiefofstaff && chiefofstaff       # or: pipx install chiefofstaff
 ```
+
+Chief of Staff runs on whichever is ready (Copilot first, then Codex, then Claude Code), and
+every session can run on any of them: Settings → Agents & models.
 
 Your browser opens Chief of Staff through a private link printed in the terminal (keep it to
 yourself). Tell it where your code lives, like `~/workspace`, and type what you need.

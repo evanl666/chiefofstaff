@@ -67,13 +67,17 @@ Copilot session，跟踪所有进展，只在需要我做决定、或者有草�
 ## 安装
 
 需要 macOS、Linux 或 Windows（实验性支持）、Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)
-（或 pipx），以及 [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli)：
+（或 pipx），以及一个已登录的编码 agent：[GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli)、
+[Codex CLI](https://developers.openai.com/codex/cli) 或 [Claude Code](https://docs.claude.com/en/docs/claude-code)
+（Codex 和 Claude Code 支持 macOS 和 Linux；Windows 上目前只能用 Copilot）：
 
 ```bash
-npm install -g @github/copilot
-copilot login
+npm install -g @github/copilot && copilot login   # 或者：codex login、claude auth login
 uvx chiefofstaff@latest    # 或者：uv tool install chiefofstaff && chiefofstaff
 ```
+
+Chief of Staff 会用已就绪的那个（先 Copilot，再 Codex，再 Claude Code），每个 session 都可以在
+Settings → Agents & models 里换到任意一个上运行。
 
 浏览器会通过终端里打印的私密链接打开 Chief of Staff（这个链接别给别人）。告诉它你的代码放在哪，比如 `~/workspace`，然后说你要做什么。
 

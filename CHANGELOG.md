@@ -87,6 +87,12 @@ waits for its worker, and the page's state is read several times faster.
   model and whose plan it uses, and goes back by itself; *Wait, and ask me* holds it with one card
   instead. Each agent that failed one is tried again after a growing wait, also across a restart;
   with none that can, it waits, and goes on by itself once one can. New workers do the same.
+- **Chief of Staff runs without Copilot.** With only Codex or only Claude Code, it runs everything
+  there: a first start picks the agent that is installed and signed in, and says so. Copilot's row
+  has *Use* like the others (the last agent on stays on); signed out or not installed, the next
+  agent runs its work meanwhile, and Copilot is tried again by itself. With no agent ready, Home's
+  *Set up a coding agent* card says what each needs, and Chief of Staff starts by itself once one
+  is, also when the only agent signs out and in again. On Windows, it runs on Copilot for now.
 - **Every worker says its agent**, Copilot's too: a mark on its row and a chip on its line in
   your chat, also once it is closed.
 - **No agent is ever given your Slack token.** Slack's read tools are Chief of Staff's own on

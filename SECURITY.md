@@ -96,7 +96,8 @@ sandbox. Add only what you would install for yourself.
 ## Workers on other coding agents
 
 Workers can also run on Codex or Claude Code (off until you allow one, on Home's card or in
-Settings → *Agents & models*). For such a worker:
+Settings → *Agents & models*; but for a first start with no Copilot ready, which turns on the first
+of them installed and signed in, and says so in your chat). For such a worker:
 
 - **Sandbox.** A Claude worker runs in Claude's own sandbox, set from Chief of Staff's policy for
   a Copilot worker (writes only in its folders, protected paths read-only, your service secrets

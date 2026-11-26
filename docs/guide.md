@@ -1622,6 +1622,23 @@ plan it uses. A changed model or effort reaches the workers on that agent that h
 own, and each of Chief of Staff's own sessions, from their next turn. A worker keeps the agent it
 started on.
 
+**Without Copilot.** Chief of Staff needs one coding agent, not Copilot in particular. At its first
+start it runs on the first one installed and signed in (Copilot, then Codex, then Claude Code) and
+says so in your chat (*Chief of Staff runs on Codex (uses your ChatGPT sign-in).*); with none ready,
+Home's *Set up a coding agent* card says what each needs, and Chief of Staff starts by itself once
+one is ready (or *Retry*). Once another agent is here, Copilot's row has *Use* too: turned off,
+Copilot is never started, its workers at work stop (their tasks wait under *Needs you*) and Chief of
+Staff's own sessions go on with the next agent on; the last agent on can't be turned off. While
+Copilot is on but signed out, not installed or unable to start, Chief of Staff runs on the next agent
+on meanwhile (its row says why, and each session that moved says so in one line), Copilot is tried
+again by itself, and what was chosen for it goes back to it once it runs; what you send a Copilot
+worker meanwhile waits for it. What needs Copilot for now: *Prepared for you* still finds what
+needs doing but prepares no fixes (its steps run in Copilot's sandbox); *Where your other sessions
+stand* and learning from your own sessions read Copilot's sessions; credits and premium requests
+are Copilot's (Usage counts other agents' tokens). With Codex alone, turning on the worker sandbox
+(Workers) keeps Codex workers from starting: Codex's sandbox hasn't passed Chief of Staff's checks
+yet. On Windows, Chief of Staff runs on Copilot for now.
+
 **Signing in and installing from here.** Wherever an agent says *Sign-in needed* (the `@` list, the
 chip's popover, a card in your chat, its row in Settings), *Sign in* runs that
 agent's own sign-in for you, as its workers run it (your `CODEX_HOME` or `CLAUDE_CONFIG_DIR`):
