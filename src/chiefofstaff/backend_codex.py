@@ -237,6 +237,11 @@ GITHUB = re.compile(r"github", re.IGNORECASE)
 # Codex's own server for ChatGPT's apps (connectors): their calls take approval from Codex's
 # `apps` settings, not a server's approval mode, so a worker that asks first runs without them.
 CODEX_APPS = "codex_apps"
+# Codex's own tools that list and read its MCP servers' resources (as server "codex"): reads,
+# which Codex runs without asking even with Ask first (as its own read-only commands): never a
+# tool that acted unasked (ran_unasked).
+CODEX_RESOURCES = ("codex", frozenset({"list_mcp_resources", "list_mcp_resource_templates",
+                                       "read_mcp_resource"}))  # fmt: skip
 
 
 class CodexError(RuntimeError):
@@ -3381,8 +3386,11 @@ class CodexSession:
         return {"decision": "accept"}
 
     def ran_unasked(self, item: dict) -> bool:
-        """Whether this MCP call ran with no question about it (Ask first: each one asks)."""
+        """Whether this MCP call ran with no question about it (Ask first: each one asks; but
+        Codex's own reads of its servers' resources, CODEX_RESOURCES)."""
         server = str(item.get("server") or "")
+        if server == CODEX_RESOURCES[0] and str(item.get("tool") or "") in CODEX_RESOURCES[1]:
+            return False
         if self.asked_mcp.get(server):
             self.asked_mcp[server] -= 1
             return False

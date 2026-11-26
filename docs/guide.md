@@ -1876,7 +1876,8 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   network limited to GitHub, as always; on Codex, which has no sandbox Chief of Staff checked,
   every command, edit and MCP call they make asks Chief of Staff first, which refuses fetching
   URLs and network commands for them, but Codex itself runs its own read-only commands (`cat`,
-  `ls`, `grep`) without asking. Their Slack reads are Chief of Staff's own tools on every agent.
+  `ls`, `grep`) and reads its MCP servers' resources without asking. Their Slack reads are Chief
+  of Staff's own tools on every agent.
   See [SECURITY.md](../SECURITY.md).
 - **Memory:** Codex's memories and Claude's auto memory are off in Chief of Staff's workers
   (Codex's run commands nobody is asked about; Claude's folder is shared with your own sessions).

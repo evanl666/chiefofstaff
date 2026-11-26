@@ -146,7 +146,8 @@ of them installed and signed in, and says so in your chat). For such a worker:
   (Codex's has not passed Chief of Staff's checks): they ask first (on a Codex version shown to
   do so), and Chief of Staff refuses what it refuses a Copilot worker that reads Slack (fetching
   URLs, network commands, writes outside its folders, the floor), reading commands as text;
-  but Codex runs its own read-only commands (`cat`, `ls`, `grep`) without asking, so text in a
+  but Codex runs its own read-only commands (`cat`, `ls`, `grep`), and its own listing and
+  reading of its MCP servers' resources, without asking, so text in a
   Slack message that steers it could have it read a local file (your secrets included) and pass
   what it read on through a call Chief of Staff allows (an MCP server's, or its report). Keep
   them on Copilot or Claude if that matters to you. The profile helper (which reads Slack) is

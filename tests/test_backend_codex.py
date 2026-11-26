@@ -1080,6 +1080,25 @@ async def test_with_ask_first_an_mcp_call_that_ran_unasked_stops_the_worker(tmp_
         await codex.stop()
 
 
+async def test_with_ask_first_codexs_own_reads_of_mcp_resources_run_unasked_and_stop_nothing(
+    tmp_path, monkeypatch
+):
+    """Codex lists and reads its MCP servers' resources by tools of its own (server "codex"),
+    never asking, Ask first or not: a reader on Codex (Watch for you) that looks at them goes
+    on; any other tool that runs unasked still stops it."""
+    monkeypatch.setenv("FAKE_CODEX_UNASKED", "mcp")
+    codex = CodexBackend(fake_codex(tmp_path / "fake", monkeypatch))
+    await codex.start()
+    try:
+        session, turn = await opened(codex, tmp_path, ask_first=True)
+        await session.send("Call the MCP tool list_mcp_resources of codex. Reply with just: done")
+        await turn.wait()
+        assert codex.alive() and not codex.refusal
+        assert "done" in [d.content for d in turn.data("assistant.message")]
+    finally:
+        await codex.stop()
+
+
 async def test_acting_on_its_own_its_github_servers_ask_and_chatgpts_apps_are_off(
     tmp_path, monkeypatch
 ):
