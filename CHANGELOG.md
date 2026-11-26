@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.59 (2026-11-26)
 
 Chief of Staff starts, and stops, however large a worker's Copilot session has grown.
 
