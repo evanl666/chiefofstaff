@@ -443,10 +443,12 @@ async def d7_one_choice_asked_by_two_is_one_card(run: Run) -> tuple[dict, dict, 
 async def d8_a_router_note_joins_the_open_ask(run: Run, card: dict):
     app = run.app
     before = len((await app.get("/api/state")).get("updates") or [])
+    # (Not in its reply to the owner: a note of its own then is refused, its reply says it.)
     await run.say(
-        "Use notify_owner with needs_action=true to ask me, as a note of yours: should invoice "
-        "totals round to cents or to whole units? Then tell me in one line what notify_owner "
-        "answered you."
+        "Start a worker titled 'Invoice Notes' (no project) and tell it, word for word: Write "
+        "notes into notes.txt in your own folder and report done. When its report reaches you, "
+        "use notify_owner with needs_action=true to ask me, as a note of yours: should invoice "
+        "totals round to cents or to whole units?"
     )
 
     async def router_asked():
@@ -454,7 +456,14 @@ async def d8_a_router_note_joins_the_open_ask(run: Run, card: dict):
         found = [s for s in subjects if "the Router" in s["asked_by"]]
         return found[0] if found else None
 
-    subject = await wait_for("the Router's note joined", router_asked, 300, app)
+    try:
+        subject = await wait_for("the Router's note joined", router_asked, 600, app)
+    except TimeoutError:
+        router = (await app.get("/api/state"))["router_id"]
+        said = [m["text"][:200] for m in await run.messages(router) if m["kind"] == "assistant"]
+        run.check("D8 the Router's note joins the open ask: no second item", False,
+                  f"no note of the Router's joined; it said {said[-2:]}")  # fmt: skip
+        return
     state = await app.get("/api/state")
     run.check(
         "D8 the Router's note joins the open ask: no second item",
