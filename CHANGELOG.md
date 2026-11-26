@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-Share a finished card as a link, and open one someone shared in your own Chief of Staff;
-Settings has four pages; and a worker waiting on another stays at work, while the Watchdog no
-longer takes long work for silence.
+Your answer to a decision card reaches its worker at once and stays decided; a finished card can
+be shared as a link, and opened in your own Chief of Staff; Settings has four pages, with General
+and You regrouped; every PR a task opened shows where it stands, however many; what you send shows
+at once; Claude sets itself up; and a worker waiting on another stays at work, while the Watchdog
+no longer takes long work for silence.
 
 - **A worker waiting for another worker stays at work.** A worker told to wait for another
   one's message ended its turn with "I'll launch once <worker> sends the release", and its task
