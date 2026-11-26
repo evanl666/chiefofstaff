@@ -768,7 +768,7 @@ class Runtime:
         self.recovery: asyncio.Task | None = None
         # Resuming the sessions that were at work as Copilot connected (resume_sessions), and
         # each of those still to be resumed: set once it is.
-        self.resuming: asyncio.Task | None = None
+        self.resume_job: asyncio.Task | None = None
         self.resumes: dict[str, asyncio.Event] = {}
         # Copilot sessions its connection died after (Runtime.disconnect): how many times.
         self.killed_by: dict[str, int] = {}
@@ -1263,9 +1263,9 @@ class Runtime:
                 self.resumes = {
                     session_id: asyncio.Event() for session_id in self.to_resume(COPILOT_AGENT)
                 }
-                self.resuming = self.background(self.resume_sessions(bool(self.connections)))
-                await asyncio.wait({self.resuming}, timeout=RESUME_WAIT)
-                resumed = self.resuming
+                self.resume_job = self.background(self.resume_sessions(bool(self.connections)))
+                await asyncio.wait({self.resume_job}, timeout=RESUME_WAIT)
+                resumed = self.resume_job
                 if resumed.done() and not resumed.cancelled() and (error := resumed.exception()):
                     raise error
                 try:
@@ -1333,11 +1333,11 @@ class Runtime:
         # Not ready from the first moment: nothing starts (a pump, a delivery) while it stops.
         backend, self.backend = self.backend, None
         self.connections += 1
-        if self.resuming and not self.resuming.done():
-            self.resuming.cancel()
+        if self.resume_job and not self.resume_job.done():
+            self.resume_job.cancel()
         for gate in self.resumes.values():
             gate.set()  # (What waits for one goes on: to a new connection.)
-        if culprit := getattr(backend, "culprit", ""):
+        if backend and (culprit := getattr(backend, "culprit", "")):
             await self.after_death(backend, culprit)
         mine = self.on_agent(COPILOT_AGENT, self.states.ids())
         sessions = self.states.take_handles(mine)

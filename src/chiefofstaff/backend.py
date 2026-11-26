@@ -1551,7 +1551,8 @@ def snake(name: str) -> str:
 def logged_event(event: dict) -> Any:
     """An event of a Copilot session's log (a dict, its fields as the CLI writes them) as the
     SDK gives a session's events: `type.value`, and `data` with snake_case fields."""
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    data = event.get("data")
+    data = data if isinstance(data, dict) else {}
     return SimpleNamespace(
         type=SimpleNamespace(value=event.get("type")),
         data=SimpleNamespace(**{snake(key): value for key, value in data.items()}),
