@@ -77,6 +77,10 @@ no longer takes long work for silence.
   into a folder of Chief of Staff's own (uv's cache is never changed), read after its own
   packages. A task for Claude meanwhile waits a little, then goes as when Claude can't run,
   saying *Claude is being set up*.
+- **A `uv tool` install reached through a link is known as one.** With `UV_TOOL_DIR` named
+  through a symbolic link (macOS's `/var` is `/private/var`), Chief of Staff took its `uv tool`
+  install for a pip one: *Update and restart* said `pip install --upgrade`, and *Details* named
+  the pip command. Both sides are compared as the folders they are now.
 
 Your answer to a decision card reaches its worker at once, and a decided question stays decided.
 

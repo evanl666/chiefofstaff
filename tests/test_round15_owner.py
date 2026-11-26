@@ -542,6 +542,22 @@ def test_how_it_updates_is_how_it_was_launched(monkeypatch):
     assert not updates.newer("0.2.0rc1", "0.1.47"), "never a pre-release"
 
 
+def test_a_uv_tool_install_is_known_through_a_link(monkeypatch, tmp_path):
+    """UV_TOOL_DIR named through a symbolic link (macOS's /var is /private/var): still a `uv
+    tool` install, so Update and restart upgrades it as one, and Details names its command."""
+    from chiefofstaff import updates
+
+    monkeypatch.setattr(updates, "editable", lambda: False)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(updates.sys, "platform", "darwin")
+    (tmp_path / "real" / "tools" / "chiefofstaff").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    monkeypatch.setenv("UV_TOOL_DIR", str(tmp_path / "link" / "tools"))
+    assert updates.launched(str(tmp_path / "link" / "tools" / "chiefofstaff"), ()).how == "tool"
+    monkeypatch.setenv("UV_TOOL_DIR", str(tmp_path / "real" / "tools"))
+    assert updates.launched(str(tmp_path / "link" / "tools" / "chiefofstaff"), ()).how == "tool"
+
+
 async def test_copilot_that_cannot_start_says_how_to_update_chief_of_staff(harness, monkeypatch):
     from chiefofstaff import updates
 

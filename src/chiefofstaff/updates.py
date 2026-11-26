@@ -104,7 +104,10 @@ def launched(prefix: str = sys.prefix, argv: tuple[str, ...] | None = None) -> L
         return Launch("uvx", "uvx chiefofstaff@latest", restart)
     posix = here.as_posix()
     tools = os.environ.get("UV_TOOL_DIR")
-    if re.search(r"/uv/(?:data/)?tools/", posix) or (tools and here.is_relative_to(tools)):
+    # Both sides resolved: a folder named through a link (macOS's /var) is still that folder.
+    if re.search(r"/uv/(?:data/)?tools/", posix) or (
+        tools and here.is_relative_to(Path(tools).resolve())
+    ):
         entry = here / "bin" / "chiefofstaff"
         restart = (str(entry), *args) if shutil.which("uv") and not windows else ()
         return Launch("tool", "uv tool upgrade chiefofstaff", restart)
