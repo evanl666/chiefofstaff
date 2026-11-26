@@ -577,6 +577,22 @@ FIXES: list[Allow] = [
         data=r"^steps\.\w+\.api\./api/state\.tasks\[\d+\]\.waits_on$",
         value="",
     ),
+    # 0.1.58 (owner report): Claude's Agent SDK is set up by Chief of Staff itself
+    # (claude_setup.py). Each side runs without the Claude extra: Claude, off, said "Needs Chief
+    # of Staff's Claude extra: `uv tool install …`" (a problem); now "Not set up yet", which
+    # turning it on sets up. Nothing is installed: Claude is never turned on here.
+    *(
+        Allow(
+            f"Claude without its Agent SDK, off: Not set up yet, no command to run ({key})",
+            data=rf"\./api/state\.agents_status\[\d+\]\.{key}$",
+            value=value,
+        )
+        for key, value in (
+            ("status", "setup"),
+            ("said", "Not set up yet"),
+            ("setup", {"state": "off"}),
+        )
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
