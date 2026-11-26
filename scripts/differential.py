@@ -1135,6 +1135,42 @@ SETTINGS_V2 = [
     ),
 ]
 
+# Every one of Chief of Staff's own sessions on any agent (docs/design/agents-anywhere.md),
+# always on: who does the work, in the page's state; a worker's start line names its agent
+# (Copilot's too); the migration of earlier agent settings, marked done; Slack's reads are Chief
+# of Staff's own tools in the Slack session (no Slack server, and so no token, in its options);
+# Settings → Agents & models' Who does the work (each kind's agent, its model and effort there,
+# what one does when its agent can't run it; Copilot's Use once another agent is here); each
+# worker's agent mark, Copilot's too, on its sidebar row and its card (left out of the pictures).
+AGENTS_ANYWHERE = [
+    Allow("agents anywhere: who does the work, in the page's state", data=r"/api/state\.work$"),
+    Allow(
+        "agents anywhere: a worker's start line names its agent, Copilot's too",
+        data=r"messages\[\d+\]\.meta\.agent$",
+        value="copilot",
+    ),
+    Allow(
+        "agents anywhere: the migration of earlier agent settings, done once",
+        data=r"\.db\.kv\.migrated:sessions$",
+    ),
+    Allow(
+        "agents anywhere: Slack's reads, Chief of Staff's own tools in the Slack session",
+        data=r"^backend\.sessions\.slack:[^.]*\.options\.(?:tools\[\d+\]|mcp_servers"
+        r"|available_tools\[\d+\]|tool_search\.defer_threshold)$",
+    ),
+    Allow(
+        "agents anywhere: Who does the work's fields in Settings → Agents & models",
+        data=r"^page\.settings\.fields\.(?:(?:role|unavailable)_(?:router|watchdog)"
+        r"|work_\w+_agent|kind_\w+_(?:copilot|codex|claude)_(?:model|effort)"
+        r"|work_unavailable|agent_copilot_enabled|agent_new_workers)$",
+    ),
+    Allow(
+        "agents anywhere: each worker's agent mark, Copilot's too",
+        element=".agent-mark",
+        views=r"^(?:home|sidebar)",
+    ),
+]
+
 # Copilot alone (--copilot-alone: no other coding agent on the PATH, the owner's hidden too): the
 # agent picker shows nothing of other agents anywhere, so this tree is v0.1.48 itself but for the
 # one line v0.1.48 ended Settings → Models with, which is gone. Nothing looked for or run, no
@@ -3058,7 +3094,7 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
     if args.copilot_alone:
         if args.feature or args.mode != "off":
             parser.error("--copilot-alone compares the baseline with every feature off")
-        allowances = {f"fix: {a.name}": a for a in FIXES + SETTINGS_V2} | {
+        allowances = {f"fix: {a.name}": a for a in FIXES + SETTINGS_V2 + AGENTS_ANYWHERE} | {
             f"Copilot alone: {a.name}": a for a in COPILOT_ALONE
         }
         allowances |= kept
@@ -3076,7 +3112,7 @@ def plan(args, parser, port: int) -> tuple[list[Side], dict[str, Allow], str]:
     chosen = [args.feature] if args.feature and args.mode == "off" else list(FEATURES)
     chosen += [name for name in lacking if name not in chosen]
     off = {key: value for name in chosen for key, value in FEATURES[name].off.items()}
-    fixes = {f"fix: {a.name}": a for a in FIXES + SETTINGS_V2}
+    fixes = {f"fix: {a.name}": a for a in FIXES + SETTINGS_V2 + AGENTS_ANYWHERE}
     installed = {f"installed: {a.name}": a for a in INSTALLED}
     if keep in chosen:
         chosen.remove(keep)
