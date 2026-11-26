@@ -69,11 +69,18 @@ SETTINGS_FIELDS |= {
 # Prepared for you: its switch in General (its tab's fields come only while it is on).
 SETTINGS_FIELDS |= {"proactive"}
 # (Ask first is worker_yolo the other way round: its field has its own name.)
-FORM_NAMES = SETTINGS_FIELDS - {"role_models", "role_efforts", "watches", "watch_hours",
-                                "worker_yolo"} | {
+FORM_NAMES = SETTINGS_FIELDS - {
+    "role_models", "role_efforts", "watches", "watch_hours", "worker_yolo", "model",
+} | {
     "ask_first", "slack_token", "profile", "setup_notes", "report_footer",
     *(f"{kind}_{role}" for kind in ("model", "effort")
       for role in ("router", "worker", "slack", "watchdog")),
+    # Who does the work (agents-anywhere.md 5): where each kind runs, what one does when its agent
+    # can't run it, and Watch for you's and the helpers' own models on Copilot.
+    "agent_new_workers", "work_unavailable",
+    *(f"work_{kind}_agent" for kind in ("router", "watchdog", "slack", "connector", "helpers")),
+    *(f"kind_{kind}_copilot_{key}" for kind in ("connector", "helpers")
+      for key in ("model", "effort")),
 }  # fmt: skip
 
 
@@ -2737,7 +2744,9 @@ async def round_seven(runtime, browser, failures: list[str]):
             title_width = await later.locator(".head .title").evaluate(
                 "n => n.getBoundingClientRect().width"
             )
-            assert title_width > 150, (width, title_width)
+            # (Its worker's agent's mark beside it, Copilot's too since 0.1.59: as with several
+            # agents on before.)
+            assert title_width > 140, (width, title_width)
             await monitoring.screenshot(path=SHOTS / f"ui-edges-r7-monitoring-{width}-{scheme}.png")
             await noted.screenshot(path=SHOTS / f"ui-edges-r7-large-{width}-{scheme}.png")
             await tidy.screenshot(path=SHOTS / f"ui-edges-r7-not-counted-{width}-{scheme}.png")
@@ -5399,8 +5408,10 @@ async def round_teams(runtime, browser, failures: list[str]):
         await expect(team.locator(".fold-items")).to_be_hidden()
         routing = timeline.locator(":scope > .fold.routing").last
         await expect(routing.locator(".fold-line .what")).to_have_text("2 routing updates")
-        # With Copilot alone, no agent marks.
-        await expect(routing.locator(".fold-line .agent-mark")).to_have_count(0)
+        # Each started worker's agent, said with Copilot alone too (agents-anywhere.md 6).
+        marks = routing.locator(".fold-line .agent-mark")
+        await expect(marks).to_have_count(2)
+        assert {await mark.get_attribute("data-agent") for mark in await marks.all()} == {"copilot"}
         # One alone after the owner's message: a line by the workers' short names.
         alone = timeline.locator(':scope > .event[data-kind="peer"]').last
         await expect(alone.locator(".what")).to_have_text(
