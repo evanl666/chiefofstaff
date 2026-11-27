@@ -6361,7 +6361,7 @@ async def main():
                           round_composer, round_decision_steer, round_decision_ledger,
                           round_ci_not_run, round_team_v4,
                           round_share_from_report, round_long_report,
-                          round_router_appears, round_agent_words):  # fmt: skip
+                          round_router_appears, round_agent_words, round_payload):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -14423,6 +14423,169 @@ async def settings_long_states(runtime, browser):
             assert not errors, errors
             await context.close()
     log("settings: long and combined states: statuses and controls apart, 800 to 1440")
+
+
+# Where the page is scrolled to, and where each card under Needs you is in the window.
+PLACES = """() => [document.scrollingElement.scrollTop,
+  ...[...document.querySelectorAll("#needs .card")].map((c) => c.getBoundingClientRect().top)]"""
+
+
+async def round_payload(runtime, browser, failures: list[str]):
+    """0.1.61: the page's state cuts a finished task's long result to what its row and chips read
+    (its start, its links) and its earlier reports to when they were said; the page asks once for
+    the whole of them (/api/task-texts) and has them where they show: its row's tooltip, its
+    Earlier reports, its links. A state read again after needs no second ask."""
+    store = runtime.store
+    router = store.get("router_id")
+    result = await call_tool(runtime, "spawn_worker", router, title="Survey the cache options",
+                             instructions="Survey the cache options", why_new="test")  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    body = "\n".join(f"Option {i}: measured at length, with its trade-offs." for i in range(80))
+    long = (
+        "Redis fits best: see [the cache survey](https://docs.example.com/cache-survey).\n\n"
+        f"{body}\n\nThe benchmark run: https://ci.example.com/runs/4417 (last word on it)."
+    )
+    runtime.tasks.move(task["id"], "done", result=long)
+    earlier = [{"at": datetime.now(UTC).isoformat(), "text": f"Memcached at first. {body}"}]
+    store.set(f"results:{task['id']}", json.dumps(earlier))
+    await settle(runtime)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    asked: list[str] = []
+    sizes: list[int] = []
+
+    async def answered(response):
+        if response.url.endswith("/api/state"):
+            sizes.append(len(await response.body()))
+
+    page.on("request", lambda r: asked.append(r.url) if "/api/task-texts" in r.url else None)
+    page.on("response", answered)
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    row = page.locator("#tasks-recent .card.task", has_text="Survey the cache options")
+    await expect(row).to_have_count(1, timeout=15000)
+    why = row.locator(".row-line .why")
+    await expect(why).to_have_text(re.compile("^Redis fits best"))
+    # Its tooltip, once the whole came: all of it, to its last line.
+    await expect(why).to_have_attribute("data-tip", re.compile(r"ci\.example\.com"))
+    await expect(why).to_have_attribute("data-tip", re.compile("Option 79: measured"))
+    assert len(asked) == 1 and task["id"] in asked[0], asked
+    # The state, smaller than the whole snapshot by this task's cut words at least.
+    whole = len(json.dumps(runtime.snapshot(), ensure_ascii=False).encode())
+    assert sizes and sizes[-1] < whole - 5000, (sizes, whole)
+    await unfold(row)
+    fold = row.locator(".task-body details.earlier-reports")
+    await expect(fold.locator("summary")).to_have_text("Earlier reports (1)")
+    await fold.locator("summary").click()
+    await expect(fold.locator(".earlier-report .body")).to_contain_text("Memcached at first.")
+    links = await row.evaluate("(node) => [...node.querySelectorAll('a[href]')].map((a) => a.href)")
+    assert any("docs.example.com/cache-survey" in link for link in links), links
+    # The state read again (a burst of events): the whole is put back at once, not asked again.
+    before = len(sizes)
+    runtime.bus.publish("state")
+    for _ in range(100):
+        if len(sizes) > before:
+            break
+        await page.wait_for_timeout(100)
+    assert len(sizes) > before, sizes
+    await page.wait_for_timeout(500)
+    assert len(asked) == 1, asked
+    await expect(fold.locator(".earlier-report .body")).to_contain_text("Memcached at first.")
+    await row.locator(":scope > .head .fold").click()
+    await expect(why).to_have_attribute("data-tip", re.compile("Option 79: measured"))
+    assert not errors, errors
+    await context.close()
+    log(
+        "a long finished result and its earlier reports: the state cut, the whole asked once "
+        "and shown in its tooltip, fold and links; a state read again asks nothing more"
+    )
+
+    # Opened before the whole came (its ask failed, then the next is slow): a report shown and
+    # its Earlier reports open, a draft's Result of open, stay open and get the whole once it
+    # comes, nothing on the page moved.
+    result = await call_tool(runtime, "spawn_worker", router, title="Compare the queue options",
+                             instructions="Compare the queue options", why_new="test")  # fmt: skip
+    queuer = json.loads(result.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    queued = runtime.tasks.current(queuer)
+    runtime.tasks.move(queued["id"], "review", result="Kafka fits best: ordered and replayable.")
+    store.set(
+        f"results:{queued['id']}",
+        json.dumps([{"at": datetime.now(UTC).isoformat(), "text": "RabbitMQ at first, then not."}]),
+    )
+    draft = store.create_draft(
+        worker, "reply", {"to": "Al", "where": "email", "task_id": task["id"]}, "Redis it is."
+    )
+    runtime.bus.publish("draft", store.draft(draft["id"]))
+    await settle(runtime)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    calls: list[str] = []
+    release = asyncio.Event()
+
+    async def failing_then_slow(route):
+        calls.append(route.request.url)
+        if len(calls) == 1:
+            await route.fulfill(status=503, json={"detail": "Busy."})
+            return
+        await release.wait()
+        await route.continue_()
+
+    await page.route("**/api/task-texts*", failing_then_slow)
+    # (Marked read, a task comes whole in its own event: not that way here.)
+    await page.route("**/api/tasks/*/read", lambda route: route.fulfill(json={"read": True}))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    shown = page.locator("#needs .card.task", has_text="Compare the queue options")
+    await expect(shown).to_have_count(1, timeout=15000)
+    for _ in range(100):
+        if calls:
+            break
+        await page.wait_for_timeout(100)
+    await shown.get_by_role("button", name="View report").click()
+    await expect(shown).to_have_class(re.compile(r"\bexpanded\b"))
+    earlier_fold = shown.locator(".report details.earlier-reports")
+    await expect(earlier_fold.locator("summary")).to_have_text("Earlier reports (1)")
+    await earlier_fold.locator("summary").click()
+    await expect(earlier_fold).to_have_attribute("open", "")
+    await expect(earlier_fold.locator(".earlier-report")).to_have_count(0)
+    about = page.locator(".card.draft > details.context", has_text="Survey the cache options")
+    await about.locator("summary").click()
+    await expect(about).to_have_attribute("open", "")
+    await expect(about.locator(".markdown")).not_to_contain_text("Option 79: measured")
+    where = await page.evaluate(PLACES)
+    # The state read again (an event): the whole asked for again, slowly this time.
+    runtime.bus.publish("state")
+    for _ in range(100):
+        if len(calls) > 1:
+            break
+        await page.wait_for_timeout(100)
+    assert len(calls) == 2, calls
+    release.set()
+    await expect(earlier_fold.locator(".earlier-report .body")).to_have_text(
+        "RabbitMQ at first, then not.", timeout=10000
+    )
+    await expect(earlier_fold).to_have_attribute("open", "")
+    await expect(shown).to_have_class(re.compile(r"\bexpanded\b"))
+    await expect(shown.locator(".report > .body")).to_contain_text("Kafka fits best")
+    await expect(about.locator(".markdown")).to_contain_text("Option 79: measured")
+    await expect(about).to_have_attribute("open", "")
+    after = await page.evaluate(PLACES)
+    assert len(after) == len(where) and all(
+        abs(a - b) < 1 for a, b in zip(after, where, strict=True)
+    ), (
+        where,
+        after,
+    )
+    assert not errors, errors
+    await context.close()
+    log(
+        "opened before the whole came (its ask failed, then slow): a report, its earlier "
+        "reports and a draft's Result of stay open and get the whole, nothing moved"
+    )
 
 
 if __name__ == "__main__":

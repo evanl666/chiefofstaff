@@ -489,7 +489,7 @@ function draftItem(draft, phases, embedded = new Set()) {
   if (inner) embedded.add(task.id);
   return {
     key: draftKey(draft),
-    version: task ? `${task.id}:${task.status}:${task.updated_at}${inner ? `:${inner.key}=${inner.version}` : ""}` : "",
+    version: task ? `${task.id}:${task.status}:${task.updated_at}${task.texts_key ? ":cut" : ""}${inner ? `:${inner.key}=${inner.version}` : ""}` : "",
     build: () => withTask(draftCard(draft), task, draft, inner),
     refresh: (node) => withTask(node, task, draft, inner),
   };

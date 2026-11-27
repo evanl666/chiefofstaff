@@ -130,6 +130,7 @@ export async function loadState(again = false) {
   const data = await api("/api/state");
   const first = !state.snapshot;
   const router = routerId();
+  data.tasks = (data.tasks || []).map(withTexts);
   state.snapshot = data;
   // Drafts gone without being sent (withdrawn, replaced) in the last days: their timeline lines
   // say so after a reload too.
@@ -162,6 +163,51 @@ export async function loadState(again = false) {
   }
   // A Router that was not there when Home's chat loaded (or another in its place): its chat.
   if (!first && routerId() && routerId() !== router) showRouterChat().catch(() => {});
+  readTexts();
+}
+// What finished tasks said at length (their result, their earlier reports): the state carries it
+// cut to what their rows and chips read (`texts_key`, pagestate.py); the whole is read once for
+// each version of it, kept here and put back into each state read after. Nothing shows it
+// meanwhile but a fold or a tooltip, which have it by then.
+const texts = new Map(); // `${id}:${texts_key}` -> { result, earlier_results, texts_key }
+const textsAsked = new Set(); // Each version asked for once (it may have changed again since).
+let readingTexts = false;
+let textsAgain = false;
+const textsOf = (task) => `${task.id}:${task.texts_key}`;
+function withTexts(task) {
+  const kept = task.texts_key && texts.get(textsOf(task));
+  if (!kept) return task;
+  const whole = { ...task, result: kept.result, earlier_results: kept.earlier_results };
+  delete whole.texts_key;
+  return whole;
+}
+async function readTexts() {
+  if (readingTexts) {
+    textsAgain = true;
+    return;
+  }
+  const wanted = (state.snapshot?.tasks || []).filter((task) => task.texts_key && !texts.has(textsOf(task)) && !textsAsked.has(textsOf(task)));
+  if (!wanted.length) return;
+  readingTexts = true;
+  for (const task of wanted) textsAsked.add(textsOf(task));
+  let found = null;
+  try {
+    found = await api(`/api/task-texts?ids=${wanted.map((task) => encodeURIComponent(task.id)).join(",")}`);
+  } catch {
+    // Asked for again with the next state (the cut words show the same meanwhile).
+    for (const task of wanted) textsAsked.delete(textsOf(task));
+  }
+  readingTexts = false;
+  if (found) {
+    for (const [id, item] of Object.entries(found)) texts.set(`${id}:${item.texts_key}`, item);
+    if (state.snapshot) state.snapshot.tasks = state.snapshot.tasks.map(withTexts);
+    scheduleHome();
+    scheduleTeam();
+  }
+  if (textsAgain) {
+    textsAgain = false;
+    readTexts();
+  }
 }
 // Copilot's models, once Copilot lists them: the header's menus, and anything open that lists
 // them (Settings' menus, kept as they are) hears `models`.
