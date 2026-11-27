@@ -355,7 +355,7 @@ class Autopilot(Answers, Results):
                 withdrawn = self.book.withdraw(why, run["id"])
             self.abandon()
             self.draw_returned(withdrawn)
-            continued = await self.stop_continued(run, stopping)
+            continued, turns = await self.stop_continued(run, stopping)
             await self.end(run, by=by, at_its_time=False)
         parts = [grammar.said_off(True, language)]
         if continued:
@@ -363,15 +363,18 @@ class Autopilot(Answers, Results):
                 f"{continued} task{'s' if continued != 1 else ''} it had continued "
                 f"wait{'' if continued != 1 else 's'} with Go on"
             )
+        if turns:
+            parts.append(f"{turns} turn{'s' if turns != 1 else ''} it had continued stopped")
         if withdrawn:
             count = len(withdrawn)
             parts.append(f"{count} answer{'s' if count != 1 else ''} not yet delivered withdrawn")
         return {**self.state(), "said": " · ".join(parts)}
 
-    async def stop_continued(self, run: dict, stopping: dict) -> int:
+    async def stop_continued(self, run: dict, stopping: dict) -> tuple[int, int]:
         """Turns it continued that are running now: stopped as Stop stops one (their tasks wait
         with Go on, and Ask first stays on them until they end); the Router's and the Slack
-        session's turns that carry it too. Returns how many of the workers'."""
+        session's turns that carry it too. Returns how many of the workers' tasks wait with Go
+        on, and how many of their turns stopped on work already finished (its task as it was)."""
         ours = {entry["id"] for entry in self.book.entries(run_id=run["id"], limit=100000)}
         for session_id, carried in list(self.origins.turns.items()):
             row = self.store.find_session(session_id)
@@ -379,7 +382,7 @@ class Autopilot(Answers, Results):
                 continue
             if row["status"] in {"working", "starting"} or self.runtime.states[session_id].busy:
                 await self.runtime.workers.interrupt(session_id, by="Autopilot's Stop")
-        stopped = 0
+        stopped = turns = 0
         for session_id, carried in list(self.origins.sticky.items()):
             if not ours & set(carried.get("entries") or []):
                 continue
@@ -388,9 +391,15 @@ class Autopilot(Answers, Results):
             if not row or row["closed_at"]:
                 continue
             if row["status"] in {"working", "starting"} or state.busy:
+                on = self.runtime.working_on(session_id)
+                task = self.runtime.tasks.find(on) if on else None
                 await self.runtime.workers.interrupt(session_id, by="Autopilot's Stop")
-                stopped += 1
-        return stopped
+                # Only a task still at work waits with Go on (Workers.mark_stopped).
+                if task and task["status"] in {"queued", "running"}:
+                    stopped += 1
+                else:
+                    turns += 1
+        return stopped, turns
 
     async def end(self, run: dict, *, by: str, at_its_time: bool):
         """The run's end: its `ended` entry, the head kept, the summary card, the Router told."""

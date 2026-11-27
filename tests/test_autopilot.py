@@ -460,6 +460,28 @@ async def test_stop_stops_a_turn_it_continued_and_its_task_waits_with_go_on(harn
     assert runtime.yolo(row) is False, "Ask first stays until the owner writes to it"
 
 
+async def test_stop_says_a_turn_on_finished_work_stopped_never_that_its_task_waits(harness):
+    """Live (C5): a turn it continued on a task already finished (Ready for review) was
+    stopped, and Stop said "1 task it had continued waits with Go on" of a task still in review.
+    It says what it did: that turn stopped; the task stays as it was."""
+    runtime = await harness.connect()
+    await tick(runtime)
+    state = await runtime.autopilot.start(None, by="home")
+    worker = await spawn(runtime, harness.router_id, "Write the client")
+    await settle(runtime)
+    answered = runtime.autopilot.book.append(state["run"], "answered", "Answered")
+    runtime.autopilot.origins.keep(
+        worker["session_id"], {"entries": [answered["id"]], "ask_first": True}
+    )
+    harness.store.execute("UPDATE tasks SET status='review' WHERE id=?", (worker["task_id"],))
+    harness.store.update_session(worker["session_id"], status="working")
+    stopped = await runtime.autopilot.stop(by="you", why="you pressed Stop")
+    await settle(runtime)
+    assert stopped["said"] == "Autopilot stopped. · 1 turn it had continued stopped"
+    assert runtime.tasks.get(worker["task_id"])["status"] == "review"
+    assert harness.store.session(worker["session_id"])["status"] == "idle"
+
+
 async def test_stop_stops_a_router_turn_that_carries_it(harness, monkeypatch):
     """Review 2: a Router turn that took in what Autopilot's work led to (its origin, this turn)
     is stopped too; one that carries none goes on."""
