@@ -1,15 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.1.60 (2026-11-26)
 
 Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one
 choice is asked of you once, and your answer reaches every worker that asked it; a team's page is
 where you run your request; a finished report can be shared from its chat, and a long one read
 to its end on its card; and Home answers at once.
 
-- **One full stop in the Router's wait card.** With *Ask me* and a plan limit, the card read
-  "…resets 10:02 PM.. What it is sent is kept until then.": the reason's own full stop was
-  doubled.
 - **Share a report from its chat.** A finished report in its worker's chat, and its line on Home
   (beside *View*), has a quiet *Share…*: the same dialog as its card's *Share…*, for that report's
   task, with the same preview, private-data check, expiry, link and *Revoke*. From an earlier
@@ -158,6 +155,9 @@ waits for its worker, and the page's state is read several times faster.
 - **A burst of events reads the state once.** The page read the whole state 150 ms after each
   event that asked for it, however many came, several at a time; now once shortly after the
   first, at most once a second while more come, one at a time.
+- **One full stop in the Router's wait card.** With *Ask me* and a plan limit, the card read
+  "…resets 10:02 PM.. What it is sent is kept until then.": the reason's own full stop was
+  doubled.
 
 ## 0.1.59 (2026-11-26)
 
