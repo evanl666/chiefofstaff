@@ -595,6 +595,63 @@ async def test_a_repeated_message_lost_at_a_stop_is_given_again(harness, monkeyp
         await runtime.stop()
 
 
+# A worker that asked the owner mid-turn: given its turn again, never a second card or ask
+
+
+async def ask(runtime, worker: str, how: str) -> asyncio.Task | None:
+    """The worker asks the owner "8080 or 9090?": on a question card it waits on (ask_user), or
+    on a decision card (ask_decision), its turn going on."""
+    if how == "ask_user":
+        request = {"question": "8080 or 9090?"}
+        return asyncio.create_task(runtime.asks.on_user_input(request, {"sessionId": worker}))
+    await call_tool(runtime, "ask_decision", worker, question="8080 or 9090?")
+    return None
+
+
+def cards(harness) -> list[dict]:
+    return [d for d in harness.store.drafts() if d["kind"] in {"question", "decision"}]
+
+
+def open_asks(harness, worker: str) -> list[dict]:
+    return harness.store.all("SELECT * FROM asks WHERE session_id=? AND status='open'", (worker,))
+
+
+@pytest.mark.parametrize("how", ["ask_user", "ask_decision"])
+async def test_a_question_asked_mid_turn_is_one_card_and_one_ask_after_a_restart(tmp_path, how):
+    """QA (0.1.61): a worker asked the owner mid-turn (on a card it waits on, or a decision
+    card), and Chief of Staff restarted. Given its turn again it asks no second time by itself;
+    and when it asks the same again, it is still one card under Needs you and one open ask in
+    the ledger."""
+    first = Harness(tmp_path / "data")
+    runtime = await first.connect()
+    worker = await spawned(runtime, first, "Pick a port")
+    asking = await ask(runtime, worker, how)
+    await until(lambda: cards(first), 10)
+    await runtime.stop()
+    if asking:
+        asking.cancel()
+    second = Harness(tmp_path / "data", client=first.client)
+    second.runtime.asks.expire_requests()  # As it starts.
+    runtime = await second.connect()
+    try:
+        await settle(runtime)
+        assert given("Pick a port", second.session(worker).sent) == 2, "its turn given again"
+        # One card: the decision card, or the question it went on without.
+        shown = len(cards(second)) + len(runtime.snapshot()["questions"])
+        assert shown == 1 and len(open_asks(second, worker)) == 1
+        asking = await ask(runtime, worker, how)
+        await asyncio.sleep(0.2)
+        await settle(runtime)
+        pending = [d for d in cards(second) if d["status"] == "pending"]
+        assert len(pending) == 1, pending
+        assert runtime.snapshot()["questions"] == [], "the one it went on without, replaced"
+        assert len(open_asks(second, worker)) == 1, open_asks(second, worker)
+        if asking:
+            asking.cancel()
+    finally:
+        await runtime.stop()
+
+
 # The stop ends the agents' processes
 
 
