@@ -30,8 +30,19 @@ D10 A worker reports done with an ask for the owner at its end: the report is he
     how to ask; the ask then reaches Needs you (or the report leaves it out), never lost with
     the result.
 
+Decision card fixes (0.1.61, QA61 L5-L8):
+
+D11 The owner answers a worker's decision card in the Router's chat: the Router passes it on,
+    the card leaves Needs you as answered, the worker uses the answer, and one decision is in
+    force (Q1).
+D12 Two workers of one request ask two different choices that share words (the API server's
+    port, the metrics server's): two cards, and each uses the answer to its own (Q3).
+D13 After "Deploy the API to staging now?" → Yes, the worker asks "Deploy the API to prod now?":
+    a card, not "decided already"; nothing goes to prod without a yes (Q4).
+D14 A worker asks the same choice again in other words while its card is open: one card (Q2).
+
 Uses your signed-in Copilot CLI and consumes premium requests (LIVE_COPILOT_MODEL,
-claude-sonnet-5.5 by default); the Copilot sessions it creates are deleted at the end; about 20
+claude-sonnet-5.5 by default); the Copilot sessions it creates are deleted at the end; about 40
 minutes. Its data folder has a space in its path, as macOS's own has. Set TMPDIR to a scratch
 folder of yours (its temporary folders go there). Ports: LIVE_DECISIONS_PORT (20780) for the
 app, the next one for the stand-in Slack. Scenarios by name run alone (D3 runs D2 first).
@@ -39,6 +50,7 @@ app, the next one for the stand-in Slack. Scenarios by name run alone (D3 runs D
     TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py
     TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D1 D6
     TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D7 D10
+    TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D11 D14
 
 D8 and D9 run D7 first.
 """
@@ -70,9 +82,10 @@ READ = {"received", "processed"}
 
 
 class Run:
-    def __init__(self, app: App, data: Path):
+    def __init__(self, app: App, data: Path, home: Path | None = None):
         self.app = app
         self.data = data
+        self.home = home or data
         self.results: list[tuple[str, bool, str]] = []
 
     def check(self, name: str, ok: bool, detail: str = ""):
@@ -104,6 +117,53 @@ class Run:
                 (f"card:{card['id']}",),
             )
         ]
+
+    def joined(self, worker: str) -> list[dict]:
+        """Every decision card the worker is an asker of (its own or joined), oldest first."""
+        rows = self.db(
+            "SELECT id, session_id, status, outcome, target FROM drafts WHERE kind='decision' "
+            "ORDER BY created_at"
+        )
+        found = [{**row, "target": json.loads(row["target"])} for row in rows]
+        return [c for c in found if any(a["session_id"] == worker for a in c["target"]["askers"])]
+
+    def in_force(self, task: str) -> list[dict]:
+        """The decisions in force its task relies on."""
+        return self.db(
+            "SELECT d.id, d.text, d.source FROM task_decisions l JOIN decisions d ON "
+            "d.id=l.decision_id WHERE l.task_id=? AND d.status='active' ORDER BY d.created_at",
+            (task,),
+        )
+
+    def asked(self, worker: str) -> list[str]:
+        """What its ask_decision calls were answered, from its Copilot log (those tools show in
+        no chat line)."""
+        ids = {worker, *(r["value"] for r in self.db("SELECT value FROM kv WHERE key=?",
+                                                     (f"copilot:{worker}",)))}  # fmt: skip
+        found, calls = [], {}
+        for sid in ids:
+            events = self.home / "session-state" / sid / "events.jsonl"
+            lines = events.read_text(errors="replace").splitlines() if events.exists() else []
+            for line in lines:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                data = event.get("data") or {}
+                if event.get("type") == "tool.execution_start" and (
+                    data.get("toolName") == "ask_decision"
+                ):
+                    calls[data.get("toolCallId")] = json.dumps(data.get("arguments"))[:200]
+                elif event.get("type") == "tool.execution_complete" and (
+                    data.get("toolCallId") in calls
+                ):
+                    result = data.get("result") or {}
+                    said = result.get("content") if isinstance(result, dict) else result
+                    found.append(f"{calls[data['toolCallId']]} => {str(said)[:240]}")
+        return found
+
+    async def tasks_of(self, worker: str) -> list[dict]:
+        return [t for t in (await self.app.get("/api/state"))["tasks"] if t["session_id"] == worker]
 
     async def say(self, text: str):
         router = (await self.app.get("/api/state"))["router_id"]
@@ -537,6 +597,147 @@ async def d10_a_done_report_with_an_ask_is_held(run: Run):
     )
 
 
+async def d11_an_answer_in_the_router_chat_answers_the_card(run: Run):
+    app = run.app
+    title = "Tie Breaker"
+    await run.say(
+        f"Start a worker titled '{title}' (no project). Tell it, word for word: Use "
+        "ask_decision to ask me which tie-break rule to add, with two options, 'Rule A' and "
+        "'Rule B', and end your turn to wait for my decision. Once it reaches you, write the rule "
+        "I picked into rule.txt in your own folder and report done, naming it."
+    )
+    worker = await run.worker(title)
+    card = await run.card(worker["id"])
+    await run.task(worker["id"], "waiting", timeout=300)
+    await asyncio.sleep(10)
+    await run.say(f"About the tie-break rule '{title}' asked me: Rule B.")
+    done = await run.task(worker["id"], *FINISHED, timeout=900)
+    await asyncio.sleep(10)
+    [now] = [c for c in run.joined(worker["id"]) if c["id"] == card["id"]]
+    worker = await app.get(f"/api/sessions/{worker['id']}")
+    found = run.in_force(done["id"])
+    run.check(
+        "D11 answered in the Router's chat: the card is answered, the worker used it, one "
+        "decision in force",
+        now["status"] != "pending" and "B" in written(worker, "rule.txt") and len(found) <= 1,
+        f"card {now['status']} {now['outcome']!r}; in force "
+        f"{[(d['text'][-40:], d['source']) for d in found]}; rule.txt "
+        f"{written(worker, 'rule.txt')!r}",
+    )
+
+
+async def d12_two_choices_sharing_words_are_two_cards(run: Run):
+    app = run.app
+    await run.say(
+        "Start two workers in parallel (no project), titled 'API Port' and 'Metrics Port', for "
+        "one piece of work: the service's ports. Tell 'API Port', word for word: Use "
+        "ask_decision to ask me which port the API server listens on, with the options 8080 and "
+        "9090, and end your turn to wait. Once my decision reaches you, write the port alone "
+        "into port.txt in your own folder and report done. Tell 'Metrics Port', word for word: "
+        "Use ask_decision to ask me which port the metrics server listens on, with the options "
+        "8080 and 9090, and end your turn to wait. Once my decision reaches you, write the port "
+        "alone into port.txt in your own folder and report done."
+    )
+    api = await run.worker("API Port")
+    metrics = await run.worker("Metrics Port")
+
+    async def both_wait():
+        waiting = [t for w in (api, metrics) for t in await run.tasks_of(w["id"])
+                   if t["status"] == "waiting"]  # fmt: skip
+        return len(waiting) >= 2 or None
+
+    await wait_for("both workers wait on a card", both_wait, 600, app)
+    await asyncio.sleep(20)
+    cards = {c["id"]: c for c in [*run.joined(api["id"]), *run.joined(metrics["id"])]}
+    pending = [c for c in cards.values() if c["status"] == "pending"]
+    run.check(
+        "D12 two different choices sharing words: two cards",
+        len(pending) == 2,
+        f"pending {[(c['target']['question'][:60], len(c['target']['askers'])) for c in pending]}"
+        f"; the metrics worker was told {run.asked(metrics['id'])[-2:]}",
+    )
+    for card in pending:
+        choice = "9090" if "metric" in card["target"]["question"].lower() else "8080"
+        await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "text": choice})
+    for worker in (api, metrics):
+        await run.task(worker["id"], *FINISHED, timeout=900)
+    api = await app.get(f"/api/sessions/{api['id']}")
+    metrics = await app.get(f"/api/sessions/{metrics['id']}")
+    run.check(
+        "D12 each worker used the answer to its own question",
+        written(api, "port.txt") == "8080" and written(metrics, "port.txt") == "9090",
+        f"API port.txt {written(api, 'port.txt')!r}; metrics {written(metrics, 'port.txt')!r}",
+    )
+
+
+async def d13_prod_is_not_answered_by_staging(run: Run):
+    app = run.app
+    title = "Deployer"
+    await run.say(
+        f"Start a worker titled '{title}' (no project). Tell it, word for word: This is a "
+        "rehearsal: 'deploying' means writing a file. First use ask_decision to ask me 'Deploy "
+        "the API to staging now?' with the options Yes and No, and end your turn to wait. If I "
+        "say Yes, write 'staging' into staging.txt in your own folder. Then use ask_decision to "
+        "ask me 'Deploy the API to prod now?' with the options Yes and No. Write 'prod' into "
+        "prod.txt only if my answer to the prod question itself is Yes; otherwise do not create "
+        "prod.txt. Report done saying what you deployed."
+    )
+    worker = await run.worker(title)
+    card = await run.card(worker["id"])
+    await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "text": "Yes"})
+
+    async def second_or_done():
+        cards = [c for c in run.cards(worker["id"]) if c["status"] == "pending"]
+        if cards:
+            return {"card": cards[-1]}
+        tasks = await run.tasks_of(worker["id"])
+        return {"task": tasks[-1]} if tasks and tasks[-1]["status"] in FINISHED else None
+
+    found = await wait_for("the prod card or its report", second_or_done, 900, app)
+    if "card" in found:
+        await app.post(f"/api/drafts/{found['card']['id']}", {"action": "answer", "text": "No"})
+        await run.task(worker["id"], *FINISHED, timeout=900)
+    worker = await app.get(f"/api/sessions/{worker['id']}")
+    cards = run.cards(worker["id"])
+    run.check(
+        "D13 asked about prod on a card; nothing deployed to prod without a yes",
+        len(cards) == 2 and not written(worker, "prod.txt"),
+        f"{len(cards)} card(s) {[c['target']['question'] for c in cards]}; prod.txt "
+        f"{written(worker, 'prod.txt')!r}; told {run.asked(worker['id'])[-2:]}",
+    )
+
+
+async def d14_asked_again_in_other_words_while_open_is_one_card(run: Run):
+    app = run.app
+    title = "Export Twice"
+    await run.say(
+        f"Start a worker titled '{title}' (no project). Tell it, word for word: Use ask_decision "
+        "to ask me whether the export should be CSV or JSON, with those two options. Right "
+        "after, without waiting, ask me the same thing again with ask_decision in other words "
+        "(to be sure I see it). Then end your turn and wait for my decision; once it reaches "
+        "you, write the format alone into format.txt in your own folder and report done."
+    )
+    worker = await run.worker(title)
+    await run.card(worker["id"])
+    await run.task(worker["id"], "waiting", timeout=300)
+    await asyncio.sleep(30)
+    cards = [c for c in run.joined(worker["id"]) if c["status"] == "pending"]
+    run.check(
+        "D14 asked again in other words while its card is open: one card",
+        len(cards) == 1,
+        f"pending {[c['target']['question'][:60] for c in cards]}; told {run.asked(worker['id'])}",
+    )
+    for card in cards:
+        await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "text": "JSON"})
+    await run.task(worker["id"], *FINISHED, timeout=900)
+    worker = await app.get(f"/api/sessions/{worker['id']}")
+    run.check(
+        "D14 it used the answer",
+        written(worker, "format.txt").upper() == "JSON",
+        f"format.txt {written(worker, 'format.txt')!r}",
+    )
+
+
 async def main():
     wanted = {name.upper() for name in sys.argv[1:]}
 
@@ -548,9 +749,15 @@ async def main():
         home, project, _ = setup(root)
         data = data_dir(root)
         data.parent.mkdir(parents=True, exist_ok=True)
+        # No notification on the owner's screen, from its first moment.
+        from chiefofstaff.store import Store
+
+        seeded = Store(data)
+        seeded.save_settings(seeded.settings().model_copy(update={"mac_notifications": False}))
+        seeded.close()
         app = App(data, root / "log", {"COPILOT_HOME": str(home)})
         await app.start()
-        run = Run(app, data)
+        run = Run(app, data, home)
         try:
             await app.post("/api/settings", {
                 "projects": [str(project)], "model": MODEL, "max_workers": 3,
@@ -575,6 +782,14 @@ async def main():
                     await d9_one_answer_reaches_every_asker(run, api, page, card)
             if runs("D10"):
                 await d10_a_done_report_with_an_ask_is_held(run)
+            for name, scenario in (
+                ("D11", d11_an_answer_in_the_router_chat_answers_the_card),
+                ("D12", d12_two_choices_sharing_words_are_two_cards),
+                ("D13", d13_prod_is_not_answered_by_staging),
+                ("D14", d14_asked_again_in_other_words_while_open_is_one_card),
+            ):
+                if runs(name):
+                    await scenario(run)
         except BaseException:
             router = (await app.get("/api/state"))["router_id"]
             print(transcript(await app.get(f"/api/sessions/{router}/messages")))
