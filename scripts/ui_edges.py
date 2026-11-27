@@ -12596,8 +12596,14 @@ async def round_agent_smooth(runtime, browser, failures: list[str]):
             await ux_shoot(page, "smooth-signin-device", scheme, "dialog.agent-setup")
             await dialog.get_by_role("button", name="Cancel").click()
             await expect(dialog.get_by_role("button", name="Try again")).to_be_visible()
-            # An API key, typed (never shown back), then Back.
+            # An API key, typed (never shown back), then Back. Other ways, opened, stays open as
+            # the dialog is drawn again (its run's last news, late on a busy machine).
             await dialog.locator(".setup-other summary").click()
+            await page.evaluate(
+                "() => import('/static/agentsetup.js').then((m) => {"
+                " const run = m.setupOf('codex'); m.heardSetup({ ...run, seq: run.seq + 1 }); })"
+            )
+            await expect(dialog.locator("details.setup-other")).to_have_attribute("open", "")
             await dialog.get_by_role("button", name="Use an API key").click()
             key = dialog.get_by_label("API key")
             await expect(key).to_have_attribute("type", "password")

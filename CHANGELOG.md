@@ -48,6 +48,8 @@ Every session runs on the agent you choose, and Chief of Staff runs without Copi
   off in Settings while its process was still starting (for a worker, or to list its models)
   left it running for an agent that was off, its row saying *Ready*, until Chief of Staff
   restarted. That start now ends stopped, as does one overtaken by Chief of Staff stopping.
+- **Other ways and Show output stay open in the Sign in and Install dialog.** Opened, they closed
+  by themselves as the dialog was drawn again (its sign-in's last news, a moment after Cancel).
 
 Every ask of you is filed under the choice it is about, and decided once.
 

@@ -216,6 +216,8 @@ function draw() {
   const run = setupOf(name);
   const active = document.activeElement;
   const focusKey = dialog.contains(active) ? active.dataset.key : "";
+  // A fold the owner opened (Other ways, Show output) stays open as what it shows is drawn again.
+  const opened = new Set([...dialog.querySelectorAll("details[open]")].map((fold) => fold.className));
   const isInstall = dialog.mode === "consent" || (run?.kind === "install" && !["starting", "confirm"].includes(dialog.mode));
   const heading = el("h2", { id: "agent-setup-title" }, agentMark(name), ` ${isInstall ? "Install" : "Sign in to"} ${title(name)}`);
   const body = el("div", { class: "agent-setup-body" });
@@ -237,6 +239,7 @@ function draw() {
     body.append(el("p", { text: `${title(name)} is ready.${status.pays ? ` ${status.pays}.` : ""}` }));
     footer.append(close, el("button", { type: "button", class: "secondary", text: "Sign in again", "data-key": "again", onclick: () => signIn(name, "browser") }));
   } else if (run) runView(body, footer, run, status, close);
+  for (const fold of body.querySelectorAll("details")) if (opened.has(fold.className)) fold.open = true;
   dialog.replaceChildren(heading, body, footer);
   const again = focusKey && dialog.querySelector(`[data-key="${focusKey}"]`);
   (again || dialog.querySelector("[data-primary]") || footer.querySelector("button:last-child"))?.focus();
