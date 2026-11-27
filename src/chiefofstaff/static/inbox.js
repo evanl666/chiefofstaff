@@ -797,9 +797,11 @@ function setupCard() {
           "div",
           { id: "home-setup", class: "card setup" },
           el("div", { class: "head" }, el("span", { class: "label", text: "Connect GitHub Copilot" })),
-          el("p", { text: "Chief of Staff runs your work in GitHub Copilot sessions, and Copilot is not ready yet:" }),
+          el("p", { text: "Chief of Staff runs your work on GitHub Copilot here, and Copilot is not ready yet:" }),
           el("p", { class: "muted", text: snap.runtime.error }),
-          snap.runtime.windows ? el("p", { class: "muted", text: "On Windows, Chief of Staff runs on GitHub Copilot for now: Codex and Claude Code need macOS or Linux." }) : [],
+          snap.runtime.windows
+            ? el("p", { class: "muted", text: "On Windows, Chief of Staff runs on GitHub Copilot for now: Codex and Claude Code need macOS or Linux." })
+            : el("p", { class: "muted", text: "Codex or Claude Code can run it too: turn one on in Settings → Agents & models." }),
           el(
             "ol",
             {},

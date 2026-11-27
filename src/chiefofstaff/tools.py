@@ -3478,6 +3478,7 @@ class Tools:
             "cwd": item["cwd"],
             "text": params.text[:4000],
             "task_title": title,
+            "agent": item.get("agent") or "copilot",  # (The card names it.)
         }
         asked = next(
             (

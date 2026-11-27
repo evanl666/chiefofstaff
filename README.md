@@ -5,7 +5,8 @@
 [![PyPI](https://img.shields.io/pypi/v/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![Python](https://img.shields.io/pypi/pyversions/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Your engineering chief of staff. It catches what comes to you (a question in Slack, a PR to
-review, a comment on your doc), gets it done with Copilot, and answers in your voice: with
+review, a comment on your doc), gets it done with your coding agent (GitHub Copilot, Codex or
+Claude Code), and answers in your voice: with
 proof of what was done, and only once you say OK. The longer it works for you, the better it
 knows how you work.
 
@@ -31,8 +32,8 @@ only with a decision to make or a draft to approve.
 ## What it does
 
 **Catches what comes to you**
-- Watches what you ask it to (Slack mentions, doc comments, mail) with any tool your Copilot
-  has, Glean or your company's search included, and turns what needs doing into tasks.
+- Watches what you ask it to (Slack mentions, doc comments, mail) with any tool your coding
+  agent has, Glean or your company's search included, and turns what needs doing into tasks.
 - React 🤖 to any Slack message, press a hotkey from any app, or just say what you need.
 - Sends a follow-up to the session that did the work, with its history and checkout.
 
@@ -61,20 +62,21 @@ only with a decision to make or a draft to approve.
   finished, what waits for you and what was handled for you.
 
 **Keeps many things moving at once**
-- Splits a request into tasks and runs each in its own Copilot session, in parallel or in order.
+- Splits a request into tasks and runs each in its own agent session, in parallel or in order.
 - Shows every task live on one board: what it is doing now, what waits and why, what is done.
 - The captain, the duck beside the name, shows how things stand at a glance: it salutes when
   something needs you, takes the wheel while work runs, keeps watch while tasks wait, and
   cheers when a task is done.
 
-**Your Copilot, your machine**
-- Uses the Copilot you already have: your plan, models, plugins, skills, MCP servers and your
-  company's policies, plus anything you add in Settings. No other AI service or API key.
-- If you also use Codex or Claude Code, workers can run on them instead, with your own sign-in:
-  allow them on Home or in Settings, and pick one for a task with `@codex` or `@claude`
-  ([how](docs/guide.md#workers-on-other-coding-agents)).
+**Your coding agent, your machine**
+- Uses the agent you already have, Copilot, Codex or Claude Code: your plan, models, plugins,
+  skills, MCP servers and your company's policies, plus anything you add in Settings. No other
+  AI service or API key.
+- Use more than one, with your own sign-in for each: pick one for a task with `@codex` or
+  `@claude`, and in Settings choose which runs new workers and each of Chief of Staff's own
+  sessions ([how](docs/guide.md#workers-on-other-coding-agents)).
 - Every worker gets its own folder and git worktree, so your checkouts stay untouched. Workers
-  run like your own Copilot sessions, but none comments, reviews, merges or closes on GitHub as
+  run like your own agent sessions, but none comments, reviews, merges or closes on GitHub as
   you, pushes to `main` or force-pushes others' branches without your OK; turn on *Ask first*
   for more checks (no force pushes at all, no `sudo`) or an OS sandbox in Settings.
 
@@ -129,14 +131,15 @@ To start this checkout after `uv sync --extra dev`:
 **Optional sign-ins**
 - **GitHub**: `gh auth login` with every account you use, to review PRs and open them.
 - **Slack**: paste a user token in Settings ([how](docs/guide.md#slack)), or reach Slack through
-  a tool your Copilot already has, such as Glean.
+  a tool your coding agent already has, such as Glean.
 - **Other services** (docs, issue trackers): a sign-in card appears when a worker needs one, and
   one card when an MCP tool says an account must be connected (however many workers it stops).
 
 ## How it works
 
-Each session is a regular Copilot CLI session, driven through the Copilot SDK; `copilot --resume`
-lists them as "Chief of Staff · …". A Codex worker is a thread of its own `codex app-server`.
+Each session is a regular session of its agent: a Copilot CLI session driven through the Copilot
+SDK (`copilot --resume` lists them as "Chief of Staff · …"), a thread of its own `codex
+app-server`, or a Claude Code session driven through Claude's Agent SDK.
 Sessions never talk to each other directly: they call tools
 such as `spawn_worker`, `report` and `tell_session`, and Chief of Staff delivers each message,
 labeled with who sent it, so a Slack message cannot pass itself off as you. Workers that work
@@ -158,8 +161,8 @@ your watches          Watchdog ──► nudges stuck workers
 
 ## Status
 
-Early (0.1): expect rough edges. Copilot usage counts against your plan, and Home shows the
-credits each task used. Issues and ideas are welcome; to contribute, see
+Early (0.1): expect rough edges. Each agent's usage counts against your plan with it (Home
+shows the Copilot credits each task used; Usage, every agent's). Issues and ideas are welcome; to contribute, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License

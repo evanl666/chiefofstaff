@@ -7,6 +7,7 @@ import { clock, codeHtml, displayPath, inlineHtml, markdown, slackText } from ".
 import { applyDraft, finalText, pendingDrafts, state } from "./state.js";
 import { select } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
+import { agentName } from "./agentpick.js";
 import { scheduleHome } from "./inbox.js";
 // A card: its label (what kind of thing it is), then what it is about.
 function card(draft, className, label, ...content) {
@@ -476,7 +477,7 @@ function adoptCard(draft) {
     draft,
     "adopt",
     "Continue a session here?",
-    el("div", { class: "why", text: `“${target.title}”, one of your Copilot sessions (${displayPath(target.cwd || "")}). The Router wants to give it this, as a new task:` }),
+    el("div", { class: "why", text: `“${target.title}”, one of your ${agentName(target.agent || "copilot")} sessions (${displayPath(target.cwd || "")}). The Router wants to give it this, as a new task:` }),
     el("div", { class: "quoted", text: target.text }),
   );
   const decide = decider(draft, node, error);

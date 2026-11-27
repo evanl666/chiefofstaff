@@ -6360,7 +6360,8 @@ async def main():
                           round_answer_label, round_sidebar_flat,
                           round_composer, round_decision_steer, round_decision_ledger,
                           round_ci_not_run, round_team_v4,
-                          round_share_from_report, round_long_report):  # fmt: skip
+                          round_share_from_report, round_long_report,
+                          round_router_appears, round_agent_words):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -9710,7 +9711,7 @@ async def send_setting(runtime, browser, scheme: str):
     await expect(consent).to_be_visible()
     await expect(consent.locator("p")).to_have_text(
         "What you send (your note, and any link or text you pass) goes to Chief of Staff on this "
-        "computer, which hands it to GitHub Copilot under your account; the work it starts runs "
+        "computer, which hands it to your coding agent under your account; the work it starts runs "
         "with your settings, as any task does."
     )
     buttons = consent.locator("button")
@@ -13024,6 +13025,166 @@ async def round_e125(runtime, browser, failures: list[str]):
         assert not errors, errors
         await context.close()
     log("E125: an update's cleanup is one line under Handled for you, with when it was written")
+
+
+def state_as(agents: list[str], **more):
+    """A page's /api/state answered as the server's, with these agents on (and `more` of it)."""
+
+    async def answer(route):
+        response = await route.fetch()
+        data = await response.json()
+        data["work"] = {**data.get("work", {}), "agents": agents}
+        await route.fulfill(response=response, json={**data, **more})
+
+    return answer
+
+
+async def round_agent_words(runtime, browser, failures: list[str]):
+    """0.1.61 wording audit: what the page says of workers is right for the agents on, naming
+    them only where they differ (Codex: no sandbox Chief of Staff checked, so workers that read
+    Slack run there without one, asking first, and none runs while the sandbox is on)."""
+    lines = {
+        ("copilot", "codex"): (
+            "Workers act without asking, as in your own Copilot and Codex sessions.",
+            "Workers that read Slack are always sandboxed on Copilot; on Codex they run without "
+            "one, asking first.",
+        ),
+        ("codex",): (
+            "Workers act without asking, as in your own Codex sessions.",
+            "Workers that read Slack run without a sandbox on Codex, asking first.",
+        ),
+        ("claude",): (
+            "Workers act without asking, as in your own Claude sessions.",
+            "Workers that read Slack are always sandboxed.",
+        ),
+    }
+    for agents, (ask, slack) in lines.items():
+        routes = {"**/api/state": state_as(list(agents))}
+        context, page, errors, _, _ = await settings_page(browser, routes=routes)
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=general]").click()
+        await expect(page.locator("#ask-first-help")).to_have_text(ask)
+        await expect(page.locator("#sandbox-slack")).to_have_text(slack)
+        await page.locator("#sandbox-options").click()
+        # Off, its Options apply to the workers that read Slack, sandboxed (not on Codex).
+        boxed = any(name != "codex" for name in agents)
+        await expect(page.locator("#sandbox-when-off")).to_be_visible(visible=boxed)
+        await page.locator("input[name=worker_sandbox]").check()
+        codex = " Codex can't run workers while it's on." if "codex" in agents else ""
+        await expect(page.locator("#sandbox-help")).to_have_text(
+            f"Workers can change files only in their own folders.{codex}"
+        )
+        if agents == ("copilot", "codex"):
+            await shoot(page, "words-general", "light", 1280, target="#settings-dialog")
+        assert not errors, errors
+        await context.close()
+    # Chief of Staff starting on Codex (no Router yet): the box says what it waits for, not
+    # Copilot; Copilot alone, as before.
+    for agents, said in (
+        (["codex"], "You can ask once Chief of Staff has started."),
+        (["copilot"], "You can ask once Copilot is connected."),
+    ):
+        starting = {"runtime": {"state": "starting", "error": ""}, "router_id": None}
+        context, page, errors, _, _ = await settings_page(
+            browser, routes={"**/api/state": state_as(agents, **starting)}
+        )
+        await expect(page.locator("#composer-note")).to_have_text(said)
+        assert not errors, errors
+        await context.close()
+    # Copilot's own card (Copilot the only agent on, not ready): another agent can run it too.
+    failed = {
+        "runtime": {"state": "error", "error": "Copilot is not signed in.", "waits": True},
+        "router_id": None,
+    }
+    context, page, errors, _, _ = await settings_page(
+        browser, routes={"**/api/state": state_as(["copilot"], **failed)}
+    )
+    card = page.locator("#home-setup")
+    await expect(card.locator(".label")).to_have_text("Connect GitHub Copilot")
+    await expect(card).to_contain_text(
+        "Chief of Staff runs your work on GitHub Copilot here, and Copilot is not ready yet:"
+    )
+    await expect(card).to_contain_text(
+        "Codex or Claude Code can run it too: turn one on in Settings → Agents & models."
+    )
+    assert not errors, errors
+    await context.close()
+    # A session of the owner's to continue here: named by its agent.
+    store = runtime.store
+    target = {"session_id": "codex-thread", "title": "Old eval", "cwd": "/tmp/eval",
+              "text": "Rerun it", "task_title": "Rerun the eval", "agent": "codex"}  # fmt: skip
+    draft = store.create_draft(store.get("router_id"), "adopt", target, "Rerun it", "Old eval")
+    runtime.bus.publish("draft", draft)
+    try:
+        context, page, errors, _, _ = await settings_page(browser)
+        row = page.locator("#needs .ok-row", has_text="Old eval")
+        await row.get_by_role("button", name="More actions").click()
+        await row.get_by_role("menuitem", name="Details").click()
+        await expect(page.locator("#needs .ok-details")).to_contain_text(
+            "“Old eval”, one of your Codex sessions"
+        )
+        assert not errors, errors
+        await context.close()
+    finally:
+        rejected = store.update_draft(draft["id"], status="rejected", outcome="test")
+        runtime.bus.publish("draft", rejected)
+    log("words: workers' lines name the agents on where they differ; the waits and cards too")
+
+
+async def round_router_appears(runtime, browser, failures: list[str]):
+    """0.1.61: a page opened before Chief of Staff had a Router (a first start waiting for an
+    agent, or Claude being set up) shows the Router's chat on Home once there is one: no reload,
+    nothing empty in between, its first-start note in sight; another Router put in its place,
+    likewise."""
+    store = runtime.store
+    router = store.get("router_id")
+    note = (
+        "Chief of Staff runs on Claude (uses your Claude plan). Change it in Settings → Agents & "
+        "models."
+    )
+    made = str(uuid4())
+    store.delete("router_id")
+    runtime.publish_state()
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    try:
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        timeline = page.locator("#timeline")
+        await expect(timeline.locator("#home-welcome")).to_be_visible()
+        # A reload would lose `stayed`; the timeline left empty at any moment is counted.
+        await page.evaluate("""() => {
+            window.stayed = true;
+            window.emptied = 0;
+            const timeline = document.querySelector("#timeline");
+            new MutationObserver(() => { if (!timeline.children.length) window.emptied += 1; })
+                .observe(timeline, { childList: true });
+        }""")
+        store.create_session(made, "router", "Router", "idle")
+        store.add_message(made, "notice", note)
+        store.set("router_id", made)
+        runtime.publish_state()
+        line = timeline.get_by_text(note)
+        await expect(line).to_have_count(1, timeout=10000)
+        await expect(timeline.locator("#home-welcome")).to_have_count(0)
+        await shoot(page, "router-appears", "light", 1280, target="#application")
+        # The first Router back in its place: its chat, as it was.
+        last = [m for m in store.messages(router) if m["kind"] in {"owner", "notice"}][-1]
+        store.set("router_id", router)
+        runtime.publish_state()
+        await expect(line).to_have_count(0, timeout=10000)
+        await expect(timeline.locator(f'[data-id="{last["id"]}"]')).to_have_count(1)
+        assert await page.evaluate("window.stayed === true"), "reloaded"
+        assert await page.evaluate("window.emptied") == 0, "Home's chat was empty for a moment"
+        assert not errors, errors
+    finally:
+        await context.close()
+        store.set("router_id", router)
+        store.update_session(made, closed_at=datetime.now(UTC).isoformat())
+        runtime.publish_state()
+    log("router appears: Home shows its chat once there is one, no reload, nothing empty between")
 
 
 async def round_ci_not_run(runtime, browser, failures: list[str]):

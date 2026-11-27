@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Home shows Chief of Staff's chat as soon as it starts.** A page opened before then (a first
+  start waiting for a coding agent, or while Claude is being set up) showed *Ask for anything*
+  until reloaded, hiding the note on which agent it runs on; now the chat appears in its place,
+  with nothing to reload.
+- **What the page says of workers is right for the agents you use.** Settings → General names
+  them where they differ: workers that read Slack are sandboxed on Copilot and Claude, and on
+  Codex run without a sandbox, asking first; Codex can't run workers while the sandbox is on; and
+  *Ask first* off says "as in your own Codex sessions" (or whichever are on). What waits for
+  Chief of Staff to start, Watch for you's tools, Send to Chief's consent and a session to
+  continue here no longer assume Copilot; the README and guide say the same.
+
 ## 0.1.60 (2026-11-26)
 
 Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one

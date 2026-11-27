@@ -6,6 +6,7 @@ import { closedWorkers, followOthers, HOME, loadState, sessions, state } from ".
 import { renderSidebar } from "./sidebar.js";
 import { renderHeader, select } from "./session.js";
 import { agentsBody, agentsSaved, agentsShown, agentsStateChanged, modelsArrived, renderAgentsPage, setupChanged } from "./agentspage.js";
+import { agentsOn, agentsSaid } from "./agentpick.js";
 import { renderSharedLinks } from "./share.js";
 
 // Settings' pages (docs/design/settings-v2.md): what each name opens, old names included, so a
@@ -334,6 +335,7 @@ export function bindSettings() {
 // The page's state changed while Settings is open: what it says, not what the owner wrote.
 export function settingsStateChanged() {
   agentsStateChanged();
+  generalWords();  // (Which agents are on: their names on General's lines.)
 }
 export { setupChanged };
 function startOfDay(date) {
@@ -566,9 +568,9 @@ export function fillSettings() {
   form.sandbox_writable.value = (settings.sandbox_writable || []).join("\n");
   const sandbox = state.snapshot.sandbox || {};
   const hint = !sandbox.supported
-    ? "This machine cannot run Copilot's sandbox (macOS needs sandbox-exec; Linux needs bwrap), so workers run unsandboxed."
+    ? "This computer cannot run the sandbox (macOS needs sandbox-exec; Linux needs bwrap), so workers run unsandboxed."
     : sandbox.gh_trusted === false
-      ? "To let workers use gh inside the sandbox, trust Copilot's certificate once: copilot sandbox ca create && copilot sandbox ca trust"
+      ? "To let Copilot workers use gh inside the sandbox, trust Copilot's certificate once: copilot sandbox ca create && copilot sandbox ca trust"
       : "";
   $("#sandbox-hint").textContent = hint;
   $("#sandbox-hint").hidden = !hint;
@@ -682,7 +684,7 @@ function keptOff(name, config) {
 export function mcpNote(servers) {
   return Object.entries(servers)
     .filter(([name, config]) => keptOff(name, config))
-    .map(([name, config]) => `MCP server ${name} is off (workers do not get it) until fixed: ${mcpProblem(config) || "Copilot would refuse it."}`)
+    .map(([name, config]) => `MCP server ${name} is off (workers do not get it) until fixed: ${mcpProblem(config) || "it would be refused."}`)
     .join(" ");
 }
 // What Copilot would refuse in one server's configuration, as models.py's mcp_problem says it
@@ -1439,20 +1441,32 @@ function showSlackToken() {
 // General's lines say what they do as their draft has them (docs/design/settings-v2.md §4, §7.2).
 // Ask first is worker_yolo the other way round, said as a worker's ⋯ says it; under it, always,
 // what holds either way (#ask-first-floor: 0.1.57's floor).
+// Each says the agents on by name where they differ (Codex has no sandbox Chief of Staff checked).
 const ASK_FIRST = {
-  off: "Workers act without asking, as in your own Copilot sessions.",
-  on: "Workers ask before risky commands.",
+  off: () => `Workers act without asking, as in your own ${agentsSaid()} sessions.`,
+  on: () => "Workers ask before risky commands.",
 };
 const SANDBOX = {
-  off: "Workers can change any of your files, as your own sessions can.",
-  on: "Workers can change files only in their own folders.",
+  off: () => "Workers can change any of your files, as your own sessions can.",
+  on: () => `Workers can change files only in their own folders.${agentsOn().includes("codex") ? " Codex can't run workers while it's on." : ""}`,
 };
+// Workers that read Slack: sandboxed on the agents whose sandbox Chief of Staff checked; on
+// Codex, without one, asking first.
+function slackWords() {
+  const on = agentsOn();
+  const boxed = on.filter((name) => name !== "codex");
+  if (!on.includes("codex")) return "Workers that read Slack are always sandboxed.";
+  if (!boxed.length) return "Workers that read Slack run without a sandbox on Codex, asking first.";
+  return `Workers that read Slack are always sandboxed on ${agentsSaid(boxed)}; on Codex they run without one, asking first.`;
+}
 function generalWords() {
   const form = $("#settings-form");
-  $("#ask-first-help").textContent = form.ask_first.checked ? ASK_FIRST.on : ASK_FIRST.off;
-  $("#sandbox-help").textContent = form.worker_sandbox.checked ? SANDBOX.on : SANDBOX.off;
-  // Off, its Options still apply: to the workers that read Slack, always sandboxed.
-  $("#sandbox-when-off").hidden = form.worker_sandbox.checked;
+  $("#ask-first-help").textContent = form.ask_first.checked ? ASK_FIRST.on() : ASK_FIRST.off();
+  $("#sandbox-help").textContent = form.worker_sandbox.checked ? SANDBOX.on() : SANDBOX.off();
+  $("#sandbox-slack").textContent = slackWords();
+  // Off, its Options still apply: to the workers that read Slack, sandboxed where they run
+  // (not on Codex).
+  $("#sandbox-when-off").hidden = form.worker_sandbox.checked || !agentsOn().some((name) => name !== "codex");
   $("#proactive-help").textContent = prsWords();
 }
 
