@@ -6360,7 +6360,8 @@ async def main():
                           round_answer_label, round_sidebar_flat,
                           round_composer, round_decision_steer, round_decision_ledger,
                           round_ci_not_run, round_team_v4,
-                          round_share_from_report, round_long_report):  # fmt: skip
+                          round_share_from_report, round_long_report,
+                          round_router_appears):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -13024,6 +13025,62 @@ async def round_e125(runtime, browser, failures: list[str]):
         assert not errors, errors
         await context.close()
     log("E125: an update's cleanup is one line under Handled for you, with when it was written")
+
+
+async def round_router_appears(runtime, browser, failures: list[str]):
+    """0.1.61: a page opened before Chief of Staff had a Router (a first start waiting for an
+    agent, or Claude being set up) shows the Router's chat on Home once there is one: no reload,
+    nothing empty in between, its first-start note in sight; another Router put in its place,
+    likewise."""
+    store = runtime.store
+    router = store.get("router_id")
+    note = (
+        "Chief of Staff runs on Claude (uses your Claude plan). Change it in Settings → Agents & "
+        "models."
+    )
+    made = str(uuid4())
+    store.delete("router_id")
+    runtime.publish_state()
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    try:
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        timeline = page.locator("#timeline")
+        await expect(timeline.locator("#home-welcome")).to_be_visible()
+        # A reload would lose `stayed`; the timeline left empty at any moment is counted.
+        await page.evaluate("""() => {
+            window.stayed = true;
+            window.emptied = 0;
+            const timeline = document.querySelector("#timeline");
+            new MutationObserver(() => { if (!timeline.children.length) window.emptied += 1; })
+                .observe(timeline, { childList: true });
+        }""")
+        store.create_session(made, "router", "Router", "idle")
+        store.add_message(made, "notice", note)
+        store.set("router_id", made)
+        runtime.publish_state()
+        line = timeline.get_by_text(note)
+        await expect(line).to_have_count(1, timeout=10000)
+        await expect(timeline.locator("#home-welcome")).to_have_count(0)
+        await shoot(page, "router-appears", "light", 1280, target="#application")
+        # The first Router back in its place: its chat, as it was.
+        last = [m for m in store.messages(router) if m["kind"] in {"owner", "notice"}][-1]
+        store.set("router_id", router)
+        runtime.publish_state()
+        await expect(line).to_have_count(0, timeout=10000)
+        await expect(timeline.locator(f'[data-id="{last["id"]}"]')).to_have_count(1)
+        assert await page.evaluate("window.stayed === true"), "reloaded"
+        assert await page.evaluate("window.emptied") == 0, "Home's chat was empty for a moment"
+        assert not errors, errors
+    finally:
+        await context.close()
+        store.set("router_id", router)
+        store.update_session(made, closed_at=datetime.now(UTC).isoformat())
+        runtime.publish_state()
+    log("router appears: Home shows its chat once there is one, no reload, nothing empty between")
 
 
 async def round_ci_not_run(runtime, browser, failures: list[str]):

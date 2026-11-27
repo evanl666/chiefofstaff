@@ -3,7 +3,7 @@
 import { $, api, toast, withKey } from "./dom.js";
 import { firstLine, shorten } from "./text.js";
 import { renderOthers, renderSidebar } from "./sidebar.js";
-import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, select, showDeliveries, updateDraftRecords, updateWorkingLine } from "./session.js";
+import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, select, showDeliveries, showRouterChat, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { scheduleHome } from "./inbox.js";
 import { upsertTask } from "./tasks.js";
 import { isTeamView, scheduleTeam } from "./team.js";
@@ -129,6 +129,7 @@ export const latestDelivery = (sessionId, since = 0) => (deliveries.get(sessionI
 export async function loadState(again = false) {
   const data = await api("/api/state");
   const first = !state.snapshot;
+  const router = routerId();
   state.snapshot = data;
   // Drafts gone without being sent (withdrawn, replaced) in the last days: their timeline lines
   // say so after a reload too.
@@ -159,6 +160,8 @@ export async function loadState(again = false) {
     renderConnections();
     settingsStateChanged();
   }
+  // A Router that was not there when Home's chat loaded (or another in its place): its chat.
+  if (!first && routerId() && routerId() !== router) showRouterChat().catch(() => {});
 }
 // Copilot's models, once Copilot lists them: the header's menus, and anything open that lists
 // them (Settings' menus, kept as they are) hears `models`.

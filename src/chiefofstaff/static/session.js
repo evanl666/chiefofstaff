@@ -583,6 +583,17 @@ export async function select(sessionId, { task = "" } = {}) {
     if (state.loading === loading) state.loading = null;
     if (state.selected !== sessionId) return;
   }
+  await fillChat(viewed, messages, loading);
+  if (state.selected !== sessionId) return;
+  if (task) await showTaskInTimeline(task);
+  followAnchor();
+  if (viewed && byId(viewed)?.unread) markRead(viewed);
+  if (!$("#composer").hidden) $("#composer-input").focus();
+}
+// A chat's latest messages in place of what the timeline showed, in one go (nothing empty in
+// between), with what came by event while they loaded; the view at its latest.
+async function fillChat(viewed, messages, loading) {
+  const timeline = $("#timeline");
   timeline.replaceChildren();
   state.lastId = 0;
   Object.assign(earlier, { session: viewed, first: messages[0] || null, more: false, count: null, busy: false });
@@ -594,11 +605,25 @@ export async function select(sessionId, { task = "" } = {}) {
   for (const message of loading.held.filter((message) => message.amended)) replaceMessage(message);
   scrollToBottom(true);
   if (messages.length >= PAGE) await countEarlier(viewed);
-  if (state.selected !== sessionId) return;
-  if (task) await showTaskInTimeline(task);
-  followAnchor();
-  if (viewed && byId(viewed)?.unread) markRead(viewed);
-  if (!$("#composer").hidden) $("#composer-input").focus();
+}
+// Home's chat once its Router is known, or another took its place (a page opened before Chief
+// of Staff had one: a first start waiting for an agent, or Claude being set up). Its messages
+// read first, then put where Home's welcome (or the other's chat) was: no flicker, no reload.
+export async function showRouterChat() {
+  const viewed = routerId();
+  if (state.selected !== HOME || !viewed) return;
+  const loading = { id: viewed, held: [] };
+  state.loading = loading;
+  let messages = null;
+  try {
+    messages = await api(`/api/sessions/${viewed}/messages?limit=${PAGE}`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+  if (state.loading === loading) state.loading = null;
+  if (!messages || state.selected !== HOME || routerId() !== viewed) return;
+  await fillChat(viewed, messages, loading);
+  if (state.selected === HOME && byId(viewed)?.unread) markRead(viewed);
 }
 // How many messages come before the first one shown: a way to load them, if any.
 async function countEarlier(sessionId) {

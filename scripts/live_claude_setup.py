@@ -188,13 +188,6 @@ async def shot(page, name: str):
     await page.locator("#settings-dialog").screenshot(path=shot_path(name))
 
 
-READY_ROUTER = """async () => {
-    const headers = {"X-Chief-Key": localStorage.getItem("cos.key") || ""};
-    const state = await (await fetch("/api/state", {headers, credentials: "omit"})).json();
-    return state.runtime?.state === "ready" && Boolean(state.router_id);
-}"""
-
-
 async def c0(world: World, browser, port: int):
     world.no_sdk()
     data = world.s / "data-first"
@@ -210,15 +203,12 @@ async def c0(world: World, browser, port: int):
             await page.screenshot(path=shot_path("c0-setting-up-home"))
         else:
             assert seen.startswith("Chief of Staff runs on Claude"), seen
+        await page.evaluate("window.stayed = true")
         await expect(page.locator("#home-setup")).to_have_count(0, timeout=240000)
-        # Running on Claude once set up (no restart): its Router there, the note said once. (A
-        # page open from before the Router existed shows its chat once reloaded.)
-        deadline = time.time() + 120
-        while not await page.evaluate(READY_ROUTER):
-            assert time.time() < deadline, "no Router running"
-            await asyncio.sleep(1)
-        await page.reload()
-        await expect(note).to_have_count(1, timeout=30000)
+        # Running on Claude once set up (no restart): its Router's chat on this page, opened
+        # before the Router existed (no reload), the note said once.
+        await expect(note).to_have_count(1, timeout=120000)
+        assert await page.evaluate("window.stayed === true"), "the page was reloaded"
         await page.screenshot(path=shot_path("c0-runs-on-claude"))
         await open_agents(page)
         await expect(page.locator("#agent-claude .agent-line .status")).to_have_text("Ready")
