@@ -393,6 +393,103 @@ async def test_stop_while_reconnecting_keeps_its_message_for_the_next_one(
         await runtime.stop()
 
 
+# Once settled or let rest, a cut turn is never continued again
+
+
+async def spawned(runtime, harness, instructions: str) -> str:
+    made = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title=instructions[:30],
+        instructions=instructions, why_new="t",
+    )  # fmt: skip
+    return json.loads(made.text_result_for_llm)["session_id"]
+
+
+def notes(sent: list[str]) -> int:
+    return sum(p.startswith('<message from="system" type="restart">') for p in sent)
+
+
+async def test_a_cut_turn_the_owners_message_settled_first_is_not_continued_again(
+    tmp_path, monkeypatch
+):
+    """Review (High): three workers cut short; resuming the first two is slow (each just within
+    its bound), and the owner writes to the third meanwhile: their message, after its wait,
+    settles its cut turn (once). Resumes reached it later still continued it from its old row,
+    marking its turn anew: it was sent everything again, with a second note."""
+    monkeypatch.setattr(runtime_module, "SESSION_RESUME", 2.0)
+    monkeypatch.setattr(runtime_module, "RESUME_WAIT", 0.1)  # Connected while they resume.
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    first, second, third = [await spawned(runtime, harness, f"Port module {n}") for n in "ABC"]
+    await settle(runtime)
+    await runtime.stop()
+    client = harness.client
+    resume = client.resume_session
+
+    async def slow(session_id, **options):
+        if session_id in {first, second}:
+            await asyncio.sleep(1.5)
+        return await resume(session_id, **options)
+
+    client.resume_session = slow
+    again = Harness(harness.store.directory, client=client)
+    runtime = again.runtime
+    runtime.mark_resuming()
+    try:
+        await connected(again)
+        await runtime.owner_send(third, "Also port module D.")  # Waits its 2 s, then goes.
+        await until(lambda: runtime.resume_job.done(), 30)
+        await settle(runtime)
+        sent = again.session(third).sent
+        assert given('title="Port module C"', sent) == 2, "its task once more, not twice"
+        assert given("Also port module D.", sent) == 1
+        assert notes(sent) == 1, "one note"
+        for worker in (first, second):
+            assert notes(again.session(worker).sent) == 1
+    finally:
+        await runtime.stop()
+
+
+async def test_a_cut_turn_let_rest_while_others_resume_is_not_continued(tmp_path):
+    """Review (High): Stop on a worker reconnecting while another's resume is held: it rests,
+    what it was on held. The resume reaching it later sent it its task and a note, working
+    again."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    first = await spawned(runtime, harness, "Port module A")
+    second = await spawned(runtime, harness, "Port module B")
+    await settle(runtime)
+    await runtime.stop()
+    client = harness.client
+    resume, held = client.resume_session, asyncio.Event()
+
+    async def holding(session_id, **options):
+        if session_id == first:
+            await held.wait()
+        return await resume(session_id, **options)
+
+    client.resume_session = holding
+    again = Harness(harness.store.directory, client=client)
+    runtime = again.runtime
+    runtime.mark_resuming()
+    try:
+        await connected(again)
+        before = len(again.session(second).sent)
+        await runtime.workers.interrupt(second)
+        assert again.store.session(second)["status"] == "idle"
+        held.set()
+        await until(lambda: runtime.resume_job.done(), 30)
+        await settle(runtime)
+        assert len(again.session(second).sent) == before, "nothing sent: it rests"
+        assert again.store.session(second)["status"] == "idle"
+        assert runtime.view(again.store.session(second))["status"] == "idle"
+        task = [m for m in again.store.prompts(second) if "Port module B" in m["text"]][-1]
+        assert delivery(runtime, task) == "held", "for its next message"
+        assert notes(again.session(first).sent) == 1
+    finally:
+        held.set()
+        await runtime.stop()
+
+
 # The stop ends the agents' processes
 
 

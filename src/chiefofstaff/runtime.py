@@ -2009,13 +2009,13 @@ class Runtime:
     def gate_resumes(self, agent: str) -> list[str]:
         """The agent's sessions to resume now (to_resume), each with a gate that what is sent to
         it waits at (session_for) until resume_working is done with it; those at work shown as
-        reconnecting until they go on (reconnecting). Returns them."""
+        reconnecting until they go on (reconnecting), their turns cut short now. Returns them."""
         ids = self.to_resume(agent)
         for session_id in ids:
             gate = self.resumes.get(session_id)
             if gate is None or gate.is_set():
                 self.resumes[session_id] = asyncio.Event()
-        self.mark_resuming(agent, ids)
+        self.mark_resuming(agent, ids, self.restart_words(agent))
         return ids
 
     def restart_words(self, agent: str, own: bool = False) -> str:
@@ -2025,10 +2025,16 @@ class Runtime:
         named = backend.capabilities.name if backend and agent != COPILOT_AGENT else "Copilot"
         return f"{named} was restarted" if connections or own else "Chief of Staff restarted"
 
-    def mark_resuming(self, agent: str | None = None, ids: list[str] | None = None):
+    def mark_resuming(
+        self,
+        agent: str | None = None,
+        ids: list[str] | None = None,
+        why: str = "Chief of Staff restarted",
+    ):
         """The sessions at work on an agent (`agent`; else on any; `ids`: of these) as Chief of
         Staff stopped or that agent did: not resumed yet, shown as reconnecting (view) until
-        they are."""
+        they are. A turn of one still at work was cut short (why): what it was given is marked
+        now (cut_short), before anything sent to it meanwhile can settle it (session_for)."""
         for row in self.store.open_sessions():
             if ids is not None and row["id"] not in ids:
                 continue
@@ -2036,6 +2042,8 @@ class Runtime:
                 continue
             on = self.agent(row["id"])
             if agent is None or on == agent:
+                if row["status"] == "working":
+                    self.cut_short(row["id"], why)
                 self.reconnecting.setdefault(row["id"], on)
 
     async def check_agent(self, agent: str, backend: Any):
@@ -2321,6 +2329,8 @@ class Runtime:
                 "send it a message to try again.",
             )
             return
+        if row["status"] == "working":
+            self.cut_short(worker, self.restart_words(agent, own=True))
         try:
             await self.reconcile_sends(agent, only=[worker])
             await self.resume_working(agent, only=[worker])  # Failed with why if it can't.
@@ -10204,6 +10214,7 @@ class Runtime:
         if (trying := self.resume_tries.pop(session_id, None)) and not trying.done():
             trying.cancel()
         self.resume_over(session_id)
+        self.resumed(session_id)  # What is sent to it next does not wait for the others.
         if (row := self.store.find_session(session_id)) and row["status"] == "working":
             self.update_session(session_id, status="idle", activity="")
 
@@ -10212,6 +10223,9 @@ class Runtime:
         given up, it is tried again later (resume_given_up). What waits for it goes on either way
         (resumed)."""
         session_id = row["id"]
+        if self.delivery.cut_record(session_id) is None and session_id not in self.reconnecting:
+            self.resumed(session_id)  # Settled meanwhile: what it was given went, or waits.
+            return
         self.reconnecting.setdefault(session_id, self.agent(session_id))
         token = RESUMING.set(True)
         try:
@@ -10271,8 +10285,18 @@ class Runtime:
         mine = set(self.on_agent(agent, [row["id"] for row in rows]))
         if only is not None:
             mine &= set(only)
+        if at_work is None:
+            # Not marked as its agent started (gate_resumes): its turn cut short now, before
+            # anything is awaited.
+            for row in rows:
+                if row["id"] in mine and row["status"] == "working":
+                    self.cut_short(row["id"], what)
         for row in rows:
             if row["id"] not in mine:
+                continue
+            # As it is now, not as it was: each before it waited for those before it, meanwhile
+            # settled (sent with the owner's message: session_for), or stopped (drop_resume).
+            if not (row := self.store.find_session(row["id"])) or row["closed_at"]:
                 continue
             if self.shepherd.marked(row["id"]):
                 # Left in a shepherd step: never continued in its normal profile.
@@ -10291,6 +10315,9 @@ class Runtime:
                 continue
             if at_work is not None and row["id"] not in at_work:
                 continue  # Its turn began since: at work, not cut short.
+            if not self.store.get(f"cutshort:{row['id']}") and row["id"] not in self.reconnecting:
+                self.resumed(row["id"])  # Settled meanwhile: never given its turn again.
+                continue
             if agent == COPILOT_AGENT and self.too_large(row["id"]):
                 self.resume_over(row["id"])
                 self.store.delete(f"cutshort:{row['id']}")  # (Its fresh one is told.)
@@ -10328,20 +10355,27 @@ class Runtime:
         """resume_working's for one session cut short at work (cut_short): opened again, it gets
         what it had not finished, once, with a note (Delivery.settle_cut); its own record showing
         it finished all of it, its turn's end is taken now. True once done (failed with why when
-        it can't be resumed); cancelled when its bound runs out."""
+        it can't be resumed); cancelled when its bound runs out. Its record is made as it is cut
+        short (mark_resuming, resume_working), never here: one settled meanwhile (sent with the
+        owner's message, stopped) is not given it again. One still reconnecting without one (a
+        try cut off as it sent it) gets what was not sent of it."""
         session_id = row["id"]
-        self.cut_short(session_id, what)
-        record = self.delivery.cut_record(session_id) or {}
-        upto = int(record.get("upto") or 0)
-        since = self.store.prompts(session_id, after=int(record.get("after") or 0))
-        given = [message for message in since if message["id"] <= upto]
-        # What it goes on with: the tasks of what it was given are taken up again.
-        if row["role"] == WORKER and (
-            named := [task for m in given for task in tasks_named(m["meta"]["prompt"])]
+        record = self.delivery.cut_record(session_id)
+        if record is None and not (
+            session_id in self.reconnecting and self.delivery.has_unsent(session_id)
         ):
-            self.took_up(session_id, named, switch=False)
-        if any(message["kind"] == "owner" for message in since):
-            self.states[session_id].owner_turn = True
+            return True
+        if record is not None:
+            upto = int(record.get("upto") or 0)
+            since = self.store.prompts(session_id, after=int(record.get("after") or 0))
+            given = [message for message in since if message["id"] <= upto]
+            # What it goes on with: the tasks of what it was given are taken up again.
+            if row["role"] == WORKER and (
+                named := [task for m in given for task in tasks_named(m["meta"]["prompt"])]
+            ):
+                self.took_up(session_id, named, switch=False)
+            if any(message["kind"] == "owner" for message in since):
+                self.states[session_id].owner_turn = True
         try:
             try:
                 session = await self.session_for(session_id)
@@ -10350,6 +10384,10 @@ class Runtime:
                 # cut short on kept for when they say to use them (settings_go_on).
                 self.states[session_id].owner_turn = False
                 await self.settings_stop(session_id)
+                return True
+            if record is None:
+                if session_id in self.reconnecting and self.delivery.has_unsent(session_id):
+                    await self.delivery.flush(session_id, session)
                 return True
             async with self.states[session_id].sending:
                 settled = await self.delivery.settle_cut(session_id, session)
