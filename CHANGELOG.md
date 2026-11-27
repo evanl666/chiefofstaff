@@ -17,11 +17,13 @@ again once it is back, and it says it is reconnecting meanwhile, never that it i
   to continue.*): your message to the Router, the Router's to a worker, a report to the Router.
   What its agent's own record shows it finished (Codex's turn completed, Copilot's or Claude's
   final answer) is not given again. Your message says *Waiting to be sent* until it goes. One
-  whose agent can't start again does not go back to that turn by itself later.
+  whose agent is turned off meanwhile fails, saying so, and does not go back to that turn by
+  itself later.
 - **Reconnecting, not thinking.** Until it is resumed, a session says *Reconnecting to Codex…*
-  (or its agent's name) on Home and in its chat, with no *Stop*. A resume given up after three
-  minutes is not the end: it is tried again by itself, waiting longer each time, and *Retry*
-  tries at once; a worker's *Stop: don't go on* (**⋯**) lets it rest, what it was given waiting
+  (or its agent's name) on Home and in its chat, with no *Stop*, also while its agent can't
+  start yet (not found while it updates, hanging, signed out): it no longer fails then. A resume
+  given up after three minutes is not the end: it is tried again by itself, waiting longer each
+  time, and *Retry* tries at once; a worker's *Stop: don't go on* (**⋯**) lets it rest, what it was given waiting
   for its next message.
 - **Stopping is shorter with several agents on.** Each agent's processes end before Chief of
   Staff does, all together (one agent after another before).

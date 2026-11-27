@@ -12,6 +12,7 @@ placing it), stayed "Thinking…" with no turn, and the message was never answer
 
 import asyncio
 import json
+import os
 import sys
 import time
 from types import SimpleNamespace
@@ -20,7 +21,7 @@ import pytest
 from conftest import FakeSession, Harness, call_tool, settle
 from test_roles import PASSED, saved, until
 
-from chiefofstaff import backend_claude, backend_codex
+from chiefofstaff import agents, backend_claude, backend_codex
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff.backend import process_table, running
 from chiefofstaff.delivery import answered
@@ -493,12 +494,13 @@ async def test_a_cut_turn_let_rest_while_others_resume_is_not_continued(tmp_path
 
 @pytest.mark.parametrize("asked", [False, True])
 async def test_a_session_failed_after_a_restart_does_not_go_on_by_itself_later(
-    tmp_path, codex_log, monkeypatch, asked
+    tmp_path, codex_log, asked
 ):
-    """Review (Medium): Codex could not start after the restart, so its worker at work failed;
-    its cut turn was kept all the same, and the next time Codex started, it was sent its task
-    again and went back to work by itself (its task maybe another worker's by then). One that
-    had asked the owner as its turn went on is not failed: it waits on, its turn over."""
+    """Review (Medium): Codex was turned off as Chief of Staff restarted, so its worker at work
+    failed, saying why; its cut turn was kept all the same, and the next time Codex started, it
+    was sent its task again and went back to work by itself (its task maybe another worker's by
+    then). One that had asked the owner as its turn went on is not failed: it waits on, its
+    turn over."""
     harness = Harness(tmp_path / "data")
     runtime = await harness.connect()
     await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
@@ -508,25 +510,58 @@ async def test_a_session_failed_after_a_restart_does_not_go_on_by_itself_later(
     if asked:
         await call_tool(runtime, "ask_decision", worker, question="Port 8080 or 9090?")
     await runtime.stop()
-    start = backend_codex.CodexAgent.start
-
-    async def refused(self):
-        raise RuntimeError("Codex is not signed in: sign in from Settings → Agents & models.")
-
-    monkeypatch.setattr(backend_codex.CodexAgent, "start", refused)
+    agents.save(harness.store, agents.planned(harness.store, {"codex": {"enabled": False}}))
     again = await restarted(harness)
     runtime = again.runtime
     status = "waiting" if asked else "failed"
     try:
         assert again.store.session(worker)["status"] == status
+        if not asked:
+            said = [m["text"] for m in again.store.messages(worker) if m["kind"] == "error"]
+            assert any("Codex is turned off" in text for text in said), said
         turns = len(started_with(codex_log, thread))
-        monkeypatch.setattr(backend_codex.CodexAgent, "start", start)
-        await runtime.connect_agent("codex")  # Signed in again: Codex starts.
+        await saved(runtime, {"codex": {"enabled": True}})  # On again: Codex starts.
+        await runtime.connect_agent("codex")
         await until(lambda: (job := runtime.agents["codex"].resuming) and job.done(), 30)
         await settle(runtime)
         assert len(started_with(codex_log, thread)) == turns, "not sent its task again"
         assert again.store.session(worker)["status"] == status
         assert not again.store.get(f"cutshort:{worker}")
+    finally:
+        await runtime.stop()
+
+
+async def test_a_cut_short_worker_waits_reconnecting_while_its_agent_cannot_start_yet(
+    tmp_path, codex_log, monkeypatch
+):
+    """QA (R1): Codex not found as Chief of Staff started again (its update under way, a PATH
+    that changed), a worker cut short by the restart failed at once ("Could not resume after
+    restart"), the Router told. It stays reconnecting, with Retry, and goes on, once, as soon
+    as Codex can start."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
+    worker = await spawned(runtime, harness, "Wait 3 s. Then report done: Ported.")
+    await until(lambda: (s := runtime.states.handle(worker)) and s.turn, 30)
+    thread = runtime.copilot_id(worker)
+    await runtime.stop()
+    path, fake = os.environ["PATH"], str(tmp_path / "fake")
+    monkeypatch.setenv("PATH", os.pathsep.join(p for p in path.split(os.pathsep) if p != fake))
+    again = await restarted(harness)
+    runtime = again.runtime
+    try:
+        await settle(runtime)
+        row = again.store.session(worker)
+        shown = runtime.view(row)
+        assert row["status"] == "working", row["activity"]
+        assert shown["status"] == "resuming" and shown["retry"], shown
+        told = [m for m in again.store.messages(harness.router_id) if "Could not" in m["text"]]
+        assert not told, told
+        monkeypatch.setenv("PATH", path)  # Codex is back.
+        runtime.retry_resume(worker)
+        await until(lambda: again.store.session(worker)["status"] == "done", 30)
+        assert given("Wait 3 s. Then report done", started_with(codex_log, thread)) == 2
+        assert worker not in runtime.reconnecting
     finally:
         await runtime.stop()
 

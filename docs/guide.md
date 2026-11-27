@@ -2032,8 +2032,9 @@ agent has it open again: your message to the Router, the Router's to a worker, a
 Router, with one line in its chat (*Chief of Staff restarted; asked the session to continue.*);
 what its agent's own record shows it finished is not given again. Until then it says
 *Reconnecting to Codex…* (or its agent's name), never *Thinking…*, and what it was given waits to
-be sent; a reconnect that takes long is tried again by itself, waiting longer each time, and
-*Retry* tries at once. A worker's *Stop: don't go on* (**⋯**) lets it rest instead: what it was
+be sent; a reconnect that takes long, or an agent that can't start yet, is tried again by itself,
+waiting longer each time, and *Retry* tries at once (an agent turned off fails its sessions at
+work, saying so). A worker's *Stop: don't go on* (**⋯**) lets it rest instead: what it was
 given waits for its next message. Installed another way (pip, pipx), or on Windows, the line says the
 command to run. Plain `uvx chiefofstaff` runs the version uv cached the first time, however old:
 start it with `uvx chiefofstaff@latest`. Chief of Staff reads its own page on PyPI for this, at
