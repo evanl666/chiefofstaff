@@ -26,7 +26,7 @@
     <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/hero.gif" width="900" alt="One request becomes a team on Copilot, Codex and Claude; one worker tells another what it changed; one decision card comes to you; the result is accepted on its receipts">
   </picture>
   <br>
-  <sub>The real app in demo mode, 24 seconds. <a href="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/hero.mp4">Full quality (MP4)</a></sub>
+  <sub>The real app in demo mode, 21 seconds. <a href="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/hero.mp4">Full quality (MP4)</a></sub>
 </p>
 
 ## Try it in 10 seconds

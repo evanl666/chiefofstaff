@@ -3,7 +3,7 @@
 ## Unreleased
 
 - **A new README, a short guide, and the full reference.** The README (on PyPI too) shows the
-  real app in a 24-second clip and says what Chief of Staff does in eight lines. The guide is a
+  real app in a 21-second clip and says what Chief of Staff does in eight lines. The guide is a
   quarter of its length: quickstart, concepts, daily use, the three agents, settings, safety,
   sharing, troubleshooting and FAQ. Everything it no longer spells out is in
   [docs/reference.md](docs/reference.md), nothing dropped, with the README's install notes for

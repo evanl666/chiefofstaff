@@ -25,7 +25,7 @@
     <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/hero.gif" width="900" alt="一句话变成一个团队，分别跑在 Copilot、Codex 和 Claude 上；一个 worker 告诉另一个它改了什么；只有一张决定卡片来找你；结果凭证据验收">
   </picture>
   <br>
-  <sub>真实界面的 demo 模式，24 秒。<a href="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/hero.mp4">高清版（MP4）</a></sub>
+  <sub>真实界面的 demo 模式，21 秒。<a href="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/hero.mp4">高清版（MP4）</a></sub>
 </p>
 
 ## 10 秒上手
