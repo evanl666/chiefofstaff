@@ -77,9 +77,11 @@ INSTALLS = (
 )
 EXIT = re.compile(r"COS-EXIT-(-?\d+)\s*$", re.MULTILINE)
 # What a step that failed for want of the network or of what its sandbox holds says: no
-# verdict on its code (a test that downloads, a tool that writes outside its caches).
+# verdict on its code (a test that downloads, a tool that writes outside its caches, uv before
+# 0.9.29, which crashes in Copilot's macOS sandbox: caches.UV_FIXED).
 UNREACHED = re.compile(
     r"Operation not permitted|sandbox is active and blocked|network connectivity is disabled"
+    r"|Attempted to create a NULL object"
     r"|nodename nor servname|Name or service not known|Temporary failure in name resolution"
     r"|Could not resolve host|getaddrinfo|ENOTFOUND|EAI_AGAIN|Network is unreachable",
     re.IGNORECASE,
