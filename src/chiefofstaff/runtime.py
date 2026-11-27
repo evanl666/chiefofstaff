@@ -2567,7 +2567,7 @@ class Runtime:
         card = self.add_message(
             router or row["id"],
             "notice",
-            f"{label} waits for {name}. {needs}. What it is sent is kept until then.",
+            f"{label} waits for {name}. {needs.rstrip('. ')}. What it is sent is kept until then.",
             {
                 "role_wait": role,
                 "agent": wanted,

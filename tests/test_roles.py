@@ -367,6 +367,26 @@ async def test_a_plan_limit_mid_turn_moves_the_router_to_copilot_with_the_messag
         await runtime.stop()
 
 
+async def test_a_plan_limit_with_ask_me_says_why_without_a_doubled_full_stop(tmp_path, codex_log):
+    """Ask me, and Codex's plan limit: the Router's card says why in one sentence (the reason
+    ends with its own full stop: "resets 10:02 PM.. What it is sent" read twice)."""
+    harness, runtime = await started(tmp_path)
+    router = harness.router_id
+    try:
+        await saved(
+            runtime,
+            {"codex": {"enabled": True}, "roles": {"router": "codex"},
+             "role_unavailable": {"router": "ask"}},
+        )  # fmt: skip
+        await runtime.owner_send(router, "Hit the usage limit, then plan the release")
+        await until(lambda: bool(runtime.role_wait(ROUTER)), 30)
+        (card,) = [m for m in harness.store.messages(router) if m["meta"].get("role_wait")]
+        assert "Codex can't run it: Codex's 5-hour limit is used up" in card["text"], card["text"]
+        assert ".." not in card["text"], card["text"]
+    finally:
+        await runtime.stop()
+
+
 # The Router on Claude
 
 
