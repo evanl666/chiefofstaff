@@ -11,16 +11,17 @@ message was never answered.
       again once it is back (one line says so), and answers it; the owner's message handled,
       sent by the owner once; no error line; no "given up" in the log
   X1  the Router on Codex (the owner's own Codex and sign-in; one short question, twice at
-      most: Codex's plan is shared): the same, Codex's thread resumed (the same one), in
+      most: Codex's plan is shared): the same, its own Codex thread resumed (no fresh one), in
       seconds
 
-A scenario whose answer came before the restart (the model was quick) is tried once more with
-another question. Copilot signs in with COPILOT_GITHUB_TOKEN, or the gh CLI's token when that is
-not set, in a Copilot home of its own; the Router's model is LIVE_RESTART_MODEL (LIVE_COPILOT_
-MODEL, else claude-haiku-5.5). Codex's model is its default, or LIVE_CODEX_MODEL's; the owner's
-Codex files are recorded before and checked after (scripts/owner_files.py). Ports 21560-21561
-(LIVE_RESTART_PORT moves them). Folders are made by `tempfile` (set TMPDIR to keep them
-elsewhere). About 3 minutes a scenario.
+A scenario whose answer came before the restart (a quick model) is tried again with another
+question, restarting sooner (1 s, then 0.5 s). Copilot signs in with COPILOT_GITHUB_TOKEN, or the
+gh CLI's token when that is not set, in a Copilot home of its own; the Router's model is
+LIVE_RESTART_MODEL (LIVE_COPILOT_MODEL, else claude-haiku-5.5). Codex's model is its default, or
+LIVE_CODEX_MODEL's; the owner's Codex files are recorded before and checked after
+(scripts/owner_files.py). The stop ends the agents' processes Chief of Staff ran before it exits
+(checked). Ports 21560-21561 (LIVE_RESTART_PORT moves them). Folders are made by `tempfile` (set
+TMPDIR to keep them elsewhere). About 3 minutes a scenario.
 
     nice -n 15 uv run python scripts/live_restart.py [C1] [X1]
 """
@@ -35,7 +36,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(1, str(Path(__file__).parent.parent / "tests"))
 import live_e2e
+from agent_paths import without_agents
 from live_e2e import App, log, transcript, wait_for
 
 BASE_PORT = int(os.environ.get("LIVE_RESTART_PORT", "21560"))
@@ -44,12 +47,16 @@ MODEL = os.environ.get(
 )
 CODEX_MODEL = os.environ.get("LIVE_CODEX_MODEL", "")
 OWNER_FILES = Path(__file__).parent / "owner_files.py"
-# Questions the Router answers itself (no worker), long enough that its turn is still running
-# 2 s after they are sent.
+# Questions the Router answers itself (no worker), long enough that its turn may still run 2 s
+# after they are sent; each next try restarts sooner (a quick model answers in 2 s).
 QUESTIONS = [
-    "Without starting a worker: in three short sentences, what does a chief of staff do for a "
-    "busy engineer?",
-    "Without starting a worker: in three short sentences, why do teams write down decisions?",
+    (
+        2.0,
+        "Without starting a worker, in about 200 words: what does a chief of staff do for a "
+        "busy engineer?",
+    ),
+    (1.0, "Without starting a worker, in about 200 words: why do teams write down decisions?"),
+    (0.5, "Without starting a worker, in about 200 words: how should a team run a postmortem?"),
 ]
 RESTARTED = "Chief of Staff restarted; asked the session to continue."
 
@@ -59,13 +66,46 @@ def restart_port(port: int):
     live_e2e.BASE = f"http://127.0.0.1:{port}"
 
 
-async def stop_gently(app: App):
-    """Stopped as the owner's service manager (or an update) stops it: SIGTERM."""
+def agent_processes(root: int) -> dict[int, str]:
+    """The agents' processes Chief of Staff (`root`) runs: each supervisor and what it runs."""
+    listed = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, check=True
+    ).stdout
+    rows = {}
+    for line in listed.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows[int(parts[0])] = (int(parts[1]), parts[2])
+    found, frontier = set(), {root}
+    while frontier:
+        frontier = {pid for pid, (parent, _) in rows.items() if parent in frontier} - found
+        found |= frontier
+    agents = ("chiefofstaff.agentrun", "codex", "claude", "copilot")
+    return {pid: rows[pid][1] for pid in found if any(word in rows[pid][1] for word in agents)}
+
+
+def running(pids: dict[int, str]) -> list[int]:
+    listed = subprocess.run(
+        ["ps", "-axo", "pid=,command="], capture_output=True, text=True, check=True
+    ).stdout
+    now = {int(p): c for p, c in (line.split(None, 1) for line in listed.splitlines() if line)}
+    return [pid for pid, command in pids.items() if now.get(pid) == command]
+
+
+async def stop_gently(app: App) -> float:
+    """Stopped as the owner's service manager (or an update) stops it: SIGTERM. Every agent's
+    process it ran has ended by the time it has (else the next start may find its session
+    held). How long it took."""
+    began = time.monotonic()
     if app.http:
         await app.http.aclose()
     if app.process and app.process.poll() is None:
+        theirs = agent_processes(app.process.pid)
         app.process.send_signal(signal.SIGTERM)
         await asyncio.to_thread(app.process.wait, 60)
+        left = running(theirs)
+        assert not left, f"agents' processes still running after the stop: {left}"
+    return time.monotonic() - began
 
 
 async def ready(app: App, name: str):
@@ -86,21 +126,21 @@ async def messages(app: App, session: str, after: int = 0) -> list[dict]:
 
 async def restart_mid_turn(app: App, name: str, agent: str) -> str:
     """The owner's message, a restart 2 s later, and its answer after it; returns the answer."""
-    for attempt, question in enumerate(QUESTIONS):
+    tries = QUESTIONS[:2] if agent == "codex" else QUESTIONS  # (Codex's plan is shared.)
+    for attempt, (delay, question) in enumerate(tries):
         before = await router(app)
         session = before["id"]
         mark = max((m["id"] for m in await messages(app, session)), default=0)
         await app.post(f"/api/sessions/{session}/messages", {"text": question})
-        await asyncio.sleep(2)
+        await asyncio.sleep(delay)
         said = [m for m in await messages(app, session, mark) if m["kind"] == "assistant"]
-        began = time.monotonic()
-        await stop_gently(app)
-        log(f"{name}: stopped {time.monotonic() - began:.1f} s after its message was sent + 2 s")
+        took = await stop_gently(app)
+        log(f"{name}: stopped in {took:.1f} s ({delay:g} s after the message), and its agents")
         if said:
-            log(f"{name}: answered before the restart (the model was quick): once more")
+            log(f"{name}: answered before the restart (a quick model): again, sooner")
             await app.start()
             await ready(app, name)
-            if attempt == len(QUESTIONS) - 1:
+            if attempt == len(tries) - 1:
                 raise AssertionError("the Router answered before every restart")
             continue
         began = time.monotonic()
@@ -119,6 +159,7 @@ async def restart_mid_turn(app: App, name: str, agent: str) -> str:
 
         found = await wait_for(f"{name}: the Router answers after the restart", answered, 300, app)
         took = time.monotonic() - began
+        assert took < 150, f"resumed in seconds, not after a resume given up: {took:.0f} s"
         asked = [m for m in found if m["kind"] == "owner"]
         assert [m["text"] for m in asked] == [question], transcript(found)
         assert asked[0]["delivery"] == "processed", asked[0]["delivery"]
@@ -152,6 +193,10 @@ async def scenario(name: str, root: Path, token: str) -> str:
     os.environ["COPILOT_HOME"] = str(home)  # (Chief of Staff's own Copilot, signed in by token.)
     data = live_e2e.data_dir(root / name)
     env = {"COPILOT_GITHUB_TOKEN": token}
+    if agent == "codex":
+        # The owner's Codex on the PATH, and not Claude Code (never run here).
+        hidden = frozenset({"claude"})
+        env["PATH"] = without_agents(os.environ.get("PATH", ""), root / name / "path", hidden)
     app = App(data, root / f"{name}.log", env, agents=agent != "copilot")
     try:
         await app.start()
