@@ -23,6 +23,7 @@ except where that section says otherwise.
 - [How you work: learned, and kept up to date](#how-you-work-learned-and-kept-up-to-date)
 - [Checks learned from mistakes](#checks-learned-from-mistakes)
 - [Focus](#focus)
+- [Autopilot](#autopilot)
 - [Slack](#slack)
 - [GitHub reviews](#github-reviews)
 - [Prepared for you: keeping your PRs moving](#prepared-for-you-keeping-your-prs-moving)
@@ -582,19 +583,24 @@ git in the worker's repository for this). Their other settings there, and all of
 sandbox, their commands can change: the same lines then ask you. In your home folder, agent
 homes (`~/.codex`, `~/.claude`, `~/.copilot`) are yours and are never read as its settings.
 
-With the **sandbox** off (the default), a worker's commands run as you, on any agent (Copilot, Codex
-or Claude): they can change or delete any file you can, outside its folders too (Chief of Staff
-refuses only a few commands outright, such as `rm -r` of your home or the root, a push to the
-default branch or `sudo`). Turn the sandbox on to prevent that. With the **sandbox** on (Settings;
-always for workers that read Slack, except on Codex), workers' shell commands can write only to
-their workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
-`HEAD` and index, nor files git would read in their place, such as `.git/commondir`), never see your
-GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot sandbox
-ca trust` once so `gh` works inside Copilot's sandbox; Settings tells you when it is needed. Codex
-can't run workers while the sandbox is on (its sandbox hasn't passed Chief of Staff's checks yet).
-The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed. On Linux
-the sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for the git files
-that change what git runs (a `.git/commondir`, a `hooks/` folder where there was none, a
+With the **sandbox** off (the default), a worker's commands run as you, on any agent (Copilot,
+Codex or Claude): they can change or delete any file you can, outside its folders too (Chief of
+Staff refuses only a few commands outright, such as `rm -r` of your home or the root, a push to
+the default branch or `sudo`). Turn the sandbox on to prevent that. With the **sandbox** on
+(Settings; always for workers that read Slack, except on Codex), workers' shell commands can write
+only to their workspace, checkouts and the repositories' `.git` (not their hooks, config, or your
+checkout's `HEAD` and index, nor files git would read in their place, such as `.git/commondir`),
+never see your GitHub token, and cannot read `~/.ssh`. On macOS, `gh` works inside Copilot's
+sandbox once Copilot's certificate is trusted: where it isn't, Settings → Workers says so with
+*Trust the sandbox's certificate*, which shows what it runs (`copilot sandbox ca create`, then
+`copilot sandbox ca trust`; one that must change first, `rotate`), asks first, and runs them for
+you: macOS asks for your password to add it to your login keychain. If it fails it says why, with
+*Try again*, and the commands to run yourself under *Details*. Claude Code's sandbox needs no
+certificate for `gh`. Codex can't run workers while the sandbox is on (its sandbox hasn't passed
+Chief of Staff's checks yet).
+The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed. On Linux the
+sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for the git files that
+change what git runs (a `.git/commondir`, a `hooks/` folder where there was none, a
 `config.worktree` where the repository reads one) after each of a worker's turns and before it
 runs git itself. If one appeared, the worker waits, Chief of Staff runs no git in that repository,
 and the timeline says "A git file appeared in .git (commondir). If you made it, use it." **Use
@@ -667,8 +673,8 @@ that start together.
 
 Some tools behave differently inside the sandbox on macOS: Playwright's Chromium runs in a single
 process (the sandbox refuses the others it would start; Firefox, WebKit and full Chrome can't
-start there), Java reaches github.com only if you have run `copilot sandbox ca create` (Copilot's
-proxy answers for it), and uv before 0.9.29 crashes there (it reads macOS's proxy settings from a
+start there), Java reaches github.com only once Copilot's certificate is trusted (*Trust the
+sandbox's certificate*, Settings → Workers; Copilot's proxy answers for it), and uv before 0.9.29 crashes there (it reads macOS's proxy settings from a
 service the sandbox closes; `brew upgrade uv` or `uv self update`): workers are told so, and
 report it rather than retry.
 
@@ -1086,6 +1092,88 @@ you get one summary: the messages and PR activity that came in, replies drafted 
 replaced or withdrawn since), tasks finished, and how many things need you, counted as
 *Needs you* counts them.
 
+## Autopilot
+
+Off by default. Tick *Autopilot* in Settings → General, under *On its own*; its *Options* hold
+*Credits a day* (100 by default), *Acts in* (*All your projects*, or *Only these…*: one
+`owner/name` per line), *While Autopilot is on, workers ask first* (on), and *Autopilot record*
+once it has run.
+
+**Turning it on.** Home's *Autopilot* menu: *For 2 hours*, *Until 9:00 AM* (your daily summary's
+time) or *Until I turn it off*. Or write one of its commands to the Router, exactly:
+`autopilot on` (2 hours, or until that morning time if it comes sooner), `autopilot until 5pm`,
+`autopilot for 3h`, `autopilot until I turn it off`, `autopilot off` or `stop autopilot`; in
+Chinese `开 autopilot`, `开 autopilot 到下午5点`, `autopilot 开两个小时`, `关 autopilot`. Chief of
+Staff answers it itself, saying until when; anything else, a near miss too, goes to the Router as
+any message. While it runs, Home's header says *Autopilot · until 6:00 PM · 4 done · 2 waiting
+for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
+
+**What it does.** It adds no capability: it changes who answers. While it is on:
+
+- A worker's question or decision card is answered only from what you said yourself: a message
+  you typed in the page (in that worker's chat, or to the Router when it gave that very message
+  to the task), your answer to a decision card in the page (your answer, not the card's
+  question, which is the worker's), or a habit you wrote or kept in the page. Each answer quotes
+  a whole sentence or clause of yours that says it, in the worker's chat too (*Autopilot
+  answered: Postgres, because you said “Postgres for v1”*): one that names the option it chose
+  (and no other) or holds its whole answer, from words of yours where nothing says no, in
+  English or Chinese (*Redis? No.* never means Redis; *Use Postgres, not Redis* waits for you).
+  It decides where the Router runs, with the Router's model and effort there (Settings →
+  *Agents & models*, *Who does the work*). What workers note, what the Router writes or decides,
+  files in a repository, away answers, Send to Chief notes and Slack messages are never your
+  word.
+- It answers a question as you would, in the one place it was asked: Chief of Staff files every
+  ask under the choice it is about, and Autopilot's answer settles it there, never kept as your
+  decision. A choice more than one worker asked (or the Router noted too) waits for you, so that
+  your one answer reaches them all (*Set aside: others asked the same choice…*).
+- What nothing you said settles waits for you under *Needs you*, saying why (*Set aside: nothing
+  you said settles it*), as does a recommendation alone, any permission (pushing, publishing,
+  deleting, merging, commenting…), and anything irreversible or outside this computer (a
+  migration, a release).
+- A finished result is accepted only after its own run of the task's checks: at the exact
+  commit, in a private copy, offline (no network, no credentials, no keychain), with only the
+  dependencies already there (the package caches workers share, filled from yours), the tree
+  checked before and after. Uncommitted work, a weakened test or checks that reach outside the
+  copy are left for you; where this computer can't run them offline (a test that downloads),
+  results wait for you (*Couldn't verify offline: it waits for you*); uv before 0.9.29 crashes
+  in the macOS sandbox, and its card says so (*Couldn't verify: uv 0.9.21 crashes in the
+  sandbox; uv 0.9.29 or newer fixes it*). The first time on a new Copilot version it waits
+  for that version's safety check first. A result it accepted says *Accepted by Autopilot*
+  (*Why* opens its entry), in its worker's chat too, and is never said to be yours. What waited
+  on it starts; a stalled worker is asked once more where it stands.
+- Nothing goes out in your name: no Slack reply, PR, comment or merge. What a turn it continued
+  would send (a reply you handed over, a note to another session) waits for you as a card.
+
+**Workers ask first.** On (the default), every turn Autopilot continues runs with Ask first,
+whatever your setting for workers, and keeps it until that turn ends, after Stop too; so does
+every turn its work leads to (a message the Router sends from it, a note from another worker).
+A Codex or Claude worker is reopened in Ask first before any of it reaches it, never mid-turn
+(it waits for that turn to end). Your own turns are as you set them. Off, workers keep your
+usual settings. Writing to a worker yourself in the page hands it back to you.
+
+**Stop** stops it at once: nothing it queued goes out, the turns it continued (and the Router's,
+when one carries its work) are stopped, their tasks waiting with *Go on*, and what it was still
+deciding or checking is yours (a card it was judging is drawn for you, a result stays to
+review; a question or decision it answered whose answer had not gone out yet is yours again,
+under *Needs you*, saying so). What its judge and the turns it starts use counts against
+*Credits a day*; at the cap it pauses until the next day and says so.
+
+**When it ends**, one card at the end of the Router's chat, *While you were away*, says what it
+did and left for you: each row opens its entry in the record, with *Undo* on an acceptance and
+*Change* on a decision; under an answer or an acceptance, *then:* what its worker did next. A daily
+summary or Focus summary due during a run of a day or less is folded into it; a longer run gets
+its part in each daily summary. *Handled for you* gets one row per run.
+
+**The record** (from *4 done*, *View all*, *Handled for you* or Settings): every run, newest first,
+each action with what it rested on, its evidence and what came next; *Left for you* shows only
+what waits; *Copy as Markdown*. It is append-only and hash-chained: *Undo* and *Change* add
+entries, and a record changed outside Chief of Staff says so. Ask the Router "what did autopilot
+do last night?": it answers from the record only, each entry linked.
+
+Before installing an earlier version, `chiefofstaff --prepare-downgrade` ends a run and stops the
+turns it continued (their tasks stopped by you, their check-backs removed), so the earlier version
+resumes none of them; the record stays.
+
 ## Slack
 
 Chief of Staff uses Slack's [official MCP server](https://docs.slack.dev/ai/slack-mcp-server/)
@@ -1264,7 +1352,7 @@ didn't go out for you to approve again. If Chief of Staff stops while it publish
 when it starts again (a reply only as your account's, since it began to go out, with exactly
 its text: when two could be it, the attempt says it can't tell), and sends the rest once, within
 that hour (replies to a fix whose push did not go out are not sent). While **Update and
-restart** waits for no turn running, no attempt starts.
+restart** waits for the turns running to end, no attempt starts.
 
 **Replies and the AI line.** The first time it would post a reply in a repository, the review
 asks whether replies there say they were drafted with an AI assistant; your answer is kept per
@@ -1711,6 +1799,22 @@ bash`; Homebrew or npm under *Other ways* where you have them), runs it with its
 the agent where installers put it (also outside the folders your terminal had on its path when Chief
 of Staff started; that folder goes after yours, so your own programs stay first), and goes on to
 *Sign in*. On Windows it shows the PowerShell command to copy.
+
+Copilot has the same *Sign in* and *Install* (Home's card when no agent can run yet, and Copilot's
+row in Settings): *Sign in* runs `copilot login --device-code` and shows its page and one-time code
+(*Sign in in the browser instead* under *Other ways*); once you've entered it, Chief of Staff starts
+on Copilot by itself, with no *Retry* and no restart. *Install* runs Copilot's official installer
+(`curl -fsSL https://gh.io/copilot-install | bash`; npm or Homebrew under *Other ways*; on Windows,
+`winget install GitHub.Copilot` to copy), then goes on to *Sign in*. Home's card lists each agent
+with what it needs and its button; the commands, to run in a terminal yourself, stay under *Or in a
+terminal*.
+
+**Updating an agent.** An agent older than the versions Chief of Staff was tested with says so
+(Codex and Claude Code can't run then; Copilot runs, with a line in the sidebar) with *Update*. It
+shows the agent's own updater, word for word (`copilot update`, `codex update`, `claude update`), and
+that it updates the agent for everything on your computer that uses it, then runs it only once you
+say *Update*, with its output and a result: the agent turns *Ready* by itself (Copilot's new version
+runs from its next start), or it says why not, with *Try again* and the command under *Details*.
 Where Claude Code says when your sign-in ends, the `@` list says so from a week before ("Claude
 sign-in ends Dec 11"); with `ANTHROPIC_API_KEY` set where Chief of Staff runs, Claude's workers use
 that key, and its status says so ("Uses your Anthropic API key (ANTHROPIC_API_KEY)"); with
@@ -1946,8 +2050,11 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   next turn (after the one under way, if it is at work). Workers don't edit `.codex/` folders or
   Codex's settings folder.
 - **Questions:** a worker asks you with the same card as a Copilot worker's, and an MCP server's
-  form reaches you too. An MCP server that needs a sign-in is signed in from a terminal:
-  `codex mcp login <name>` or `claude mcp login <name>`.
+  form reaches you too. An MCP server that needs a sign-in has a card under *Needs you* (Your OK),
+  as for Copilot's: its *Sign in* runs the agent's own `codex mcp login <name>` or `claude mcp login
+  <name>` for you, in the worker's folder, shows the server's page to open, and answers the card
+  once you've signed in there (the agent keeps the sign-in). The command, to run in a terminal
+  yourself (then *I signed in*), is under the card's *Details*.
 - **Claude's own tools** are tied into Chief of Staff: a worktree it makes is one of the
   worker's checkouts (receipts, *Storage*, removed with the others). Claude makes one
   (`EnterWorktree`, a subagent isolated in a worktree) in its repository's main checkout, which
@@ -2080,17 +2187,30 @@ workers it stops).
 ## Updating
 
 When a newer release is out, one quiet line at the bottom of the sidebar says so. Started with
-`uvx` or installed with `uv tool`, **Update and restart** does the rest: once no turn is running
-(it waits, never stopping one; *Cancel* stops waiting), Chief of Staff gets the new version
-(`uvx chiefofstaff@<version>`, or `uv tool upgrade chiefofstaff`), stops as on Ctrl+C and starts
+`uvx`, installed with `uv tool` or pipx, or with pip into a virtual environment of its own,
+**Update and restart** does the rest: once the turns running end (the line says which:
+*Restarting after the Router's turn ends…*; two minutes at most, a turn still running then goes on
+after the restart; *Cancel* stops waiting), Chief of Staff gets the new version (`uvx
+chiefofstaff@<version>`, `uv tool upgrade chiefofstaff`, `pipx upgrade chiefofstaff`, or that
+environment's `uv pip` or `pip install --upgrade chiefofstaff`), stops as on Ctrl+C and starts
 again in its own place: the same terminal, port and private link. The page reloads by itself,
 every session goes on as after any restart, and Home says it updated (or why it couldn't: it then
-runs the version it had). Installed another way (pip, pipx), or on Windows, the line says the
+runs the version it had). Installed into a system's Python, or on Windows, the line says the
 command to run. Plain `uvx chiefofstaff` runs the version uv cached the first time, however old:
 start it with `uvx chiefofstaff@latest`. Chief of Staff reads its own page on PyPI for this, at
 most once a day, and sends nothing about you or your machine; *Say when a newer Chief of Staff is
 out* (Settings → General → More) turns it off. When Copilot can't start at all, the error says the
 command that updates Chief of Staff.
+
+**A restart loses no message.** A session at work as Chief of Staff stops (or as it crashes, or as
+its agent does) is given again, once, what that turn was given and did not finish, as soon as its
+agent has it open again: your message to the Router, the Router's to a worker, a report to the
+Router, with one line in its chat (*Chief of Staff restarted; asked the session to continue.*);
+what its agent's own record shows it finished is not given again. Until then it says
+*Reconnecting to Codex…* (or its agent's name), never *Thinking…*, and what it was given waits to
+be sent; a reconnect that takes long is tried again by itself, waiting longer each time, and
+*Retry* tries at once. A worker's *Stop: don't go on* (**⋯**) lets it rest instead: what it was
+given waits for its next message.
 
 Your Copilot CLI updates itself, and the Copilot SDK Chief of Staff is built on can lag behind it.
 Chief of Staff tells which protocol your CLI speaks before starting it, and runs it when it speaks

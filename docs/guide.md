@@ -6,7 +6,8 @@ you may want more.
 
 - [Quickstart](#quickstart)
 - [Concepts](#concepts): the Router, workers and tasks, *Needs you*, teams, decisions, receipts
-- [Daily use](#daily-use): giving work, reviewing, Slack, GitHub, watches, away, Send to Chief
+- [Daily use](#daily-use): giving work, reviewing, Slack, GitHub, watches, away, Autopilot, Send
+  to Chief
 - [Agents: Copilot, Codex and Claude](#agents-copilot-codex-and-claude)
 - [Settings](#settings)
 - [Safety and privacy](#safety-and-privacy)
@@ -38,7 +39,8 @@ uv tool install chiefofstaff && chiefofstaff       # or: pipx install chiefofsta
 ```
 
 Without installing, `uvx chiefofstaff@latest` runs the newest version (plain `uvx chiefofstaff`
-runs whatever version uv cached first).
+runs whatever version uv cached first). No agent installed or signed in yet? Start Chief of Staff
+anyway: Home's card has *Install* and *Sign in* for each agent and runs them for you.
 
 **3. First start.** The terminal prints a private link and opens it in your browser; keep the
 link to yourself. Chief of Staff runs on the first agent it finds ready (Copilot, then Codex,
@@ -279,6 +281,19 @@ and only for what it came with; anything else you write there is never taken as 
 a test* tries the way you gave. More: [Reference → When you are
 away](reference.md#when-you-are-away).
 
+### Autopilot
+
+Off by default: tick *Autopilot* in Settings → General → *On its own* (its *Options*: a daily
+credit cap, the projects it acts in, workers asking first). Then turn it on from Home's
+*Autopilot* menu (*For 2 hours*, *Until 9:00 AM*, *Until I turn it off*) or tell the Router
+`autopilot on`; Home's header says until when, with **Stop**. While it runs, it answers a worker's
+question or decision only from what you said yourself, quoting you; it accepts a finished result
+only after running its checks again offline, in a private copy (where it can't, the card says
+why, such as *Couldn't verify: uv 0.9.21 crashes in the sandbox; uv 0.9.29 or newer fixes it*).
+Everything else waits for you under *Needs you*, and nothing goes out in your name. When it ends,
+*While you were away* lists what it did (*Undo*, *Change*) and what it left for you. More:
+[Reference → Autopilot](reference.md#autopilot).
+
 ### Send to Chief
 
 Hand over work from wherever you are without switching to Home. Turn it on in Settings →
@@ -345,7 +360,9 @@ Codex and Claude Code run on macOS and Linux; on Windows, Chief of Staff runs on
 **Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once:
 *Codex is ready. Allow workers to use it?* Settings → Agents & models has a row per agent with
 its status (*Ready*, *Sign in needed*, *At its limit · resets …*), a meter of its plan's limits,
-*Sign in* (which runs the agent's own sign-in, in your browser) and *Use*. Claude workers also
+*Sign in* (which runs the agent's own sign-in, in your browser) and *Use*; Copilot's row has
+*Install* and *Sign in* too. An agent older than the versions tested says so with *Update*, which
+shows the agent's own updater, asks first and runs it. Claude workers also
 need Anthropic's Agent SDK for Python; Chief of Staff installs the tested version by itself when
 you turn Claude on (*Setting up Claude…*, usually under a minute).
 
@@ -396,7 +413,7 @@ Settings (the gear at the bottom of the sidebar) has four pages.
 
 | Page | What is there |
 | --- | --- |
-| **General** | *Code folder*; *Workers at once*; *Ask first* and *Sandbox* (see [Safety](#safety-and-privacy)); *Keep my PRs moving*; *A busy worker's new task starts at once*; *Daily summary*; desktop notifications. Under *More*: when finished workers close, when a task is *Overdue*, *Show where my other sessions stand*, update notices, other project folders, where task folders go |
+| **General** | *Code folder*; *Workers at once*; *Ask first* and *Sandbox* (see [Safety](#safety-and-privacy)); *On its own*: *Autopilot* (see [Autopilot](#autopilot)); *Keep my PRs moving*; *A busy worker's new task starts at once*; *Daily summary*; desktop notifications. Under *More*: when finished workers close, when a task is *Overdue*, *Show where my other sessions stand*, update notices, other project folders, where task folders go |
 | **Agents & models** | Each agent's status, sign-in and *Use*; *Who does the work*: the agent, model and effort for new workers and for each of Chief of Staff's own sessions; what happens when an agent can't run |
 | **Connections** | *Slack*, *GitHub reviews*, *Watches*, *When you're away*, *Skills, plugins and MCP servers* (more for workers; plugins are Copilot's), *Send to Chief from the command line*, and *Pause watching* to stop all of them at once |
 | **You** | *Learn from what I write*, *Learn now*, checks from mistakes; what was learned (writing styles, habits, checks, your profile); *Shared links* |
@@ -409,8 +426,10 @@ keep a worker's files.
 Workers on Copilot load what your own Copilot sessions load: your plugins, skills, MCP servers
 and custom agents, your company's, and a repository's own; workers on Codex and Claude Code use
 their agent's own configuration in the same way ([Reference → Workers on other coding
-agents](reference.md#workers-on-other-coding-agents)). Gitignored files a worktree needs
-(`.env`, `.env.*`, or what a `.worktreeinclude` lists) are copied in from your checkout.
+agents](reference.md#workers-on-other-coding-agents)). An MCP server a worker needs a sign-in for,
+on any agent, gets a card under *Needs you* whose *Sign in* runs that sign-in for you.
+Gitignored files a worktree needs (`.env`, `.env.*`, or what a `.worktreeinclude` lists) are
+copied in from your checkout.
 
 Environment variables (Slack token, timeouts, the Watchdog's timing, disk thresholds) are listed
 in [Reference → Settings and environment
@@ -445,7 +464,9 @@ otherwise for one.
 write only in their own folders, never see your GitHub token, and can't read your SSH keys. Codex
 can't run workers while it is on (its sandbox hasn't passed Chief of Staff's checks yet). Workers
 that read Slack are always sandboxed on Copilot and Claude, with the network limited to GitHub;
-on Codex they run without a sandbox and ask first. Turn it on for repositories you don't trust:
+on Codex they run without a sandbox and ask first. On macOS, Copilot workers use `gh` in it once
+Copilot's certificate is trusted: Settings says so, with *Trust the sandbox's certificate*, which
+runs Copilot's two commands for you after asking. Turn it on for repositories you don't trust:
 with it, settings a worker writes into its folder (hooks, MCP servers) never load without your
 word.
 
@@ -511,8 +532,13 @@ prune` removes old cached versions; never run `uv cache clean` while Chief of St
 or MCP servers changed waits, and its timeline says what changed; click **Use these settings**
 if you trust the change.
 
-**Update and restart failed.** Home says why, and the version you had keeps running. Installed
-with pip or pipx, update with the command the sidebar shows.
+**A session says *Reconnecting to Codex…*** (or its agent's name). Chief of Staff restarted while
+it was at work; once its agent has it open again, it gets what that turn was given, once, and goes
+on. It is tried again by itself; *Retry* tries now. Nothing is lost to a restart.
+
+**Update and restart** waits for the turns running to end (two minutes at most; one still running
+then goes on after the restart). If it fails, Home says why, and the version you had keeps running.
+Installed into a system's Python, or on Windows, update with the command the sidebar shows.
 
 **On Windows**, Send to Chief, the sandbox and folder sizes are unavailable, and only Copilot runs
 workers. See [Reference → Installing and running](reference.md#installing-and-running).
