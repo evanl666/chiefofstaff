@@ -684,6 +684,13 @@ FIXES: list[Allow] = [
     ),
     Allow("the asks ledger: each ask under its subject", data=r"\.db\.(?:subjects|asks)$"),
     Allow("the asks ledger: open asks filed once", data=r"\.db\.kv\.migrated:ledger$"),
+    # An ask answered (the decision card, at `decide`) settles in the ledger, which publishes the
+    # page's state once more (Ledger.pass_on): counted from `decide` on.
+    Allow(
+        "the asks ledger: an ask answered publishes the page's state: one more state event",
+        data=r"^steps\.(?!boot\.|ask\.)\w+\.bus\.state$",
+        more=1,
+    ),
     # The decisions in force each worker was given (named in what it got): the line "Decisions
     # in force for your tasks" brings it only those it was not.
     Allow("the decisions each worker was given", data=r"\.db\.kv\.dgiven:"),
