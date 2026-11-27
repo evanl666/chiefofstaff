@@ -14265,10 +14265,6 @@ async def settings_long_states(runtime, browser):
     log("settings: long and combined states: statuses and controls apart, 800 to 1440")
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
-
-
 async def round_reconnecting(runtime, browser, failures: list[str]):
     """0.1.61 (owner report "router stuck?"): at work when Chief of Staff restarted, the Router
     said Thinking… with Stop while no turn ran. Until it is resumed it says Reconnecting to
@@ -14307,7 +14303,11 @@ async def round_reconnecting(runtime, browser, failures: list[str]):
         retrying = line.get_by_role("button", name="Retry")
         await expect(retrying).to_be_visible()
         await retrying.click()
-        await expect.poll(lambda: asked).to_equal([router])
+        for _ in range(100):
+            if asked:
+                break
+            await asyncio.sleep(0.05)
+        assert asked == [router], asked
         await page.screenshot(path=SHOTS / "reconnecting-home.png")
         # Resumed: at work again, as usual.
         for session in (router, worker):
@@ -14330,3 +14330,7 @@ async def round_reconnecting(runtime, browser, failures: list[str]):
         runtime.unresumed.pop(router, None)
         await context.close()
     log("Reconnecting after a restart: no Thinking… nor Stop, Retry once given up; an update")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
