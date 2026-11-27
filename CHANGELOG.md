@@ -93,6 +93,12 @@ Home shows the Router's chat at once, and the page reads less and says it right.
 - **A card's note goes once the card is settled.** The note at the bottom of the page that a
   decision, a question or a draft needs you stayed its twelve seconds after you had answered it,
   above the note that said so. It now goes as soon as its card is answered, sent or dropped.
+- **`@claude` typed in one go picks Claude.** Typing `@claude compare two date libraries` (or
+  `@codex`, `@copilot`) without picking from the list under it sent the words as they were, with
+  no agent chosen, so the Router could start the work anywhere. Typed at the start or in the
+  middle, before punctuation, in any case, it now counts as picked: the message says *On Claude*,
+  and two (`@codex @claude`) compare them. A worker whose name starts like an agent's (*Codex
+  migration*) is still that worker, and one turned off says so, with your words back in the box.
 
 A new README, a short guide and the full reference; the demo runs every agent.
 

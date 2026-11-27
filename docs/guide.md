@@ -162,8 +162,8 @@ Type on Home. Several things at once is fine: the Router splits them and starts 
 or in order when one needs another's result.
 
 - **To one worker:** type `@` and pick it; your message goes straight to it.
-- **On one agent:** type `@` and pick an agent (`@codex`, `@claude`) for what you ask next; pick
-  two to compare (see [Agents](#agents-copilot-codex-and-claude)).
+- **On one agent:** type `@codex` or `@claude` (or pick one from the list `@` opens) for what you
+  ask next; two to compare (see [Agents](#agents-copilot-codex-and-claude)).
 - **Images:** paste or drop screenshots (up to five, 5 MB each); the worker gets them too.
 - **Progress:** ask the Router. A worker's routine updates stay quiet on its task's card.
 - **Stop:** *Stop* in a worker's chat interrupts it; its task waits under *Needs you* for *Go on*

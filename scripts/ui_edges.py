@@ -6363,7 +6363,7 @@ async def main():
                           round_share_from_report, round_long_report,
                           round_router_appears, round_agent_words, round_payload,
                           round_reconnecting, round_self_handle,
-                          round_toast_settled):  # fmt: skip
+                          round_toast_settled, round_typed_agents):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -13277,6 +13277,102 @@ async def in_sight(page, locator) -> bool:
           return Boolean(top) && (top === node || node.contains(top));
         }"""
     )
+
+
+# What the owner types on Home in one go, never picking from @'s list, and the agents it is to
+# run on ({} for none): at the start, in the middle, before punctuation, in any case; two to
+# compare; never a worker's name that starts like an agent's, an address, nor a word glued on.
+TYPED_AGENTS = [
+    ("@claude compare two date libraries", {"agent": "claude"}),
+    ("@CODEX, rename the retry flag", {"agent": "codex"}),
+    ("Compare two date libraries @Claude please", {"agent": "claude"}),
+    ("@copilot: list the open PRs", {"agent": "copilot"}),
+    ("Port the parser to Rust on @codex.", {"agent": "codex"}),
+    ("@claude，比较两个日期库", {"agent": "claude"}),  # noqa: RUF001 (as Chinese is typed)
+    ("@codex @claude compare the two parsers", {"agents": ["codex", "claude"]}),
+    ("@Codex migration: rerun the import", {}),
+    ("Mail me@claude.ai or see @claude.ai's docs", {}),
+    ("Ask @codexbot and @claude-team about it", {}),
+]
+
+
+async def round_typed_agents(runtime, browser, failures: list[str]):
+    """0.1.61 (QA U8): "@claude compare two date libraries" typed in one go, never picked from
+    @'s list, went as text: no agent chosen, so the Router was free to start it anywhere. The
+    README and the guide say to type @codex or @claude. Typed so, an agent counts as picked (the
+    bubble says "On Claude"; two typed are a Compare); a worker whose name starts like an agent's
+    is not read as one, nor is an address; one turned off says so, the words back in the box."""
+    folder, _ = codex_on_path()
+    try:
+        runtime.found_cache = (float("-inf"), [])
+        await agents_saved(runtime, {"codex": {"enabled": True}, "claude": {"enabled": True}})
+        await runtime.refresh_agent_status()
+        router = runtime.store.get("router_id")
+        await call_tool(runtime, "spawn_worker", router, title="Codex migration",
+                        instructions="Move the nightly jobs", why_new="test")  # fmt: skip
+        await settle(runtime)
+        context, page, errors, _ = await agents_page(browser, "light")
+        await at_home(page)
+        box = page.locator("#composer-input")
+        sent: list[dict] = []
+        page.on(
+            "request",
+            lambda r: (
+                sent.append(r.post_data_json)
+                if r.method == "POST" and r.url.endswith("/messages")
+                else None
+            ),
+        )
+        wrong: list[tuple] = []
+        for text, expected in TYPED_AGENTS:
+            await box.press_sequentially(text, delay=5)  # Typed in one go: nothing picked.
+            await expect(page.locator("#mention-list")).to_be_hidden()
+            await box.press("Enter")
+            bubble = page.locator("#timeline .msg.owner").filter(
+                has=page.locator(".text", has_text=re.compile(f"^{re.escape(text)}$"))
+            )
+            await expect(bubble).to_have_attribute("data-id", re.compile(r"^\d+$"))
+            body = sent[-1]
+            chosen = {key: body[key] for key in ("agent", "agents") if key in body}
+            log(f"  {text!r}: {chosen or 'no agent'}")
+            if chosen != expected:
+                wrong.append((text, chosen, expected))
+                continue
+            said = {"claude": "On Claude", "codex": "On Codex", "copilot": "On Copilot"}
+            if "agent" in expected:
+                await expect(bubble.locator(".to")).to_have_text(said[expected["agent"]])
+            elif "agents" in expected:
+                await expect(bubble.locator(".to")).to_have_text("Compare on Codex and Claude")
+            else:
+                await expect(bubble.locator(".to")).to_have_count(0)
+            await expect(page.locator("#composer-to")).to_be_hidden()
+            await expect(box).to_have_value("")
+        assert not wrong, f"typed, then sent: {wrong}"
+        stored = [m for m in runtime.store.messages(router) if m["kind"] == "owner"]
+        assert stored[-1]["meta"].get("agent") is None and "agents" not in stored[-1]["meta"]
+        log("@codex, @claude, @copilot typed in one go: picked (start, middle, punctuation, case,"
+            " CJK, two to compare); a worker's name, an address or a glued word: not")  # fmt: skip
+
+        # Turned off since: it says so, and the words are back to send otherwise.
+        await agents_saved(runtime, {"claude": {"enabled": False}})
+        await runtime.refresh_agent_status()
+        await page.reload()
+        await expect(page.locator("#application")).to_be_visible()
+        await at_home(page)
+        off = "@claude summarize the release notes"
+        await box.press_sequentially(off, delay=5)
+        await box.press("Enter")
+        await expect(page.locator(".toast", has_text="Claude is turned off")).to_be_visible()
+        await expect(box).to_have_value(off)
+        await box.fill("")
+        await page.locator("#composer-to button.clear").click()
+        # (The refusal is the browser's one line about a 400: said, as it should be.)
+        assert [e for e in errors if "status of 400" not in e] == [], errors
+        await context.close()
+        log("@claude typed while Claude is off: said so, the words back in the box")
+    finally:
+        await agents_saved(runtime, {"codex": {"enabled": False}, "claude": {"enabled": False}})
+        codex_off_path(folder)
 
 
 async def round_toast_settled(runtime, browser, failures: list[str]):

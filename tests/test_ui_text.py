@@ -43,6 +43,37 @@ def run_js(body: str):
     return json.loads(done.stdout.strip().splitlines()[-1])
 
 
+def test_an_agent_typed_in_one_go_is_picked_but_never_a_workers_name():
+    """QA U8 (0.1.61): "@claude compare two date libraries" typed in one go, never picked from
+    @'s list, went as text with no agent. Typed so (start, middle, before punctuation, any case,
+    Chinese after it), it is picked; two are a Compare; never the start of a worker's name, an
+    address or a longer word."""
+    found = run_js(
+        f"""
+        const m = await import({json.dumps((STATIC / "mention.js").as_uri())});
+        s.state.snapshot = {{ sessions: [
+          {{ id: "w1", role: "worker", title: "Codex migration", status: "idle" }},
+          {{ id: "w2", role: "worker", title: "Fix the CI", display_title: "Claude prompt review",
+             status: "idle" }},
+          {{ id: "w3", role: "worker", title: "Codex retry", status: "done", closed_at: "x" }},
+        ] }};
+        return [
+          "@claude compare two date libraries", "@CODEX, rename the flag",
+          "Compare two date libraries @Claude please", "@copilot: list the open PRs",
+          "Port the parser to Rust on @codex.", "@claude，比较两个日期库", "@claude比较两个日期库",
+          "@codex @claude compare the parsers", "@claude @claude twice", "@Codex migration: rerun",
+          "@codex migr the jobs", "@codex compare the jobs", "@Claude prompt review again",
+          "@codex retry it", "Mail me@claude.ai or see @claude.ai's docs",
+          "Ask @codexbot and @claude-team", "@claude\\ndo it",
+        ].map((text) => m.typedAgents(text));
+        """
+    )
+    assert found == [
+        ["claude"], ["codex"], ["claude"], ["copilot"], ["codex"], ["claude"], ["claude"],
+        ["codex", "claude"], ["claude"], [], [], ["codex"], [], ["codex"], [], [], ["claude"],
+    ]  # fmt: skip
+
+
 def test_a_url_ends_where_the_sentence_goes_on():
     cases = {
         "#1068 https://github.com/o/ranking-model/pull/1068：head `5e8adc1b`": (
