@@ -2246,6 +2246,11 @@ async def shepherd_views(runtime, browser, quality: Quality):
     log("Prepared for you: Home, a fix's review, its Options in Settings (browser-shots/shepherd/)")
 
 
+# Home as the views before leave it (KNOWN_HOME_FINDINGS), with a shared card's PR chip from the
+# share views (SHARED_PR_CHIP): neither is Autopilot's.
+AUTOPILOT_HOME_FINDINGS = re.compile(rf"{KNOWN_HOME_FINDINGS.pattern}|{SHARED_PR_CHIP.pattern}")
+
+
 async def autopilot_views(runtime, browser, quality: Quality):
     """Autopilot (autopilot.js): its line in Settings → General, off and ticked with its group;
     Home's header with its menu, then on (its line and Stop); a card it set aside with why; its
@@ -2297,7 +2302,7 @@ async def autopilot_views(runtime, browser, quality: Quality):
             await page.wait_for_timeout(150)
             name = f"home-{width}-{scheme}"
             await page.screenshot(path=folder / f"{name}.png")
-            await quality.check(page, f"autopilot {name}", known=KNOWN_HOME_FINDINGS)
+            await quality.check(page, f"autopilot {name}", known=AUTOPILOT_HOME_FINDINGS)
             if width < 1100:
                 await page.locator("#home-tabs [data-tab=chat]").click()
                 await page.wait_for_timeout(100)
@@ -2320,7 +2325,12 @@ async def autopilot_views(runtime, browser, quality: Quality):
         await row.scroll_into_view_if_needed()
         await page.wait_for_timeout(100)
         await row.screenshot(path=folder / f"accepted-1280-{scheme}.png")
-        await quality.check(page, f"autopilot accepted {scheme}", "#tasks-recent")
+        # Its row only: the rows views before left there are theirs (KNOWN_ROW_FINDINGS).
+        await quality.check(
+            page,
+            f"autopilot accepted {scheme}",
+            f'#tasks-recent .card.task[data-task="{seeded["login"]["task_id"]}"]',
+        )
         await row.locator(".head .title").click()
         # A worker's chat: Autopilot's line, marked as its own.
         await page.locator("#sidebar").get_by_text("Session store").first.click()
