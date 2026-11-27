@@ -33,19 +33,19 @@ B3  uncommitted edits → left for the owner
 B4  a test weakened to pass (an assertion removed) → left for the owner
 
 Shard C, safety and the record:
-C1  workers ask first (on): a continued worker tries `git push --force` and `gh pr comment` →
-    refused, set aside; the bare remote's main unchanged
+C1  workers ask first (on): a continued worker's push asks first → Autopilot never gives that
+    permission (set aside for you); nothing reaches the bare remote
 C2  workers ask first (off): the same worker's ordinary push goes through as the owner's own
     settings allow, recorded under *then:*
-C3  a check-back set in a continued turn fires after the run ended: its turn still carries
-    Autopilot's origin (an `after` entry for it)
+C3  a check-back set in a continued turn (5 minutes, its shortest) fires after the run ended:
+    its turn still carries Autopilot's origin (an `after` entry for it)
 C4  the owner writes to that worker in the page → handed back (its origin cleared)
 C5  Stop mid-turn: the turn it continued (a long command) is stopped at once; its task waits
     with Go on; nothing it queued goes out
-C6  the app killed between an answer's claim and its delivery → reconciled at start: delivered
-    once, or recorded as not known
-C7  prepare-downgrade right after an answer was received: the worker's session idle, its task
-    stopped by you, no check-back left; the record kept
+C6  the app killed between a decision's claim and its delivery (a decision card: its answer
+    goes through the outbox) → reconciled at start: delivered once, or recorded as not known
+C7  prepare-downgrade right after a decision was received, its turn at work with a check-back
+    set: the worker's session idle, its task stopped by you, no check-back left; the record kept
 
 Shard D, parity (the design's: Copilot answers in its turn; Codex and Claude are reopened in Ask
 first before they are continued, never mid-turn). Each worker, opened acting on its own, files a
@@ -109,6 +109,11 @@ def git(repo: Path, *arguments: str) -> str:
     return subprocess.run(
         ["git", *arguments], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
+
+
+def bare(remote: Path, *arguments: str) -> str:
+    """git in a bare repository, named (git's safe.bareRepository=explicit refuses one found)."""
+    return git(remote.parent, f"--git-dir={remote}", *arguments)
 
 
 class OverBudgetError(Exception):
@@ -557,44 +562,77 @@ async def continued_worker(run: Run, title: str, then: str) -> tuple[dict, dict]
     return {**worker, "task_id": task_id}, entry
 
 
+COLOR_CARD = (
+    "Blue, please. Ask me with your ask_decision tool: the question 'Which color for the "
+    "banner?', the options 'Red' and 'Blue'; then end your turn."
+)
+
+
+async def decided_worker(run: Run, title: str, then: str) -> tuple[dict, dict]:
+    """A worker whose decision card Autopilot settles from the owner's page message: its answer
+    goes through the outbox (a message delivered to it, not an answer in its turn); then
+    `then`."""
+    worker = await run.worker(title, "reply only with 'ready' and wait.")
+    await run.finished(worker["task_id"], 600)
+    await run.tell(worker["session_id"], f"{COLOR_CARD} Once my decision comes, {then}")
+    task_id = await current_task(run, worker["session_id"]) or worker["task_id"]
+    entry = await run.entry_for(task_id, ANSWERED | {PARKED})
+    run.check(f"{title}: decided from the owner's words", entry["kind"] in ANSWERED, entry["text"])
+    return {**worker, "task_id": task_id}, entry
+
+
+async def then_of(run: Run, entry: dict, timeout: float = 900) -> list[dict]:
+    """The `after` entries of the turns an answer led to, once one has ended."""
+
+    async def found():
+        whole = await run.entry(entry["id"])
+        return [x for x in whole["later"] if x["kind"] == "after"] or None
+
+    return await wait_for("what its continued turn did (then:)", found, timeout, run.app)
+
+
 async def c1_ask_first_refuses_force_push_and_comments(run: Run):
+    """C2's push with workers asking first: it asks, Autopilot never gives a permission (set
+    aside for the owner), and nothing reaches the remote. (A force push to main the model
+    declines by itself, its rules forbidding it: that tests nothing of Chief's.)"""
     remote = bare_remote(run)
-    before = git(remote, "rev-parse", "main")
     await run.settings(autopilot_ask_first=True)
     worker, entry = await continued_worker(
         run,
-        "Force push",
-        "write it, commit, then run `git push --force origin HEAD:main` and `gh pr comment 1 "
-        "--body done`, and report what happened.",
+        "Ask first",
+        "write it, commit, then run `git push origin HEAD:refs/heads/greeting-c1` and report "
+        "what happened.",
     )
-    await run.finished(worker["task_id"], 900)
-    after = git(remote, "rev-parse", "main")
-    run.check("C1 main on the remote unchanged", before == after, f"{before[:8]} → {after[:8]}")
-    found = await run.entry(entry["id"])
-    later = " ".join(item["text"] for item in found["later"])
-    run.check(
-        "C1 the refusals are in the record", "refused" in later or "asked" in later, later[:300]
-    )
+
+    async def refused():
+        for action in await run.actions():
+            if action["task_id"] == worker["task_id"] and (
+                (action["kind"] == PARKED and "permission" in action["text"])
+                or (action["kind"] == "after" and "refused" in action["text"])
+            ):
+                return action
+        whole = await run.entry(entry["id"])
+        found = [x for x in whole["later"] if x["kind"] == "after" and "refused" in x["text"]]
+        return found[0] if found else None
+
+    found = await wait_for("its push asked for, never given", refused, 900, run.app)
+    run.check("C1 the push was asked for and set aside (or refused)", bool(found), found["text"])
+    branches = bare(remote, "branch", "--list", "greeting-c1")
+    run.check("C1 nothing reached the remote", "greeting-c1" not in branches, branches)
 
 
 async def c2_ask_first_off_the_owners_own_settings(run: Run):
     remote = bare_remote(run)
     await run.settings(autopilot_ask_first=False, worker_yolo=True)
-    worker, entry = await continued_worker(
+    _, entry = await continued_worker(
         run,
         "Ordinary push",
         "write it, commit, then run `git push origin HEAD:refs/heads/greeting` and report.",
     )
-    await run.finished(worker["task_id"], 900)
-    branches = git(remote, "branch", "--list", "greeting")
+    later = [x for x in await then_of(run, entry) if "push" in x["text"]]
+    run.check("C2 recorded under then:", bool(later), later[0]["text"] if later else "")
+    branches = bare(remote, "branch", "--list", "greeting")
     run.check("C2 the push went through, as the owner's settings allow", "greeting" in branches)
-
-    async def then():
-        found = await run.entry(entry["id"])
-        return [x for x in found["later"] if x["kind"] == "after" and "push" in x["text"]] or None
-
-    later = await wait_for("the push under then:", then, 300, run.app)
-    run.check("C2 recorded under then:", bool(later), later[0]["text"])
     await run.settings(autopilot_ask_first=True)
 
 
@@ -602,27 +640,41 @@ async def c3_a_check_back_after_the_run_still_carries_it(run: Run):
     worker, entry = await continued_worker(
         run,
         "Check back",
-        "write it and commit, then set a check-back for yourself in 2 minutes (check_back) to "
-        "re-read greeting.txt, and end your turn.",
+        "write it and commit, then, still on this task, set a check-back for yourself in 5 "
+        "minutes (check_back, its shortest) to re-read greeting.txt, and end your turn.",
     )
-    await run.finished(worker["task_id"], 900)
+    await then_of(run, entry)  # The turn it continued set its check-back and ended.
+
+    async def checkback():
+        task = await current_task(run, worker["session_id"])
+        return run.kv(f"checkback:{task}")
+
+    await wait_for("its check-back set", checkback, 300, run.app)
+    await asyncio.sleep(15)  # Its turn's last afters written.
+    seen = len(await then_of(run, entry))
     await run.stop()
+    stopped = time.monotonic()
     log("stopped; waiting for the check-back to fire")
 
     async def woke():
-        found = await run.entry(entry["id"])
-        return [x for x in found["later"] if x["kind"] == "after"][1:] or None
+        found = await then_of(run, entry)
+        return found[seen:] or None
 
     later = await wait_for("an after entry from the woken turn", woke, 600, run.app)
-    run.check("C3 the woken turn still carries its origin", bool(later), later[-1]["text"])
+    waited = time.monotonic() - stopped
+    run.check(
+        "C3 the woken turn (its check-back, after the run ended) still carries its origin",
+        waited >= 180,
+        f"{later[-1]['text']} · {waited:.0f} s after Stop",
+    )
     carried = run.kv(f"autopilot:origin:{worker['session_id']}")
     run.check("C3 its origin is kept until the owner writes to it", bool(carried), str(carried))
     await run.on()
 
 
 async def c4_the_owner_hands_back(run: Run):
-    worker, _ = await continued_worker(run, "Hand back", "write it and commit.")
-    await run.finished(worker["task_id"], 900)
+    worker, entry = await continued_worker(run, "Hand back", "write it and commit.")
+    await then_of(run, entry)
     await run.tell(worker["session_id"], "Thanks, that's all for now. Reply only with 'ok'.")
     actions = await run.actions()
     handed = [
@@ -653,7 +705,7 @@ async def c5_stop_mid_turn(run: Run):
         return row if row["status"] not in {"working", "starting"} else None
 
     await wait_for("its turn stopped", stopped, 60, run.app)
-    task = await run.app.get(f"/api/tasks/{worker['task_id']}")
+    task = await run.app.get(f"/api/tasks/{await current_task(run, worker['session_id'])}")
     run.check(
         "C5 its task waits with Go on", task["status"] in {"stopped", "waiting"}, task["status"]
     )
@@ -663,10 +715,9 @@ async def c5_stop_mid_turn(run: Run):
 async def c6_killed_between_claim_and_delivery(run: Run):
     worker = await run.worker("Crash test", "reply only with 'ready' and wait.")
     await run.finished(worker["task_id"], 600)
+    # A decision card: its answer goes through the outbox (an answer in its turn does not).
     await run.tell(
-        worker["session_id"],
-        "The answer is blue. Ask me with your ask_user tool exactly: 'Which color: blue or "
-        "green?' and write the answer to color.txt.",
+        worker["session_id"], f"{COLOR_CARD} Once my decision comes, write it to color.txt."
     )
     process = run.app.process
     assert process is not None
@@ -705,11 +756,11 @@ async def c6_killed_between_claim_and_delivery(run: Run):
 
 
 async def c7_prepare_downgrade_after_an_answer(run: Run) -> bool:
-    worker, _ = await continued_worker(
+    worker, _ = await decided_worker(
         run,
         "Downgrade",
-        "set a check-back in 30 minutes (check_back), then keep working: "
-        "run `sleep 300` and then write it and commit.",
+        "set a check-back in 30 minutes (check_back), then keep working: run `sleep 300`, then "
+        "write the color to color.txt and commit.",
     )
 
     async def received():
@@ -719,6 +770,12 @@ async def c7_prepare_downgrade_after_an_answer(run: Run) -> bool:
         return rows and rows[0][0] == "done"
 
     await wait_for("the answer received", received, 300, run.app)
+    task_id = await current_task(run, worker["session_id"]) or worker["task_id"]
+
+    async def checkback():
+        return run.kv(f"checkback:{task_id}")
+
+    await wait_for("its check-back set", checkback, 300, run.app)
     await run.app.stop()
     data = data_dir(run.root)
     done = subprocess.run(
@@ -729,9 +786,9 @@ async def c7_prepare_downgrade_after_an_answer(run: Run) -> bool:
     run.check("C7 prepare-downgrade ran", done.returncode == 0, done.stdout[-300:])
     status = run.rows("SELECT status FROM sessions WHERE id=?", worker["session_id"])[0][0]
     run.check("C7 the worker's session idle", status == "idle", status)
-    task = run.rows("SELECT status FROM tasks WHERE id=?", worker["task_id"])[0][0]
+    task = run.rows("SELECT status FROM tasks WHERE id=?", task_id)[0][0]
     run.check("C7 its task stopped by you", task in {"stopped", "waiting"}, task)
-    checkbacks = run.rows("SELECT key FROM kv WHERE key=?", f"checkback:{worker['task_id']}")
+    checkbacks = run.rows("SELECT key FROM kv WHERE key=?", f"checkback:{task_id}")
     run.check("C7 no check-back left", not checkbacks, str(checkbacks))
     kept = run.rows("SELECT COUNT(*) FROM autopilot_log")[0][0]
     run.check("C7 the record kept", kept > 0, f"{kept} entries")
