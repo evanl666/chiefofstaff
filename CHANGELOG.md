@@ -2,24 +2,31 @@
 
 ## Unreleased
 
-- **Home shows Chief of Staff's chat as soon as it starts.** A page opened before then (a first
-  start waiting for a coding agent, or while Claude is being set up) showed *Ask for anything*
-  until reloaded, hiding the note on which agent it runs on; now the chat appears in its place,
-  with nothing to reload.
-- **What the page says of workers is right for the agents you use.** Settings → General names
-  them where they differ: workers that read Slack are sandboxed on Copilot and Claude, and on
-  Codex run without a sandbox, asking first; Codex can't run workers while the sandbox is on; and
-  *Ask first* off says "as in your own Codex sessions" (or whichever are on). What waits for
-  Chief of Staff to start, Watch for you's tools, Send to Chief's consent and a session to
-  continue here no longer assume Copilot; the README and guide say the same.
-- **The page's state is under half its size.** Home reads it again after each burst of events,
-  and on the owner's data it had grown to 891 KB, mostly finished tasks' words: every earlier
-  report of each (342 KB) and each whole result (220 KB). It now carries a finished task's long
-  result as far as its row and chips read it (its start, and each line that gives a link), and
-  its earlier reports by when they were said; the page asks once for the rest of each
-  (`GET /api/task-texts`), keeps it, and has it where it shows: a row's tooltip, *Earlier
-  reports*, a draft's *Result of*. A worker's columns the page never reads are left out too.
-  Now 340 KB, read as fast as before; nothing on the page changes.
+Autopilot answers for you while you're away, from what you said yourself, and accepts only
+what it checked again; no message is lost to a restart; Chief of Staff installs, signs in and
+updates your agents, and itself, from the page; Home shows the Router's chat at once and reads a
+state under half its size; and a new README, a short guide and the full reference.
+
+Autopilot, phase 1: while you're away, it answers what you already answered, and leaves the
+rest for you.
+
+- **Autopilot answers for you, from what you said.** Off by default: tick *Autopilot* in
+  Settings → General → *On its own*, then turn it on from Home's *Autopilot* menu (*For 2 hours*,
+  *Until 9:00 AM*, *Until I turn it off*) or tell the Router `autopilot on`. While it runs, a
+  worker's question or decision card is answered only from what you said yourself in the page (a
+  message, your answer to a card, a habit you kept), quoting your words in the worker's chat. A
+  choice several workers asked, a recommendation alone, any permission (pushing, merging,
+  commenting…) and anything irreversible wait for you under *Needs you*, saying why.
+- **A result is accepted only once Autopilot has checked it itself.** It runs the task's checks
+  again at the exact commit, offline, in a private copy; uncommitted work, a weakened test or
+  checks it can't run offline wait for you, saying why (uv before 0.9.29, which crashes in the
+  macOS sandbox, is named with its fix). Nothing goes out in your name: no Slack reply, PR,
+  comment or merge.
+- **Stop, its record, and what it left you.** Home's header says *Autopilot · until 6:00 PM ·
+  4 done · 2 waiting for you*, with **Stop**, which ends it at once. Workers ask first while it
+  runs (an option), and *Credits a day* caps what it spends. When it ends, *While you were away*
+  lists what it did, with *Undo* and *Change*, and what it left for you; every action is in an
+  append-only record the Router answers from.
 
 No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
 again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.
@@ -84,6 +91,32 @@ Staff.
   as you stop Chief of Staff ends with it, as *Cancel* does: a sign-in no longer keeps waiting on
   its local port.
 
+Home shows the Router's chat at once, and the page reads less and says it right.
+
+- **Home shows Chief of Staff's chat as soon as it starts.** A page opened before then (a first
+  start waiting for a coding agent, or while Claude is being set up) showed *Ask for anything*
+  until reloaded, hiding the note on which agent it runs on; now the chat appears in its place,
+  with nothing to reload.
+- **What the page says of workers is right for the agents you use.** Settings → General names
+  them where they differ: workers that read Slack are sandboxed on Copilot and Claude, and on
+  Codex run without a sandbox, asking first; Codex can't run workers while the sandbox is on; and
+  *Ask first* off says "as in your own Codex sessions" (or whichever are on). What waits for
+  Chief of Staff to start, Watch for you's tools, Send to Chief's consent and a session to
+  continue here no longer assume Copilot; the README and guide say the same.
+- **The page's state is under half its size.** Home reads it again after each burst of events,
+  and on the owner's data it had grown to 891 KB, mostly finished tasks' words: every earlier
+  report of each (342 KB) and each whole result (220 KB). It now carries a finished task's long
+  result as far as its row and chips read it (its start, and each line that gives a link), and
+  its earlier reports by when they were said; the page asks once for the rest of each
+  (`GET /api/task-texts`), keeps it, and has it where it shows: a row's tooltip, *Earlier
+  reports*, a draft's *Result of*. A worker's columns the page never reads are left out too.
+  Now 340 KB, read as fast as before; nothing on the page changes.
+- **A card's note goes once the card is settled.** The note at the bottom of the page that a
+  decision, a question or a draft needs you stayed its twelve seconds after you had answered it,
+  above the note that said so. It now goes as soon as its card is answered, sent or dropped.
+
+A new README, a short guide and the full reference; the demo runs every agent.
+
 - **A new README, a short guide, and the full reference.** The README (on PyPI too) shows the
   real app in a 21-second clip and says what Chief of Staff does in eight lines. The guide is a
   quarter of its length: quickstart, concepts, daily use, the three agents, settings, safety,
@@ -96,9 +129,6 @@ Staff.
   login fix tells the rate limiting what it changed, and every agent's chip shows. A share link
   made in the demo is sealed as for real, but no gist is made: nothing leaves your machine, as the
   demo says (before, it made a secret gist on the account signed in to `gh`).
-- **A card's note goes once the card is settled.** The note at the bottom of the page that a
-  decision, a question or a draft needs you stayed its twelve seconds after you had answered it,
-  above the note that said so. It now goes as soon as its card is answered, sent or dropped.
 - `chiefofstaff --help` says it runs Copilot, Codex and Claude Code, not only Copilot.
 
 ## 0.1.60 (2026-11-26)
