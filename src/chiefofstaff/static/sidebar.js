@@ -9,7 +9,7 @@ import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings, watchGaps } from "./settings.js";
 import { ownTasks } from "./tasks.js";
 import { duck, setMood } from "./mascot.js";
-import { agentName, markOf } from "./agentpick.js";
+import { agentName, copilotAlone, markOf } from "./agentpick.js";
 import { labelOf } from "./team.js";
 import { glyph } from "./relations.js";
 // The captain beside the name says how Home stands, as the dots do: it salutes when something
@@ -455,7 +455,7 @@ function noOthers(count) {
     return null;
   }
   const why = !connected
-    ? "Shown once Copilot is connected."
+    ? copilotAlone() ? "Shown once Copilot is connected." : "Shown once Chief of Staff has started."
     : state.externalError || (othersOn() && state.othersWhy) || "No other sessions yet.";
   return el("div", { class: "empty-note", text: why });
 }

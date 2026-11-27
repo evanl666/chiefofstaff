@@ -8,7 +8,7 @@ import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
-import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, markOf, modelLabel, modelOptions, ready, severalAgents, statuses, statusOf } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, copilotAlone, fixLine, markOf, modelLabel, modelOptions, ready, severalAgents, statuses, statusOf } from "./agentpick.js";
 import { setupAction, setupKind } from "./agentsetup.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
@@ -53,7 +53,7 @@ export function renderHeader() {
     sessionMenu(router);
     $("#composer").hidden = false;
     const waiting = !router && state.snapshot.runtime.state !== "ready";
-    setComposer(router?.elsewhere ? { locked: IN_TERMINAL } : waiting ? { locked: "You can ask once Copilot is connected." } : { placeholder: routerPlaceholder() });
+    setComposer(router?.elsewhere ? { locked: IN_TERMINAL } : waiting ? { locked: copilotAlone() ? "You can ask once Copilot is connected." : "You can ask once Chief of Staff has started." } : { placeholder: routerPlaceholder() });
     return;
   }
   const session = current();

@@ -78,19 +78,19 @@ waits 15 minutes has its task done by a new worker in a fresh worktree from the 
 the held folder holds is not carried); one in your own checkout waits for you.
 
 **Yolo** turns off Chief of Staff's *Ask first* checks for workers, not the floor above. It is
-on by default, as in your own Copilot sessions, except for workers that read Slack (they keep
+on by default, as in your own agent sessions, except for workers that read Slack (they keep
 the checks unless you choose yolo in their header); tick *Ask first* in Settings → General, or
 per worker in its **⋯**. With the sandbox on, the OS boundaries above still hold (a worker's `git` and `gh`
-still reach GitHub as you, through Copilot's proxy). With the sandbox off (or unsupported), yolo
+still reach GitHub as you, through the sandbox's proxy). With the sandbox off (or unsupported), yolo
 means a worker can do anything your user account can, but what the floor refuses. Whatever yolo
 says, the floor holds; Chief of Staff keeps a worker out of a checkout of yours given to read
 and out of its own private files (as far as a command line can be read, as above), a *Prepared
 for you* step reaches no GitHub, and the Router never asks a worker to merge or force-push. Yolo
-is on by default since 0.1.18, as your own Copilot sessions usually run: if workers read content
+is on by default since 0.1.18, as your own agent sessions usually run: if workers read content
 you do not trust (PR comments from strangers, say), tick *Ask first* in Settings.
 
 **Abilities you add** (Settings → Connections → Skills, plugins and MCP servers) run as they would
-in your own Copilot sessions: a plugin's hooks and an MCP server run as you, outside the
+in your own agent sessions: a plugin's hooks and an MCP server run as you, outside the
 sandbox. Add only what you would install for yourself.
 
 ## Workers on other coding agents
@@ -444,7 +444,7 @@ the checks you approved run.
 ## Known limits
 
 - Pattern checks on shell commands are guardrails, not isolation. Unless you turn the sandbox on,
-  workers that do not read Slack run as your own Copilot sessions do: with your access.
+  workers that do not read Slack run as your own agent sessions do: with your access.
 - The push check reads a command line as text; code the line only makes or keeps elsewhere is
   not read: a `-c` script built by a substitution or from input (`bash -c "$(…)"`,
   `while read l; do bash -c "$l"; done`), code in `trap '…'`, a script the line writes to a file

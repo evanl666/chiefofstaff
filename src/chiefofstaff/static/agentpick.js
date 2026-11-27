@@ -16,6 +16,14 @@ const rank = (name) => (ORDER.includes(name) ? ORDER.indexOf(name) : ORDER.lengt
 export const agentsOn = () => state.snapshot?.work?.agents || (state.snapshot?.agents ? ["copilot", ...[...state.snapshot.agents.on].sort((a, b) => rank(a) - rank(b))] : []);
 // More than one agent on: a worker can move to another, and what names one says which.
 export const severalAgents = () => agentsOn().length > 1;
+// The agents on, as a sentence names them: "Copilot", "Copilot and Codex", "Copilot, Codex and
+// Claude".
+export function agentsSaid(names = agentsOn()) {
+  const said = names.map(agentName);
+  return said.length > 1 ? `${said.slice(0, -1).join(", ")} and ${said.at(-1)}` : said[0] || "Copilot";
+}
+// Copilot the only agent on: what waits for it names it (else Chief of Staff, whichever runs it).
+export const copilotAlone = () => !agentsOn().some((name) => name !== "copilot");
 export const statuses = () => state.snapshot?.agents_status || [];
 export const statusOf = (name) => statuses().find((found) => found.name === name);
 export const ready = (status) => status?.status === "ready";

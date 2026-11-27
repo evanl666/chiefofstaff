@@ -4,8 +4,8 @@
 
 [![PyPI](https://img.shields.io/pypi/v/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![Python](https://img.shields.io/pypi/pyversions/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-工程师的幕僚长。别人找你的事（Slack 里的问题、要 review 的 PR、文档上的评论），它接住，用
-Copilot 做完，再用你的口吻回话：做了什么都有证据，每句话都等你点头才发出。它替你干得越久，越懂你
+工程师的幕僚长。别人找你的事（Slack 里的问题、要 review 的 PR、文档上的评论），它接住，用你的
+编码 agent（GitHub Copilot、Codex 或 Claude Code）做完，再用你的口吻回话：做了什么都有证据，每句话都等你点头才发出。它替你干得越久，越懂你
 怎么做事。
 
 **活它干，话它拟，主意你拿。**
@@ -28,7 +28,7 @@ Copilot session，跟踪所有进展，只在需要我做决定、或者有草�
 ## 能做什么
 
 **接住找上你的事**
-- 按你说的帮你盯着（Slack 里 @ 你的、文档评论、邮件），用你的 Copilot 现有的任何工具，包括 Glean
+- 按你说的帮你盯着（Slack 里 @ 你的、文档评论、邮件），用你的编码 agent 现有的任何工具，包括 Glean
   或公司自己的搜索，需要做的事变成任务。
 - 在 Slack 任意消息上点 🤖、在任何 app 里按一下快捷键，或者直接告诉它要做什么。
 - 追问发给做过这件事的 session，它有之前的对话和代码。
@@ -52,14 +52,14 @@ Copilot session，跟踪所有进展，只在需要我做决定、或者有草�
 - 专注模式先压着通知，结束后给你一份总结；每日汇总告诉你做完了什么、什么在等你、哪些没打扰你就处理了。
 
 **很多事同时推进**
-- 把一句话拆成几个任务，每个任务一个 Copilot session，可以并行，也可以按顺序。
+- 把一句话拆成几个任务，每个任务一个 agent session，可以并行，也可以按顺序。
 - 一个面板看所有任务的实时进度：正在做什么、谁在排队以及为什么、哪些做完了。
 - 名字旁边的小鸭子船长一眼告诉你现在的情况：有事需要你时它敬礼，任务在跑时它掌舵，任务在等别的东西时它举着望远镜盯着，任务完成时它欢呼。
 
-**用你自己的 Copilot，跑在你自己的电脑上**
-- 用你现有的 Copilot：订阅、模型、插件、skill、MCP server 和公司策略，也可以在 Settings 里再加。不需要别的 AI 服务或 API key。
-- 如果你也用 Codex，可以在 Settings 里让 worker 改用 Codex，用你自己的 Codex 登录（[怎么设置](docs/guide.md#workers-on-other-coding-agents)，英文）。
-- 每个 worker 有自己的文件夹和 git worktree，不会动你的代码目录。worker 和你自己的 Copilot
+**用你自己的编码 agent，跑在你自己的电脑上**
+- 用你现有的 agent，Copilot、Codex 或 Claude Code：订阅、模型、插件、skill、MCP server 和公司策略，也可以在 Settings 里再加。不需要别的 AI 服务或 API key。
+- 可以同时用几个，各用你自己的登录：用 `@codex` 或 `@claude` 给某个任务挑一个，在 Settings 里选新 worker 和 Chief of Staff 自己的每个 session 跑在哪个上（[怎么设置](docs/guide.md#workers-on-other-coding-agents)，英文）。
+- 每个 worker 有自己的文件夹和 git worktree，不会动你的代码目录。worker 和你自己的 agent
   session 一样运行，但没有你点头，不会以你的名义在 GitHub 上评论、review、merge 或关闭，也不会
   推 `main` 或 force push 别人的分支；可以在 Settings 里打开 *Ask first* 加更多检查（完全不
   force push、不用 `sudo`）或系统沙箱。
@@ -100,13 +100,14 @@ Git 在很深的路径下仍可能遇到路径长度限制；遇到此问题时�
 **可选的登录**
 - **GitHub**：用你所有的账号各 `gh auth login` 一次，用来 review 和开 PR。
 - **Slack**：在 Settings 里粘贴 user token（[怎么获取](docs/guide.md#slack)，英文），或者通过你的
-  Copilot 已有的工具（比如 Glean）访问 Slack。
+  编码 agent 已有的工具（比如 Glean）访问 Slack。
 - **其他服务**（文档、issue 系统）：worker 需要时会出现一张登录卡片。
 
 ## 工作原理
 
-每个 session 都是普通的 Copilot CLI session，通过 Copilot SDK 驱动，在 `copilot --resume` 里叫
-"Chief of Staff · …"（Codex worker 是它自己的 `codex app-server` 里的一个 thread）。session 之间从不直接对话：它们调用 `spawn_worker`、`report`、`tell_session`
+每个 session 都是它所在 agent 的普通 session：通过 Copilot SDK 驱动的 Copilot CLI session（在
+`copilot --resume` 里叫 "Chief of Staff · …"）、它自己的 `codex app-server` 里的一个 thread，或通过
+Claude 的 Agent SDK 驱动的 Claude Code session。session 之间从不直接对话：它们调用 `spawn_worker`、`report`、`tell_session`
 这类工具，由 Chief of Staff 传话，并标明是谁发的，所以一条 Slack 消息没法冒充成你。一起干活的 worker
 把对方需要的信息直接传给对方，Router 会收到一份副本。
 
@@ -126,8 +127,8 @@ Slack、GitHub ──┘   草稿 ──────► 等你批准
 
 ## 当前状态
 
-早期版本（0.1），会有粗糙的地方。Copilot 用量照常算在你的订阅里，首页会显示每个任务用了多少
-credits。欢迎提 issue；想参与开发请看 [CONTRIBUTING.md](CONTRIBUTING.md)。
+早期版本（0.1），会有粗糙的地方。每个 agent 的用量照常算在你在那边的订阅里（首页显示每个任务用了多少
+Copilot credits；Usage 里有每个 agent 的用量）。欢迎提 issue；想参与开发请看 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 
