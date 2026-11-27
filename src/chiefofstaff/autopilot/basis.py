@@ -117,7 +117,9 @@ def quote_refusal(item: Item, quote: str, answer: str, options: Sequence[str] = 
     the owner's that holds the answer (with options: the one chosen, and no other), from an item
     with nothing in it that says no: anywhere in it, the question waits for them ("Redis? No.",
     "Use Postgres, not Redis")."""
-    text, said = plain(item.text), plain(quote)
+    # Its own stop or comma at an end ("Blue, please.") is where the clause ends, as the
+    # character after it would be: the same phrase.
+    text, said = plain(item.text), plain(quote).strip("".join(CLAUSE) + " ")
     places = bounded(text, said)
     if not said or not places:
         return f"its quote is not in what you said ({item.id})"

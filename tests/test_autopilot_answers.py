@@ -442,6 +442,12 @@ async def test_a_quote_is_a_whole_phrase_of_theirs_that_says_the_answer(harness,
         ("Don't use the U.S. Redis cluster.", ["Postgres", "Redis"], "Redis",
          "Don't use the U.S. Redis cluster", "may say no to that answer"),
         ("Postgres for v1.", ["Postgres", "Redis"], "Postgres", "Postgres for v1", ""),
+        # Quoted with its own stop, more after it (live, the judge on Copilot): still a whole
+        # phrase; one that starts mid-clause still isn't.
+        ("Blue, please. Then carry on.", ["Red", "Blue"], "Blue", "Blue, please.", ""),
+        ("I want port 8080. Write it down.", [], "8080", "I want port 8080.", ""),
+        ("Pick Blue, please. Then carry on.", ["Red", "Blue"], "Blue", "Blue, please.",
+         "not a whole phrase of what you said"),
         ("Use Postgres 16.2 here.", ["Postgres", "Redis"], "Postgres", "Use Postgres 16.2 here",
          ""),
         ("Use Postgres.", ["Postgres", "Redis"], "Postgres", "Use Postgres", ""),
