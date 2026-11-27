@@ -1298,7 +1298,8 @@ class CodexBackend:
         if method is None:
             key = message.get("id")
             future = self.pending.pop(key, None) if isinstance(key, int) else None
-            self.sent_at.pop(key, None)
+            if isinstance(key, int):
+                self.sent_at.pop(key, None)
             if future and not future.done():
                 future.set_result(message)
             return
