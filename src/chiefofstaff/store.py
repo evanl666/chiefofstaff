@@ -3,10 +3,11 @@ import re
 import sqlite3
 import threading
 import time
-from contextlib import closing, suppress
+from collections.abc import Iterator
+from contextlib import closing, contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, overload
+from typing import Any, Literal, overload
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -52,7 +53,7 @@ LAST_ID = 2**63 - 1
 
 # Chief of Staff's own helper workers (learning, checks, profile, connector, messenger): not the
 # owner's tasks, never listed with them.
-HELPER_KINDS = ("learner", "checker", "distill", "connector", "messenger")
+HELPER_KINDS = ("learner", "checker", "distill", "connector", "messenger", "judge")
 # Constant SQL, made of the constant kinds above.
 HELPERS = " UNION ".join(
     f"SELECT substr(key, {len(kind) + 2}) FROM kv WHERE key >= '{kind}:' AND key < '{kind}:\uffff'"  # noqa: S608
@@ -121,6 +122,31 @@ def rename_database(directory: Path):
             return
 
 
+class Connection(sqlite3.Connection):
+    """The database connection. Outside Store.transaction() a `with` block is one transaction of
+    its own, as sqlite3's is; inside one it joins it (a savepoint: a block that fails is undone
+    alone), so nothing commits before the transaction ends."""
+
+    depth = 0
+
+    def __enter__(self) -> "Connection":
+        if not self.depth:
+            return super().__enter__()
+        self.depth += 1
+        self.execute(f"SAVEPOINT part{self.depth}")
+        return self
+
+    def __exit__(self, kind, value, trace) -> Literal[False]:
+        if not self.depth:
+            return super().__exit__(kind, value, trace)
+        name = f"part{self.depth}"
+        self.depth -= 1
+        if kind is not None:
+            self.execute(f"ROLLBACK TO {name}")
+        self.execute(f"RELEASE {name}")
+        return False
+
+
 def valid(values: dict) -> bool:
     try:
         Settings.model_validate(values, context=AS_SAVED)
@@ -140,7 +166,7 @@ class Store:
         store.cached = None
         store.commands_changes = 0
         uri = f"{(directory / DB_NAME).absolute().as_uri()}?mode=ro"
-        store.db = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        store.db = sqlite3.connect(uri, uri=True, check_same_thread=False, factory=Connection)
         store.db.row_factory = sqlite3.Row
         return store
 
@@ -154,7 +180,7 @@ class Store:
         # Writes that may change which commands a task's runs ran, or how they ended: a task's
         # are read again for its receipts only after one (TaskActions.task_commands).
         self.commands_changes = 0
-        self.db = sqlite3.connect(directory / DB_NAME, check_same_thread=False)
+        self.db = sqlite3.connect(directory / DB_NAME, check_same_thread=False, factory=Connection)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript("""
@@ -463,6 +489,33 @@ class Store:
             if "commands" in sql or "runs" in sql:
                 self.commands_changes += 1
             return self.db.execute(sql, params)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Several changes as one: every write through the store inside it (execute, set,
+        delete, the update_* of each part, a `with store.db` block) is committed once, at its
+        end, or none is (an exception rolls all of it back). Nested, it joins the outer one.
+        Synchronous only (nothing awaits inside it): the store's lock is held throughout, so
+        other threads wait for it, and never executescript (which commits)."""
+        with self.lock:
+            db = self.db
+            if db.depth:
+                with db:
+                    yield
+                return
+            if db.in_transaction:
+                db.commit()
+            db.execute("BEGIN IMMEDIATE")
+            db.depth = 1
+            try:
+                yield
+                db.depth = 0
+                db.commit()
+            except BaseException:
+                db.depth = 0
+                db.rollback()
+                self.cached = None
+                raise
 
     def settings(self) -> Settings:
         """The saved settings. Shared by every caller until they change: never change the object

@@ -4219,11 +4219,15 @@ class TaskActions:
 
     def finished_words(self, task: dict) -> str:
         """How a cancelled or done task ended, as the Router is told ("its task t1 “X” …"):
-        accepted by the owner only when they did (E141: said of tasks nobody reviewed)."""
+        accepted by the owner only when they did (E141: said of tasks nobody reviewed), by
+        Autopilot when it did (its own offline run of the checks: autopilot/results.py)."""
         if task["status"] == "cancelled":
             return "was cancelled"
-        if self.store.get(f"acceptedby:{task['id']}") == "owner":
+        accepted = self.store.get(f"acceptedby:{task['id']}")
+        if accepted == "owner":
             return "was accepted by the owner and is done"
+        if accepted == "autopilot":
+            return "was accepted by Autopilot and is done"
         return "is done"
 
     def finished_at(self, task: dict) -> str:
@@ -5013,6 +5017,13 @@ class TaskActions:
         nudged = self.store.get(f"stallnudge:{task['id']}") or ""
         return {
             **task,
+            # Accepted for the owner by Autopilot (only then: autopilot/results.py), with its
+            # entry in the record.
+            **(
+                {"accepted_by": "autopilot", "accepted_entry": entry}
+                if (entry := self.runtime.autopilot.accepted_entry(task))
+                else {}
+            ),
             # Its state, apart: where its run is (queued, running, waiting, finished,
             # cancelled, failed), what the owner has to do about it now (attention, with why;
             # "" for nothing), and what Chief of Staff still follows up for it (monitoring).

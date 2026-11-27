@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 
 from . import agents, prompts, receipts, settings_guard, threads
+from .autopilot.origin import CARRIED
 from .backend import COPILOT_AGENT, running_background, stop_background
 from .delivery import digest
 from .envelope import SWITCHED, from_owner, news_tasks, tasks_named, wrap
@@ -479,7 +480,13 @@ class Events:
         handler = self.handlers.get(kind)
         row = self.store.find_session(session_id)
         if handler and row and not row["closed_at"]:
-            handler(row, event)
+            if self.runtime.autopilot.origins.any() or CARRIED.get() is not None:
+                # What its turn causes (a report filed, a notice to a peer) carries its origin,
+                # and only that.
+                with self.runtime.autopilot.origins.acting(session_id):
+                    handler(row, event)
+            else:
+                handler(row, event)
 
     def at_work(self, session_id: str, kind: str, event: Any) -> bool:
         """Its session's event, as a sign of work (E140): when its model call began and ended,
@@ -911,6 +918,8 @@ class Events:
         state.held = held
         state.busy = False
         self.delivery.handled(session_id)
+        if self.runtime.autopilot.origins.any():
+            self.runtime.autopilot.turn_ended(row)  # A turn Autopilot continued: what came of it.
         if row["role"] == WORKER and self.store.get(f"gitwatch:{session_id}"):
             # (Linux: what its turn made in a .git.)
             self.runtime.background(self.runtime.git_watch_after(session_id))
@@ -1289,7 +1298,9 @@ class Events:
             elif reason in OWNERS_CHECKOUTS and getattr(request, "kind", "") == "shell":
                 # Run in a copy of its own instead, made now (once): never stuck on it.
                 reason = await self.runtime.own_copy(row, request) or reason
-            self.runtime.add_message(row["id"], "notice", reason)
+            # (Refused in a turn Autopilot continued: its record says so, `after`.)
+            refused = {"refused": True} if self.runtime.autopilot.origins.of(row["id"]) else None
+            self.runtime.add_message(row["id"], "notice", reason, refused)
             return PermissionDecisionReject(feedback=reason)
         if row["role"] == WORKER and getattr(request, "kind", "") == "write":
             self.store.record(row["id"], "files", [written_file(row["cwd"], request)])

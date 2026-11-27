@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from . import ingress
 from .asks import asks_back, clock
 from .envelope import wrap
 from .ledger import related, same_value
@@ -421,13 +422,21 @@ class Decisions:
                 subject=subject["id"] if subject else "",
                 join=False,
             )
-            self.runtime.add_message(
-                caller, "draft", question, {"draft_id": card["id"], "label": "Decision"}
-            )
-            self.bus.publish("draft", card)
-            self.runtime.alert(
-                question, session_id=caller, needs_action=True, title=f"Decision · {row['title']}"
-            )
+            autopilot = self.runtime.autopilot
+            if autopilot.ticked and autopilot.holds_decision(row):
+                # Autopilot decides it first: not drawn meanwhile (autopilot/answers.py).
+                self.runtime.background(autopilot.decide_decision(row, card))
+            else:
+                self.runtime.add_message(
+                    caller, "draft", question, {"draft_id": card["id"], "label": "Decision"}
+                )
+                self.bus.publish("draft", card)
+                self.runtime.alert(
+                    question,
+                    session_id=caller,
+                    needs_action=True,
+                    title=f"Decision · {row['title']}",
+                )
         if task and task["status"] in OPEN:
             self.tasks.move(task["id"], "waiting", progress=f"Needs your decision: {question}")
         self.runtime.update_session(caller, status="waiting")
@@ -574,6 +583,9 @@ class Decisions:
         choice = clean(decision.text, 500)
         if not choice:
             raise ValueError("Pick an option or write your decision.")
+        if channel := ingress.current():
+            # How their answer came in (the page, an away answer): see ingress.py.
+            self.store.set(f"ingress:{card['id']}", channel)
         if kept and target.get("options") and not self.named(target, choice):
             # A reconsideration answered in words that pick none of its options (E154: "try
             # more variants first" replaced the decision in force and reopened six finished
@@ -595,6 +607,9 @@ class Decisions:
             agreed=(choice.lower() == best.lower()) if best else None,
         )
         card = self.close(card["id"], "answered", choice)
+        if changes := target.get("changes"):
+            # Their Change of a decision Autopilot made: theirs now (autopilot/answers.py).
+            self.runtime.autopilot.decision_changed(changes, choice)
         text = f"The owner decided: {choice}"
         short = choice if len(choice) <= 80 else choice[:79].rstrip() + "…"
         await self.tell_askers(

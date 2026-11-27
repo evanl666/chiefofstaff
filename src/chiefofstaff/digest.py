@@ -75,6 +75,8 @@ class Needs:
     markers: dict[str, str] = field(default_factory=dict)
     # What an accepted task is still monitored for, in a few words ("" for nothing).
     monitored: Callable[[dict], str] = lambda task: ""
+    # Whether Autopilot accepted a done task (its entry; "" when the owner did).
+    by_autopilot: Callable[[dict], str] = lambda task: ""
 
     def of(self, kind: str) -> list[dict]:
         return [item for item in self.items if item["kind"] == kind]
@@ -144,7 +146,8 @@ def needs(runtime: Runtime, moment: datetime | None = None) -> Needs:
 
     moment = moment or datetime.now(UTC)
     store = runtime.store
-    found = Needs(monitored=runtime.task_actions.monitoring_words)
+    found = Needs(monitored=runtime.task_actions.monitoring_words,
+                  by_autopilot=runtime.autopilot.accepted_entry)  # fmt: skip
     drafts = store.drafts()
     deciding = {
         asker.get("task_id")
@@ -264,7 +267,10 @@ def task_words(task: dict, found: Needs) -> str:
     elif task["status"] == "review":
         words = "to accept once its worker has followed up on the owner's message"
     elif task["status"] == "done" and (watched := found.monitored(task)):
-        words = f"accepted, monitoring {watched}"
+        who = " by Autopilot" if found.by_autopilot(task) else ""
+        words = f"accepted{who}, monitoring {watched}"
+    elif task["status"] == "done" and found.by_autopilot(task):
+        words = "accepted by Autopilot"
     else:
         return task["status"]
     return words if words.startswith(task["status"]) else f"{task['status']}, {words}"

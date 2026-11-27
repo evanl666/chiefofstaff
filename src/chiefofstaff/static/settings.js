@@ -1,5 +1,6 @@
 // The settings and usage dialogs.
 
+import { autopilot, autopilotRun, showRecord, untilWords } from "./autopilot.js";
 import { $, api, el, submits, toast } from "./dom.js";
 import { lines, plural, since } from "./text.js";
 import { closedWorkers, followOthers, HOME, loadState, sessions, state } from "./state.js";
@@ -18,6 +19,7 @@ const PLACES = {
   workers: { tab: "general", scroll: "general-workers" },
   advanced: { tab: "general", unfold: "more" },
   proactive: { tab: "general", unfold: "prs" },
+  autopilot: { tab: "general", unfold: "autopilot" },
   models: { tab: "agents", unfold: "models" },
   agents: { tab: "agents" },
   connections: { tab: "connections" },
@@ -50,7 +52,8 @@ export function showSettingsTab(name, { focus = false } = {}) {
   // page; while it is on) or its Workers group (Workers' old page), in view.
   if (place.unfold === "more") $("#general-more").open = true;
   if (place.unfold === "prs" && $("#settings-form").proactive.checked) setUnfold("prs-more", true);
-  const target = { more: "general-more", prs: "proactive-line" }[place.unfold] || place.scroll;
+  if (place.unfold === "autopilot" && $("#settings-form").autopilot.checked) setUnfold("autopilot-more", true);
+  const target = { more: "general-more", prs: "proactive-line", autopilot: "autopilot-line" }[place.unfold] || place.scroll;
   if (target) document.getElementById(target)?.scrollIntoView?.({ block: "start" });
   // The models it named: Who does the work, at the top of its page, nothing folded.
   if (place.unfold === "models") document.querySelector("#agents-page .work-grid")?.scrollIntoView({ block: "nearest" });
@@ -307,6 +310,9 @@ export function bindSettings() {
   for (const input of [form.ask_first, form.worker_sandbox]) input.addEventListener("change", generalWords);
   $("#prs-more").addEventListener("input", generalWords);
   $("#prs-more").addEventListener("change", generalWords);
+  // Autopilot: its Options are offered while its line is ticked (before it is saved too).
+  form.autopilot.addEventListener("change", showAutopilotLine);
+  $("#autopilot-more").addEventListener("input", generalWords);
   $("#send-cancel").addEventListener("click", () => {
     renderSendLine();
     sendSwitch.focus();
@@ -609,6 +615,10 @@ export function fillSettings() {
   setUnfold("prs-more", false);
   $("#general-more").open = false;
   generalWords();
+  form.autopilot.checked = Boolean(settings.autopilot);
+  $("#autopilot-more").replaceChildren();
+  setUnfold("autopilot-more", false);
+  showAutopilotLine();
   // When none of them can say where it stands, its line says why.
   const why = settings.other_sessions ? state.othersWhy : "";
   $("#others-why").textContent = why;
@@ -1236,6 +1246,8 @@ export function settingsBody() {
     proactive: form.proactive.checked,
     ...proactiveFields(),
     watchdog_enabled: named("watchdog_enabled") ? named("watchdog_enabled").checked : settings.watchdog_enabled,
+    autopilot: form.autopilot.checked,
+    ...autopilotFields(),
     slack_enabled: form.slack_enabled.checked,
     slack_poll_seconds: number("slack_poll_seconds"),
     slack_delegate_emoji: form.slack_delegate_emoji.value.trim(),
@@ -1488,6 +1500,7 @@ function generalWords() {
   // (not on Codex).
   $("#sandbox-when-off").hidden = form.worker_sandbox.checked || !agentsOn().some((name) => name !== "codex");
   $("#proactive-help").textContent = prsWords();
+  $("#autopilot-help").textContent = autopilotWords();
 }
 
 // Keep my PRs moving (shepherd.py): its Options, under its line while it is on: whose PRs it
@@ -1576,6 +1589,70 @@ function prsWords() {
   const used = spent ? round((spent.settled || 0) + (spent.reserved || 0)) : 0;
   const today = used ? (budget ? `${used} of ${budget} used today` : `${used} used today`) : "";
   return [what, budget ? `up to ${budget} credits a day without asking` : "", today].filter(Boolean).join(" · ");
+}
+// Autopilot (autopilot.md §8): its line says what it does, and while it is ticked its Options
+// hold its credits a day, where it acts, whether workers ask first, and its record. Made the
+// first time it is ticked (from what is saved); then only shown and hidden as the line goes.
+function showAutopilotLine() {
+  const on = $("#settings-form").autopilot.checked;
+  if (on && !$("#autopilot-more").childElementCount) renderAutopilotOptions();
+  $("#autopilot-options").hidden = !on;
+  if (!on) setUnfold("autopilot-more", false);
+  generalWords();
+}
+function autopilotWords() {
+  const form = $("#settings-form");
+  if (!form.autopilot.checked) return "Answers your workers from what you said, and accepts results it checked itself, while it's on.";
+  const settings = state.snapshot.settings;
+  const credits = form.autopilot_credits ? Number(form.autopilot_credits.value || 0) : settings.autopilot_credits ?? 100;
+  const run = autopilotRun();
+  const head = run ? `On ${untilWords(run)}` : "Home's Autopilot button turns it on, for a while";
+  return `${head} · up to ${credits} credits a day`;
+}
+function renderAutopilotOptions() {
+  const settings = state.snapshot.settings;
+  const repos = settings.autopilot_repos || [];
+  const only = el("textarea", { name: "autopilot_repos", rows: 2, placeholder: "owner/name, one per line", "aria-label": "Only these repositories", hidden: !repos.length });
+  only.value = repos.join("\n");
+  const scope = el(
+    "select",
+    { name: "autopilot_scope", "aria-label": "Where it acts", onchange: () => { only.hidden = scope.value !== "only"; if (!only.hidden) only.focus(); } },
+    el("option", { value: "all", text: "All your projects", selected: !repos.length }),
+    el("option", { value: "only", text: "Only these…", selected: Boolean(repos.length) }),
+  );
+  const record = autopilot()?.record
+    ? el("button", { type: "button", class: "link quiet autopilot-record-link", text: "Autopilot record", onclick: () => { $("#settings-dialog").close(); showRecord(); } })
+    : null;
+  const sandbox = state.snapshot.sandbox || {};
+  const parts = [
+    el(
+      "div",
+      { class: "row" },
+      el("label", { class: "budget" }, el("span", { text: "Credits a day" }), el("input", { name: "autopilot_credits", type: "number", min: "0", max: "10000", step: "1", "aria-label": "Credits Autopilot may spend a day", value: String(settings.autopilot_credits ?? 100) })),
+      el("label", { class: "acts-in" }, el("span", { text: "Acts in" }), scope),
+      record,
+    ),
+    only,
+    el(
+      "div",
+      { class: "ask-first" },
+      el("label", { class: "check" }, el("input", { name: "autopilot_ask_first", type: "checkbox", checked: settings.autopilot_ask_first !== false, "aria-describedby": "autopilot-ask-help" }), " While Autopilot is on, workers ask first"),
+      el("small", { id: "autopilot-ask-help", text: "The turns it continues get Ask first's checks, whatever your setting for workers; your own turns don't." }),
+    ),
+    sandbox.supported === false ? el("small", { class: "note", text: "Here it can't verify results offline: this computer has no sandbox for it. It answers and sets questions aside; results wait for you." }) : null,
+  ];
+  $("#autopilot-more").replaceChildren(...parts.filter(Boolean));
+}
+function autopilotFields() {
+  const form = $("#settings-form");
+  const settings = state.snapshot.settings;
+  // Unticked, what its Options hold stays as saved.
+  if (!form.autopilot.checked || !$("#autopilot-more").childElementCount) return {};
+  return {
+    autopilot_credits: numberField(form.autopilot_credits, settings.autopilot_credits ?? 100),
+    autopilot_repos: form.autopilot_scope.value === "only" ? lines(form.autopilot_repos.value) : [],
+    autopilot_ask_first: form.autopilot_ask_first.checked,
+  };
 }
 function proactiveFields() {
   const form = $("#settings-form");

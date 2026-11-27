@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from . import prompts, threads
+from . import ingress, prompts, threads
 from .envelope import UNTRUSTED, wrap
 from .models import DraftDecision, NestedArguments
 from .roles import WORKER
@@ -3148,7 +3148,11 @@ class Connector:
     async def apply(self, item: dict, text: str, code: str, intent: str = "answer") -> str:
         """The owner's answer to one card, from elsewhere: what follows its code (any case).
         `intent`: what the messenger read it to mean, for a draft or a merge card (see
-        OwnerReply); a send it holds back is not sent (holds_send)."""
+        OwnerReply); a send it holds back is not sent (holds_send). Its ingress is `away`."""
+        with ingress.through(ingress.AWAY):
+            return await self.applied(item, text, code, intent)
+
+    async def applied(self, item: dict, text: str, code: str, intent: str) -> str:
         answer = without_code(text, code)
         word = answer.lower().strip(" .!")
         say = self.say

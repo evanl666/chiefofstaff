@@ -1112,6 +1112,84 @@ FEATURES["proactive"] = Feature(
     ],
 )
 
+# Autopilot (autopilot.md §8, "Off state"): off on upgrade and for new installs. Off and never
+# used, it differs only by name: its line in Settings → General; its settings keys at their off
+# values; an owner message to the Router that is exactly one of its commands is answered by Chief
+# of Staff (the script sends none); and how each owner input came in (ingress), stored with it and
+# never shown or sent to a model. On and never run: that line checked with its small group, its
+# menu on Home (and Recently finished's help: results you or Autopilot accepted), its part of
+# the state, its tables (made on the first tick), the owner's messages a task was given by (kept
+# for its scope), and the Router's rule and its record tool.
+AUTOPILOT_TABLES = r"autopilot_(runs|log|blobs|outbox|decisions)"
+FEATURES["autopilot"] = Feature(
+    off={"autopilot": False},
+    on={"autopilot": True},
+    allow_off=[
+        Allow("its setting, off", setting="autopilot", value=False),
+        Allow("its credits a day, the default", setting="autopilot_credits", value=100),
+        Allow("all your projects, the default", setting="autopilot_repos", value=[]),
+        Allow(
+            "workers ask first while it is on, the default",
+            setting="autopilot_ask_first",
+            value=True,
+        ),
+        Allow(
+            "its switch line in Settings → General's On its own (its Options folded, hidden)",
+            element="#settings-dialog #autopilot-line, #settings-dialog #autopilot-more",
+            views=r"^settings-general-",
+        ),
+        Allow(
+            "its switch's field in Settings → General", data=r"^page\.settings\.fields\.autopilot$"
+        ),
+        Allow("how an owner message came in (ingress), stored with it", data=r"\.meta\.ingress$"),
+        Allow("how a decision card was answered (ingress)", data=r"\.db\.kv\.ingress:"),
+    ],
+    allow_on=[
+        Allow(
+            "its switch line in Settings → General, checked, and its Options",
+            element="#settings-dialog #autopilot-line, #settings-dialog #autopilot-more",
+            views=r"^settings-general-",
+        ),
+        Allow(
+            "its switch's and its Options' fields in Settings → General",
+            data=r"^page\.settings\.fields\.autopilot(?:_credits|_scope|_repos|_ask_first)?$",
+        ),
+        Allow(
+            "its menu in Home's header",
+            element="#session-actions .menu-wrap.autopilot",
+            views=r"^home",
+        ),
+        Allow(
+            "Recently finished's help: results you or Autopilot accepted",
+            element="#tasks-recent > summary",
+            views=r"^home",
+        ),
+        Allow("its part of the state", data=r"\./api/state\.autopilot$"),
+        Allow("its tables", data=rf"\.db\.{AUTOPILOT_TABLES}$"),
+        Allow("its tables in the schema", data=rf"\.db\._schema\.{AUTOPILOT_TABLES}(_\w+)?$"),
+        Allow(
+            "the owner's messages a task was given by ({owner:<ref>}), kept for its scope while "
+            "its line is ticked",
+            data=r"\.db\.kv\.autopilot:refs:",
+        ),
+        Allow(
+            "the Router's rule while its line is ticked",
+            data=r"\.system_message\.content$",
+            lines=r"^- Autopilot",
+        ),
+        Allow(
+            "the Router's record tool (autopilot_log) while its line is ticked",
+            data=r"^backend\.sessions\.router:.*\.options\.available_tools\[\d+\]$",
+            value="autopilot_log",
+        ),
+        Allow(
+            "the Router's tool search, its record tool one more",
+            data=r"^backend\.sessions\.router:.*\.options\.tool_search\.defer_threshold$",
+            value=50,
+        ),
+    ],
+)
+
 # The agent picker with other coding agents installed and never decided on (the stand-ins are on
 # the PATH in every run but --copilot-alone): v0.1.48's last line of Settings → Models is gone;
 # Settings has a Coding agents tab after Models, which looks at them only when shown (left out
@@ -1956,8 +2034,14 @@ class Scenario:
 
     async def post(self, client, path: str, body: dict):
         response = await client.post(path, json=body)
+        # Its answer field by field when it is JSON (each allowance by its path: a key added to
+        # a message's meta, say); else its first 400 characters.
+        try:
+            answer = response.json()
+        except ValueError:
+            answer = response.text[:400]
         self.record("backend", {"call": "owner", "path": path, "status": response.status_code,
-                                "answer": response.text[:400]})  # fmt: skip
+                                "answer": answer})  # fmt: skip
 
     async def agents_drained(self, name: str = "codex"):
         """More agents' on mode: Codex turned on, then off, as a Settings save of the Coding

@@ -23,6 +23,9 @@ from pydantic import BaseModel, Field, create_model
 
 from . import agents, prompts, receipts, threads
 from .asks import AnswerSession, AskSession, RecordSetup, clock
+from .autopilot.core import AutopilotLog
+from .autopilot.judge import ProposeAnswer
+from .autopilot.origin import CARRIED
 from .checks import ProposeChecks
 from .decisions import AckDecision, AskDecision, RecordDecision
 from .digest import NEEDS_WORDS, Needs, needs, task_words, waiting_parts
@@ -1387,6 +1390,19 @@ class Tools:
                 self.runtime.habits.t_update_style,
             ),
             (
+                "autopilot_log",
+                "What Autopilot did, from its record: each entry (when, what, why, its link), "
+                "newest last, with counts. The only source for what Autopilot did.",
+                AutopilotLog,
+                self.runtime.autopilot.t_autopilot_log,
+            ),
+            (
+                "propose_answer",
+                "Propose the answer the owner's own words give to one question, or park it.",
+                ProposeAnswer,
+                self.runtime.autopilot.t_propose_answer,
+            ),
+            (
                 "propose_checks",
                 "Propose checks learned from workers' mistakes; each is run on the failing and "
                 "the fixed code before the owner sees it.",
@@ -1859,7 +1875,12 @@ class Tools:
             asked = self.states[caller].turn_request if caller == self.runtime.router_id() else ""
             mark = TURN_REQUEST.set(asked)
             try:
-                result = await handler(params, caller)
+                if self.runtime.autopilot.origins.any() or CARRIED.get() is not None:
+                    # What it causes carries its turn's origin, and only that (origin.py).
+                    with self.runtime.autopilot.origins.acting(caller):
+                        result = await handler(params, caller)
+                else:
+                    result = await handler(params, caller)
             except (ValueError, LookupError, RuntimeError) as exc:
                 return ToolResult(
                     text_result_for_llm=f"Error: {exc}", result_type="failure", error=str(exc)
@@ -1931,7 +1952,7 @@ class Tools:
             raise ValueError(f"“{row['title']}” is at work already.")
         # Held as reopening does: a removal of its folder started when it closed waits.
         # Its run on the agent Settings put its kind on (another while that can't run it).
-        agent = await self.runtime.helper_agent(agents.kind_of(WORKER, special))
+        agent = await self.runtime.helper_agent(agents.runs_as(WORKER, special))
         async with self.states[session_id].checkouts, self.states[session_id].lifecycle:
             await self.runtime.drop_handle(session_id)
             fresh = str(uuid4())
@@ -1965,6 +1986,22 @@ class Tools:
         await self.runtime.workers.pump()
         status = self.store.session(session_id)["status"]
         return {"task_id": task["id"], "session_id": session_id, "status": status}
+
+    def owner_refs(self, text: str) -> list[int]:
+        """The owner's messages a text names by their refs ({owner:<ref>}): their ids, for
+        Autopilot's scope (only while its line is ticked)."""
+        if not self.runtime.autopilot.ticked:
+            return []
+        found = []
+        for ref in OWNER_REF.findall(text):
+            row = self.store.one(
+                "SELECT id FROM messages WHERE session_id=? AND kind='owner' "
+                "AND json_extract(meta, '$.ref')=?",
+                (self.runtime.router_id(), ref),
+            )
+            if row:
+                found.append(row["id"])
+        return found
 
     def owner_words(self, text: str) -> str:
         """The owner's messages in place of {owner:<ref>}."""
@@ -2027,6 +2064,7 @@ class Tools:
             return await self.spawn_fork_of(params, caller, fork_of, request)
         if not special and not agent and not fork and (compared := self.compared(params, caller)):
             return await self.spawn_compare(params, caller, compared, request)
+        refs = self.owner_refs(params.instructions)
         params = params.model_copy(update={"instructions": self.owner_words(params.instructions)})
         if not special and (asked := risky(params.instructions)):
             raise ValueError(
@@ -2115,7 +2153,7 @@ class Tools:
         if special:
             # Watch for you and the helpers on the agent Settings put their kind on, once that
             # can run them (another meanwhile).
-            agent = await self.runtime.helper_agent(agents.kind_of(WORKER, special))
+            agent = await self.runtime.helper_agent(agents.runs_as(WORKER, special))
         if agent == agents.COPILOT:
             await self.runtime.check_model(params.model)
         else:
@@ -2268,6 +2306,7 @@ class Tools:
         )
         if request and params.works_with:
             self.runtime.teams_lite.record_with(task["id"], request, params.works_with)
+        self.runtime.autopilot.given(task["id"], refs)  # (Its scope, while ticked: basis.py.)
         if params.review:
             self.store.set(f"reviewreq:{task['id']}", "1")
         if context_from:
@@ -2436,9 +2475,13 @@ class Tools:
             )
         elif params.after:
             result["note"] = (
-                "Starts automatically once the owner accepted the tasks it depends on."
-                if params.wait_for == "accepted"
-                else "Starts automatically when the tasks it depends on are done."
+                "Starts automatically when the tasks it depends on are done."
+                if params.wait_for != "accepted"
+                # (Autopilot on: it may accept them; autopilot/results.py.)
+                else "Starts automatically once the tasks it depends on are accepted (by the "
+                "owner, or by Autopilot while it is on)."
+                if self.runtime.autopilot.run()
+                else "Starts automatically once the owner accepted the tasks it depends on."
             )
         elif row["status"] == "queued" and row["activity"].startswith("waiting for memory"):
             result["note"] = (
@@ -2605,6 +2648,7 @@ class Tools:
         self.caller(caller, ROUTER)
         request = self.request_of(request)
         quoted = bool(OWNER_REF.search(params.text))  # The owner's own words, passed on.
+        refs = self.owner_refs(params.text)
         params = params.model_copy(update={"text": self.owner_words(params.text)})
         try:
             target = self.store.session(params.session_id)
@@ -2972,6 +3016,8 @@ class Tools:
         self.runtime.follow(
             target["id"], to_follow, task_id=task["id"] if task else "", asked=params.follow
         )
+        if task:
+            self.runtime.autopilot.given(task["id"], refs)  # (Its scope, while ticked.)
         if task and (handed := self.runtime.drafts.handed_to(task["id"])):
             prompt += "\n\n" + wrap("system", "context", self.runtime.drafts.handed_note(handed))
         elif (
@@ -5456,7 +5502,15 @@ class Tools:
         replaced = await self.runtime.drafts.supersede(draft)
         self.runtime.add_message(caller, "draft", params.text, {"draft_id": draft["id"]})
         held = ""
-        if handed := self.runtime.drafts.handed_over(draft, row):
+        handed = self.runtime.drafts.handed_over(draft, row)
+        if handed and self.runtime.autopilot.origins.of(caller):
+            # Drafted in a turn Autopilot continued: never sent through the owner's delegation;
+            # it waits for them as any other reply (autopilot/origin.py).
+            handed = None
+            draft = self.store.update_draft(
+                draft["id"], outcome="Not sent at once: Autopilot continued this work."
+            )
+        if handed:
             # The owner handed this message over with their own reaction: the reply in its
             # thread goes out at once (their decision, Settings), unless a check holds it.
             sent, held = await self.runtime.drafts.send_handed(draft, handed)

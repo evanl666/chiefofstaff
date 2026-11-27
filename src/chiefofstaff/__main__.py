@@ -191,6 +191,7 @@ def prepare_downgrade(parser: argparse.ArgumentParser, data_dir: Path) -> int:
     """--prepare-downgrade (more-agents.md 8), with Chief of Staff not running on this data
     directory: 0 when no process of another agent is left, else 1, saying which."""
     from . import agents, shepherd
+    from .autopilot.downgrade import prepare_downgrade as autopilot_downgrade
     from .store import Store
 
     directory = data_dir.expanduser().resolve()
@@ -213,9 +214,13 @@ def prepare_downgrade(parser: argparse.ArgumentParser, data_dir: Path) -> int:
         if preparing:
             named = ", ".join(f"“{title}”" for title in preparing)
             print(f"Stopped preparing fixes in {len(preparing)} worker(s): {named}.", flush=True)
+        # Autopilot: its run ends, and what it had not delivered yet is withdrawn.
+        drained = autopilot_downgrade(store)
+        for line in drained:
+            print(line, flush=True)
         if not agents.ever_used(store):
             # Bug E80: no "close the workers on other agents" when there never were any.
-            if not preparing:
+            if not preparing and not drained:
                 print("Nothing to prepare: no workers ran on another agent.", flush=True)
             return 0
         stopped, left = agents.prepare_downgrade(store)

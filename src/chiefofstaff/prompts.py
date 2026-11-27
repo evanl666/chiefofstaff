@@ -1151,6 +1151,20 @@ def with_shepherd_rule(prompt: str) -> str:
     return f"{head}\n{SHEPHERD_RULE}{end}{tail}"
 
 
+AUTOPILOT_RULE = (
+    "- Autopilot can be turned on by the owner: then Chief of Staff answers workers from what "
+    "the owner said and accepts results it verified itself. Answer what Autopilot did only from "
+    "autopilot_log, entry by entry, with counts and each entry's link; never infer one. A task "
+    'Autopilot accepted says "accepted by Autopilot": say so, never that the owner accepted it.'
+)
+
+
+def with_autopilot_rule(prompt: str) -> str:
+    """The Router's role while Autopilot's line is ticked: one rule, after its others."""
+    head, end, tail = prompt.rpartition("\n</chiefofstaff_role>")
+    return f"{head}\n{AUTOPILOT_RULE}{end}{tail}"
+
+
 def with_send_rule(prompt: str) -> str:
     """The Router's role with Send to Chief's rule after its others."""
     head, end, tail = prompt.rpartition("\n</chiefofstaff_role>")
