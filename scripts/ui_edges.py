@@ -14307,8 +14307,9 @@ async def round_payload(runtime, browser, failures: list[str]):
     await expect(why).to_have_attribute("data-tip", re.compile(r"ci\.example\.com"))
     await expect(why).to_have_attribute("data-tip", re.compile("Option 79: measured"))
     assert len(asked) == 1 and task["id"] in asked[0], asked
-    whole = len(json.dumps(runtime.snapshot()["tasks"]))
-    assert sizes and sizes[-1] < whole, (sizes, whole)
+    # The state, smaller than the whole snapshot by this task's cut words at least.
+    whole = len(json.dumps(runtime.snapshot(), ensure_ascii=False).encode())
+    assert sizes and sizes[-1] < whole - 5000, (sizes, whole)
     await unfold(row)
     fold = row.locator(".task-body details.earlier-reports")
     await expect(fold.locator("summary")).to_have_text("Earlier reports (1)")
