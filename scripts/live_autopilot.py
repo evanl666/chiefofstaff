@@ -94,7 +94,7 @@ from live_e2e import App, cleanup, data_dir, log, transcript, wait_for  # noqa: 
 from live_parity import setup, write  # noqa: E402
 
 MODEL = os.environ.get("AUTOPILOT_MODEL", "claude-sonnet-5.5")
-SHARD_CREDITS = {"A": 80.0, "B": 80.0, "C": 80.0, "D": 40.0}
+SHARD_CREDITS = {"A": 80.0, "B": 80.0, "C": 120.0, "D": 40.0}
 SCENARIOS = {
     "A": ["A1", "A2", "A3", "A4", "A5", "A6", "A7"],
     "B": ["B1", "B2", "B3", "B4"],
