@@ -4,8 +4,9 @@ import { $, api, closeMenus, closeOnBackdrop, FRESH_START, rememberKey, startFre
 import { byId, connectEvents, current, HOME, loadModels, loadState, markRead, othersOn, routerId, state, viewedId } from "./state.js";
 import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
 import { agentModels, answerSending, appendMessages, chatAnchor, dropSending, followAnchor, forgetUnsent, noteUnsent, renderHeader, repeatSending, scrolledByOwner, scrollToBottom, select, showSending, unsentFor } from "./session.js";
-import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setAgent, setRecipient } from "./mention.js";
+import { closeMentions, mention, onComposerInput, onMentionKey, pickTyped, routerSide, setAgent, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
+import { copilotAlone } from "./agentpick.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
 import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, showLength, takeAttachments, tooLong } from "./composer.js";
 import { bindSettings, openSettings, refreshUsageLink, showUsage } from "./settings.js";
@@ -73,7 +74,7 @@ function bindUi() {
       return;
     }
     if (sessionId === HOME && !routerId()) {
-      toast("Your chief of staff starts once Copilot is ready.", "error");
+      toast(copilotAlone() ? "Your chief of staff starts once Copilot is ready." : "Your chief of staff starts once one of your coding agents is ready.", "error");
       return;
     }
     // Refused here, with the limit in words: the text stays to be shortened.
@@ -86,6 +87,8 @@ function bindUi() {
     input.value = "";
     autosize();
     const to = routerSide() ? mention.to : null;
+    // "@claude …" typed in one go, never picked from the list: as if picked (README, the guide).
+    if (routerSide() && !to) pickTyped(text);
     // The agent chosen with @ for what this asks (only from Home, only while agents are on),
     // with its model and effort; or several, to compare.
     const agent = routerSide() && !to && mention.agent ? mention.agent.name : "";

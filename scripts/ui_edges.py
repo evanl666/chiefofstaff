@@ -6361,7 +6361,9 @@ async def main():
                           round_composer, round_decision_steer, round_decision_ledger,
                           round_ci_not_run, round_team_v4,
                           round_share_from_report, round_long_report,
-                          round_self_handle):  # fmt: skip
+                          round_router_appears, round_agent_words, round_payload,
+                          round_reconnecting, round_self_handle,
+                          round_toast_settled, round_typed_agents):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -9711,7 +9713,7 @@ async def send_setting(runtime, browser, scheme: str):
     await expect(consent).to_be_visible()
     await expect(consent.locator("p")).to_have_text(
         "What you send (your note, and any link or text you pass) goes to Chief of Staff on this "
-        "computer, which hands it to GitHub Copilot under your account; the work it starts runs "
+        "computer, which hands it to your coding agent under your account; the work it starts runs "
         "with your settings, as any task does."
     )
     buttons = consent.locator("button")
@@ -13030,6 +13032,166 @@ async def round_e125(runtime, browser, failures: list[str]):
     log("E125: an update's cleanup is one line under Handled for you, with when it was written")
 
 
+def state_as(agents: list[str], **more):
+    """A page's /api/state answered as the server's, with these agents on (and `more` of it)."""
+
+    async def answer(route):
+        response = await route.fetch()
+        data = await response.json()
+        data["work"] = {**data.get("work", {}), "agents": agents}
+        await route.fulfill(response=response, json={**data, **more})
+
+    return answer
+
+
+async def round_agent_words(runtime, browser, failures: list[str]):
+    """0.1.61 wording audit: what the page says of workers is right for the agents on, naming
+    them only where they differ (Codex: no sandbox Chief of Staff checked, so workers that read
+    Slack run there without one, asking first, and none runs while the sandbox is on)."""
+    lines = {
+        ("copilot", "codex"): (
+            "Workers act without asking, as in your own Copilot and Codex sessions.",
+            "Workers that read Slack are always sandboxed on Copilot; on Codex they run without "
+            "one, asking first.",
+        ),
+        ("codex",): (
+            "Workers act without asking, as in your own Codex sessions.",
+            "Workers that read Slack run without a sandbox on Codex, asking first.",
+        ),
+        ("claude",): (
+            "Workers act without asking, as in your own Claude sessions.",
+            "Workers that read Slack are always sandboxed.",
+        ),
+    }
+    for agents, (ask, slack) in lines.items():
+        routes = {"**/api/state": state_as(list(agents))}
+        context, page, errors, _, _ = await settings_page(browser, routes=routes)
+        await page.locator("#settings-button").click()
+        await page.locator("#settings-tabs [data-tab=general]").click()
+        await expect(page.locator("#ask-first-help")).to_have_text(ask)
+        await expect(page.locator("#sandbox-slack")).to_have_text(slack)
+        await page.locator("#sandbox-options").click()
+        # Off, its Options apply to the workers that read Slack, sandboxed (not on Codex).
+        boxed = any(name != "codex" for name in agents)
+        await expect(page.locator("#sandbox-when-off")).to_be_visible(visible=boxed)
+        await page.locator("input[name=worker_sandbox]").check()
+        codex = " Codex can't run workers while it's on." if "codex" in agents else ""
+        await expect(page.locator("#sandbox-help")).to_have_text(
+            f"Workers can change files only in their own folders.{codex}"
+        )
+        if agents == ("copilot", "codex"):
+            await shoot(page, "words-general", "light", 1280, target="#settings-dialog")
+        assert not errors, errors
+        await context.close()
+    # Chief of Staff starting on Codex (no Router yet): the box says what it waits for, not
+    # Copilot; Copilot alone, as before.
+    for agents, said in (
+        (["codex"], "You can ask once Chief of Staff has started."),
+        (["copilot"], "You can ask once Copilot is connected."),
+    ):
+        starting = {"runtime": {"state": "starting", "error": ""}, "router_id": None}
+        context, page, errors, _, _ = await settings_page(
+            browser, routes={"**/api/state": state_as(agents, **starting)}
+        )
+        await expect(page.locator("#composer-note")).to_have_text(said)
+        assert not errors, errors
+        await context.close()
+    # Copilot's own card (Copilot the only agent on, not ready): another agent can run it too.
+    failed = {
+        "runtime": {"state": "error", "error": "Copilot is not signed in.", "waits": True},
+        "router_id": None,
+    }
+    context, page, errors, _, _ = await settings_page(
+        browser, routes={"**/api/state": state_as(["copilot"], **failed)}
+    )
+    card = page.locator("#home-setup")
+    await expect(card.locator(".label")).to_have_text("Connect GitHub Copilot")
+    await expect(card).to_contain_text(
+        "Chief of Staff runs your work on GitHub Copilot here, and Copilot is not ready yet:"
+    )
+    await expect(card).to_contain_text(
+        "Codex or Claude Code can run it too: turn one on in Settings → Agents & models."
+    )
+    assert not errors, errors
+    await context.close()
+    # A session of the owner's to continue here: named by its agent.
+    store = runtime.store
+    target = {"session_id": "codex-thread", "title": "Old eval", "cwd": "/tmp/eval",
+              "text": "Rerun it", "task_title": "Rerun the eval", "agent": "codex"}  # fmt: skip
+    draft = store.create_draft(store.get("router_id"), "adopt", target, "Rerun it", "Old eval")
+    runtime.bus.publish("draft", draft)
+    try:
+        context, page, errors, _, _ = await settings_page(browser)
+        row = page.locator("#needs .ok-row", has_text="Old eval")
+        await row.get_by_role("button", name="More actions").click()
+        await row.get_by_role("menuitem", name="Details").click()
+        await expect(page.locator("#needs .ok-details")).to_contain_text(
+            "“Old eval”, one of your Codex sessions"
+        )
+        assert not errors, errors
+        await context.close()
+    finally:
+        rejected = store.update_draft(draft["id"], status="rejected", outcome="test")
+        runtime.bus.publish("draft", rejected)
+    log("words: workers' lines name the agents on where they differ; the waits and cards too")
+
+
+async def round_router_appears(runtime, browser, failures: list[str]):
+    """0.1.61: a page opened before Chief of Staff had a Router (a first start waiting for an
+    agent, or Claude being set up) shows the Router's chat on Home once there is one: no reload,
+    nothing empty in between, its first-start note in sight; another Router put in its place,
+    likewise."""
+    store = runtime.store
+    router = store.get("router_id")
+    note = (
+        "Chief of Staff runs on Claude (uses your Claude plan). Change it in Settings → Agents & "
+        "models."
+    )
+    made = str(uuid4())
+    store.delete("router_id")
+    runtime.publish_state()
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    try:
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        timeline = page.locator("#timeline")
+        await expect(timeline.locator("#home-welcome")).to_be_visible()
+        # A reload would lose `stayed`; the timeline left empty at any moment is counted.
+        await page.evaluate("""() => {
+            window.stayed = true;
+            window.emptied = 0;
+            const timeline = document.querySelector("#timeline");
+            new MutationObserver(() => { if (!timeline.children.length) window.emptied += 1; })
+                .observe(timeline, { childList: true });
+        }""")
+        store.create_session(made, "router", "Router", "idle")
+        store.add_message(made, "notice", note)
+        store.set("router_id", made)
+        runtime.publish_state()
+        line = timeline.get_by_text(note)
+        await expect(line).to_have_count(1, timeout=10000)
+        await expect(timeline.locator("#home-welcome")).to_have_count(0)
+        await shoot(page, "router-appears", "light", 1280, target="#application")
+        # The first Router back in its place: its chat, as it was.
+        last = [m for m in store.messages(router) if m["kind"] in {"owner", "notice"}][-1]
+        store.set("router_id", router)
+        runtime.publish_state()
+        await expect(line).to_have_count(0, timeout=10000)
+        await expect(timeline.locator(f'[data-id="{last["id"]}"]')).to_have_count(1)
+        assert await page.evaluate("window.stayed === true"), "reloaded"
+        assert await page.evaluate("window.emptied") == 0, "Home's chat was empty for a moment"
+        assert not errors, errors
+    finally:
+        await context.close()
+        store.set("router_id", router)
+        store.update_session(made, closed_at=datetime.now(UTC).isoformat())
+        runtime.publish_state()
+    log("router appears: Home shows its chat once there is one, no reload, nothing empty between")
+
+
 async def round_ci_not_run(runtime, browser, failures: list[str]):
     """Owner report 0.1.58: CI GitHub never started (the account's Actions minutes used up) is
     one calm line on the card, said once (not a ⚠ flag, not ✗ CI on the PR's chip), and the
@@ -13118,6 +13280,138 @@ async def in_sight(page, locator) -> bool:
           return Boolean(top) && (top === node || node.contains(top));
         }"""
     )
+
+
+# What the owner types on Home in one go, never picking from @'s list, and the agents it is to
+# run on ({} for none): at the start, in the middle, before punctuation, in any case; two to
+# compare; never a worker's name that starts like an agent's, an address, nor a word glued on.
+TYPED_AGENTS = [
+    ("@claude compare two date libraries", {"agent": "claude"}),
+    ("@CODEX, rename the retry flag", {"agent": "codex"}),
+    ("Compare two date libraries @Claude please", {"agent": "claude"}),
+    ("@copilot: list the open PRs", {"agent": "copilot"}),
+    ("Port the parser to Rust on @codex.", {"agent": "codex"}),
+    ("@claude，比较两个日期库", {"agent": "claude"}),  # noqa: RUF001 (as Chinese is typed)
+    ("@codex @claude compare the two parsers", {"agents": ["codex", "claude"]}),
+    ("@Codex migration: rerun the import", {}),
+    ("Mail me@claude.ai or see @claude.ai's docs", {}),
+    ("Ask @codexbot and @claude-team about it", {}),
+]
+
+
+async def round_typed_agents(runtime, browser, failures: list[str]):
+    """0.1.61 (QA U8): "@claude compare two date libraries" typed in one go, never picked from
+    @'s list, went as text: no agent chosen, so the Router was free to start it anywhere. The
+    README and the guide say to type @codex or @claude. Typed so, an agent counts as picked (the
+    bubble says "On Claude"; two typed are a Compare); a worker whose name starts like an agent's
+    is not read as one, nor is an address; one turned off says so, the words back in the box."""
+    folder, _ = codex_on_path()
+    try:
+        runtime.found_cache = (float("-inf"), [])
+        await agents_saved(runtime, {"codex": {"enabled": True}, "claude": {"enabled": True}})
+        await runtime.refresh_agent_status()
+        router = runtime.store.get("router_id")
+        await call_tool(runtime, "spawn_worker", router, title="Codex migration",
+                        instructions="Move the nightly jobs", why_new="test")  # fmt: skip
+        await settle(runtime)
+        context, page, errors, _ = await agents_page(browser, "light")
+        await at_home(page)
+        box = page.locator("#composer-input")
+        sent: list[dict] = []
+        page.on(
+            "request",
+            lambda r: (
+                sent.append(r.post_data_json)
+                if r.method == "POST" and r.url.endswith("/messages")
+                else None
+            ),
+        )
+        wrong: list[tuple] = []
+        for text, expected in TYPED_AGENTS:
+            await box.press_sequentially(text, delay=5)  # Typed in one go: nothing picked.
+            await expect(page.locator("#mention-list")).to_be_hidden()
+            await box.press("Enter")
+            bubble = page.locator("#timeline .msg.owner").filter(
+                has=page.locator(".text", has_text=re.compile(f"^{re.escape(text)}$"))
+            )
+            await expect(bubble).to_have_attribute("data-id", re.compile(r"^\d+$"))
+            body = sent[-1]
+            chosen = {key: body[key] for key in ("agent", "agents") if key in body}
+            log(f"  {text!r}: {chosen or 'no agent'}")
+            if chosen != expected:
+                wrong.append((text, chosen, expected))
+                continue
+            said = {"claude": "On Claude", "codex": "On Codex", "copilot": "On Copilot"}
+            if "agent" in expected:
+                await expect(bubble.locator(".to")).to_have_text(said[expected["agent"]])
+            elif "agents" in expected:
+                await expect(bubble.locator(".to")).to_have_text("Compare on Codex and Claude")
+            else:
+                await expect(bubble.locator(".to")).to_have_count(0)
+            await expect(page.locator("#composer-to")).to_be_hidden()
+            await expect(box).to_have_value("")
+        assert not wrong, f"typed, then sent: {wrong}"
+        stored = [m for m in runtime.store.messages(router) if m["kind"] == "owner"]
+        assert stored[-1]["meta"].get("agent") is None and "agents" not in stored[-1]["meta"]
+        log("@codex, @claude, @copilot typed in one go: picked (start, middle, punctuation, case,"
+            " CJK, two to compare); a worker's name, an address or a glued word: not")  # fmt: skip
+
+        # Turned off since: it says so, and the words are back to send otherwise.
+        await agents_saved(runtime, {"claude": {"enabled": False}})
+        await runtime.refresh_agent_status()
+        await page.reload()
+        await expect(page.locator("#application")).to_be_visible()
+        await at_home(page)
+        off = "@claude summarize the release notes"
+        await box.press_sequentially(off, delay=5)
+        await box.press("Enter")
+        await expect(page.locator(".toast", has_text="Claude is turned off")).to_be_visible()
+        await expect(box).to_have_value(off)
+        await box.fill("")
+        await page.locator("#composer-to button.clear").click()
+        # (The refusal is the browser's one line about a 400: said, as it should be.)
+        assert [e for e in errors if "status of 400" not in e] == [], errors
+        await context.close()
+        log("@claude typed while Claude is off: said so, the words back in the box")
+    finally:
+        await agents_saved(runtime, {"codex": {"enabled": False}, "claude": {"enabled": False}})
+        codex_off_path(folder)
+
+
+async def round_toast_settled(runtime, browser, failures: list[str]):
+    """0.1.61 (seen in the README's clip): the note at the bottom that a decision needs the owner
+    stayed its twelve seconds after it was decided, above the note that said so. A card's note
+    now goes once the card is settled."""
+    store = runtime.store
+    router = store.get("router_id")
+    if runtime.focus.active():
+        await runtime.focus.end()  # (Focus holds notes back.)
+    old = store.settings()
+    new = old.model_copy(update={"max_workers": 1000})  # (Other rounds' workers hold slots.)
+    store.save_settings(new)
+    await runtime.settings_changed(old, new)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    made = await call_tool(runtime, "spawn_worker", router, title="Limit the logins",
+                           instructions="Limit the logins", why_new="test")  # fmt: skip
+    worker = json.loads(made.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    question = "Toast check: limit logins per IP address or per account?"
+    await call_tool(runtime, "ask_decision", worker, question=question,
+                    options=[{"choice": "Per IP address"}, {"choice": "Per account"}],
+                    distinct=True)  # fmt: skip
+    await settle(runtime)
+    note = page.locator(".toast.attention", has_text=question)
+    await expect(note).to_be_visible(timeout=10000)
+    card = [d for d in store.drafts() if d["kind"] == "decision" and d["session_id"] == worker][-1]
+    await page.locator(f'#needs .card.draft[data-id="{card["id"]}"] .option').first.click()
+    await expect(page.locator(".toast", has_text="Decided.")).to_be_visible(timeout=5000)
+    await expect(note).to_have_count(0, timeout=3000)
+    log("a decision's note at the bottom goes once it is decided, not twelve seconds later")
+    await context.close()
 
 
 async def round_long_report(runtime, browser, failures: list[str]):
@@ -14268,6 +14562,236 @@ async def settings_long_states(runtime, browser):
     log("settings: long and combined states: statuses and controls apart, 800 to 1440")
 
 
+# Where the page is scrolled to, and where each card under Needs you is in the window.
+PLACES = """() => [document.scrollingElement.scrollTop,
+  ...[...document.querySelectorAll("#needs .card")].map((c) => c.getBoundingClientRect().top)]"""
+
+
+async def round_payload(runtime, browser, failures: list[str]):
+    """0.1.61: the page's state cuts a finished task's long result to what its row and chips read
+    (its start, its links) and its earlier reports to when they were said; the page asks once for
+    the whole of them (/api/task-texts) and has them where they show: its row's tooltip, its
+    Earlier reports, its links. A state read again after needs no second ask."""
+    store = runtime.store
+    router = store.get("router_id")
+    result = await call_tool(runtime, "spawn_worker", router, title="Survey the cache options",
+                             instructions="Survey the cache options", why_new="test")  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    body = "\n".join(f"Option {i}: measured at length, with its trade-offs." for i in range(80))
+    long = (
+        "Redis fits best: see [the cache survey](https://docs.example.com/cache-survey).\n\n"
+        f"{body}\n\nThe benchmark run: https://ci.example.com/runs/4417 (last word on it)."
+    )
+    runtime.tasks.move(task["id"], "done", result=long)
+    earlier = [{"at": datetime.now(UTC).isoformat(), "text": f"Memcached at first. {body}"}]
+    store.set(f"results:{task['id']}", json.dumps(earlier))
+    await settle(runtime)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    asked: list[str] = []
+    sizes: list[int] = []
+
+    async def answered(response):
+        if response.url.endswith("/api/state"):
+            sizes.append(len(await response.body()))
+
+    page.on("request", lambda r: asked.append(r.url) if "/api/task-texts" in r.url else None)
+    page.on("response", answered)
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    row = page.locator("#tasks-recent .card.task", has_text="Survey the cache options")
+    await expect(row).to_have_count(1, timeout=15000)
+    why = row.locator(".row-line .why")
+    await expect(why).to_have_text(re.compile("^Redis fits best"))
+    # Its tooltip, once the whole came: all of it, to its last line.
+    await expect(why).to_have_attribute("data-tip", re.compile(r"ci\.example\.com"))
+    await expect(why).to_have_attribute("data-tip", re.compile("Option 79: measured"))
+    assert len(asked) == 1 and task["id"] in asked[0], asked
+    # The state, smaller than the whole snapshot by this task's cut words at least.
+    whole = len(json.dumps(runtime.snapshot(), ensure_ascii=False).encode())
+    assert sizes and sizes[-1] < whole - 5000, (sizes, whole)
+    await unfold(row)
+    fold = row.locator(".task-body details.earlier-reports")
+    await expect(fold.locator("summary")).to_have_text("Earlier reports (1)")
+    await fold.locator("summary").click()
+    await expect(fold.locator(".earlier-report .body")).to_contain_text("Memcached at first.")
+    links = await row.evaluate("(node) => [...node.querySelectorAll('a[href]')].map((a) => a.href)")
+    assert any("docs.example.com/cache-survey" in link for link in links), links
+    # The state read again (a burst of events): the whole is put back at once, not asked again.
+    before = len(sizes)
+    runtime.bus.publish("state")
+    for _ in range(100):
+        if len(sizes) > before:
+            break
+        await page.wait_for_timeout(100)
+    assert len(sizes) > before, sizes
+    await page.wait_for_timeout(500)
+    assert len(asked) == 1, asked
+    await expect(fold.locator(".earlier-report .body")).to_contain_text("Memcached at first.")
+    await row.locator(":scope > .head .fold").click()
+    await expect(why).to_have_attribute("data-tip", re.compile("Option 79: measured"))
+    assert not errors, errors
+    await context.close()
+    log(
+        "a long finished result and its earlier reports: the state cut, the whole asked once "
+        "and shown in its tooltip, fold and links; a state read again asks nothing more"
+    )
+
+    # Opened before the whole came (its ask failed, then the next is slow): a report shown and
+    # its Earlier reports open, a draft's Result of open, stay open and get the whole once it
+    # comes, nothing on the page moved.
+    result = await call_tool(runtime, "spawn_worker", router, title="Compare the queue options",
+                             instructions="Compare the queue options", why_new="test")  # fmt: skip
+    queuer = json.loads(result.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    queued = runtime.tasks.current(queuer)
+    runtime.tasks.move(queued["id"], "review", result="Kafka fits best: ordered and replayable.")
+    store.set(
+        f"results:{queued['id']}",
+        json.dumps([{"at": datetime.now(UTC).isoformat(), "text": "RabbitMQ at first, then not."}]),
+    )
+    draft = store.create_draft(
+        worker, "reply", {"to": "Al", "where": "email", "task_id": task["id"]}, "Redis it is."
+    )
+    runtime.bus.publish("draft", store.draft(draft["id"]))
+    await settle(runtime)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    calls: list[str] = []
+    release = asyncio.Event()
+
+    async def failing_then_slow(route):
+        calls.append(route.request.url)
+        if len(calls) == 1:
+            await route.fulfill(status=503, json={"detail": "Busy."})
+            return
+        await release.wait()
+        await route.continue_()
+
+    await page.route("**/api/task-texts*", failing_then_slow)
+    # (Marked read, a task comes whole in its own event: not that way here.)
+    await page.route("**/api/tasks/*/read", lambda route: route.fulfill(json={"read": True}))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    shown = page.locator("#needs .card.task", has_text="Compare the queue options")
+    await expect(shown).to_have_count(1, timeout=15000)
+    for _ in range(100):
+        if calls:
+            break
+        await page.wait_for_timeout(100)
+    await shown.get_by_role("button", name="View report").click()
+    await expect(shown).to_have_class(re.compile(r"\bexpanded\b"))
+    earlier_fold = shown.locator(".report details.earlier-reports")
+    await expect(earlier_fold.locator("summary")).to_have_text("Earlier reports (1)")
+    await earlier_fold.locator("summary").click()
+    await expect(earlier_fold).to_have_attribute("open", "")
+    await expect(earlier_fold.locator(".earlier-report")).to_have_count(0)
+    about = page.locator(".card.draft > details.context", has_text="Survey the cache options")
+    await about.locator("summary").click()
+    await expect(about).to_have_attribute("open", "")
+    await expect(about.locator(".markdown")).not_to_contain_text("Option 79: measured")
+    where = await page.evaluate(PLACES)
+    # The state read again (an event): the whole asked for again, slowly this time.
+    runtime.bus.publish("state")
+    for _ in range(100):
+        if len(calls) > 1:
+            break
+        await page.wait_for_timeout(100)
+    assert len(calls) == 2, calls
+    release.set()
+    await expect(earlier_fold.locator(".earlier-report .body")).to_have_text(
+        "RabbitMQ at first, then not.", timeout=10000
+    )
+    await expect(earlier_fold).to_have_attribute("open", "")
+    await expect(shown).to_have_class(re.compile(r"\bexpanded\b"))
+    await expect(shown.locator(".report > .body")).to_contain_text("Kafka fits best")
+    await expect(about.locator(".markdown")).to_contain_text("Option 79: measured")
+    await expect(about).to_have_attribute("open", "")
+    after = await page.evaluate(PLACES)
+    assert len(after) == len(where) and all(
+        abs(a - b) < 1 for a, b in zip(after, where, strict=True)
+    ), (
+        where,
+        after,
+    )
+    assert not errors, errors
+    await context.close()
+    log(
+        "opened before the whole came (its ask failed, then slow): a report, its earlier "
+        "reports and a draft's Result of stay open and get the whole, nothing moved"
+    )
+
+
+async def round_reconnecting(runtime, browser, failures: list[str]):
+    """0.1.61 (owner report "router stuck?"): at work when Chief of Staff restarted, the Router
+    said Thinking… with Stop while no turn ran. Until it is resumed it says Reconnecting to
+    Codex… (no Thinking…, no Stop), its dot's tip says so; once a try was given up, Retry asks
+    for the next one now. A worker reconnecting says so on its row on Home. Update and restart,
+    waiting, says for what: Restarting after the Router's turn ends…"""
+    store = runtime.store
+    router = store.get("router_id")
+    made = await call_tool(runtime, "spawn_worker", router, title="Port the parser",
+                           instructions="Port the parser", why_new="test")  # fmt: skip
+    worker = json.loads(made.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    asked: list[str] = []
+    retry = runtime.retry_resume
+    runtime.retry_resume = asked.append
+    for session in (router, worker):
+        runtime.reconnecting[session] = "codex"
+        runtime.update_session(session, status="working", activity="")
+    runtime.publish_state()
+    context = await browser.new_context(viewport={"width": 1440, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    try:
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        line = page.locator("#timeline .working-line")
+        await expect(line).to_have_text(re.compile(r"^\s*Reconnecting to Codex…\s*$"))
+        await expect(line.get_by_role("button", name="Stop")).to_have_count(0)
+        await expect(page.locator("#timeline")).not_to_contain_text("Thinking…")
+        dot = page.locator(".home-item .dot")
+        await expect(dot).to_have_attribute("title", "Reconnecting to Codex…")
+        row = page.locator("#tasks", has_text="Port the parser")
+        await expect(row.first).to_contain_text("Reconnecting to Codex…")
+        # Given up once: Retry, which asks for the next try now.
+        runtime.unresumed[router] = 1
+        runtime.publish_session(store.session(router))
+        retrying = line.get_by_role("button", name="Retry")
+        await expect(retrying).to_be_visible()
+        await retrying.click()
+        for _ in range(100):
+            if asked:
+                break
+            await asyncio.sleep(0.05)
+        assert asked == [router], asked
+        await page.screenshot(path=SHOTS / "reconnecting-home.png")
+        # Resumed: at work again, as usual.
+        for session in (router, worker):
+            runtime.resume_over(session)
+        await expect(line).to_contain_text("Thinking…")
+        await expect(line.get_by_role("button", name="Stop")).to_have_count(1)
+        # Update and restart, waiting for the Router's turn: says so, with Cancel.
+        await patch_state(page, {}, {"update": {
+            "version": "9.9.9", "automatic": True, "command": "uv tool upgrade chiefofstaff",
+            "state": "waiting", "to": "9.9.9", "after": "the Router's turn ends"}})  # fmt: skip
+        await page.reload()
+        update = page.locator(".update")
+        await expect(update).to_contain_text("Restarting after the Router's turn ends…")
+        await expect(update.get_by_role("button", name="Cancel")).to_be_visible()
+    finally:
+        runtime.retry_resume = retry
+        for session in (router, worker):
+            runtime.resume_over(session)
+            runtime.update_session(session, status="idle", activity="")
+        runtime.unresumed.pop(router, None)
+        await context.close()
+    log("Reconnecting after a restart: no Thinking… nor Stop, Retry once given up; an update")
+
+
 def copilot_on_path() -> Path:
     """The stand-in Copilot CLI (tests/fake_copilot.py) as `copilot`, first on this process's
     PATH (never the owner's own: it could be changed), its state and runs in its own folder.
@@ -14388,7 +14912,8 @@ async def round_self_handle(runtime, browser, failures: list[str]):
             await page.locator("#settings-tabs [data-tab=general]").click()
             hint, trust = page.locator("#sandbox-hint"), page.locator("#sandbox-trust")
             await expect(hint).to_have_text(
-                "Workers can't use gh inside the sandbox until Copilot's certificate is trusted."
+                "To let Copilot workers use gh inside the sandbox, trust Copilot's certificate "
+                "once: copilot sandbox ca create && copilot sandbox ca trust"
             )
             await expect(trust).to_have_text("Trust the sandbox's certificate")
             await shoot(

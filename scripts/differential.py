@@ -702,6 +702,17 @@ FIXES: list[Allow] = [
         element="#needs .card > .subject",
         views=r"^home",
     ),
+    # 0.1.61 (the page's state under half its size, pagestate.py): a worker's columns the page
+    # never reads are left out of it (its checkouts stay, parsed); a finished task's long result
+    # and its earlier reports come cut, the rest from /api/task-texts (none that long here).
+    Allow(
+        "the page's state: a worker's columns the page never reads",
+        data=r"/api/state\.(sessions|closed)\[\d+\]\.(report|repos|files|links|said|said_at)$",
+    ),
+    Allow(
+        "the page's state: a finished task's long words cut, asked for once",
+        data=r"/api/state\.tasks\[\d+\]\.(result|earlier_results|texts_key)$",
+    ),
     # 0.1.61 (owner: "不要让用户做这做那"): an agent older than the versions tested (or whose
     # version can't be told) has Update, which runs its own updater for the owner: its status
     # says what it needs, not the command, and offers it (`update`). The stand-in Codex here

@@ -9,7 +9,7 @@ import { closeMentions, setRecipient } from "./mention.js";
 import { openSettings, watchGaps } from "./settings.js";
 import { ownTasks } from "./tasks.js";
 import { duck, setMood } from "./mascot.js";
-import { agentName, markOf } from "./agentpick.js";
+import { agentName, copilotAlone, markOf } from "./agentpick.js";
 import { openSetup, setupKind, setupWords, statusFor } from "./agentsetup.js";
 import { labelOf } from "./team.js";
 import { glyph } from "./relations.js";
@@ -369,7 +369,7 @@ async function turnOffSlack() {
   }
 }
 // Where an update stands, in a few words; Chief of Staff does it, or says the command.
-function updateLine({ version, command, automatic, state: stage, error }) {
+function updateLine({ version, command, automatic, state: stage, error, after }) {
   const ask = (cancel) => async (event) => {
     event.currentTarget.disabled = true;
     try {
@@ -382,6 +382,8 @@ function updateLine({ version, command, automatic, state: stage, error }) {
   };
   const button = (text, cancel = false) => el("button", { type: "button", class: "link", text, onclick: ask(cancel) });
   const line = (...parts) => el("div", { class: "update" }, ...parts);
+  // What it waits for, a short while at most (a long turn goes on after the restart).
+  if (stage === "waiting" && after) return el("div", { class: "update", title: `Chief of Staff ${version} installs then. A long turn is not waited for: it goes on after the restart.` }, `Restarting after ${after}… `, button("Cancel", true));
   if (stage === "waiting") return line(`Chief of Staff ${version} installs once the running work ends `, button("Cancel", true));
   if (stage === "fetching") return line(`Getting Chief of Staff ${version}…`);
   if (stage === "restarting") return line(`Restarting with Chief of Staff ${version}…`);
@@ -460,7 +462,7 @@ function noOthers(count) {
     return null;
   }
   const why = !connected
-    ? "Shown once Copilot is connected."
+    ? copilotAlone() ? "Shown once Copilot is connected." : "Shown once Chief of Staff has started."
     : state.externalError || (othersOn() && state.othersWhy) || "No other sessions yet.";
   return el("div", { class: "empty-note", text: why });
 }

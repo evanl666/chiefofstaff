@@ -3,7 +3,7 @@
 import { $, api, toast, withKey } from "./dom.js";
 import { firstLine, shorten } from "./text.js";
 import { renderOthers, renderSidebar } from "./sidebar.js";
-import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, select, showDeliveries, updateDraftRecords, updateWorkingLine } from "./session.js";
+import { appendMessages, PAGE, refreshChips, renderHeader, replaceMessage, select, showDeliveries, showRouterChat, updateDraftRecords, updateWorkingLine } from "./session.js";
 import { scheduleHome } from "./inbox.js";
 import { upsertTask } from "./tasks.js";
 import { isTeamView, scheduleTeam } from "./team.js";
@@ -12,12 +12,14 @@ import { heardSetup } from "./agentsetup.js";
 // Home: the Router's conversation, with what needs the owner and every task beside it.
 export const HOME = "home";
 // Workers in the sidebar: running first.
-export const STATUS_ORDER = { working: 0, starting: 0, waiting: 1, queued: 2, failed: 3, idle: 4, done: 5 };
+export const STATUS_ORDER = { working: 0, starting: 0, resuming: 0, waiting: 1, queued: 2, failed: 3, idle: 4, done: 5 };
 // A worker whose Copilot session a fresh one takes over meanwhile (Runtime.continue_fresh).
 export const RECONNECTING = "Reconnecting this worker…";
 export const STATUS_TEXT = {
   working: "Working",
   starting: "Starting",
+  // At work when Chief of Staff restarted, not resumed yet: nothing of it runs meanwhile.
+  resuming: "Reconnecting",
   queued: "Queued",
   idle: "Idle",
   waiting: "Waiting for an answer",
@@ -28,6 +30,7 @@ export const STATUS_TEXT = {
 export const DOT_HELP = {
   working: "Working",
   starting: "Starting",
+  resuming: "Reconnecting: it goes on once its agent has it open again",
   queued: "Queued: waits for a free worker slot, or for another task",
   idle: "Idle: between tasks",
   waiting: "Waiting for your answer",
@@ -129,6 +132,8 @@ export const latestDelivery = (sessionId, since = 0) => (deliveries.get(sessionI
 export async function loadState(again = false) {
   const data = await api("/api/state");
   const first = !state.snapshot;
+  const router = routerId();
+  data.tasks = (data.tasks || []).map(withTexts);
   state.snapshot = data;
   // Drafts gone without being sent (withdrawn, replaced) in the last days: their timeline lines
   // say so after a reload too.
@@ -158,6 +163,53 @@ export async function loadState(again = false) {
     renderLearning();
     renderConnections();
     settingsStateChanged();
+  }
+  // A Router that was not there when Home's chat loaded (or another in its place): its chat.
+  if (!first && routerId() && routerId() !== router) showRouterChat().catch(() => {});
+  readTexts();
+}
+// What finished tasks said at length (their result, their earlier reports): the state carries it
+// cut to what their rows and chips read (`texts_key`, pagestate.py); the whole is read once for
+// each version of it, kept here and put back into each state read after. Nothing shows it
+// meanwhile but a fold or a tooltip, which have it by then.
+const texts = new Map(); // `${id}:${texts_key}` -> { result, earlier_results, texts_key }
+const textsAsked = new Set(); // Each version asked for once (it may have changed again since).
+let readingTexts = false;
+let textsAgain = false;
+const textsOf = (task) => `${task.id}:${task.texts_key}`;
+function withTexts(task) {
+  const kept = task.texts_key && texts.get(textsOf(task));
+  if (!kept) return task;
+  const whole = { ...task, result: kept.result, earlier_results: kept.earlier_results };
+  delete whole.texts_key;
+  return whole;
+}
+async function readTexts() {
+  if (readingTexts) {
+    textsAgain = true;
+    return;
+  }
+  const wanted = (state.snapshot?.tasks || []).filter((task) => task.texts_key && !texts.has(textsOf(task)) && !textsAsked.has(textsOf(task)));
+  if (!wanted.length) return;
+  readingTexts = true;
+  for (const task of wanted) textsAsked.add(textsOf(task));
+  let found = null;
+  try {
+    found = await api(`/api/task-texts?ids=${wanted.map((task) => encodeURIComponent(task.id)).join(",")}`);
+  } catch {
+    // Asked for again with the next state (the cut words show the same meanwhile).
+    for (const task of wanted) textsAsked.delete(textsOf(task));
+  }
+  readingTexts = false;
+  if (found) {
+    for (const [id, item] of Object.entries(found)) texts.set(`${id}:${item.texts_key}`, item);
+    if (state.snapshot) state.snapshot.tasks = state.snapshot.tasks.map(withTexts);
+    scheduleHome();
+    scheduleTeam();
+  }
+  if (textsAgain) {
+    textsAgain = false;
+    readTexts();
   }
 }
 // Copilot's models, once Copilot lists them: the header's menus, and anything open that lists
@@ -293,10 +345,12 @@ function handleEvent({ type, data }) {
 // A notification while the page is open: none while the owner focuses (unless urgent), nor where
 // the owner is looking and sees it already: the session it is from (on Home, the Router's: its
 // chat and Needs you), or Home's chat line for news that needs nothing of them.
-function notify({ text = "", session_id: sessionId, needs_action: needsAction, urgent }) {
+function notify({ text = "", session_id: sessionId, needs_action: needsAction, urgent, draft_id: draftId }) {
   const looking = document.hasFocus() && (sessionId === viewedId() || (state.selected === HOME && !needsAction));
   if (!urgent && (focusing() || looking)) return;
-  toast(shorten(firstLine(text) || text, 200), needsAction || urgent ? "attention" : "", sessionId);
+  const node = toast(shorten(firstLine(text) || text, 200), needsAction || urgent ? "attention" : "", sessionId);
+  // The card it announces: once that is settled (answered, sent, dropped), so is its note.
+  if (draftId) node.dataset.draft = draftId;
 }
 // A question one worker asked another waits until its answer comes (Home: "1 waiting 9 min"):
 // as their rows reach the Router, without reading the whole state again.
@@ -344,6 +398,7 @@ export function applyDraft(data) {
   state.snapshot.uncertain = uncertain;
   if (data.status !== "pending" && data.status !== "uncertain") {
     state.leaving.delete(`draft:${data.id}`);
+    document.querySelector(`#toasts .toast[data-draft="${CSS.escape(String(data.id))}"]`)?.remove();
     // Its review view, if one was opened, goes with it.
     document.querySelector(`.review-dialog[data-draft="${data.id}"]`)?.remove();
     if (/^(Withdrawn|Replaced by)/.test(data.outcome || "")) state.draftOutcomes.set(data.id, data.outcome);

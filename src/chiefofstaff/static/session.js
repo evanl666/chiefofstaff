@@ -8,7 +8,7 @@ import { slotReason } from "./tasks.js";
 import { renderSidebar, showExternal } from "./sidebar.js";
 import { focusDraft, focusTask, renderHome, renderHomeHeader, showHomeTab, welcomeCard, workerStates } from "./inbox.js";
 import { closeMentions, setRecipient } from "./mention.js";
-import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, fixLine, markOf, modelLabel, modelOptions, ready, severalAgents, statuses, statusOf } from "./agentpick.js";
+import { agentMark, agentName, agentPopover, agentsOn, closeAgentPopover, copilotAlone, fixLine, markOf, modelLabel, modelOptions, ready, severalAgents, statuses, statusOf } from "./agentpick.js";
 import { setupAction, setupKind } from "./agentsetup.js";
 import { openSettings } from "./settings.js";
 import { showLength } from "./composer.js";
@@ -53,7 +53,7 @@ export function renderHeader() {
     sessionMenu(router);
     $("#composer").hidden = false;
     const waiting = !router && state.snapshot.runtime.state !== "ready";
-    setComposer(router?.elsewhere ? { locked: IN_TERMINAL } : waiting ? { locked: "You can ask once Copilot is connected." } : { placeholder: routerPlaceholder() });
+    setComposer(router?.elsewhere ? { locked: IN_TERMINAL } : waiting ? { locked: copilotAlone() ? "You can ask once Copilot is connected." : "You can ask once Chief of Staff has started." } : { placeholder: routerPlaceholder() });
     return;
   }
   const session = current();
@@ -67,7 +67,7 @@ export function renderHeader() {
   if (session.closed_at) {
     meta = ["Closed", session.branch];
   } else if (session.role === "router") {
-    meta = ["Coordinates your sessions", session.status === "working" ? "routing…" : ""];
+    meta = ["Coordinates your sessions", session.status === "working" ? "routing…" : session.status === "resuming" ? session.activity : ""];
   } else if (session.role === "slack") {
     meta = ["Drafts your Slack replies", STATUS_TEXT[session.status]];
   } else if (session.role === "watchdog") {
@@ -80,7 +80,7 @@ export function renderHeader() {
     const where = (found?.dot || "idle").split(" ")[0];
     // Its turn over while a command it left running goes on: said, not "Running" alone.
     const background = session.background && session.status !== "working" ? "waiting for background process" : "";
-    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], found?.sub || background, session.status === "queued" || session.activity === RECONNECTING ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
+    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], found?.sub || background, session.status === "queued" || session.status === "resuming" || session.activity === RECONNECTING ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
     if (session.elsewhere) {
       // What it does in the terminal, read from its log; Chief of Staff does not drive it now.
       const terminal = session.terminal || {};
@@ -194,6 +194,7 @@ export function renderHeader() {
     items.push(
       el("hr"),
       session.status === "working" ? menuButton("Stop what it is doing", () => post(`/api/sessions/${session.id}/stop`, "Stopped.")) : "",
+      session.status === "resuming" ? menuButton("Stop: don't go on", () => post(`/api/sessions/${session.id}/stop`, "Stopped: it waits for your next message.")) : "",
       menuButton(
         "Close worker",
         () => {
@@ -583,6 +584,17 @@ export async function select(sessionId, { task = "" } = {}) {
     if (state.loading === loading) state.loading = null;
     if (state.selected !== sessionId) return;
   }
+  await fillChat(viewed, messages, loading);
+  if (state.selected !== sessionId) return;
+  if (task) await showTaskInTimeline(task);
+  followAnchor();
+  if (viewed && byId(viewed)?.unread) markRead(viewed);
+  if (!$("#composer").hidden) $("#composer-input").focus();
+}
+// A chat's latest messages in place of what the timeline showed, in one go (nothing empty in
+// between), with what came by event while they loaded; the view at its latest.
+async function fillChat(viewed, messages, loading) {
+  const timeline = $("#timeline");
   timeline.replaceChildren();
   state.lastId = 0;
   Object.assign(earlier, { session: viewed, first: messages[0] || null, more: false, count: null, busy: false });
@@ -594,11 +606,25 @@ export async function select(sessionId, { task = "" } = {}) {
   for (const message of loading.held.filter((message) => message.amended)) replaceMessage(message);
   scrollToBottom(true);
   if (messages.length >= PAGE) await countEarlier(viewed);
-  if (state.selected !== sessionId) return;
-  if (task) await showTaskInTimeline(task);
-  followAnchor();
-  if (viewed && byId(viewed)?.unread) markRead(viewed);
-  if (!$("#composer").hidden) $("#composer-input").focus();
+}
+// Home's chat once its Router is known, or another took its place (a page opened before Chief
+// of Staff had one: a first start waiting for an agent, or Claude being set up). Its messages
+// read first, then put where Home's welcome (or the other's chat) was: no flicker, no reload.
+export async function showRouterChat() {
+  const viewed = routerId();
+  if (state.selected !== HOME || !viewed) return;
+  const loading = { id: viewed, held: [] };
+  state.loading = loading;
+  let messages = null;
+  try {
+    messages = await api(`/api/sessions/${viewed}/messages?limit=${PAGE}`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+  if (state.loading === loading) state.loading = null;
+  if (!messages || state.selected !== HOME || routerId() !== viewed) return;
+  await fillChat(viewed, messages, loading);
+  if (state.selected === HOME && byId(viewed)?.unread) markRead(viewed);
 }
 // How many messages come before the first one shown: a way to load them, if any.
 async function countEarlier(sessionId) {
@@ -1942,6 +1968,14 @@ export function updateWorkingLine() {
   const background = session?.background && session.status !== "working";
   if (session?.activity === RECONNECTING) {
     timeline.append(el("div", { class: "working-line" }, duck("working"), el("span", { text: RECONNECTING })));
+    scrollToBottom();
+    return;
+  }
+  if (session?.status === "resuming") {
+    // At work when Chief of Staff restarted: it goes on (with what it was on) once its agent has
+    // it open again. Nothing of it runs to stop; once a try was given up, it can be tried now.
+    const retry = session.retry ? el("button", { type: "button", class: "link", text: "Retry", title: "Try to reconnect it now", onclick: (event) => { event.currentTarget.disabled = true; post(`/api/sessions/${session.id}/reconnect`, "Reconnecting…"); } }) : null;
+    timeline.append(el("div", { class: "working-line reconnecting" }, duck("watching"), el("span", { text: session.activity || "Reconnecting…" }), retry));
     scrollToBottom();
     return;
   }

@@ -295,7 +295,7 @@
               <button type="button" class="back-link" data-back>‹ Connections</button>
               <div class="detail-head"><h3 id="conn-watches-title" tabindex="-1">Watches</h3><span class="state" data-conn-state="watches"></span></div>
               <div class="conn-fields">
-                <small>Uses whatever tools your Copilot has here — Slack, Glean, mail. Found items go to the Router, which drafts replies in your voice for you to approve.</small>
+                <small>Uses whatever tools the agent it runs on has here — Slack, Glean, mail. Found items go to the Router, which drafts replies in your voice for you to approve.</small>
                 <ul id="watch-list" class="watch-list"></ul>
                 <div><button id="watch-add" type="button" class="link">+ Add watch</button></div>
                 <div class="schedule-line">
@@ -340,7 +340,7 @@
               <button type="button" class="back-link" data-back>‹ Connections</button>
               <div class="detail-head"><h3 id="conn-tools-title" tabindex="-1">Skills, plugins and MCP servers</h3><span class="state" data-conn-state="tools"></span></div>
               <div class="conn-fields">
-                <small>For workers, on top of what your Copilot has. They run as you: add only what you would install for yourself.</small>
+                <small>For workers, on top of what their agent has. They run as you: add only what you would install for yourself.</small>
                 <h4>Skills</h4>
                 <ul id="skills" class="memory"></ul>
                 <div class="inline-actions">
@@ -374,7 +374,7 @@
               <div id="send-line" class="send-line">
                 <label class="check"><input name="send_to_chief" type="checkbox" aria-describedby="send-how send-problem" /> Send to Chief from the command line</label>
                 <div id="send-consent" class="send-consent" hidden>
-                  <p class="hint">What you send (your note, and any link or text you pass) goes to Chief of Staff on this computer, which hands it to GitHub Copilot under your account; the work it starts runs with your settings, as any task does.</p>
+                  <p class="hint">What you send (your note, and any link or text you pass) goes to Chief of Staff on this computer, which hands it to your coding agent under your account; the work it starts runs with your settings, as any task does.</p>
                   <div class="inline-actions"><button id="send-on" type="button">Turn on</button><button id="send-cancel" type="button" class="link">Cancel</button></div>
                 </div>
                 <small id="send-how" hidden><code>chiefofstaff send "…"</code> from a terminal, or a hotkey: <a class="link" href="https://github.com/evanl666/chiefofstaff/blob/main/docs/guide.md#send-to-chief" target="_blank" rel="noreferrer">recipes</a></small>

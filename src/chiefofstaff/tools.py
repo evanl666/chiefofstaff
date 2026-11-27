@@ -1289,6 +1289,7 @@ class Tools:
             session_id=caller,
             needs_action=True,
             title="Choose a folder",
+            draft_id=draft["id"],
         )
         return (
             f"Asked the owner ({draft['id']}). Their choice arrives as a [draft outcome] message; "
@@ -3478,6 +3479,7 @@ class Tools:
             "cwd": item["cwd"],
             "text": params.text[:4000],
             "task_title": title,
+            "agent": item.get("agent") or "copilot",  # (The card names it.)
         }
         asked = next(
             (
@@ -3506,6 +3508,7 @@ class Tools:
             session_id=self.runtime.router_id(),
             needs_action=True,
             title="Continue a session here?",
+            draft_id=card["id"],
         )
         return (
             "That is one of the owner's own sessions: they were asked whether it continues "
@@ -5477,6 +5480,7 @@ class Tools:
             session_id=caller,
             needs_action=True,
             title="Slack reply to approve",
+            draft_id=draft["id"],
         )
         result = (
             f"Draft {draft['id']} is waiting for the owner's approval. You will be told if "
@@ -5538,7 +5542,11 @@ class Tools:
         )
         self.bus.publish("draft", draft)
         self.runtime.alert(
-            params.note or text, session_id=caller, needs_action=True, title="Reply to approve"
+            params.note or text,
+            session_id=caller,
+            needs_action=True,
+            title="Reply to approve",
+            draft_id=draft["id"],
         )
         return (
             f"Draft {draft['id']} is waiting for the owner: they copy it and send it themself. "
@@ -5712,7 +5720,11 @@ class Tools:
         self.bus.publish("draft", draft)
         self.runtime.drafts.link_reviews()  # A Slack reply that may speak of it waits for it.
         self.runtime.alert(
-            label, session_id=caller, needs_action=True, title="GitHub text to approve"
+            label,
+            session_id=caller,
+            needs_action=True,
+            title="GitHub text to approve",
+            draft_id=draft["id"],
         )
         result = f"Draft {draft['id']} is waiting for the owner's approval."
         if replaced:
@@ -5798,6 +5810,7 @@ class Tools:
             session_id=self.runtime.router_id(),
             needs_action=True,
             title="Profile to review",
+            draft_id=card["id"],
         )
         task = self.tasks.current(caller)
         if task and task["status"] not in {"done", "cancelled"}:

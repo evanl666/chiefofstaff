@@ -69,6 +69,7 @@ tool allowlist, permission and request callbacks, sandbox, model.
 | `sources/` | Watchers: Slack (MCP search), GitHub (`gh`). |
 | `store.py` | SQLite: schema, migrations, small helpers. |
 | `bus.py` | Fan-out of UI events to browser tabs. |
+| `pagestate.py` | The snapshot as `/api/state` gives it to the page, which reads it again after each burst of events: session columns the page never reads left out, and a finished task's long result cut to what its row and chips read (its start, its lines with links), its earlier reports to when they were said (`texts_key`); the page asks once for each version of the rest (`GET /api/task-texts`) and keeps it. |
 | `static/` | The UI: plain HTML, CSS and JavaScript modules, no build step. |
 
 ## The agent backend
@@ -249,7 +250,8 @@ connector) takes its agent at each fresh run (`helper_agent`), only where what r
 ## The UI
 
 The UI is plain ES modules in `static/`, with no build step: `app.js` starts the page;
-`state.js` loads a snapshot (`/api/state`) and applies SSE events (`message`, `session`, `task`,
+`state.js` loads a snapshot (`/api/state`, as `pagestate.py` cuts it; the cut words read once from
+`/api/task-texts`) and applies SSE events (`message`, `session`, `task`,
 `draft`, `toast`, `state`, `focus_summary`); `inbox.js` renders Home (the Router's chat beside
 Needs you and the task board; Needs you also lists the Router's notes that need the owner,
 `updates` in the snapshot, until seen: `POST /api/messages/{id}/seen` or a later owner message

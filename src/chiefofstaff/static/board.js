@@ -129,7 +129,8 @@ function ownership(task) {
 
 const hours = (from, now) => (from ? (now - Date.parse(from)) / 3600000 : 0);
 export const howLong = (hours) => (hours >= 48 ? `${Math.floor(hours / 24)}d` : `${Math.floor(hours)}h`);
-const working = (worker) => Boolean(worker) && ["working", "starting"].includes(worker.status);
+// (Reconnecting after a restart: at work still, it goes on once resumed.)
+const working = (worker) => Boolean(worker) && ["working", "starting", "resuming"].includes(worker.status);
 
 // What a PR it follows waits for, by where it stands (an older server's tasks: see obligationsOf).
 const PR_WAITS = { "awaiting approval": "approval", "CI running": "CI", "in review": "review", draft: "review", approved: "merge", "ready to merge": "merge", "CI failing": "CI", "changes requested": "changes", "merge conflicts": "conflicts resolved" };

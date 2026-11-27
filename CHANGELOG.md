@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+A restart no longer loses what a session was on; Chief of Staff installs, signs in and updates
+your agents, and itself, from the page; Home shows the Router's chat at once and reads a state
+under half its size; and a new README, a short guide and the full reference, with a demo that
+runs every agent.
+
+No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
+again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.
+
+- **The Router answers what you sent just before a restart.** On 0.1.60, the Router on Codex,
+  restarted 3 seconds after your message (an update's restart), never answered it: resuming it
+  waited for its own placement, which the same start held, until its three minutes ran out
+  ("Resuming … took over 180 s: given up"); nothing tried again, and Home said *Thinking…* with
+  *Stop* though no turn ran. The Router now resumes in seconds on every agent.
+- **A turn cut short by a restart goes on, once.** As Chief of Staff stops, each session at work
+  (also a worker that asked you something mid-turn) has what that turn was given kept; after the
+  restart (or a crash, of Chief of Staff or of its agent), once its agent has it open again, it
+  gets that again, once, with one line in its chat (*Chief of Staff restarted; asked the session
+  to continue.*): your message to the Router, the Router's to a worker, a report to the Router.
+  What its agent's own record shows it finished (Codex's turn completed, Copilot's or Claude's
+  final answer) is not given again. Your message says *Waiting to be sent* until it goes.
+- **Reconnecting, not thinking.** Until it is resumed, a session says *Reconnecting to Codex…*
+  (or its agent's name) on Home and in its chat, with no *Stop*. A resume given up after three
+  minutes is not the end: it is tried again by itself, waiting longer each time, and *Retry*
+  tries at once; a worker's *Stop: don't go on* (**⋯**) lets it rest, what it was given waiting
+  for its next message.
+- **Stopping is shorter with several agents on.** Each agent's processes end before Chief of
+  Staff does, all together (one agent after another before).
+- **Update and restart waits a little, and says for what.** *Restarting after the Router's turn
+  ends…* (or a worker's): two minutes at most; a turn still running then goes on after the
+  restart, as above. It waited for every turn to end, however long.
+
 Chief of Staff runs for you what it used to ask you to run in a terminal: Copilot's install and
 sign-in, an agent's update, the sandbox's certificate, an MCP server's sign-in, and its own update
 for pipx and pip installs. Each shows its command first and asks where it changes more than Chief of
@@ -24,11 +55,11 @@ Staff.
   agent for everything on your computer, runs it once you say so, with its output, and the agent
   turns *Ready* without a restart (Copilot's new version from its next start). If it fails it says
   why, with *Try again*, the command under *Details*; it is never tried again by itself.
-- **Trust the sandbox's certificate.** Settings → General → Workers → Sandbox no longer asks you to run
-  `copilot sandbox ca create && copilot sandbox ca trust`: *Trust the sandbox's certificate* shows
-  those commands, asks first (macOS asks for your password to add it to your login keychain), runs
-  them, and the line goes once `gh` works inside the sandbox. Claude Code's and Codex's sandboxes
-  need no certificate.
+- **Trust the sandbox's certificate.** Settings → General → Workers → Sandbox no longer leaves you
+  to run `copilot sandbox ca create && copilot sandbox ca trust`: *Trust the sandbox's
+  certificate*, under the line that names them, shows those commands, asks first (macOS asks for
+  your password to add it to your login keychain), runs them, and the line goes once `gh` works
+  inside the sandbox. Claude Code's and Codex's sandboxes need no certificate.
 - **Sign in to an MCP server a Codex or Claude worker needs, on its card.** Its card under *Needs
   you* has *Sign in*, which runs `codex mcp login <server>` or `claude mcp login <server>` for you,
   shows the server's page to open, and answers the card once you've signed in; a Claude worker's
@@ -44,6 +75,52 @@ Staff.
 - **Nothing left running when Chief of Staff stops.** A sign-in, install or update still under way
   as you stop Chief of Staff ends with it, as *Cancel* does: a sign-in no longer keeps waiting on
   its local port.
+
+Home shows the Router's chat at once, and the page reads less and says it right.
+
+- **Home shows Chief of Staff's chat as soon as it starts.** A page opened before then (a first
+  start waiting for a coding agent, or while Claude is being set up) showed *Ask for anything*
+  until reloaded, hiding the note on which agent it runs on; now the chat appears in its place,
+  with nothing to reload.
+- **What the page says of workers is right for the agents you use.** Settings → General names
+  them where they differ: workers that read Slack are sandboxed on Copilot and Claude, and on
+  Codex run without a sandbox, asking first; Codex can't run workers while the sandbox is on; and
+  *Ask first* off says "as in your own Codex sessions" (or whichever are on). What waits for
+  Chief of Staff to start, Watch for you's tools, Send to Chief's consent and a session to
+  continue here no longer assume Copilot; the README and guide say the same.
+- **The page's state is under half its size.** Home reads it again after each burst of events,
+  and on the owner's data it had grown to 891 KB, mostly finished tasks' words: every earlier
+  report of each (342 KB) and each whole result (220 KB). It now carries a finished task's long
+  result as far as its row and chips read it (its start, and each line that gives a link), and
+  its earlier reports by when they were said; the page asks once for the rest of each
+  (`GET /api/task-texts`), keeps it, and has it where it shows: a row's tooltip, *Earlier
+  reports*, a draft's *Result of*. A worker's columns the page never reads are left out too.
+  Now 340 KB, read as fast as before; nothing on the page changes.
+- **A card's note goes once the card is settled.** The note at the bottom of the page that a
+  decision, a question or a draft needs you stayed its twelve seconds after you had answered it,
+  above the note that said so. It now goes as soon as its card is answered, sent or dropped.
+- **`@claude` typed in one go picks Claude.** Typing `@claude compare two date libraries` (or
+  `@codex`, `@copilot`) without picking from the list under it sent the words as they were, with
+  no agent chosen, so the Router could start the work anywhere. Typed at the start or in the
+  middle, before punctuation, in any case, it now counts as picked: the message says *On Claude*,
+  and two (`@codex @claude`) compare them. A worker whose name starts like an agent's (*Codex
+  migration*) is still that worker, and one turned off says so, with your words back in the box.
+
+A new README, a short guide and the full reference; the demo runs every agent.
+
+- **A new README, a short guide, and the full reference.** The README (on PyPI too) shows the
+  real app in a 21-second clip and says what Chief of Staff does in eight lines. The guide is a
+  quarter of its length: quickstart, concepts, daily use, the three agents, settings, safety,
+  sharing, troubleshooting and FAQ. Everything it no longer spells out is in
+  [docs/reference.md](docs/reference.md), nothing dropped, with the README's install notes for
+  Windows and uv's cache, and what was said of Copilot alone now said of every agent. Links into the guide from the app (also from earlier versions) land
+  where they did. On PyPI the README's pictures now show, from the version's own tag.
+- **The demo runs on Copilot, Codex and Claude.** `chiefofstaff --demo` has scripted Codex and
+  Claude too, ready as if signed in: you ask Codex and Claude for two of the three tasks, the
+  login fix tells the rate limiting what it changed, and every agent's chip shows. A share link
+  made in the demo is sealed as for real, but no gist is made: nothing leaves your machine, as the
+  demo says (before, it made a secret gist on the account signed in to `gh`).
+- `chiefofstaff --help` says it runs Copilot, Codex and Claude Code, not only Copilot.
 
 ## 0.1.60 (2026-11-26)
 

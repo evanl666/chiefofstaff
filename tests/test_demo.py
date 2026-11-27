@@ -38,8 +38,19 @@ async def test_the_demo_scenario_plays_through(tmp_path):
         assert [dep["title"] for dep in runtime.tasks.deps(rate["id"])] == [
             "Fix the flaky login test"
         ]
+        # Each on its own agent (Codex and Claude scripted too, needing nothing installed).
+        on = {title: runtime.agent(task["session_id"]) for title, task in titles.items()}
+        assert on == {
+            "Fix the flaky login test": "copilot",
+            "Rate-limit login attempts": "codex",
+            "Compare feature-flag services": "claude",
+        }
 
         question = await until(lambda: store.drafts() and store.drafts()[0])
+        # The fix told the rate limiting what it changed, worker to worker.
+        [told] = store.all("SELECT session_id, meta FROM messages WHERE kind='tell'")
+        assert told["session_id"] == titles["Fix the flaky login test"]["session_id"]
+        assert json.loads(told["meta"])["target"] == rate["session_id"]
         assert question["kind"] == "decision" and question["target"]["recommendation"]
         await runtime.drafts.resolve(
             question["id"], DraftDecision(action="answer", text="Per account")
@@ -73,6 +84,12 @@ async def test_the_demo_scenario_plays_through(tmp_path):
         assert json.loads(json.dumps(found))  # The UI gets plain JSON.
         limited = runtime.task_actions.view(runtime.tasks.get(rate["id"]))["receipts"]
         assert [c["state"] for c in limited["criteria"]] == ["verified", "claimed"]
+
+        # A share link is sealed as for real, but no gist is made: nothing leaves the machine.
+        preview = await runtime.shares.preview(fix["id"])
+        assert [account["login"] for account in preview["accounts"]] == ["you"]
+        shared = await runtime.shares.create(fix["id"], {}, preview["digest"], 7, "you")
+        assert shared["link"].startswith("https://") and shared["share"]["state"] == "live"
 
         # The owner changes the decision: the finished rate limiting is redone and confirmed.
         await runtime.owner_send(

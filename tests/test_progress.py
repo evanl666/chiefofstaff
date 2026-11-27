@@ -189,6 +189,7 @@ async def test_the_router_knows_sessions_open_in_a_terminal(harness, tmp_path):
     assert not harness.store.find_session("old-1"), "not taken over by the Router itself"
     [card] = [draft for draft in harness.store.drafts() if draft["kind"] == "adopt"]
     assert card["target"]["title"] == "Old work" and card["target"]["text"] == "Rerun the old eval"
+    assert card["target"]["agent"] == "copilot", "the card names its agent"
     await runtime.drafts.resolve(card["id"], DraftDecision(action="answer"))
     assert harness.store.find_session("old-1")["role"] == "worker"
     task = runtime.tasks.current("old-1")

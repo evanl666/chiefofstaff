@@ -1687,7 +1687,9 @@ async def test_router_resumes_unhandled_events_after_restart(tmp_path):
     await second.connect()
     replay = second.session(second.router_id).sent[-1]
     assert replay.startswith('<message from="system" type="restart">\nChief of Staff restarted')
-    assert "Carol: are you around?" in replay and '&lt;message from="slack"' in replay
+    # Cut short by the stop, the event it was on comes again, whole (0.1.61: not quoted), once.
+    assert replay.count("Carol: are you around?") == 1
+    assert '<message from="slack" type="event"' in replay
     assert "hello" not in replay, "handled messages are not replayed"
 
 
@@ -1704,8 +1706,12 @@ async def test_a_restart_sends_held_events_once_and_keeps_the_owners_turn(tmp_pa
     router = second.session(second.router_id)
     replay = router.sent[-1]
     assert replay.count("please deploy the hotfix") == 1
-    assert replay.startswith('<message from="slack"'), "the held event goes out as it is"
-    assert "What is open?" in replay, "the owner's message it was handling is quoted"
+    assert '<message from="slack" type="event"' in replay, "the held event goes out as it is"
+    # The owner's message it was handling comes again, whole (0.1.61: not quoted), once, after
+    # the restart's note and before what came since.
+    assert replay.startswith('<message from="system" type="restart">')
+    assert replay.count("What is open?") == 1
+    assert replay.index("What is open?") < replay.index("please deploy the hotfix")
     router.emit("user.message", content=replay)
     router.emit("assistant.message", content="Nothing is open.", tool_requests=None)
     await settle(restarted)

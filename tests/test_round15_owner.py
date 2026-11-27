@@ -672,6 +672,62 @@ async def test_update_and_restart_waits_for_running_work_then_starts_again(harne
     assert notices[-1] == "Chief of Staff updated to 9.0.0." and len(notices) == len(set(notices))
 
 
+async def test_update_and_restart_waits_a_little_for_the_routers_turn_and_says_so(
+    harness, monkeypatch
+):
+    """0.1.61: it waited for every turn to end, however long. Now two minutes at most (a turn
+    still running then goes on after the restart, with what it was given), and it says for
+    what: Restarting after the Router's turn ends…"""
+    from chiefofstaff import runtime as runtime_module
+    from chiefofstaff import updates
+
+    monkeypatch.setattr(updates, "launch_now", lambda: updates.Launch(
+        "uvx", "uvx chiefofstaff@latest", ("uvx", "chiefofstaff@latest")))  # fmt: skip
+    monkeypatch.setattr(updates, "installed", lambda: "0.1.60")
+    monkeypatch.setattr(runtime_module, "UPDATE_POLL", 0.01)
+    monkeypatch.setattr(runtime_module, "UPDATE_WAIT", 0.5)
+
+    async def fetch(launch):
+        return True, ""
+
+    monkeypatch.setattr(updates, "fetch", fetch)
+    runtime = await harness.connect()
+    harness.store.set(updates.LAST, json.dumps({"at": time.time(), "latest": "9.0.0"}))
+    restarts: list = []
+    runtime.restarter = restarts.append
+    router = harness.router_id
+    await runtime.owner_send(router, "Summarise the week.")
+    update = await runtime.update_now()
+    assert (update["state"], update["after"]) == ("waiting", "the Router's turn ends")
+    await asyncio.sleep(0.2)
+    assert not restarts, "it waits for the Router's turn"
+    await runtime.updater
+    assert restarts, "not for ever: a turn still running goes on after the restart"
+    assert runtime.snapshot()["update"]["state"] == "restarting"
+
+
+def test_what_an_update_waits_for_is_said_in_a_few_words(harness):
+    runtime = harness.runtime
+    rows = []
+
+    def session(role: str, status: str = "working") -> dict:
+        row = harness.store.create_session(f"s{len(rows)}", role, "x", status)
+        rows.append(row)
+        return row
+
+    assert runtime.turns_running() == ""
+    session("worker")
+    assert runtime.turns_running() == "a worker's turn ends"
+    session("worker")
+    assert runtime.turns_running() == "2 workers' turns end"
+    router = session("router")
+    assert runtime.turns_running() == "the Router's and 2 workers' turns end"
+    runtime.reconnecting[router["id"]] = "codex"  # Nothing of it runs.
+    assert runtime.turns_running() == "2 workers' turns end"
+    session("watchdog", "idle")
+    assert runtime.turns_running() == "2 workers' turns end"
+
+
 async def test_an_update_that_failed_says_why_and_runs_as_before(harness, monkeypatch):
     from chiefofstaff import updates
 

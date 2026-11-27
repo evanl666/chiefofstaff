@@ -59,6 +59,7 @@ from .models import (
     Unfollow,
     UpdateRequest,
 )
+from .pagestate import page_state
 from .runtime import Runtime
 from .shares import ChangedError
 from .sharing import link_alone
@@ -369,7 +370,23 @@ def create_app(
 
     @app.get("/api/state")
     async def state():
-        return {**runtime.snapshot(), "data_directory": str(directory), "home": str(Path.home())}
+        """The page's state, as the page reads it (pagestate.py): finished tasks' long words
+        cut, and asked for once each (/api/task-texts)."""
+        found = {**page_state(runtime.snapshot()), "data_directory": str(directory)}
+        found["home"] = str(Path.home())
+        # Written out at once, as JSONResponse writes it: it is plain JSON already, and the page
+        # reads it after each burst of events. (FastAPI's own conversion took longer than the
+        # rest; it still writes anything plain JSON cannot hold.)
+        try:
+            return JSONResponse(found)
+        except (TypeError, ValueError):
+            return found
+
+    @app.get("/api/task-texts")
+    async def task_texts(ids: str = ""):
+        """Tasks' whole words the page's state cut (their result, their earlier reports), by
+        id ("t1,t2"), each with what they are (texts_key); one not found is left out."""
+        return runtime.task_actions.texts([item for item in ids.split(",") if item][:200])
 
     @app.get("/api/events")
     async def events():
@@ -928,6 +945,15 @@ def create_app(
     @app.post("/api/sessions/{session_id}/stop")
     async def stop(session_id: str):
         await runtime.workers.interrupt(session_id)
+        return {"ok": True, **runtime.view(store.session(session_id))}
+
+    @app.post("/api/sessions/{session_id}/reconnect")
+    async def reconnect_session(session_id: str):
+        """Retry, on a session reconnecting after a restart: its next try now."""
+        try:
+            runtime.retry_resume(session_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         return {"ok": True, **runtime.view(store.session(session_id))}
 
     @app.post("/api/sessions/{session_id}/reopen")

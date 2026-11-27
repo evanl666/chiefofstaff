@@ -80,7 +80,7 @@ export function workerStates() {
     let dot = "idle";
     if (session.elsewhere) dot = `open${session.terminal?.working ? " busy" : ""}`;
     else if (asking.has(session.id)) dot = "waiting";
-    else if (["working", "starting"].includes(session.status) || section === "running") dot = "working";
+    else if (["working", "starting", "resuming"].includes(session.status) || section === "running") dot = "working";
     else if (section === "monitoring") dot = "watching";
     // A marker in words, not a color of its own: queued, overdue, checks back…
     const markers = [...new Set(list.map((task) => MARKED[phases.get(task.id)?.marker]).filter(Boolean))];
@@ -125,10 +125,11 @@ export function homeItem() {
   const count = needsCount();
   const router = byId(routerId());
   const working = router?.status === "working";
+  const resuming = router?.status === "resuming";
   return el(
     "button",
     { type: "button", class: `item home-item${state.selected === HOME ? " selected" : ""}`, onclick: () => select(HOME) },
-    el("span", { class: `dot${working ? " working" : ""}`, title: working ? "Your chief of staff is working" : "Your chief of staff" }),
+    el("span", { class: `dot${working ? " working" : ""}`, title: working ? "Your chief of staff is working" : resuming ? router.activity : "Your chief of staff" }),
     el("span", { class: "label", text: "Home" }),
     count ? el("span", { class: "badge amber", text: String(count), title: `${count} need${count === 1 ? "s" : ""} you` }) : null,
   );
@@ -490,7 +491,7 @@ function draftItem(draft, phases, embedded = new Set()) {
   if (inner) embedded.add(task.id);
   return {
     key: draftKey(draft),
-    version: task ? `${task.id}:${task.status}:${task.updated_at}${inner ? `:${inner.key}=${inner.version}` : ""}` : "",
+    version: task ? `${task.id}:${task.status}:${task.updated_at}${task.texts_key ? ":cut" : ""}${inner ? `:${inner.key}=${inner.version}` : ""}` : "",
     build: () => withTask(draftCard(draft), task, draft, inner),
     refresh: (node) => withTask(node, task, draft, inner),
   };
@@ -849,9 +850,11 @@ function setupCard() {
           "div",
           { id: "home-setup", class: "card setup" },
           el("div", { class: "head" }, el("span", { class: "label", text: "Connect GitHub Copilot" })),
-          el("p", { text: "Chief of Staff runs your work in GitHub Copilot sessions, and Copilot is not ready yet:" }),
+          el("p", { text: "Chief of Staff runs your work on GitHub Copilot here, and Copilot is not ready yet:" }),
           el("p", { class: "muted", text: snap.runtime.error }),
-          snap.runtime.windows ? el("p", { class: "muted", text: "On Windows, Chief of Staff runs on GitHub Copilot for now: Codex and Claude Code need macOS or Linux." }) : [],
+          snap.runtime.windows
+            ? el("p", { class: "muted", text: "On Windows, Chief of Staff runs on GitHub Copilot for now: Codex and Claude Code need macOS or Linux." })
+            : el("p", { class: "muted", text: "Codex or Claude Code can run it too: turn one on in Settings → Agents & models." }),
           el("p", { text: `${setupLead(["copilot"], true)} Chief of Staff runs each step for you. ${then}` }),
           el("ul", { class: "setup-agents" }, agentStep("copilot")),
           inTerminalFold(["copilot"]),

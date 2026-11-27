@@ -1439,6 +1439,10 @@ class Workers:
             # returns, and must find a deliberate stop, not a worker that ended without a report
             # (nor a silent stall for the Watchdog).
             self.mark_stopped(row, by, notice, full)
+        if session_id in self.runtime.reconnecting or self.store.get(f"cutshort:{session_id}"):
+            # Its turn cut short by a restart: it does not go on by itself; what it was on
+            # waits for its next message.
+            self.runtime.drop_resume(session_id)
         if row["role"] == WORKER:
             self.runtime.hold_schedules(session_id)  # Its schedules too, until it goes on.
         if session := self.states.handle(session_id):
