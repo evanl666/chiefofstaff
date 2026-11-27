@@ -13199,7 +13199,10 @@ async def round_qa61_words(runtime, browser, failures: list[str]):
     # Copilot on (with Codex): as before, credits and the offer as it was.
     routes = {"**/api/state": state_as(["copilot", "codex"])}
     context, page, errors, _, _ = await settings_page(browser, routes=routes)
-    await expect(page.locator("#usage-today")).to_contain_text("credits today")
+    # (Other agents' tokens beside, when they used any: "13.9 credits · 2k tokens today".)
+    await expect(page.locator("#usage-today")).to_have_text(
+        re.compile(r"^\d+\.\d credits( · \S+ tokens)? today$")
+    )
     await page.locator("#settings-button").click()
     await page.locator("#settings-tabs [data-tab=general]").click()
     await expect(page.locator("#proactive-help")).to_have_text(
