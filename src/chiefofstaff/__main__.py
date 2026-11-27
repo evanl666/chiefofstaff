@@ -20,6 +20,7 @@ import uvicorn
 from platformdirs import user_data_path
 
 from . import claude_setup
+from .store import DatabaseProblemError
 from .updates import UPDATE_NOTE, Launch, own_args
 from .web import create_app
 
@@ -318,7 +319,13 @@ def main():
     except OSError:
         listener.close()
         parser.error(f"Port {args.port} is unavailable. Choose another --port.")
-    app = create_app(directory, token, args.port, **extra)
+    try:
+        app = create_app(directory, token, args.port, **extra)
+    except DatabaseProblemError as exc:
+        # Said as it is, what to do with it, and no traceback.
+        listener.close()
+        data_lock.close()
+        parser.exit(1, f"{exc}\n")
     launch = directory / LAUNCH_FILE
     launch.write_text(url)  # Readable only by the owner (umask 077, like the data directory).
     print(

@@ -129,6 +129,64 @@ def valid(values: dict) -> bool:
     return True
 
 
+class DatabaseProblemError(RuntimeError):
+    """Chief of Staff's database can't be opened (damaged, held by another program, not
+    writable, emptied): said in a line, with what to do (__main__ says it and ends, no
+    traceback)."""
+
+
+# What the start leaves in a data folder before the database holds anything (a first run).
+FIRST_RUN_FILES = {DB_NAME, f"{DB_NAME}-wal", f"{DB_NAME}-shm", "service.lock", "launch-url"}
+
+
+def emptied(directory: Path) -> bool:
+    """Whether its database is an empty file (0 bytes, nothing in its write-ahead log) in a
+    folder that holds what earlier runs made: emptied or replaced, not a first run."""
+    try:
+        if (directory / DB_NAME).stat().st_size:
+            return False
+    except OSError:
+        return False
+    with suppress(OSError):
+        if (directory / f"{DB_NAME}-wal").stat().st_size:
+            return False
+    try:
+        return any(
+            entry.name not in FIRST_RUN_FILES and not entry.name.startswith(".")
+            for entry in directory.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def problem(path: Path, error: BaseException | None = None) -> str:
+    """What is wrong with the database at `path`, and what to do, in a line."""
+    said = str(error or "").strip()
+    known = said.lower()
+    if error is None:
+        return (
+            f"Chief of Staff's database ({path}) is empty (0 bytes), but its folder holds what "
+            "earlier runs made: it was emptied or replaced. Restore it from a backup, or move "
+            "it aside to start with a new, empty one."
+        )
+    if "locked" in known or "busy" in known:
+        return (
+            f"Another program holds Chief of Staff's database ({path}): close it (a database "
+            "viewer, a backup tool, another Chief of Staff), then start Chief of Staff again."
+        )
+    if "readonly" in known or "read-only" in known or "unable to open" in known:
+        return (
+            f"Chief of Staff can't write its database ({path}): {said}. Make sure the file and "
+            "its folder are yours and writable, then start it again."
+        )
+    if isinstance(error, sqlite3.DatabaseError) and not isinstance(error, sqlite3.OperationalError):
+        return (
+            f"Chief of Staff's database ({path}) is damaged ({said}). Restore it from a backup, "
+            "or move it aside to start with a new, empty one."
+        )
+    return f"Chief of Staff can't open its database ({path}): {said}."
+
+
 class Store:
     @classmethod
     def reading(cls, directory: Path) -> "Store":
@@ -145,7 +203,19 @@ class Store:
         return store
 
     def __init__(self, directory: Path):
+        """Opened, made or brought up to date; DatabaseProblemError when it can't be."""
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if emptied(directory):
+            raise DatabaseProblemError(problem(directory / DB_NAME))
+        try:
+            self.open_database(directory)
+        except sqlite3.Error as exc:
+            if db := getattr(self, "db", None):
+                with suppress(sqlite3.Error):
+                    db.close()
+            raise DatabaseProblemError(problem(directory / DB_NAME, exc)) from exc
+
+    def open_database(self, directory: Path):
         self.directory = directory
         rename_database(directory)
         self.lock = threading.RLock()
