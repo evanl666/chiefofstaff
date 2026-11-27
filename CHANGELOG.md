@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **A new README, a short guide, and the full reference.** The README (on PyPI too) shows the
+  real app in a 24-second clip and says what Chief of Staff does in eight lines. The guide is a
+  quarter of its length: quickstart, concepts, daily use, the three agents, settings, safety,
+  sharing, troubleshooting and FAQ. Everything it no longer spells out is in
+  [docs/reference.md](docs/reference.md), nothing dropped, with the README's install notes for
+  Windows and uv's cache, and what was said of Copilot alone now said of every agent. Links into the guide from the app (also from earlier versions) land
+  where they did. On PyPI the README's pictures now show, from the version's own tag.
+- **The demo runs on Copilot, Codex and Claude.** `chiefofstaff --demo` has scripted Codex and
+  Claude too, ready as if signed in: you ask Codex and Claude for two of the three tasks, the
+  login fix tells the rate limiting what it changed, and every agent's chip shows. A share link
+  made in the demo is sealed as for real, but no gist is made: nothing leaves your machine, as the
+  demo says (before, it made a secret gist on the account signed in to `gh`).
+
 ## 0.1.60 (2026-11-26)
 
 Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one
