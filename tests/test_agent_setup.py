@@ -320,6 +320,51 @@ async def test_install_runs_the_official_installer_finds_it_and_goes_on_to_sign_
         await runtime.stop()
 
 
+async def test_an_agent_turned_off_or_stopped_while_it_starts_is_not_left_running(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """Turned off in Settings while its backend starts (its check under way): that start ends
+    stopped, never left running for an agent that is off (ui_edges' round_agent_smooth: Claude,
+    off, still said Ready from it). So with its backend disconnected while it starts (Chief of
+    Staff stopping it): a backend begun before what stopped it is not kept."""
+    _, runtime = await started(tmp_path)
+    checking, go, begun = asyncio.Event(), asyncio.Event(), []
+    check = runtime.check_agent
+
+    async def slow_check(agent, backend):
+        begun.append(backend)
+        checking.set()
+        await go.wait()
+        return await check(agent, backend)
+
+    monkeypatch.setattr(runtime, "check_agent", slow_check)
+
+    async def overtaken_by(stop) -> str:
+        checking.clear()
+        go.clear()
+        starting = asyncio.ensure_future(runtime.connect_agent("codex"))
+        await asyncio.wait_for(checking.wait(), 20)
+        await stop()
+        go.set()
+        with pytest.raises(RuntimeError) as raised:
+            await starting
+        assert runtime.connection("codex")[0] is None
+        await until(lambda: not begun[-1].alive(), 10)
+        return str(raised.value)
+
+    try:
+        await saved(runtime, {"codex": {"enabled": True}})
+        said = await overtaken_by(lambda: saved(runtime, {"codex": {"enabled": False}}))
+        assert said == "Codex is turned off in Settings → Agents & models."
+        await saved(runtime, {"codex": {"enabled": True}})
+        said = await overtaken_by(lambda: runtime.disconnect_agent("codex"))
+        assert said == "Codex was stopped while it started."
+        go.set()
+        assert await runtime.connect_agent("codex") is runtime.connection("codex")[0], "then on"
+    finally:
+        await runtime.stop()
+
+
 async def test_a_failed_install_says_its_last_words(tmp_path, monkeypatch, quick):
     script = "echo 'curl: (6) Could not resolve host: chatgpt.com' >&2; exit 6"
     monkeypatch.setattr(agentsetup, "INSTALLERS", {"codex": (("script", script, ""),),

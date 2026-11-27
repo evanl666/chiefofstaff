@@ -1866,6 +1866,20 @@ class Runtime:
                 raise RuntimeError(self.not_on_windows(agent))
             if not entry.enabled():
                 raise RuntimeError(self.turned_off(agent))
+            generation = entry.connections
+
+            def overtaken() -> str:
+                """Why this start is not kept: turned off in Settings, or stopped (Chief of
+                Staff stopping, its backend disconnected), while it started. Its backend would
+                run on for an agent that is off, or one begun before what stopped it."""
+                if self.stopping:
+                    return "Chief of Staff is stopping."
+                if not entry.enabled():
+                    return self.turned_off(agent)
+                if entry.connections != generation:
+                    return f"{agents.display(agent)} was stopped while it started."
+                return ""
+
             if agent == "claude" and (why := await self.claude_setup.wait()):
                 # Its Agent SDK being set up (waited for a little), or its setup failed.
                 raise RuntimeError(why)
@@ -1880,12 +1894,15 @@ class Runtime:
             try:
                 await backend.start()
                 await self.check_agent(agent, backend)
+                pids = await asyncio.to_thread(backend.processes)
+                records = await asyncio.to_thread(copilot_records, pids, directory, hashed=True)
+                if why := overtaken():
+                    raise RuntimeError(why)
             except BaseException:
                 with suppress(Exception):
                     await backend.stop()
                 raise
-            pids = await asyncio.to_thread(backend.processes)
-            records = await asyncio.to_thread(copilot_records, pids, directory, hashed=True)
+            # (Nothing awaited from here until it is its backend: what overtook it is known.)
             self.store.set(key, json.dumps(records))
             self.agent_pids[agent] = pids
             # Its turns begin only once admitted (the next message in its own queue too).

@@ -44,6 +44,10 @@ Every session runs on the agent you choose, and Chief of Staff runs without Copi
   your chat, also once it is closed.
 - **No agent is ever given your Slack token.** Slack's read tools are Chief of Staff's own on
   every agent, Copilot included: it calls Slack with the token it holds.
+- **An agent turned off while it was starting no longer stays running.** Turning Codex or Claude
+  off in Settings while its process was still starting (for a worker, or to list its models)
+  left it running for an agent that was off, its row saying *Ready*, until Chief of Staff
+  restarted. That start now ends stopped, as does one overtaken by Chief of Staff stopping.
 
 Every ask of you is filed under the choice it is about, and decided once.
 
