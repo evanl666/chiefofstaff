@@ -22,8 +22,8 @@ again once it is back, and it says it is reconnecting meanwhile, never that it i
   minutes is not the end: it is tried again by itself, waiting longer each time, and *Retry*
   tries at once; a worker's *Stop: don't go on* (**⋯**) lets it rest, what it was given waiting
   for its next message.
-- **Chief of Staff's stop ends every agent's processes, at once.** Codex's and Claude Code's
-  processes end before Chief of Staff does (each in a few seconds, all together).
+- **Stopping is shorter with several agents on.** Each agent's processes end before Chief of
+  Staff does, all together (one agent after another before).
 - **Update and restart waits a little, and says for what.** *Restarting after the Router's turn
   ends…* (or a worker's): two minutes at most; a turn still running then goes on after the
   restart, as above. It waited for every turn to end, however long.
