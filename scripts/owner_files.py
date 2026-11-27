@@ -61,6 +61,11 @@ STATE_KEYS = {
     # Refreshed with the owner's profile (ACCOUNT_STAMPS), on the same clock (f1fix-4, r75, c1:
     # F's calibration, a plain `claude -p`, changed both).
     "passesEligibilityCache",
+    # Caches Claude Code 2.1.332 refreshes on its own clock as any of its processes starts
+    # (`claude auth status` too): feature flags and when they were fetched, model costs, the
+    # artifact roster (live r60).
+    "cachedFeatureFlags", "cachedFeatureFlagsAt", "additionalModelCostsCache",
+    "cachedArtifactRoster",
 }  # fmt: skip
 # Of the owner's account (`oauthAccount`, NEVER otherwise): when Claude last fetched their
 # profile, which any session of a signed-in Claude refreshes on its own clock (2.1.322; in
