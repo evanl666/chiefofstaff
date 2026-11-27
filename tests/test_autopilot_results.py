@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -313,6 +314,31 @@ async def test_without_an_offline_sandbox_nothing_is_verified(tmp_path, git_repo
     assert runtime.tasks.get(info["task_id"])["status"] == "review"
     [left] = entries(runtime, "not-done")
     assert left["why"]["reason"] == "Couldn't verify offline: it waits for you"
+
+
+async def test_the_first_check_of_a_copilot_version_is_waited_for_not_a_reason(
+    harness, monkeypatch
+):
+    """Live (B1, a fresh install): the safety check of this Copilot version, never run here,
+    was a reason to leave the first result for the owner; it is waited for (bounded), then
+    what it found holds: passed, verified; failed, it waits for the owner."""
+    from chiefofstaff.backend import TESTED_CLI
+
+    runtime = await harness.connect()
+    runtime.sandbox_host = True
+    found = {"passed": True}
+
+    async def probe(runtime):
+        await asyncio.sleep(0.3)
+        return {**found, "why": "" if found["passed"] else "its shell reached GitHub",
+                "at": "now", "checked": time.time()}  # fmt: skip
+
+    monkeypatch.setattr("chiefofstaff.step_probe.probe", probe)
+    runtime.store.delete(f"stepprobe:{TESTED_CLI}")
+    assert await asyncio.wait_for(verify.refusal(runtime), 10) == ""
+    found["passed"] = False
+    runtime.store.delete(f"stepprobe:{TESTED_CLI}")
+    assert await asyncio.wait_for(verify.refusal(runtime), 10) == verify.OFFLINE
 
 
 @pytest.mark.parametrize(

@@ -40,6 +40,7 @@ from uuid import uuid4
 
 from .. import integrity, receipts
 from ..backend import StepSandboxPolicy
+from ..shepherd import PROBING
 from ..workspaces import base_of, checkout_git, worth_committing
 
 if TYPE_CHECKING:
@@ -49,6 +50,9 @@ OFFLINE = "Couldn't verify offline: it waits for you"
 # Each step's time, and the whole run's.
 STEP_SECONDS = 600
 RUN_SECONDS = 1800
+# How long a first verification waits for the safety check of this Copilot version (run once a
+# version, Shepherd.probe_refusal) to say whether its sandbox holds.
+PROBE_SECONDS = 300
 # What a plan's command may not hold (see the docstring).
 OUTSIDE = re.compile(
     r"(?:^|\s|=)(?:/|~)|(?:^|[\s=/])\.\.(?:/|\s|$)|\$|`|(?:^|\s)(?:cd|pushd|popd|chdir)(?:\s|$)"
@@ -218,9 +222,14 @@ async def refusal(runtime: Runtime) -> str:
     network, whose check passed for this Copilot version."""
     if not (runtime.sandbox_host and runtime.backend and runtime.backend.capabilities.sandbox):
         return OFFLINE
-    if await runtime.shepherd.probe_refusal():
-        return OFFLINE
-    return ""
+    why = await runtime.shepherd.probe_refusal()
+    deadline = time.monotonic() + PROBE_SECONDS
+    while why.endswith(PROBING) and time.monotonic() < deadline:
+        # Never checked here (a fresh install, a new version): waited for, then what it found.
+        await asyncio.sleep(1)
+        if not getattr(runtime.shepherd, "probing", False):
+            why = await runtime.shepherd.probe_refusal()
+    return OFFLINE if why else ""
 
 
 async def verify(runtime: Runtime, task: dict, runner: Runner | None = None) -> dict:
