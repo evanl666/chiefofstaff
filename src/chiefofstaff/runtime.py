@@ -1148,11 +1148,12 @@ class Runtime:
     def turns_running(self) -> str:
         """The turns running or starting now, as what an update waits for: "the Router's turn
         ends", "2 workers' turns end", "the Router's and a worker's turns end"; "" when none.
-        Not a session reconnecting after a restart: nothing of it runs."""
+        Not a session reconnecting after a restart, nor one waiting for the owner's answer to
+        its question: nothing of it runs."""
         router, workers, others = False, 0, []
         for row in self.store.open_sessions():
-            if row["id"] in self.reconnecting:
-                continue
+            if row["id"] in self.reconnecting or self.states[row["id"]].asking:
+                continue  # (Its turn waits for the owner's answer, kept across the restart.)
             if not (row["status"] in {"working", "starting"} or self.states[row["id"]].busy):
                 continue
             if row["role"] == ROUTER:

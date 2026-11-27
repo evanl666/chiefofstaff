@@ -27,7 +27,8 @@ again once it is back, and it says it is reconnecting meanwhile, never that it i
   Staff does, all together (one agent after another before).
 - **Update and restart waits a little, and says for what.** *Restarting after the Router's turn
   ends…* (or a worker's): two minutes at most; a turn still running then goes on after the
-  restart, as above. It waited for every turn to end, however long.
+  restart, as above. A worker waiting for your answer to its question is not waited for (its
+  question stays). It waited for every turn to end, however long.
 
 ## 0.1.60 (2026-11-26)
 

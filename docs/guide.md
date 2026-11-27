@@ -2019,7 +2019,8 @@ commands run in.
 When a newer release is out, one quiet line at the bottom of the sidebar says so. Started with
 `uvx` or installed with `uv tool`, **Update and restart** does the rest: once the turns running
 end (the line says which: *Restarting after the Router's turn ends…*; two minutes at most, a turn
-still running then goes on after the restart; *Cancel* stops waiting), Chief of Staff gets the new
+still running then goes on after the restart; not a worker waiting for your answer; *Cancel* stops
+waiting), Chief of Staff gets the new
 version (`uvx chiefofstaff@<version>`, or `uv tool upgrade chiefofstaff`), stops as on Ctrl+C and
 starts again in its own place: the same terminal, port and private link. The page reloads by
 itself, every session goes on as after any restart, and Home says it updated (or why it couldn't:
