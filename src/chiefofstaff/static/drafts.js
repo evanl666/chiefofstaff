@@ -577,7 +577,7 @@ function okLines(draft) {
     }));
   }
   if (draft.kind === "check") return [{ kind: "Check", text: `${target.name} · ${target.repo}`, safe: true, main: { text: "Use", body: { action: "answer" }, done: "Check in use." }, more: [{ text: "Drop", body: { action: "reject" }, done: "Dropped." }] }];
-  if (draft.kind === "profile") return [{ kind: "Profile", text: "Your profile, distilled from your work", main: details("Review") }];
+  if (draft.kind === "profile") return [{ kind: "Profile", text: "Your profile, distilled from your work", main: details("Review"), more: [{ text: "Discard", body: { action: "reject" }, done: "Discarded." }] }];
   if (draft.kind === "adopt") return [{ kind: "Continue here?", text: `“${target.title}”: ${target.text || draft.text}`, main: { text: "Continue it here", body: { action: "answer" }, done: "Continuing it here." }, more: [{ text: "Not now", body: { action: "reject" }, done: "Left as it is." }] }];
   if (draft.kind === "workspace") return [{ kind: "Folder", text: target.picked ? `Where should “${target.title}” work? Picked ${target.picked.split("/").pop()} for you` : `Where should “${target.title}” work?`, main: details("Choose…"), more: [{ text: "Don't start it", body: { action: "reject" }, done: "Not started." }] }];
   if (draft.kind === "merge") {

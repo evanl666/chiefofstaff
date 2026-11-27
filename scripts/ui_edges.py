@@ -6361,7 +6361,8 @@ async def main():
                           round_composer, round_decision_steer, round_decision_ledger,
                           round_ci_not_run, round_team_v4,
                           round_share_from_report, round_long_report,
-                          round_router_appears, round_agent_words):  # fmt: skip
+                          round_router_appears, round_agent_words,
+                          round_qa61_words, round_qa61_needs):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -13091,6 +13092,24 @@ async def round_agent_words(runtime, browser, failures: list[str]):
         await expect(page.locator("#composer-note")).to_have_text(said)
         assert not errors, errors
         await context.close()
+    # A first start, no agent ready (QA 0.1.61 U5): Copilot is on by default, but Home's card
+    # offers any agent, so what waits says Chief of Staff, not Copilot.
+    first = {
+        "runtime": {"state": "error", "error": "Copilot CLI 'copilot' not found.", "waits": True,
+                    "setup": True},
+        "router_id": None,
+    }  # fmt: skip
+    context, page, errors, _, _ = await settings_page(
+        browser, routes={"**/api/state": state_as(["copilot"], **first)}
+    )
+    await expect(page.locator("#home-setup .label")).to_have_text("Set up a coding agent")
+    await expect(page.locator("#composer-note")).to_have_text(
+        "You can ask once Chief of Staff has started."
+    )
+    others = page.locator("#sidebar .empty-note", has_text="Shown once")
+    await expect(others).to_have_text("Shown once Chief of Staff has started.")
+    assert not errors, errors
+    await context.close()
     # Copilot's own card (Copilot the only agent on, not ready): another agent can run it too.
     failed = {
         "runtime": {"state": "error", "error": "Copilot is not signed in.", "waits": True},
@@ -13129,6 +13148,110 @@ async def round_agent_words(runtime, browser, failures: list[str]):
         rejected = store.update_draft(draft["id"], status="rejected", outcome="test")
         runtime.bus.publish("draft", rejected)
     log("words: workers' lines name the agents on where they differ; the waits and cards too")
+
+
+def usage_as(**parts):
+    """A page's /api/usage answered as the server's, with these parts in its place: Copilot's
+    total and tables nothing (as with Copilot off), and `parts` (other agents', say)."""
+
+    async def answer(route):
+        response = await route.fetch()
+        data = await response.json()
+        data["total"] = dict.fromkeys(data["total"], 0)
+        for table in ("by_session", "by_task", "by_model", "by_role"):
+            data[table] = []
+        data["spend"] = {
+            "accepted": {"tasks": 0, "each": 0},
+            "in_progress": {"tasks": 0, "credits": 0},
+            "stopped": {"tasks": 0, "credits": 0},
+            "untasked": {"credits": 0, "by": []},
+        }
+        await route.fulfill(response=response, json={**data, **parts})
+
+    return answer
+
+
+async def round_qa61_words(runtime, browser, failures: list[str]):
+    """QA 0.1.61 U12 and U13: with Codex alone, Keep my PRs moving says it needs Copilot (its
+    fixes and replies are prepared in Copilot workers), and what was used is said in Codex's
+    tokens, the sidebar's and Usage's, not in Copilot's credits."""
+    codex = [{"name": "Codex", "models": [{"model": "gpt-5.5", "tokens": 45000, "least": 45000}],
+              "unknown": []}]  # fmt: skip
+    routes = {"**/api/state": state_as(["codex"]), "**/api/usage?*": usage_as(agents=codex)}
+    context, page, errors, _, _ = await settings_page(browser, routes=routes)
+    await expect(page.locator("#usage-today")).to_have_text("45k tokens today")
+    await page.locator("#usage-button").click()
+    total = page.locator("#usage-total")
+    await expect(total).to_contain_text("45k tokens")
+    await expect(total).not_to_contain_text("premium requests")
+    await expect(page.locator("#usage-tables")).not_to_contain_text("No Copilot model calls")
+    await expect(page.locator("#usage-tables .agent-usage")).to_contain_text("Codex")
+    await shoot(page, "usage-codex-alone", "light", 1280, target="#usage-dialog")
+    await page.keyboard.press("Escape")
+    await page.locator("#settings-button").click()
+    await page.locator("#settings-tabs [data-tab=general]").click()
+    await expect(page.locator("#proactive-help")).to_have_text(
+        "Prepares fixes for failing CI and replies to reviews, for your approval. Needs "
+        "Copilot, which is off."
+    )
+    assert not errors, errors
+    await context.close()
+    # Copilot on (with Codex): as before, credits and the offer as it was.
+    routes = {"**/api/state": state_as(["copilot", "codex"])}
+    context, page, errors, _, _ = await settings_page(browser, routes=routes)
+    await expect(page.locator("#usage-today")).to_contain_text("credits today")
+    await page.locator("#settings-button").click()
+    await page.locator("#settings-tabs [data-tab=general]").click()
+    await expect(page.locator("#proactive-help")).to_have_text(
+        "Prepares fixes for failing CI and replies to reviews, for your approval."
+    )
+    assert not errors, errors
+    await context.close()
+    log("qa61 words: Codex alone, Keep my PRs moving says it needs Copilot; usage in tokens")
+
+
+async def round_qa61_needs(runtime, browser, failures: list[str]):
+    """QA 0.1.61 U14 and polish: a long note of the Router's shows its start with Show more,
+    then reads whole (in a box of its own, as a long update does); the Profile row in Your OK
+    has its ⋯ (Discard) as every other row has."""
+    store = runtime.store
+    router = store.get("router_id")
+    long = (
+        "A long note from the Router. "
+        + (
+            "The loader reads keel.toml, then the environment, then the command line; a key set "
+            "in two places was taken from the first one read. "
+        )
+        * 15
+        + "The very last sentence."
+    )
+    note = runtime.add_message(router, "update", long, {"needs_action": True})
+    profile = store.create_draft(router, "profile", {}, "You review PRs before lunch.")
+    runtime.bus.publish("draft", profile)
+    await settle(runtime)
+    context, page, errors, _, _ = await settings_page(browser)
+    try:
+        card = page.locator("#needs .card.update-card", has_text="A long note from the Router")
+        await expect(card).to_have_count(1, timeout=15000)
+        more = card.get_by_role("button", name="Show more")
+        await expect(more).to_be_visible()
+        await more.click()
+        await expect(card.get_by_role("button", name="Show less")).to_be_visible()
+        body = card.locator(".body")
+        await body.evaluate("n => n.scrollTop = n.scrollHeight")
+        await expect(card.get_by_text("The very last sentence.")).to_be_in_viewport()
+        await shoot(page, "router-note-open", "light", 1280, target="#needs")
+        row = page.locator("#needs .ok-row", has_text="Your profile")
+        await row.get_by_role("button", name="More actions").click()
+        await expect(row.get_by_role("menuitem", name="Discard")).to_be_visible()
+        await page.keyboard.press("Escape")
+        assert not errors, errors
+    finally:
+        await context.close()
+        rejected = store.update_draft(profile["id"], status="rejected", outcome="test")
+        runtime.bus.publish("draft", rejected)
+        runtime.update_seen(note["id"])
+    log("qa61 needs: a long Router note reads whole after Show more; Profile has its ⋯")
 
 
 async def round_router_appears(runtime, browser, failures: list[str]):

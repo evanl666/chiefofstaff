@@ -12,6 +12,15 @@
   *Ask first* off says "as in your own Codex sessions" (or whichever are on). What waits for
   Chief of Staff to start, Watch for you's tools, Send to Chief's consent and a session to
   continue here no longer assume Copilot; the README and guide say the same.
+- **A first start offers any agent, and what waits says so.** With no agent ready, the message box
+  and Other sessions say *once Chief of Staff has started*, not *once Copilot is connected*.
+- **With Copilot off, Keep my PRs moving says it needs Copilot** (fixes and replies are prepared
+  in Copilot workers), and its line no longer blames a missing sandbox.
+- **Usage counts what your agents used**: with Copilot off, the sidebar and Usage show Codex's
+  or Claude's tokens, not Copilot's credits; with Copilot on, other agents' tokens show beside.
+- **A long note from the Router, or a long question, reads whole**: its start, then *Show more*
+  (it was cut at 240 px in a box that didn't look scrollable). The Profile row in *Your OK* has
+  its ⋯ (*Discard*), as every row does.
 
 ## 0.1.60 (2026-11-26)
 

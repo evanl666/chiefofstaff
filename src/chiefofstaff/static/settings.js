@@ -343,11 +343,19 @@ function startOfDay(date) {
   day.setHours(0, 0, 0, 0);
   return day.getTime() / 1000;
 }
+// What other agents used (their tokens: each counts its own), by agent, with any.
+const agentTokens = (usage) => (usage.agents || []).map((part) => ({ name: part.name, tokens: part.models.reduce((sum, row) => sum + row.tokens, 0) })).filter((part) => part.tokens);
 export async function refreshUsageLink() {
   try {
     const usage = await api(`/api/usage?since=${startOfDay(new Date())}`);
-    $("#usage-today").textContent = `${usage.total.credits.toFixed(1)} credits today`;
-    $("#usage-button").title = `Usage: ${usage.total.credits.toFixed(1)} credits today`;
+    // Copilot's credits while Copilot is on (or spent them today); other agents' tokens beside.
+    const others = agentTokens(usage);
+    const sum = others.reduce((all, part) => all + part.tokens, 0);
+    const copilot = agentsOn().includes("copilot") || usage.total.calls > 0;
+    const shown = [copilot ? `${usage.total.credits.toFixed(1)} credits` : "", sum || !copilot ? `${tokens(sum)} tokens` : ""].filter(Boolean);
+    const said = [copilot ? `${usage.total.credits.toFixed(1)} Copilot credits` : "", ...others.map((part) => `${tokens(part.tokens)} tokens on ${part.name}`)].filter(Boolean);
+    $("#usage-today").textContent = `${shown.join(" · ")} today`;
+    $("#usage-button").title = `Usage today: ${said.join(", ") || "nothing yet"}`;
   } catch {
     $("#usage-today").textContent = "";
     $("#usage-button").title = "Usage";
@@ -504,6 +512,18 @@ export async function showUsage(range) {
   try {
     const usage = await api(`/api/usage?since=${since}&until=${until}`);
     const total = usage.total;
+    // Copilot off with no call of its own in the range: what other agents used, in their tokens.
+    const others = agentTokens(usage);
+    if (!agentsOn().includes("copilot") && !total.calls) {
+      const sum = others.reduce((all, part) => all + part.tokens, 0);
+      $("#usage-total").replaceChildren(
+        el("strong", { text: `${tokens(sum)} tokens` }),
+        el("span", { text: others.length ? `on ${others.map((part) => part.name).join(" and ")}, as each counts them` : "used in this range" }),
+      );
+      $("#usage-tables").replaceChildren(...(usage.agents || []).map(agentUsage));
+      if (!usage.agents?.length) $("#usage-tables").replaceChildren(el("div", { class: "line", text: "No model calls in this range." }));
+      return;
+    }
     // Premium requests as Copilot counts them: a call a user message started, at its model's
     // multiplier (not the agent's next calls); calls kept before that was known, apart.
     const unread = Math.round(total.premium_unread);
@@ -1540,7 +1560,9 @@ function showPrsLine() {
 // What it does now, in its helper: each kind's level and the day's credits, as the draft has them.
 function prsWords() {
   const form = $("#settings-form");
-  if (!form.proactive.checked) return "Prepares fixes for failing CI and replies to reviews, for your approval.";
+  // (Its fixes and replies are prepared in Copilot workers: off, Copilot's absence said here;
+  // on, the server's line under it says it, as for any reason they can't be.)
+  if (!form.proactive.checked) return `Prepares fixes for failing CI and replies to reviews, for your approval.${agentsOn().includes("copilot") ? "" : " Needs Copilot, which is off."}`;
   const settings = state.snapshot.settings;
   const level = (kind) => form[`level_${kind}`]?.value || (settings.proactive_levels || {})[kind] || "suggest";
   const verb = { suggest: "suggests", prepare: "prepares" };

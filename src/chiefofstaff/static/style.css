@@ -2275,7 +2275,7 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 .card:is(.question-card, .update-card) .head { display: flex; gap: 8px; align-items: center; }
 .card.question-card .head .title { flex: 1; min-width: 0; text-align: left; padding: 0; background: none; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.question-card .head .meta { color: var(--muted); font-size: var(--small); }
-.card:is(.question-card, .update-card) > .body { margin-top: 6px; max-height: 240px; overflow-y: auto; }
+.card:is(.question-card, .update-card) > .said { margin-top: 6px; }
 .card.update-card .head .title { flex: 1; min-width: 0; font-weight: 600; }
 .card.update-card > .actions { margin-top: 8px; }
 .card.update-card.urgent { background: var(--amber-soft); border-color: transparent; }

@@ -1,6 +1,6 @@
 // Home: the conversation with the Router, and beside it what needs the owner and every task.
 
-import { $, api, checkTip, el, freshButton, keepingFocus, moreMenu, once, reconcile, submits, toast, watchPanel } from "./dom.js";
+import { $, api, checkTip, el, foldable, freshButton, keepingFocus, moreMenu, once, reconcile, submits, toast, watchPanel } from "./dom.js";
 import { clock, markdown, shortPath, slackText } from "./text.js";
 import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, ownerUpdates, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
 import { boardOf, followingUp, workerSection } from "./board.js";
@@ -605,7 +605,7 @@ function questionCard(question) {
       el("span", { class: "chip question", text: "Question" }),
       el("span", { class: "meta", text: questionMeta(question) }),
     ),
-    el("div", { class: "body markdown", html: markdown(worker?.role === "slack" ? slackText(question.text) : question.text) }),
+    said(question.text, worker?.role === "slack" ? slackText(question.text) : question.text, "Question"),
   );
   const act = (run, done) => once(key, null, () => answer(run, done));
   const ended = ["cancelled", "done", "review", "failed"].includes(question.task_status);
@@ -677,6 +677,13 @@ function questionCard(question) {
 function updateItem(update) {
   return { key: `update:${update.id}`, build: () => updateCard(update) };
 }
+// What a question or a Router's note says: its start, with Show more when long, then read
+// whole in a box of its own, as a long update is (QA 0.1.61 U14: it was cut at 240 px).
+function said(text, shown, label) {
+  const wrapper = el("div", { class: "said" });
+  foldable(wrapper, el("div", { class: "body markdown", html: markdown(shown) }), text, { chars: 600, lines: 8, label });
+  return wrapper;
+}
 function updateCard(update) {
   const key = `update:${update.id}`;
   const error = el("span", { class: "error" });
@@ -691,7 +698,7 @@ function updateCard(update) {
       update.urgent ? el("span", { class: "chip blocked", text: "Urgent" }) : null,
       el("time", { text: clock(update.at), title: new Date(update.at).toLocaleString() }),
     ),
-    el("div", { class: "body markdown", html: markdown(update.text) }),
+    said(update.text, update.text, "The Router's note"),
     el(
       "div",
       { class: "actions" },

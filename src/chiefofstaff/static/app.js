@@ -6,7 +6,7 @@ import { externalItem, bindSidebarToggle, loadExternal } from "./sidebar.js";
 import { agentModels, answerSending, appendMessages, chatAnchor, dropSending, followAnchor, forgetUnsent, noteUnsent, renderHeader, repeatSending, scrolledByOwner, scrollToBottom, select, showSending, unsentFor } from "./session.js";
 import { closeMentions, mention, onComposerInput, onMentionKey, routerSide, setAgent, setRecipient } from "./mention.js";
 import { openFile } from "./files.js";
-import { copilotAlone } from "./agentpick.js";
+import { waitsForCopilot } from "./agentpick.js";
 import { scheduleHome, showHomeTab } from "./inbox.js";
 import { attachmentBody, bindAttachments, hasAttachments, restoreAttachments, showLength, takeAttachments, tooLong } from "./composer.js";
 import { bindSettings, openSettings, refreshUsageLink, showUsage } from "./settings.js";
@@ -74,7 +74,7 @@ function bindUi() {
       return;
     }
     if (sessionId === HOME && !routerId()) {
-      toast(copilotAlone() ? "Your chief of staff starts once Copilot is ready." : "Your chief of staff starts once one of your coding agents is ready.", "error");
+      toast(waitsForCopilot() ? "Your chief of staff starts once Copilot is ready." : "Your chief of staff starts once one of your coding agents is ready.", "error");
       return;
     }
     // Refused here, with the limit in words: the text stays to be shortened.

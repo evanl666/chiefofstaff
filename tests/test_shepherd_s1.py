@@ -342,6 +342,15 @@ async def test_without_a_sandbox_it_is_refused(world):
     assert "no sandbox" in runtime.shepherd.snapshot()["steps_here"]
 
 
+async def test_with_copilot_not_running_settings_say_so_not_no_sandbox(world):
+    """QA 0.1.61 U12: Chief of Staff on Codex alone (Copilot off, no backend): fixes are
+    prepared in Copilot workers, so that is why none is here, not a missing sandbox."""
+    runtime = await claimed(world)
+    runtime.backend = None
+    said = runtime.shepherd.snapshot()["steps_here"]
+    assert said == "Fixes are prepared in Copilot workers, and Copilot isn't running here."
+
+
 async def test_until_its_safety_check_passes_an_attempt_waits(world, monkeypatch):
     from chiefofstaff.backend import TESTED_CLI
 
