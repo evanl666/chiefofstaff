@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 import uvicorn
+from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -245,8 +246,13 @@ async def walk_through(w: Walk, out: Path, frames_dir: Path):
 
     await w.caption("5", "Followed to done, with receipts of what actually ran")
     fix = card_of(page, "Fix the flaky login test")
-    await w.click(fix.get_by_text("View report"), 0.5, 0.5, 600)
     receipts = fix.locator(".chips .receipts").first
+    for _ in range(3):
+        # (A result that comes in meanwhile redraws Needs you under the click: again.)
+        await w.click(fix.get_by_text("View report"), 0.5, 0.5, 600)
+        with contextlib.suppress(PlaywrightTimeout):
+            await receipts.get_by_text("✓ Verified").wait_for(timeout=4000)
+            break
     await receipts.get_by_text("✓ Verified").wait_for()
     await page.wait_for_timeout(700)
     await w.spot(receipts)
