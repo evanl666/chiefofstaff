@@ -49,8 +49,8 @@ C7  prepare-downgrade right after an answer was received: the worker's session i
 
 Shard D, parity (the design's: Copilot answers in its turn; Codex and Claude are reopened in Ask
 first before they are continued, never mid-turn):
-D1  a Codex worker, opened acting on its own, asks: reopened in Ask first, then answered (with
-    your Codex; skipped when it is not installed)
+D1  a Codex worker (the stand-in `codex`, never yours), opened acting on its own, asks: reopened
+    in Ask first, then answered
 D2  a Claude worker (the stand-in `claude`, never the real one), opened acting on its own: the
     same
 D3  a Claude worker (the stand-in) asked while mid-turn: its question waits for that turn
@@ -59,7 +59,7 @@ Uses your signed-in Copilot CLI (COPILOT_HOME of its own, its config.json copied
 read only) and consumes premium requests (SHARD_CREDITS a shard at most: a shard that reaches it
 stops, failed); the Copilot sessions it creates are deleted at the end. The data folder has a
 space in its path, as macOS's own does. Set TMPDIR to a scratch folder of yours; ports from
-LIVE_AUTOPILOT_PORT (default 19650; Slack's address the next one, where nothing listens: no Slack).
+LIVE_AUTOPILOT_PORT (default 21650; Slack's address the next one, where nothing listens: no Slack).
 """
 
 import asyncio
@@ -67,7 +67,6 @@ import contextlib
 import json
 import os
 import re
-import shutil
 import signal
 import sqlite3
 import subprocess
@@ -81,7 +80,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
 import live_e2e
 import live_parity  # noqa: F401  (it sets its own port: this one is set after)
 
-live_e2e.PORT = int(os.environ.get("LIVE_AUTOPILOT_PORT", "19650"))
+live_e2e.PORT = int(os.environ.get("LIVE_AUTOPILOT_PORT", "21650"))
 live_e2e.SLACK_PORT = live_e2e.PORT + 1
 live_e2e.BASE = f"http://127.0.0.1:{live_e2e.PORT}"
 from live_e2e import App, cleanup, data_dir, log, transcript, wait_for  # noqa: E402
@@ -713,8 +712,8 @@ async def c7_prepare_downgrade_after_an_answer(run: Run) -> bool:
 
 async def d_reopened_in_ask_first(run: Run, agent: str, code: str):
     """New workers on `agent` (Settings), acting without asking (the owner's usual setting); the
-    owner's page message settles the question it then asks (the stand-in Claude asks "Which
-    color?" when told "Ask the owner which color")."""
+    owner's page message settles the question it then asks (the stand-ins ask which color when
+    told "Ask the owner which color", Codex's with Red and Blue to choose from)."""
     await run.settings(
         worker_yolo=True,
         agents={
@@ -729,8 +728,7 @@ async def d_reopened_in_ask_first(run: Run, agent: str, code: str):
         worker["session_id"],
         "Blue, please. Ask the owner which color, and use the answer."
         if agent == "Claude"
-        else "Blue, please. Ask me with your question tool exactly: 'Which color: red or "
-        "blue?' and write the answer to color.txt.",
+        else "Blue, please. Ask the owner Which color: red or blue?",
     )
     task_id = await current_task(run, worker["session_id"]) or worker["task_id"]
     entry = await run.entry_for(task_id, ANSWERED | {PARKED}, 900)
@@ -780,6 +778,34 @@ async def d3_mid_turn_waits(run: Run):
 # The shards.
 
 
+def stand_ins(root: Path) -> dict:
+    """Claude and Codex are never the owner's here: the stand-ins (tests/fake_claude.py,
+    tests/fake_codex.py), first on the PATH, each with folders of its own for what would be
+    ~/.claude and ~/.codex."""
+    tests = Path(__file__).parent.parent / "tests"
+    stand_in = root / "bin"
+    stand_in.mkdir()
+    # Claude's runs as a file named `claude`, so its command line reads as Claude Code's does.
+    script = root / "stand-in" / "claude"
+    script.parent.mkdir()
+    script.symlink_to(tests / "fake_claude.py")
+    for name, target in (("claude", script), ("codex", tests / "fake_codex.py")):
+        command = stand_in / name
+        command.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{target}" "$@"\n')
+        command.chmod(0o755)
+    claude_config = root / "claude-config"
+    claude_config.mkdir()
+    (claude_config / ".claude.json").write_text("{}\n")
+    (root / "codex-home").mkdir()
+    return {
+        "PATH": f"{stand_in}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_CLAUDE_HOME": str(root / "fake-claude"),
+        "CLAUDE_CONFIG_DIR": str(claude_config),
+        "FAKE_CODEX_HOME": str(root / "fake-codex"),
+        "CODEX_HOME": str(root / "codex-home"),
+    }
+
+
 async def shard(name: str, root: Path, wanted: set[str]) -> list:
     home, project, _ = setup(root)
     calc_project(project)
@@ -787,16 +813,7 @@ async def shard(name: str, root: Path, wanted: set[str]) -> list:
     data.parent.mkdir(parents=True, exist_ok=True)
     env = {"COPILOT_HOME": str(home), "CHIEFOFSTAFF_MIN_FREE_MEMORY": "0"}
     if name == "D":
-        # Claude is never the real one here: the stand-in, first on the PATH.
-        stand_in = root / "bin"
-        stand_in.mkdir()
-        claude = stand_in / "claude"
-        claude.write_text(
-            f"#!/bin/sh\nexec {sys.executable} "
-            f'{Path(__file__).parent.parent / "tests" / "fake_claude.py"} "$@"\n'
-        )
-        claude.chmod(0o755)
-        env["PATH"] = f"{stand_in}{os.pathsep}{os.environ['PATH']}"
+        env |= stand_ins(root)
     app = App(data, root / "log", env, agents=name == "D")
     await app.start()
     run = Run(name, app, root, project)
@@ -837,9 +854,6 @@ async def shard(name: str, root: Path, wanted: set[str]) -> list:
         for scenario in chosen:
             log(f"---- {scenario}")
             if scenario == "D1":
-                if not shutil.which("codex"):
-                    run.check("D1 skipped: Codex is not installed", True)
-                    continue
                 await d_reopened_in_ask_first(run, "Codex", "D1")
             elif scenario == "D2":
                 await d_reopened_in_ask_first(run, "Claude", "D2")
