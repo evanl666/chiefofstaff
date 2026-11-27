@@ -1999,7 +1999,7 @@ class Runtime:
         RESUMING.set(True)
         try:
             await self.reconcile_sends(agent, only=ids)
-            await self.resume_working(agent, only=ids, what=what)
+            await self.resume_working(agent, what=what, at_work=ids)
         except Exception:
             logger.exception("Recovering the sessions of %s failed", agent)
         finally:
@@ -10123,7 +10123,7 @@ class Runtime:
             # Held for their folder's settings by an earlier version (or with the sandbox
             # on then): without it now, they go on (release_unguarded).
             await self.release_unguarded()
-            await self.resume_working(only=ids, what=what)
+            await self.resume_working(what=what, at_work=ids)
         finally:
             for session_id in self.on_agent(COPILOT_AGENT, list(self.resumes)):
                 self.resumed(session_id)
@@ -10255,12 +10255,17 @@ class Runtime:
                 self.resumed(session_id)
 
     async def resume_working(
-        self, agent: str = COPILOT_AGENT, only: list[str] | None = None, what: str = ""
+        self,
+        agent: str = COPILOT_AGENT,
+        only: list[str] | None = None,
+        what: str = "",
+        at_work: list[str] | None = None,
     ):
         """After a restart, the agent's sessions that were mid-turn continue, with what they had
-        not handled; `only` these sessions. What restarted (`what`, as they are told): else this
-        app, or (connected before) only the agent; with `only` alone, their own process of the
-        agent."""
+        not handled (`at_work`: of those, these, at work as it started: one whose turn began
+        since is not one to resume); `only` these sessions. What restarted (`what`, as they are
+        told): else this app, or (connected before) only the agent; with `only` alone, their own
+        process of the agent."""
         what = what or self.restart_words(agent, own=only is not None)
         rows = self.store.open_sessions()
         mine = set(self.on_agent(agent, [row["id"] for row in rows]))
@@ -10284,6 +10289,8 @@ class Runtime:
                     # Events held, or a send interrupted, when Chief of Staff stopped.
                     self.background(self.delivery.resume(row["id"]))
                 continue
+            if at_work is not None and row["id"] not in at_work:
+                continue  # Its turn began since: at work, not cut short.
             if agent == COPILOT_AGENT and self.too_large(row["id"]):
                 self.resume_over(row["id"])
                 self.store.delete(f"cutshort:{row['id']}")  # (Its fresh one is told.)
