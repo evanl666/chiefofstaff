@@ -110,6 +110,16 @@ A new README, a short guide and the full reference; the demo runs every agent.
   demo says (before, it made a secret gist on the account signed in to `gh`).
 - `chiefofstaff --help` says it runs Copilot, Codex and Claude Code, not only Copilot.
 
+A share link no longer carries a token cut short.
+
+- **A value cut short where its text was cut is marked too.** A task's title is cut to its length (a
+  command on a card at 200 characters), so a token pasted near its end was left in part, too short
+  to be recognised: that part went out in the link, and in the downloaded file's name, though every
+  value marked was removed. Now a known token's start up to where its text was cut (`ghp_`, `xoxp-`,
+  `sk-`, `AKIA`…) is marked however short, and so are a link's password and a quoted value cut
+  before their end; a share never cuts a title, a PR's title or a result through a value; and the
+  HTML file is named for the card as shared.
+
 ## 0.1.60 (2026-11-26)
 
 Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one

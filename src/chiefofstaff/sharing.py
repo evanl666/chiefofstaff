@@ -339,8 +339,28 @@ def outcome(item: dict) -> str:
     return "passed" if item["passed"] else "failed"
 
 
-def cut_result(text: str, most: int = RESULT_CHARS) -> tuple[str, bool]:
-    """At most `most` characters, cut at a paragraph (else a line), said at its end."""
+def whole(text: str, at: int, environment: Sequence[str] = ()) -> int:
+    """Where to cut `text` at `at` or before so as not to cut through a private value, as the
+    scan finds them in the whole text before it is cut (U9): the start of the one `at` is
+    inside, else `at`."""
+    for hit in hits_in(text, environment):
+        if hit["start"] < at < hit["end"]:
+            return hit["start"]
+    return at
+
+
+def cut(text: str, most: int, environment: Sequence[str] = ()) -> str:
+    """At most `most` characters, never cut through a private value."""
+    if len(text) <= most:
+        return text
+    return text[: whole(text, most, environment)].rstrip()
+
+
+def cut_result(
+    text: str, most: int = RESULT_CHARS, environment: Sequence[str] = ()
+) -> tuple[str, bool]:
+    """At most `most` characters, cut at a paragraph (else a line), said at its end; never
+    through a private value (a key's block spans lines)."""
     text = (text or "").strip()
     if len(text) <= most:
         return text, False
@@ -350,14 +370,18 @@ def cut_result(text: str, most: int = RESULT_CHARS) -> tuple[str, bool]:
         at = head.rfind("\n")
     if at < most // 2:
         at = most
+    at = whole(text, at, environment)
     return f"{head[:at].rstrip()}\n\n{CUT_NOTE}", True
 
 
-def snapshot(view: dict, finished_at: str = "") -> dict:
+def snapshot(view: dict, finished_at: str = "", environment: Sequence[str] = ()) -> dict:
     """The card of a finished task's view (TaskActions.view), as it would be shared: only the
-    fields of share-links' allow-list. Paths are not shortened yet (see shorten)."""
+    fields of share-links' allow-list. Paths are not shortened yet (see shorten). What it cuts
+    short it never cuts through a private value (`environment`: values the scan looks for)."""
     found = view.get("receipts") or {}
-    result, _ = cut_result(view.get("result") or view.get("progress") or "")
+    result, _ = cut_result(
+        view.get("result") or view.get("progress") or "", RESULT_CHARS, environment
+    )
     checks = []
     for label, key in (("tests", "tests"), ("checks", "checks"), ("build", "build")):
         item = found.get(key)
@@ -378,7 +402,7 @@ def snapshot(view: dict, finished_at: str = "") -> dict:
         {
             "label": str(pr.get("label") or ""),
             "url": str(pr.get("url") or ""),
-            "title": str(pr.get("title") or "")[:200],
+            "title": cut(str(pr.get("title") or ""), 200, environment),
             "state": pr.get("state") if pr.get("state") in {"OPEN", "CLOSED", "MERGED"} else "",
             "checks": pr.get("checks")
             if pr.get("checks") in {"passing", "failing", "pending", "none"}
@@ -391,7 +415,7 @@ def snapshot(view: dict, finished_at: str = "") -> dict:
         if PR_URL.fullmatch(str(pr.get("url") or ""))
     ]
     return {
-        "title": (view.get("title") or "")[:TITLE_CHARS],
+        "title": cut(view.get("title") or "", TITLE_CHARS, environment),
         "status": view.get("status", ""),
         "status_words": finished_words(view),
         "finished_at": zulu(finished_at or view.get("ended_at") or view.get("updated_at") or ""),
@@ -508,6 +532,11 @@ KEY_LINE = (
     rf"(?:{BREAK}[ \t]*)+(?:[A-Za-z0-9+/=]{{4,}}|[A-Za-z][A-Za-z-]*:[^\n\\]*)"
     r"(?=[ \t]*(?:\r?\n|\\[rn]|\"|$))"
 )
+# Where a text was cut short: its end, or the … (or ...) that marks a cut (envelope.clean_title,
+# receipts.shown, cut_result's note). A value that runs up to one may be the start of a longer
+# one cut there (U9: a title cut through a token): a known prefix and at least 4 of its value's
+# characters up to a cut are flagged, however short of a whole one.
+CUT = r"(?=\s*(?:\u2026|\.\.\.|\Z))"
 AWS_ID = rf"{START}(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{{16}}{STOP}"
 # A secret access key: 40 of base64, not a commit's 40 of hex.
 AWS_KEY_BODY = (
@@ -520,7 +549,12 @@ CREDENTIAL_NAME = (
     r"[A-Za-z0-9_.-]{0,40}?(?:password|passwd|passphrase|pwd|secret|api[_ -]?key|access[_ -]?key"
     r"|private[_ -]?key|token|credentials?)(?:(?:[_.-]|(?-i:[A-Z]))[A-Za-z0-9_.-]{0,40})?"
 )
-CREDENTIAL_VALUE = r"(?:\"[^\"\n]+\"|'[^'\n]+'|[^\s\"'`]{6,})"
+CREDENTIAL_VALUE = (
+    rf"(?:\"[^\"\n]+\"|'[^'\n]+'|[^\s\"'`]{{6,}}"
+    # Cut short: a quoted one before its closing quote; a bare one only where … marks a cut
+    # ("token: none" at a text's end is no value).
+    rf"|\"[^\"\n\u2026]+{CUT}|'[^'\n\u2026]+{CUT}|[^\s\"'`\u2026]+(?=\s*(?:\u2026|\.\.\.)))"
+)
 RULES: tuple[tuple[str, re.Pattern], ...] = (
     (
         "a private key",
@@ -534,25 +568,58 @@ RULES: tuple[tuple[str, re.Pattern], ...] = (
     ),
     (
         "a link with a password",
-        re.compile(rf"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:[^\s/@]+@{URL_TAIL}"),
+        re.compile(
+            rf"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://(?:[^\s/:@]*:[^\s/@]+@{URL_TAIL}"
+            # Cut before its @: a user (no host's dots) and a password (not a port).
+            rf"|[^\s/:@.]*:(?!\d+{CUT})[^\s/@\u2026]+{CUT})"
+        ),
     ),
     (
         "a GitHub token",
-        re.compile(rf"{START}(?:gh[pousr]_[A-Za-z0-9]{{36,255}}|github_pat_\w{{22,255}})"),
+        re.compile(
+            rf"{START}(?:gh[pousr]_[A-Za-z0-9]{{36,255}}|github_pat_\w{{22,255}}"
+            rf"|(?:gh[pousr]_[A-Za-z0-9]{{4,}}|github_pat_\w{{4,}}){CUT})"
+        ),
     ),
-    ("an AWS access key", re.compile(AWS_ID)),
-    ("a Google API key", re.compile(rf"{START}AIza[0-9A-Za-z_-]{{35}}(?![0-9A-Za-z_-])")),
-    ("a Slack token", re.compile(rf"{START}xox[abposre]-[0-9A-Za-z-]{{10,}}")),
-    ("a Stripe key", re.compile(rf"{START}(?:sk|rk)_live_[0-9A-Za-z]{{16,}}")),
-    ("an npm token", re.compile(rf"{START}npm_[A-Za-z0-9]{{36}}{STOP}")),
-    ("an Anthropic key", re.compile(rf"{START}sk-ant-[A-Za-z0-9_-]{{32,}}")),
-    ("an OpenAI key", re.compile(rf"{START}sk-(?:proj-)?[A-Za-z0-9_-]{{32,}}")),
+    (
+        "an AWS access key",
+        re.compile(rf"{AWS_ID}|{START}(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{{4,15}}{CUT}"),
+    ),
+    (
+        "a Google API key",
+        re.compile(
+            rf"{START}AIza(?:[0-9A-Za-z_-]{{35}}(?![0-9A-Za-z_-])|[0-9A-Za-z_-]{{4,}}{CUT})"
+        ),
+    ),
+    (
+        "a Slack token",
+        re.compile(rf"{START}xox[abposre]-(?:[0-9A-Za-z-]{{10,}}|[0-9A-Za-z-]{{4,}}{CUT})"),
+    ),
+    (
+        "a Stripe key",
+        re.compile(rf"{START}(?:sk|rk)_live_(?:[0-9A-Za-z]{{16,}}|[0-9A-Za-z]{{4,}}{CUT})"),
+    ),
+    ("an npm token", re.compile(rf"{START}npm_(?:[A-Za-z0-9]{{36}}{STOP}|[A-Za-z0-9]{{4,}}{CUT})")),
+    (
+        "an Anthropic key",
+        re.compile(rf"{START}sk-ant-(?:[A-Za-z0-9_-]{{32,}}|[A-Za-z0-9_-]{{4,}}{CUT})"),
+    ),
+    (
+        "an OpenAI key",
+        re.compile(rf"{START}sk-(?:proj-)?(?:[A-Za-z0-9_-]{{32,}}|[A-Za-z0-9_-]{{4,}}{CUT})"),
+    ),
     # As drafts.SECRET has it.
     (
         "a JSON web token",
-        re.compile(rf"{START}eyJ[\w-]{{10,}}\.eyJ[\w-]{{10,}}\.[\w-]{{10,}}"),
+        re.compile(
+            rf"{START}eyJ(?:[\w-]{{10,}}\.eyJ[\w-]{{10,}}\.[\w-]{{10,}}"
+            rf"|[\w-]{{4,}}(?:\.[\w-]*){{0,2}}{CUT})"
+        ),
     ),
-    ("a bearer token", re.compile(rf"{START}Bearer\s+[A-Za-z0-9._~+/-]{{20,}}=*")),
+    (
+        "a bearer token",
+        re.compile(rf"{START}Bearer\s+(?:[A-Za-z0-9._~+/-]{{20,}}=*|[A-Za-z0-9._~+/-]{{8,}}{CUT})"),
+    ),
     (
         "a password or key",
         re.compile(rf"(?i){START}[\"']?{CREDENTIAL_NAME}[\"']?[ \t]*[:=][ \t]*{CREDENTIAL_VALUE}"),
@@ -580,7 +647,10 @@ RULES: tuple[tuple[str, re.Pattern], ...] = (
     ("an internal host name", re.compile(rf"(?i)\b{INTERNAL_HOST}\b")),
     (
         "an email address",
-        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
+        re.compile(
+            r"\b[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
+            rf"|[A-Za-z0-9.-]*{CUT})"
+        ),
     ),
 )
 ENVIRONMENT = "a value from your environment"

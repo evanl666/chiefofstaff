@@ -392,7 +392,11 @@ for 1, 7 or 30 days (7 by default). Nothing is shared until you click *Create li
   so *Remove* takes it out whole: a private key from its `BEGIN` line to its `END` (or to the end
   of its body), an AWS key id with the secret beside it, a link's `user:password@` whatever its
   scheme (`postgres://`, `redis://`…), and a value given by a name that says it is one
-  (`DB_PASSWORD=`, `JWT_SECRET=`, `"password": "…"`, `client_secret:`).
+  (`DB_PASSWORD=`, `JWT_SECRET=`, `"password": "…"`, `client_secret:`). A value cut short where
+  its text was cut (a title cut to its length, a command at 200 characters) is marked too: a
+  known token's start up to the cut (`ghp_`, `xoxp-`, `sk-`, `AKIA`…), a link's password or a
+  quoted value before its end. The share's own cuts (a title at 300 characters, a PR's at 200, the
+  result at 40,000) never cut through a value, and the HTML file is named for the card as shared.
 - **Where:** a secret gist of your own GitHub account, made with that account's own token from
   `gh` (its identity checked, never another account), holding only ciphertext: AES-256-GCM with
   a fresh key per link, bound to your GitHub user id, at most 64 KiB, with the expiry inside. The

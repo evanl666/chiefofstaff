@@ -9,7 +9,7 @@ import pytest
 from conftest import FakeClient, FakeSlackMcp, FakeTokens, Harness
 from fastapi.testclient import TestClient
 from share_world import NO_SCOPE, SLOW, TIMED_OUT, FakeGitHub, finished_task
-from test_share_remove import KEY_ID, KEY_SECRET, block
+from test_share_remove import GH, KEY_ID, KEY_SECRET, block
 
 from chiefofstaff import sharing
 from chiefofstaff.runtime import Runtime
@@ -175,6 +175,29 @@ async def test_share_from_a_report_in_a_chat_says_when_the_card_has_a_newer_resu
     [elsewhere], _ = reports_of(world, other["id"])
     for message in (elsewhere, 10**9):
         assert (await world.shares.preview(task["id"], message))["older_report"] is False
+
+
+async def test_a_title_cut_through_a_token_is_flagged_and_out_of_the_file_and_the_link(world):
+    # U9 (QA 0.1.61): the demo's Router names a task by the first 60 characters of what was
+    # asked, cutting through the token in it; the token whole is in its result.
+    asked = f"Check the staging API: token {GH} at http://10.0.4.17:8080/health"
+    task = await finished_task(world, title=asked[:60], result=f"Checked it with {GH}.")
+    preview = await world.shares.preview(task["id"])
+    assert sorted((hit["where"][0], hit["label"]) for hit in preview["hits"]) == [
+        ("Result", "a GitHub token"),
+        ("Title", "a GitHub token"),
+    ]
+    decisions = decide(preview)
+    filed = world.shares.file(task["id"], decisions, preview["digest"])
+    made = await world.shares.create(task["id"], decisions, preview["digest"], 7, "jordan")
+    [gist] = world.fake.gists.values()
+    blob, link = gist["files"]["share.txt"]["content"], sharing.parse_link(made["link"])
+    sealed = sharing.open_payload(blob, link["key"], 4242001)["card"]
+    for shared in (filed["card"], sealed):
+        assert shared["title"] == "Check the staging API: token [removed]"
+        assert "ghp_" not in "\n".join(text for _, text, _ in sharing.strings(shared))
+    # The HTML file's name is the card's title as shared, not the task's own.
+    assert filed["name"] == "check-the-staging-api-token-removed.html"
 
 
 async def test_only_a_finished_card_can_be_shared(world):

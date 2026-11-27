@@ -205,10 +205,11 @@ class Shares:
         result was cut)."""
         view = self.runtime.task_actions.view(task)
         ended = self.store.value("SELECT max(ended_at) FROM runs WHERE task_id=?", (task["id"],))
-        raw = sharing.snapshot(view, ended or task.get("ended_at") or task["updated_at"])
+        found = environment()
+        raw = sharing.snapshot(view, ended or task.get("ended_at") or task["updated_at"], found)
         cut = raw["result"].endswith(sharing.CUT_NOTE)
         card, shortened = sharing.shorten(raw, self.roots(task))
-        hits = sharing.scan(card, environment())
+        hits = sharing.scan(card, found)
         return card, shortened, hits, sharing.digest(card, hits), cut
 
     async def preview(self, task_id: str, message_id: int | None = None) -> dict:
@@ -298,8 +299,9 @@ class Shares:
 
     def file(self, task_id: str, decisions: Mapping[str, str], digest: str) -> dict:
         """The card for Download HTML file: no gist, no gh, nothing to revoke."""
-        task, card = self.checked(task_id, decisions, digest)
-        return {"card": card, "name": slug(task["title"])}
+        _, card = self.checked(task_id, decisions, digest)
+        # Named for the card as shared: the task's own title may hold what was removed (U9).
+        return {"card": card, "name": slug(card["title"])}
 
     # Create a link.
 
