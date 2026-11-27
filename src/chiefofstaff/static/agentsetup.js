@@ -25,6 +25,7 @@ const BUSY = { install: "Installing…", update: "Updating…", trust: "Trusting
 export function setupWords(name) {
   const run = setupOf(name);
   if (run?.state !== "running") return "";
+  if (run.starting) return "Starting…";
   return BUSY[run.kind] || "Signing in…";
 }
 const ACTIONS = { install: ["Install", "Install"], update: ["Update", "Update"], signin: ["Sign in", "Sign in to"] };
@@ -341,7 +342,7 @@ function consent(body, footer, status, kind) {
       el("p", { text: `Run this in PowerShell, then come back: ${agentName(name)} turns Ready by itself.` }),
       el("pre", { class: "setup-command" }, el("code", { text: first.command })),
     );
-    footer.append(el("button", { type: "button", "data-primary": "1", "data-key": "copy", text: "Copy command", onclick: () => copy(first.command, "Copied: run it in PowerShell.") }));
+    footer.append(notNow, el("button", { type: "button", "data-primary": "1", "data-key": "copy", text: "Copy command", onclick: () => copy(first.command, "Copied: run it in PowerShell.") }));
     return;
   }
   body.append(el("p", { text: "Chief of Staff runs this for you, in your account:" }), el("pre", { class: "setup-command" }, el("code", { text: first.command })));
@@ -356,6 +357,7 @@ function consent(body, footer, status, kind) {
     );
   }
   footer.append(
+    notNow,
     el("button", { type: "button", class: "text", text: "Copy command", "data-key": "copy", onclick: () => copy(first.command, `Copied: run ${first.command} in a terminal.`) }),
     el("button", { type: "button", "data-primary": "1", "data-key": "install", text: "Install", onclick: () => install(name, first.method) }),
   );
@@ -413,6 +415,12 @@ const DONE = {
 function runView(body, footer, run, status, close) {
   const name = run.agent;
   const cancelButton = () => el("button", { type: "button", class: "secondary", text: "Cancel", "data-key": "cancel", onclick: () => cancel(run.key || name) });
+  // Its agent ready while Chief of Staff waited for one: it starts on it now (done once it runs).
+  if (run.state === "running" && run.starting) {
+    body.append(waiting(`${title(name)} is ready. Chief of Staff is starting on it…`, run.started));
+    footer.append(close);
+    return;
+  }
   if (RUNNING[run.kind] && run.state === "running") {
     body.append(waiting(RUNNING[run.kind](run), run.started), el("pre", { class: "setup-command" }, el("code", { text: run.command })));
     if (run.tail?.length) body.append(el("pre", { class: "setup-tail", "aria-live": "polite", text: run.tail.slice(-3).join("\n") }));

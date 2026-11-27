@@ -124,8 +124,9 @@ URL = re.compile(r"https://[^\s<>\"'`]+")
 # A one-time code as `codex login --device-auth` prints it (ABCD-12345).
 DEVICE_CODE = re.compile(r"\b[A-Z0-9]{4,5}-[A-Z0-9]{4,6}\b")
 PASTE = re.compile(r"paste (?:the |your )?code", re.IGNORECASE)
-# How long Copilot may take to start once it is signed in or installed (recover), at most.
-COPILOT_SECONDS = 90.0
+# How long Chief of Staff may take to start once an agent is signed in, installed or updated
+# from here while it waited for one (recover), waited for at most.
+START_SECONDS = 90.0
 # An MCP server's name, as Codex and Claude Code name them (never an option's dash first).
 SERVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}")
 # The run that trusts Copilot's sandbox certificate (its key: one at a time).
@@ -291,6 +292,7 @@ class SetupRun:
         self.readers: list[asyncio.Task] = []
         self.secret = ""
         self.follows = False  # An install whose Sign in follows (it is signed out).
+        self.starting = False  # Its agent ready: Chief of Staff starts on it (Setups.ready_here).
         self.seq = 0  # Each change counted: the page keeps the newest it heard.
         self.changed: Callable[[], None] | None = None  # Called as what it shows changes.
 
@@ -311,6 +313,7 @@ class SetupRun:
             **({"asks_code": True} if self.asks_code else {}),
             **({"error": self.error} if self.error else {}),
             **({"follows": "signin"} if self.follows else {}),
+            **({"starting": True} if self.starting else {}),
             "tail": list(self.tail)[-40:],
         }
 
@@ -733,13 +736,31 @@ class Setups:
             return False
         return True
 
-    async def copilot_up(self) -> bool:
-        """Copilot signed in or installed from here: started now, as Chief of Staff would by
-        itself soon (recover), waited for COPILOT_SECONDS at most; whether it is ready (or, off,
-        found)."""
+    async def start_now(self):
+        """recover's step now, not at its next one (minutes later, maybe): Chief of Staff
+        started on what is ready now; waited for START_SECONDS at most (it goes on after)."""
         started = self.runtime.background(self.runtime.recover_now())
         with contextlib.suppress(Exception):
-            await asyncio.wait_for(asyncio.shield(started), COPILOT_SECONDS)
+            await asyncio.wait_for(asyncio.shield(started), START_SECONDS)
+
+    async def ready_here(self, run: SetupRun):
+        """Codex or Claude Code made ready from here (signed in, installed, updated) while
+        Chief of Staff waits for an agent (Home's first-run card): it starts now, the run saying
+        so meanwhile, and is done once it runs; never "ready" while the card still says none
+        is. Running already, nothing more (the work it held goes on: Runtime.agent_up)."""
+        if self.runtime.ready() or getattr(self.runtime, "stopping", False):
+            return
+        run.starting = True
+        run.seq += 1
+        self.changed(run)
+        await self.start_now()
+        run.starting = False
+        run.seq += 1
+
+    async def copilot_up(self) -> bool:
+        """Copilot signed in or installed from here: started now (start_now), as Chief of
+        Staff would by itself later; whether it is ready (or, off, found)."""
+        await self.start_now()
         return self.runtime.agent_status(agents.COPILOT).get("status") == agents.READY
 
     async def watch(self, run: SetupRun):
@@ -760,6 +781,7 @@ class Setups:
                 # (Copilot's sign-in, and an MCP server's, end by themselves once it is done.)
                 polled = run.kind == "signin" and run.agent != agents.COPILOT
                 if polled and await self.ready_now(run.agent):
+                    await self.ready_here(run)
                     run.finish("done")  # Its own process ends by itself now.
                     break
             if not ending.done():
@@ -802,6 +824,7 @@ class Setups:
             await self.copilot_up()
             run.finish("done")
         elif run.agent != agents.COPILOT and await self.ready_now(run.agent):
+            await self.ready_here(run)
             run.finish("done")
         elif code == 0:
             run.finish("failed", f"{agents.display(run.agent)} still says it is signed out.")
@@ -828,12 +851,16 @@ class Setups:
         self.runtime.store.set(f"agentpath:{name}", str(Path(path).parent))
         self.runtime.found_cache = (0.0, [])
         run.tail.append(f"Found {path}")
-        run.finish("done")
         if name == agents.COPILOT:
+            run.finish("done")
             self.runtime.copilot_installed()
             await self.copilot_up()
             return self.runtime.agent_status(name).get("status") == agents.SIGN_IN
-        return not await self.ready_now(name)
+        ready = await self.ready_now(name)
+        if ready:
+            await self.ready_here(run)  # (Signed in already: it starts on it now.)
+        run.finish("done")
+        return not ready
 
     async def updated(self, run: SetupRun, code: int):
         """An update's end: done once the agent is no longer older than the versions tested
@@ -853,12 +880,14 @@ class Setups:
             self.runtime.copilot_updated(version)
             run.finish("done")
             return
-        await self.ready_now(name)
+        ready = await self.ready_now(name)
         status = self.runtime.agent_status(name)
         if status.get("update"):
             run.finish("failed", f"Still not a version tested: {status.get('said', '')}".strip())
-        else:
-            run.finish("done")
+            return
+        if ready:
+            await self.ready_here(run)
+        run.finish("done")
 
     async def mcp_signed_in(self, run: SetupRun, code: int):
         """An MCP server's sign-in's end: its card answered (the worker told, its session

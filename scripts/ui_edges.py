@@ -10261,8 +10261,11 @@ async def agents_setup_card(runtime, browser):
         context, page, errors, _ = await agents_page(browser, "light")
         card = page.locator("#home-setup")
         await expect(card.locator(".label")).to_have_text("Set up a coding agent")
-        await expect(card).to_contain_text("codex login")
-        await expect(card).to_contain_text("claude auth login")
+        # A line for each agent with what it needs, as it stands here (round_self_handle has
+        # each step: Install, Sign in, Update, and their commands under Or in a terminal).
+        await expect(card.locator(".setup-agents .setup-agent .name")).to_have_text(
+            ["Copilot", "Codex", "Claude"]
+        )
         await expect(card).to_contain_text("It starts by itself once one is ready, or Retry here.")
         await shoot(page, "setup-card", "light", 1280, target="#home-setup")
         # Claude alone, its Agent SDK being set up: said calmly, nothing to do.
@@ -14461,6 +14464,14 @@ async def round_self_handle(runtime, browser, failures: list[str]):
         assert store.draft(draft["id"])["status"] != "pending"
         # Copilot alone can't run: Home's card offers its Sign in (its code shown in the
         # dialog) and, not installed, Install (its official installer, asked first).
+        # Codex older than tested again: its step is Update, and in a terminal `codex update`
+        # (not its install), the card's lead what they need (QA 0.1.61 P4).
+        os.environ["FAKE_CODEX_VERSION"] = "0.160.0"
+        (codex_home / "updated").unlink(missing_ok=True)
+        runtime.glanced.clear()
+        runtime.agent_failed.clear()
+        await runtime.refresh_agent_status()
+        assert runtime.agent_status("codex").get("update"), runtime.agent_status("codex")
         missing = "Copilot CLI 'copilot' not found."
         for problem, button in (("Copilot is not signed in.", "Sign in to Copilot"),
                                 (missing, "Install Copilot")):  # fmt: skip
@@ -14475,6 +14486,16 @@ async def round_self_handle(runtime, browser, failures: list[str]):
                 "Or in a terminal"
             )
             name = "signin" if "signed" in problem else "install"
+            await expect(card.get_by_role("button", name="Update Codex")).to_be_visible()
+            await expect(card).to_contain_text("Get one of them ready: Chief of Staff runs each")
+            fold = card.locator("details.setup-manual")
+            await fold.locator("summary").click()
+            await expect(fold).to_contain_text("Codex: codex update")
+            await expect(fold).not_to_contain_text("chatgpt.com/codex/install.sh")
+            await expect(fold).to_contain_text(
+                "Copilot: copilot login" if name == "signin"
+                else "Copilot: npm install -g @github/copilot, then copilot login"
+            )  # fmt: skip
             await shoot(page, f"self-home-card-{name}", "light", 1280, target="#home-setup")
             await card.get_by_role("button", name=button).click()
             dialog = page.locator("dialog.agent-setup")
@@ -14494,7 +14515,11 @@ async def round_self_handle(runtime, browser, failures: list[str]):
             if name == "signin":
                 await dialog.get_by_role("button", name="Close").click()
             else:
-                await page.keyboard.press("Escape")  # (Nothing installed: not asked to.)
+                # Not now, beside Copy command and Install (QA 0.1.61 U10): nothing installed.
+                await expect(dialog.locator("footer button")).to_have_text(
+                    ["Not now", "Copy command", "Install"]
+                )
+                await dialog.get_by_role("button", name="Not now").click()
             await expect(dialog).to_have_count(0)
             assert not errors, errors
             await context.close()

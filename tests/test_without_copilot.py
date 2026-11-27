@@ -290,6 +290,40 @@ async def test_with_no_agent_it_waits_and_starts_by_itself_once_one_can(
         await runtime.stop()
 
 
+class ListsSignedIn(SignedOut):
+    """As the Copilot CLI does: signed out, it lists no models (its request fails)."""
+
+    async def list_models(self):
+        if not self.signed_in:
+            raise RuntimeError(
+                "JSON-RPC Error -32603: Request models.list failed with message: Not "
+                "authenticated. Please authenticate first."
+            )
+        return await super().list_models()
+
+
+async def test_copilot_signed_out_lists_no_models_and_the_page_gets_no_error(tmp_path):
+    """QA 0.1.61 U11: Copilot alone and signed out, its CLI runs all the same: the page's ask
+    for Copilot's models (GET /api/models) got a 500 and the terminal a traceback. Now none, as
+    while Chief of Staff runs without Copilot; signed in, they are listed."""
+    harness = Harness(tmp_path / "data")
+    await (await harness.connect()).stop()
+    client = ListsSignedIn()
+    harness = Harness(tmp_path / "data", client=client)
+    runtime = await harness.connect()
+    try:
+        assert runtime.status["error"] == "Copilot is not signed in."
+        assert runtime.backend is not None, "its CLI runs, signed out"
+        assert await runtime.available_models() == []
+        client.signed_in = True
+        await runtime.recover_now()
+        await settle(runtime)
+        assert runtime.copilot_ready()
+        assert [model["id"] for model in await runtime.available_models()]
+    finally:
+        await runtime.stop()
+
+
 async def test_copilot_alone_signed_out_starts_by_itself_once_signed_in(tmp_path):
     """Copilot the only agent, signed out: its own error, as before, and Chief of Staff starts by
     itself once it is signed in (no Retry, no restart)."""

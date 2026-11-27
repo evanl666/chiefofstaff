@@ -572,7 +572,7 @@ the default branch or `sudo`). Turn the sandbox on to prevent that. With the **s
 workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
 `HEAD` and index, nor files git would read in their place, such as `.git/commondir`), never see
 your GitHub token, and cannot read `~/.ssh`. On macOS, `gh` works inside the sandbox once Copilot's
-certificate is trusted: where it isn't, Settings → Workers says so with *Trust the sandbox's
+certificate is trusted: where it isn't, Settings → General → Workers says so with *Trust the sandbox's
 certificate*, which shows what it runs (`copilot sandbox ca create`, then `copilot sandbox ca
 trust`; one that must change first, `rotate`), asks first, and runs them for you: macOS asks for
 your password to add it to your login keychain. If it fails it says why, with *Try again*, and the
@@ -654,7 +654,7 @@ that start together.
 Some tools behave differently inside the sandbox on macOS: Playwright's Chromium runs in a single
 process (the sandbox refuses the others it would start; Firefox, WebKit and full Chrome can't
 start there), Java reaches github.com only once Copilot's certificate is trusted (*Trust the
-sandbox's certificate*, Settings → Workers; Copilot's proxy answers for it), and uv before 0.9.29 crashes there (it reads macOS's proxy settings from a
+sandbox's certificate*, Settings → General → Workers; Copilot's proxy answers for it), and uv before 0.9.29 crashes there (it reads macOS's proxy settings from a
 service the sandbox closes; `brew upgrade uv` or `uv self update`): workers are told so, and
 report it rather than retry.
 
@@ -1701,11 +1701,13 @@ of Staff started; that folder goes after yours, so your own programs stay first)
 Copilot has the same *Sign in* and *Install* (Home's card when no agent can run yet, and Copilot's
 row in Settings): *Sign in* runs `copilot login --device-code` and shows its page and one-time code
 (*Sign in in the browser instead* under *Other ways*); once you've entered it, Chief of Staff starts
-on Copilot by itself, with no *Retry* and no restart. *Install* runs Copilot's official installer
+on Copilot by itself, with no *Retry* and no restart; Codex or Claude Code signed in, installed or
+updated there while no agent could run starts it at once too ("Chief of Staff is starting on it…",
+then ready). *Install* runs Copilot's official installer
 (`curl -fsSL https://gh.io/copilot-install | bash`; npm or Homebrew under *Other ways*; on Windows,
 `winget install GitHub.Copilot` to copy), then goes on to *Sign in*. Home's card lists each agent
-with what it needs and its button; the commands, to run in a terminal yourself, stay under *Or in a
-terminal*.
+with what it needs and its button; what each needs in a terminal instead (its install and
+sign-in, its sign-in, or its update) stays under *Or in a terminal*.
 
 **Updating an agent.** An agent older than the versions Chief of Staff was tested with says so
 (Codex and Claude Code can't run then; Copilot runs, with a line in the sidebar) with *Update*. It
