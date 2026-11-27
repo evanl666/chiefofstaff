@@ -3,7 +3,7 @@
 // leaves as soon as the owner acts, and comes back with the reason if that did not work.
 
 import { api, el, moreMenu, once, submits, toast } from "./dom.js";
-import { clock, codeHtml, displayPath, inlineHtml, markdown, slackText } from "./text.js";
+import { clipWords, clock, codeHtml, displayPath, inlineHtml, markdown, slackText } from "./text.js";
 import { applyDraft, finalText, pendingDrafts, state } from "./state.js";
 import { select } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
@@ -314,6 +314,26 @@ function keepTyped(input, key) {
   return input;
 }
 const taskLink = (item) => el("button", { type: "button", class: "link", text: item.title, onclick: () => select(item.session_id) });
+// A card's long words folded at a word with "…"; its one More opens all of them whole (QA 0.1.61
+// Q11: a question cut mid-word lost its choice).
+function folding() {
+  const opens = [];
+  const part = (node, text, max, render) => {
+    node.innerHTML = render(text.length > max ? clipWords(text, max) : text);
+    if (text.length > max) opens.push(() => (node.innerHTML = render(text)));
+    return node;
+  };
+  const control = () => {
+    if (!opens.length) return null;
+    const more = el("button", { type: "button", class: "link more-text", text: "More", "aria-label": "Show all of it", onclick: (event) => {
+      event.stopPropagation();
+      for (const open of opens) open();
+      more.remove();
+    } });
+    return more;
+  };
+  return { part, control };
+}
 // A decision that is the owner's: why it comes up, the options and what each means, and what
 // the worker recommends. Workers that hit the same question wait on the same card.
 function decisionCard(draft) {
@@ -324,14 +344,18 @@ function decisionCard(draft) {
   // A reconsideration: what the owner answered, when, and why it is asked again, first.
   const kept = target.replaces ? (target.previous || "").split(" → ").slice(1).join(" → ") || target.previous || "" : "";
   const answered = target.replaces ? el("div", { class: "answered", html: inlineHtml(`You answered this ${target.previous_at ? `at ${clock(target.previous_at)}` : "before"} (“${kept}”).${target.why ? ` Asked again because: ${target.why}` : ""}`) }) : null;
+  const fold = folding();
+  // Joined asks in other words: each asker's own question too (QA 0.1.61 Q3).
+  const also = askers.filter((asker) => asker.question && asker.question !== target.question);
   const node = card(
     draft,
     "decision",
     askers.length === 1 ? ["Decision for ", taskLink(askers[0])] : "Decision",
     askers.length > 1 ? el("div", { class: "affects" }, el("span", { text: `For ${askers.length} tasks:` }), ...askers.map(taskLink)) : null,
     answered,
-    el("div", { class: "question", html: inlineHtml(target.question) }),
-    target.why && !answered ? el("div", { class: "why", html: inlineHtml(target.why) }) : null,
+    fold.part(el("div", { class: "question" }), target.question, 300, inlineHtml),
+    ...also.map((asker) => el("div", { class: "asked-also" }, taskLink(asker), " asked: ", fold.part(el("span", { class: "said" }), `“${asker.question}”`, 200, inlineHtml))),
+    target.why && !answered ? fold.part(el("div", { class: "why" }), target.why, 400, inlineHtml) : null,
   );
   // Asked again by its worker with what it found since: the same card, saying when.
   if (target.updated_at) node.querySelector(":scope > .head").append(el("span", { class: "updated", text: `updated ${clock(target.updated_at)}` }));
@@ -353,12 +377,14 @@ function decisionCard(draft) {
             { type: "button", class: `option${option === best ? " recommended" : ""}`, onclick: () => answer(option.choice) },
             el("span", { class: "choice", html: codeHtml(option.choice) }),
             option === best ? el("span", { class: "tag", text: "Recommended" }) : null,
-            option.effect ? el("small", { html: codeHtml(option.effect) }) : null,
+            option.effect ? fold.part(el("small"), option.effect, 160, codeHtml) : null,
           ),
         ),
       ),
     );
   }
+  const more = fold.control();
+  if (more) node.append(el("div", { class: "more-line" }, more));
   if (target.recommendation) {
     // "Per account: it protects each user directly" says why next to the option marked.
     const reason = best && lowered.startsWith(best.choice.toLowerCase()) ? target.recommendation.slice(best.choice.length).replace(/^[\s:,.;—–-]+/, "") : "";

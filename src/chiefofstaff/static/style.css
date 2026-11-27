@@ -2122,6 +2122,12 @@ dialog .hint:empty, dialog small:empty { display: none; }
 select.verdict { margin-right: auto; field-sizing: content; }
 .card .affects { display: flex; flex-wrap: wrap; gap: 0 8px; align-items: center; font-size: var(--small); color: var(--muted); margin: -4px 0 4px; }
 .card .affects button.link, .card .impact button.link { padding: 0; font-size: var(--small); color: var(--accent); }
+/* A joined ask in other words: its asker's own question, quiet under the card's. */
+.card.decision .asked-also { font-size: var(--small); color: var(--soft); margin: 0 0 4px; overflow-wrap: anywhere; }
+.card.decision .asked-also button.link { padding: 0; min-height: 0; font-size: var(--small); color: var(--accent); }
+/* Long words folded at a word; More opens them whole. */
+.card.decision .more-line { margin-top: 4px; }
+.card.decision button.more-text { padding: 0; min-height: 0; font-size: var(--small); }
 .card .impact { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 3px; font-size: var(--body); }
 .card .impact li { display: flex; gap: 8px; align-items: baseline; }
 .card .impact .mark { width: 14px; text-align: center; color: var(--muted); }

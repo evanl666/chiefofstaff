@@ -542,3 +542,20 @@ def test_copy_summary_is_the_prs_the_decisions_and_a_line_per_part():
         "Parts:\n- Pa: The refund API is merged\n"
         "- Pb: Done · you accepted it at 2026-11-24T11:40:00Z\n"
     )
+
+
+def test_parts_asking_the_owner_one_card_are_one_need():
+    """QA 0.1.61 Q10: two parts waiting on one joined decision card were two needs ("Pb needs
+    you too (below)"); they are one, asked by both. Different cards stay two."""
+    found = v4(
+        "const ask = { section: 'needs', marker: 'question' };\n"
+        "const t = team([member('a'), member('b'), member('c')]);\n"
+        "const st = ts.teamState(t, ctx({ a: ask, b: ask, c: run }));\n"
+        "st.parts[0].askKey = 'draft:d1'; st.parts[1].askKey = 'draft:d1';\n"
+        "const one = ts.briefOf(t, st);\n"
+        "st.parts[1].askKey = 'draft:d2';\n"
+        "const two = ts.briefOf(t, st);\n"
+        "return { one: [one.along, one.also], two: [two.along, two.also] };"
+    )
+    assert found["one"] == [["Pb"], ""]
+    assert found["two"] == [[], "Pb needs you too (below)."]

@@ -6361,6 +6361,7 @@ async def main():
                           round_settings, round_teams_v2,
                           round_answer_label, round_sidebar_flat,
                           round_composer, round_decision_steer, round_decision_ledger,
+                          round_decision_fixes,
                           round_ci_not_run, round_team_v4,
                           round_share_from_report, round_long_report,
                           round_router_appears, round_agent_words, round_payload,
@@ -6890,6 +6891,146 @@ async def round_decision_ledger(runtime, browser, failures: list[str]):
     await expect(count).to_have_text(str(needs(runtime).count()) if needs(runtime).count() else "")
     log("E151: one answer closes every ask on the choice, and only those")
     await context.close()
+
+
+LONG_ASK = (
+    "Which cache should the ranker use for the nightly batch, given the memory limit on the "
+    "shared node and the latency budget the API team asked for, and the report that reads it "
+    "at 7 AM sharp, so a slow cache delays the report and the people reading it? "
+) * 2 + "Redis or Memcached?"
+
+
+async def round_decision_fixes(runtime, browser, failures: list[str]):
+    """0.1.61 (QA61): two teammates' different choices that share words (the API's port, the
+    metrics server's) are two cards, each with its own question (Q3); a long question folds at a
+    word with "…" and its More opens it whole, its choice never lost (Q11); the owner's answer
+    the Router relays closes the card, and the worker's done leaves none (Q1); a team's page
+    shows a card two of its parts wait on once (Q10). 800 and 1440 px, light and dark."""
+    import teams_scene
+
+    store = runtime.store
+    router = store.get("router_id")
+    shots = Path(os.environ.get("DECISION_FIXES_SHOTS", SHOTS / "decision-fixes"))
+    shots.mkdir(parents=True, exist_ok=True)
+    store.save_settings(store.settings().model_copy(update={"max_workers": 1000}))
+    runtime.states[router].turn_decisions.clear()
+
+    async def start(title, request=""):
+        result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                                 why_new="test")  # fmt: skip
+        found = json.loads(result.text_result_for_llm)
+        if request:
+            store.set(f"req:{found['task_id']}", request)
+        await settle(runtime)
+        return found["session_id"]
+
+    async def ask(worker, question, options, **extra):
+        options = [o if isinstance(o, dict) else {"choice": o} for o in options]
+        said = await call_tool(runtime, "ask_decision", worker, question=question,
+                               options=options, **extra)  # fmt: skip
+        await settle(runtime)
+        return said.text_result_for_llm
+
+    def card_of(worker):
+        return [
+            d
+            for d in store.drafts()
+            if d["kind"] == "decision"
+            and any(a["session_id"] == worker for a in d["target"]["askers"])
+        ][-1]["id"]
+
+    api = await start("QA61 API server", "77001")
+    metrics = await start("QA61 metrics server", "77001")
+    api_q = "Which port should the API server listen on: 8080 or 9090?"
+    metrics_q = "Which port should the metrics server use: 8080 or 9090?"
+    await ask(api, api_q, ["8080", "9090"])
+    said = await ask(metrics, metrics_q, ["8080", "9090"])
+    ports = {card_of(api): api_q, card_of(metrics): metrics_q}
+    assert len(ports) == 2, f"one card for two choices; the metrics worker was told {said!r}"
+    ranker = await start("QA61 ranker cache")
+    effect = "One more process on the shared node, " * 6 + "and its memory counted in the limit."
+    await ask(ranker, LONG_ASK, [{"choice": "Redis", "effect": effect}, {"choice": "Memcached"}],
+              why="The nightly batch reads every ranking twice. " * 12)  # fmt: skip
+    long_card = card_of(ranker)
+    for scheme, width in (("light", 1440), ("dark", 1440), ("light", 800), ("dark", 800)):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 1000}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator("#application")).to_be_visible()
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        for card, question in ports.items():
+            await expect(
+                page.locator(f'#needs .card.draft[data-id="{card}"] .question')
+            ).to_have_text(question, timeout=15000)
+        node = page.locator(f'#needs .card.draft[data-id="{long_card}"]')
+        folded = await node.locator(".question").inner_text()
+        assert folded.endswith("…") and len(folded) < len(LONG_ASK), folded
+        assert LONG_ASK.startswith(folded[:-1].rstrip()), "cut at a word, never mid-word"
+        await expect(node.locator(".option .choice")).to_have_text(["Redis", "Memcached"])
+        await node.scroll_into_view_if_needed()
+        await node.screenshot(path=shots / f"long-folded-{width}-{scheme}.png")
+        await node.get_by_role("button", name="Show all of it").click()
+        await expect(node.locator(".question")).to_have_text(LONG_ASK)
+        await expect(node.locator(".more-text")).to_have_count(0)
+        await node.screenshot(path=shots / f"long-opened-{width}-{scheme}.png")
+        await page.locator(f'#needs .card.draft[data-id="{card_of(metrics)}"]').screenshot(
+            path=shots / f"ports-{width}-{scheme}.png"
+        )
+        wide = await page.evaluate("document.scrollingElement.scrollWidth <= innerWidth")
+        assert wide, f"wider than the window at {width}"
+        await context.close()
+    log("Q3: two teammates' different choices sharing words are two cards, each its own question")
+    log("Q11: a long question folds at a word with …, More opens it whole, its choices whole")
+
+    ties = await start("QA61 tie breaker")
+    await ask(ties, "QA61: which tie-break rule, Rule A or Rule B?", ["Rule A", "Rule B"])
+    card = card_of(ties)
+    await call_tool(runtime, "message_session", router, session_id=ties, task="note",
+                    text="The owner says: Rule B.", answers_question=True)  # fmt: skip
+    await call_tool(runtime, "report", ties, status="done", summary="Added Rule B.")
+    await settle(runtime)
+    assert store.draft(card)["status"] != "pending", store.draft(card)
+    context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator(f'#needs .card.draft[data-id="{long_card}"]')).to_be_visible(
+        timeout=15000
+    )
+    await expect(page.locator(f'#needs .card.draft[data-id="{card}"]')).to_have_count(0)
+    log("Q1: the owner's answer the Router relays closes the card; done leaves none")
+
+    # A decision an earlier round left in force would be every new part's too: not this scene's.
+    store.execute("UPDATE decisions SET status='replaced' WHERE status='active'")
+    found = await teams_scene.refund_team(runtime)
+    [asked] = [
+        d for d in store.drafts() if d["kind"] == "decision" and d["session_id"] == found["ui"]
+    ]
+    question = asked["target"]["question"]
+    await ask(found["mail"], question, [o["choice"] for o in asked["target"]["options"]])
+    assert card_of(found["mail"]) == asked["id"], "one card, asked by both parts"
+    runtime.publish_state()
+    await settle(runtime)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 1100}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await (await team_row(page, found["team"])).click()
+        await expect(page.locator("#timeline .tp-brief")).to_be_visible(timeout=15000)
+        await expect(page.locator("#timeline .tp-brief")).to_contain_text("ask you")
+        text = await page.locator("#timeline .team-page").inner_text()
+        assert text.count(question) == 1, text
+        assert "needs you too" not in text, text
+        await page.screenshot(path=shots / f"team-one-need-{scheme}.png", full_page=True)
+        await context.close()
+    log("Q10: a team's page shows the card two parts wait on once")
 
 
 async def round_needs_dots(runtime, browser, failures: list[str]):
