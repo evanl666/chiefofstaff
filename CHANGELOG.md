@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **The page's state is under half its size.** Home reads it again after each burst of events,
+  and on the owner's data it had grown to 891 KB, mostly finished tasks' words: every earlier
+  report of each (342 KB) and each whole result (220 KB). It now carries a finished task's long
+  result as far as its row and chips read it (its start, and each line that gives a link), and
+  its earlier reports by when they were said; the page asks once for the rest of each
+  (`GET /api/task-texts`), keeps it, and has it where it shows: a row's tooltip, *Earlier
+  reports*, a draft's *Result of*. A worker's columns the page never reads are left out too.
+  Now 340 KB, read as fast as before; nothing on the page changes.
+
 ## 0.1.60 (2026-11-26)
 
 Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one
