@@ -14,6 +14,10 @@
   login fix tells the rate limiting what it changed, and every agent's chip shows. A share link
   made in the demo is sealed as for real, but no gist is made: nothing leaves your machine, as the
   demo says (before, it made a secret gist on the account signed in to `gh`).
+- **A card's note goes once the card is settled.** The note at the bottom of the page that a
+  decision, a question or a draft needs you stayed its twelve seconds after you had answered it,
+  above the note that said so. It now goes as soon as its card is answered, sent or dropped.
+- `chiefofstaff --help` says it runs Copilot, Codex and Claude Code, not only Copilot.
 
 ## 0.1.60 (2026-11-26)
 

@@ -4,9 +4,7 @@
 
 <h1 align="center">Chief of Staff</h1>
 
-<p align="center">
-  <b>Your engineering chief of staff. The more it works for you, the more it works like you.</b>
-</p>
+<h3 align="center">Your engineering chief of staff.<br>The more it works for you, the more it works like you.</h3>
 
 <p align="center">
   It runs Copilot, Codex and Claude as one team whose agents talk to each other, follows every
@@ -46,7 +44,7 @@ No `uv`? `pipx run chiefofstaff --demo` works too. The browser opens by itself.
    messages, PR reviews, commits) and what you keep asking for; habits wait for your OK. When a
    worker fixes a failing test, it proposes a check that fails on the mistake and passes on the
    fix: proved on both, so that mistake is caught next time.
-2. **A team that talks to itself.** One request becomes parts, each worker on its own agent and
+2. **A team whose agents talk to each other.** One request becomes parts, each worker on its own agent and
    worktree. They tell and ask each other directly, wait on each other's results and share your
    decisions; a live team page shows the plan. Or run one task on two agents and compare.
 3. **Sees it through to done.** It keeps your PRs moving: when CI fails or reviewers comment, the
@@ -59,9 +57,9 @@ No `uv`? `pipx run chiefofstaff --demo` works too. The browser opens by itself.
 5. **Only decisions reach you.** One card per question, with options and a recommendation.
    Workers that hit the same question share it, and your one answer reaches all of them. Every
    result comes with receipts: the tests, commits and diff it saw, not just what the agent says.
-6. **Never acts as you.** It drafts Slack replies and PR reviews in your voice and sends them only
-   on your OK. Workers can't comment, review, merge or close on GitHub as you, push to `main`, or
-   force-push someone else's branch.
+6. **Never acts as you without your OK.** It drafts Slack replies and PR reviews in your voice and
+   sends them only when you say so. No worker can comment, review, merge or close on GitHub as
+   you, push to `main`, or force-push someone else's branch.
 7. **Share in one link.** A finished result becomes an encrypted link that expires, opened in
    any browser; whatever looks private is flagged for you to remove first.
 8. **The basics.** Copilot CLI, Codex CLI and Claude Code, mixed per task on the subscriptions you
@@ -103,12 +101,12 @@ delivers each message with who sent it, so a Slack message can't pass itself off
 
 ## Safety and privacy
 
-| On its own | Only with your OK | Never, whatever the mode |
+| On its own | Only with your OK | Never: no worker can, in any mode |
 | --- | --- | --- |
-| Works in its own folder and git worktree; your checkouts stay untouched | Sends a Slack reply or posts a PR review in your name | Comments on, reviews, merges or closes a PR as you, or writes to issues |
-| Runs tests and builds; pushes its own `chief/…` branches and opens PRs | Merges a PR (one click on its card) | Pushes to `main` or `master` |
-| Reads what you let it: your code, Slack, the tools your agents have | Turns on a check, a habit or your profile it learned | Force-pushes a branch that isn't its own |
-| Asks you instead of guessing | With *Ask first* on: writes outside its folders, `sudo`, any force push | Gives any agent your Slack token |
+| Works in its own folder and git worktree; your checkouts stay untouched | Sends a Slack reply or posts a PR review in your name | Comment on, review, merge or close a PR as you, or write to issues |
+| Runs tests and builds; pushes its own `chief/…` branches and opens PRs | Merges a PR (one click on its card) | Push to `main` or `master` |
+| Reads what you let it: your code, Slack, the tools your agents have | Turns on a check, a habit or your profile it learned | Force-push a branch that isn't its own |
+| Asks you instead of guessing | With *Ask first* on: writes outside its folders, `sudo`, any force push | Get your Slack token (no agent ever does) |
 
 Everything runs on your machine; your data stays in your data folder. No account, no telemetry:
 your code and prompts go only to the coding agents you use, and it reaches Slack and GitHub with
@@ -158,9 +156,9 @@ plans, and every worker stays a real session of its agent.
 **What does it cost?** Nothing itself. Each agent's work counts against your plan with it: Home
 shows the Copilot credits each task used, and Usage every agent's.
 
-**Can it post or merge as me?** Not on its own. Replies and reviews wait for your OK on a card, and
-the floor above holds on every agent. One exception you choose: reacting 🤖 to a Slack message is
-your OK for the one reply to that thread.
+**Can it post or merge as me?** Only when you say so. A reply, a review or a merge happens when
+you OK it on its card; no worker can do any of them itself, on any agent. One exception you
+choose: reacting 🤖 to a Slack message is your OK for the one reply to that thread.
 
 **Do I need all three agents?** No. One is enough, any of them. Add more in Settings → Agents &
 models, and pick one for a task by typing `@codex` or `@claude`.
