@@ -135,11 +135,18 @@ async def share(harness: Harness, title: str) -> dict:
 
 
 async def gist_status(gist_id: str) -> int:
+    """Whether the gist is there (200) or gone (404), asked as the test account: the script's
+    own checks never spend GitHub's 60 unauthenticated reads an hour for this computer, which
+    the viewer and an import use (S5 asks every few seconds; a run left them none: "limited")."""
     async with httpx.AsyncClient(timeout=15) as client:
         answer = await client.get(
             f"https://api.github.com/gists/{gist_id}",
             params={"_": str(time.time_ns())},
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "chiefofstaff-live"},
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "chiefofstaff-live",
+                "Authorization": f"Bearer {TOKEN}",
+            },
         )
     return answer.status_code
 
