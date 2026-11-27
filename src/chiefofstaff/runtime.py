@@ -52,7 +52,6 @@ from . import (
     caches,
     claude_setup,
     compat,
-    ingress,
     prompts,
     settings_guard,
     threads,
@@ -62,7 +61,6 @@ from . import workspaces as workspaces_module
 from .abilities import Abilities
 from .accounts import Accounts
 from .asks import Asks
-from .autopilot import Autopilot, origin
 from .backend import (
     CLIENT_NAME,
     COPILOT_AGENT,
@@ -317,12 +315,7 @@ MAX_ATTACHMENT = 5 * 1024 * 1024
 ATTACHMENT_NAME = re.compile(r"\b([0-9a-f]{32}\.(?:png|jpg|gif|webp))\b")
 # Workers Chief of Staff starts for itself that have nothing but their own tools: they read
 # quoted data (the owner's words, test output) and propose; they run nothing.
-TOOLLESS = {
-    "learner": ["update_style", "propose_lessons"],
-    "checker": ["propose_checks"],
-    # Autopilot's judge (autopilot/judge.py): proposes an answer from the owner's own words.
-    "judge": ["propose_answer"],
-}
+TOOLLESS = {"learner": ["update_style", "propose_lessons"], "checker": ["propose_checks"]}
 SPECIALS = HELPER_KINDS
 CONNECTOR_TOOLS = ["report_found", "report_owner_words"]
 # The messenger sends away notifications and reads the owner's replies to them; through Chief of
@@ -1057,8 +1050,6 @@ class Runtime:
         self.cache_seeded = 0.0
         # Prepared for you: keeping the owner's PRs moving, while the setting is on.
         self.shepherd = Shepherd(self)
-        # Autopilot: Chief of Staff answers for the owner while they turn it on (autopilot/).
-        self.autopilot = Autopilot(self)
         self.toolset = Tools(self)
         self.tools = self.toolset.definitions()
 
@@ -1094,7 +1085,6 @@ class Runtime:
         self.after_update()
         # Before anything else resumes: a worker left in a shepherd step is not continued.
         await self.shepherd.start()
-        await self.autopilot.started()
         await self.recover_agents()
         for source in self.all_sources():
             await source.start()
@@ -4366,10 +4356,6 @@ class Runtime:
         Never while it is in a shepherd step: its checks apply then, whatever its mode."""
         if row["role"] == WORKER and self.shepherd.marked(row["id"]):
             return False
-        if row["role"] == WORKER and self.autopilot.origins.asks_first(row["id"]):
-            # A turn Autopilot continued, with *workers ask first* on: the Ask-first checks,
-            # whatever the owner's mode, until the owner writes to it in the page.
-            return False
         return self.yolo_choice(row)
 
     def yolo_choice(self, row: dict) -> bool:
@@ -4764,8 +4750,7 @@ class Runtime:
 
     def tool_names(self, row: dict) -> list[str]:
         if row["role"] == ROUTER:
-            # Autopilot's record, once its line is ticked (autopilot/).
-            return ROUTER_TOOLS + (["autopilot_log"] if self.store.settings().autopilot else [])
+            return ROUTER_TOOLS
         if (special := self.special(row)) in TOOLLESS:
             return TOOLLESS[special]
         if special == "connector":
@@ -4848,8 +4833,6 @@ class Runtime:
                 )
         if row["role"] == ROUTER and self.shepherd.on():
             prompt = prompts.with_shepherd_rule(prompt)
-        if row["role"] == ROUTER and settings.autopilot:
-            prompt = prompts.with_autopilot_rule(prompt)
         if (profile := self.store.get("profile", "")) and row["role"] != WATCHDOG:
             prompt += f"\n<owner_profile>\n{profile}\n</owner_profile>"
         prompt += self.learning.block(row)
@@ -4996,7 +4979,7 @@ class Runtime:
     def agent_model_choice(self, row: dict) -> dict:
         """The model and effort a session on another agent runs with: its own (its ⋯, the
         Router's or a task's chip), else its kind of work's on that agent in Settings."""
-        kind = agents.runs_as(row["role"], self.special(row))
+        kind = agents.kind_of(row["role"], self.special(row))
         chosen = agents.kind_model(self.store, kind, self.agent(row["id"]))
         return chosen | {key: value for key, value in self.agent_choice(row["id"]).items() if value}
 
@@ -5077,9 +5060,6 @@ class Runtime:
             "on_elicitation_request": self.asks.on_elicitation,
             "on_mcp_auth_request": self.asks.on_mcp_auth,
             "ask_first": not self.yolo(row),
-            # The checks of each request read the policy now: stricter than at its start while
-            # Autopilot continues it (its process opened acting on its own).
-            "asks_first_now": lambda: not self.yolo(self.store.find_session(row["id"]) or row),
             "folders": folders,
             # The worker (its own process of the agent), and the child agents it had: the only
             # other threads its turns may reach.
@@ -6787,7 +6767,7 @@ class Runtime:
         own = self.agent_choice(row["id"])
         backend, _ = self.connection(agent)
         running = getattr(self.states.handle(row["id"]), "current_model", "")
-        kind = agents.runs_as(row["role"], self.special(row))
+        kind = agents.kind_of(row["role"], self.special(row))
         chosen = agents.kind_model(self.store, kind, agent)
         return {
             "agent": agent,
@@ -6820,9 +6800,8 @@ class Runtime:
         any other session): their model and effort are their own (agents.kind_model)."""
         if row["role"] != WORKER or not row.get("id"):
             return ""
-        kind = agents.runs_as(WORKER, self.special(row))
-        # (Autopilot's judge: the Router's, agents.runs_as.)
-        return kind if kind in {"connector", "helpers", "router"} else ""
+        kind = agents.kind_of(WORKER, self.special(row))
+        return kind if kind in {"connector", "helpers"} else ""
 
     def fallback(self, row: dict) -> str:
         """How far Copilot's refusal took the session ("tuning": its model without the effort
@@ -7224,14 +7203,7 @@ class Runtime:
         what waited for its new session (sent while its sandbox went on) goes to it there."""
         note, self.states[session_id].after_refresh = self.states[session_id].after_refresh, ""
         waited = self.states[session_id].confined
-        reopen, self.states[session_id].reopen_asking = self.states[session_id].reopen_asking, False
         await self.detach(session_id)
-        if reopen:
-            # Held for Autopilot's origin (Delivery.held_to_ask_first): its process ends, and
-            # the next opens asking first.
-            backend, _ = self.connection(self.agent(session_id))
-            if retire := getattr(backend, "retire", None):
-                await retire(session_id)
         row = self.store.find_session(session_id)
         if waited and not note and row and not row["closed_at"]:
             self.background(self.delivery.resume(session_id))
@@ -7253,7 +7225,6 @@ class Runtime:
         state = self.states[session_id]
         state.stale = False
         state.confined = False  # Its next connection is sandboxed from the start.
-        state.reopen_asking = False  # Its next connection opens asking first if it must.
         state.after_refresh = ""  # The next connection has the new options from the start.
         state.steps.clear()  # A disconnected session is in no step.
         state.mcp_calls.clear()
@@ -7388,8 +7359,6 @@ class Runtime:
             # Chief of Staff's own sessions that need only its own tools: nothing else there.
             placed = self.role_key(row) in PLACED_ROLES or self.special(row) in TOOLLESS
             options = self.role_options(row) if placed else self.agent_options(row)
-            # How its process opens (Autopilot opens it again asking first before it goes on).
-            self.states[row["id"]].opened_asking = bool(options.get("ask_first"))
             trusted = {}
             if (
                 agent == "claude"
@@ -9761,15 +9730,10 @@ class Runtime:
                 await asyncio.wait_for(gate.wait(), SESSION_RESUME)
             if session := self.states.handle(session_id):
                 return session
-        # What it opens carries no origin of what opened it (autopilot/origin.py).
-        token = origin.CARRIED.set(None)
-        try:
-            row = self.store.find_session(session_id) if self.agents else None
-            if row and (role := self.role_key(row)) in PLACED_ROLES:
-                return await self.role_session(row, role)
-            return await self.open_session(session_id)
-        finally:
-            origin.CARRIED.reset(token)
+        row = self.store.find_session(session_id) if self.agents else None
+        if row and (role := self.role_key(row)) in PLACED_ROLES:
+            return await self.role_session(row, role)
+        return await self.open_session(session_id)
 
     async def role_session(self, row: dict, role: str):
         """A role's session where it runs now (place_role): its agent's, or Copilot's while
@@ -10470,17 +10434,6 @@ class Runtime:
             and (same := self.repeated(session_id, kind, text, meta or {}))
         ):
             return same  # The same answer again within a minute (a turn retried, say): once.
-        if kind == "owner" and (channel := ingress.current()):
-            # How the owner's word came in (the page, an away answer): only the page's is theirs
-            # for Autopilot (ingress.py). Never drawn, never in a prompt.
-            meta = {**(meta or {}), "ingress": channel}
-        if meta and "prompt" in meta and origin.CARRIED.get() is not None:
-            # Stored to deliver by code acting in a turn Autopilot continued: it carries that
-            # origin (autopilot/origin.py). A worker not at work keeps it now (its next turn
-            # takes it in: opened asking first, if it must); one at work, as its turn takes it.
-            row = self.store.session(session_id)
-            idle = row["status"] != "working" and not self.states[session_id].busy
-            meta = self.autopilot.origins.tag(row, meta, keep=idle)
         message = self.store.add_message(session_id, kind, text, meta)
         if kind in DOING and self.store.get(f"untouched:{session_id}"):
             # Its first step: Restart on… gives way to Continue with… (its view says so with
@@ -10763,15 +10716,6 @@ class Runtime:
             )
         ):
             return said
-        if (
-            typed
-            and row["role"] == ROUTER
-            and not attachments
-            and not agent
-            and not compare
-            and (said := await self.autopilot.typed(row, text))
-        ):
-            return said  # An Autopilot command, answered without the Router's model.
         for chosen in (agent, *compare) if row["role"] == ROUTER else ():
             if chosen and chosen not in {COPILOT_AGENT, *self.agents_on()}:
                 # Chosen in the composer, then turned off before it was sent: said, not dropped.
@@ -10783,9 +10727,6 @@ class Runtime:
             await self.workers.reopen(session_id, restore=True)
         if row["role"] == WORKER:
             self.release_schedules(session_id)  # The owner's word: its schedules fire again.
-        if row["role"] == WORKER and ingress.current() == ingress.PAGE:
-            # Written in the page: its work is the owner's again, not Autopilot's (origin.py).
-            self.autopilot.handed_back(row)
         # The task this is about: the one whose question it answers, the one the owner looks
         # at, the one it is on… (see chat_task).
         about = self.chat_task(session_id, task_id) if row["role"] == WORKER else None
@@ -11874,8 +11815,6 @@ class Runtime:
                 self.storage.tick,
                 # Prepared for you, while on (shepherd.py).
                 self.shepherd.tick,
-                # Autopilot, while its line is ticked (autopilot/).
-                self.autopilot.tick,
             )
             for job in jobs:
                 try:
@@ -11897,9 +11836,6 @@ class Runtime:
         since = float(self.store.get("digest_at") or moment - 86400)
         self.store.set("digest_at", str(moment))
         text = digest(self, since, moment)
-        if self.autopilot.ticked:
-            # Due during an Autopilot run: folded into its card, or its part said each day.
-            text = self.autopilot.fold_digest(text)
         if text:
             self.add_message(self.router_id(), "update", text, {"digest": True}, unread=True)
             self.alert(text.splitlines()[0], session_id=self.router_id(), needs_action=False)
@@ -12445,8 +12381,7 @@ class Runtime:
         rows = self.store.all(
             "SELECT id, text, meta, created_at FROM messages WHERE session_id=? AND kind='update'"
             " AND created_at > ? AND id > coalesce((SELECT id FROM messages WHERE session_id=?"
-            " AND kind='owner' AND json_extract(meta, '$.to') IS NULL"
-            " AND json_extract(meta, '$.autopilot_command') IS NULL ORDER BY id DESC LIMIT 1),"
+            " AND kind='owner' AND json_extract(meta, '$.to') IS NULL ORDER BY id DESC LIMIT 1),"
             " 0) ORDER BY id",
             (router, hours_ago(72), router),
         )
@@ -12534,8 +12469,6 @@ class Runtime:
             **({} if sys.platform == "darwin" else {"desktop_notifications": False}),
             # Only once Prepared for you was turned on: its rows, and where steps can run.
             **({"shepherd": kept} if (kept := self.shepherd.snapshot()) else {}),
-            # Only while Autopilot's line is ticked: its run, for Home's header.
-            **({"autopilot": run} if (run := self.autopilot.snapshot()) else {}),
             # Only while another coding agent is on: Settings' Agents & models page shows it.
             **({"agents": self.agents_view()} if self.agents_on() else {}),
             # Who does the work (Settings → Agents & models), every agent included.
@@ -12603,10 +12536,6 @@ class Runtime:
             await self.shepherd.settings_changed(old, new)
         if old.proactive != new.proactive:
             await self.refresh(ROUTER)  # Its one rule and its tools' shepherd field.
-        if old.autopilot or new.autopilot:
-            await self.autopilot.settings_changed(old, new)
-        if old.autopilot != new.autopilot:
-            await self.refresh(ROUTER)  # Its one rule and autopilot_log come and go with it.
         if old.other_sessions != new.other_sessions:
             # First, before anything awaits: once the save returns, nothing more is told.
             self.others.switch(new.other_sessions)

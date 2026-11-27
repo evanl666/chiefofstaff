@@ -227,9 +227,6 @@ class Forks:
         its log begins (what it copied is never shown as what it did, nor counted as what it
         used)."""
         session_id, source = row["id"], second.source
-        if carried := self.runtime.autopilot.origins.sticky.get(source["id"]):
-            # Its conversation goes on Autopilot's word: so does this one's.
-            self.runtime.autopilot.origins.keep(session_id, carried)
         origin: dict[str, Any] = {"id": source["id"], "title": self.runtime.display_title(source)}
         if not second.native:
             origin["brief"] = True

@@ -12,8 +12,6 @@ once, and known by every worker that waits on it.
   joins one subject; across requests it is only "possibly the same", for the owner to Merge.
 - Any answer settles the subject: every other ask on it is answered in its own channel with
   the same words, each worker once (`settle`), and a choice is kept as the decision on it.
-  Autopilot's answer (autopilot/answers.py) settles an ask only when it is the one open on its
-  subject, of one asker (`alone`): one answer for several is the owner's; never a decision.
 """
 
 from __future__ import annotations
@@ -60,21 +58,6 @@ CHANNELS = ("decision", "ask_user", "question", "notify")
 COMPARED = 40
 # A joined ask of the Router's (notify_owner refused as asked already) waits this long at most.
 ROUTER_ASK_HOURS = 72
-
-
-class SharedAskError(Exception):
-    """An answer that may settle only an ask alone on its subject (Autopilot's): others wait on
-    the same choice, or it has several askers. Nothing was settled."""
-
-
-def reopen(store: Any, channel: str, ref: str):
-    """What Autopilot answered and then withdrew (Stop before its answer went out): open again,
-    as asked (Logbook.give_back, in its transaction)."""
-    store.execute(
-        "UPDATE asks SET status='open', answer='', settled_at=NULL WHERE channel=? AND ref=? "
-        "AND status='settled'",
-        (channel, ref),
-    )
 
 
 def plain(text: str) -> str:
@@ -492,18 +475,6 @@ class Ledger:
             )
         return found
 
-    def shared(self, channel: str, ref: str, session_id: str = "") -> bool:
-        """Whether an ask is not alone: several askers on it, or another open on its subject
-        (Autopilot leaves those to the owner: claim's `alone`)."""
-        rows = self.store.all(
-            "SELECT id, subject_id FROM asks WHERE channel=? AND ref=? AND status='open' "
-            "AND (?='' OR session_id=?)",
-            (channel, ref, session_id, session_id),
-        )
-        if len(rows) > 1:
-            return True
-        return any(ask["id"] != row["id"] for row in rows for ask in self.live(row["subject_id"]))
-
     def drop(self, channel: str, ref: str, session_id: str = ""):
         """An ask withdrawn (its worker went on, its task ended): no longer open."""
         self.store.execute(
@@ -557,11 +528,10 @@ class Ledger:
         )
 
     def claim(
-        self, channel: str, ref: str, answer: str, session_id: str = "", *, alone: bool = False
+        self, channel: str, ref: str, answer: str, session_id: str = ""
     ) -> tuple[list[dict], list[dict]]:
         """settle's first step, at once (before what was asked leaves where it was): the asks
-        answered, and the others on their subjects, all settled now. `alone`: only if it is one
-        ask, the only one open on its subject (else SharedAskError, nothing settled)."""
+        answered, and the others on their subjects, all settled now."""
         rows = self.store.all(
             "SELECT * FROM asks WHERE channel=? AND ref=? AND status='open' "
             "AND (?='' OR session_id=?)",
@@ -576,8 +546,6 @@ class Ledger:
             for ask in self.live(subject)
             if ask["id"] not in mine
         ]
-        if alone and (others or len(rows) > 1):
-            raise SharedAskError(f"{len(rows) + len(others)} asks of one choice")
         stamp = now()
         for ask in [*rows, *others]:
             self.store.execute(

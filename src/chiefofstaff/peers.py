@@ -293,12 +293,7 @@ class Peers:
         )
         meta = {"told_by": caller, "title": teller["title"]}
         current = self.tasks.current(target["id"])
-        if self.runtime.autopilot.origins.of(caller):
-            # From a turn Autopilot continued: never steered into the other's running turn; it
-            # reads this with its next message (autopilot/origin.py).
-            self.delivery.hold(target["id"], prompt, kind="inbound", display=text, meta=meta)
-            outcome = f"“{target['title']}” reads this with its next message."
-        elif current and current["status"] in OPEN:
+        if current and current["status"] in OPEN:
             await self.delivery.deliver(
                 target["id"], prompt, kind="inbound", display=text, meta=meta, steer=True
             )

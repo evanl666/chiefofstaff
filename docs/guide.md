@@ -6,8 +6,7 @@ you may want more.
 
 - [Quickstart](#quickstart)
 - [Concepts](#concepts): the Router, workers and tasks, *Needs you*, teams, decisions, receipts
-- [Daily use](#daily-use): giving work, reviewing, Slack, GitHub, watches, away, Autopilot, Send
-  to Chief
+- [Daily use](#daily-use): giving work, reviewing, Slack, GitHub, watches, away, Send to Chief
 - [Agents: Copilot, Codex and Claude](#agents-copilot-codex-and-claude)
 - [Settings](#settings)
 - [Safety and privacy](#safety-and-privacy)
@@ -281,19 +280,6 @@ and only for what it came with; anything else you write there is never taken as 
 a test* tries the way you gave. More: [Reference → When you are
 away](reference.md#when-you-are-away).
 
-### Autopilot
-
-Off by default: tick *Autopilot* in Settings → General → *On its own* (its *Options*: a daily
-credit cap, the projects it acts in, workers asking first). Then turn it on from Home's
-*Autopilot* menu (*For 2 hours*, *Until 9:00 AM*, *Until I turn it off*) or tell the Router
-`autopilot on`; Home's header says until when, with **Stop**. While it runs, it answers a worker's
-question or decision only from what you said yourself, quoting you; it accepts a finished result
-only after running its checks again offline, in a private copy (where it can't, the card says
-why, such as *Couldn't verify: uv 0.9.21 crashes in the sandbox; uv 0.9.29 or newer fixes it*).
-Everything else waits for you under *Needs you*, and nothing goes out in your name. When it ends,
-*While you were away* lists what it did (*Undo*, *Change*) and what it left for you. More:
-[Reference → Autopilot](reference.md#autopilot).
-
 ### Send to Chief
 
 Hand over work from wherever you are without switching to Home. Turn it on in Settings →
@@ -413,7 +399,7 @@ Settings (the gear at the bottom of the sidebar) has four pages.
 
 | Page | What is there |
 | --- | --- |
-| **General** | *Code folder*; *Workers at once*; *Ask first* and *Sandbox* (see [Safety](#safety-and-privacy)); *On its own*: *Autopilot* (see [Autopilot](#autopilot)); *Keep my PRs moving*; *A busy worker's new task starts at once*; *Daily summary*; desktop notifications. Under *More*: when finished workers close, when a task is *Overdue*, *Show where my other sessions stand*, update notices, other project folders, where task folders go |
+| **General** | *Code folder*; *Workers at once*; *Ask first* and *Sandbox* (see [Safety](#safety-and-privacy)); *Keep my PRs moving*; *A busy worker's new task starts at once*; *Daily summary*; desktop notifications. Under *More*: when finished workers close, when a task is *Overdue*, *Show where my other sessions stand*, update notices, other project folders, where task folders go |
 | **Agents & models** | Each agent's status, sign-in and *Use*; *Who does the work*: the agent, model and effort for new workers and for each of Chief of Staff's own sessions; what happens when an agent can't run |
 | **Connections** | *Slack*, *GitHub reviews*, *Watches*, *When you're away*, *Skills, plugins and MCP servers* (more for workers; plugins are Copilot's), *Send to Chief from the command line*, and *Pause watching* to stop all of them at once |
 | **You** | *Learn from what I write*, *Learn now*, checks from mistakes; what was learned (writing styles, habits, checks, your profile); *Shared links* |

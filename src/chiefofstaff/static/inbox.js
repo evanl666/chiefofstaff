@@ -1,6 +1,5 @@
 // Home: the conversation with the Router, and beside it what needs the owner and every task.
 
-import { autopilot, autopilotControl, autopilotMeta, autopilotRun, deciding as autopilotDeciding, emptyWords, openAutopilotLink, setAsideLine } from "./autopilot.js";
 import { $, api, checkTip, el, freshButton, keepingFocus, moreMenu, once, reconcile, submits, toast, watchPanel } from "./dom.js";
 import { clock, markdown, shortPath, slackText } from "./text.js";
 import { byId, closedWorkers, DOT_HELP, HOME, loadState, ownerQuestions, ownerUpdates, pendingDrafts, routerId, sessions, state, uncertainDrafts } from "./state.js";
@@ -21,8 +20,7 @@ import { folding, subjectVersion } from "./subjects.js";
 // worker's question whose task does not show it (cancelled, finished, or none); the Router's
 // notes that need the owner, until seen. A task waiting on a decision card shows as that card.
 export function needsYou() {
-  // (Not a card Autopilot is deciding: drawn, if at all, once it set it aside.)
-  const pending = pendingDrafts().filter((draft) => !autopilotDeciding(draft.id));
+  const pending = pendingDrafts();
   const found = board();
   const deciding = new Set(pending.filter((draft) => draft.kind === "decision").flatMap((draft) => draft.target.askers.map((asker) => asker.task_id)));
   const waiting = found.sections.needs.filter((task) => !(task.status === "waiting" && deciding.has(task.id)));
@@ -144,23 +142,15 @@ export function renderHomeHeader() {
   const until = focusUntil();
   const router = byId(routerId());
   $("#session-title").textContent = "Home";
-  // Autopilot's line while a run is on (autopilot.js), else Focus's.
-  const autopilotLine = autopilotMeta(needsCount());
-  if (autopilotLine) $("#session-meta").replaceChildren(autopilotLine);
-  else $("#session-meta").textContent = until ? `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` : "";
+  $("#session-meta").textContent = until ? `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` : "";
   $("#session-meta").title = "";
   const actions = $("#session-actions");
   // Rebuilt only when they change: an open Focus menu stays open as tasks move. (Stop is on
   // the "Thinking…" line, where the Router is seen working.)
-  // (Autopilot's part of it kept off the page's markup: unticked, the header is as it was.)
-  const run = autopilotRun();
-  const pilot = autopilot() ? (run ? `${run.run}:${run.until}` : "off") : "";
   const key = `home:${Boolean(until)}:${state.snapshot.runtime.state}:${Boolean(router)}`;
-  if (actions.dataset.key === key && (actions.pilot || "") === pilot) return;
+  if (actions.dataset.key === key) return;
   actions.dataset.key = key;
-  actions.pilot = pilot;
-  const ready = state.snapshot.runtime.state === "ready";
-  actions.replaceChildren(ready ? focusControl() : "", ready ? autopilotControl(() => { renderHeader(); renderStatusLine(); scheduleHome(); }) || "" : "");
+  actions.replaceChildren(state.snapshot.runtime.state === "ready" ? focusControl() : "");
 }
 // Focus: notifications wait, the Router handles what it can, one summary at the end.
 function focusControl() {
@@ -298,9 +288,6 @@ function renderPanel() {
   const needCount = needsCount();
   counted(needs, needCount);
   shownIf(needs.querySelector(".empty-hint"), !needCount);
-  // (Autopilot on: says so.)
-  const emptyText = [...needs.querySelector(":scope > .empty-hint").childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
-  if (emptyText && emptyText.textContent !== emptyWords()) emptyText.textContent = emptyWords();
   // A card per thing to do: a task's own row holds all it waits for (a result to accept, its
   // question), once.
   const embedded = new Set();
@@ -313,10 +300,10 @@ function renderPanel() {
   const needItems = [
     ...items.updates.map((update) => about(`update:${update.id}`, updateItem(update))),
     ...okItem(items.ok),
-    ...items.drafts.map((draft) => about(`draft:${draft.id}`, setAside(draftItem(draft, tasks.phases, embedded), draft.id))),
+    ...items.drafts.map((draft) => about(`draft:${draft.id}`, draftItem(draft, tasks.phases, embedded))),
     ...items.uncertain.map((draft) => ({ key: `uncertain:${draft.id}:${draft.outcome}`, build: () => uncertainCard(draft) })),
-    ...items.tasks.map((task) => about(`task:${task.id}`, setAside(taskItem(task, tasks.phases.get(task.id)), task.id))),
-    ...items.questions.map((question) => about(`question:${question.id}`, setAside(questionItem(question), question.id))),
+    ...items.tasks.map((task) => about(`task:${task.id}`, taskItem(task, tasks.phases.get(task.id)))),
+    ...items.questions.map((question) => about(`question:${question.id}`, questionItem(question))),
     ...items.held.map(heldItem),
   ];
   // Folded, it opens by itself when something new needs the owner.
@@ -348,11 +335,7 @@ function renderPanel() {
   const monitoring = section(taskBox, "tasks-monitoring", "Monitoring", { help: "Not being worked on now; waiting on something that wakes it: a PR's CI or review, a thread, a time it checks back, a slot or its turn. Click a row to see all of it.", empty: "Nothing to wait on." });
   fill(monitoring, sections.monitoring.map((task) => taskItem(task, tasks.phases.get(task.id))), editing, { hold: true });
   // Recently finished: a row per task, the newest first across all workers, a page at a time.
-  const recentHelp = `Finished in the last three days, the newest first: results ${autopilot() ? "you or Autopilot" : "you"} accepted, tasks cancelled or set aside. Click a row to see all of it.`;
-  const recent = section(taskBox, "tasks-recent", "Recently finished", { help: recentHelp, empty: "Nothing finished lately." });
-  // (Autopilot's line ticked or unticked since it was drawn: said as it is now.)
-  const recentTip = recent.querySelector(":scope > summary");
-  if (recentTip.dataset.tip !== recentHelp) recentTip.dataset.tip = recentHelp;
+  const recent = section(taskBox, "tasks-recent", "Recently finished", { help: "Finished in the last three days, the newest first: results you accepted, tasks cancelled or set aside. Click a row to see all of it.", empty: "Nothing finished lately." });
   const finished = sections.finished.length;
   const shown = Math.min(state.finishedShown || FINISHED_PAGE, finished);
   const more = shown < finished
@@ -446,8 +429,6 @@ function handledLine(needs) {
       entry.at ? el("time", { text: writtenAt(entry.at), title: `Handled ${clock(entry.created_at)}` }) : el("time", { text: ago(entry.created_at) }),
       // What it is about, where it is (a reply sent for the owner: in Slack).
       /^https:\/\//.test(entry.link || "") ? el("a", { class: "link quiet", href: entry.link, target: "_blank", rel: "noreferrer", text: "Open in Slack ↗" }) : null,
-      // An Autopilot run: its record.
-      /^#autopilot/.test(entry.link || "") ? el("button", { type: "button", class: "link quiet", text: "Open", onclick: () => openAutopilotLink(entry.link) }) : null,
       undo,
     );
   });
@@ -598,17 +579,6 @@ export async function focusQuestion(questionId) {
 }
 // A worker's question to the owner, kept here until answered: its task may have been cancelled
 // or finished meanwhile (the task card shows it otherwise).
-// What Autopilot set aside says why, under its card (autopilot.js).
-function setAside(item, ...ids) {
-  const line = setAsideLine(...ids);
-  if (!line) return item;
-  const build = () => {
-    const node = item.build();
-    node.append(setAsideLine(...ids));
-    return node;
-  };
-  return { ...item, key: `${item.key}:aside:${line.textContent}`, build };
-}
 function questionItem(question) {
   return {
     key: `question:${question.id}:${question.at}`,

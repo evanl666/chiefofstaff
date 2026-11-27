@@ -1,6 +1,5 @@
 // The sidebar: Home, sessions, closed workers and other Copilot sessions.
 
-import { autopilotStatus } from "./autopilot.js";
 import { $, api, el, toast, withoutBidi } from "./dom.js";
 import { ago, clock, plural, shortPath, since, span } from "./text.js";
 import { byId, closedWorkers, DOT_HELP, forkOrigin, HOME, loadState, otherItem, othersOn, otherStatus, routerId, sessions, state, workerTitle } from "./state.js";
@@ -20,7 +19,7 @@ import { glyph } from "./relations.js";
 // needs the owner).
 const CHEER_MS = 6000;
 const cheer = { finished: null, until: 0 };
-export function captainMood({ needs, finished, dots, now = Date.now(), autopilot = false }) {
+export function captainMood({ needs, finished, dots, now = Date.now() }) {
   if (cheer.finished !== null && finished > cheer.finished) {
     cheer.until = now + CHEER_MS;
     setTimeout(renderSidebar, CHEER_MS + 50);
@@ -28,8 +27,6 @@ export function captainMood({ needs, finished, dots, now = Date.now(), autopilot
   cheer.finished = finished;
   if (needs) return ["needs", `${needs} need${needs === 1 ? "s" : ""} you`];
   if (now < cheer.until) return ["done", "Done"];
-  // Autopilot on: at the wheel (autopilot.js).
-  if (autopilot) return ["working", autopilotStatus()];
   if (dots.includes("working")) return ["working", "At work"];
   if (dots.includes("watching")) return ["watching", "Keeping watch: tasks wait on CI, a review or a reply"];
   return ["idle", "All quiet"];
@@ -40,7 +37,7 @@ function captain(needs, where) {
   if (!node) brand.prepend((node = duck()));
   // The Router and the owner's workers: not Chief of Staff's own helpers.
   const dots = sessions().filter((session) => session.id === routerId() || (session.role === "worker" && !session.helper)).map((session) => where.get(session.id)?.dot);
-  const [mood, words] = captainMood({ needs, finished: ownTasks().filter((task) => task.status === "done").length, dots, autopilot: Boolean(autopilotStatus()) });
+  const [mood, words] = captainMood({ needs, finished: ownTasks().filter((task) => task.status === "done").length, dots });
   setMood(node, mood);
   node.title = words;
 }
@@ -277,7 +274,6 @@ export function renderStatusLine() {
   if (snap.demo) nodes.push(el("div", { class: "demo", text: "Demo mode: scripted sessions, nothing leaves this machine" }));
   const until = snap.focus?.until && new Date(snap.focus.until) > new Date() ? new Date(snap.focus.until) : null;
   if (until) nodes.push(el("div", { class: "demo", text: `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` }));
-  if (autopilotStatus()) nodes.push(el("div", { class: "demo", text: autopilotStatus() }));
   if (snap.runtime.warning) {
     nodes.push(el("div", { class: "bad", text: snap.runtime.warning }));
     // Copilot older than the versions tested: Update runs its updater, asked first.

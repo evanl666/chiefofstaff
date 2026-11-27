@@ -2,31 +2,10 @@
 
 ## Unreleased
 
-Autopilot answers for you while you're away, from what you said yourself, and accepts only
-what it checked again; no message is lost to a restart; Chief of Staff installs, signs in and
-updates your agents, and itself, from the page; Home shows the Router's chat at once and reads a
-state under half its size; and a new README, a short guide and the full reference.
-
-Autopilot, phase 1: while you're away, it answers what you already answered, and leaves the
-rest for you.
-
-- **Autopilot answers for you, from what you said.** Off by default: tick *Autopilot* in
-  Settings → General → *On its own*, then turn it on from Home's *Autopilot* menu (*For 2 hours*,
-  *Until 9:00 AM*, *Until I turn it off*) or tell the Router `autopilot on`. While it runs, a
-  worker's question or decision card is answered only from what you said yourself in the page (a
-  message, your answer to a card, a habit you kept), quoting your words in the worker's chat. A
-  choice several workers asked, a recommendation alone, any permission (pushing, merging,
-  commenting…) and anything irreversible wait for you under *Needs you*, saying why.
-- **A result is accepted only once Autopilot has checked it itself.** It runs the task's checks
-  again at the exact commit, offline, in a private copy; uncommitted work, a weakened test or
-  checks it can't run offline wait for you, saying why (uv before 0.9.29, which crashes in the
-  macOS sandbox, is named with its fix). Nothing goes out in your name: no Slack reply, PR,
-  comment or merge.
-- **Stop, its record, and what it left you.** Home's header says *Autopilot · until 6:00 PM ·
-  4 done · 2 waiting for you*, with **Stop**, which ends it at once. Workers ask first while it
-  runs (an option), and *Credits a day* caps what it spends. When it ends, *While you were away*
-  lists what it did, with *Undo* and *Change*, and what it left for you; every action is in an
-  append-only record the Router answers from.
+A restart no longer loses what a session was on; Chief of Staff installs, signs in and updates
+your agents, and itself, from the page; Home shows the Router's chat at once and reads a state
+under half its size; and a new README, a short guide and the full reference, with a demo that
+runs every agent.
 
 No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
 again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.

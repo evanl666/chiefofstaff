@@ -17,12 +17,10 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import Callable
-from contextlib import nullcontext, suppress
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import agents, compat
-from .autopilot.origin import TAG, merged
 from .backend import (
     COPILOT_AGENT,
     NotStartedError,
@@ -169,14 +167,12 @@ class Delivery:
         meta: dict | None = None,
         steer: bool = False,
         batch: bool = False,
-        check: Callable[[], None] | None = None,
     ) -> dict:
         """Give a session a message: stored first, then sent with what else it has not received.
 
         `steer` (the owner's messages) reaches a session that is working within its current
         turn. `batch` (events and reports for the Router or the Slack session) waits until
-        the session is idle and a short burst has passed, so several become one turn. `check`
-        runs just before it is stored (nothing awaited between): it raises to store nothing.
+        the session is idle and a short burst has passed, so several become one turn.
         """
         row = self.store.session(session_id)
         if row["closed_at"]:
@@ -187,17 +183,13 @@ class Delivery:
         if row["role"] == WORKER and not self.states.handle(session_id):
             # Not attached: what it did in a terminal meanwhile goes first, before this.
             await self.runtime.workers.catch_up(row)
-        # The exact prompt is kept so a queued worker or a restart can replay it. With a
-        # `check`, in one transaction with what it does (all of it stored, or none).
-        with self.store.transaction() if check is not None else nullcontext():
-            if check is not None:
-                check()
-            message = self.runtime.add_message(
-                session_id,
-                kind,
-                prompt if display is None else display,
-                {**(meta or {}), "prompt": prompt},
-            )
+        # The exact prompt is kept so a queued worker or a restart can replay it.
+        message = self.runtime.add_message(
+            session_id,
+            kind,
+            prompt if display is None else display,
+            {**(meta or {}), "prompt": prompt},
+        )
         if row["role"] == WORKER:
             # A worktree removed under it (by hand, a cleanup) is back before it reads this.
             with suppress(Exception):
@@ -512,50 +504,6 @@ class Delivery:
             not m["meta"].get("deferred") for m in self.store.prompts(session_id, after=mark)
         )
 
-    def held_to_ask_first(self, row: dict, pending: list[dict], claimed: bool) -> bool:
-        """Whether what a worker is given waits for its process to open again asking first
-        (autopilot/answers.py reopen_first): what it carries Autopilot's origin, asking first,
-        and its process (another agent's) was opened acting on its own. Not at work: opened
-        again now, then given it; at work: once its turn is over (never mid-turn). `claimed`:
-        this send took its slot (not one joining a turn); held, it gives it back."""
-        autopilot = self.runtime.autopilot
-        carried = None
-        for message in pending:
-            carried = merged(carried, message["meta"].get(TAG))
-        carried = carried or autopilot.origins.sticky.get(row["id"])
-        if not carried:
-            return False
-        state = self.states[row["id"]]
-        if state.reopen_asking:
-            job = autopilot.reopening.get(row["id"])
-            if job and not job.done():
-                self.give_back(row["id"], claimed)
-                return True  # Being opened again now.
-            # Held for its turn's end (confined, which held it until then, went with its
-            # process or that turn): looked at again as it is now.
-            state.reopen_asking = False
-        how = autopilot.reopen_first(row, carried, claimed=claimed)
-        if not how:
-            return False
-        # It carries the origin from now (its next process opens asking first: Runtime.yolo).
-        autopilot.origins.keep(row["id"], carried)
-        state.reopen_asking = True
-        self.give_back(row["id"], claimed)
-        if how == "after":
-            # Kept for its next process (Runtime.reattach, once its turn is over).
-            state.confined = state.stale = True
-            return True
-        autopilot.reopening[row["id"]] = self.runtime.background(
-            autopilot.reopen_asking(row, carried)
-        )
-        return True
-
-    def give_back(self, session_id: str, claimed: bool):
-        """A slot this send took (claimed), nothing sent: free until it is given what it holds."""
-        if claimed and self.states[session_id].busy:
-            self.states[session_id].busy = False
-            self.runtime.background(self.runtime.workers.pump())
-
     async def flush(
         self,
         session_id: str,
@@ -604,11 +552,6 @@ class Delivery:
             # No turn starts while its folder's agent settings are changed (see deliver).
             self.runtime.background(self.runtime.settings_stop(session_id))
             return False
-        if worker["role"] == WORKER and self.held_to_ask_first(worker, pending, not joins):
-            return False
-        if any(TAG in message["meta"] for message in pending):
-            # Messages that carry Autopilot's origin: so does the turn that takes them in.
-            self.runtime.autopilot.origins.taken(worker, pending)
         # A restart's note goes before what it is about (Delivery.settle_cut).
         ordered = sorted(pending, key=lambda message: not message["meta"].get("restart"))
         prompts = [self.runtime.told_prompt(message) for message in ordered]
