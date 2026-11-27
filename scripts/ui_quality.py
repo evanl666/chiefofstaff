@@ -1524,13 +1524,15 @@ async def self_handle_views(runtime, browser, quality: Quality):
                 viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
             )
             page = await context.new_page()
-            await page.goto(f"{BASE}/#token={TOKEN}")
-            await expect(page.locator("#application")).to_be_visible()
-            # Copilot older than tested: Update on its row, its command asked first.
+            # Copilot older than tested: Update on its row, its command asked first. (Before the
+            # page loads: it reads it then.)
             runtime.copilot_older = "1.0.50"
             warning = "Copilot CLI 1.0.50 is older than the versions tested (1.0.100)."
             runtime.status = {**kept, "warning": warning}
             runtime.publish_state()
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            await expect(page.locator("#status-line")).to_contain_text(warning)
             await page.locator("#settings-button").click()
             await page.locator("#settings-tabs [data-tab=agents]").click()
             row = page.locator("#agent-copilot")
@@ -1546,6 +1548,7 @@ async def self_handle_views(runtime, browser, quality: Quality):
             # The sandbox's certificate not trusted: one click, asked first.
             runtime.sandbox_host, runtime.sandbox_gh = True, False
             runtime.publish_state()
+            await expect(page.locator("#status-line")).not_to_contain_text(warning)
             await page.locator("#settings-button").click()
             await page.locator("#settings-tabs [data-tab=general]").click()
             trust = page.locator("#sandbox-trust")
@@ -1571,9 +1574,10 @@ async def self_handle_views(runtime, browser, quality: Quality):
             runtime.copilot_problem, runtime.status = kept_problem, dict(kept)
             runtime.publish_state()
             # An MCP card of a Codex worker: Sign in runs Codex's own command.
-            ok = page.locator(f'#needs .your-ok .ok-row[data-id="{draft["id"]}"]')
+            row = f'#needs .your-ok .ok-row[data-id="{draft["id"]}"]'
+            ok = page.locator(row)
             await expect(ok.get_by_role("button", name="Sign in", exact=True)).to_be_visible()
-            await views(page, "mcp-row", "#needs", widths=(1024, 1280, 1440))
+            await views(page, "mcp-row", row, widths=(1024, 1280, 1440))
             await context.close()
     finally:
         runtime.copilot_older = ""
