@@ -2295,15 +2295,27 @@ class Runtime:
         with suppress(Exception):
             self.end_epoch(worker, process)
         self.turn_gone(worker)
+        if why == agents.FROZEN_AT_STOP and not self.stopping:
+            # Found not answering as the owner's Stop waited for it: said, and let go of, before
+            # that Stop returns, so that the next message opens a new process.
+            name = agents.display(agent)
+            line = f"{name} stopped answering: it starts again with the next message."
+            self.add_message(worker, "notice", line)
+            sessions = self.states.take_handles([worker])
+            self.background(asyncio.gather(*(s.disconnect() for s in sessions),
+                                           return_exceptions=True))  # fmt: skip
         if why and not self.stopping:
             self.background(self.worker_lost(agent, worker, why))
 
     async def worker_lost(self, agent: str, worker: str, why: str):
-        """Its process stopped by itself ("crash") or was stopped at once (why): its turns and
-        commands end, and no other worker's. One at work goes on in a new process, as after a
-        restart of its agent, unless its process stopped by itself shortly after the last time
-        (it fails then: never a loop of starts) or Chief of Staff stopped it (it fails, with
-        why); one with a limit and what it spent unknown waits for Go on."""
+        """Its process stopped by itself ("crash"), was ended as it stopped answering
+        (agents.FROZEN; agents.FROZEN_AT_STOP: as the owner's Stop waited for it), or was
+        stopped at once (why): its turns and commands end, and no other worker's. One at work
+        goes on in a new process, as after a restart of its agent (one that stopped answering
+        says so in one line), unless its process stopped shortly after the last time (it fails
+        then: never a loop of starts) or Chief of Staff stopped it (it fails, with why); one
+        with a limit and what it spent unknown waits for Go on. One stopped by the owner does
+        not go on: its next message starts a new process."""
         working = [key for key in self.at_work_on(agent) if key == worker]
         sessions = self.states.take_handles([worker])
         self.states.end_turns([worker])
@@ -2317,14 +2329,19 @@ class Runtime:
         self.background(self.workers.pump())  # Its slot is free.
         if not row or row["closed_at"]:
             return
-        if why != "crash":
+        stuck = why in {agents.FROZEN, agents.FROZEN_AT_STOP}
+        if why != "crash" and not stuck:
             if working or row["status"] in {"working", "queued", "starting"}:
                 self.fail(row, why)
             else:
                 self.add_message(worker, "notice", why)
             return
         name = agents.display(agent)
-        logger.warning("%s's %s process stopped by itself.", worker, name)
+        later = f"{name} stopped answering: it starts again with the next message."
+        if why == agents.FROZEN_AT_STOP:
+            return  # (Said as it ended: agent_process_ended.)
+        logger.warning("%s's %s process %s.", worker, name,
+                       "stopped answering" if stuck else "stopped by itself")  # fmt: skip
         again = time.monotonic() - self.lost_at.get(worker, -AGENT_LOST_AGAIN) < AGENT_LOST_AGAIN
         self.lost_at[worker] = time.monotonic()
         if (
@@ -2335,14 +2352,18 @@ class Runtime:
             await self.stop_for_spend(row)
             return
         if not working:
+            if stuck:
+                self.add_message(worker, "notice", later)
             return
         if again:
             self.fail(
                 row,
-                f"{name} stopped unexpectedly twice within {int(AGENT_LOST_AGAIN / 60)} minutes; "
-                "send it a message to try again.",
+                f"{name} stopped {'answering' if stuck else 'unexpectedly'} twice within "
+                f"{int(AGENT_LOST_AGAIN / 60)} minutes; send it a message to try again.",
             )
             return
+        if stuck:
+            self.add_message(worker, "notice", f"{name} stopped answering; restarting it…")
         try:
             await self.reconcile_sends(agent, only=[worker])
             await self.resume_working(agent, only=[worker])  # Failed with why if it can't.

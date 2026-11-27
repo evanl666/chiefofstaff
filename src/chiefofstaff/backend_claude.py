@@ -94,6 +94,7 @@ from .claude_tools import (
 )
 from .machine import kill_process_tree
 from .policy import GITHUB_MCP, private_denial, reads_only
+from .processes import kill_now
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,15 @@ HOOK_SECONDS = 120
 OPEN_SECONDS = float(os.environ.get("CHIEFOFSTAFF_CLAUDE_TIMEOUT", "90"))
 # How long a request of Chief of Staff's to the CLI may take (an interrupt, a task's stop).
 REQUEST_SECONDS = 30.0
+# A worker's process that stops answering (alive, answering nothing: a hang), noticed as
+# Copilot's and Codex's are: looked at each PROBE_EVERY seconds; a turn it said nothing of for
+# PROBE_IDLE has it asked whether it answers at all (its MCP servers' status, twice,
+# PROBE_TIMEOUT each). When it does not, it is ended (froze) and its worker goes on in a new
+# one (Runtime.worker_lost). The owner's Stop asks it too, and waits INTERRUPT_SECONDS.
+PROBE_EVERY = float(os.environ.get("CHIEFOFSTAFF_CLAUDE_PROBE_EVERY", "2"))
+PROBE_IDLE = 30.0
+PROBE_TIMEOUT = 5.0
+INTERRUPT_SECONDS = 3.0
 # How long the read of a resumed session's totals may take.
 PROBE_SECONDS = 30.0
 # How long a worker's process whose settings changed has for its turn to end before it ends.
@@ -1315,6 +1325,10 @@ class ClaudeWorker:
         self.retiring: asyncio.Future | None = None
         self.on_end: Callable[[bool], None] | None = None
         self.handling = False
+        # Whether it still answers (keep_answering): when it last said anything, and, once it
+        # was found not to answer, how (agents.FROZEN, agents.FROZEN_AT_STOP).
+        self.heard = time.monotonic()
+        self.frozen = ""
         # The current process's MCP configuration and system prompt, as files (private_files):
         # each process's go with it (run).
         self.private: list[Path] = []
@@ -1499,6 +1513,7 @@ class ClaudeWorker:
         self.ready = loop.create_future()
         self.stop_requested = asyncio.Event()
         self.stopping = self.by_itself = self.told_end = False
+        self.frozen, self.heard = "", time.monotonic()
         self.epoch = uuid.uuid4().hex
         # What it spends in this process counts from what it restores on (its probe).
         self.restored, self.told_usage, self.last_told = None, False, {}
@@ -1542,6 +1557,8 @@ class ClaudeWorker:
             self.read_back(mapping(getattr(self.query, "_initialization_result", None)))
             self.reader = asyncio.ensure_future(self.read())
             self.tasks.add(asyncio.ensure_future(self.watch(process)))
+            if not self.checking:
+                self.tasks.add(asyncio.ensure_future(self.keep_answering()))
             if self.resume:
                 await self.probe()
             if not ready.done():
@@ -1971,15 +1988,72 @@ class ClaudeWorker:
     async def abort(self) -> None:
         """Its turn ends; what it left running goes on until stopped (stop_background). What
         waited for the turn's end, or was written and not yet taken up, is dropped (Delivery
-        sends it again with its next message)."""
+        sends it again with its next message). A process that answers nothing meanwhile (in
+        INTERRUPT_SECONDS) is ended, and its turn with it (froze)."""
         self.queue.clear()
         self.aborts += 1  # A turn starting now (start_turn) is stopped before it begins.
         for sent in self.written.values():
             sent.stopped = True
-        if self.turn and self.query is not None:
+        if self.query is None or not (self.turn or self.starting):
+            return
+        interrupting = None
+        if self.turn:
             self.aborting = True
+            interrupting = asyncio.ensure_future(self.query.interrupt())
+        if not self.checking and not await self.answers(INTERRUPT_SECONDS):
+            if interrupting:
+                interrupting.cancel()
+            await self.froze(agents.FROZEN_AT_STOP)
+            return
+        if interrupting:
             with suppress(Exception):
-                await asyncio.wait_for(self.query.interrupt(), REQUEST_SECONDS)
+                await asyncio.wait_for(interrupting, REQUEST_SECONDS)
+
+    async def keep_answering(self):
+        """A process that stops answering is noticed: a turn it says nothing of for a while,
+        and it is asked whether it answers at all; twice not, it is ended (froze). One quiet in
+        a long command answers."""
+        while not self.stopping and not self.frozen:
+            await asyncio.sleep(PROBE_EVERY)
+            if self.stopping or self.frozen or self.query is None:
+                return
+            if not (self.turn or self.starting) or time.monotonic() - self.heard < PROBE_IDLE:
+                continue
+            if await self.answers() or await self.answers():
+                continue
+            await self.froze(agents.FROZEN)
+
+    async def answers(self, seconds: float | None = None) -> bool:
+        """Whether it answers anything now (its MCP servers' status, in PROBE_TIMEOUT seconds);
+        an error answers too. False once it stopped."""
+        query = self.query
+        if query is None or not self.alive():
+            return False
+        try:
+            await asyncio.wait_for(query.get_mcp_status(), seconds or PROBE_TIMEOUT)
+        except TimeoutError:
+            return False
+        except Exception:
+            return self.alive()
+        self.heard = time.monotonic()
+        return True
+
+    async def froze(self, how: str):
+        """It does not answer: ended at once (its supervisor and all it runs, killed: a hung
+        process may ignore anything gentler); its worker is told (ClaudeAgent.process_ended)
+        once its process's task has ended."""
+        if self.frozen or self.stopping:
+            return
+        self.frozen = how
+        logger.warning("%s's Claude process stopped answering (%s): it is ended.",
+                       self.worker, how)  # fmt: skip
+        tree = await asyncio.to_thread(self.processes)
+        await asyncio.to_thread(kill_now, tree)
+        task = self.task
+        if task and not task.done() and asyncio.current_task() not in {task, *self.tasks}:
+            # Its end told before this returns: what comes next (the owner's next message)
+            # finds its worker let go of.
+            await asyncio.wait({task}, timeout=STOP_SECONDS)
 
     def idle(self) -> bool:
         """Nothing of it runs: no turn (nor one starting), no command it left running, no
@@ -2126,6 +2200,7 @@ class ClaudeWorker:
         try:
             observe = self.options.get("on_message")  # The check's: what Claude says.
             async for message in self.query.receive_messages():
+                self.heard = time.monotonic()
                 if not isinstance(message, dict):
                     continue
                 if callable(observe):
@@ -3778,7 +3853,7 @@ class ClaudeAgent:
             del self.workers[name]
         self.retired = {w for w in self.retired if w.task and not w.task.done()}
         if self.ended:
-            why = worker.refusal or ("crash" if by_itself else "")
+            why = worker.refusal or worker.frozen or ("crash" if by_itself else "")
             try:
                 self.ended(name, worker.epoch, why)
             except Exception:
