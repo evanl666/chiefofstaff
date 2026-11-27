@@ -23,6 +23,7 @@ from test_roles import PASSED, saved, until
 from chiefofstaff import backend_claude, backend_codex
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff.backend import process_table, running
+from chiefofstaff.delivery import answered
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Other agents need macOS/Linux")
 
@@ -223,6 +224,29 @@ async def test_what_the_agent_finished_before_the_stop_was_seen_is_not_given_aga
         assert delivery(runtime, owner_message(again, "Is the deploy done?")) == "processed"
     finally:
         await runtime.stop()
+
+
+def test_what_an_agents_record_counts_as_finished():
+    """A final answer after the message, in a turn that ended: Codex's says so (`final`);
+    Copilot's and Claude's ask for no tool. Not a subagent's within the turn, nor one after
+    the turn was stopped (Copilot's abort, Claude's interrupt), nor Codex's in a turn cut
+    short."""
+
+    def said(kind: str, content: str = "", **data) -> tuple[str, SimpleNamespace]:
+        return kind, SimpleNamespace(content=content, **data)
+
+    asked = said("user.message", "Is the deploy done?")
+    yes = said("assistant.message", "Yes.", tool_requests=None)
+    assert answered([asked, yes], 0)
+    assert not answered([asked], 0)
+    assert not answered([asked, said("assistant.message", "Looking.", tool_requests=[{}])], 0)
+    child = said("assistant.message", "Found it.", tool_requests=None, parent_tool_call_id="c")
+    assert not answered([asked, child], 0), "a subagent's, not its answer"
+    assert not answered([asked, said("abort"), yes], 0)
+    stopped = said("user.message", "[Request interrupted by user]")
+    assert not answered([asked, stopped, yes], 0)
+    assert answered([asked, said("assistant.message", "Yes.", final=True)], 0)
+    assert not answered([asked, said("assistant.message", "Checking.", final=False)], 0)
 
 
 # Workers

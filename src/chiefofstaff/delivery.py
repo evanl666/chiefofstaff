@@ -1194,6 +1194,8 @@ def answered(events: list[tuple[str, Any]], index: int) -> bool:
             return False
         if kind != "assistant.message" or not content.strip():
             continue
+        if getattr(data, "parent_tool_call_id", None):
+            continue  # A subagent's, within the turn: not its answer.
         final = getattr(data, "final", None)
         if final is None:
             final = not getattr(data, "tool_requests", None)
