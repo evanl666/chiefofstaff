@@ -1275,7 +1275,8 @@ class Runtime:
     async def stop(self):
         # Turns in flight are cut short by the stop: what they were given goes to them again
         # once they are open again (Delivery.settle_cut).
-        self.cut_short_all()
+        with suppress(Exception):
+            self.cut_short_all()
         self.stopping = True
         self.send.close()
         self.shares.stop()
