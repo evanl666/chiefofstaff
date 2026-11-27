@@ -106,8 +106,9 @@ def commands_of(found: dict | None) -> tuple[list[str], str]:
             return [], f"nothing it ran shows “{receipts.shown(item['criterion'], 80)}”"
         commands.append(item["command"])
     tests = found.get("tests") or {}
-    if tests.get("passed") and tests.get("command"):
-        commands.append(tests["command"])
+    # The worker's last test run, again: one that is no test (only lists tests) is left out.
+    if tests.get("passed") and (line := tests.get("command")) and receipts.kind(line) == "test":
+        commands.append(line)
     if not commands:
         return [], "it ran no tests"
     return commands, ""

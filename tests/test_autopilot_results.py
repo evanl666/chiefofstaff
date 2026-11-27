@@ -420,3 +420,18 @@ def test_a_plan_that_reaches_outside_or_masks_a_failure_is_rejected(command):
 def test_a_plan_of_tests_checks_and_builds_is_run_step_by_step():
     steps, why = verify.plan(["ruff check . && pytest -q tests/test_x.py", "pytest -q tests"])
     assert why == "" and steps == ["ruff check .", "pytest -q tests/test_x.py", "pytest -q tests"]
+
+
+def test_a_last_run_that_only_lists_tests_is_left_out_not_a_reason():
+    """Live (B1): the worker's last test command only listed its tests (`--collect-only`), and
+    the whole plan was refused ("isn't a test, check or build"): that run is left out; what
+    its criteria rest on is still run, and a last run reaching outside is still refused."""
+    found = {
+        "criteria": [{"criterion": "tests pass", "state": "verified",
+                      "command": "uv run --with pytest pytest -q"}],
+        "tests": {"passed": True, "command": "uv run --with pytest pytest -q --collect-only"},
+    }  # fmt: skip
+    commands, why = verify.commands_of(found)
+    assert why == "" and verify.plan(commands) == (["uv run --with pytest pytest -q"], "")
+    found["tests"]["command"] = "cd ../other && pytest -q"
+    assert "reaches outside" in verify.plan(verify.commands_of(found)[0])[1]
