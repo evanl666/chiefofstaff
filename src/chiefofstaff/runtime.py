@@ -10512,6 +10512,9 @@ class Runtime:
 
     def fail(self, row: dict, message: str):
         self.resume_over(row["id"])
+        # Its turn cut short by a restart ends here: it never goes on by itself later (a placed
+        # role moved to the next agent is given what it was on: role_failed).
+        self.store.delete(f"cutshort:{row['id']}")
         if (
             self.agents
             and not self.on_copilot(row["id"])

@@ -490,6 +490,41 @@ async def test_a_cut_turn_let_rest_while_others_resume_is_not_continued(tmp_path
         await runtime.stop()
 
 
+async def test_a_session_failed_after_a_restart_does_not_go_on_by_itself_later(
+    tmp_path, codex_log, monkeypatch
+):
+    """Review (Medium): Codex could not start after the restart, so its worker at work failed;
+    its cut turn was kept all the same, and the next time Codex started, it was sent its task
+    again and went back to work by itself (its task maybe another worker's by then)."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
+    worker = await spawned(runtime, harness, "Wait 3 s. Then report done: Ported.")
+    await until(lambda: (s := runtime.states.handle(worker)) and s.turn, 30)
+    thread = runtime.copilot_id(worker)
+    await runtime.stop()
+    start = backend_codex.CodexAgent.start
+
+    async def refused(self):
+        raise RuntimeError("Codex is not signed in: sign in from Settings → Agents & models.")
+
+    monkeypatch.setattr(backend_codex.CodexAgent, "start", refused)
+    again = await restarted(harness)
+    runtime = again.runtime
+    try:
+        assert again.store.session(worker)["status"] == "failed"
+        turns = len(started_with(codex_log, thread))
+        monkeypatch.setattr(backend_codex.CodexAgent, "start", start)
+        await runtime.connect_agent("codex")  # Signed in again: Codex starts.
+        await until(lambda: (job := runtime.agents["codex"].resuming) and job.done(), 30)
+        await settle(runtime)
+        assert len(started_with(codex_log, thread)) == turns, "not sent its task again"
+        assert again.store.session(worker)["status"] == "failed"
+        assert not again.store.get(f"cutshort:{worker}")
+    finally:
+        await runtime.stop()
+
+
 # The stop ends the agents' processes
 
 
